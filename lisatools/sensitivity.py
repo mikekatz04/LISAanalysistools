@@ -99,7 +99,7 @@ def get_sensitivity(f, sens_fn="lisasens", return_type="PSD", *args, **kwargs):
     except KeyError:
         raise ValueError("{} sensitivity is not available.".format(sens_fn))
 
-    PSD = xp.asarray(sensitivity(f, *args, **kwargs))
+    PSD = sensitivity(f, *args, **kwargs)
 
     if return_type == "PSD":
         return PSD

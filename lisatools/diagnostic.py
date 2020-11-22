@@ -62,9 +62,9 @@ def inner_product(
             )
 
         ft_sig1 = [
-            xp.fft.rfft(sig.real)[1:] / dt for sig in sig1
+            xp.fft.rfft(sig.real)[1:] * dt for sig in sig1
         ]  # remove DC / dt factor helps to cast to proper dimensionality
-        ft_sig2 = [xp.fft.rfft(sig.real)[1:] / dt for sig in sig2]  # remove DC
+        ft_sig2 = [xp.fft.rfft(sig.real)[1:] * dt for sig in sig2]  # remove DC
 
     else:
 
@@ -90,9 +90,12 @@ def inner_product(
     elif isinstance(PSD, xp.ndarray):
         PSD_arr = PSD
 
+    elif PSD is None:
+        PSD_arr = 1.0
+
     else:
         raise ValueError(
-            "PSD must be a string giving the sens_fn or a predetermimed array."
+            "PSD must be a string giving the sens_fn or a predetermimed array or None if noise weighting is included in a signal."
         )
 
     out = 0.0
@@ -152,6 +155,7 @@ def h_var_p_eps(
             params_p_eps[ind] = transform_fn(params_p_eps[ind])
 
     dh = waveform_model(*params_p_eps, **waveform_kwargs)
+
     return dh
 
 
@@ -456,6 +460,7 @@ def cutler_vallisneri_bias(
     )
 
     diff = h_true - h_approx
+
     syst_vec = np.array(
         [
             inner_product(
@@ -484,3 +489,18 @@ def cutler_vallisneri_bias(
         returns.append(dh)
 
     return returns
+
+
+def scale_snr(target_snr, sig, *snr_args, return_orig_snr=False, **snr_kwargs):
+    snr_out = snr(sig, *snr_args, **snr_kwargs)
+
+    factor = target_snr / snr_out
+
+    if isinstance(sig, list) is False:
+        sig = [sig]
+
+    out = [sig_i * factor for sig_i in sig]
+    if return_orig_snr:
+        return (out, snr_out)
+
+    return out

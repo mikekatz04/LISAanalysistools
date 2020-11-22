@@ -9,6 +9,7 @@ from lisatools.diagnostic import (
     covariance,
     mismatch_criterion,
     cutler_vallisneri_bias,
+    scale_snr,
 )
 
 from few.waveform import FastSchwarzschildEccentricFlux
@@ -20,20 +21,28 @@ p0 = 12.0
 e0 = 0.3
 phi = 0.0
 theta = np.pi / 3.0
-dist = 1.0
+dist = 10.0
 
 T = 1.0
 dt = 10.0
 
 transform_fn = {0: np.exp}
 
-params = np.array([np.log(M), mu, p0, e0, phi, theta, dist])
+params = np.array([np.log(M), mu, p0, e0, theta, phi, dist])
 
 waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-5}
 
 eps = 1e-9
 
 inner_product_kwargs = dict(frequency_domain=False, PSD="cornish_lisa_psd")
+
+sig1 = fast(M, mu, p0, e0, theta, phi, dist, T=T, dt=dt)
+
+sig1 = scale_snr(
+    20.0, [sig1.real, sig1.imag], dt, frequency_domain=False, PSD="cornish_lisa_psd"
+)
+check2 = snr(sig1, dt, frequency_domain=False, PSD="cornish_lisa_psd")
+
 
 deriv_inds = np.array([0, 2, 3])
 # fish = fisher(
@@ -77,13 +86,13 @@ waveform_approx_kwargs = waveform_kwargs.copy()
 
 waveform_approx_kwargs["eps"] = 1e-2
 
-syst_vec, bias = cutler_vallisneri_bias(
+out = cutler_vallisneri_bias(
     fast,
     fast,
     params,
     eps,
     dt,
-    return_fisher=False,
+    return_fisher=True,
     return_derivs=False,
     return_cov=False,
     deriv_inds=deriv_inds,
