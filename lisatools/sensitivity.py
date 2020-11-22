@@ -39,14 +39,14 @@ def cornish_lisa_psd(f, sky_averaged=False):
     f0 = 19.09 * 10 ** (-3)  # transfer frequency
 
     # Optical Metrology Sensor
-    Poms = ((1.5e-11) * (1.5e-11)) * (1 + xp.power((2e-3) / f, 4))
+    Poms = ((1.5e-11) * (1.5e-11)) * (1 + np.power((2e-3) / f, 4))
 
     # Acceleration Noise
     Pacc = (
         (3e-15)
         * (3e-15)
         * (1 + (4e-4 / f) * (4e-4 / f))
-        * (1 + xp.power(f / (8e-3), 4))
+        * (1 + np.power(f / (8e-3), 4))
     )
 
     # constants for Galactic background after 1 year of observation
@@ -59,15 +59,15 @@ def cornish_lisa_psd(f, sky_averaged=False):
     # Galactic background contribution
     Sc = (
         9e-45
-        * xp.power(f, -7 / 3)
-        * xp.exp(-xp.power(f, alpha) + beta * f * xp.sin(k * f))
-        * (1 + xp.tanh(gamma * (f_k - f)))
+        * np.power(f, -7 / 3)
+        * np.exp(-np.power(f, alpha) + beta * f * np.sin(k * f))
+        * (1 + np.tanh(gamma * (f_k - f)))
     )
 
     # PSD
     PSD = (sky_averaging_constant) * (
         (10 / (3 * L * L))
-        * (Poms + (4 * Pacc) / (xp.power(2 * xp.pi * f, 4)))
+        * (Poms + (4 * Pacc) / (np.power(2 * np.pi * f, 4)))
         * (1 + 0.6 * (f / f0) * (f / f0))
         + Sc
     )
@@ -81,7 +81,7 @@ def get_sensitivity(f, sens_fn="lisasens", return_type="PSD", *args, **kwargs):
     Same interface to many sensitivity curves.
 
     Args:
-        f (1D double xp.ndarray): Array containing frequency  values.
+        f (1D double np.ndarray): Array containing frequency  values.
         sens_fn (str, optional): String that represents the name of the desired
             SNR function. Options are "cornish_lisa_psd" or any sensitivity
             function found in tdi.py from the MLDC gitlab. Default is the

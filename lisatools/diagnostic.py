@@ -258,7 +258,7 @@ def fisher(
         # A = window_zero(A,dt)
         # B = window_zero(B,dt)
 
-    dh = np.asarray(dh)
+    dh = xp.asarray(dh)
 
     fish = np.zeros((num_fish_params, num_fish_params))
     for i in range(num_fish_params):

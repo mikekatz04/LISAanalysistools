@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 
 import emcee
@@ -66,9 +68,13 @@ class LogProb:
         else:
             x_in = x
 
-        loglike_vals[inds_eval] = self.lnlike.get_ll(
-            x_in[inds_eval], **self.lnlike_kwargs
-        )
+        temp = self.lnlike.get_ll(x_in[inds_eval], **self.lnlike_kwargs)
+
+        try:
+            loglike_vals[inds_eval] = temp.get()
+
+        except AttributeError:
+            loglike_vals[inds_eval] = temp
 
         return -loglike_vals
 
@@ -85,6 +91,9 @@ class EmceeSampler:
         test_inds=None,
         fill_values=None,
         fp=None,
+        autocorr_iter_count=100,
+        autocorr_multiplier=100,
+        sampler_kwargs={},
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
@@ -99,6 +108,9 @@ class EmceeSampler:
             fill_values=fill_values,
         )
 
+        self.autocorr_iter_count = autocorr_iter_count
+        self.autocorr_multiplier = autocorr_multiplier
+
         if fp is None:
             backend = emcee.backends.Backend()
 
@@ -107,39 +119,54 @@ class EmceeSampler:
             backend.reset(nwalkers, ndim)
 
         self.sampler = emcee.EnsembleSampler(
-            nwalkers, ndim, self.lnprob, vectorize=True, backend=backend
+            nwalkers,
+            ndim,
+            self.lnprob,
+            vectorize=True,
+            backend=backend,
+            **sampler_kwargs
         )
 
     def sample(self, x0, max_iter, show_progress=False):
 
         # We'll track how the average autocorrelation time estimate changes
-        # index = 0
-        # autocorr = np.empty(max_n)
+        index = 0
+        autocorr = np.empty(max_iter)
 
         # This will be useful to testing convergence
-        # old_tau = np.inf
+        old_tau = np.inf
 
+        st = time.perf_counter()
         # Now we'll sample for up to max_n steps
         for sample in self.sampler.sample(
             x0, iterations=max_iter, progress=show_progress
         ):
             # Only check convergence every 100 steps
-            """
-            if sampler.iteration % 100:
+
+            if self.sampler.iteration % self.autocorr_iter_count:
                 continue
 
             # Compute the autocorrelation time so far
             # Using tol=0 means that we'll always get an estimate even
             # if it isn't trustworthy
-            tau = sampler.get_autocorr_time(tol=0)
+            tau = self.sampler.get_autocorr_time(tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
 
             # Check convergence
-            converged = np.all(tau * 100 < sampler.iteration)
+            converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)
             converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
+
             if converged:
                 break
             old_tau = tau
-            """
+
+            autocorr[index]
+
             pass
+
+        et = time.perf_counter()
+
+        duration = et - st
+
+        print("timing:", duration)

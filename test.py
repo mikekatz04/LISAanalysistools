@@ -23,7 +23,7 @@ phi = 0.0
 theta = np.pi / 3.0
 dist = 10.0
 
-T = 1.0
+T = 0.1
 dt = 10.0
 
 transform_fn = {0: np.exp}
@@ -36,12 +36,12 @@ eps = 1e-9
 
 inner_product_kwargs = dict(frequency_domain=False, PSD="cornish_lisa_psd")
 
-sig1 = fast(M, mu, p0, e0, theta, phi, dist, T=T, dt=dt)
+# sig1 = fast(M, mu, p0, e0, theta, phi, dist, T=T, dt=dt)
 
-sig1 = scale_snr(
-    20.0, [sig1.real, sig1.imag], dt, frequency_domain=False, PSD="cornish_lisa_psd"
-)
-check2 = snr(sig1, dt, frequency_domain=False, PSD="cornish_lisa_psd")
+# sig1 = scale_snr(
+#    20.0, [sig1.real, sig1.imag], dt, frequency_domain=False, PSD="cornish_lisa_psd"
+# )
+# check2 = snr(sig1, dt, frequency_domain=False, PSD="cornish_lisa_psd")
 
 
 deriv_inds = np.array([0, 2, 3])

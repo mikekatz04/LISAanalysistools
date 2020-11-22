@@ -62,9 +62,14 @@ class Likelihood(object):
             for ind, transform_fn in self.parameter_transforms.items():
                 params[ind] = transform_fn(params[ind])
 
-            injection_channels = np.asarray(
+            injection_channels = xp.asarray(
                 self.template_model(*params, **waveform_kwargs)
             )
+            try:
+                injection_channels = injection_channels.get()
+
+            except AttributeError:
+                pass
 
         elif data_stream is not None:
             if isinstance(data_stream, list) is False:
