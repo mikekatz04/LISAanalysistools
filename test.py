@@ -23,7 +23,7 @@ phi = 0.0
 theta = np.pi / 3.0
 dist = 10.0
 
-T = 0.1
+T = 2.0
 dt = 10.0
 
 transform_fn = {0: np.exp}
