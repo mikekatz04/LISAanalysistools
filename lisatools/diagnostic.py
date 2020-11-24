@@ -418,6 +418,8 @@ def cutler_vallisneri_bias(
     params,
     eps,
     x,
+    in_diagnostics=None,
+    fish=None,
     deriv_inds=None,
     return_fisher=False,
     return_derivs=False,
@@ -442,22 +444,29 @@ def cutler_vallisneri_bias(
     for ind, transform_fn in parameter_transforms.items():
         params_true[ind] = transform_fn(params_true[ind])
 
-    h_true = waveform_model_true(*params_true, **waveform_true_kwargs)
+    if in_diagnostics is None:
+
+        h_true = waveform_model_true(*params_true, **waveform_true_kwargs)
+
+        cov, fish, dh = covariance(
+            waveform_model_true,
+            params,
+            eps,
+            x,
+            return_fisher=True,
+            return_derivs=True,
+            deriv_inds=deriv_inds,
+            parameter_transforms=parameter_transforms,
+            waveform_kwargs=waveform_true_kwargs,
+            inner_product_kwargs=inner_product_kwargs,
+        )
+
+    else:
+        cov = in_diagnostics["cov"]
+        h_true = in_diagnostics["h_true"]
+        dh = in_diagnostics["dh"]
 
     h_approx = waveform_model_approx(*params_true, **waveform_approx_kwargs)
-
-    cov, fish, dh = covariance(
-        waveform_model_true,
-        params,
-        eps,
-        x,
-        return_fisher=True,
-        return_derivs=True,
-        deriv_inds=deriv_inds,
-        parameter_transforms=parameter_transforms,
-        waveform_kwargs=waveform_true_kwargs,
-        inner_product_kwargs=inner_product_kwargs,
-    )
 
     diff = h_true - h_approx
 

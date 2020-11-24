@@ -23,12 +23,14 @@ phi = 0.0
 theta = np.pi / 3.0
 dist = 10.0
 
-T = 2.0
+T = 1.0
 dt = 10.0
 
 transform_fn = {0: np.exp}
 
 params = np.array([np.log(M), mu, p0, e0, theta, phi, dist])
+
+params_copy = params.copy()
 
 waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-5}
 
@@ -89,7 +91,7 @@ waveform_approx_kwargs["eps"] = 1e-2
 out = cutler_vallisneri_bias(
     fast,
     fast,
-    params,
+    params_copy,
     eps,
     dt,
     return_fisher=True,

@@ -4,6 +4,8 @@ import numpy as np
 
 import emcee
 
+from lisatools.sampling.moves.ptredblue import PTStretchMove
+
 
 class LogUniformPrior:
     def __init__(self, ranges):
@@ -26,6 +28,7 @@ class LogUniformPrior:
 class LogProb:
     def __init__(
         self,
+        betas,
         ndim_full,
         lnlike,
         lnprior,
@@ -38,6 +41,9 @@ class LogProb:
         self.lnlike_kwargs = lnlike_kwargs
         self.lnlike = lnlike
         self.lnprior = lnprior
+
+        self.betas = betas
+        self.ntemps = len(self.betas)
 
         self.ndim_full = ndim_full
 
@@ -88,10 +94,14 @@ class LogProb:
 
         loglike_vals[inds_eval] = temp
 
-        return -loglike_vals
+        # tempered like
+        logP = -loglike_vals.reshape(self.ntemps, -1) * self.betas[
+            :, None
+        ] + prior_vals.reshape(self.ntemps, -1)
+        return np.array([logP.flatten(), -loglike_vals, prior_vals]).T
 
 
-class EmceeSampler:
+class PTEmceeSampler:
     def __init__(
         self,
         nwalkers,
@@ -111,8 +121,11 @@ class EmceeSampler:
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
 
+        betas = np.array([1.0, 0.1, 0.01, 0.0])
+
         self.lnprior = LogUniformPrior(prior_ranges)
         self.lnprob = LogProb(
+            betas,
             ndim_full,
             lnprob,
             self.lnprior,
@@ -134,11 +147,14 @@ class EmceeSampler:
             backend = emcee.backends.HDFBackend(fp)
             backend.reset(nwalkers, ndim)
 
+        # TODO: add block if nwalkers / betas is not okay
+        pt_move = PTStretchMove(betas, int(nwalkers / len(betas)), ndim)
         self.sampler = emcee.EnsembleSampler(
             nwalkers,
             ndim,
             self.lnprob,
             vectorize=True,
+            moves=pt_move,
             backend=backend,
             **sampler_kwargs
         )
@@ -158,13 +174,15 @@ class EmceeSampler:
             x0, iterations=max_iter, progress=show_progress
         ):
             # Only check convergence every 100 steps
-
+            """
             if self.sampler.iteration % self.autocorr_iter_count:
                 continue
 
             # Compute the autocorrelation time so far
             # Using tol=0 means that we'll always get an estimate even
             # if it isn't trustworthy
+
+            # TODO: fix this for parallel tempering
             tau = self.sampler.get_autocorr_time(tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
@@ -176,9 +194,7 @@ class EmceeSampler:
             if converged:
                 break
             old_tau = tau
-
-            autocorr[index]
-
+            """
             pass
 
         et = time.perf_counter()

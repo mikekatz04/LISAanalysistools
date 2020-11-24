@@ -19,6 +19,7 @@ class Likelihood(object):
         use_gpu=False,
         vectorized=False,
         separate_d_h=False,
+        return_cupy=False,
     ):
         self.template_model = template_model
         self.frequency_domain = frequency_domain
@@ -31,6 +32,7 @@ class Likelihood(object):
 
         self.separate_d_h = separate_d_h
 
+        self.return_cupy = return_cupy
         if use_gpu:
             self.xp = xp
 
@@ -238,4 +240,13 @@ class Likelihood(object):
             if self.noise_has_been_added:
                 ll -= self.noise_likelihood_factor
 
-            return ll.squeeze()
+            out = ll.squeeze()
+
+            if self.use_gpu:
+                if self.return_cupy:
+                    return out
+                else:
+                    return out.get()
+
+            else:
+                return out
