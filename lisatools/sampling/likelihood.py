@@ -183,7 +183,11 @@ class Likelihood(object):
             self.freqs = self.xp.asarray(freqs)[1:]
 
         else:
-            self.injection_channels = self.xp.asarray(injection_channels)
+            self.injection_channels += self.xp.asarray(injection_channels)
+
+        if self.like_here is False:
+            self.injection_channels = [inj.copy() for inj in self.injection_channels]
+            self.noise_factor = [nf.copy() for nf in self.noise_factor]
 
     def get_ll(self, params, waveform_kwargs={}):
 
