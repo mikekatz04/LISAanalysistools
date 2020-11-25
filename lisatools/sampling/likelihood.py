@@ -111,6 +111,7 @@ class Likelihood(object):
                 df = x
                 can_add_noise = True
                 freqs = np.arange(self.injection_length)[1:] * x
+                injection_channels = [inj[1:] for inj in injection_channels]
 
             elif isinstance(x, np.ndarray):
                 freqs = x
@@ -200,7 +201,7 @@ class Likelihood(object):
             if self.separate_d_h is False:
                 args += (self.injection_channels, self.noise_factor)
 
-            return self.template_model.get_ll(*args, **waveform_kwarg)
+            return self.template_model.get_ll(*args, **waveform_kwargs)
 
         if self.vectorized:
             template_channels = self.xp.asarray(
