@@ -114,6 +114,7 @@ sampler = PTEmceeSampler(
 )
 
 
+"""
 eps = 1e-9
 cov = covariance(
     fast,
@@ -126,6 +127,7 @@ cov = covariance(
     inner_product_kwargs=inner_product_kwargs,
     diagonalize=False,
 )
+"""
 
 factor = 1e-2
 start_points = injection_params[

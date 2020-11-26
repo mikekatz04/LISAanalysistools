@@ -205,53 +205,54 @@ class Likelihood(object):
             if self.separate_d_h is False:
                 args += (self.injection_channels, self.noise_factor)
 
-            return self.template_model.get_ll(*args, **waveform_kwargs)
-
-        if self.vectorized:
-            template_channels = self.xp.asarray(
-                self.template_model(*params, **waveform_kwargs)
-            )
+            out = self.template_model.get_ll(*args, **waveform_kwargs)
 
         else:
-            template_channels = self.xp.asarray(
-                [
-                    self.template_model(*params_i, **waveform_kwargs)
-                    for params_i in params.T
-                ]
-            )
-
-        if self.frequency_domain is False:
-            # TODO: vectorize this
-            # 2: is removal of DC component + right summation approximation
-            template_channels = (
-                self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
-            )
-
-        h = template_channels * self.noise_factor[self.xp.newaxis, :, :]
-        if self.separate_d_h:
-            raise NotImplementedError
-
-        else:
-            d_minus_h = (self.injection_channels[self.xp.newaxis, :, :] - h).reshape(
-                num_likes, -1
-            )
-
-            ll = (
-                1.0
-                / 2.0
-                * (4.0 * self.xp.sum((d_minus_h.conj() * d_minus_h).real, axis=1))
-            )
-
-            if self.noise_has_been_added:
-                ll -= self.noise_likelihood_factor
-
-            out = ll.squeeze()
-
-            if self.use_gpu:
-                if self.return_cupy:
-                    return out
-                else:
-                    return out.get()
+            if self.vectorized:
+                template_channels = self.xp.asarray(
+                    self.template_model(*params, **waveform_kwargs)
+                )
 
             else:
+                template_channels = self.xp.asarray(
+                    [
+                        self.template_model(*params_i, **waveform_kwargs)
+                        for params_i in params.T
+                    ]
+                )
+
+            if self.frequency_domain is False:
+                # TODO: vectorize this
+                # 2: is removal of DC component + right summation approximation
+                template_channels = (
+                    self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
+                )
+
+            h = template_channels * self.noise_factor[self.xp.newaxis, :, :]
+            if self.separate_d_h:
+                raise NotImplementedError
+
+            else:
+                d_minus_h = (
+                    self.injection_channels[self.xp.newaxis, :, :] - h
+                ).reshape(num_likes, -1)
+
+                ll = (
+                    1.0
+                    / 2.0
+                    * (4.0 * self.xp.sum((d_minus_h.conj() * d_minus_h).real, axis=1))
+                )
+
+                if self.noise_has_been_added:
+                    ll -= self.noise_likelihood_factor
+
+                out = ll.squeeze()
+
+        if self.use_gpu:
+            if self.return_cupy:
                 return out
+            else:
+                return out.get()
+
+        else:
+            return out

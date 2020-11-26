@@ -6,5 +6,10 @@ setup(
     # Random metadata. there's more you can supply
     author="Michael Katz, Lorenzo Speri, Ollie Burke",
     version="0.1",
-    packages=["lisatools", "lisatools.sampling", "lisatools.sampling.samplers"],
+    packages=[
+        "lisatools",
+        "lisatools.sampling",
+        "lisatools.sampling.samplers",
+        "lisatools.sampling.moves",
+    ],
 )

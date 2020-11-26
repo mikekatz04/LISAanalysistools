@@ -98,7 +98,13 @@ class LogProb:
         logP = -loglike_vals.reshape(self.ntemps, -1) * self.betas[
             :, None
         ] + prior_vals.reshape(self.ntemps, -1)
-        return np.array([logP.flatten(), -loglike_vals, prior_vals]).T
+
+        # TODO: verify this
+        logP[np.isinf(logP)] = -1e30
+        logP[np.isnan(logP)] = -1e30
+        out = np.array([logP.flatten(), -loglike_vals, prior_vals]).T
+
+        return out
 
 
 class PTEmceeSampler:
