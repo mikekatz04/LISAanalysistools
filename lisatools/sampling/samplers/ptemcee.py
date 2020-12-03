@@ -4,7 +4,27 @@ import numpy as np
 
 import emcee
 
+from ptemcee.sampler import default_beta_ladder
+
 from lisatools.sampling.moves.ptredblue import PTStretchMove
+
+
+def get_pt_autocorr_time(x, discard=0, thin=1, **kwargs):
+    """Compute an estimate of the autocorrelation time for each parameter
+        Args:
+            thin (Optional[int]): Use only every ``thin`` steps from the
+                chain. The returned estimate is multiplied by ``thin`` so the
+                estimated time is in units of steps, not thinned steps.
+                (default: ``1``)
+            discard (Optional[int]): Discard the first ``discard`` steps in
+                the chain as burn-in. (default: ``0``)
+        Other arguments are passed directly to
+        :func:`emcee.autocorr.integrated_time`.
+        Returns:
+            array[ndim]: The integrated autocorrelation time estimate for the
+                chain for each parameter.
+        """
+    return thin * emcee.autocorr.integrated_time(x, **kwargs)
 
 
 class LogUniformPrior:
@@ -122,12 +142,19 @@ class PTEmceeSampler:
         fp=None,
         autocorr_iter_count=100,
         autocorr_multiplier=100,
+        betas=None,
+        ntemps=None,
+        Tmax=None,
         sampler_kwargs={},
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
 
-        betas = np.array([1.0, 0.1, 0.01, 0.0])
+        if betas is None:
+            self.betas = betas = default_beta_ladder(ndim, ntemps=ntemps, Tmax=Tmax)
+
+        self.ntemps = len(betas)
+        self.all_walkers = self.nwalkers * len(betas)
 
         self.lnprior = LogUniformPrior(prior_ranges)
         self.lnprob = LogProb(
@@ -151,12 +178,12 @@ class PTEmceeSampler:
 
         else:
             backend = emcee.backends.HDFBackend(fp)
-            backend.reset(nwalkers, ndim)
+            backend.reset(self.all_walkers, ndim)
 
         # TODO: add block if nwalkers / betas is not okay
-        pt_move = PTStretchMove(betas, int(nwalkers / len(betas)), ndim)
+        pt_move = PTStretchMove(betas, nwalkers, ndim)
         self.sampler = emcee.EnsembleSampler(
-            nwalkers,
+            self.all_walkers,
             ndim,
             self.lnprob,
             vectorize=True,
@@ -180,7 +207,6 @@ class PTEmceeSampler:
             x0, iterations=max_iter, progress=show_progress
         ):
             # Only check convergence every 100 steps
-            """
             if self.sampler.iteration % self.autocorr_iter_count:
                 continue
 
@@ -189,9 +215,15 @@ class PTEmceeSampler:
             # if it isn't trustworthy
 
             # TODO: fix this for parallel tempering
-            tau = self.sampler.get_autocorr_time(tol=0)
+            x = self.sampler.get_chain()
+
+            x_temp = x.reshape(self.sampler.iteration, self.ntemps, self.nwalkers, -1)
+
+            tau = get_pt_autocorr_time(x_temp[:, 0], tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
+
+            print(index, tau, tau * self.autocorr_multiplier, self.sampler.iteration)
 
             # Check convergence
             converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)
@@ -200,7 +232,6 @@ class PTEmceeSampler:
             if converged:
                 break
             old_tau = tau
-            """
             pass
 
         et = time.perf_counter()

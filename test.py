@@ -12,6 +12,7 @@ from lisatools.diagnostic import (
     scale_snr,
 )
 
+from few.utils.constants import *
 from few.waveform import FastSchwarzschildEccentricFlux
 
 fast = FastSchwarzschildEccentricFlux(sum_kwargs=dict(pad_output=True))
@@ -38,13 +39,27 @@ eps = 1e-9
 
 inner_product_kwargs = dict(frequency_domain=False, PSD="cornish_lisa_psd")
 
-# sig1 = fast(M, mu, p0, e0, theta, phi, dist, T=T, dt=dt)
+sig1 = fast(M, mu, p0, e0, theta, phi, dist=dist, T=T, dt=dt)
 
+inner = inner_product(
+    [sig1.real, sig1.imag],
+    [sig1.real, sig1.imag],
+    dt,
+    frequency_domain=False,
+    PSD="cornish_lisa_psd",
+)
+
+sig1_fft = [np.fft.rfft(sig1.real)[1:] * dt, np.fft.rfft(sig1.imag)[1:] * dt]
+df = 1 / (dt * len(sig1))
+
+inner_FD = inner_product(
+    sig1_fft, sig1_fft, df, frequency_domain=True, PSD="cornish_lisa_psd",
+)
 # sig1 = scale_snr(
 #    20.0, [sig1.real, sig1.imag], dt, frequency_domain=False, PSD="cornish_lisa_psd"
 # )
 # check2 = snr(sig1, dt, frequency_domain=False, PSD="cornish_lisa_psd")
-
+breakpoint()
 
 deriv_inds = np.array([0, 2, 3])
 # fish = fisher(
