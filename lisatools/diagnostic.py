@@ -53,12 +53,9 @@ def inner_product(
             dt = x
             freqs = xp.fft.rfftfreq(length, dt)[1:]
 
-        elif isinstance(x, xp.ndarray):
-            freqs = x
-
         else:
             raise ValueError(
-                "When providing signals in the frequency domain, the x parameter must be a double value equivalent to df or an xp.ndarray with the frequency values."
+                "When providing signals in the time domain, the x parameter must be a double value equivalent to dt."
             )
 
         ft_sig1 = [
@@ -67,13 +64,12 @@ def inner_product(
         ft_sig2 = [xp.fft.rfft(sig.real)[1:] * dt for sig in sig2]  # remove DC
 
     else:
-
         ft_sig1 = sig1
         ft_sig2 = sig2
 
         if isinstance(x, float):
             df = x
-            freqs = (xp.arange(len(sig1)) + 1) * df  # ignores DC component using + 1
+            freqs = (xp.arange(len(sig1[0])) + 1) * df  # ignores DC component using + 1
 
         elif isinstance(x, xp.ndarray):
             freqs = x
