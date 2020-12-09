@@ -59,9 +59,12 @@ class LogProb:
 
     def __call__(self, x):
         prior_vals = self.lnprior(x)
-        inds_eval = np.squeeze(np.where(np.isinf(prior_vals) != True))
+        inds_eval = np.atleast_1d(np.squeeze(np.where(np.isinf(prior_vals) != True)))
 
         loglike_vals = np.full(x.shape[0], -np.inf)
+
+        if len(inds_eval) == 0:
+            return loglike_vals
 
         if self.need_to_fill:
             x_in = np.zeros((x.shape[0], self.ndim_full))

@@ -168,6 +168,8 @@ class Likelihood(object):
             )
             self.noise_has_been_added = True
 
+            self.noise_added_base_injections = injection_channels
+
         # noise weighting
         injection_channels = [
             inj[1:] * (diff_freqs / psd_temp[1:]) ** (1 / 2)
@@ -246,7 +248,7 @@ class Likelihood(object):
                 if self.noise_has_been_added:
                     ll -= self.noise_likelihood_factor
 
-                out = ll.squeeze()
+                out = xp.atleast_1d(ll.squeeze())
 
         if self.use_gpu:
             if self.return_cupy:

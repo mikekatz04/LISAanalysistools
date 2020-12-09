@@ -106,7 +106,8 @@ def inner_product(
 
         out += 4 * xp.sum(x_vals * y)
 
-    if normalize:
+    normalization_value = 1.0
+    if normalize is True:
         norm1 = inner_product(
             sig1,
             sig1,
@@ -128,13 +129,47 @@ def inner_product(
             normalize=False,
         )
 
-        out /= xp.sqrt(norm1 * norm2)
+        normalization_value = np.sqrt(norm1 * norm2)
 
+    elif isinstance(normalize, str):
+        if normalize == "sig1":
+
+            sig_to_normalize = sig1
+
+        elif normalize == "sig2":
+            sig_to_normalize = sig2
+
+        else:
+            raise ValueError(
+                "If normalizing with respect to sig1 or sig2, normalize kwarg must either be 'sig1' or 'sig2'."
+            )
+
+        normalization_value = inner_product(
+            sig_to_normalize,
+            sig_to_normalize,
+            x,
+            frequency_domain=frequency_domain,
+            PSD=PSD,
+            PSD_args=PSD_args,
+            PSD_kwargs=PSD_kwargs,
+            normalize=False,
+        )
+
+    elif normalize is not False:
+        raise ValueError("Normalize must be True, False, 'sig1', or 'sig2'.")
+
+    out /= normalization_value
     return out
 
 
-def snr(sig1, *args, **kwargs):
-    return xp.sqrt(inner_product(sig1, sig1, *args, **kwargs))
+def snr(sig1, *args, data=None, **kwargs):
+    if data is None:
+        sig2 = sig1
+
+    else:
+        sig2 = data
+
+    return xp.sqrt(inner_product(sig1, sig2, *args, **kwargs))
 
 
 def h_var_p_eps(
