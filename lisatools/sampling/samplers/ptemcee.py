@@ -27,28 +27,24 @@ def get_pt_autocorr_time(x, discard=0, thin=1, **kwargs):
     return thin * emcee.autocorr.integrated_time(x, **kwargs)
 
 
-class LogUniformPrior:
-    def __init__(self, ranges):
-        self.minimums = np.asarray([range_i[0] for range_i in ranges])
-        self.maximums = np.asarray([range_i[1] for range_i in ranges])
+class LogPrior:
+    def __init__(self, priors):
+        self.priors = priors
 
     def __call__(self, x):
 
-        temp = np.sum(
-            (x < self.minimums[np.newaxis, :]) * 1.0
-            + (x > self.maximums[np.newaxis, :]) * 1.0,
-            axis=-1,
-        )
+        prior_vals = np.zeros((x.shape[0]))
+        for prior_i, x_i in zip(self.priors, x.T):
+            temp = prior_i.logpdf(x_i)
 
-        temp[temp > 0.0] = -np.inf
+            prior_vals[np.isinf(temp)] += -np.inf
 
-        return temp
+        return prior_vals
 
 
 class LogProb:
     def __init__(
         self,
-        betas,
         ndim_full,
         lnlike,
         lnprior,
@@ -61,9 +57,6 @@ class LogProb:
         self.lnlike_kwargs = lnlike_kwargs
         self.lnlike = lnlike
         self.lnprior = lnprior
-
-        self.betas = betas
-        self.ntemps = len(self.betas)
 
         self.ndim_full = ndim_full
 
@@ -85,9 +78,12 @@ class LogProb:
 
     def __call__(self, x):
         prior_vals = self.lnprior(x)
-        inds_eval = np.squeeze(np.where(np.isinf(prior_vals) != True))
+        inds_eval = np.atleast_1d(np.squeeze(np.where(np.isinf(prior_vals) != True)))
 
         loglike_vals = np.full(x.shape[0], -np.inf)
+
+        if len(inds_eval) == 0:
+            return loglike_vals
 
         if self.need_to_fill:
             x_in = np.zeros((x.shape[0], self.ndim_full))
@@ -114,17 +110,7 @@ class LogProb:
 
         loglike_vals[inds_eval] = temp
 
-        # tempered like
-        logP = -loglike_vals.reshape(self.ntemps, -1) * self.betas[
-            :, None
-        ] + prior_vals.reshape(self.ntemps, -1)
-
-        # TODO: verify this
-        logP[np.isinf(logP)] = -1e30
-        logP[np.isnan(logP)] = -1e30
-        out = np.array([logP.flatten(), -loglike_vals, prior_vals]).T
-
-        return out
+        return np.array([loglike_vals, prior_vals]).T
 
 
 class PTEmceeSampler:
@@ -134,31 +120,36 @@ class PTEmceeSampler:
         ndim,
         ndim_full,
         lnprob,
-        prior_ranges,
+        priors,
         subset=None,
         lnlike_kwargs={},
         test_inds=None,
         fill_values=None,
         fp=None,
         autocorr_iter_count=100,
-        autocorr_multiplier=100,
+        autocorr_multiplier=1000,  # higher in ptemcee
         betas=None,
         ntemps=None,
+        ntemps_target_extra=0,
         Tmax=None,
         sampler_kwargs={},
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
 
+        ntemps_ladder = ntemps - ntemps_target_extra
         if betas is None:
-            self.betas = betas = default_beta_ladder(ndim, ntemps=ntemps, Tmax=Tmax)
+            betas = default_beta_ladder(ndim, ntemps=ntemps_ladder, Tmax=Tmax)
+            if ntemps_target_extra > 0:
+                betas = np.concatenate([np.full(ntemps_target_extra, 1.0), betas])
 
+        self.betas = betas
         self.ntemps = len(betas)
+        self.ntemps_target = 1 + ntemps_target_extra
         self.all_walkers = self.nwalkers * len(betas)
 
-        self.lnprior = LogUniformPrior(prior_ranges)
+        self.lnprior = LogPrior(priors)
         self.lnprob = LogProb(
-            betas,
             ndim_full,
             lnprob,
             self.lnprior,
@@ -217,9 +208,14 @@ class PTEmceeSampler:
             # TODO: fix this for parallel tempering
             x = self.sampler.get_chain()
 
-            x_temp = x.reshape(self.sampler.iteration, self.ntemps, self.nwalkers, -1)
+            x_temp = x.reshape(
+                self.sampler.iteration, self.ntemps, self.nwalkers, self.ndim
+            )
 
-            tau = get_pt_autocorr_time(x_temp[:, 0], tol=0)
+            x_temp = x_temp[:, : self.ntemps_target].reshape(
+                self.sampler.iteration, -1, self.ndim
+            )
+            tau = get_pt_autocorr_time(x_temp, tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
 

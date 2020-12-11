@@ -14,7 +14,9 @@ class Likelihood(object):
         self,
         template_model,
         num_channels,
-        frequency_domain=True,
+        dt=None,
+        df=None,
+        f_arr=None,
         parameter_transforms={},
         use_gpu=False,
         vectorized=False,
@@ -22,7 +24,7 @@ class Likelihood(object):
         return_cupy=False,
     ):
         self.template_model = template_model
-        self.frequency_domain = frequency_domain
+
         self.parameter_transforms = parameter_transforms
 
         self.use_gpu = use_gpu
@@ -31,6 +33,16 @@ class Likelihood(object):
         self.num_channels = num_channels
 
         self.separate_d_h = separate_d_h
+
+        if dt is None and df is None and f_arr is None:
+            raise ValueError("Must provide dt, df or f_arr.")
+
+        self.dt, self.df, self.f_arr = dt, df, f_arr
+
+        if df is not None or f_arr is not None:
+            self.frequency_domain = True
+        else:
+            self.frequency_domain = False
 
         self.return_cupy = return_cupy
         if use_gpu:
@@ -51,7 +63,6 @@ class Likelihood(object):
     # TODO: add SNR scaling, need to read out new distance
     def inject_signal(
         self,
-        x,
         data_stream=None,
         params=None,
         waveform_kwargs={},
@@ -107,27 +118,18 @@ class Likelihood(object):
             noise_fn = [noise_fn for _ in range(self.num_channels)]
 
         if self.frequency_domain:
-            if isinstance(x, float):
-                df = x
+            if self.df is not None:
+                df = self.df
                 can_add_noise = True
-                freqs = np.arange(self.injection_length)[1:] * x
+                freqs = np.arange(self.injection_length)[1:] * df
                 injection_channels = [inj[1:] for inj in injection_channels]
 
-            elif isinstance(x, np.ndarray):
-                freqs = x
+            else:
+                freqs = self.f_arr
                 can_add_noise = False
 
-            else:
-                raise ValueError(
-                    "When in the frequency domain, x must be scalar or a np.ndarray."
-                )
-
         else:
-            if isinstance(x, float) is False:
-                raise ValueError("When in the time domain, x must be equivalent to dt.")
-
-            dt = x
-            self.dt = dt
+            dt = self.dt
             freqs = np.fft.rfftfreq(self.injection_length, dt)[1:]
             can_add_noise = True
             df = 1.0 / (self.injection_length * dt)

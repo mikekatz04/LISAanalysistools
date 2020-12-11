@@ -14,13 +14,17 @@ from lisatools.sensitivity import get_sensitivity
 def inner_product(
     sig1,
     sig2,
-    x,
-    frequency_domain=True,
+    dt=None,
+    df=None,
+    f_arr=None,
     PSD="lisasens",
     PSD_args=(),
     PSD_kwargs={},
     normalize=False,
 ):
+
+    if df is None and dt is None and f_arr is None:
+        raise ValueError("Must provide either df, dt or f_arr keyword arguments.")
 
     if isinstance(sig1, list) is False:
         sig1 = [sig1]
@@ -35,7 +39,7 @@ def inner_product(
             )
         )
 
-    if frequency_domain is False:
+    if dt is not None:
 
         if len(sig1[0]) != len(sig2[0]):
             warnings.warn(
@@ -49,14 +53,7 @@ def inner_product(
 
         length = len(sig1[0])
 
-        if isinstance(x, float):
-            dt = x
-            freqs = xp.fft.rfftfreq(length, dt)[1:]
-
-        else:
-            raise ValueError(
-                "When providing signals in the time domain, the x parameter must be a double value equivalent to dt."
-            )
+        freqs = xp.fft.rfftfreq(length, dt)[1:]
 
         ft_sig1 = [
             xp.fft.rfft(sig.real)[1:] * dt for sig in sig1
@@ -67,17 +64,11 @@ def inner_product(
         ft_sig1 = sig1
         ft_sig2 = sig2
 
-        if isinstance(x, float):
-            df = x
+        if df is not None:
             freqs = (xp.arange(len(sig1[0])) + 1) * df  # ignores DC component using + 1
 
-        elif isinstance(x, xp.ndarray):
-            freqs = x
-
         else:
-            raise ValueError(
-                "When providing signals in the frequency domain, the x parameter must be a double value equivalent to df or an xp.ndarray with the frequency values."
-            )
+            freqs = x
 
     # get PSD weighting
     if isinstance(PSD, str):
@@ -111,8 +102,9 @@ def inner_product(
         norm1 = inner_product(
             sig1,
             sig1,
-            x,
-            frequency_domain=frequency_domain,
+            dt=dt,
+            df=df,
+            f_arr=f_arr,
             PSD=PSD,
             PSD_args=PSD_args,
             PSD_kwargs=PSD_kwargs,
@@ -121,8 +113,9 @@ def inner_product(
         norm2 = inner_product(
             sig2,
             sig2,
-            x,
-            frequency_domain=frequency_domain,
+            dt=dt,
+            df=df,
+            f_arr=f_arr,
             PSD=PSD,
             PSD_args=PSD_args,
             PSD_kwargs=PSD_kwargs,
@@ -147,8 +140,9 @@ def inner_product(
         normalization_value = inner_product(
             sig_to_normalize,
             sig_to_normalize,
-            x,
-            frequency_domain=frequency_domain,
+            dt=dt,
+            df=df,
+            f_arr=f_arr,
             PSD=PSD,
             PSD_args=PSD_args,
             PSD_kwargs=PSD_kwargs,
@@ -253,7 +247,6 @@ def fisher(
     waveform_model,
     params,
     eps,
-    x,
     deriv_inds=None,
     parameter_transforms={},
     waveform_kwargs={},
@@ -297,7 +290,6 @@ def fisher(
             fish[i][j] = inner_product(
                 [dh[i].real, dh[i].imag],
                 [dh[j].real, dh[j].imag],
-                x,
                 **inner_product_kwargs
             )
             fish[j][i] = fish[i][j]
@@ -343,7 +335,6 @@ def mismatch_criterion(
     waveform_model,
     params,
     eps,
-    x,
     deriv_inds=None,
     parameter_transforms={},
     waveform_kwargs={},
@@ -378,7 +369,6 @@ def mismatch_criterion(
             waveform_model,
             params,
             eps,
-            x,
             deriv_inds=deriv_inds,
             parameter_transforms=parameter_transforms,
             waveform_kwargs=waveform_kwargs,
@@ -423,7 +413,6 @@ def mismatch_criterion(
     over = inner_product(
         [h_delta.real, h_delta.imag],
         [h_true.real, h_true.imag],
-        x,
         **inner_product_kwargs,
         normalize=True
     )
@@ -434,7 +423,6 @@ def mismatch_criterion(
         / inner_product(
             [h_delta.real, h_delta.imag],
             [h_true.real, h_true.imag],
-            x,
             **inner_product_kwargs,
             normalize=False
         )
@@ -448,7 +436,6 @@ def cutler_vallisneri_bias(
     waveform_model_approx,
     params,
     eps,
-    x,
     in_diagnostics=None,
     fish=None,
     deriv_inds=None,
@@ -483,7 +470,6 @@ def cutler_vallisneri_bias(
             waveform_model_true,
             params,
             eps,
-            x,
             return_fisher=True,
             return_derivs=True,
             deriv_inds=deriv_inds,

@@ -1,5 +1,14 @@
 import numpy as np
-import matplotlib.pyplot as plt
+
+try:
+    import cupy as xp
+
+    gpu_available = True
+except ModuleNotFoundError:
+    import numpy as xp
+
+    gpu_available = False
+# import matplotlib.pyplot as plt
 
 from lisatools.sensitivity import get_sensitivity
 from lisatools.diagnostic import (
@@ -12,128 +21,174 @@ from lisatools.diagnostic import (
     scale_snr,
 )
 
-from few.waveform import FastSchwarzschildEccentricFlux
+from gbgpu.gbgpu import GBGPU
+
+from gbgpu.utils.constants import *
 
 from lisatools.sampling.likelihood import Likelihood
 
-from lisatools.sampling.samplers.emcee import EmceeSampler
-from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
+from lisatools.sensitivity import get_sensitivity
 
+# from lisatools.sampling.samplers.emcee import EmceeSampler
+from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
+from lisatools.utils.utility import uniform_dist
 import warnings
+
 
 warnings.filterwarnings("ignore")
 
-fast = FastSchwarzschildEccentricFlux(sum_kwargs=dict(pad_output=True), use_gpu=False)
+use_gpu = gpu_available
+gb = GBGPU(use_gpu=use_gpu)
 
+num_bin = 100
+amp = 1e-19
+f0 = 2e-3
+fdot = 1e-14
+fddot = 0.0
+phi0 = 0.1
+iota = 0.2
+psi = 0.3
+lam = 0.4
+beta_sky = 0.5
+A2 = 19.5
+omegabar = 0.0
+e2 = 0.3
+P2 = 0.6
+T2 = 0.0
 
-def wrap_func(*args, **kwargs):
-    temp = fast(*args, **kwargs)
-    return [temp.real, -temp.imag]
+amp_in = np.full(num_bin, amp)
+f0_in = np.full(num_bin, f0)
+fdot_in = np.full(num_bin, fdot)
+fddot_in = np.full(num_bin, fddot)
+phi0_in = np.full(num_bin, phi0)
+iota_in = np.full(num_bin, iota)
+psi_in = np.full(num_bin, psi)
+lam_in = np.full(num_bin, lam)
+beta_sky_in = np.full(num_bin, beta_sky)
+A2_in = np.full(num_bin, A2)
+P2_in = np.full(num_bin, P2)
+omegabar_in = np.full(num_bin, omegabar)
+e2_in = np.full(num_bin, e2)
+T2_in = np.full(num_bin, T2)
+N = int(1024)
 
+Tobs = 4.0 * YEAR
+dt = 15.0
 
-M = 1e6
-mu = 1e2
-p0 = 10.601813660750054
-e0 = 0.2
-phi = 0.0
-theta = np.pi / 3.0
-dist = 5.0
+n = int(Tobs / dt)
 
-T = 0.01
-dt = 10.0
+df = 1 / (n * dt)
 
-inner_product_kwargs = dict(frequency_domain=False, PSD="cornish_lisa_psd")
+waveform_kwargs = dict(N=N, dt=dt)
 
-transform_fn = {0: np.exp}
+transform_fn = {
+    0: (lambda x: 1 * np.exp(x)),
+    1: (lambda x: x * 1e-3),
+    2: (lambda x: 1 * np.exp(x)),
+}
 
-injection_params = np.array([np.log(M), mu, p0, e0, theta, phi, dist])
+like = Likelihood(gb, 2, df=df, parameter_transforms=transform_fn, use_gpu=use_gpu,)
 
-params_test = injection_params.copy()
-
-waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-5}
-
-nwalkers = 16
-
-ndim_full = 7
-
-test_inds = np.array([0, 1, 2, 3])
-
-ndim = len(test_inds)
-fill_inds = np.delete(np.arange(ndim_full), test_inds)
-fill_values = injection_params[fill_inds]
-
-like = Likelihood(
-    wrap_func,
-    2,
-    frequency_domain=False,
-    parameter_transforms=transform_fn,
-    use_gpu=False,
+params = np.array(
+    [
+        np.log(amp),
+        f0 * 1e3,
+        np.log(fdot),
+        fddot,
+        phi0,
+        iota,
+        psi,
+        lam,
+        beta_sky,
+        # A2,
+        # omegabar,
+        # e2,
+        # P2,
+        # T2,
+    ]
 )
 
+fish_params = np.array([params.copy()]).T
+
+inds_test = np.delete(np.arange(len(fish_params)), 3)
+
+fish = gb.fisher(
+    fish_params, inds=inds_test, parameter_transforms=transform_fn, **waveform_kwargs
+).squeeze()
+
+cov = xp.linalg.pinv(fish)
+
+injection_params = params.copy()
+for ind, trans_fn in transform_fn.items():
+    injection_params[ind] = trans_fn(injection_params[ind])
+
+A_inj, E_inj = gb.inject_signal(*injection_params, **waveform_kwargs,)
 
 like.inject_signal(
-    dt,
-    params=injection_params.copy(),
-    waveform_kwargs=waveform_kwargs,
+    data_stream=[A_inj, E_inj],
     noise_fn=get_sensitivity,
-    noise_kwargs=dict(sens_fn="cornish_lisa_psd"),
+    noise_kwargs={"sens_fn": "noisepsd_AE"},
     add_noise=False,
 )
 
-snr_check = snr(
-    wrap_func(M, mu, p0, e0, theta, phi, dist, dt=dt, T=T, eps=1e-2),
-    dt,
-    **inner_product_kwargs
-)
-
-print("snr:", snr_check)
-params_test[0] *= 1.0000001
-
-params_test = np.tile(params_test, (2, 1))
+amp_in[0] *= 1.1
+f0_in[1] = 2.001e-3
+params_test = np.array(
+    [
+        np.log(amp_in),
+        f0_in * 1e3,
+        np.log(fdot_in),
+        fddot_in,
+        phi0_in,
+        iota_in,
+        psi_in,
+        lam_in,
+        beta_sky_in,
+    ]
+).T
 
 check = like.get_ll(params_test, waveform_kwargs=waveform_kwargs)
 
 
-prior_ranges = [
-    [injection_params[i] * 0.9, injection_params[i] * 1.1] for i in test_inds
-]
+nwalkers = 50
 
-waveform_kwargs_templates = waveform_kwargs.copy()
-waveform_kwargs_templates["eps"] = 1e-5
+ndim_full = len(params)
+
+test_inds = np.delete(np.arange(ndim_full), np.array([3]))
+
+ndim = len(test_inds)
+fill_inds = np.delete(np.arange(ndim_full), test_inds)
+fill_values = params[fill_inds]
+
+priors = [uniform_dist(params[i] * 0.95, params[i] * 1.05) for i in test_inds]
+
+ntemps = 20
+Tmax = np.inf
+ntemps_target_extra = 10
+
 sampler = PTEmceeSampler(
     nwalkers,
     ndim,
     ndim_full,
     like,
-    prior_ranges,
-    subset=4,
-    lnlike_kwargs={"waveform_kwargs": waveform_kwargs_templates},
+    priors,
+    subset=None,
+    lnlike_kwargs={"waveform_kwargs": waveform_kwargs},
     test_inds=test_inds,
     fill_values=fill_values,
-    fp="test_full_2yr.h5",
+    ntemps=ntemps,
+    ntemps_target_extra=ntemps_target_extra,
+    Tmax=Tmax,
+    autocorr_multiplier=500,
+    autocorr_iter_count=100,
+    fp="test_full_gb.h5",
 )
-
-
-"""
-eps = 1e-9
-cov = covariance(
-    fast,
-    injection_params,
-    eps,
-    dt,
-    deriv_inds=test_inds,
-    parameter_transforms=transform_fn,
-    waveform_kwargs=waveform_kwargs,
-    inner_product_kwargs=inner_product_kwargs,
-    diagonalize=False,
-)
-"""
 
 factor = 1e-2
-start_points = injection_params[
-    np.newaxis, test_inds
-] + factor * np.random.multivariate_normal(np.zeros(len(test_inds)), cov, size=nwalkers)
-
+start_points = (
+    params[np.newaxis, test_inds]
+    + factor * np.random.randn(nwalkers * ntemps, ndim) * params[np.newaxis, test_inds]
+)
 
 max_iter = 40000
 sampler.sample(start_points, max_iter, show_progress=True)

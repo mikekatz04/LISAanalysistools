@@ -42,19 +42,13 @@ inner_product_kwargs = dict(frequency_domain=False, PSD="cornish_lisa_psd")
 sig1 = fast(M, mu, p0, e0, theta, phi, dist=dist, T=T, dt=dt)
 
 inner = inner_product(
-    [sig1.real, sig1.imag],
-    [sig1.real, sig1.imag],
-    dt,
-    frequency_domain=False,
-    PSD="cornish_lisa_psd",
+    [sig1.real, sig1.imag], [sig1.real, sig1.imag], dt=dt, PSD="cornish_lisa_psd",
 )
 
 sig1_fft = [np.fft.rfft(sig1.real)[1:] * dt, np.fft.rfft(sig1.imag)[1:] * dt]
 df = 1 / (dt * len(sig1))
 
-inner_FD = inner_product(
-    sig1_fft, sig1_fft, df, frequency_domain=True, PSD="cornish_lisa_psd",
-)
+inner_FD = inner_product(sig1_fft, sig1_fft, df=df, PSD="cornish_lisa_psd",)
 # sig1 = scale_snr(
 #    20.0, [sig1.real, sig1.imag], dt, frequency_domain=False, PSD="cornish_lisa_psd"
 # )

@@ -32,9 +32,12 @@ class PTRedBlueMove(Move):
         betas,
         nwalkers,
         ndim,
+        adaptive=True,
         nsplits=2,
         randomize_split=True,
         live_dangerously=False,
+        adaptation_lag=10000,
+        adaptation_time=100,
     ):
 
         self.betas = betas
@@ -45,6 +48,12 @@ class PTRedBlueMove(Move):
         self.nsplits = int(nsplits)
         self.live_dangerously = live_dangerously
         self.randomize_split = randomize_split
+
+        self.swaps_proposed = np.full(self.ntemps - 1, self.nwalkers)
+        self.time = 0
+
+        self.adaptive = adaptive
+        self.adaptation_time, self.adaptation_lag = adaptation_time, adaptation_lag
 
     def setup(self, coords):
         pass
@@ -62,7 +71,7 @@ class PTRedBlueMove(Move):
             random: A numpy-compatible random number state.
         """
         # Check that the dimensions are compatible.
-        nwalkers, ndim = state.coords.shape
+        ntemps, nwalkers, ndim = self.ntemps, self.nwalkers, self.ndim
         if nwalkers < 2 * ndim and not self.live_dangerously:
             raise RuntimeError(
                 "It is unadvisable to use a red-blue move "
@@ -74,7 +83,7 @@ class PTRedBlueMove(Move):
         self.setup(state.coords)
 
         # Split the ensemble in half and iterate over these two halves.
-        accepted = np.zeros(nwalkers, dtype=bool)
+        accepted = np.zeros(nwalkers * ntemps, dtype=bool)
         all_inds = np.arange(nwalkers)
         inds = all_inds % self.nsplits
         if self.randomize_split:
@@ -82,54 +91,108 @@ class PTRedBlueMove(Move):
         for split in range(self.nsplits):
             S1 = inds == split
 
-            # Get the two halves of the ensemble.
-            sets = [state.coords[inds == j] for j in range(self.nsplits)]
-            s = sets[split]
-            c = sets[:split] + sets[split + 1 :]
+            nwalkers_here = np.sum(S1)
+
+            # need to update 2nd based on updated coords from 1st
+            coords = state.coords.reshape(ntemps, nwalkers, ndim)
 
             # Get the move-specific proposal.
-            q, factors = self.get_proposal(s, c, model.random)
+            q = np.zeros((ntemps, nwalkers_here, ndim))
+            factors = np.zeros((ntemps, nwalkers_here))
+            for t in range(ntemps):
+                # Get the two halves of the ensemble.
+                sets = [coords[t, inds == j] for j in range(self.nsplits)]
+                s = sets[split]
+                c = sets[:split] + sets[split + 1 :]
+
+                q_temp, factors_temp = self.get_proposal(s, c, model.random)
+                q[t] = q_temp
+                factors[t] = factors_temp
+
+            q = q.reshape(-1, ndim)
+            factors = factors.flatten()
 
             # Compute the lnprobs of the proposed position.
             new_log_probs, new_blobs = model.compute_log_prob_fn(q)
 
-            # Loop over the walkers and update them accordingly.
-            for i, (j, f, nlp) in enumerate(zip(all_inds[S1], factors, new_log_probs)):
+            logl = new_log_probs.reshape(ntemps, nwalkers_here)
+            logp = new_blobs.reshape(ntemps, nwalkers_here)
+            logP = self._tempered_likelihood(logl, self.betas) + logp
 
-                lnpdiff = f + nlp - state.log_prob[j]
+            prev_logl = state.log_prob.reshape(ntemps, nwalkers)[:, all_inds[S1]]
+            prev_logp = state.blobs.reshape(ntemps, nwalkers)[:, all_inds[S1]]
+            prev_logP = self._tempered_likelihood(prev_logl, self.betas) + prev_logp
+
+            logP = logP.flatten()
+            prev_logP = prev_logP.flatten()
+
+            inds_temp = (
+                np.tile(all_inds[S1], (ntemps, 1))
+                + (nwalkers * np.arange(ntemps)[:, np.newaxis])
+            ).flatten()
+
+            # Loop over the walkers and update them accordingly.
+            for i, (j, f, nlp, olp) in enumerate(
+                zip(inds_temp, factors, logP, prev_logP)
+            ):
+
+                lnpdiff = f + nlp - olp
                 if lnpdiff > np.log(model.random.rand()):
                     accepted[j] = True
 
+            S1_temp = np.tile(S1, (ntemps, 1)).flatten()
             new_state = State(q, log_prob=new_log_probs, blobs=new_blobs)
-            state = self.update(state, new_state, accepted, S1)
+            state = self.update(state, new_state, accepted, S1_temp)
 
-        logp = state.blobs[:, 1]
+        logl = state.log_prob.reshape(ntemps, nwalkers)
+        logp = state.blobs.reshape(ntemps, nwalkers)
+        logP = self._tempered_likelihood(logl, self.betas) + logp
 
         x, logP, logl, logp = self._temperature_swaps(
-            state.coords.copy(),
-            state.log_prob.copy(),
-            state.blobs[:, 0].copy(),
-            state.blobs[:, 1].copy(),
+            state.coords.reshape(ntemps, nwalkers, -1),
+            logP.copy(),
+            logl.copy(),
+            logp.copy(),
         )
 
+        ratios = self.swaps_accepted / self.swaps_proposed
+
+        if self.adaptive and self.ntemps > 1:
+            dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
+            self.betas += dbetas
+
         state = State(
-            x.reshape(-1, self.ndim),
-            log_prob=logP.flatten(),
-            blobs=np.array([logl.flatten(), logp.flatten()]).T,
+            x.reshape(-1, self.ndim), log_prob=logl.flatten(), blobs=logp.flatten(),
         )
+
+        self.time += 1
         return state, accepted
+
+    def _tempered_likelihood(self, logl, betas=None):
+        """
+        Compute tempered log likelihood.  This is usually a mundane multiplication, except for the special case where
+        beta == 0 *and* we're outside the likelihood support.
+        Here, we find a singularity that demands more careful attention; we allow the likelihood to dominate the
+        temperature, since wandering outside the likelihood support causes a discontinuity.
+        """
+
+        if betas is None:
+            betas = self.betas
+
+        with np.errstate(invalid="ignore"):
+            loglT = logl * betas[:, None]
+        loglT[np.isnan(loglT)] = -np.inf
+
+        return loglT
 
     def _temperature_swaps(self, x, logP, logl, logp):
         """
         Perform parallel-tempering temperature swaps on the state in ``x`` with associated ``logP`` and ``logl``.
         """
 
-        x = x.reshape(self.ntemps, self.nwalkers, -1)
-        logP = logP.reshape(self.ntemps, self.nwalkers)
-        logl = logl.reshape(self.ntemps, self.nwalkers)
-        logp = logp.reshape(self.ntemps, self.nwalkers)
         ntemps, nwalkers = self.ntemps, self.nwalkers
         self.swaps_accepted = np.empty(ntemps - 1)
+
         for i in range(ntemps - 1, 0, -1):
             bi = self.betas[i]
             bi1 = self.betas[i - 1]
@@ -164,6 +227,28 @@ class PTRedBlueMove(Move):
             logP[i - 1, i1perm[sel]] = logP_temp + dbeta * logl_temp
 
         return x, logP, logl, logp
+
+    def _get_ladder_adjustment(self, time, betas0, ratios):
+        """
+        Execute temperature adjustment according to dynamics outlined in
+        `arXiv:1501.05823 <http://arxiv.org/abs/1501.05823>`_.
+        """
+        betas = betas0.copy()
+
+        # Modulate temperature adjustments with a hyperbolic decay.
+        decay = self.adaptation_lag / (time + self.adaptation_lag)
+        kappa = decay / self.adaptation_time
+
+        # Construct temperature adjustments.
+        dSs = kappa * (ratios[:-1] - ratios[1:])
+
+        # Compute new ladder (hottest and coldest chains don't move).
+        deltaTs = np.diff(1 / betas[:-1])
+        deltaTs *= np.exp(dSs)
+        betas[1:-1] = 1 / (np.cumsum(deltaTs) + 1 / betas[0])
+
+        # Don't mutate the ladder here; let the client code do that.
+        return betas - betas0
 
 
 class PTStretchMove(PTRedBlueMove):
