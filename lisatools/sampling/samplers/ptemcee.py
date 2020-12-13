@@ -110,7 +110,7 @@ class LogProb:
 
         loglike_vals[inds_eval] = temp
 
-        return np.array([loglike_vals, prior_vals]).T
+        return np.array([-loglike_vals, prior_vals]).T
 
 
 class PTEmceeSampler:

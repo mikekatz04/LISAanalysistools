@@ -90,7 +90,7 @@ class LogProb:
 
         loglike_vals[inds_eval] = temp
 
-        return loglike_vals
+        return -loglike_vals
 
 
 class EmceeSampler:
