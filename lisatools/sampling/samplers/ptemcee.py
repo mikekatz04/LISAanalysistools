@@ -132,6 +132,7 @@ class PTEmceeSampler:
         ntemps=None,
         ntemps_target_extra=0,
         Tmax=None,
+        burn=None,
         sampler_kwargs={},
     ):
 
@@ -147,6 +148,7 @@ class PTEmceeSampler:
         self.ntemps = len(betas)
         self.ntemps_target = 1 + ntemps_target_extra
         self.all_walkers = self.nwalkers * len(betas)
+        self.burn = burn
 
         self.lnprior = LogPrior(priors)
         self.lnprob = LogProb(
@@ -198,6 +200,16 @@ class PTEmceeSampler:
             x0, iterations=max_iter, progress=show_progress
         ):
             # Only check convergence every 100 steps
+            if self.burn is not None:
+                if self.sampler.iteration < self.burn:
+                    continue
+
+                elif self.sampler.iteration == self.burn:
+                    self.sampler.reset()
+                    self.burn = None
+
+                else:
+                    raise ValueError("Sampler iteration went beyond burn number.")
             if self.sampler.iteration % self.autocorr_iter_count:
                 continue
 
@@ -215,6 +227,7 @@ class PTEmceeSampler:
             x_temp = x_temp[:, : self.ntemps_target].reshape(
                 self.sampler.iteration, -1, self.ndim
             )
+
             tau = get_pt_autocorr_time(x_temp, tol=0)
             autocorr[index] = np.mean(tau)
             index += 1

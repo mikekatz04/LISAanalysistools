@@ -4,23 +4,22 @@ import numpy as np
 
 import emcee
 
+np.random.seed(100)
 
-class LogUniformPrior:
-    def __init__(self, ranges):
-        self.minimums = np.asarray([range_i[0] for range_i in ranges])
-        self.maximums = np.asarray([range_i[1] for range_i in ranges])
+
+class LogPrior:
+    def __init__(self, priors):
+        self.priors = priors
 
     def __call__(self, x):
 
-        temp = np.sum(
-            (x < self.minimums[np.newaxis, :]) * 1.0
-            + (x > self.maximums[np.newaxis, :]) * 1.0,
-            axis=-1,
-        )
+        prior_vals = np.zeros((x.shape[0]))
+        for prior_i, x_i in zip(self.priors, x.T):
+            temp = prior_i.logpdf(x_i)
 
-        temp[temp > 0.0] = -np.inf
+            prior_vals[np.isinf(temp)] += -np.inf
 
-        return temp
+        return prior_vals
 
 
 class LogProb:
@@ -91,7 +90,7 @@ class LogProb:
 
         loglike_vals[inds_eval] = temp
 
-        return -loglike_vals
+        return loglike_vals
 
 
 class EmceeSampler:
@@ -101,7 +100,7 @@ class EmceeSampler:
         ndim,
         ndim_full,
         lnprob,
-        prior_ranges,
+        priors,
         subset=None,
         lnlike_kwargs={},
         test_inds=None,
@@ -114,7 +113,7 @@ class EmceeSampler:
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
 
-        self.lnprior = LogUniformPrior(prior_ranges)
+        self.lnprior = LogPrior(priors)
         self.lnprob = LogProb(
             ndim_full,
             lnprob,
@@ -171,6 +170,8 @@ class EmceeSampler:
             tau = self.sampler.get_autocorr_time(tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
+
+            print(index, tau, tau * self.autocorr_multiplier, self.sampler.iteration)
 
             # Check convergence
             converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)

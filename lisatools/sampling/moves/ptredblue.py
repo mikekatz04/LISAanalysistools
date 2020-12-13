@@ -34,7 +34,7 @@ class PTRedBlueMove(Move):
         ndim,
         adaptive=True,
         nsplits=2,
-        randomize_split=True,
+        randomize_split=False,
         live_dangerously=False,
         adaptation_lag=10000,
         adaptation_time=100,
@@ -96,6 +96,7 @@ class PTRedBlueMove(Move):
             # need to update 2nd based on updated coords from 1st
             coords = state.coords.reshape(ntemps, nwalkers, ndim)
 
+            coords_check = coords.copy()
             # Get the move-specific proposal.
             q = np.zeros((ntemps, nwalkers_here, ndim))
             factors = np.zeros((ntemps, nwalkers_here))

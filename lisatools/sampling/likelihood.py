@@ -256,7 +256,10 @@ class Likelihood(object):
             if self.return_cupy:
                 return out
             else:
-                return out.get()
+                try:
+                    return out.get()
+                except AttributeError:
+                    return out
 
         else:
             return out
