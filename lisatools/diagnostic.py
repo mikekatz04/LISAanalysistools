@@ -56,9 +56,9 @@ def inner_product(
         freqs = xp.fft.rfftfreq(length, dt)[1:]
 
         ft_sig1 = [
-            xp.fft.rfft(sig.real)[1:] * dt for sig in sig1
+            xp.fft.rfft(sig)[1:] * dt for sig in sig1
         ]  # remove DC / dt factor helps to cast to proper dimensionality
-        ft_sig2 = [xp.fft.rfft(sig.real)[1:] * dt for sig in sig2]  # remove DC
+        ft_sig2 = [xp.fft.rfft(sig)[1:] * dt for sig in sig2]  # remove DC
 
     else:
         ft_sig1 = sig1
@@ -68,7 +68,7 @@ def inner_product(
             freqs = (xp.arange(len(sig1[0])) + 1) * df  # ignores DC component using + 1
 
         else:
-            freqs = x
+            freqs = f_arr
 
     # get PSD weighting
     if isinstance(PSD, str):
@@ -91,9 +91,7 @@ def inner_product(
 
     # account for hp and hx if included in time domain signal
     for temp1, temp2 in zip(ft_sig1, ft_sig2):
-        y = (
-            xp.real(temp1.conj()[1:] * temp2[1:]) / PSD_arr[1:]
-        )  # 1: assumes right summation rule
+        y = xp.real(temp1.conj() * temp2) / PSD_arr  # assumes right summation rule
 
         out += 4 * xp.sum(x_vals * y)
 
@@ -258,7 +256,7 @@ def fisher(
     num_params = len(params)
 
     if deriv_inds is None:
-        deriv_inds = np.range(num_params)
+        deriv_inds = np.arange(num_params)
 
     num_fish_params = len(deriv_inds)
 
@@ -357,7 +355,7 @@ def mismatch_criterion(
     num_params = len(params)
 
     if deriv_inds is None:
-        deriv_inds = np.range(num_params)
+        deriv_inds = np.arange(num_params)
 
     num_fish_params = len(deriv_inds)
 
@@ -451,7 +449,7 @@ def cutler_vallisneri_bias(
     num_params = len(params)
 
     if deriv_inds is None:
-        deriv_inds = np.range(num_params)
+        deriv_inds = np.arange(num_params)
 
     num_fish_params = len(deriv_inds)
 

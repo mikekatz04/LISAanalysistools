@@ -198,7 +198,7 @@ sampler = PTEmceeSampler(
     fp="test_gb_pt_11_zero_temps.h5",
 )
 
-factor = 1e-8
+factor = 1e-6
 start_points = (
     params[np.newaxis, test_inds]
     + factor * np.random.randn(nwalkers * ntemps, ndim) * params[np.newaxis, test_inds]
