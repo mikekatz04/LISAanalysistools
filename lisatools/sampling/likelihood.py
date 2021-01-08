@@ -108,14 +108,25 @@ class Likelihood(object):
         if isinstance(noise_fn, list):
             if len(noise_fn) != 1 and len(noise_fn) != self.num_channels:
                 raise ValueError(
-                    "Number of noise functions does not match number of channels declare by user."
+                    "Number of noise functions does not match number of channels declared by user."
                 )
 
-            else:
+            elif len(noise_fn) == 1:
                 noise_fn = [noise_fn[0] for _ in range(self.num_channels)]
 
         else:
             noise_fn = [noise_fn for _ in range(self.num_channels)]
+
+        if isinstance(noise_kwargs, list):
+            if len(noise_kwargs) != 1 and len(noise_kwargs) != self.num_channels:
+                raise ValueError(
+                    "Number of noise kwargs does not match number of channels declared by user."
+                )
+            elif len(noise_kwargs) == 1:
+                noise_kwargs = [noise_kwargs[0] for _ in range(self.num_channels)]
+
+        else:
+            noise_kwargs = [noise_kwargs for _ in range(self.num_channels)]
 
         if self.frequency_domain:
             if self.df is not None:
@@ -134,7 +145,10 @@ class Likelihood(object):
             can_add_noise = True
             df = 1.0 / (self.injection_length * dt)
 
-        psd = [noise_fn_temp(freqs, **noise_kwargs) for noise_fn_temp in noise_fn]
+        psd = [
+            noise_fn_temp(freqs, **noise_kwargs_temp)
+            for noise_fn_temp, noise_kwargs_temp in zip(noise_fn, noise_kwargs)
+        ]
 
         if self.frequency_domain is False:
             injection_channels = [

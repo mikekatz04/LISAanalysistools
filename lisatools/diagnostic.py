@@ -87,7 +87,10 @@ def inner_product(
 
     out = 0.0
     # assumes right summation rule
-    x_vals = xp.diff(freqs)
+    x_vals = xp.zeros(len(PSD_arr))
+
+    x_vals[1:] = xp.diff(freqs)
+    x_vals[0] = x_vals[1]
 
     # account for hp and hx if included in time domain signal
     for temp1, temp2 in zip(ft_sig1, ft_sig2):

@@ -185,6 +185,14 @@ class PTEmceeSampler:
             **sampler_kwargs
         )
 
+    def get_chain(self, *args, **kwargs):
+        x = self.sampler.get_chain()
+
+        x_temp = x.reshape(
+            self.sampler.iteration, self.ntemps, self.nwalkers, self.ndim
+        )
+        return x_temp
+
     def sample(self, x0, max_iter, show_progress=False):
 
         # We'll track how the average autocorrelation time estimate changes
