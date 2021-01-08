@@ -1,0 +1,5 @@
+from scipy import constants as ct
+
+ConstOmega = 1.99098659277e-7
+YRSID_SI = 31558149.763545600
+MTSUN = 1.988546954961461467461011951140572744e30 * ct.G / ct.c ** 3

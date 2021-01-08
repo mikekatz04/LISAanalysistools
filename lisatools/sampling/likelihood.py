@@ -17,7 +17,7 @@ class Likelihood(object):
         dt=None,
         df=None,
         f_arr=None,
-        parameter_transforms={},
+        parameter_transforms=None,
         use_gpu=False,
         vectorized=False,
         separate_d_h=False,
@@ -72,8 +72,8 @@ class Likelihood(object):
     ):
 
         if params is not None:
-            for ind, transform_fn in self.parameter_transforms.items():
-                params[ind] = transform_fn(params[ind])
+            if self.parameter_transforms is not None:
+                params = self.parameter_transforms.transform_base_parameters(params)
 
             injection_channels = xp.asarray(
                 self.template_model(*params, **waveform_kwargs)
@@ -208,15 +208,11 @@ class Likelihood(object):
             self.noise_factor = [nf.copy() for nf in self.noise_factor]
 
     def get_ll(self, params, waveform_kwargs={}):
-
-        params = self.xp.atleast_2d(self.xp.asarray(params.copy()))
+        if self.parameter_transforms is not None:
+            params = self.parameter_transforms.transform_base_parameters(params)
 
         # TODO: make sure parameter transformations appear in posterior if possible
-        num_likes = params.shape[0]
-        params = params.T
-
-        for ind, transform_fn in self.parameter_transforms.items():
-            params[ind, :] = transform_fn(params[ind, :])
+        num_likes = params.shape[1]
 
         if self.like_here is False:
             args = (params,)

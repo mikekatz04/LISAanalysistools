@@ -83,7 +83,12 @@ class LogProb:
         loglike_vals = np.full(x.shape[0], -np.inf)
 
         if len(inds_eval) == 0:
-            return loglike_vals
+            return np.array([-loglike_vals, prior_vals]).T
+
+        if self.lnlike.parameter_transforms is not None:
+            self.lnlike.parameter_transforms.transform_inplace_parameters(
+                x.T, self.test_inds
+            )
 
         if self.need_to_fill:
             x_in = np.zeros((x.shape[0], self.ndim_full))

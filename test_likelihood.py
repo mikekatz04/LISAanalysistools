@@ -47,8 +47,8 @@ fdot = 1e-16
 fddot = 0.0
 phi0 = 0.1
 iota = 0.2
-psi = 0.3
-lam = 0.4
+psi = 12.0
+lam = 10.0
 beta_sky = 0.5
 A2 = 19.5
 omegabar = 0.0
@@ -81,34 +81,75 @@ df = 1 / (n * dt)
 
 waveform_kwargs = dict(N=N, dt=dt)
 
+
+def add_hund(x, y):
+    return (x + 100, y + 100)
+
+
 transform_fn = {
-    0: (lambda x: 1 * np.exp(x)),
-    1: (lambda x: x * 1e-3),
-    2: (lambda x: 1 * np.exp(x)),
-    5: (lambda x: np.arccos(x)),
-    8: (lambda x: np.arcsin(x)),
+    "base": {
+        0: (lambda x: 1 * np.exp(x)),
+        1: (lambda x: x * 1e-3),
+        2: (lambda x: 1 * np.exp(x)),
+        5: (lambda x: np.arccos(x)),
+        8: (lambda x: np.arcsin(x)),
+        (5, 8): add_hund,
+    },
+    "inplace": {
+        6: (lambda x: x % (np.pi)),
+        7: (lambda x: x % (2 * np.pi)),
+        (6, 7): add_hund,
+    },
 }
 
 like = Likelihood(gb, 2, df=df, parameter_transforms=transform_fn, use_gpu=use_gpu,)
 
 params = np.array(
     [
-        np.log(amp),
-        f0 * 1e3,
-        np.log(fdot),
-        fddot,
-        phi0,
-        np.cos(iota),
-        psi,
-        lam,
-        np.sin(beta_sky),
-        # A2,
-        # omegabar,
-        # e2,
-        # P2,
-        # T2,
+        [
+            np.log(amp),
+            f0 * 1e3,
+            np.log(fdot),
+            fddot,
+            phi0,
+            np.cos(iota),
+            psi,
+            lam,
+            np.sin(beta_sky),
+            # A2,
+            # omegabar,
+            # e2,
+            # P2,
+            # T2,
+        ],
+        [
+            np.log(amp),
+            f0 * 1e3,
+            np.log(fdot),
+            fddot,
+            phi0,
+            np.cos(iota),
+            psi,
+            lam,
+            np.sin(beta_sky),
+            # A2,
+            # omegabar,
+            # e2,
+            # P2,
+            # T2,
+        ],
     ]
 )
+
+old_params = params.copy()
+
+temp_test_inds = np.array([6, 7])
+
+temp_params = params[:, temp_test_inds]
+like.transform_inplace_parameters(temp_params, inds_map=temp_test_inds)
+test = like.transform_base_parameters(params)
+
+breakpoint()
 
 fish_params = np.array([params.copy()]).T
 
