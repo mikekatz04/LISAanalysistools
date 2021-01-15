@@ -24,3 +24,77 @@ def uniform_dist(min, max):
     sig = max - min
     dist = uniform(min, sig)
     return dist
+
+
+def mbh_sky_mode_transform(
+    coords, ind_map=None, kind="both", inplace=False, cos_i=False
+):
+
+    if ind_map is None:
+        ind_map = dict(inc=7, lam=8, beta=9, psi=10)
+
+    elif isinstance(ind_map, dict) is False:
+        raise ValueError("If providing the ind_map kwarg, it must be a dict.")
+
+    if kind not in ["both", "lat", "long"]:
+        raise ValueError(
+            "The kwarg 'kind' must be lat for latitudinal transformation, long for longitudinal transformation, or both for both."
+        )
+
+    elif kind == "both":
+        factor = 8
+
+    elif kind == "long":
+        factor = 4
+
+    elif kind == "lat":
+        factor = 2
+
+    if inplace:
+        if (coords.shape[0] % factor) != 0:
+            raise ValueError(
+                "If performing an inplace transformation, the coords provided must have a first dimension size divisible by {} for a '{}' transformation.".format(
+                    factor, kind
+                )
+            )
+
+    else:
+        coords = np.tile(coords, (factor, 1))
+
+    if kind == "both" or kind == "lat":
+
+        # inclination
+        if cos_i:
+            coords[1::2, ind_map["inc"]] *= -1
+
+        else:
+            coords[1::2, ind_map["inc"]] = np.pi - coords[1::2, ind_map["inc"]]
+
+        # beta
+        coords[1::2, ind_map["beta"]] *= -1
+
+        # psi
+        coords[1::2, ind_map["psi"]] = np.pi - coords[1::2, ind_map["psi"]]
+
+    if kind == "long":
+        for i in range(1, 4):
+            coords[i::4, ind_map["lam"]] = (
+                coords[i::4, ind_map["lam"]] + np.pi / 2 * i
+            ) % (2 * np.pi)
+
+            coords[i::4, ind_map["psi"]] = (
+                coords[i::4, ind_map["psi"]] + np.pi / 2 * i
+            ) % (np.pi)
+    if kind == "both":
+        num = coords.shape[0]
+        for i in range(1, 4):
+            for j in range(2):
+                coords[2 * i + j :: 8, ind_map["lam"]] = (
+                    coords[2 * i + j :: 8, ind_map["lam"]] + np.pi / 2 * i
+                ) % (2 * np.pi)
+
+                coords[2 * i + j :: 8, ind_map["psi"]] = (
+                    coords[2 * i + j :: 8, ind_map["psi"]] + np.pi / 2 * i
+                ) % (np.pi)
+
+    return coords
