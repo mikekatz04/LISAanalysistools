@@ -34,7 +34,7 @@ class LogPrior:
     def __call__(self, x):
 
         prior_vals = np.zeros((x.shape[0]))
-        for prior_i, x_i in zip(self.priors, x.T):
+        for i, (prior_i, x_i) in enumerate(zip(self.priors, x.T)):
             temp = prior_i.logpdf(x_i)
 
             prior_vals[np.isinf(temp)] += -np.inf
@@ -85,10 +85,10 @@ class LogProb:
         if len(inds_eval) == 0:
             return np.array([-loglike_vals, prior_vals]).T
 
-        if self.lnlike.parameter_transforms is not None:
-            self.lnlike.parameter_transforms.transform_inplace_parameters(
-                x.T, self.test_inds
-            )
+        # if self.lnlike.parameter_transforms is not None:
+        #    self.lnlike.parameter_transforms.transform_inplace_parameters(
+        #        x.T, self.test_inds
+        #    )
 
         if self.need_to_fill:
             x_in = np.zeros((x.shape[0], self.ndim_full))
@@ -138,6 +138,7 @@ class PTEmceeSampler:
         ntemps_target_extra=0,
         Tmax=None,
         burn=None,
+        periodic=None,
         sampler_kwargs={},
     ):
 
@@ -179,7 +180,7 @@ class PTEmceeSampler:
             backend.reset(self.all_walkers, ndim)
 
         # TODO: add block if nwalkers / betas is not okay
-        pt_move = PTStretchMove(betas, nwalkers, ndim)
+        pt_move = PTStretchMove(betas, nwalkers, ndim, periodic=periodic)
         self.sampler = emcee.EnsembleSampler(
             self.all_walkers,
             ndim,
@@ -198,20 +199,17 @@ class PTEmceeSampler:
         )
         return x_temp
 
-    def sample(self, x0, max_iter, show_progress=False):
-
+    def sample(self, x0, iterations=10000, **sampler_kwargs):
         # We'll track how the average autocorrelation time estimate changes
         index = 0
-        autocorr = np.empty(max_iter)
+        autocorr = np.empty(iterations)
 
         # This will be useful to testing convergence
         old_tau = np.inf
 
         st = time.perf_counter()
         # Now we'll sample for up to max_n steps
-        for sample in self.sampler.sample(
-            x0, iterations=max_iter, progress=show_progress
-        ):
+        for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
             # Only check convergence every 100 steps
             if self.burn is not None:
                 if self.sampler.iteration < self.burn:

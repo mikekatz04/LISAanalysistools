@@ -262,8 +262,19 @@ class PTStretchMove(PTRedBlueMove):
         The stretch scale parameter. (default: ``2.0``)
     """
 
-    def __init__(self, *args, a=2.0, **kwargs):
+    def __init__(self, *args, periodic=None, a=2.0, **kwargs):
         self.a = a
+
+        if periodic is None:
+            periodic = {}
+        elif isinstance(periodic, dict) is False:
+            raise ValueError(
+                "'periodic' kwarg must be a dict with indexes as keys and periods as values."
+            )
+
+        self.periodic = periodic
+        self.inds_periodic = np.asarray([i for i in periodic.keys()])
+        self.periods = np.asarray([i for i in periodic.values()])
         super(PTStretchMove, self).__init__(*args, **kwargs)
 
     def get_proposal(self, s, c, random):
@@ -273,4 +284,27 @@ class PTStretchMove(PTRedBlueMove):
         zz = ((self.a - 1.0) * random.rand(Ns) + 1) ** 2.0 / self.a
         factors = (ndim - 1.0) * np.log(zz)
         rint = random.randint(Nc, size=(Ns,))
-        return c[rint] - (c[rint] - s) * zz[:, None], factors
+
+        diff = c[rint] - s
+
+        if self.periodic != {}:
+            diff_periodic = diff[:, self.inds_periodic]
+
+            inds_fix = np.abs(diff_periodic) > self.periods[np.newaxis, :] / 2.0
+
+            new_s = -(self.periods[np.newaxis, :] - s[:, self.inds_periodic]) * (
+                diff_periodic < 0.0
+            ) + (self.periods[np.newaxis, :] + s[:, self.inds_periodic]) * (
+                diff_periodic >= 0.0
+            )
+
+            diff_periodic[inds_fix] = (
+                c[rint][:, self.inds_periodic][inds_fix] - new_s[inds_fix]
+            )
+            diff[:, self.inds_periodic] = diff_periodic
+
+        new_proposals = c[rint] - (diff) * zz[:, None]
+        new_proposals[:, self.inds_periodic] = (
+            new_proposals[:, self.inds_periodic] % self.periods[np.newaxis, :]
+        )
+        return new_proposals, factors
