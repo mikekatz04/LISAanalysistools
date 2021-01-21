@@ -116,7 +116,7 @@ class SSB_to_LISA:
     def __init__(self, t0):
         self.t0 = t0 * YRSID_SI
 
-    def __call__(self, tSSb, lambdaSSB, betaSSB, psiSSB):
+    def __call__(self, tSSB, lambdaSSB, betaSSB, psiSSB):
 
         ConstPhi0 = ConstOmega * (self.t0)
         alpha = 0.0
