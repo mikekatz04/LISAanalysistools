@@ -304,7 +304,9 @@ class PTStretchMove(PTRedBlueMove):
             diff[:, self.inds_periodic] = diff_periodic
 
         new_proposals = c[rint] - (diff) * zz[:, None]
-        new_proposals[:, self.inds_periodic] = (
-            new_proposals[:, self.inds_periodic] % self.periods[np.newaxis, :]
-        )
+
+        if self.periodic != {}:
+            new_proposals[:, self.inds_periodic] = (
+                new_proposals[:, self.inds_periodic] % self.periods[np.newaxis, :]
+            )
         return new_proposals, factors

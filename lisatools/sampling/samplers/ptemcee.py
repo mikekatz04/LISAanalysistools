@@ -80,7 +80,7 @@ class LogProb:
         prior_vals = self.lnprior(x)
         inds_eval = np.atleast_1d(np.squeeze(np.where(np.isinf(prior_vals) != True)))
 
-        loglike_vals = np.full(x.shape[0], -np.inf)
+        loglike_vals = np.full(x.shape[0], np.inf)
 
         if len(inds_eval) == 0:
             return np.array([-loglike_vals, prior_vals]).T
@@ -144,8 +144,8 @@ class PTEmceeSampler:
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
 
-        ntemps_ladder = ntemps - ntemps_target_extra
         if betas is None:
+            ntemps_ladder = ntemps - ntemps_target_extra
             betas = default_beta_ladder(ndim, ntemps=ntemps_ladder, Tmax=Tmax)
             if ntemps_target_extra > 0:
                 betas = np.concatenate([np.full(ntemps_target_extra, 1.0), betas])

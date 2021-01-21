@@ -168,7 +168,7 @@ def snr(sig1, *args, data=None, **kwargs):
 
 
 def h_var_p_eps(
-    waveform_model, params, step, i, parameter_transforms={}, waveform_kwargs={}
+    waveform_model, params, step, i, parameter_transforms=None, waveform_kwargs={}
 ):
     """
     Calculate the waveform with a perturbation step of the variable V[i]
@@ -176,9 +176,7 @@ def h_var_p_eps(
     params_p_eps = params.copy()
     params_p_eps[i] += step
 
-    if parameter_transforms != {}:
-        for ind, transform_fn in parameter_transforms.items():
-            params_p_eps[ind] = transform_fn(params_p_eps[ind])
+    params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps)
 
     dh = waveform_model(*params_p_eps, **waveform_kwargs)
 
@@ -186,7 +184,7 @@ def h_var_p_eps(
 
 
 def dh_dlambda(
-    waveform_model, params, eps, i, parameter_transforms={}, waveform_kwargs={}
+    waveform_model, params, eps, i, parameter_transforms=None, waveform_kwargs={}
 ):
     """
     Calculate the derivative of the waveform with precision of order (step^4)
