@@ -3,6 +3,8 @@ import time
 import numpy as np
 
 import emcee
+from lisatools.sampling.utility import ModifiedHDFBackend
+from lisatools.sampling.plot import PlotContainer
 
 from ptemcee.sampler import default_beta_ladder
 
@@ -128,11 +130,15 @@ class PTEmceeSampler:
         priors,
         subset=None,
         lnlike_kwargs={},
+        injection=None,
         test_inds=None,
         fill_values=None,
         fp=None,
         autocorr_iter_count=100,
         autocorr_multiplier=1000,  # higher in ptemcee
+        plot_iterations=-1,
+        plot_source=None,
+        plot_kwargs={},
         betas=None,
         ntemps=None,
         ntemps_target_extra=0,
@@ -172,12 +178,26 @@ class PTEmceeSampler:
 
         self.subset = subset
 
+        self.plot_iterations = plot_iterations
         if fp is None:
             backend = emcee.backends.Backend()
+            if plot_iterations > 0:
+                raise NotImplementedError
 
         else:
-            backend = emcee.backends.HDFBackend(fp)
-            backend.reset(self.all_walkers, ndim)
+            backend = ModifiedHDFBackend(fp)
+            backend.reset(
+                self.all_walkers,
+                ndim,
+                ntemps=self.ntemps,
+                injection=injection,
+                test_inds=test_inds,
+            )
+
+            if self.plot_iterations > 0:
+                if plot_source is None:
+                    raise ValueError("plot_in_run is True. plot_source must be given.")
+                self.plot_gen = PlotContainer(fp, plot_source, **plot_kwargs)
 
         # TODO: add block if nwalkers / betas is not okay
         pt_move = PTStretchMove(betas, nwalkers, ndim, periodic=periodic)
@@ -190,14 +210,6 @@ class PTEmceeSampler:
             backend=backend,
             **sampler_kwargs
         )
-
-    def get_chain(self, *args, **kwargs):
-        x = self.sampler.get_chain()
-
-        x_temp = x.reshape(
-            self.sampler.iteration, self.ntemps, self.nwalkers, self.ndim
-        )
-        return x_temp
 
     def sample(self, x0, iterations=10000, **sampler_kwargs):
         # We'll track how the average autocorrelation time estimate changes
@@ -221,25 +233,17 @@ class PTEmceeSampler:
 
                 else:
                     raise ValueError("Sampler iteration went beyond burn number.")
-            if self.sampler.iteration % self.autocorr_iter_count:
+
+            if self.sampler.iteration % self.autocorr_iter_count and (
+                self.sampler.iteration % self.plot_iterations
+                or self.plot_iterations <= 0
+            ):
                 continue
 
             # Compute the autocorrelation time so far
             # Using tol=0 means that we'll always get an estimate even
             # if it isn't trustworthy
-
-            # TODO: fix this for parallel tempering
-            x = self.sampler.get_chain()
-
-            x_temp = x.reshape(
-                self.sampler.iteration, self.ntemps, self.nwalkers, self.ndim
-            )
-
-            x_temp = x_temp[:, : self.ntemps_target].reshape(
-                self.sampler.iteration, -1, self.ndim
-            )
-
-            tau = get_pt_autocorr_time(x_temp, tol=0)
+            tau = self.sampler.get_autocorr_time(tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
 
@@ -248,6 +252,12 @@ class PTEmceeSampler:
             # Check convergence
             converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)
             converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
+
+            if (
+                self.sampler.iteration % self.plot_iterations == 0
+                and self.plot_iterations > 0
+            ):
+                self.plot_gen.generate_corner()
 
             if converged:
                 break
