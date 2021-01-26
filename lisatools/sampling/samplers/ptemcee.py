@@ -199,6 +199,10 @@ class PTEmceeSampler:
                     raise ValueError("plot_in_run is True. plot_source must be given.")
                 self.plot_gen = PlotContainer(fp, plot_source, **plot_kwargs)
 
+        self.injection = injection
+        self.test_inds = test_inds
+        self.ndim = ndim
+
         # TODO: add block if nwalkers / betas is not okay
         pt_move = PTStretchMove(betas, nwalkers, ndim, periodic=periodic)
         self.sampler = emcee.EnsembleSampler(
@@ -220,19 +224,18 @@ class PTEmceeSampler:
         old_tau = np.inf
 
         st = time.perf_counter()
+
+        if self.burn is not None:
+            for sample in self.sampler.sample(
+                x0, iterations=self.burn, store=False, **sampler_kwargs
+            ):
+                x0 = sample.coords
+            print("Burn Finished")
+
+        breakpoint()
         # Now we'll sample for up to max_n steps
         for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
             # Only check convergence every 100 steps
-            if self.burn is not None:
-                if self.sampler.iteration < self.burn:
-                    continue
-
-                elif self.sampler.iteration == self.burn:
-                    self.sampler.reset()
-                    self.burn = None
-
-                else:
-                    raise ValueError("Sampler iteration went beyond burn number.")
 
             if self.sampler.iteration % self.autocorr_iter_count and (
                 self.sampler.iteration % self.plot_iterations
