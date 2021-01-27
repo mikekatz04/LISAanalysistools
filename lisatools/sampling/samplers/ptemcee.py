@@ -232,7 +232,6 @@ class PTEmceeSampler:
                 x0 = sample.coords
             print("Burn Finished")
 
-        breakpoint()
         # Now we'll sample for up to max_n steps
         for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
             # Only check convergence every 100 steps
