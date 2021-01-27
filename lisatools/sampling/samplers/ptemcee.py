@@ -151,10 +151,13 @@ class PTEmceeSampler:
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
 
         if betas is None:
-            ntemps_ladder = ntemps - ntemps_target_extra
-            betas = default_beta_ladder(ndim, ntemps=ntemps_ladder, Tmax=Tmax)
-            if ntemps_target_extra > 0:
-                betas = np.concatenate([np.full(ntemps_target_extra, 1.0), betas])
+            if ntemps == 1:
+                betas = np.array([1.0])
+            else:
+                ntemps_ladder = ntemps - ntemps_target_extra
+                betas = default_beta_ladder(ndim, ntemps=ntemps_ladder, Tmax=Tmax)
+                if ntemps_target_extra > 0:
+                    betas = np.concatenate([np.full(ntemps_target_extra, 1.0), betas])
 
         self.betas = betas
         self.ntemps = len(betas)
