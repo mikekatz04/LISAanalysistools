@@ -87,7 +87,10 @@ class Likelihood(object):
         elif data_stream is not None:
             if isinstance(data_stream, list) is False:
                 raise ValueError("If data_stream is provided, it must be as a list.")
-            injection_channels = np.asarray(data_stream)
+            try:
+                injection_channels = self.xp.asarray(data_stream).get()
+            except AttributeError:
+                injection_channels = np.asarray(data_stream)
 
         else:
             raise ValueError(

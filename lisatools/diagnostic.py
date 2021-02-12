@@ -348,8 +348,7 @@ def mismatch_criterion(
 
     params_true = params.copy()
 
-    for ind, transform_fn in parameter_transforms.items():
-        params_true[ind] = transform_fn(params_true[ind])
+    params_true = parameter_transforms.transform_base_parameters(params_true)
 
     h_true = waveform_model(*params_true, **waveform_kwargs)
 
@@ -390,8 +389,7 @@ def mismatch_criterion(
     for i, ind in enumerate(deriv_inds):  # for only the considered variables
         var_p_eps[ind] = var_p_eps[ind].copy() + vec_delta[i]
 
-    for ind, transform_fn in parameter_transforms.items():
-        var_p_eps[ind] = transform_fn(var_p_eps[ind])
+    var_p_eps = parameter_transforms.transform_base_parameters(var_p_eps)
 
     h_delta = waveform_model(*var_p_eps, **waveform_kwargs)
 
@@ -458,8 +456,7 @@ def cutler_vallisneri_bias(
         eps = np.full_like(params, eps)
 
     params_true = params.copy()
-    for ind, transform_fn in parameter_transforms.items():
-        params_true[ind] = transform_fn(params_true[ind])
+    params_true = parameter_transforms.transform_base_parameters(params_true)
 
     if in_diagnostics is None:
 
@@ -491,7 +488,6 @@ def cutler_vallisneri_bias(
             inner_product(
                 [dh[k, :].real, dh[k, :].imag],
                 [diff.real, diff.imag],
-                x,
                 **inner_product_kwargs
             )
             for k in range(num_fish_params)

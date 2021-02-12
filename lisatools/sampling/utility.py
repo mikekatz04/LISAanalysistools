@@ -79,7 +79,7 @@ class ModifiedHDFBackend(HDFBackend):
 
         return (ntemps, nwalkers, ndim)
 
-    def get_chain(self, **kwargs):
+    def get_chain(self, squeeze=False, **kwargs):
         """Get the stored chain of MCMC samples
         Args:
             flat (Optional[bool]): Flatten the chain across the ensemble.
@@ -92,7 +92,11 @@ class ModifiedHDFBackend(HDFBackend):
             array[..., nwalkers, ndim]: The MCMC samples.
         """
         ntemps, nwalkers, ndim = self.get_dims()
-        return self.get_value("chain", **kwargs).reshape(-1, ntemps, nwalkers, ndim)
+
+        out = self.get_value("chain", **kwargs)
+        if squeeze:
+            out = out.squeeze()
+        return out
 
     def get_value(self, name, flat=False, thin=1, discard=0):
         if not self.initialized:
@@ -115,10 +119,20 @@ class ModifiedHDFBackend(HDFBackend):
                 return None
 
             v = g[name][discard + thin - 1 : self.iteration : thin]
+
             ntemps, nwalkers, ndim = self.get_dims()
+            if name == "accepted":
+                return v
+
+            elif name == "log_prob":
+                v = v.reshape(-1, ntemps, nwalkers)
+                if flat:
+                    v = v.flatten()
+                return v
+
             v = v.reshape(-1, ntemps, nwalkers, ndim)
             if flat:
-                v.reshape(-1, ndim)
+                v = v.reshape(-1, ndim)
             return v
 
     def get_autocorr_time(self, discard=0, thin=1, ntemps_target=1, **kwargs):
@@ -136,7 +150,7 @@ class ModifiedHDFBackend(HDFBackend):
             array[ndim]: The integrated autocorrelation time estimate for the
                 chain for each parameter.
         """
-        x = self.get_chain(discard=discard, thin=thin)
+        x = self.get_chain(discard=discard, thin=thin, squeeze=False)
         ntemps, nwalkers, ndim = self.get_dims()
         x_keep = x[:, :ntemps_target].reshape(-1, ntemps_target * nwalkers, ndim)
         return thin * autocorr.integrated_time(x_keep, **kwargs)

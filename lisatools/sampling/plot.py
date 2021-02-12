@@ -48,6 +48,8 @@ class PlotContainer:
             contour_kwargs={"colors": "blue"},
             hist_kwargs={"density": True},
             truths=self.injection,
+            show_titles=True,
+            title_fmt=".2e",
         )
 
         for key, default in default_corner_kwargs.items():
@@ -129,7 +131,9 @@ class PlotContainer:
             for ind, label in sub_keys.items():
                 self.corner_kwargs["labels"][ind] = label
 
-    def generate_corner(self, burn=None, thin=None, **corner_kwargs):
+    def generate_corner(
+        self, burn=None, thin=None, save=True, return_fig=False, **corner_kwargs
+    ):
 
         samples = self.reader.get_chain()
 
@@ -150,7 +154,12 @@ class PlotContainer:
         samples = samples[burn::thin, :ntemps_target].reshape(-1, ndim)
         plot_sample_shape = samples.shape
 
-        corner_kwargs = {**corner_kwargs, **self.corner_kwargs}
+        for key, val in self.corner_kwargs.items():
+            corner_kwargs[key] = corner_kwargs.get(key, val)
+
+        if "hist_kwargs" in corner_kwargs:
+            if "color" in corner_kwargs["hist_kwargs"] and "color" in corner_kwargs:
+                corner_kwargs["hist_kwargs"]["color"] = corner_kwargs["color"]
 
         if self.print_diagnostics:
             print("burn-in: {0}".format(burn))
@@ -177,7 +186,11 @@ class PlotContainer:
 
             fig.suptitle(title_str, fontsize=16)
 
-        fig.savefig(self.name + "_corner.pdf")
+        if save:
+            fig.savefig(self.name + "_corner.pdf")
+
+        if return_fig:
+            return fig
 
 
 if __name__ == "__main__":

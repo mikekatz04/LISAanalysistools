@@ -207,7 +207,9 @@ class PTEmceeSampler:
         self.ndim = ndim
 
         # TODO: add block if nwalkers / betas is not okay
-        pt_move = PTStretchMove(betas, nwalkers, ndim, periodic=periodic)
+        pt_move = PTStretchMove(
+            betas, nwalkers, ndim, periodic=periodic, **sampler_kwargs
+        )
         self.sampler = emcee.EnsembleSampler(
             self.all_walkers,
             ndim,
