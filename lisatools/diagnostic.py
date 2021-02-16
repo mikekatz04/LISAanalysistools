@@ -176,7 +176,9 @@ def h_var_p_eps(
     params_p_eps = params.copy()
     params_p_eps[i] += step
 
-    params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps)
+    if parameter_transforms:
+        # transform
+        params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps)
 
     dh = waveform_model(*params_p_eps, **waveform_kwargs)
 

@@ -27,7 +27,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-use_gpu = True
+use_gpu = False
 fast = GenerateEMRIWaveform(
     "FastSchwarzschildEccentricFlux",
     sum_kwargs=dict(pad_output=True),
@@ -98,13 +98,13 @@ injection_params = np.array(
 )
 
 # define other quantities
-T = 2.0  # years
+T = 14/365  # years
 dt = 15.0
 
 snr_goal = 30.0
 
 # for SNR and covariance calculation
-inner_product_kwargs = dict(dt=dt, PSD="lisasens")
+inner_product_kwargs = dict(dt=dt, PSD="cornish_lisa_psd")
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
@@ -126,7 +126,7 @@ waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-5}
 check_sig = fast(*check_params, **waveform_kwargs)
 
 # adjust distance for SNR goal
-check_sig, snr_orig = scale_snr(snr_goal, check_sig, dt=dt, return_orig_snr=True)
+check_sig, snr_orig = scale_snr(snr_goal, check_sig, return_orig_snr=True,**inner_product_kwargs) #, dt=dt
 
 print("orig_dist:", injection_params[6])
 injection_params[6] *= snr_orig / snr_goal
@@ -165,7 +165,7 @@ like.inject_signal(
     params=injection_params.copy(),
     waveform_kwargs=waveform_kwargs,
     noise_fn=get_sensitivity,
-    noise_kwargs=dict(sens_fn="lisasens"),
+    noise_kwargs=dict(sens_fn="cornish_lisa_psd"),
     add_noise=False,
 )
 
@@ -262,8 +262,8 @@ sampler = PTEmceeSampler(
     test_inds=test_inds,
     fill_values=fill_values,
     ntemps=ntemps,
-    autocorr_multiplier=100,
-    autocorr_iter_count=50,
+    autocorr_multiplier=100, # automatic stopper, be careful with this since the parallel tempering 
+    autocorr_iter_count=50, # how often it checks the autocorrelation
     ntemps_target_extra=ntemps_target_extra,
     Tmax=Tmax,
     injection=injection_test_points,
@@ -276,7 +276,7 @@ sampler = PTEmceeSampler(
 )
 
 thin_by = 1
-max_iter = 100000
+max_iter = 10000
 sampler.sample(
     start_points,
     iterations=max_iter,
