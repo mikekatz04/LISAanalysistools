@@ -207,15 +207,17 @@ class PTEmceeSampler:
         self.ndim = ndim
 
         # TODO: add block if nwalkers / betas is not okay
-        pt_move = PTStretchMove(
-            betas, nwalkers, ndim, periodic=periodic, **sampler_kwargs
-        )
+        if "moves" not in sampler_kwargs:
+            pt_move = PTStretchMove(
+                betas, nwalkers, ndim, periodic=periodic, **sampler_kwargs
+            )
+            sampler_kwargs["moves"] = pt_move
+
         self.sampler = emcee.EnsembleSampler(
             self.all_walkers,
             ndim,
             self.lnprob,
             vectorize=True,
-            moves=pt_move,
             backend=backend,
             **sampler_kwargs
         )
