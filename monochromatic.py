@@ -20,7 +20,7 @@ use_gpu = False
 from lisatools.sampling.likelihood import Likelihood
 from lisatools.sampling.samplers.emcee import EmceeSampler
 from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
-from lisatools.utils.utility import uniform_dist
+from lisatools.utils.utility import uniform_dist, log_uniform
 from lisatools.utils.transform import TransformContainer
 import warnings
 
@@ -46,13 +46,14 @@ class Monochromatic:
     def __call__(
         self,
         f,
+        fdot,
         A,
         phi,
         dt=10.0,
         T=1.0,
     ):
         time_vec = np.arange(0,T*31536000,dt)
-        h = zero_pad(A*np.exp(1j* 2 * np.pi * f * time_vec + phi))
+        h = zero_pad(A*np.exp(1j* 2 * np.pi * (f + fdot * time_vec) * time_vec + phi))
 
         if self.return_list is False:
             return h
@@ -70,6 +71,7 @@ mon_not_list = Monochromatic(return_list=False)
 injection_params = np.array(
     [
         1e-3,
+        1e-11,
         np.log(1e-19),
         0
     ]
@@ -77,7 +79,7 @@ injection_params = np.array(
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
-    "base": {1: (lambda x: np.exp(x)),},
+    "base": {2: (lambda x: np.exp(x)),},
 }
 # use the special transform container
 transform_fn = TransformContainer(transform_fn_in)
@@ -87,7 +89,8 @@ check_params = transform_fn.transform_base_parameters(injection_params.copy()).T
 
 # time stuff
 dt = 10
-T = 1/365
+T = 10/365
+minf = 1/(T*3600*24*365)
 waveform_kwargs = {"T": T, "dt": dt}
 
 # generate waveform
@@ -101,8 +104,8 @@ tot_snr_0 = snr(h,**inner_product_kwargs)
 
 #############
 #%% Fisher and derivatives
-test_inds = [0, 1]
-eps = 1e-9
+test_inds = [0, 1, 2]
+eps = [1e-10, 1e-15, 1e-7]
 cov, fish, dh = covariance(
     mon_not_list,
     injection_params,
@@ -116,19 +119,21 @@ cov, fish, dh = covariance(
     return_derivs=True
 )
 
-print(np.sqrt(np.diag(cov))/injection_params.copy()[test_inds] )
+print("ratio numerical theoretical ", fish[2,2]/(tot_snr_0**2) )
+print("ratio numerical theoretical ", fish[0,0]/(4*(np.pi*tot_snr_0*T*365*24*3600)**2 / 3) )
+print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*(T*365*24*3600)**2)**2 / 5) )
 
 ############################################
 #%% MCMC parameters to sample over
 
 # define sampling quantities
-nwalkers = 6  # per temperature
-ntemps = 4
+nwalkers = 20  # per temperature
+ntemps = 10
 
-ndim_full = 3  # full dimensionality of inputs to waveform model
+ndim_full = 4  # full dimensionality of inputs to waveform model
 
 # which of the injection parameters you actually want to sample over
-test_inds = np.array([0, 1])
+test_inds = np.array([0, 1, 2])
 
 # ndim for sampler
 ndim = len(test_inds)
@@ -161,12 +166,13 @@ like.inject_signal(
 #%% MCMC priors
 # define priors, it really can only do uniform cube at the moment
 priors = [
-    uniform_dist(5e-4, 0.5e-2),
+    log_uniform(5e-5, 1e-1),
+    uniform_dist(5e-15, 0.5e-10),
     uniform_dist(np.log(1e-21), np.log(1e-18))
 ]
 
 # can add extra temperatures of 1 to have multiple temps accessing the target distribution
-ntemps_target_extra = 2
+ntemps_target_extra = 0
 # define max temperature (generally should be inf if you want to sample prior)
 Tmax = np.inf
 
@@ -231,7 +237,7 @@ sampler = PTEmceeSampler(
 )
 
 thin_by = 1
-max_iter = 5000
+max_iter = 10000
 sampler.sample(
     start_points,
     iterations=max_iter,

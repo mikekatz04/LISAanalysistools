@@ -14,7 +14,6 @@ from lisatools.diagnostic import (
 )
 
 from few.waveform import FastSchwarzschildEccentricFlux, GenerateEMRIWaveform
-
 from lisatools.sampling.likelihood import Likelihood
 
 from lisatools.sampling.samplers.emcee import EmceeSampler
@@ -134,7 +133,7 @@ check_params = transform_fn.transform_base_parameters(check_params).T
 #########################################
 # Waveform
 # INJECTION kwargs
-waveform_kwargs = {"T": T, "dt": dt, "mode_selection": [(2,2,0)]}
+waveform_kwargs = {"T": T, "dt": dt, 'eps':1e-1}#"mode_selection": [(2,2,0)]}
 
 check_sig = fast(*check_params, **waveform_kwargs)
 
@@ -266,7 +265,7 @@ if likelike:
         gaus = np.exp(-x*x/(2))
         plt.plot(x,gaus,label='theoretical likelihood')
         plt.legend()
-        plt.savefig('plot_check_fish_var'+str(i) +'.png')
+        plt.savefig('plot_check_fish_var'+str(i) +'_eps1e-2.png')
         #plt.show()
 
     #
