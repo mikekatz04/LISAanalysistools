@@ -106,15 +106,19 @@ class MultiSourceFisherProposal(ModifiedMHMove):
         mean = np.zeros(self.per_system_ndim)
         old_coords = coords.copy()
 
-        if (
-            self.time > 10
-            and self.adaptive
-            and not (self.time % self.adapt_time)
-            and np.all(self.af > 0.0)
-        ):
+        # if self.time > 10 and self.adaptive and not (self.time % self.adapt_time) and np.all(self.af > 0.0):
 
-            self.factors = self.factors * (self.af / self.desired_acceptance)
-            print(self.factors, self.af)
+        #    self.factors = np.exp(self.af - self.desired_acceptance) * self.factors
+
+        if self.time % 25 == 0 and self.time > 0:
+            print(
+                self.factors,
+                self.af,
+                self.time > 10
+                and self.adaptive
+                and not (self.time % self.adapt_time)
+                and np.all(self.af > 0.0),
+            )
 
         new_change_in_coords = np.array(
             [

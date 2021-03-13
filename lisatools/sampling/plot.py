@@ -58,7 +58,7 @@ class PlotContainer:
     def _load_mbh(self, test_inds=None, sub_keys={}):
 
         if test_inds is None:
-            self.test_inds = test_inds = np.arange(11)
+            self.test_inds = test_inds = np.delete(np.arange(11), 6)
 
         if "labels" not in self.corner_kwargs:
             keys_default = [
@@ -68,6 +68,7 @@ class PlotContainer:
                 r"$a_2$",
                 r"$d_L$",
                 r"$\phi_0$",
+                r"$f_{ref}$",
                 r"cos$\iota$",
                 r"$\lambda$",
                 r"sin$\beta$",

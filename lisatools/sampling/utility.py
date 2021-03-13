@@ -121,6 +121,7 @@ class ModifiedHDFBackend(HDFBackend):
             v = g[name][discard + thin - 1 : self.iteration : thin]
 
             ntemps, nwalkers, ndim = self.get_dims()
+
             if name == "accepted":
                 return v
 

@@ -3,10 +3,10 @@ import warnings
 import numpy as np
 
 try:
-    import cupy as xp
+    import cupy as cp
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as xp
+    pass
 
 from lisatools.sensitivity import get_sensitivity
 
@@ -21,7 +21,14 @@ def inner_product(
     PSD_args=(),
     PSD_kwargs={},
     normalize=False,
+    use_gpu=False,
 ):
+
+    if use_gpu:
+        xp = cp
+
+    else:
+        xp = np
 
     if df is None and dt is None and f_arr is None:
         raise ValueError("Must provide either df, dt or f_arr keyword arguments.")
@@ -157,14 +164,21 @@ def inner_product(
     return out
 
 
-def snr(sig1, *args, data=None, **kwargs):
+def snr(sig1, *args, data=None, use_gpu=False, **kwargs):
+
+    if use_gpu:
+        xp = cp
+
+    else:
+        xp = np
+
     if data is None:
         sig2 = sig1
 
     else:
         sig2 = data
 
-    return xp.sqrt(inner_product(sig1, sig2, *args, **kwargs))
+    return xp.sqrt(inner_product(sig1, sig2, *args, use_gpu=use_gpu, **kwargs))
 
 
 def h_var_p_eps(
