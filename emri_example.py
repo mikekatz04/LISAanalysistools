@@ -42,22 +42,6 @@ fast_not_list = GenerateEMRIWaveform(
     return_list=False,
 )
 
-"""
-M = 3.00000000e06
-mu = 3.00000000e01
-p0 = 8.93568206e00
-e0 = 1.00000000e-01
-dist = 6.13242402e-01
-"""
-
-"""
-M = 3.00000000e05
-mu = 3.00000000e00
-p0 = 1.31495565e01
-e0 = 5.00000000e-01
-dist = 1.37036074e00
-
-"""
 
 # define injection parameters
 M = 1.00000000e06
@@ -137,7 +121,7 @@ params_test = injection_params.copy()
 
 # define sampling quantities
 nwalkers = 32  # per temperature
-ntemps = 1
+ntemps = 10
 
 ndim_full = 14  # full dimensionality of inputs to waveform model
 
@@ -218,7 +202,7 @@ waveform_kwargs_templates["eps"] = 1e-2
 factor = 1e-2
 start_points = injection_params[
     np.newaxis, test_inds
-] + factor * np.random.multivariate_normal(np.zeros(len(test_inds)), cov, size=nwalkers)
+] + factor * np.random.multivariate_normal(np.zeros(len(test_inds)), cov, size=nwalkers*ntemps)
 
 """
 # random starts

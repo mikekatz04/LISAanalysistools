@@ -45,15 +45,16 @@ class Monochromatic:
 
     def __call__(
         self,
+        A,
         f,
         fdot,
-        A,
+        fddot,
         phi,
         dt=10.0,
         T=1.0,
     ):
         time_vec = np.arange(0,T*31536000,dt)
-        h = zero_pad(A*np.exp(1j* 2 * np.pi * (f + fdot * time_vec) * time_vec + phi))
+        h = zero_pad(A*np.exp(1j* 2 * np.pi * (f + fdot * time_vec/2 + fddot/6 * time_vec * time_vec) * time_vec + phi))
 
         if self.return_list is False:
             return h
@@ -70,16 +71,20 @@ mon_not_list = Monochromatic(return_list=False)
 # injection array
 injection_params = np.array(
     [
+        np.log(1e-19),
         1e-3,
         1e-11,
-        np.log(1e-19),
+        0,
         0
     ]
 )
 
+# which of the injection parameters you actually want to sample over
+test_inds = np.array([0, 1, 2])
+
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
-    "base": {2: (lambda x: np.exp(x)),},
+    "base": {0: (lambda x: np.exp(x)),},
 }
 # use the special transform container
 transform_fn = TransformContainer(transform_fn_in)
@@ -104,8 +109,7 @@ tot_snr_0 = snr(h,**inner_product_kwargs)
 
 #############
 #%% Fisher and derivatives
-test_inds = [0, 1, 2]
-eps = [1e-10, 1e-15, 1e-7]
+eps = [1e-7, 1e-10, 1e-15,]
 cov, fish, dh = covariance(
     mon_not_list,
     injection_params,
@@ -119,21 +123,19 @@ cov, fish, dh = covariance(
     return_derivs=True
 )
 
-print("ratio numerical theoretical ", fish[2,2]/(tot_snr_0**2) )
-print("ratio numerical theoretical ", fish[0,0]/(4*(np.pi*tot_snr_0*T*365*24*3600)**2 / 3) )
-print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*(T*365*24*3600)**2)**2 / 5) )
+print("ratio numerical theoretical ", fish[0,0]/(tot_snr_0**2) )
+print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*T*365*24*3600)**2 / 3) )
+print("ratio numerical theoretical ", fish[2,2]/((np.pi*tot_snr_0*(T*365*24*3600)**2)**2 / 5) )
 
 ############################################
 #%% MCMC parameters to sample over
 
 # define sampling quantities
-nwalkers = 20  # per temperature
-ntemps = 10
+nwalkers = 8  # per temperature
+ntemps = 2
 
-ndim_full = 4  # full dimensionality of inputs to waveform model
+ndim_full = 5  # full dimensionality of inputs to waveform model
 
-# which of the injection parameters you actually want to sample over
-test_inds = np.array([0, 1, 2])
 
 # ndim for sampler
 ndim = len(test_inds)
@@ -156,6 +158,8 @@ like = Likelihood(
 
 # inject
 like.inject_signal(
+    # in this way I provide the data stream
+    #data_stream=h,
     params=injection_params.copy(),
     waveform_kwargs=waveform_kwargs,
     noise_fn=get_sensitivity,
@@ -166,9 +170,9 @@ like.inject_signal(
 #%% MCMC priors
 # define priors, it really can only do uniform cube at the moment
 priors = [
+    uniform_dist(np.log(1e-20), np.log(1e-18)),
     log_uniform(5e-5, 1e-1),
     uniform_dist(5e-15, 0.5e-10),
-    uniform_dist(np.log(1e-21), np.log(1e-18))
 ]
 
 # can add extra temperatures of 1 to have multiple temps accessing the target distribution
@@ -182,19 +186,11 @@ subset = 2
 # set kwargs for the templates
 waveform_kwargs_templates = waveform_kwargs.copy()
 
-# sampler starting points around true point
-"""
-factor = 1e-5
-start_points = injection_params[
-    np.newaxis, test_inds
-] + factor * np.random.multivariate_normal(np.zeros(len(test_inds)), cov, size=nwalkers)
-
-"""
 # random starts
 np.random.seed(3000)
 start_points = np.zeros((nwalkers * ntemps, ndim))
 for i in range(ndim):
-    start_points[:, i] = priors[i].rvs(nwalkers * ntemps)
+    start_points[:, i] = np.random.multivariate_normal(injection_params[test_inds], cov, size=nwalkers*ntemps)[:,i] #priors[i].rvs(nwalkers * ntemps) #
 
 
 # check the starting points
@@ -231,13 +227,13 @@ sampler = PTEmceeSampler(
     ntemps_target_extra=ntemps_target_extra,
     Tmax=Tmax,
     injection=injection_test_points,
-    plot_iterations=100,
-    plot_source="emri",
-    fp="search_mono_no_noise.h5"
+    plot_iterations=990,
+    plot_source="gb",
+    fp="test_mono_no_noise.h5"
 )
 
 thin_by = 1
-max_iter = 10000
+max_iter = 1000
 sampler.sample(
     start_points,
     iterations=max_iter,
@@ -245,3 +241,5 @@ sampler.sample(
     skip_initial_state_check=False,
     thin_by=thin_by,
 )
+
+# %%
