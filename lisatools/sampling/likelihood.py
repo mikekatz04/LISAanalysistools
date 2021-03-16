@@ -87,7 +87,10 @@ class Likelihood(object):
         elif data_stream is not None:
             if isinstance(data_stream, list) is False:
                 raise ValueError("If data_stream is provided, it must be as a list.")
-            injection_channels = np.asarray(data_stream)
+            try:
+                injection_channels = self.xp.asarray(data_stream).get()
+            except AttributeError:
+                injection_channels = np.asarray(data_stream)
 
         else:
             raise ValueError(
@@ -206,6 +209,28 @@ class Likelihood(object):
         if self.like_here is False:
             self.injection_channels = [inj.copy() for inj in self.injection_channels]
             self.noise_factor = [nf.copy() for nf in self.noise_factor]
+
+    @property
+    def d_h(self):
+        if self.separate_d_h is False:
+            raise ValueError("Cannot get dh term if self.separate_d_h if False.")
+
+        if hasattr(self.template_model, "d_h"):
+            return self.template_model.d_h
+
+        else:
+            raise ValueError("Template model does not have the d_h term available.")
+
+    @property
+    def h_h(self):
+        if self.separate_d_h is False:
+            raise ValueError("Cannot get dh term if self.separate_d_h if False.")
+
+        if hasattr(self.template_model, "h_h"):
+            return self.template_model.h_h
+
+        else:
+            raise ValueError("Template model does not have the d_h term available.")
 
     def get_ll(self, params, waveform_kwargs={}):
         if self.parameter_transforms is not None:

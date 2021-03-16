@@ -3,10 +3,10 @@ import warnings
 import numpy as np
 
 try:
-    import cupy as xp
+    import cupy as cp
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as xp
+    import numpy as cp
 
 try:
     from tdi import *
@@ -18,7 +18,7 @@ except (ModuleNotFoundError, ImportError):
     warnings.warn("No tdi module available.")
 
 
-def cornish_lisa_psd(f, sky_averaged=False):
+def cornish_lisa_psd(f, sky_averaged=False, use_gpu=False):
     """PSD from https://arxiv.org/pdf/1803.01944.pdf
 
     Power Spectral Density for the LISA detector assuming it has been active for a year.
@@ -28,6 +28,11 @@ def cornish_lisa_psd(f, sky_averaged=False):
     PSD obtained from: https://arxiv.org/pdf/1803.01944.pdf
 
     """
+
+    if use_gpu:
+        xp = cp
+    else:
+        xp = np
 
     if sky_averaged:
         sky_averaging_constant = 20 / 3
@@ -39,14 +44,14 @@ def cornish_lisa_psd(f, sky_averaged=False):
     f0 = 19.09 * 10 ** (-3)  # transfer frequency
 
     # Optical Metrology Sensor
-    Poms = ((1.5e-11) * (1.5e-11)) * (1 + np.power((2e-3) / f, 4))
+    Poms = ((1.5e-11) * (1.5e-11)) * (1 + xp.power((2e-3) / f, 4))
 
     # Acceleration Noise
     Pacc = (
         (3e-15)
         * (3e-15)
         * (1 + (4e-4 / f) * (4e-4 / f))
-        * (1 + np.power(f / (8e-3), 4))
+        * (1 + xp.power(f / (8e-3), 4))
     )
 
     # constants for Galactic background after 1 year of observation
@@ -59,15 +64,15 @@ def cornish_lisa_psd(f, sky_averaged=False):
     # Galactic background contribution
     Sc = (
         9e-45
-        * np.power(f, -7 / 3)
-        * np.exp(-np.power(f, alpha) + beta * f * np.sin(k * f))
-        * (1 + np.tanh(gamma * (f_k - f)))
+        * xp.power(f, -7 / 3)
+        * xp.exp(-xp.power(f, alpha) + beta * f * xp.sin(k * f))
+        * (1 + xp.tanh(gamma * (f_k - f)))
     )
 
     # PSD
     PSD = (sky_averaging_constant) * (
         (10 / (3 * L * L))
-        * (Poms + (4 * Pacc) / (np.power(2 * np.pi * f, 4)))
+        * (Poms + (4 * Pacc) / (xp.power(2 * np.pi * f, 4)))
         * (1 + 0.6 * (f / f0) * (f / f0))
         + Sc
     )

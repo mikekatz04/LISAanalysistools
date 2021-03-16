@@ -3,10 +3,10 @@ import warnings
 import numpy as np
 
 try:
-    import cupy as xp
+    import cupy as cp
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as xp
+    pass
 
 from lisatools.sensitivity import get_sensitivity
 
@@ -21,7 +21,14 @@ def inner_product(
     PSD_args=(),
     PSD_kwargs={},
     normalize=False,
+    use_gpu=False,
 ):
+
+    if use_gpu:
+        xp = cp
+
+    else:
+        xp = np
 
     if df is None and dt is None and f_arr is None:
         raise ValueError("Must provide either df, dt or f_arr keyword arguments.")
@@ -157,14 +164,21 @@ def inner_product(
     return out
 
 
-def snr(sig1, *args, data=None, **kwargs):
+def snr(sig1, *args, data=None, use_gpu=False, **kwargs):
+
+    if use_gpu:
+        xp = cp
+
+    else:
+        xp = np
+
     if data is None:
         sig2 = sig1
 
     else:
         sig2 = data
 
-    return xp.sqrt(inner_product(sig1, sig2, *args, **kwargs))
+    return xp.sqrt(inner_product(sig1, sig2, *args, use_gpu=use_gpu, **kwargs))
 
 
 def h_var_p_eps(
@@ -382,8 +396,7 @@ def mismatch_criterion(
 
     params_true = params.copy()
 
-    for ind, transform_fn in parameter_transforms.items():
-        params_true[ind] = transform_fn(params_true[ind])
+    params_true = parameter_transforms.transform_base_parameters(params_true)
 
     h_true = waveform_model(*params_true, **waveform_kwargs)
 
@@ -424,8 +437,7 @@ def mismatch_criterion(
     for i, ind in enumerate(deriv_inds):  # for only the considered variables
         var_p_eps[ind] = var_p_eps[ind].copy() + vec_delta[i]
 
-    for ind, transform_fn in parameter_transforms.items():
-        var_p_eps[ind] = transform_fn(var_p_eps[ind])
+    var_p_eps = parameter_transforms.transform_base_parameters(var_p_eps)
 
     h_delta = waveform_model(*var_p_eps, **waveform_kwargs)
 
@@ -492,8 +504,7 @@ def cutler_vallisneri_bias(
         eps = np.full_like(params, eps)
 
     params_true = params.copy()
-    for ind, transform_fn in parameter_transforms.items():
-        params_true[ind] = transform_fn(params_true[ind])
+    params_true = parameter_transforms.transform_base_parameters(params_true)
 
     if in_diagnostics is None:
 
@@ -525,7 +536,6 @@ def cutler_vallisneri_bias(
             inner_product(
                 [dh[k, :].real, dh[k, :].imag],
                 [diff.real, diff.imag],
-                x,
                 **inner_product_kwargs
             )
             for k in range(num_fish_params)
