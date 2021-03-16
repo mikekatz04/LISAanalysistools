@@ -117,11 +117,21 @@ class PTRedBlueMove(Move):
             new_log_probs, new_blobs = model.compute_log_prob_fn(q)
 
             logl = new_log_probs.reshape(ntemps, nwalkers_here)
-            logp = new_blobs.reshape(ntemps, nwalkers_here)
+
+            if new_blobs.ndim == 1:
+                logp = new_blobs.reshape(ntemps, nwalkers_here)
+            else:
+                logp = new_blobs[:, 0].reshape(ntemps, nwalkers_here)
+
             logP = self._tempered_likelihood(logl, self.betas) + logp
 
             prev_logl = state.log_prob.reshape(ntemps, nwalkers)[:, all_inds[S1]]
-            prev_logp = state.blobs.reshape(ntemps, nwalkers)[:, all_inds[S1]]
+
+            if new_blobs.ndim == 1:
+                prev_logp = state.blobs.reshape(ntemps, nwalkers)[:, all_inds[S1]]
+            else:
+                prev_logp = state.blobs[:, 0].reshape(ntemps, nwalkers)[:, all_inds[S1]]
+
             prev_logP = self._tempered_likelihood(prev_logl, self.betas) + prev_logp
 
             logP = logP.flatten()
@@ -146,14 +156,25 @@ class PTRedBlueMove(Move):
             state = self.update(state, new_state, accepted, S1_temp)
 
         logl = state.log_prob.reshape(ntemps, nwalkers)
-        logp = state.blobs.reshape(ntemps, nwalkers)
+        if state.blobs.ndim == 1:
+            logp = state.blobs.reshape(ntemps, nwalkers)
+            d_h = None
+            h_h = None
+
+        else:
+            logp = state.blobs[:, 0].reshape(ntemps, nwalkers)
+            d_h = state.blobs[:, 1].reshape(ntemps, nwalkers)
+            h_h = state.blobs[:, 2].reshape(ntemps, nwalkers)
+
         logP = self._tempered_likelihood(logl, self.betas) + logp
 
-        x, logP, logl, logp = self._temperature_swaps(
+        x, logP, logl, logp, d_h, h_h = self._temperature_swaps(
             state.coords.reshape(ntemps, nwalkers, -1),
             logP.copy(),
             logl.copy(),
             logp.copy(),
+            d_h=d_h,
+            h_h=h_h,
         )
 
         ratios = self.swaps_accepted / self.swaps_proposed
@@ -162,9 +183,13 @@ class PTRedBlueMove(Move):
             dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
             self.betas += dbetas
 
-        state = State(
-            x.reshape(-1, self.ndim), log_prob=logl.flatten(), blobs=logp.flatten(),
+        blobs = (
+            logp.flatten()
+            if state.blobs.ndim == 1
+            else np.asarray([logp.flatten(), d_h.flatten(), h_h.flatten()]).T
         )
+
+        state = State(x.reshape(-1, self.ndim), log_prob=logl.flatten(), blobs=blobs,)
 
         self.time += 1
         return state, accepted
@@ -186,7 +211,7 @@ class PTRedBlueMove(Move):
 
         return loglT
 
-    def _temperature_swaps(self, x, logP, logl, logp):
+    def _temperature_swaps(self, x, logP, logl, logp, d_h=None, h_h=None):
         """
         Perform parallel-tempering temperature swaps on the state in ``x`` with associated ``logP`` and ``logl``.
         """
@@ -215,19 +240,29 @@ class PTRedBlueMove(Move):
             logp_temp = np.copy(logp[i, iperm[sel]])
             logP_temp = np.copy(logP[i, iperm[sel]])
 
+            if d_h is not None:
+                d_h_temp = np.copy(d_h[i, iperm[sel]])
+                h_h_temp = np.copy(h_h[i, iperm[sel]])
+
             x[i, iperm[sel], :] = x[i - 1, i1perm[sel], :]
             logl[i, iperm[sel]] = logl[i - 1, i1perm[sel]]
             logp[i, iperm[sel]] = logp[i - 1, i1perm[sel]]
             logP[i, iperm[sel]] = (
                 logP[i - 1, i1perm[sel]] - dbeta * logl[i - 1, i1perm[sel]]
             )
+            if d_h is not None:
+                d_h[i, iperm[sel]] = d_h[i - 1, i1perm[sel]]
+                h_h[i, iperm[sel]] = h_h[i - 1, i1perm[sel]]
 
             x[i - 1, i1perm[sel], :] = x_temp
             logl[i - 1, i1perm[sel]] = logl_temp
             logp[i - 1, i1perm[sel]] = logp_temp
             logP[i - 1, i1perm[sel]] = logP_temp + dbeta * logl_temp
+            if d_h is not None:
+                d_h[i - 1, i1perm[sel]] = d_h_temp
+                h_h[i - 1, i1perm[sel]] = h_h_temp
 
-        return x, logP, logl, logp
+        return x, logP, logl, logp, d_h, h_h
 
     def _get_ladder_adjustment(self, time, betas0, ratios):
         """

@@ -183,7 +183,8 @@ class PlotContainer:
             title_str += "Plotted samples shape: {}\n".format(plot_sample_shape)
             title_str += "Burnin Samples: {} / Thin: {}\n".format(burn, thin)
 
-            title_str += "Autocorrelation: {}".format(tau)
+            title_str += "Autocorrelation: {}\n".format(tau)
+            title_str += "max logl: {}".format(self.reader.get_log_prob().max())
 
             fig.suptitle(title_str, fontsize=16)
 

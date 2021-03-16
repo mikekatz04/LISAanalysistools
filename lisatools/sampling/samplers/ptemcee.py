@@ -54,6 +54,8 @@ class LogProb:
         test_inds=None,
         fill_values=None,
         subset=None,
+        get_d_h=False,
+        add_prior=False,
     ):
 
         self.lnlike_kwargs = lnlike_kwargs
@@ -77,15 +79,26 @@ class LogProb:
             self.need_to_fill = False
 
         self.subset = subset
+        self.get_d_h = get_d_h
+        self.add_prior = add_prior
 
     def __call__(self, x):
         prior_vals = self.lnprior(x)
         inds_eval = np.atleast_1d(np.squeeze(np.where(np.isinf(prior_vals) != True)))
 
         loglike_vals = np.full(x.shape[0], np.inf)
+        if self.get_d_h:
+            d_h_vals = np.full(x.shape[0], 0.0)
+            h_h_vals = np.full(x.shape[0], 0.0)
 
         if len(inds_eval) == 0:
-            return np.array([-loglike_vals, prior_vals]).T
+            array_1 = (
+                -loglike_vals if self.add_prior is False else -loglike_vals + prior_vals
+            )
+            list_of_arrays = [array_1, prior_vals]
+            if self.get_d_h:
+                list_of_arrays = list_of_arrays + [d_h_vals, h_h_vals]
+            return np.asarray(list_of_arrays).T
 
         # if self.lnlike.parameter_transforms is not None:
         #    self.lnlike.parameter_transforms.transform_inplace_parameters(
@@ -103,21 +116,43 @@ class LogProb:
         if self.subset is None:
             temp = self.lnlike.get_ll(x_in[inds_eval], **self.lnlike_kwargs)
 
+            if self.get_d_h:
+                d_h = self.lnlike.d_h
+                h_h = self.lnlike.d_h
+
         else:
             num_inds = len(inds_eval)
             ind_skip = np.arange(self.subset, num_inds, self.subset)
             inds_eval_temp = [inds for inds in np.split(inds_eval, ind_skip)]
 
-            temp = np.concatenate(
-                [
-                    self.lnlike.get_ll(x_in[inds], **self.lnlike_kwargs)
-                    for inds in inds_eval_temp
-                ]
-            )
+            temp = [None for j in range(len(inds_eval_temp))]
+            if self.get_d_h:
+                d_h = [None for j in range(len(inds_eval_temp))]
+                h_h = [None for j in range(len(inds_eval_temp))]
+
+            for j, inds in enumerate(inds_eval_temp):
+                temp[j] = self.lnlike.get_ll(x_in[inds], **self.lnlike_kwargs)
+                if self.get_d_h:
+                    d_h[j] = self.lnlike.d_h
+                    h_h[j] = self.lnlike.h_h
+            temp = np.concatenate(temp)
+            if self.get_d_h:
+                h_h = np.concatenate(h_h)
+                d_h = np.concatenate(d_h)
 
         loglike_vals[inds_eval] = temp
 
-        return np.array([-loglike_vals, prior_vals]).T
+        if self.get_d_h:
+            d_h_vals[inds_eval] = d_h
+            h_h_vals[inds_eval] = h_h
+
+        array_1 = (
+            -loglike_vals if self.add_prior is False else -loglike_vals + prior_vals
+        )
+        list_of_arrays = [array_1, prior_vals]
+        if self.get_d_h:
+            list_of_arrays = list_of_arrays + [d_h_vals, h_h_vals]
+        return np.asarray(list_of_arrays).T
 
 
 class PTEmceeSampler:
@@ -144,6 +179,7 @@ class PTEmceeSampler:
         ntemps_target_extra=0,
         Tmax=None,
         burn=None,
+        get_d_h=False,
         periodic=None,
         sampler_kwargs={},
     ):
@@ -174,6 +210,7 @@ class PTEmceeSampler:
             subset=subset,
             test_inds=test_inds,
             fill_values=fill_values,
+            get_d_h=get_d_h,
         )
 
         self.autocorr_iter_count = autocorr_iter_count
@@ -252,6 +289,13 @@ class PTEmceeSampler:
             # Compute the autocorrelation time so far
             # Using tol=0 means that we'll always get an estimate even
             # if it isn't trustworthy
+
+            ind = self.sampler.get_log_prob().argmax()
+            print(
+                self.sampler.get_log_prob().max(),
+                np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
+                np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
+            )
             tau = self.sampler.get_autocorr_time(tol=0)
             autocorr[index] = np.mean(tau)
             index += 1

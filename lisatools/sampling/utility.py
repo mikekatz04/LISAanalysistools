@@ -131,6 +131,14 @@ class ModifiedHDFBackend(HDFBackend):
                     v = v.flatten()
                 return v
 
+            elif name == "blobs":
+                if v.ndim == 3:
+                    _, _, nblobs = v.shape
+                    v = v.reshape(-1, ntemps, nwalkers, nblobs)
+                else:
+                    v = v.reshape(-1, ntemps, nwalkers)
+                return v
+
             v = v.reshape(-1, ntemps, nwalkers, ndim)
             if flat:
                 v = v.reshape(-1, ndim)
@@ -162,3 +170,27 @@ class ModifiedHDFBackend(HDFBackend):
             iteration = g.attrs[attr]
 
         return iteration
+
+    def save_step(self, state, accepted):
+        """Save a step to the backend
+        Args:
+            state (State): The :class:`State` of the ensemble.
+            accepted (ndarray): An array of boolean flags indicating whether
+                or not the proposal for each walker was accepted.
+        """
+        self._check(state, accepted)
+
+        with self.open("a") as f:
+            g = f[self.name]
+            iteration = g.attrs["iteration"]
+
+            g["chain"][iteration, :, :] = state.coords
+            g["log_prob"][iteration, :] = state.log_prob
+            if state.blobs is not None:
+                g["blobs"][iteration, :] = state.blobs
+            g["accepted"][:] += accepted
+
+            for i, v in enumerate(state.random_state):
+                g.attrs["random_state_{0}".format(i)] = v
+
+            g.attrs["iteration"] = iteration + 1
