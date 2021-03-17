@@ -27,7 +27,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-use_gpu = True
+use_gpu = False
 fast = GenerateEMRIWaveform(
     "FastSchwarzschildEccentricFlux",
     sum_kwargs=dict(pad_output=True),
@@ -42,22 +42,6 @@ fast_not_list = GenerateEMRIWaveform(
     return_list=False,
 )
 
-"""
-M = 3.00000000e06
-mu = 3.00000000e01
-p0 = 8.93568206e00
-e0 = 1.00000000e-01
-dist = 6.13242402e-01
-"""
-
-"""
-M = 3.00000000e05
-mu = 3.00000000e00
-p0 = 1.31495565e01
-e0 = 5.00000000e-01
-dist = 1.37036074e00
-
-"""
 
 # define injection parameters
 M = 1.00000000e06
@@ -98,13 +82,13 @@ injection_params = np.array(
 )
 
 # define other quantities
-T = 2.0  # years
+T = 14/365  # years
 dt = 15.0
 
 snr_goal = 30.0
 
 # for SNR and covariance calculation
-inner_product_kwargs = dict(dt=dt, PSD="lisasens")
+inner_product_kwargs = dict(dt=dt, PSD="cornish_lisa_psd")
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
@@ -126,7 +110,7 @@ waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-5}
 check_sig = fast(*check_params, **waveform_kwargs)
 
 # adjust distance for SNR goal
-check_sig, snr_orig = scale_snr(snr_goal, check_sig, dt=dt, return_orig_snr=True)
+check_sig, snr_orig = scale_snr(snr_goal, check_sig, return_orig_snr=True,**inner_product_kwargs) #, dt=dt
 
 print("orig_dist:", injection_params[6])
 injection_params[6] *= snr_orig / snr_goal
@@ -137,7 +121,7 @@ params_test = injection_params.copy()
 
 # define sampling quantities
 nwalkers = 32  # per temperature
-ntemps = 1
+ntemps = 10
 
 ndim_full = 14  # full dimensionality of inputs to waveform model
 
@@ -165,7 +149,7 @@ like.inject_signal(
     params=injection_params.copy(),
     waveform_kwargs=waveform_kwargs,
     noise_fn=get_sensitivity,
-    noise_kwargs=dict(sens_fn="lisasens"),
+    noise_kwargs=dict(sens_fn="cornish_lisa_psd"),
     add_noise=False,
 )
 
@@ -218,7 +202,7 @@ waveform_kwargs_templates["eps"] = 1e-2
 factor = 1e-2
 start_points = injection_params[
     np.newaxis, test_inds
-] + factor * np.random.multivariate_normal(np.zeros(len(test_inds)), cov, size=nwalkers)
+] + factor * np.random.multivariate_normal(np.zeros(len(test_inds)), cov, size=nwalkers*ntemps)
 
 """
 # random starts
@@ -262,8 +246,8 @@ sampler = PTEmceeSampler(
     test_inds=test_inds,
     fill_values=fill_values,
     ntemps=ntemps,
-    autocorr_multiplier=100,
-    autocorr_iter_count=50,
+    autocorr_multiplier=100, # automatic stopper, be careful with this since the parallel tempering 
+    autocorr_iter_count=50, # how often it checks the autocorrelation
     ntemps_target_extra=ntemps_target_extra,
     Tmax=Tmax,
     injection=injection_test_points,
@@ -276,7 +260,7 @@ sampler = PTEmceeSampler(
 )
 
 thin_by = 1
-max_iter = 100000
+max_iter = 10000
 sampler.sample(
     start_points,
     iterations=max_iter,

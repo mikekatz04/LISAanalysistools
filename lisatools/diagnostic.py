@@ -190,7 +190,9 @@ def h_var_p_eps(
     params_p_eps = params.copy()
     params_p_eps[i] += step
 
-    params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps)
+    if parameter_transforms:
+        # transform
+        params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps)
 
     dh = waveform_model(*params_p_eps, **waveform_kwargs)
 
@@ -198,60 +200,90 @@ def h_var_p_eps(
 
 
 def dh_dlambda(
-    waveform_model, params, eps, i, parameter_transforms=None, waveform_kwargs={}
+    waveform_model, params, eps, i, parameter_transforms=None, waveform_kwargs={}, accuracy=True
 ):
     """
     Calculate the derivative of the waveform with precision of order (step^4)
     with respect to the variable V in the i direction
     """
-    # Derivative of the Waveform
-    # up
-    h_I_up_2eps = h_var_p_eps(
-        waveform_model,
-        params,
-        2 * eps,
-        i,
-        waveform_kwargs=waveform_kwargs,
-        parameter_transforms=parameter_transforms,
-    )
-    h_I_up_eps = h_var_p_eps(
-        waveform_model,
-        params,
-        eps,
-        i,
-        waveform_kwargs=waveform_kwargs,
-        parameter_transforms=parameter_transforms,
-    )
-    # down
-    h_I_down_2eps = h_var_p_eps(
-        waveform_model,
-        params,
-        -2 * eps,
-        i,
-        waveform_kwargs=waveform_kwargs,
-        parameter_transforms=parameter_transforms,
-    )
-    h_I_down_eps = h_var_p_eps(
-        waveform_model,
-        params,
-        -eps,
-        i,
-        waveform_kwargs=waveform_kwargs,
-        parameter_transforms=parameter_transforms,
-    )
+    if accuracy:
+        # Derivative of the Waveform
+        # up
+        h_I_up_2eps = h_var_p_eps(
+            waveform_model,
+            params,
+            2 * eps,
+            i,
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=parameter_transforms,
+        )
+        h_I_up_eps = h_var_p_eps(
+            waveform_model,
+            params,
+            eps,
+            i,
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=parameter_transforms,
+        )
+        # down
+        h_I_down_2eps = h_var_p_eps(
+            waveform_model,
+            params,
+            -2 * eps,
+            i,
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=parameter_transforms,
+        )
+        h_I_down_eps = h_var_p_eps(
+            waveform_model,
+            params,
+            -eps,
+            i,
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=parameter_transforms,
+        )
 
-    ind_max = np.min(
-        [len(h_I_up_2eps), len(h_I_up_eps), len(h_I_down_2eps), len(h_I_down_eps)]
-    )
-    # print([len(h_I_up_2eps), len(h_I_up_eps), len(h_I_down_2eps), len(h_I_down_eps)])
+        ind_max = np.min(
+            [len(h_I_up_2eps), len(h_I_up_eps), len(h_I_down_2eps), len(h_I_down_eps)]
+        )
+        # print([len(h_I_up_2eps), len(h_I_up_eps), len(h_I_down_2eps), len(h_I_down_eps)])
 
-    # error scales as eps^4
-    dh_I = (
-        -h_I_up_2eps[:ind_max]
-        + h_I_down_2eps[:ind_max]
-        + 8 * (h_I_up_eps[:ind_max] - h_I_down_eps[:ind_max])
-    ) / (12 * eps)
-    # Time thta it takes for one variable: approx 5 minutes
+        # error scales as eps^4
+        dh_I = (
+            -h_I_up_2eps[:ind_max]
+            + h_I_down_2eps[:ind_max]
+            + 8 * (h_I_up_eps[:ind_max] - h_I_down_eps[:ind_max])
+        ) / (12 * eps)
+        # Time thta it takes for one variable: approx 5 minutes
+    else:
+        # Derivative of the Waveform
+        # up
+        h_I_up_eps = h_var_p_eps(
+            waveform_model,
+            params,
+            eps,
+            i,
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=parameter_transforms,
+        )
+        # down
+        h_I_down_eps = h_var_p_eps(
+            waveform_model,
+            params,
+            -eps,
+            i,
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=parameter_transforms,
+        )
+
+        ind_max = np.min(
+            [len(h_I_up_eps), len(h_I_down_eps)]
+        )
+        # print([len(h_I_up_2eps), len(h_I_up_eps), len(h_I_down_2eps), len(h_I_down_eps)])
+
+        # error scales as eps^4
+        dh_I = (h_I_up_eps[:ind_max] - h_I_down_eps[:ind_max]) / (2 * eps)
+        # Time thta it takes for one variable: approx 5 minutes
 
     return dh_I
 
@@ -265,6 +297,7 @@ def fisher(
     waveform_kwargs={},
     inner_product_kwargs={},
     return_derivs=False,
+    accuracy = True
 ):
     # is for inner product
 
@@ -289,6 +322,7 @@ def fisher(
             i,
             waveform_kwargs=waveform_kwargs,
             parameter_transforms=parameter_transforms,
+            accuracy=accuracy
         )
         dh.append(temp)
 

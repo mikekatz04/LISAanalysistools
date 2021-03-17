@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.stats import uniform
+from scipy.stats import uniform, loguniform
 from lisatools.sensitivity import get_sensitivity
 
 
@@ -23,6 +23,17 @@ def uniform_dist(min, max):
     mean = (max + min) / 2.0
     sig = max - min
     dist = uniform(min, sig)
+    return dist
+
+def log_uniform(min, max):
+    if min > max:
+        temp = min
+        min = max
+        max = temp
+
+    mean = (max + min) / 2.0
+    sig = max - min
+    dist = loguniform(min, sig)
     return dist
 
 
