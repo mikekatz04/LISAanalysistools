@@ -5,6 +5,14 @@ from scipy import constants as ct
 from .constants import *
 
 
+def mT_q(mT, q):
+    return (mT / (1 + q), mT * q / (1 + q))
+
+
+def transfer_tref(tRef_sampling_frame_orig, tRef_sampling_frame_keep):
+    return (tRef_sampling_frame_orig, tRef_sampling_frame_orig)
+
+
 def modpi(phase):
     # from sylvain
     return phase - np.floor(phase / np.pi) * np.pi
@@ -172,66 +180,20 @@ class SSB_to_LISA:
 
 class TransformContainer:
     def __init__(self, parameter_transforms):
-        self.base_transforms = {}
-
-        inplace_transforms_temp = parameter_transforms.get("inplace", {})
-        base_transforms_temp = parameter_transforms.get("base", {})
 
         self.base_transforms = {"single_param": {}, "mult_param": {}}
-        self.inplace_transforms = {"single_param": {}, "mult_param": {}}
 
-        for trans, trans_temp in zip(
-            [self.base_transforms, self.inplace_transforms],
-            [base_transforms_temp, inplace_transforms_temp],
-        ):
-            for key, item in trans_temp.items():
-                if isinstance(key, int):
-                    trans["single_param"][key] = item
-                elif isinstance(key, tuple):
-                    trans["mult_param"][key] = item
-                else:
-                    raise ValueError(
-                        "Parameter transform keys must be int or tuple of ints. {} is neither.".format(
-                            key
-                        )
+        for key, item in parameter_transforms.items():
+            if isinstance(key, int):
+                self.base_transforms["single_param"][key] = item
+            elif isinstance(key, tuple):
+                self.base_transforms["mult_param"][key] = item
+            else:
+                raise ValueError(
+                    "Parameter transform keys must be int or tuple of ints. {} is neither.".format(
+                        key
                     )
-
-    def transform_inplace_parameters(self, params, inds_map=None):
-        # inplace transforms
-        if inds_map is None:
-            inds_map = np.arange(params.shape[1])
-        try:
-            inds_list = inds_map.tolist()
-        except AttributeError:
-            pass
-
-        try:
-            inds_map = {ind1: inds_list.index(ind1) for ind1 in inds_map}
-        except ValueError:
-            raise ValueError(
-                "inplace transformations can only be done on indices that are being tested."
-            )
-
-        params = params.T
-        for ind_temp, trans_fn in self.inplace_transforms["single_param"].items():
-            try:
-                ind = inds_map[ind_temp]
-            except KeyError:
-                raise KeyError(
-                    "Parameters from inplace tansform are not being sampled."
                 )
-            params[ind] = trans_fn(params[ind])
-
-        for inds_temp, trans_fn in self.inplace_transforms["mult_param"].items():
-            try:
-                inds = [inds_map[ind_temp_i] for ind_temp_i in inds_temp]
-            except KeyError:
-                raise KeyError(
-                    "Parameters from inplace tansform are not being sampled."
-                )
-            temp = trans_fn(*[params[i] for i in inds])
-            for j, i in enumerate(inds):
-                params[i] = temp[j]
 
     def transform_base_parameters(self, params):
         params_temp = params.copy().T
@@ -245,3 +207,77 @@ class TransformContainer:
                 params_temp[i] = temp[j]
 
         return params_temp
+
+
+def mbh_sky_mode_transform(
+    coords, ind_map=None, kind="both", inplace=False, cos_i=False
+):
+
+    if ind_map is None:
+        ind_map = dict(inc=7, lam=8, beta=9, psi=10)
+
+    elif isinstance(ind_map, dict) is False:
+        raise ValueError("If providing the ind_map kwarg, it must be a dict.")
+
+    if kind not in ["both", "lat", "long"]:
+        raise ValueError(
+            "The kwarg 'kind' must be lat for latitudinal transformation, long for longitudinal transformation, or both for both."
+        )
+
+    elif kind == "both":
+        factor = 8
+
+    elif kind == "long":
+        factor = 4
+
+    elif kind == "lat":
+        factor = 2
+
+    if inplace:
+        if (coords.shape[0] % factor) != 0:
+            raise ValueError(
+                "If performing an inplace transformation, the coords provided must have a first dimension size divisible by {} for a '{}' transformation.".format(
+                    factor, kind
+                )
+            )
+
+    else:
+        coords = np.tile(coords, (factor, 1))
+
+    if kind == "both" or kind == "lat":
+
+        # inclination
+        if cos_i:
+            coords[1::2, ind_map["inc"]] *= -1
+
+        else:
+            coords[1::2, ind_map["inc"]] = np.pi - coords[1::2, ind_map["inc"]]
+
+        # beta
+        coords[1::2, ind_map["beta"]] *= -1
+
+        # psi
+        coords[1::2, ind_map["psi"]] = np.pi - coords[1::2, ind_map["psi"]]
+
+    if kind == "long":
+        for i in range(1, 4):
+            coords[i::4, ind_map["lam"]] = (
+                coords[i::4, ind_map["lam"]] + np.pi / 2 * i
+            ) % (2 * np.pi)
+
+            coords[i::4, ind_map["psi"]] = (
+                coords[i::4, ind_map["psi"]] + np.pi / 2 * i
+            ) % (np.pi)
+    if kind == "both":
+        num = coords.shape[0]
+        for i in range(1, 4):
+            for j in range(2):
+                coords[2 * i + j :: 8, ind_map["lam"]] = (
+                    coords[2 * i + j :: 8, ind_map["lam"]] + np.pi / 2 * i
+                ) % (2 * np.pi)
+
+                coords[2 * i + j :: 8, ind_map["psi"]] = (
+                    coords[2 * i + j :: 8, ind_map["psi"]] + np.pi / 2 * i
+                ) % (np.pi)
+
+    return coords

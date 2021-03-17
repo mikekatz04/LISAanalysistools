@@ -37,7 +37,10 @@ class PlotContainer:
 
         getattr(self, "_load_" + source)(test_inds=self.test_inds, sub_keys=sub_keys)
 
-        self.injection = self.reader.get_attr("test_injection_values")
+        try:
+            self.injection = self.reader.get_attr("test_injection_values")
+        except KeyError:
+            self.injection = None
 
         default_corner_kwargs = dict(
             levels=(1 - np.exp(-0.5 * np.array([1, 2, 3]) ** 2)),
