@@ -30,6 +30,8 @@ from lisatools.utils.transform import (
     mbh_sky_mode_transform,
 )
 from lisatools.utils.utility import uniform_dist
+from lisatools.sampling.utility import ModifiedHDFBackend
+from lisatools.utils.constants import *
 
 try:
     import cupy as cp
@@ -85,8 +87,9 @@ class SamplerGuide:
 
         self.likelihood_kwargs = likelihood_kwargs
 
-        self.initial_setup(priors, start_points, test_inds)
         self.sampler_kwargs = sampler_kwargs
+
+        self.initial_setup(priors, start_points, test_inds)
 
         self.parameter_transforms = parameter_transforms
 
@@ -104,8 +107,8 @@ class SamplerGuide:
     def initial_setup(self, priors, start_points, test_inds):
 
         self.priors = priors
-        self.start_points = start_points
         self.set_test_inds_info(test_inds)
+        self.start_points = start_points
 
     @property
     def start_points(self):
@@ -113,7 +116,11 @@ class SamplerGuide:
 
     @start_points.setter
     def start_points(self, start_points):
-        if isinstance(start_points, str) or start_points is None:
+        if "resume" in self.sampler_kwargs and self.sampler_kwargs["resume"]:
+            reader = ModifiedHDFBackend(self.sampler_kwargs["fp"])
+            self._start_points = reader.get_last_sample().coords.reshape(-1, self.ndim)
+
+        elif isinstance(start_points, str) or start_points is None:
             if start_points == "prior" or start_points is None:
                 self._start_points = np.asarray(
                     [prior.rvs(size=self.nwalkers_all) for prior in self.priors]
@@ -200,7 +207,7 @@ class SamplerGuide:
         test_start[:, self.fill_inds] = self.fill_values
 
         if "subset" in self.sampler_kwargs:
-            pts_in = test_start[:subset]
+            pts_in = test_start[: self.sampler_kwargs["subset"]]
 
         else:
             pts_in = test_start
@@ -277,7 +284,7 @@ class MBHGuide(SamplerGuide):
     @property
     def default_priors(self):
         default_priors = [
-            uniform_dist(np.log(1e4), np.log(1e5)),
+            uniform_dist(np.log(1e4), np.log(1e8)),
             uniform_dist(0.01, 0.999999999),
             uniform_dist(-0.99999999, +0.99999999),
             uniform_dist(-0.99999999, +0.99999999),
@@ -366,6 +373,24 @@ class MBHGuide(SamplerGuide):
 
         return {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
 
+    @property
+    def default_relbin_kwargs(self):
+        template_kwargs = dict(
+            tBase=0.0,
+            t_obs_start=1.0,
+            t_obs_end=0.0,
+            modes=[(2, 2)],
+            direct=True,
+            compress=True,
+        )
+        return dict(
+            template_gen_kwargs=template_kwargs, noise_kwargs_AE={}, noise_kwargs_T={},
+        )
+
+    @property
+    def default_relbin_args(self):
+        return (256,)
+
     def __init__(
         self,
         *args,
@@ -377,8 +402,11 @@ class MBHGuide(SamplerGuide):
         use_gpu=False,
         f_arr=None,
         dt=10.0,
-        Tobs=1.0,
+        Tobs=YRSID_SI,
         relbin=False,
+        relbin_args=None,
+        relbin_kwargs=None,
+        relbin_template=None,
         multi_mode_start=True,
         **kwargs,
     ):
@@ -427,16 +455,41 @@ class MBHGuide(SamplerGuide):
         dataChannels = self.xp.asarray(self.lnprob.injection_channels)
 
         if relbin:
+            if relbin_args is None:
+                relbin_args = self.default_relbin_args
+            if relbin_kwargs is None:
+                relbin_kwargs = self.default_relbin_kwargs
+
+            if relbin_template is None:
+                if (
+                    "resume" not in self.sampler_kwargs
+                    or not self.sampler_kwargs["resume"]
+                ):
+                    raise ValueError(
+                        "If using relative binning and not providin relbin_template parameters, must be resuming a run to get last sample."
+                    )
+                pass
+                reader = ModifiedHDFBackend(self.sampler_kwargs["fp"])
+                best_ind = reader.get_log_prob().argmax()
+                relbin_template = np.zeros(self.default_ndim_full)
+                relbin_template[self.test_inds] = reader.get_chain().reshape(
+                    -1, self.ndim
+                )[best_ind]
+                relbin_template[self.fill_inds] = self.fill_values
+
+            relbin_template = self.parameter_transforms.transform_base_parameters(
+                relbin_template
+            )
+
+            # TODO: update this
             dataChannels /= noiseFactors
-            relbin = RelativeBinning(
+            mbh_like = RelativeBinning(
                 bbh,
-                xp.asarray(freqs[1:]),
+                self.xp.asarray(f_arr[1:]),
                 dataChannels,
-                template_gen_args,
-                128,
-                template_gen_kwargs=template_gen_kwargs,
-                noise_kwargs_AE={},
-                noise_kwargs_T={},
+                relbin_template,
+                *relbin_args,
+                **relbin_kwargs,
                 use_gpu=use_gpu,
             )
 
@@ -463,12 +516,12 @@ if __name__ == "__main__":
     from lisatools.utils.utility import AET
     from ldc.waveform.lisabeta import FastMBHB
 
-    use_gpu = False
+    use_gpu = True
 
     xp = cp if use_gpu else np
 
-    nwalkers = 22
-    ntemps = 1
+    nwalkers = 80
+    ntemps = 10
 
     nwalkers_all = nwalkers * ntemps
 
@@ -516,16 +569,40 @@ if __name__ == "__main__":
         compress=True,
     )
 
+    fp_search = "/projects/b1095/mkatz/mbh/test_new_code.h5"
+    fp_pe = "/projects/b1095/mkatz/mbh/test_new_code_pe.h5"
+
+    reader = ModifiedHDFBackend(fp_search)
+    log_prob = reader.get_log_prob().flatten()
+    start_inds = np.argsort(log_prob)
+    uni, inds = np.unique(log_prob[start_inds], return_index=True)
+    start_inds = start_inds[inds[-int(ntemps * nwalkers) :]]
+
+    ndim = 11
+    ndim_full = 13
+    test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
+
+    start_points = reader.get_chain().reshape(-1, ndim)[start_inds]
+
+    relbin_template = np.zeros(ndim_full)
+    relbin_template[test_inds] = start_points[-1]
+
+    breakpoint()
+
     sampler_kwargs = dict(
         lnlike_kwargs=dict(waveform_kwargs=template_kwargs_full),
-        fp="test_new_code.h5",
+        fp=fp_pe,
+        resume=False,
         plot_iterations=500,
         plot_source="mbh",
         ntemps=ntemps,
         get_d_h=True,
+        # subset=int(nwalkers / 2),
+        burn=1000,
     )
     kwargs = dict(
         dt=dt,
+        start_points=start_points,
         Tobs=len(t) * dt,
         f_arr=fd,
         sampler_kwargs=sampler_kwargs,
@@ -533,11 +610,14 @@ if __name__ == "__main__":
         data=[Afd, Efd, Tfd],
         waveform_kwargs=template_kwargs_full,
         verbose=True,
-        multi_mode_start=False,
+        multi_mode_start=True,
+        relbin=True,
+        relbin_template=relbin_template,
+        use_gpu=True,
     )
 
     mbh_guide = MBHGuide(nwalkers * ntemps, **kwargs)
-    mbh_guide.run_sampler(iterations=5)
+    mbh_guide.run_sampler(thin=1, iterations=10000)
     breakpoint()
 
     """

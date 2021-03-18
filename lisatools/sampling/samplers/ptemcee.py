@@ -182,6 +182,7 @@ class PTEmceeSampler:
         get_d_h=False,
         periodic=None,
         sampler_kwargs={},
+        resume=True,
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
@@ -225,14 +226,16 @@ class PTEmceeSampler:
                 raise NotImplementedError
 
         else:
+            # 0.1595769121605731
             backend = ModifiedHDFBackend(fp)
-            backend.reset(
-                self.all_walkers,
-                ndim,
-                ntemps=self.ntemps,
-                injection=injection,
-                test_inds=test_inds,
-            )
+            if not resume:
+                backend.reset(
+                    self.all_walkers,
+                    ndim,
+                    ntemps=self.ntemps,
+                    injection=injection,
+                    test_inds=test_inds,
+                )
 
             if self.plot_iterations > 0:
                 if plot_source is None:
