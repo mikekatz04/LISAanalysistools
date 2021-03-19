@@ -66,7 +66,7 @@ class SamplerGuide:
 
         self.use_gpu = use_gpu
         if self.use_gpu:
-            self.xp = xp
+            self.xp = cp
         else:
             self.xp = np
 
@@ -294,7 +294,7 @@ class MBHGuide(SamplerGuide):
             uniform_dist(0.0, 2 * np.pi),
             uniform_dist(-1.0, 1.0),
             uniform_dist(0.0, np.pi),
-            uniform_dist(0.0, T),
+            uniform_dist(0.0, self.Tobs),
         ]
 
         if hasattr(self, "include_precession") and self.include_precession:
@@ -421,9 +421,10 @@ class MBHGuide(SamplerGuide):
             df = 1 / Tobs
             f_arr = np.arange(0.0, 1 / (2 * dt) + df, df)[1:]  # remove dc
         else:
-            df = f_arr[0]
+            df = f_arr[1]
             Tobs = 1 / df
 
+        self.Tobs = Tobs
         self.f_arr = f_arr
         if "likelihood_kwargs" not in kwargs:
             kwargs["likelihood_kwargs"] = {}
@@ -528,7 +529,7 @@ if __name__ == "__main__":
     amp_phase_kwargs = {"run_phenomd": True}
 
     params = {}
-    with h5py.File("../GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5", "r") as f:
+    with h5py.File("../GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD.hdf5", "r") as f:
         grp = f["H5LISA"]["GWSources"]["MBHB-0"]
         for key in grp:
             params[key] = grp[key][()]
@@ -587,17 +588,16 @@ if __name__ == "__main__":
     relbin_template = np.zeros(ndim_full)
     relbin_template[test_inds] = start_points[-1]
 
-    breakpoint()
-
     sampler_kwargs = dict(
-        lnlike_kwargs=dict(waveform_kwargs=template_kwargs_full),
+        lnlike_kwargs=dict(waveform_kwargs=template_kwargs),
         fp=fp_pe,
         resume=False,
-        plot_iterations=500,
+        plot_iterations=1000,
         plot_source="mbh",
         ntemps=ntemps,
         get_d_h=True,
         # subset=int(nwalkers / 2),
+        autocorr_multiplier=10000,
         burn=1000,
     )
     kwargs = dict(
@@ -617,8 +617,9 @@ if __name__ == "__main__":
     )
 
     mbh_guide = MBHGuide(nwalkers * ntemps, **kwargs)
-    mbh_guide.run_sampler(thin=1, iterations=10000)
-    breakpoint()
+    mbh_guide.lnprob.template_model.d_d = 0.0
+    mbh_guide.run_sampler(thin=1, iterations=50000)
+    # breakpoint()
 
     """
     lisabeta_mbhb = FastMBHB(T=1 / fd[1], delta_t=dt, approx="IMRPhenomD", orbits=None)

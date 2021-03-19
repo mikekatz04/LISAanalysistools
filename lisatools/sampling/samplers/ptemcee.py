@@ -183,6 +183,7 @@ class PTEmceeSampler:
         periodic=None,
         sampler_kwargs={},
         resume=True,
+        verbose=False,
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
@@ -201,6 +202,7 @@ class PTEmceeSampler:
         self.ntemps_target = 1 + ntemps_target_extra
         self.all_walkers = self.nwalkers * len(betas)
         self.burn = burn
+        self.verbose = verbose
 
         self.lnprior = LogPrior(priors)
         self.lnprob = LogProb(
@@ -279,13 +281,18 @@ class PTEmceeSampler:
                 x0 = sample.coords
             print("Burn Finished")
 
-        # Now we'll sample for up to max_n steps
-        for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
-            # Only check convergence every 100 steps
+        if "thin" in sampler_kwargs:
+            thin = sampler_kwargs["thin"]
+        else:
+            thin = 1
 
-            if self.sampler.iteration % self.autocorr_iter_count and (
-                self.sampler.iteration % self.plot_iterations
-                or self.plot_iterations <= 0
+        # Now we'll sample for up to iterations steps
+        iter = 0
+        for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
+
+            iter += 1
+            if iter % (thin * self.autocorr_iter_count) and (
+                (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
             ):
                 continue
 
@@ -294,25 +301,27 @@ class PTEmceeSampler:
             # if it isn't trustworthy
 
             ind = self.sampler.get_log_prob().argmax()
-            print(
-                self.sampler.get_log_prob().max(),
-                np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
-                np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
-            )
+
+            if self.verbose:
+                print(
+                    self.sampler.get_log_prob().max(),
+                    np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
+                    np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
+                )
             tau = self.sampler.get_autocorr_time(tol=0)
             autocorr[index] = np.mean(tau)
             index += 1
 
-            print(index, tau, tau * self.autocorr_multiplier, self.sampler.iteration)
+            if self.verbose:
+                print(
+                    index, tau, tau * self.autocorr_multiplier, self.sampler.iteration
+                )
 
             # Check convergence
             converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)
             converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
 
-            if (
-                self.sampler.iteration % self.plot_iterations == 0
-                and self.plot_iterations > 0
-            ):
+            if iter % (thin * self.plot_iterations) == 0 and self.plot_iterations > 0:
                 self.plot_gen.generate_corner()
 
             if converged:
