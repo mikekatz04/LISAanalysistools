@@ -29,21 +29,6 @@ def get_pt_autocorr_time(x, discard=0, thin=1, **kwargs):
     return thin * emcee.autocorr.integrated_time(x, **kwargs)
 
 
-class LogPrior:
-    def __init__(self, priors):
-        self.priors = priors
-
-    def __call__(self, x):
-
-        prior_vals = np.zeros((x.shape[0]))
-        for i, (prior_i, x_i) in enumerate(zip(self.priors, x.T)):
-            temp = prior_i.logpdf(x_i)
-
-            prior_vals[np.isinf(temp)] += -np.inf
-
-        return prior_vals
-
-
 class LogProb:
     def __init__(
         self,
@@ -83,7 +68,7 @@ class LogProb:
         self.add_prior = add_prior
 
     def __call__(self, x):
-        prior_vals = self.lnprior(x)
+        prior_vals = self.lnprior.logpdf(x)
         inds_eval = np.atleast_1d(np.squeeze(np.where(np.isinf(prior_vals) != True)))
 
         loglike_vals = np.full(x.shape[0], np.inf)
@@ -204,7 +189,7 @@ class PTEmceeSampler:
         self.burn = burn
         self.verbose = verbose
 
-        self.lnprior = LogPrior(priors)
+        self.lnprior = priors
         self.lnprob = LogProb(
             ndim_full,
             lnprob,
