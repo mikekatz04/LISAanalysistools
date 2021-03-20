@@ -29,9 +29,10 @@ from lisatools.utils.transform import (
     transfer_tref,
     mbh_sky_mode_transform,
 )
-from lisatools.utils.utility import uniform_dist
+from lisatools.sampling.prior import uniform_dist
 from lisatools.sampling.utility import ModifiedHDFBackend
 from lisatools.utils.constants import *
+from lisatools.sampling.prior import PriorContainer
 
 try:
     import cupy as cp
@@ -122,9 +123,8 @@ class SamplerGuide:
 
         elif isinstance(start_points, str) or start_points is None:
             if start_points == "prior" or start_points is None:
-                self._start_points = np.asarray(
-                    [prior.rvs(size=self.nwalkers_all) for prior in self.priors]
-                ).T
+                self._start_points = self.priors.rvs(size=self.nwalkers_all)
+
             elif start_points == "fisher":
                 if self.start_mean is None or self.cov is None:
                     raise ValueError(
@@ -152,14 +152,14 @@ class SamplerGuide:
             self._priors = self.default_priors
 
         elif isinstance(priors, dict):
-            self._priors = self.default_priors
+            temp = self.default_priors.priors_in
             for ind, distribution in priors.items():
-                self._priors[ind] = distribution
-        elif isinstance(priors, list):
-            self._priors = priors
+                temp[ind] = distribution
+            self._priors = PriorContainer(temp)
+
         else:
             raise ValueError(
-                "If providing a prior, it must be dictionary to add specific priors into the defaults or list of all priors."
+                "If providing a prior, it must be dictionary to add specific priors into the defaults."
             )
 
     def set_test_inds_info(self, value):
@@ -283,22 +283,24 @@ class SamplerGuide:
 class MBHGuide(SamplerGuide):
     @property
     def default_priors(self):
-        default_priors = [
-            uniform_dist(np.log(1e4), np.log(1e8)),
-            uniform_dist(0.01, 0.999999999),
-            uniform_dist(-0.99999999, +0.99999999),
-            uniform_dist(-0.99999999, +0.99999999),
-            uniform_dist(0.01, 1000.0),
-            uniform_dist(0.0, 2 * np.pi),
-            uniform_dist(-1.0, 1.0),
-            uniform_dist(0.0, 2 * np.pi),
-            uniform_dist(-1.0, 1.0),
-            uniform_dist(0.0, np.pi),
-            uniform_dist(0.0, self.Tobs),
-        ]
+        default_priors = {
+            0: uniform_dist(np.log(1e4), np.log(1e8)),
+            1: uniform_dist(0.01, 0.999999999),
+            2: uniform_dist(-0.99999999, +0.99999999),
+            3: uniform_dist(-0.99999999, +0.99999999),
+            4: uniform_dist(0.01, 1000.0),
+            5: uniform_dist(0.0, 2 * np.pi),
+            6: uniform_dist(-1.0, 1.0),
+            7: uniform_dist(0.0, 2 * np.pi),
+            8: uniform_dist(-1.0, 1.0),
+            9: uniform_dist(0.0, np.pi),
+            10: uniform_dist(0.0, self.Tobs),
+        }
 
         if hasattr(self, "include_precession") and self.include_precession:
             raise NotImplementedError
+
+        default_priors = PriorContainer(default_priors)
 
         return default_priors
 
