@@ -678,6 +678,7 @@ class GBGuide(SamplerGuide):
         if "likelihood_kwargs" not in kwargs:
             kwargs["likelihood_kwargs"] = {}
         kwargs["likelihood_kwargs"]["f_arr"] = f_arr
+        kwargs["likelihood_kwargs"]["use_gpu"] = use_gpu
 
         if "sampler_kwargs" not in kwargs:
             kwargs["sampler_kwargs"] = {}
