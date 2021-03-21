@@ -10,8 +10,6 @@ import matplotlib.pyplot as plt
 
 #%matplotlib inline
 
-from ldc.waveform.lisabeta.fast_mbhb import FastMBHB
-
 from bbhx.utils.waveformbuild import BBHWaveform
 from lisatools.utils.transform import tLfromSSBframe, TransformContainer
 from scipy import constants as ct
@@ -33,6 +31,8 @@ from lisatools.sampling.prior import uniform_dist
 from lisatools.sampling.utility import ModifiedHDFBackend
 from lisatools.utils.constants import *
 from lisatools.sampling.prior import PriorContainer
+
+from gbgpu.gbgpu import GBGPU
 
 try:
     import cupy as cp
@@ -62,6 +62,8 @@ class SamplerGuide:
         parameter_transforms=None,
         periodic=None,
         use_gpu=False,
+        mean_and_cov=None,
+        start_factor=None,
         verbose=False,
     ):
 
@@ -70,6 +72,16 @@ class SamplerGuide:
             self.xp = cp
         else:
             self.xp = np
+
+        if mean_and_cov is not None:
+            self.start_mean, self.cov = mean_and_cov
+        else:
+            self.start_mean, self.cov = None, None
+
+        if start_factor is None:
+            start_factor = 1.0
+
+        self.start_factor = start_factor
 
         self.nwalkers_all = nwalkers_all
         self.include_precession = include_precession
@@ -131,7 +143,9 @@ class SamplerGuide:
                         "If generating points from fisher matrix, must store start_mean and cov attributes."
                     )
                 self._start_points = np.random.multivariate_normal(
-                    self.start_mean, self.cov
+                    self.start_mean,
+                    self.start_factor * self.cov,
+                    size=self.nwalkers_all,
                 )
 
         elif isinstance(start_points, np.ndarray):
@@ -514,178 +528,355 @@ class MBHGuide(SamplerGuide):
         self.setup_sampler()
 
 
+class GBGuide(SamplerGuide):
+    @property
+    def default_priors(self):
+
+        default_priors = {
+            0: uniform_dist(np.log(1e-24), np.log(1e-20)),
+            1: uniform_dist(1.0, 5.0),
+            2: uniform_dist(np.log(1e-20), np.log(1e-15)),
+            3: uniform_dist(0.0, 2 * np.pi),
+            4: uniform_dist(-1, 1),
+            5: uniform_dist(0.0, np.pi),
+            6: uniform_dist(0.0, 2 * np.pi),
+            7: uniform_dist(-1, 1),
+        }
+
+        if hasattr(self, "include_third") and self.include_third:
+            default_priors[8] = uniform_dist(1.0, 1000.0)
+            default_priors[9] = uniform_dist(0.0, np.pi * 2)
+            default_priors[10] = uniform_dist(0.0001, 0.9)
+            default_priors[11] = uniform_dist(0.5, 8.0)
+            default_priors[12] = uniform_dist(0.0, 0.5)
+
+        default_priors = PriorContainer(default_priors)
+
+        return default_priors
+
+    @property
+    def default_ndim(self):
+        if hasattr(self, "include_third") and self.include_third:
+            return 13
+
+        return 8
+
+    @property
+    def default_ndim_full(self):
+        if hasattr(self, "include_third") and self.include_third:
+            return 14
+
+        return 9
+
+    @property
+    def default_test_inds(self):
+        if hasattr(self, "include_third") and self.include_third:
+            return np.array([0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+
+        return np.array([0, 1, 2, 4, 5, 6, 7, 8])
+
+    @property
+    def default_fill_inds(self):
+        return np.array([3])
+
+    @property
+    def default_fill_values(self):
+        return np.array([0.0])
+
+    @property
+    def default_injection_setup_kwargs(self):
+        return dict(
+            waveform_kwargs={"dt": 15.0, "N": None, "T": self.Tobs},
+            noise_fn=get_sensitivity,
+            noise_kwargs=[
+                dict(sens_fn="noisepsd_AE", model="SciRDv1", includewd=None),
+                dict(sens_fn="noisepsd_AE", model="SciRDv1", includewd=None),
+            ],
+            add_noise=False,
+        )
+
+    @property
+    def default_parameter_transforms(self):
+        parameter_transforms = {
+            0: (lambda x: np.exp(x)),
+            1: (lambda x: x * 1e-3),
+            2: (lambda x: np.exp(x)),
+            5: (lambda x: np.arccos(x)),
+            8: (lambda x: np.arcsin(x)),
+        }
+
+        return parameter_transforms
+
+    @property
+    def default_periodic(self):
+        periodic = {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}
+        if hasattr(self, "include_third") and self.include_third:
+            periodic[9] = 2 * np.pi
+
+        return periodic
+
+    @property
+    def default_plot_labels(self):
+        labels = [
+            r"$A$",
+            r"$f_0$ (mHz)",
+            r"$\dot{f}_0$",
+            r"$\phi_0$",
+            r"cos$\iota$",
+            r"$\psi$",
+            r"$\lambda$",
+            r"sin$\beta$",
+        ]
+        if self.include_third:
+            labels += [r"$A_2$", r"$\bar{\omega}$", r"$e_2$", r"$P_2$", r"$T_2$"]
+
+        return labels
+
+    def adjust_start_points(self):
+        self.start_points[:, 3] = self.start_points[:, 3] % (2 * np.pi)
+        self.start_points[:, 5] = self.start_points[:, 5] % (np.pi)
+        self.start_points[:, 6] = self.start_points[:, 6] % (2 * np.pi)
+
+        if self.include_third:
+            self.start_points[:, -1] = np.abs(self.start_points[:, -1])
+            self.start_points[:, -4] = np.abs(self.start_points[:, -4])
+            self.start_points[:, 9] = self.start_points[:, 9] % (2 * np.pi)
+            self.start_points[:, 10] = np.abs(self.start_points[:, 10])
+            self.start_points[:, 10] = np.clip(self.start_points[:, 10], 0.02, 0.7)
+
+    @property
+    def default_inner_product_kwargs(self):
+        return dict(PSD="noisepsd_AE", PSD_kwargs={"includewd": self.Tobs / YRSID_SI})
+
+    def __init__(
+        self,
+        *args,
+        include_third=False,
+        use_gpu=False,
+        f_arr=None,
+        dt=10.0,
+        Tobs=YRSID_SI,
+        fix_snr=None,
+        inner_product_kwargs={},
+        **kwargs,
+    ):
+
+        self.include_third = include_third
+        self.nchannels = 2
+
+        if f_arr is None:
+            Npts = int(Tobs / dt)
+            Tobs = dt * Npts
+            df = 1 / Tobs
+            f_arr = np.arange(0.0, 1 / (2 * dt) + df, df)  # remove dc
+        else:
+            df = f_arr[1]
+            Tobs = 1 / df
+
+        self.Tobs = Tobs
+        self.f_arr = f_arr
+        if "likelihood_kwargs" not in kwargs:
+            kwargs["likelihood_kwargs"] = {}
+        kwargs["likelihood_kwargs"]["f_arr"] = f_arr
+
+        if "sampler_kwargs" not in kwargs:
+            kwargs["sampler_kwargs"] = {}
+
+        if "plot_kwargs" not in kwargs["sampler_kwargs"]:
+            kwargs["sampler_kwargs"]["plot_kwargs"] = {}
+
+        if "corner_kwargs" not in kwargs["sampler_kwargs"]["plot_kwargs"]:
+            kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"] = {}
+
+        kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"][
+            "labels"
+        ] = self.default_plot_labels
+
+        gb = GBGPU(use_gpu=use_gpu, shift_ind=1)
+
+        if (
+            "lnlike_kwargs" in kwargs["sampler_kwargs"]
+            and "waveform_kwargs" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
+        ):
+            template_kwargs = kwargs["sampler_kwargs"]["lnlike_kwargs"][
+                "waveform_kwargs"
+            ]
+        else:
+            template_kwargs = self.default_injection_setup_kwargs["waveform_kwargs"]
+        # only temperary to help prepare data
+        if "injection_params" in kwargs and (
+            "data" not in kwargs or kwargs["data"] is None
+        ):
+            injection_params = kwargs["injection_params"]
+            if (
+                "lnlike_kwargs" in kwargs["sampler_kwargs"]
+                and "parameter_transforms" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
+            ):
+                transform = kwargs["sampler_kwargs"]["lnlike_kwargs"][
+                    "parameter_transforms"
+                ]
+            else:
+                transform = TransformContainer(self.default_parameter_transforms)
+
+            make_params = transform.transform_base_parameters(injection_params)
+
+            A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs)
+
+            if fix_snr is not None:
+                temp_inner_product_kwargs = self.default_inner_product_kwargs
+
+                if inner_product_kwargs != {}:
+                    for key, value in inner_product_kwargs.items():
+                        temp_inner_product_kwargs[key] = value
+
+                temp_inner_product_kwargs["df"] = df
+
+                snr_check = snr([A_inj, E_inj], **temp_inner_product_kwargs)
+
+                factor = fix_snr / snr_check
+
+                make_params[0] *= factor
+                injection_params[0] = np.log(make_params[0])
+
+                A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs,)
+                snr_check2 = snr([A_inj, E_inj], **temp_inner_product_kwargs)
+
+                # print(snr_check2)
+
+            kwargs["data"] = [A_inj, E_inj]
+
+        if "start_points" in kwargs and kwargs["start_points"] == "fisher":
+            mean = injection_params[self.default_test_inds]
+
+            fish_kwargs = template_kwargs.copy()
+            fish_kwargs["N"] = 1024
+            fish_kwargs["inds"] = self.default_test_inds
+            fish_kwargs["parameter_transforms"] = self.default_parameter_transforms
+            fisher = gb.fisher(np.array([injection_params]).T, **fish_kwargs).squeeze()
+            cov = np.linalg.pinv(fisher)
+            kwargs["mean_and_cov"] = [mean, cov]
+
+        SamplerGuide.__init__(self, *args, use_gpu=use_gpu, **kwargs)
+
+        self.lnprob = gb
+
+        self.injection_setup_kwargs["params"] = None
+        self.lnprob.inject_signal(**self.injection_setup_kwargs)
+
+        if self.test_start_likelihood:
+            self.perform_test_start_likelihood()
+
+        self.setup_sampler()
+        self.adjust_start_points()
+        # check = self.lnprob.get_ll(
+        #    np.array([injection_params]), waveform_kwargs=template_kwargs
+        # )
+
+
 if __name__ == "__main__":
 
     from lisatools.utils.utility import AET
-    from ldc.waveform.lisabeta import FastMBHB
+    from gbgpu.utils.constants import *
 
-    use_gpu = True
+    use_gpu = False
 
     xp = cp if use_gpu else np
 
     nwalkers = 80
     ntemps = 10
+    num_bin = nwalkers * ntemps
 
     nwalkers_all = nwalkers * ntemps
 
-    amp_phase_kwargs = {"run_phenomd": True}
+    amp = 1.0689e-22
+    f0 = 0.00322061
+    fdot = 5.53680665282078e-17
+    fddot = 0.0
+    phi0 = 2.84090075
+    iota = 1.6169347
+    psi = 2.53292165
+    lam = 0.4297
+    beta_sky = -0.354825
 
-    params = {}
-    with h5py.File("../GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD.hdf5", "r") as f:
-        grp = f["H5LISA"]["GWSources"]["MBHB-0"]
-        for key in grp:
-            params[key] = grp[key][()]
-        print(list(f["H5LISA"]))
+    A2 = 227.49224525104734
+    omegabar = 0.0
+    e2 = 0.4
+    P2 = 1.3230498230
+    T2 = 0.0
 
-        data = f["H5LISA"]["PreProcess"]["TDIdata"][:]
-        t, Xd, Yd, Zd = data[:4194304].T
+    amp_in = np.full(num_bin, amp)
+    f0_in = np.full(num_bin, f0)
+    fdot_in = np.full(num_bin, fdot)
+    fddot_in = np.full(num_bin, fddot)
+    phi0_in = np.full(num_bin, phi0)
+    iota_in = np.full(num_bin, iota)
+    psi_in = np.full(num_bin, psi)
+    lam_in = np.full(num_bin, lam)
+    beta_sky_in = np.full(num_bin, beta_sky)
 
-    t -= t[0]
+    A2_in = np.full(num_bin, A2)
+    P2_in = np.full(num_bin, P2)
+    omegabar_in = np.full(num_bin, omegabar)
+    e2_in = np.full(num_bin, e2)
+    T2_in = np.full(num_bin, T2)
+    N = None
 
-    dt = params["Cadence"]
-    T = t[-1]
-    fd, Xfd, Yfd, Zfd = (
-        np.fft.rfftfreq(len(Xd), dt),
-        np.fft.rfft(Xd) * dt,
-        np.fft.rfft(Yd) * dt,
-        np.fft.rfft(Zd) * dt,
+    modes = np.array([2])
+
+    Tobs = 4.0 * YEAR
+    dt = 15.0
+    Tobs = int(Tobs / dt) * dt
+    df = 1 / Tobs
+
+    waveform_kwargs = dict(modes=modes, N=N, dt=dt, T=Tobs)
+
+    fp = "test_new_code.h5"  # "/projects/b1095/mkatz/gb/test_new_code.h5"
+
+    injection_params = injection_params = np.array(
+        [
+            np.log(amp),
+            f0 * 1e3,
+            np.log(fdot),
+            fddot,
+            phi0,
+            np.cos(iota),
+            psi,
+            lam,
+            np.sin(beta_sky),
+            # A2,
+            # omegabar,
+            # e2,
+            # P2,
+            # T2,
+        ]
     )
-
-    Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
-
-    template_kwargs = dict(
-        tBase=0.0,
-        t_obs_start=1.0,
-        t_obs_end=0.0,
-        modes=[(2, 2)],
-        direct=True,
-        compress=True,
-    )
-    template_kwargs_full = dict(
-        tBase=0.0,
-        length=1024,
-        freqs=xp.asarray(fd[1:]),
-        t_obs_start=1.0,
-        t_obs_end=0.0,
-        modes=[(2, 2)],
-        direct=False,
-        compress=True,
-    )
-
-    fp_search = "/projects/b1095/mkatz/mbh/test_new_code.h5"
-    fp_pe = "/projects/b1095/mkatz/mbh/test_new_code_pe.h5"
-
-    reader = ModifiedHDFBackend(fp_search)
-    log_prob = reader.get_log_prob().flatten()
-    start_inds = np.argsort(log_prob)
-    uni, inds = np.unique(log_prob[start_inds], return_index=True)
-    start_inds = start_inds[inds[-int(ntemps * nwalkers) :]]
-
-    ndim = 11
-    ndim_full = 13
-    test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
-
-    start_points = reader.get_chain().reshape(-1, ndim)[start_inds]
-
-    relbin_template = np.zeros(ndim_full)
-    relbin_template[test_inds] = start_points[-1]
 
     sampler_kwargs = dict(
-        lnlike_kwargs=dict(waveform_kwargs=template_kwargs),
-        fp=fp_pe,
+        lnlike_kwargs=dict(waveform_kwargs=waveform_kwargs),
+        fp=fp,
         resume=False,
         plot_iterations=1000,
-        plot_source="mbh",
+        plot_source="gb",
         ntemps=ntemps,
-        get_d_h=True,
+        # get_d_h=True,
         # subset=int(nwalkers / 2),
         autocorr_multiplier=10000,
-        burn=1000,
+        # burn=1000,
     )
+
     kwargs = dict(
         dt=dt,
-        start_points=start_points,
-        Tobs=len(t) * dt,
-        f_arr=fd,
+        start_points="fisher",
+        Tobs=Tobs,
         sampler_kwargs=sampler_kwargs,
-        likelihood_kwargs=dict(separate_d_h=True),
-        data=[Afd, Efd, Tfd],
-        waveform_kwargs=template_kwargs_full,
+        likelihood_kwargs=dict(separate_d_h=False),
+        injection_params=injection_params,
+        waveform_kwargs=waveform_kwargs,
         verbose=True,
-        multi_mode_start=True,
-        relbin=True,
-        relbin_template=relbin_template,
-        use_gpu=True,
+        use_gpu=use_gpu,
+        start_factor=10000.0,
     )
 
-    mbh_guide = MBHGuide(nwalkers * ntemps, **kwargs)
-    mbh_guide.lnprob.template_model.d_d = 0.0
-    mbh_guide.run_sampler(thin=1, iterations=50000)
+    gb_guide = GBGuide(nwalkers * ntemps, **kwargs)
+    gb_guide.run_sampler(thin=10, iterations=50000)
     # breakpoint()
-
-    """
-    lisabeta_mbhb = FastMBHB(T=1 / fd[1], delta_t=dt, approx="IMRPhenomD", orbits=None)
-
-    params_dc = params.copy()
-
-    params_dc["Distance"] = 1e3 * params["Distance"]
-    params_dc["PhaseAtCoalescence"] = params["PhaseAtCoalescence"]
-    params_dc.pop("Approximant")
-    params_dc.pop("AzimuthalAngleOfSpin1")
-    params_dc.pop("AzimuthalAngleOfSpin2")
-
-    try:
-        params_dc.pop("hphcData")
-    except KeyError:
-        pass
-
-
-    params_lb = lisabeta_mbhb.rename_as_lisabeta(params_dc)
-
-    tSSB, lamSSB, betaSSB, psiSSB = (
-        params_lb["Deltat"],
-        params_lb["lambda"],
-        params_lb["beta"],
-        params_lb["psi"],
-    )
-
-    back_to_LISA = SSB_to_LISA(0.0)
-    tL, lamL, betaL, psiL = back_to_LISA(tSSB, lamSSB, betaSSB, psiSSB)
-    params_lb["Deltat"], params_lb["lambda"], params_lb["beta"], params_lb["psi"] = (
-        tL,
-        lamL,
-        betaL,
-        psiL,
-    )
-    """
-
-    """
-    nwalkers_all,
-    *args,
-    include_precession=False,
-    amp_phase_kwargs={},
-    response_kwargs={},
-    sampler_frame="LISA",
-    convert_from_ldc=False,
-    use_gpu=False,
-    f_arr=None,
-    dt=10.0,
-    Tobs=1.0,
-    relbin=False,
-    multi_mode_start=True,
-
-    start_points=None,
-    include_precession=False,
-    priors=None,
-    sampler_kwargs={},
-    data=None,
-    injection_params=None,
-    test_inds=None,
-    likehood_kwargs={},
-    injection_setup_kwargs={},
-    waveform_kwargs={},
-    parameter_transforms=None,
-    periodic=None,
-    use_gpu=False,
-    verbose=False,
-    """

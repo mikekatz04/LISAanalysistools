@@ -38,6 +38,7 @@ class PTRedBlueMove(Move):
         live_dangerously=False,
         adaptation_lag=10000,
         adaptation_time=100,
+        stop_adaptation=-1,
     ):
 
         self.betas = betas
@@ -54,6 +55,7 @@ class PTRedBlueMove(Move):
 
         self.adaptive = adaptive
         self.adaptation_time, self.adaptation_lag = adaptation_time, adaptation_lag
+        self.stop_adaptation = stop_adaptation
 
     def setup(self, coords):
         pass
@@ -180,8 +182,9 @@ class PTRedBlueMove(Move):
         ratios = self.swaps_accepted / self.swaps_proposed
 
         if self.adaptive and self.ntemps > 1:
-            dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
-            self.betas += dbetas
+            if self.stop_adaptation < 0 or self.time < self.stop_adaptation:
+                dbetas = self._get_ladder_adjustment(self.time, self.betas, ratios)
+                self.betas += dbetas
 
         blobs = (
             logp.flatten()

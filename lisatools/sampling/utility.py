@@ -48,6 +48,14 @@ class ModifiedHDFBackend(HDFBackend):
                 # compression_opts=self.compression_opts,
             )
             g.create_dataset(
+                "betas",
+                (0, ntemps),
+                maxshape=(None, ntemps),
+                dtype=self.dtype,
+                # compression=self.compression,
+                # compression_opts=self.compression_opts,
+            )
+            g.create_dataset(
                 "chain",
                 (0, nwalkers, ndim),
                 maxshape=(None, nwalkers, ndim),
@@ -98,6 +106,11 @@ class ModifiedHDFBackend(HDFBackend):
             out = out.squeeze()
         return out
 
+    def get_temps(self, **kwargs):
+        ntemps, nwalkers, ndim = self.get_dims()
+        out = self.get_value("betas", **kwargs)
+        return out
+
     def get_value(self, name, flat=False, thin=1, discard=0):
         if not self.initialized:
             raise AttributeError(
@@ -105,6 +118,7 @@ class ModifiedHDFBackend(HDFBackend):
                 "'store == True' before accessing the "
                 "results"
             )
+        # TODO: add compression stuff
         with self.open() as f:
             g = f[self.name]
             iteration = g.attrs["iteration"]
@@ -122,7 +136,7 @@ class ModifiedHDFBackend(HDFBackend):
 
             ntemps, nwalkers, ndim = self.get_dims()
 
-            if name == "accepted":
+            if name == "accepted" or name == "betas":
                 return v
 
             elif name == "log_prob":
@@ -194,3 +208,22 @@ class ModifiedHDFBackend(HDFBackend):
                 g.attrs["random_state_{0}".format(i)] = v
 
             g.attrs["iteration"] = iteration + 1
+
+    def grow_temps(self, ngrow):
+        """Expand the storage space by some number of samples
+            Args:
+                ngrow (int): The number of steps to grow the chain.
+                blobs: The current array of blobs. This is used to compute the
+                    dtype for the blobs array.
+            """
+        with self.open("a") as f:
+            g = f[self.name]
+            ntot = g.attrs["iteration"] + ngrow
+            g["betas"].resize(ntot, axis=0)
+
+    def save_temps(self, temps):
+        with self.open("a") as f:
+            g = f[self.name]
+            iteration = g.attrs["iteration"]
+
+            g["betas"][iteration, :] = temps

@@ -167,6 +167,7 @@ class PTEmceeSampler:
         get_d_h=False,
         periodic=None,
         sampler_kwargs={},
+        ptstretch_kwargs={},
         resume=True,
         verbose=False,
     ):
@@ -236,10 +237,11 @@ class PTEmceeSampler:
         # TODO: add block if nwalkers / betas is not okay
         if "moves" not in sampler_kwargs:
             pt_move = PTStretchMove(
-                betas, nwalkers, ndim, periodic=periodic, **sampler_kwargs
+                betas, nwalkers, ndim, periodic=periodic, **ptstretch_kwargs
             )
             sampler_kwargs["moves"] = pt_move
 
+        self.backend = backend
         self.sampler = emcee.EnsembleSampler(
             self.all_walkers,
             ndim,
@@ -271,11 +273,16 @@ class PTEmceeSampler:
         else:
             thin = 1
 
+        ngrow = iterations // thin + 1
+        self.backend.grow_temps(ngrow)
+        self.backend.save_temps(self.betas)
         # Now we'll sample for up to iterations steps
         iter = 0
         for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
-
             iter += 1
+            if iter % thin == 0:
+                self.backend.save_temps(self.betas)
+
             if iter % (thin * self.autocorr_iter_count) and (
                 (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
             ):
