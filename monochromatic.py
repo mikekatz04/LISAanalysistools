@@ -20,7 +20,7 @@ use_gpu = False
 from lisatools.sampling.likelihood import Likelihood
 from lisatools.sampling.samplers.emcee import EmceeSampler
 from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
-from lisatools.utils.utility import uniform_dist, log_uniform
+from lisatools.sampling.prior import uniform_dist, log_uniform
 from lisatools.utils.transform import TransformContainer
 import warnings
 
@@ -83,9 +83,8 @@ injection_params = np.array(
 test_inds = np.array([0, 1, 2])
 
 # transformation of arguments from sampling basis to waveform basis
-transform_fn_in = {
-    "base": {0: (lambda x: np.exp(x)),},
-}
+transform_fn_in = {0: (lambda x: np.exp(x)),}
+
 # use the special transform container
 transform_fn = TransformContainer(transform_fn_in)
 #
