@@ -227,9 +227,9 @@ sampler = PTEmceeSampler(
     ntemps_target_extra=ntemps_target_extra,
     Tmax=Tmax,
     injection=injection_test_points,
-    plot_iterations=990,
-    plot_source="gb",
-    fp="test_mono_no_noise.h5"
+#    plot_iterations=990,
+#    plot_source="gb",
+#    fp="test_mono_no_noise.h5"
 )
 
 thin_by = 1
