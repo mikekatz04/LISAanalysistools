@@ -20,7 +20,7 @@ use_gpu = False
 from lisatools.sampling.likelihood import Likelihood
 from lisatools.sampling.samplers.emcee import EmceeSampler
 from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
-from lisatools.utils.utility import uniform_dist, log_uniform
+from lisatools.sampling.prior import uniform_dist
 from lisatools.utils.transform import TransformContainer
 import warnings
 
@@ -84,7 +84,7 @@ test_inds = np.array([0, 1, 2])
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
-    "base": {0: (lambda x: np.exp(x)),},
+    0: (lambda x: np.exp(x))
 }
 # use the special transform container
 transform_fn = TransformContainer(transform_fn_in)
@@ -171,7 +171,7 @@ like.inject_signal(
 # define priors, it really can only do uniform cube at the moment
 priors = [
     uniform_dist(np.log(1e-20), np.log(1e-18)),
-    log_uniform(5e-5, 1e-1),
+    uniform_dist(5e-5, 1e-1),
     uniform_dist(5e-15, 0.5e-10),
 ]
 
