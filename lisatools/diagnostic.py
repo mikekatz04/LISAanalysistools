@@ -346,6 +346,40 @@ def fisher(
     else:
         return fish
 
+class FisherMatrix(object):
+    def __init__(
+        self,
+        template_model,
+        eps,
+        parameter_transforms=None,
+        deriv_inds=None,
+        waveform_kwargs={},
+        inner_product_kwargs={},
+        use_gpu=False,
+
+    ):
+        self.template_model = template_model
+        self.eps = eps
+        self.parameter_transforms = parameter_transforms
+        self.deriv_inds = deriv_inds
+        self.waveform_kwargs = waveform_kwargs
+        self.inner_product_kwargs = inner_product_kwargs
+        self.use_gpu = use_gpu
+
+    def __call__(self,params):
+        fish = fisher(
+            self.template_model,
+            params,
+            self.eps,
+            deriv_inds=self.deriv_inds,
+            parameter_transforms=self.parameter_transforms,
+            waveform_kwargs=self.waveform_kwargs,
+            inner_product_kwargs=self.inner_product_kwargs,
+            return_derivs=False,
+            accuracy = True
+            )
+        return fish
+
 
 def covariance(*fisher_args, diagonalize=False, return_fisher=False, **fisher_kwargs):
     fish = fisher(*fisher_args, **fisher_kwargs)

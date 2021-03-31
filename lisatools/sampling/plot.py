@@ -144,10 +144,16 @@ class PlotContainer:
         tau = self.reader.get_autocorr_time(tol=0)
         if burn is None or thin is None:
             if burn is None:
-                burn = int(2 * np.max(tau))
+                if np.isnan(np.max(tau)):
+                    burn = 0
+                else:
+                    burn = int(2 * np.max(tau))
 
             if thin is None:
-                thin = int(0.5 * np.min(tau))
+                if np.isnan(np.min(tau)):
+                    thin = 0
+                else:
+                    thin = int(2 * np.min(tau))
 
         if thin == 0:
             thin = 1

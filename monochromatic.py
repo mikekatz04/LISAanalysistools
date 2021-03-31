@@ -94,7 +94,7 @@ check_params = transform_fn.transform_base_parameters(injection_params.copy()).T
 
 
 # time stuff
-dt = 10
+dt = 15
 T = 5/365
 minf = 1/(T*YRSID_SI)
 waveform_kwargs = {"T": T, "dt": dt}
@@ -128,6 +128,18 @@ print("ratio numerical theoretical ", fish[0,0]/(tot_snr_0**2) )
 print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*T*YRSID_SI)**2 / 3) )
 print("ratio numerical theoretical ", fish[2,2]/((np.pi*tot_snr_0*(T*YRSID_SI)**2)**2 / 5) )
 
+from lisatools.diagnostic import FisherMatrix
+
+fish_class = FisherMatrix(
+    mon_not_list,
+    eps,
+    deriv_inds=test_inds,
+    waveform_kwargs=waveform_kwargs,
+    inner_product_kwargs=inner_product_kwargs,
+    parameter_transforms=transform_fn,
+)
+
+print(fish_class(injection_params) - fish)
 ############################################
 #%% MCMC parameters to sample over
 
@@ -193,7 +205,7 @@ for i in range(ndim):
     start_points[:, i] = np.random.multivariate_normal(injection_params[test_inds], cov, size=nwalkers*ntemps)[:,i] #priors[i].rvs(nwalkers * ntemps) #
 # or simply
 start_points = priors.rvs(nwalkers * ntemps) 
-
+#start_points = np.random.multivariate_normal(injection_params[test_inds], 100*cov, size=nwalkers*ntemps)
 # check the starting points
 start_test = np.zeros((nwalkers * ntemps, ndim_full))
 
@@ -210,8 +222,10 @@ start_ll = np.asarray(
     ]
 )
 
+from lisatools.sampling.moves.gaussian import GaussianMove
 
-#%% setup sampler
+samp_kwargs = {}#{"moves": GaussianMove(cov=10000*cov)}
+
 sampler = PTEmceeSampler(
     nwalkers,
     ndim,
@@ -228,10 +242,12 @@ sampler = PTEmceeSampler(
     ntemps_target_extra=ntemps_target_extra,
     Tmax=Tmax,
     injection=injection_test_points,
-    plot_iterations=100,
+    plot_iterations=200,
     plot_source="gb",
     fp="mono_no_noise.h5",
-#    resume=False
+    resume=False,
+    sampler_kwargs=samp_kwargs,
+#    burn=100
 )
 
 thin_by = 1
