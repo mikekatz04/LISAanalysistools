@@ -20,7 +20,7 @@ use_gpu = False
 from lisatools.sampling.likelihood import Likelihood
 from lisatools.sampling.samplers.emcee import EmceeSampler
 from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
-from lisatools.utils.utility import uniform_dist, log_uniform
+from lisatools.sampling.prior import *
 from lisatools.utils.transform import TransformContainer
 import warnings
 
@@ -84,7 +84,7 @@ test_inds = np.array([0, 1, 2])
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
-    "base": {0: (lambda x: np.exp(x)),},
+    0: (lambda x: np.exp(x))
 }
 # use the special transform container
 transform_fn = TransformContainer(transform_fn_in)
@@ -169,12 +169,11 @@ like.inject_signal(
 
 #%% MCMC priors
 # define priors, it really can only do uniform cube at the moment
-priors = [
-    uniform_dist(np.log(1e-20), np.log(1e-18)),
-    log_uniform(5e-5, 1e-1),
-    uniform_dist(5e-15, 0.5e-10),
-]
+priors_in = {0: uniform_dist(np.log(1e-20), np.log(1e-18)), 
+             1: uniform_dist(5e-5, 1e-1),
+             2: uniform_dist(5e-15, 0.5e-10)}
 
+priors = PriorContainer(priors_in)
 # can add extra temperatures of 1 to have multiple temps accessing the target distribution
 ntemps_target_extra = 0
 # define max temperature (generally should be inf if you want to sample prior)
@@ -227,9 +226,10 @@ sampler = PTEmceeSampler(
     ntemps_target_extra=ntemps_target_extra,
     Tmax=Tmax,
     injection=injection_test_points,
-    plot_iterations=990,
+    plot_iterations=100,
     plot_source="gb",
-    fp="test_mono_no_noise.h5"
+    fp="mono_no_noise.h5",
+    resume=False
 )
 
 thin_by = 1
