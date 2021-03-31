@@ -21,6 +21,7 @@ from lisatools.sampling.likelihood import Likelihood
 from lisatools.sampling.samplers.emcee import EmceeSampler
 from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
 from lisatools.sampling.prior import *
+from lisatools.utils.constants import *
 from lisatools.utils.transform import TransformContainer
 import warnings
 
@@ -53,7 +54,7 @@ class Monochromatic:
         dt=10.0,
         T=1.0,
     ):
-        time_vec = np.arange(0,T*31536000,dt)
+        time_vec = np.arange(0,T*YRSID_SI,dt)
         h = zero_pad(A*np.exp(1j* 2 * np.pi * (f + fdot * time_vec/2 + fddot/6 * time_vec * time_vec) * time_vec + phi))
 
         if self.return_list is False:
@@ -94,8 +95,8 @@ check_params = transform_fn.transform_base_parameters(injection_params.copy()).T
 
 # time stuff
 dt = 10
-T = 10/365
-minf = 1/(T*3600*24*365)
+T = 30/365
+minf = 1/(T*YRSID_SI)
 waveform_kwargs = {"T": T, "dt": dt}
 
 # generate waveform
@@ -109,7 +110,7 @@ tot_snr_0 = snr(h,**inner_product_kwargs)
 
 #############
 #%% Fisher and derivatives
-eps = [1e-7, 1e-10, 1e-15,]
+eps = [1e-7, 1e-10, 1e-15]
 cov, fish, dh = covariance(
     mon_not_list,
     injection_params,
@@ -124,8 +125,8 @@ cov, fish, dh = covariance(
 )
 
 print("ratio numerical theoretical ", fish[0,0]/(tot_snr_0**2) )
-print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*T*365*24*3600)**2 / 3) )
-print("ratio numerical theoretical ", fish[2,2]/((np.pi*tot_snr_0*(T*365*24*3600)**2)**2 / 5) )
+print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*T*YRSID_SI)**2 / 3) )
+print("ratio numerical theoretical ", fish[2,2]/((np.pi*tot_snr_0*(T*YRSID_SI)**2)**2 / 5) )
 
 ############################################
 #%% MCMC parameters to sample over
@@ -190,7 +191,8 @@ np.random.seed(3000)
 start_points = np.zeros((nwalkers * ntemps, ndim))
 for i in range(ndim):
     start_points[:, i] = np.random.multivariate_normal(injection_params[test_inds], cov, size=nwalkers*ntemps)[:,i] #priors[i].rvs(nwalkers * ntemps) #
-
+# or simply
+start_points = priors.rvs(nwalkers * ntemps) 
 
 # check the starting points
 start_test = np.zeros((nwalkers * ntemps, ndim_full))
@@ -229,7 +231,7 @@ sampler = PTEmceeSampler(
     plot_iterations=100,
     plot_source="gb",
     fp="mono_no_noise.h5",
-    resume=False
+#    resume=False
 )
 
 thin_by = 1
@@ -241,5 +243,3 @@ sampler.sample(
     skip_initial_state_check=False,
     thin_by=thin_by,
 )
-
-# %%
