@@ -95,7 +95,7 @@ check_params = transform_fn.transform_base_parameters(injection_params.copy()).T
 
 # time stuff
 dt = 10
-T = 30/365
+T = 5/365
 minf = 1/(T*YRSID_SI)
 waveform_kwargs = {"T": T, "dt": dt}
 
