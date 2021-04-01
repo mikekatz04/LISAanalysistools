@@ -105,7 +105,7 @@ check_params = injection_params.copy()
 check_params = transform_fn.transform_base_parameters(check_params).T
 
 # INJECTION kwargs
-waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-5}
+waveform_kwargs = {"T": T, "dt": dt, "eps": 1e-2}
 
 check_sig = fast(*check_params, **waveform_kwargs)
 

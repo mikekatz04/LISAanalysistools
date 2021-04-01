@@ -74,14 +74,14 @@ injection_params = np.array(
     [
         np.log(1e-19),
         1e-3,
-        1e-11,
-        0,
-        0
+        0.0,
+        0.0,
+        0.0
     ]
 )
 
 # which of the injection parameters you actually want to sample over
-test_inds = np.array([0, 1, 2])
+test_inds = np.array([0, 1])
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
@@ -94,7 +94,7 @@ check_params = transform_fn.transform_base_parameters(injection_params.copy()).T
 
 
 # time stuff
-dt = 15
+dt = 20
 T = 5/365
 minf = 1/(T*YRSID_SI)
 waveform_kwargs = {"T": T, "dt": dt}
@@ -110,7 +110,7 @@ tot_snr_0 = snr(h,**inner_product_kwargs)
 
 #############
 #%% Fisher and derivatives
-eps = [1e-7, 1e-10, 1e-15]
+eps = [1e-7, 1e-10]#, 1e-15]
 cov, fish, dh = covariance(
     mon_not_list,
     injection_params,
@@ -126,7 +126,7 @@ cov, fish, dh = covariance(
 
 print("ratio numerical theoretical ", fish[0,0]/(tot_snr_0**2) )
 print("ratio numerical theoretical ", fish[1,1]/(4*(np.pi*tot_snr_0*T*YRSID_SI)**2 / 3) )
-print("ratio numerical theoretical ", fish[2,2]/((np.pi*tot_snr_0*(T*YRSID_SI)**2)**2 / 5) )
+#print("ratio numerical theoretical ", fish[2,2]/((np.pi*tot_snr_0*(T*YRSID_SI)**2)**2 / 5) )
 
 from lisatools.diagnostic import FisherMatrix
 
@@ -145,7 +145,7 @@ print(fish_class(injection_params) - fish)
 
 # define sampling quantities
 nwalkers = 8  # per temperature
-ntemps = 2
+ntemps = 4
 
 ndim_full = 5  # full dimensionality of inputs to waveform model
 
@@ -182,9 +182,10 @@ like.inject_signal(
 
 #%% MCMC priors
 # define priors, it really can only do uniform cube at the moment
-priors_in = {0: uniform_dist(np.log(1e-20), np.log(1e-18)), 
-             1: uniform_dist(5e-5, 1e-1),
-             2: uniform_dist(5e-15, 0.5e-10)}
+priors_in = {0: uniform_dist(np.log(0.9e-19), np.log(1.1e-19)), 
+             1: uniform_dist(0.9e-4, 1.1e-3),
+             #2: uniform_dist(5e-15, 0.5e-10)
+             }
 
 priors = PriorContainer(priors_in)
 # can add extra temperatures of 1 to have multiple temps accessing the target distribution
@@ -224,7 +225,7 @@ start_ll = np.asarray(
 
 from lisatools.sampling.moves.gaussian import GaussianMove
 
-samp_kwargs = {}#{"moves": GaussianMove(cov=10000*cov)}
+samp_kwargs = {"moves": GaussianMove(cov=cov)}
 
 sampler = PTEmceeSampler(
     nwalkers,
@@ -251,7 +252,7 @@ sampler = PTEmceeSampler(
 )
 
 thin_by = 1
-max_iter = 1000
+max_iter = 100000
 sampler.sample(
     start_points,
     iterations=max_iter,

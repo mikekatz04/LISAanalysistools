@@ -1,4 +1,5 @@
 import warnings
+from scipy import signal
 
 import numpy as np
 
@@ -10,6 +11,19 @@ except (ModuleNotFoundError, ImportError):
 
 from lisatools.sensitivity import get_sensitivity
 
+
+def zero_pad(data):
+    """
+    This function takes in a vector and zero pads it so it is a power of two.
+    We do this for the O(Nlog_{2}N) cost when we work in the frequency domain.
+    """
+    N = len(data)
+    pow_2 = np.ceil(np.log2(N))
+    return np.pad(data,(0,int((2**pow_2)-N)),'constant')
+
+def window_zero(sig,dt):
+    Length = len(sig)
+    return zero_pad(sig * signal.tukey(Length,0.05))
 
 def inner_product(
     sig1,

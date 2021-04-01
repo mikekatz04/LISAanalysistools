@@ -18,7 +18,6 @@ from lisatools.sampling.likelihood import Likelihood
 
 from lisatools.sampling.samplers.emcee import EmceeSampler
 from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
-from lisatools.utils.utility import uniform_dist
 
 from lisatools.utils.transform import TransformContainer
 
@@ -84,7 +83,7 @@ traj = RunSchwarzEccFluxInspiral()
 traj(M, mu, p0, e0, T=1)
 
 #
-T = 6/12 # years
+T = 2 # years
 dt = 10.0  # seconds
 
 # injection array
@@ -118,9 +117,8 @@ inner_product_kwargs = dict(dt=dt, PSD="cornish_lisa_psd")
 
 # transformation of arguments from sampling basis to waveform basis
 transform_fn_in = {
-    'base':{0: (lambda x: np.exp(x)), 1: (lambda x: np.exp(x))}
-    }
-
+    0: (lambda x: np.exp(x)),1: (lambda x: np.exp(x))
+}
 # use the special transform container
 transform_fn = TransformContainer(transform_fn_in)
 

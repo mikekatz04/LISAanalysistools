@@ -33,28 +33,9 @@ class GaussianMove(MHMove):
 
     def __init__(self, cov, mode="vector", factor=None):
         # Parse the proposal type.
-        try:
-            float(cov)
 
-        except TypeError:
-            cov = np.atleast_1d(cov)
-            if len(cov.shape) == 1:
-                # A diagonal proposal was given.
-                ndim = len(cov)
-                proposal = _diagonal_proposal(np.sqrt(cov), factor, mode)
-
-            elif len(cov.shape) == 2 and cov.shape[0] == cov.shape[1]:
-                # The full, square covariance matrix was given.
-                ndim = cov.shape[0]
-                proposal = _proposal(cov, factor, mode)
-
-            else:
-                raise ValueError("Invalid proposal scale dimensions")
-
-        else:
-            # This was a scalar proposal.
-            ndim = None
-            proposal = _isotropic_proposal(np.sqrt(cov), factor, mode)
+        ndim = cov.shape[0]
+        proposal = _proposal(cov, factor, mode)
 
         super(GaussianMove, self).__init__(proposal, ndim=ndim)
 
