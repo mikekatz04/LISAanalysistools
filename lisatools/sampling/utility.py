@@ -227,3 +227,14 @@ class ModifiedHDFBackend(HDFBackend):
             iteration = g.attrs["iteration"]
 
             g["betas"][iteration, :] = temps
+
+
+def rel_bin_update(
+    sampler,
+    template_gen_kwargs={},
+    noise_kwargs_AE={},
+    noise_kwargs_T={},
+    batch_size=50,
+):
+    breakpoint()
+    pass

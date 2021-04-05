@@ -41,6 +41,7 @@ class LogProb:
         subset=None,
         get_d_h=False,
         add_prior=False,
+        add_inds=False,
     ):
 
         self.lnlike_kwargs = lnlike_kwargs
@@ -48,6 +49,8 @@ class LogProb:
         self.lnprior = lnprior
 
         self.ndim_full = ndim_full
+
+        self.add_inds = add_inds
 
         if test_inds is not None:
             if fill_values is None:
@@ -66,6 +69,9 @@ class LogProb:
         self.subset = subset
         self.get_d_h = get_d_h
         self.add_prior = add_prior
+
+        if "waveform_kwargs" not in lnlike_kwargs:
+            lnlike_kwargs["waveform_kwargs"] = {}
 
     def __call__(self, x):
         prior_vals = self.lnprior.logpdf(x)
@@ -99,6 +105,8 @@ class LogProb:
             x_in = x
 
         if self.subset is None:
+            if self.add_inds:
+                self.lnlike_kwargs["waveform_kwargs"]["inds"] = inds_eval
             temp = self.lnlike.get_ll(x_in[inds_eval], **self.lnlike_kwargs)
 
             if self.get_d_h:
@@ -116,6 +124,9 @@ class LogProb:
                 h_h = [None for j in range(len(inds_eval_temp))]
 
             for j, inds in enumerate(inds_eval_temp):
+                if self.add_inds:
+                    self.lnlike_kwargs["waveform_kwargs"]["inds"] = inds
+
                 temp[j] = self.lnlike.get_ll(x_in[inds], **self.lnlike_kwargs)
                 if self.get_d_h:
                     d_h[j] = self.lnlike.d_h
@@ -169,10 +180,17 @@ class PTEmceeSampler:
         sampler_kwargs={},
         ptstretch_kwargs={},
         resume=True,
+        update_fn=None,
+        update=-1,
+        update_kwargs={},
+        add_inds=False,
         verbose=False,
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
+        self.update_fn = update_fn
+        self.update = update
+        self.update_kwargs = update_kwargs
 
         if betas is None:
             if ntemps == 1:
@@ -200,6 +218,7 @@ class PTEmceeSampler:
             test_inds=test_inds,
             fill_values=fill_values,
             get_d_h=get_d_h,
+            add_inds=add_inds,
         )
 
         self.autocorr_iter_count = autocorr_iter_count
@@ -282,6 +301,9 @@ class PTEmceeSampler:
             iter += 1
             if iter % thin == 0:
                 self.backend.save_temps(self.betas)
+
+            if (iter % self.update) == 0 and (self.update_fn is not None):
+                self.update_fn(self.sampler, self.update_kwargs)
 
             if iter % (thin * self.autocorr_iter_count) and (
                 (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
