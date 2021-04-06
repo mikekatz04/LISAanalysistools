@@ -229,12 +229,13 @@ class ModifiedHDFBackend(HDFBackend):
             g["betas"][iteration, :] = temps
 
 
-def rel_bin_update(
-    sampler,
-    template_gen_kwargs={},
-    noise_kwargs_AE={},
-    noise_kwargs_T={},
-    batch_size=50,
-):
-    breakpoint()
-    pass
+def rel_bin_update(samples, sampler, lnlike, **kwargs):
+    x_current = lnlike.get_x_in(samples.coords)
+
+    if lnlike.lnlike.parameter_transforms is not None:
+        x_in = lnlike.lnlike.parameter_transforms.transform_base_parameters(x_current)
+
+    else:
+        x_in = x_current.T
+
+    sampler.log_prob_fn.f.lnlike.template_model.setup(x_in, **kwargs)

@@ -73,6 +73,16 @@ class LogProb:
         if "waveform_kwargs" not in lnlike_kwargs:
             lnlike_kwargs["waveform_kwargs"] = {}
 
+    def get_x_in(self, x):
+        if self.need_to_fill:
+            x_in = np.zeros((x.shape[0], self.ndim_full))
+            x_in[:, self.test_inds] = x
+            x_in[:, self.fill_inds] = self.fill_values[np.newaxis, :]
+
+            return x_in
+        else:
+            return x
+
     def __call__(self, x):
         prior_vals = self.lnprior.logpdf(x)
         inds_eval = np.atleast_1d(np.squeeze(np.where(np.isinf(prior_vals) != True)))
@@ -96,13 +106,7 @@ class LogProb:
         #        x.T, self.test_inds
         #    )
 
-        if self.need_to_fill:
-            x_in = np.zeros((x.shape[0], self.ndim_full))
-            x_in[:, self.test_inds] = x
-            x_in[:, self.fill_inds] = self.fill_values[np.newaxis, :]
-
-        else:
-            x_in = x
+        x_in = self.get_x_in(x)
 
         if self.subset is None:
             if self.add_inds:
@@ -280,10 +284,16 @@ class PTEmceeSampler:
 
         st = time.perf_counter()
 
+        iter = 0
         if self.burn is not None:
             for sample in self.sampler.sample(
                 x0, iterations=self.burn, store=False, **sampler_kwargs
             ):
+                iter += 1
+                if (iter % self.update) == 0 and (self.update_fn is not None):
+                    self.update_fn(
+                        sample, self.sampler, self.lnprob, **self.update_kwargs
+                    )
                 x0 = sample.coords
             print("Burn Finished")
 
@@ -303,7 +313,7 @@ class PTEmceeSampler:
                 self.backend.save_temps(self.betas)
 
             if (iter % self.update) == 0 and (self.update_fn is not None):
-                self.update_fn(self.sampler, self.update_kwargs)
+                self.update_fn(sample, self.sampler, self.lnprob, **self.update_kwargs)
 
             if iter % (thin * self.autocorr_iter_count) and (
                 (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
