@@ -194,7 +194,7 @@ class PTEmceeSampler:
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
         self.update_fn = update_fn
         self.update = update
-        self.update_kwargs = update_kwargs
+        self.update_kwargs = update_kwargs.copy()
 
         if betas is None:
             if ntemps == 1:
@@ -291,9 +291,7 @@ class PTEmceeSampler:
             ):
                 iter += 1
                 if (iter % self.update) == 0 and (self.update_fn is not None):
-                    self.update_fn(
-                        sample, self.sampler, self.lnprob, **self.update_kwargs
-                    )
+                    self.update_fn(iter, sample, self.sampler, self.lnprob, **self.update_kwargs)
                 x0 = sample.coords
             print("Burn Finished")
 
@@ -313,7 +311,8 @@ class PTEmceeSampler:
                 self.backend.save_temps(self.betas)
 
             if (iter % self.update) == 0 and (self.update_fn is not None):
-                self.update_fn(sample, self.sampler, self.lnprob, **self.update_kwargs)
+                print(self.sampler.get_log_prob().max(), sample.log_prob.max())
+                self.update_fn(iter, sample, self.sampler, self.lnprob, **self.update_kwargs)
 
             if iter % (thin * self.autocorr_iter_count) and (
                 (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
@@ -325,7 +324,7 @@ class PTEmceeSampler:
             # if it isn't trustworthy
 
             ind = self.sampler.get_log_prob().argmax()
-
+            self.verbose = True
             if self.verbose:
                 print(
                     self.sampler.get_log_prob().max(),

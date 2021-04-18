@@ -229,13 +229,31 @@ class ModifiedHDFBackend(HDFBackend):
             g["betas"][iteration, :] = temps
 
 
-def rel_bin_update(samples, sampler, lnlike, **kwargs):
-    x_current = lnlike.get_x_in(samples.coords)
+def rel_bin_update(it, sample_state, sampler, lnlike, nwalkers_per_temp=None, **kwargs):
 
+    samples = sample_state.coords.reshape(-1, sampler.ndim)
+    lp_max = sample_state.log_prob.argmax()
+    best = samples[lp_max]
+
+    sorted = np.argsort(sample_state.log_prob)
+    inds_best = sorted[-1000:]
+    inds_worst = sorted[:1000]
+
+    x_current = lnlike.get_x_in(np.atleast_2d(best))
     if lnlike.lnlike.parameter_transforms is not None:
         x_in = lnlike.lnlike.parameter_transforms.transform_base_parameters(x_current)
 
     else:
         x_in = x_current.T
 
-    sampler.log_prob_fn.f.lnlike.template_model.setup(x_in, **kwargs)
+    sampler.log_prob_fn.f.lnlike.template_model._init_rel_bin_info(x_in, **kwargs)
+
+    sampler.log_prob_fn.f.lnlike.template_model.base_d_d = 7.5e4
+    samples[inds_worst] = samples[inds_best].copy()
+    lp, pp, dh, hh = sampler.log_prob_fn.f(samples).T
+
+    sample_state.coords = samples
+    sample_state.log_prob = lp
+    sample_state.blobs = np.array([pp, dh, hh]).T
+
+    #sampler.backend.save_step(sample_state, np.full_like(lp, True))

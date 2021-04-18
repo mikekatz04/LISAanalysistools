@@ -298,7 +298,7 @@ class MBHGuide(SamplerGuide):
     @property
     def default_priors(self):
         default_priors = {
-            0: uniform_dist(np.log(1e4), np.log(1e8)),
+            0: uniform_dist(np.log(5e5), np.log(5e7)),
             1: uniform_dist(0.01, 0.999999999),
             2: uniform_dist(-0.99999999, +0.99999999),
             3: uniform_dist(-0.99999999, +0.99999999),
@@ -519,9 +519,7 @@ class MBHGuide(SamplerGuide):
                         relbin_template[:, self.test_inds] = self.start_points.copy()
                         relbin_template[:, self.fill_inds] = self.fill_values
 
-            elif (
-                not isinstance(relbin_template, np.ndarray) or relbin_template.ndim < 3
-            ):
+            elif not isinstance(relbin_template, np.ndarray):
                 raise ValueError(
                     "When using relative binning, relbin_template must be set to 'multi', 'single', or it must be an array of start points."
                 )
@@ -530,14 +528,16 @@ class MBHGuide(SamplerGuide):
                 relbin_template
             )
 
+
             # TODO: update this
             dataChannels /= noiseFactors
             mbh_like = RelativeBinning(
                 bbh,
                 self.xp.asarray(f_arr[1:]),
                 dataChannels,
+                relbin_template,
                 *relbin_args,
-                template_gen_args=relbin_template,
+                #template_gen_args=relbin_template,
                 **relbin_kwargs,
                 use_gpu=use_gpu,
             )

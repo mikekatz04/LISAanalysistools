@@ -216,7 +216,7 @@ class Likelihood(object):
             raise ValueError("Cannot get dh term if self.separate_d_h if False.")
 
         if hasattr(self.template_model, "d_h"):
-            return self.template_model.d_h
+            return self.template_model.d_h.copy()
 
         else:
             raise ValueError("Template model does not have the d_h term available.")
@@ -227,7 +227,7 @@ class Likelihood(object):
             raise ValueError("Cannot get dh term if self.separate_d_h if False.")
 
         if hasattr(self.template_model, "h_h"):
-            return self.template_model.h_h
+            return self.template_model.h_h.copy()
 
         else:
             raise ValueError("Template model does not have the d_h term available.")

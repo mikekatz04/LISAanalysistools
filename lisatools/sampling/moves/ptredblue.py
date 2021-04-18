@@ -303,6 +303,9 @@ class PTStretchMove(PTRedBlueMove):
     def __init__(self, *args, periodic=None, a=2.0, **kwargs):
         self.a = a
 
+        #a = 2.0
+        print("a", a)
+
         if periodic is None:
             periodic = {}
         elif isinstance(periodic, dict) is False:
