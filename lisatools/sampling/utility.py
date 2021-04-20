@@ -248,7 +248,7 @@ def rel_bin_update(it, sample_state, sampler, lnlike, nwalkers_per_temp=None, **
 
     sampler.log_prob_fn.f.lnlike.template_model._init_rel_bin_info(x_in, **kwargs)
 
-    sampler.log_prob_fn.f.lnlike.template_model.base_d_d = 7.5e4
+    sampler.log_prob_fn.f.lnlike.template_model.base_d_d = 2 * 7.5e4
     samples[inds_worst] = samples[inds_best].copy()
     lp, pp, dh, hh = sampler.log_prob_fn.f(samples).T
 
@@ -256,4 +256,4 @@ def rel_bin_update(it, sample_state, sampler, lnlike, nwalkers_per_temp=None, **
     sample_state.log_prob = lp
     sample_state.blobs = np.array([pp, dh, hh]).T
 
-    #sampler.backend.save_step(sample_state, np.full_like(lp, True))
+    # sampler.backend.save_step(sample_state, np.full_like(lp, True))

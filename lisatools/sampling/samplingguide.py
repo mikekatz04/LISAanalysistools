@@ -275,6 +275,8 @@ class SamplerGuide:
 
         self.nwalkers = int(self.nwalkers_all / ntemps)
 
+        # TODO: fix this
+        self.sampler_kwargs["sampler_kwargs"] = {}
         self.sampler = PTEmceeSampler(
             self.nwalkers,
             self.ndim,
@@ -528,7 +530,6 @@ class MBHGuide(SamplerGuide):
                 relbin_template
             )
 
-
             # TODO: update this
             dataChannels /= noiseFactors
             mbh_like = RelativeBinning(
@@ -537,7 +538,7 @@ class MBHGuide(SamplerGuide):
                 dataChannels,
                 relbin_template,
                 *relbin_args,
-                #template_gen_args=relbin_template,
+                # template_gen_args=relbin_template,
                 **relbin_kwargs,
                 use_gpu=use_gpu,
             )

@@ -141,6 +141,7 @@ class LogProb:
                 d_h = np.concatenate(d_h)
 
         loglike_vals[inds_eval] = temp
+        loglike_vals[np.isnan(loglike_vals)] = np.inf
 
         if self.get_d_h:
             d_h_vals[inds_eval] = d_h
@@ -188,6 +189,8 @@ class PTEmceeSampler:
         update=-1,
         update_kwargs={},
         add_inds=False,
+        stopping_fn=None,
+        stopping_iter=-1,
         verbose=False,
     ):
 
@@ -195,6 +198,9 @@ class PTEmceeSampler:
         self.update_fn = update_fn
         self.update = update
         self.update_kwargs = update_kwargs.copy()
+
+        self.stopping_fn = stopping_fn
+        self.stopping_iter = stopping_iter
 
         if betas is None:
             if ntemps == 1:
@@ -276,8 +282,10 @@ class PTEmceeSampler:
 
     def sample(self, x0, iterations=10000, **sampler_kwargs):
         # We'll track how the average autocorrelation time estimate changes
-        index = 0
-        autocorr = np.empty(iterations)
+
+        if self.autocorr_iter_count > 0:
+            index = 0
+            autocorr = np.empty(iterations)
 
         # This will be useful to testing convergence
         old_tau = np.inf
@@ -291,7 +299,9 @@ class PTEmceeSampler:
             ):
                 iter += 1
                 if (iter % self.update) == 0 and (self.update_fn is not None):
-                    self.update_fn(iter, sample, self.sampler, self.lnprob, **self.update_kwargs)
+                    self.update_fn(
+                        iter, sample, self.sampler, self.lnprob, **self.update_kwargs
+                    )
                 x0 = sample.coords
             print("Burn Finished")
 
@@ -312,10 +322,19 @@ class PTEmceeSampler:
 
             if (iter % self.update) == 0 and (self.update_fn is not None):
                 print(self.sampler.get_log_prob().max(), sample.log_prob.max())
-                self.update_fn(iter, sample, self.sampler, self.lnprob, **self.update_kwargs)
+                self.update_fn(
+                    iter, sample, self.sampler, self.lnprob, **self.update_kwargs
+                )
 
-            if iter % (thin * self.autocorr_iter_count) and (
-                (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
+            if (
+                (
+                    iter % (thin * self.autocorr_iter_count)
+                    or self.autocorr_iter_count <= 0
+                )
+                and (
+                    (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
+                )
+                and ((iter % (thin * self.stopping_iter) or self.stopping_iter <= 0))
             ):
                 continue
 
@@ -323,31 +342,45 @@ class PTEmceeSampler:
             # Using tol=0 means that we'll always get an estimate even
             # if it isn't trustworthy
 
-            ind = self.sampler.get_log_prob().argmax()
+            if self.autocorr_iter_count >= 0:
+                tau = self.sampler.get_autocorr_time(tol=0)
+                autocorr[index] = np.mean(tau)
+                index += 1
+
+                # Check convergence
+                converged = np.all(
+                    tau * self.autocorr_multiplier < self.sampler.iteration
+                )
+                converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
+
             self.verbose = True
             if self.verbose:
+                ind = self.sampler.get_log_prob().argmax()
+
+                if self.autocorr_iter_count >= 0:
+                    print(
+                        index,
+                        tau,
+                        tau * self.autocorr_multiplier,
+                        self.sampler.iteration,
+                    )
+
                 print(
                     self.sampler.get_log_prob().max(),
                     np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
                     np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
                 )
-            tau = self.sampler.get_autocorr_time(tol=0)
-            autocorr[index] = np.mean(tau)
-            index += 1
-
-            if self.verbose:
-                print(
-                    index, tau, tau * self.autocorr_multiplier, self.sampler.iteration
-                )
-
-            # Check convergence
-            converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)
-            converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
 
             if iter % (thin * self.plot_iterations) == 0 and self.plot_iterations > 0:
                 self.plot_gen.generate_corner()
 
-            if converged:
+            if iter % (thin * self.stopping_iter) == 0 and self.stopping_iter > 0:
+                stop = self.stopping_fn(iter, sample, self.sampler, self.lnprob)
+
+            else:
+                stop = False
+
+            if converged or stop:
                 break
             old_tau = tau
             pass
