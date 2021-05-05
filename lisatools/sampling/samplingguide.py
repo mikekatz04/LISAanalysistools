@@ -227,7 +227,6 @@ class SamplerGuide:
             pts_in = test_start
 
         check = self.lnprob.get_ll(pts_in, waveform_kwargs=self.waveform_kwargs)
-
         print(check)
 
     @property
@@ -291,7 +290,7 @@ class SamplerGuide:
             self.start_points,
             thin_by=thin_by,
             iterations=iterations,
-            progress=True,
+            progress=progress,
             **kwargs,
         )
 
@@ -378,8 +377,9 @@ class MBHGuide(SamplerGuide):
             9: (lambda x: np.arcsin(x)),
         }
 
+        parameter_transforms[(11, 12)] = transfer_tref
+
         if self.sampler_frame == "LISA":
-            parameter_transforms[(11, 12)] = transfer_tref
             parameter_transforms[(11, 8, 9, 10)] = LISA_to_SSB(0.0)
 
         return parameter_transforms
@@ -439,7 +439,7 @@ class MBHGuide(SamplerGuide):
             df = 1 / Tobs
             f_arr = np.arange(0.0, 1 / (2 * dt) + df, df)[1:]  # remove dc
         else:
-            df = f_arr[1]
+            df = f_arr[1] - f_arr[0]
             Tobs = 1 / df
 
         self.Tobs = Tobs

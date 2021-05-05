@@ -29,7 +29,7 @@ ntemps = 10
 nwalkers_relbin = 400
 ntemps_relbin = 10
 
-fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD.hdf5"
+fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
 # fpin = "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
 with h5py.File(fpin, "r") as f:
     grp = f["H5LISA"]["GWSources"]["MBHB-0"]
@@ -68,15 +68,20 @@ fd, Xfd, Yfd, Zfd = (
 )
 
 Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
+
+
 fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_search.h5"
 fp_search_rel_bin = (
     "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_search_rel_bin.h5"
 )
-fp_pe_rel_bin = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_pe_rel_bin.h5"
+fp_pe_rel_bin = (
+    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_pe_rel_bin_testing.h5"
+)
 
+breakpoint()
 info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=t[-1])
 
-mbh_search_module = MBHBaseSearch(name="initial search")
+mbh_search_module = MBHBase(name="initial search")
 mbh_search_module.initialize_module(fp_search, nwalkers, ntemps, use_gpu=use_gpu)
 
 mbh_search_rel_bin_module = MBHRelBinSearch(name="relbin search")
@@ -91,6 +96,33 @@ mbh_pe_rel_bin_module.initialize_module(
 
 module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
 
+
+mbh_pipeline = PipelineGuide(info, module_list)
+
+mbh_pipeline.run(verbose=True)
+
+exit()
+fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_full_NO_noise_search_3.h5"
+fp_pe = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_full_NO_noise_pe_4.h5"
+
+breakpoint()
+info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=t[-1])
+
+mbh_full_search_module = MBHBase(name="initial full search")
+mbh_full_search_module.initialize_module(
+    fp_search, nwalkers, ntemps, search=True, n_iter_stop=30, use_gpu=use_gpu
+)
+
+mbh_full_pe_module = MBHBase(name="full pe")
+mbh_full_pe_module.initialize_module(
+    fp_pe, nwalkers, ntemps, search=False, use_gpu=use_gpu
+)
+
+info.fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_NO_noise_pe_rel_bin.h5"
+# module_list = [mbh_full_search_module, mbh_full_pe_module]
+
+breakpoint()
+module_list = [mbh_pe_rel_bin_module]
 
 mbh_pipeline = PipelineGuide(info, module_list)
 

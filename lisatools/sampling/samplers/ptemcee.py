@@ -115,7 +115,7 @@ class LogProb:
 
             if self.get_d_h:
                 d_h = self.lnlike.d_h
-                h_h = self.lnlike.d_h
+                h_h = self.lnlike.h_h
 
         else:
             num_inds = len(inds_eval)
@@ -316,6 +316,13 @@ class PTEmceeSampler:
         # Now we'll sample for up to iterations steps
         iter = 0
         for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
+
+            # sort = np.argsort(sample.coords[: self.nwalkers, 6])[np.array([0, -1])]
+            # print(
+            #    sample.coords[: self.nwalkers, 6][sort],
+            #    sample.log_prob[: self.nwalkers][sort],
+            # )
+
             iter += 1
             if iter % thin == 0:
                 self.backend.save_temps(self.betas)
