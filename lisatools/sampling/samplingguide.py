@@ -142,11 +142,19 @@ class SamplerGuide:
                     raise ValueError(
                         "If generating points from fisher matrix, must store start_mean and cov attributes."
                     )
-                self._start_points = np.random.multivariate_normal(
-                    self.start_mean,
-                    self.start_factor * self.cov,
-                    size=self.nwalkers_all,
-                )
+                self._start_points = np.zeros((self.nwalkers_all, self.ndim))
+                inds_fix = np.arange(self.nwalkers_all)
+
+                while len(inds_fix) > 0:
+                    self._start_points[inds_fix] = np.random.multivariate_normal(
+                        self.start_mean,
+                        self.start_factor * self.cov,
+                        size=len(inds_fix),
+                    )
+
+                    inds_fix = np.where(
+                        np.isinf(self.priors.logpdf(self._start_points))
+                    )[0]
 
         elif isinstance(start_points, np.ndarray):
             self._start_points = start_points
