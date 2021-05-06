@@ -580,8 +580,8 @@ class GBGuide(SamplerGuide):
             default_priors[8] = uniform_dist(1.0, 1000.0)
             default_priors[9] = uniform_dist(0.0, np.pi * 2)
             default_priors[10] = uniform_dist(0.0001, 0.9)
-            default_priors[11] = uniform_dist(0.5, 8.0)
-            default_priors[12] = uniform_dist(0.0, 0.5)
+            default_priors[11] = uniform_dist(0.2, 10.0)
+            default_priors[12] = uniform_dist(0.0, 1.0)
 
         default_priors = PriorContainer(default_priors)
 
@@ -646,6 +646,10 @@ class GBGuide(SamplerGuide):
             8: (lambda x: np.arcsin(x)),
         }
 
+        if hasattr(self, "include_third") and self.include_third:
+            # transform from fraction of period for T2 to regular T2
+            parameter_transforms[(12, 13)] = lambda x, y: (x, y * x)
+
         return parameter_transforms
 
     @property
@@ -653,6 +657,7 @@ class GBGuide(SamplerGuide):
         periodic = {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}
         if hasattr(self, "include_third") and self.include_third:
             periodic[9] = 2 * np.pi
+            periodic[12] = 1.0
 
         return periodic
 

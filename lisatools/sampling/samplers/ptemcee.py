@@ -374,8 +374,8 @@ class PTEmceeSampler:
 
                 print(
                     self.sampler.get_log_prob().max(),
-                    np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
-                    np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
+                    #    np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
+                    #    np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
                 )
 
             if iter % (thin * self.plot_iterations) == 0 and self.plot_iterations > 0:

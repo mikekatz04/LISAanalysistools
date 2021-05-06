@@ -83,7 +83,7 @@ class PipelineGuide:
                 print(print_str)
 
             module.update_module(self.info_manager)
-            module.run_module()
+            module.run_module(progress=progress)
 
             if verbose:
                 print_str = "finished module {}".format(i)
@@ -158,7 +158,6 @@ class MBHBase(PipelineModule):
             burn = 1000
             resume = False
 
-        print("\n\ncheck it\n\n")
         self.sampler_kwargs = dict(
             lnlike_kwargs=dict(waveform_kwargs=self.template_kwargs),
             fp=self.fp,
@@ -212,11 +211,11 @@ class MBHBase(PipelineModule):
         self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
 
         # TODO: remove
-        # self.mbh_guide.lnprob.template_model.d_d = 2 * 7.5e4
+        self.mbh_guide.lnprob.template_model.d_d = 2 * 7.5e4
         print(self.mbh_guide.lnprob.template_model.d_d)
 
-    def run_module(self, *args, **kwargs):
-        self.mbh_guide.run_sampler(thin=5, iterations=100000, progress=False)
+    def run_module(self, *args, progress=False, **kwargs):
+        self.mbh_guide.run_sampler(thin=5, iterations=100000, progress=progress)
         self.update_information(self.info_manager, self.fp)
         # del self.mbh_guide
 
@@ -313,10 +312,11 @@ class MBHRelBinSearch(PipelineModule):
         self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
 
         # TODO: remove
-        # self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
+        self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
+        print(self.mbh_guide.lnprob.template_model.base_d_d)
 
-    def run_module(self, *args, **kwargs):
-        self.mbh_guide.run_sampler(thin=10, iterations=100000, progress=True)
+    def run_module(self, *args, progress=False, **kwargs):
+        self.mbh_guide.run_sampler(thin=10, iterations=100000, progress=progress)
         self.update_information(self.info_manager, self.fp_search_rel_bin)
 
 
@@ -409,8 +409,7 @@ class MBHRelBinPE(PipelineModule):
         )
 
         self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
-        breakpoint()
 
-    def run_module(self, *args, **kwargs):
-        self.mbh_guide.run_sampler(thin=200, iterations=100000, progress=True)
+    def run_module(self, *args, progress=False, **kwargs):
+        self.mbh_guide.run_sampler(thin=200, iterations=100000, progress=progress)
         self.update_information(self.info_manager, self.fp_pe_rel_bin)

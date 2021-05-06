@@ -29,7 +29,7 @@ ntemps = 10
 nwalkers_relbin = 400
 ntemps_relbin = 10
 
-fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
+fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD.hdf5"
 # fpin = "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
 with h5py.File(fpin, "r") as f:
     grp = f["H5LISA"]["GWSources"]["MBHB-0"]
@@ -70,19 +70,20 @@ fd, Xfd, Yfd, Zfd = (
 Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
 
 
-fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_search.h5"
+fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_final_WITH_noise_search.h5"
 fp_search_rel_bin = (
-    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_search_rel_bin.h5"
+    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_final_WITH_noise_search_rel_bin.h5"
 )
 fp_pe_rel_bin = (
-    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_WITH_noise_pe_rel_bin_testing.h5"
+    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_final_WITH_noise_pe_rel_bin_testing.h5"
 )
 
-breakpoint()
-info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=t[-1])
+info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=1 / fd[1])
 
 mbh_search_module = MBHBase(name="initial search")
-mbh_search_module.initialize_module(fp_search, nwalkers, ntemps, use_gpu=use_gpu)
+mbh_search_module.initialize_module(
+    fp_search, nwalkers, ntemps, snr_stopping=200.0, search=True, use_gpu=use_gpu
+)
 
 mbh_search_rel_bin_module = MBHRelBinSearch(name="relbin search")
 mbh_search_rel_bin_module.initialize_module(
@@ -99,7 +100,7 @@ module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_modu
 
 mbh_pipeline = PipelineGuide(info, module_list)
 
-mbh_pipeline.run(verbose=True)
+mbh_pipeline.run(verbose=True, progress=False)
 
 exit()
 fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_full_NO_noise_search_3.h5"
