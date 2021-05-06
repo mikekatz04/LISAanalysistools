@@ -430,7 +430,7 @@ def mismatch_criterion(
     x = r * u / norm
     # MISMATCH vector
     for l in range(0, d):
-        vec_delta = x[l] * v[:, l] / np.sqrt(w[l])
+        vec_delta += x[l] * v[:, l] / np.sqrt(w[l])
 
     # signal perturbed
     var_p_eps = params.copy()
