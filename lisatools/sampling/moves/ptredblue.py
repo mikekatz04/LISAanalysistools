@@ -96,7 +96,10 @@ class PTRedBlueMove(Move):
             nwalkers_here = np.sum(S1)
 
             # need to update 2nd based on updated coords from 1st
-            coords = state.coords.reshape(ntemps, nwalkers, ndim)
+            try:
+                coords = state.coords.reshape(ntemps, nwalkers, ndim)
+            except ValueError:
+                breakpoint()
 
             coords_check = coords.copy()
             # Get the move-specific proposal.
@@ -302,6 +305,9 @@ class PTStretchMove(PTRedBlueMove):
 
     def __init__(self, *args, periodic=None, a=2.0, **kwargs):
         self.a = a
+
+        # a = 2.0
+        print("a", a)
 
         if periodic is None:
             periodic = {}

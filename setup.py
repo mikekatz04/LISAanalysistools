@@ -11,6 +11,7 @@ setup(
         "lisatools.sampling",
         "lisatools.sampling.samplers",
         "lisatools.sampling.moves",
+        "lisatools.pipeline",
         "lisatools.utils",
     ],
 )

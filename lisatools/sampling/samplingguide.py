@@ -227,7 +227,6 @@ class SamplerGuide:
             pts_in = test_start
 
         check = self.lnprob.get_ll(pts_in, waveform_kwargs=self.waveform_kwargs)
-
         print(check)
 
     @property
@@ -275,6 +274,8 @@ class SamplerGuide:
 
         self.nwalkers = int(self.nwalkers_all / ntemps)
 
+        # TODO: fix this
+        self.sampler_kwargs["sampler_kwargs"] = {}
         self.sampler = PTEmceeSampler(
             self.nwalkers,
             self.ndim,
@@ -289,7 +290,7 @@ class SamplerGuide:
             self.start_points,
             thin_by=thin_by,
             iterations=iterations,
-            progress=True,
+            progress=progress,
             **kwargs,
         )
 
@@ -298,7 +299,7 @@ class MBHGuide(SamplerGuide):
     @property
     def default_priors(self):
         default_priors = {
-            0: uniform_dist(np.log(1e4), np.log(1e8)),
+            0: uniform_dist(np.log(5e5), np.log(5e7)),
             1: uniform_dist(0.01, 0.999999999),
             2: uniform_dist(-0.99999999, +0.99999999),
             3: uniform_dist(-0.99999999, +0.99999999),
@@ -376,8 +377,9 @@ class MBHGuide(SamplerGuide):
             9: (lambda x: np.arcsin(x)),
         }
 
+        parameter_transforms[(11, 12)] = transfer_tref
+
         if self.sampler_frame == "LISA":
-            parameter_transforms[(11, 12)] = transfer_tref
             parameter_transforms[(11, 8, 9, 10)] = LISA_to_SSB(0.0)
 
         return parameter_transforms
@@ -437,7 +439,7 @@ class MBHGuide(SamplerGuide):
             df = 1 / Tobs
             f_arr = np.arange(0.0, 1 / (2 * dt) + df, df)[1:]  # remove dc
         else:
-            df = f_arr[1]
+            df = f_arr[1] - f_arr[0]
             Tobs = 1 / df
 
         self.Tobs = Tobs
@@ -478,21 +480,51 @@ class MBHGuide(SamplerGuide):
                 relbin_kwargs = self.default_relbin_kwargs
 
             if relbin_template is None:
-                if (
-                    "resume" not in self.sampler_kwargs
-                    or not self.sampler_kwargs["resume"]
-                ):
-                    raise ValueError(
-                        "If using relative binning and not providin relbin_template parameters, must be resuming a run to get last sample."
-                    )
-                pass
-                reader = ModifiedHDFBackend(self.sampler_kwargs["fp"])
-                best_ind = reader.get_log_prob().argmax()
-                relbin_template = np.zeros(self.default_ndim_full)
-                relbin_template[self.test_inds] = reader.get_chain().reshape(
-                    -1, self.ndim
-                )[best_ind]
-                relbin_template[self.fill_inds] = self.fill_values
+                raise ValueError(
+                    "When using relative binning, relbin_template must be set to 'multi', 'single', or it must be an array of start points."
+                )
+            elif relbin_template in ["multi", "single"]:
+                if "resume" in self.sampler_kwargs and self.sampler_kwargs["resume"]:
+                    reader = ModifiedHDFBackend(self.sampler_kwargs["fp"])
+                    if relbin_template == "single":
+                        best_ind = reader.get_log_prob().argmax()
+                        relbin_template = np.zeros(self.default_ndim_full)
+                        relbin_template[self.test_inds] = reader.get_chain().reshape(
+                            -1, self.ndim
+                        )[best_ind]
+                        relbin_template[self.fill_inds] = self.fill_values
+
+                    else:
+                        temp = reader.get_log_prob().flatten()
+                        sort = np.argsort(temp)
+                        nwalkers_all = len(self.start_points)
+                        best_ind = sort[-nwalkers_all:]
+                        relbin_template = np.zeros(
+                            (nwalkers_all, self.default_ndim_full)
+                        )
+                        relbin_template[:, self.test_inds] = reader.get_chain().reshape(
+                            -1, self.ndim
+                        )[best_ind]
+                        relbin_template[:, self.fill_inds] = self.fill_values
+                        relbin_template = relbin_template.T
+                else:
+                    if relbin_template == "single":
+                        relbin_template = np.zeros(self.default_ndim_full)
+                        relbin_template[self.test_inds] = self.start_points[0]
+                        relbin_template[self.fill_inds] = self.fill_values
+
+                    else:
+                        nwalkers_all = len(self.start_points)
+                        relbin_template = np.zeros(
+                            (nwalkers_all, self.default_ndim_full)
+                        )
+                        relbin_template[:, self.test_inds] = self.start_points.copy()
+                        relbin_template[:, self.fill_inds] = self.fill_values
+
+            elif not isinstance(relbin_template, np.ndarray):
+                raise ValueError(
+                    "When using relative binning, relbin_template must be set to 'multi', 'single', or it must be an array of start points."
+                )
 
             relbin_template = self.parameter_transforms.transform_base_parameters(
                 relbin_template
@@ -506,6 +538,7 @@ class MBHGuide(SamplerGuide):
                 dataChannels,
                 relbin_template,
                 *relbin_args,
+                # template_gen_args=relbin_template,
                 **relbin_kwargs,
                 use_gpu=use_gpu,
             )
@@ -589,8 +622,16 @@ class GBGuide(SamplerGuide):
             waveform_kwargs={"dt": 15.0, "N": None, "T": self.Tobs},
             noise_fn=get_sensitivity,
             noise_kwargs=[
-                dict(sens_fn="noisepsd_AE", model="SciRDv1", includewd=None),
-                dict(sens_fn="noisepsd_AE", model="SciRDv1", includewd=None),
+                dict(
+                    sens_fn="noisepsd_AE",
+                    model="SciRDv1",
+                    includewd=self.Tobs / YRSID_SI,
+                ),
+                dict(
+                    sens_fn="noisepsd_AE",
+                    model="SciRDv1",
+                    includewd=self.Tobs / YRSID_SI,
+                ),
             ],
             add_noise=False,
         )
@@ -709,6 +750,7 @@ class GBGuide(SamplerGuide):
             "data" not in kwargs or kwargs["data"] is None
         ):
             injection_params = kwargs["injection_params"]
+
             if (
                 "lnlike_kwargs" in kwargs["sampler_kwargs"]
                 and "parameter_transforms" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
@@ -744,6 +786,345 @@ class GBGuide(SamplerGuide):
 
                 # print(snr_check2)
 
+            kwargs["sampler_kwargs"]["injection"] = injection_params[
+                self.default_test_inds
+            ]
+            kwargs["data"] = [A_inj, E_inj]
+
+        if "start_points" in kwargs and kwargs["start_points"] == "fisher":
+            mean = injection_params[self.default_test_inds]
+
+            fish_kwargs = template_kwargs.copy()
+            fish_kwargs["N"] = 1024
+            fish_kwargs["inds"] = self.default_test_inds
+            fish_kwargs["parameter_transforms"] = self.default_parameter_transforms
+            fisher = gb.fisher(np.array([injection_params]).T, **fish_kwargs).squeeze()
+            cov = np.linalg.pinv(fisher)
+            kwargs["mean_and_cov"] = [mean, cov]
+
+        SamplerGuide.__init__(self, *args, use_gpu=use_gpu, **kwargs)
+
+        self.lnprob = gb
+
+        self.injection_setup_kwargs["params"] = None
+        self.lnprob.inject_signal(**self.injection_setup_kwargs)
+
+        if self.test_start_likelihood:
+            self.perform_test_start_likelihood()
+
+        self.setup_sampler()
+        self.adjust_start_points()
+        # check = self.lnprob.get_ll(
+        #    np.array([injection_params]), waveform_kwargs=template_kwargs
+        # )
+
+
+class EMRIGuide(SamplerGuide):
+    @property
+    def default_priors(self):
+
+        default_priors = {
+            0: uniform_dist(np.log(1e5), np.log(1e7)),
+            1: uniform_dist(1.0, 100.0),
+            2: uniform_dist(0.001, 0.95),
+            3: uniform_dist(7.5, 16.0),
+            4: uniform_dist(0.01, 0.75),
+            5: uniform_dist(-0.999, 0.999),
+            6: uniform_dist(0.01, 100.0),
+            7: uniform_dist(0.0, np.pi),
+            8: uniform_dist(0.0, 2 * np.pi),
+            9: uniform_dist(0.0, np.pi),
+            10: uniform_dist(0.0, 2 * np.pi),
+            11: uniform_dist(0.0, 2 * np.pi),
+            12: uniform_dist(0.0, 2 * np.pi),
+            13: uniform_dist(0.0, 2 * np.pi),
+        }
+
+        if hasattr(self, "intrinsic") and self.intrinsic:
+            keep = [0, 1, 2, 3, 4, 5, 11, 12, 13]
+            for keep_i in keep:
+                try:
+                    del default_priors[keep_i]
+                except KeyError:
+                    pass
+
+        if hasattr(self, "schwarzschild") and self.schwarzschild:
+            keep = [0, 1, 3, 4, 11, 12]
+            for keep_i in keep:
+                try:
+                    del default_priors[keep_i]
+                except KeyError:
+                    pass
+
+        default_priors = PriorContainer(default_priors)
+
+        return default_priors
+
+    @property
+    def default_ndim(self):
+        intrinsic = False
+        schwarzschild = False
+        if hasattr(self, "intrinsic") and self.intrinsic:
+            intrinsic = self.intrinsic
+
+        if hasattr(self, "schwarzschild") and self.schwarzschild:
+            schwarzschild = self.schwarzschild
+
+        if intrinsic and schwarzschild:
+            return 6
+        elif intrinsic:
+            return 9
+        elif schwarzschild:
+            return 11
+        else:
+            return 14
+
+    @property
+    def default_ndim_full(self):
+        return self.default_ndim
+
+    @property
+    def default_test_inds(self):
+        intrinsic = False
+        schwarzschild = False
+        if hasattr(self, "intrinsic") and self.intrinsic:
+            intrinsic = self.intrinsic
+
+        if hasattr(self, "schwarzschild") and self.schwarzschild:
+            schwarzschild = self.schwarzschild
+
+        if intrinsic and schwarzschild:
+            return np.array([0, 1, 3, 4, 5, 11, 12])
+        elif intrinsic:
+            return np.array([0, 1, 2, 3, 4, 5, 11, 12, 13])
+        elif schwarzschild:
+            return np.array([0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        else:
+            return np.arange(self.default_ndim)
+
+    @property
+    def default_fill_inds(self):
+        return np.delete(np.arange(self.default_ndim), self.default_test_inds)
+
+    @property
+    def default_fill_values(self):
+        return np.array(
+            [
+                1e6,
+                1e1,
+                0.5,
+                12.0,
+                0.25,
+                0.5,
+                1.0,
+                np.pi / 3.0,
+                np.pi / 4.0,
+                np.pi / 5.0,
+                np.pi / 6.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+        )[self.default_fill_inds]
+
+    @property
+    def default_injection_setup_kwargs(self):
+        return dict(
+            waveform_kwargs={"dt": self.dt, "T": self.Tobs},
+            noise_fn=get_sensitivity,
+            noise_kwargs=[
+                dict(
+                    sens_fn="lisasens", model="SciRDv1", includewd=self.Tobs / YRSID_SI,
+                ),
+                dict(
+                    sens_fn="lisasens", model="SciRDv1", includewd=self.Tobs / YRSID_SI,
+                ),
+            ],
+            add_noise=False,
+        )
+
+    @property
+    def default_parameter_transforms(self):
+        parameter_transforms = {
+            0: (lambda x: np.exp(x)),
+            7: (lambda x: np.arccos(x)),
+            9: (lambda x: np.arccos(x)),
+        }
+
+        if hasattr("intrinsic") and self.intrinsic:
+            for i in [7, 9]:
+                del parameter_transforms[i]
+
+        return parameter_transforms
+
+    @property
+    def default_periodic(self):
+        if hasattr(self, "include_third") and self.include_third:
+            periodic[9] = 2 * np.pi
+
+        intrinsic = False
+        schwarzschild = False
+        if hasattr(self, "intrinsic") and self.intrinsic:
+            intrinsic = self.intrinsic
+
+        if hasattr(self, "schwarzschild") and self.schwarzschild:
+            schwarzschild = self.schwarzschild
+
+        if intrinsic and schwarzschild:
+            return {
+                4: 2 * np.pi,
+                5: 2 * np.pi,
+            }
+        elif intrinsic:
+            return {
+                6: 2 * np.pi,
+                7: 2 * np.pi,
+                8: 2 * np.pi,
+            }
+
+        elif schwarzschild:
+            return {
+                6: 2 * np.pi,
+                8: 2 * np.pi,
+                9: 2 * np.pi,
+                10: 2 * np.pi,
+            }
+
+        else:
+            return {
+                8: 2 * np.pi,
+                10: 2 * np.pi,
+                11: 2 * np.pi,
+                12: 2 * np.pi,
+                13: 2 * np.pi,
+            }
+        return periodic
+
+    @property
+    def default_plot_labels(self):
+        labels = [
+            r"ln$M$",
+            r"$\mu$",
+            r"$a$",
+            r"$p_0$",
+            r"$e_0$",
+            r"$Y_0$",
+            r"$d_L$",
+            r"sin$q_S$",
+            r"$\phi_S$",
+            r"sin$q_K$",
+            r"$\phi_K$",
+            r"$\Phi_{\varphi, 0}$",
+            r"$\Phi_{\theta, 0}$",
+            r"$\Phi_{r, 0}$",
+        ]
+
+        return [labels[i] for i in self.test_inds]
+
+    @property
+    def default_inner_product_kwargs(self):
+        return dict(PSD="lisasens", PSD_kwargs={"includewd": self.Tobs / YRSID_SI})
+
+    def __init__(
+        self,
+        *args,
+        include_third=False,
+        use_gpu=False,
+        f_arr=None,
+        dt=10.0,
+        Tobs=YRSID_SI,
+        fix_snr=None,
+        inner_product_kwargs={},
+        **kwargs,
+    ):
+
+        self.include_third = include_third
+        self.nchannels = 2
+
+        if f_arr is None:
+            Npts = int(Tobs / dt)
+            Tobs = dt * Npts
+            df = 1 / Tobs
+            f_arr = np.arange(0.0, 1 / (2 * dt) + df, df)  # remove dc
+        else:
+            df = f_arr[1]
+            Tobs = 1 / df
+
+        self.Tobs = Tobs
+        self.f_arr = f_arr
+        if "likelihood_kwargs" not in kwargs:
+            kwargs["likelihood_kwargs"] = {}
+        kwargs["likelihood_kwargs"]["f_arr"] = f_arr
+        kwargs["likelihood_kwargs"]["use_gpu"] = use_gpu
+
+        if "sampler_kwargs" not in kwargs:
+            kwargs["sampler_kwargs"] = {}
+
+        if "plot_kwargs" not in kwargs["sampler_kwargs"]:
+            kwargs["sampler_kwargs"]["plot_kwargs"] = {}
+
+        if "corner_kwargs" not in kwargs["sampler_kwargs"]["plot_kwargs"]:
+            kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"] = {}
+
+        kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"][
+            "labels"
+        ] = self.default_plot_labels
+
+        gb = GBGPU(use_gpu=use_gpu, shift_ind=1)
+
+        if (
+            "lnlike_kwargs" in kwargs["sampler_kwargs"]
+            and "waveform_kwargs" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
+        ):
+            template_kwargs = kwargs["sampler_kwargs"]["lnlike_kwargs"][
+                "waveform_kwargs"
+            ]
+        else:
+            template_kwargs = self.default_injection_setup_kwargs["waveform_kwargs"]
+        # only temperary to help prepare data
+        if "injection_params" in kwargs and (
+            "data" not in kwargs or kwargs["data"] is None
+        ):
+            injection_params = kwargs["injection_params"]
+
+            if (
+                "lnlike_kwargs" in kwargs["sampler_kwargs"]
+                and "parameter_transforms" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
+            ):
+                transform = kwargs["sampler_kwargs"]["lnlike_kwargs"][
+                    "parameter_transforms"
+                ]
+            else:
+                transform = TransformContainer(self.default_parameter_transforms)
+
+            make_params = transform.transform_base_parameters(injection_params)
+
+            A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs)
+
+            if fix_snr is not None:
+                temp_inner_product_kwargs = self.default_inner_product_kwargs
+
+                if inner_product_kwargs != {}:
+                    for key, value in inner_product_kwargs.items():
+                        temp_inner_product_kwargs[key] = value
+
+                temp_inner_product_kwargs["df"] = df
+
+                snr_check = snr([A_inj, E_inj], **temp_inner_product_kwargs)
+
+                factor = fix_snr / snr_check
+
+                make_params[0] *= factor
+                injection_params[0] = np.log(make_params[0])
+
+                A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs,)
+                snr_check2 = snr([A_inj, E_inj], **temp_inner_product_kwargs)
+
+                # print(snr_check2)
+
+            kwargs["sampler_kwargs"]["injection"] = injection_params[
+                self.default_test_inds
+            ]
             kwargs["data"] = [A_inj, E_inj]
 
         if "start_points" in kwargs and kwargs["start_points"] == "fisher":
@@ -780,55 +1161,6 @@ if __name__ == "__main__":
     from gbgpu.utils.constants import *
 
     use_gpu = False
-
-    xp = cp if use_gpu else np
-
-    nwalkers = 80
-    ntemps = 10
-    num_bin = nwalkers * ntemps
-
-    nwalkers_all = nwalkers * ntemps
-
-    amp = 1.0689e-22
-    f0 = 0.00322061
-    fdot = 5.53680665282078e-17
-    fddot = 0.0
-    phi0 = 2.84090075
-    iota = 1.6169347
-    psi = 2.53292165
-    lam = 0.4297
-    beta_sky = -0.354825
-
-    A2 = 227.49224525104734
-    omegabar = 0.0
-    e2 = 0.4
-    P2 = 1.3230498230
-    T2 = 0.0
-
-    amp_in = np.full(num_bin, amp)
-    f0_in = np.full(num_bin, f0)
-    fdot_in = np.full(num_bin, fdot)
-    fddot_in = np.full(num_bin, fddot)
-    phi0_in = np.full(num_bin, phi0)
-    iota_in = np.full(num_bin, iota)
-    psi_in = np.full(num_bin, psi)
-    lam_in = np.full(num_bin, lam)
-    beta_sky_in = np.full(num_bin, beta_sky)
-
-    A2_in = np.full(num_bin, A2)
-    P2_in = np.full(num_bin, P2)
-    omegabar_in = np.full(num_bin, omegabar)
-    e2_in = np.full(num_bin, e2)
-    T2_in = np.full(num_bin, T2)
-    N = None
-
-    modes = np.array([2])
-
-    Tobs = 4.0 * YEAR
-    dt = 15.0
-    Tobs = int(Tobs / dt) * dt
-    df = 1 / Tobs
-
     waveform_kwargs = dict(modes=modes, N=N, dt=dt, T=Tobs)
 
     fp = "test_new_code.h5"  # "/projects/b1095/mkatz/gb/test_new_code.h5"
@@ -880,4 +1212,204 @@ if __name__ == "__main__":
 
     gb_guide = GBGuide(nwalkers * ntemps, **kwargs)
     gb_guide.run_sampler(thin=10, iterations=50000)
-    # breakpoint()
+
+    # can add extra temperatures of 1 to have multiple temps accessing the target distribution
+    ntemps_target_extra = 0
+    # define max temperature (generally should be inf if you want to sample prior)
+    Tmax = np.inf
+
+    # not all walkers can fit in memory. subset says how many to do at one time
+    subset = 4
+
+    # set periodic parameters
+    periodic = {
+        4: 2 * np.pi,
+        5: 2 * np.pi,
+    }  # the indexes correspond to the index within test_inds
+
+    # define sampling quantities
+    nwalkers = 32  # per temperature
+    ntemps = 1
+
+    ndim_full = 14  # full dimensionality of inputs to waveform model
+
+    # which of the injection parameters you actually want to sample over
+    test_inds = np.array([0, 1, 3, 4, 11, 13])
+
+    # ndim for sampler
+    ndim = len(test_inds)
+
+    # need to get values to fill arrays for quantities that we are not sampling
+    fill_inds = np.delete(np.arange(ndim_full), test_inds)
+
+    for i, (M, mu, p0, e0, dist) in tqdm.tqdm(
+        enumerate(zip(M_arr, mu_arr, p0_arr, e0_arr, dist_arr))
+    ):
+
+        for j, (wave_gen, wave_kwargs, key) in enumerate(
+            zip(wave_gens, wave_kwargs_list, keys)
+        ):
+
+            print(M, mu, e0, key)
+
+            e0_temp = e0
+
+            if M < 3e6 or mu != 10.0 and e0 != 0.7:
+                continue
+
+                # if mu == 10.0 and e0 >= 0.5:
+                #    continue
+
+                # if mu == 3.0 and e0 == 0.7:
+                #    continue
+
+                # if p0 <= 15.8:
+                #    continue
+
+                if key in ["22", "1e-2"]:
+                    continue
+
+                wave_gen.return_list = True
+                if e0 > 0.7:
+                    e0 = 0.7
+
+                # define priors, it really can only do uniform cube at the moment
+                priors = [
+                    uniform_dist(np.log(1e5), np.log(1e7)),
+                    uniform_dist(1.0, 100.0),
+                    uniform_dist(6.0 + 2 * e0, 16.0 + 2 * e0),
+                    uniform_dist(0.01, 0.75),
+                    uniform_dist(0.0, 2 * np.pi),
+                    uniform_dist(0.0, 2 * np.pi),
+                ]
+
+                injection_params = np.array(
+                    [
+                        np.log(M),
+                        mu,
+                        a,
+                        p0,
+                        e0,
+                        Y0,
+                        dist,
+                        qS,
+                        phiS,
+                        qK,
+                        phiK,
+                        Phi_phi0,
+                        Phi_theta0,
+                        Phi_r0,
+                    ]
+                )
+
+                injection_params = injection_params.copy()
+
+                if j == 0:
+                    injection_params_trans = transform_fn.transform_base_parameters(
+                        injection_params
+                    )
+                    data = wave_gen_base(*injection_params_trans, **wave_kwargs_base)
+
+                    snr_check = snr(data, **inner_product_kwargs)
+
+                    data = [snr_goal / snr_check * data_i for data_i in data]
+                    dist = snr_check / snr_goal * dist
+
+                    try:
+                        dist = dist.item()
+                    except AttributeError:
+                        pass
+
+                if dist < 0.1:
+                    continue
+
+                if key == "1e-5":
+                    continue
+
+                fp2 = "new_fix_p_2_output_2yr_snr_{:d}_no_noise_{}_{}_{}_{}.h5".format(
+                    int(snr_goal), M, mu, e0, key
+                )
+
+                if fp2 in os.listdir(folder):
+                    continue
+
+                test = wave_gen(*injection_params_trans, **wave_kwargs)
+
+                with h5py.File(folder + fp, "r") as f:
+                    cov = f[key]["cov"][i]
+
+                fill_values = injection_params[fill_inds]
+
+                # to store in sampler file, get injection points we are sampling
+                injection_test_points = injection_params[test_inds]
+
+                # instantiate the likelihood class
+                nchannels = 2
+                like = Likelihood(
+                    wave_gen,
+                    nchannels,
+                    dt=dt,
+                    parameter_transforms=transform_fn,
+                    use_gpu=gpu_available,
+                )
+
+                # inject
+                like.inject_signal(
+                    data_stream=data,
+                    noise_fn=get_sensitivity,
+                    noise_kwargs=dict(sens_fn="lisasens"),
+                    add_noise=False,
+                )
+
+                factor = 1
+                start_points = injection_params[
+                    np.newaxis, test_inds
+                ] + factor * np.random.multivariate_normal(
+                    np.zeros(len(test_inds)), cov, size=nwalkers
+                )
+
+                start_points_check = np.zeros((start_points.shape[0], ndim_full))
+
+                start_points_check[:, test_inds] = start_points
+                start_points_check[:, fill_inds] = fill_values
+
+                check = [
+                    like.get_ll(
+                        start_points_check[:subset], waveform_kwargs=wave_kwargs
+                    )
+                ]
+
+                # setup sampler
+                sampler = PTEmceeSampler(
+                    nwalkers,
+                    ndim,
+                    ndim_full,
+                    like,
+                    priors,
+                    subset=subset,
+                    lnlike_kwargs={"waveform_kwargs": wave_kwargs},
+                    test_inds=test_inds,
+                    fill_values=fill_values,
+                    ntemps=ntemps,
+                    autocorr_multiplier=50,
+                    autocorr_iter_count=50,
+                    injection=injection_test_points,
+                    plot_iterations=50,
+                    plot_source="emri",
+                    periodic=periodic,
+                    fp=folder + fp2,
+                )
+
+                print(fp2, "start")
+                thin_by = 1
+                max_iter = 20000
+
+                sampler.sample(
+                    start_points,
+                    iterations=max_iter,
+                    progress=False,
+                    skip_initial_state_check=False,
+                    thin_by=thin_by,
+                )
+
+                print(fp2, "done")

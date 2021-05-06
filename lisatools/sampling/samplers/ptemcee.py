@@ -41,6 +41,7 @@ class LogProb:
         subset=None,
         get_d_h=False,
         add_prior=False,
+        add_inds=False,
     ):
 
         self.lnlike_kwargs = lnlike_kwargs
@@ -48,6 +49,8 @@ class LogProb:
         self.lnprior = lnprior
 
         self.ndim_full = ndim_full
+
+        self.add_inds = add_inds
 
         if test_inds is not None:
             if fill_values is None:
@@ -66,6 +69,19 @@ class LogProb:
         self.subset = subset
         self.get_d_h = get_d_h
         self.add_prior = add_prior
+
+        if "waveform_kwargs" not in lnlike_kwargs:
+            lnlike_kwargs["waveform_kwargs"] = {}
+
+    def get_x_in(self, x):
+        if self.need_to_fill:
+            x_in = np.zeros((x.shape[0], self.ndim_full))
+            x_in[:, self.test_inds] = x
+            x_in[:, self.fill_inds] = self.fill_values[np.newaxis, :]
+
+            return x_in
+        else:
+            return x
 
     def __call__(self, x):
         prior_vals = self.lnprior.logpdf(x)
@@ -90,20 +106,16 @@ class LogProb:
         #        x.T, self.test_inds
         #    )
 
-        if self.need_to_fill:
-            x_in = np.zeros((x.shape[0], self.ndim_full))
-            x_in[:, self.test_inds] = x
-            x_in[:, self.fill_inds] = self.fill_values[np.newaxis, :]
-
-        else:
-            x_in = x
+        x_in = self.get_x_in(x)
 
         if self.subset is None:
+            if self.add_inds:
+                self.lnlike_kwargs["waveform_kwargs"]["inds"] = inds_eval
             temp = self.lnlike.get_ll(x_in[inds_eval], **self.lnlike_kwargs)
 
             if self.get_d_h:
                 d_h = self.lnlike.d_h
-                h_h = self.lnlike.d_h
+                h_h = self.lnlike.h_h
 
         else:
             num_inds = len(inds_eval)
@@ -116,6 +128,9 @@ class LogProb:
                 h_h = [None for j in range(len(inds_eval_temp))]
 
             for j, inds in enumerate(inds_eval_temp):
+                if self.add_inds:
+                    self.lnlike_kwargs["waveform_kwargs"]["inds"] = inds
+
                 temp[j] = self.lnlike.get_ll(x_in[inds], **self.lnlike_kwargs)
                 if self.get_d_h:
                     d_h[j] = self.lnlike.d_h
@@ -126,6 +141,7 @@ class LogProb:
                 d_h = np.concatenate(d_h)
 
         loglike_vals[inds_eval] = temp
+        loglike_vals[np.isnan(loglike_vals)] = np.inf
 
         if self.get_d_h:
             d_h_vals[inds_eval] = d_h
@@ -169,10 +185,22 @@ class PTEmceeSampler:
         sampler_kwargs={},
         ptstretch_kwargs={},
         resume=True,
+        update_fn=None,
+        update=-1,
+        update_kwargs={},
+        add_inds=False,
+        stopping_fn=None,
+        stopping_iter=-1,
         verbose=False,
     ):
 
         self.nwalkers, self.ndim, self.ndim_full = nwalkers, ndim, ndim_full
+        self.update_fn = update_fn
+        self.update = update
+        self.update_kwargs = update_kwargs.copy()
+
+        self.stopping_fn = stopping_fn
+        self.stopping_iter = stopping_iter
 
         if betas is None:
             if ntemps == 1:
@@ -200,6 +228,7 @@ class PTEmceeSampler:
             test_inds=test_inds,
             fill_values=fill_values,
             get_d_h=get_d_h,
+            add_inds=add_inds,
         )
 
         self.autocorr_iter_count = autocorr_iter_count
@@ -253,18 +282,26 @@ class PTEmceeSampler:
 
     def sample(self, x0, iterations=10000, **sampler_kwargs):
         # We'll track how the average autocorrelation time estimate changes
-        index = 0
-        autocorr = np.empty(iterations)
+
+        if self.autocorr_iter_count > 0:
+            index = 0
+            autocorr = np.empty(iterations)
 
         # This will be useful to testing convergence
         old_tau = np.inf
 
         st = time.perf_counter()
 
+        iter = 0
         if self.burn is not None:
             for sample in self.sampler.sample(
                 x0, iterations=self.burn, store=False, **sampler_kwargs
             ):
+                iter += 1
+                if (iter % self.update) == 0 and (self.update_fn is not None):
+                    self.update_fn(
+                        iter, sample, self.sampler, self.lnprob, **self.update_kwargs
+                    )
                 x0 = sample.coords
             print("Burn Finished")
 
@@ -279,12 +316,32 @@ class PTEmceeSampler:
         # Now we'll sample for up to iterations steps
         iter = 0
         for sample in self.sampler.sample(x0, iterations=iterations, **sampler_kwargs):
+
+            # sort = np.argsort(sample.coords[: self.nwalkers, 6])[np.array([0, -1])]
+            # print(
+            #    sample.coords[: self.nwalkers, 6][sort],
+            #    sample.log_prob[: self.nwalkers][sort],
+            # )
+
             iter += 1
             if iter % thin == 0:
                 self.backend.save_temps(self.betas)
 
-            if iter % (thin * self.autocorr_iter_count) and (
-                (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
+            if (iter % self.update) == 0 and (self.update_fn is not None):
+                print(self.sampler.get_log_prob().max(), sample.log_prob.max())
+                self.update_fn(
+                    iter, sample, self.sampler, self.lnprob, **self.update_kwargs
+                )
+
+            if (
+                (
+                    iter % (thin * self.autocorr_iter_count)
+                    or self.autocorr_iter_count <= 0
+                )
+                and (
+                    (iter % (thin * self.plot_iterations) or self.plot_iterations <= 0)
+                )
+                and ((iter % (thin * self.stopping_iter) or self.stopping_iter <= 0))
             ):
                 continue
 
@@ -292,31 +349,45 @@ class PTEmceeSampler:
             # Using tol=0 means that we'll always get an estimate even
             # if it isn't trustworthy
 
-            ind = self.sampler.get_log_prob().argmax()
+            if self.autocorr_iter_count >= 0:
+                tau = self.sampler.get_autocorr_time(tol=0)
+                autocorr[index] = np.mean(tau)
+                index += 1
 
+                # Check convergence
+                converged = np.all(
+                    tau * self.autocorr_multiplier < self.sampler.iteration
+                )
+                converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
+
+            self.verbose = True
             if self.verbose:
+                ind = self.sampler.get_log_prob().argmax()
+
+                if self.autocorr_iter_count >= 0:
+                    print(
+                        index,
+                        tau,
+                        tau * self.autocorr_multiplier,
+                        self.sampler.iteration,
+                    )
+
                 print(
                     self.sampler.get_log_prob().max(),
                     np.sqrt(self.sampler.get_blobs()[:, :, :, 1].flatten()[ind]),
                     np.sqrt(self.sampler.get_blobs()[:, :, :, 2].flatten()[ind]),
                 )
-            tau = self.sampler.get_autocorr_time(tol=0)
-            autocorr[index] = np.mean(tau)
-            index += 1
-
-            if self.verbose:
-                print(
-                    index, tau, tau * self.autocorr_multiplier, self.sampler.iteration
-                )
-
-            # Check convergence
-            converged = np.all(tau * self.autocorr_multiplier < self.sampler.iteration)
-            converged &= np.all(np.abs(old_tau - tau) / tau < 0.01)
 
             if iter % (thin * self.plot_iterations) == 0 and self.plot_iterations > 0:
                 self.plot_gen.generate_corner()
 
-            if converged:
+            if iter % (thin * self.stopping_iter) == 0 and self.stopping_iter > 0:
+                stop = self.stopping_fn(iter, sample, self.sampler, self.lnprob)
+
+            else:
+                stop = False
+
+            if converged or stop:
                 break
             old_tau = tau
             pass
