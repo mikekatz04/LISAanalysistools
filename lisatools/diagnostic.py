@@ -116,6 +116,7 @@ def inner_product(
             PSD=PSD,
             PSD_args=PSD_args,
             PSD_kwargs=PSD_kwargs,
+            use_gpu=use_gpu,
             normalize=False,
         )
         norm2 = inner_product(
@@ -127,6 +128,7 @@ def inner_product(
             PSD=PSD,
             PSD_args=PSD_args,
             PSD_kwargs=PSD_kwargs,
+            use_gpu=use_gpu,
             normalize=False,
         )
 
@@ -292,6 +294,7 @@ def fisher(
     waveform_model,
     params,
     eps,
+    use_gpu=False,
     deriv_inds=None,
     parameter_transforms={},
     waveform_kwargs={},
@@ -299,6 +302,12 @@ def fisher(
     return_derivs=False,
     accuracy = True
 ):
+    
+    if use_gpu:
+        xp = cp
+    else:
+        xp = np
+
     # is for inner product
 
     num_params = len(params)
@@ -329,7 +338,7 @@ def fisher(
         # A = window_zero(A,dt)
         # B = window_zero(B,dt)
 
-    dh = np.asarray(dh)
+    dh = xp.asarray(dh)
 
     fish = np.zeros((num_fish_params, num_fish_params))
     for i in range(num_fish_params):
@@ -415,19 +424,25 @@ def mismatch_criterion(
             waveform_model,
             params,
             eps,
+            use_gpu=use_gpu,
             deriv_inds=deriv_inds,
             parameter_transforms=parameter_transforms,
             waveform_kwargs=waveform_kwargs,
             inner_product_kwargs=inner_product_kwargs,
         )
+    
+    try:
+        fish = fish.get()    # This works both for use_gpu=True and for passing in a numpy Fisher matrix 
+    except AttributeError:
+        pass
 
     w, v = np.linalg.eig(fish)
     d = num_fish_params
     vec_delta = np.zeros_like(eps)
     u = np.random.normal(0, 1, d)  # an array of d normally distributed random variables
     norm = np.sum(u ** 2) ** (0.5)
-    r = (np.random.uniform(0, 1)) ** (1.0 / d)
-    x = r * u / norm
+    #r = (np.random.uniform(0, 1)) ** (1.0 / d)  - i dont know why this is here if we are sampling from sphere surface
+    x = u / norm #r * u / norm
     # MISMATCH vector
     for l in range(0, d):
         vec_delta += x[l] * v[:, l] / np.sqrt(w[l])
