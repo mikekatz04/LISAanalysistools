@@ -392,10 +392,12 @@ def mismatch_criterion(
     params,
     eps,
     deriv_inds=None,
+    use_gpu=False,
     parameter_transforms={},
     waveform_kwargs={},
     inner_product_kwargs={},
     fish=None,
+    return_fish = False,
 ):
     """
     return the mismatch criterion of Vallisneri abs(log r)for a zero noise signal approximation
@@ -453,6 +455,16 @@ def mismatch_criterion(
         var_p_eps[ind] = var_p_eps[ind].copy() + vec_delta[i]
 
     var_p_eps = parameter_transforms.transform_base_parameters(var_p_eps)
+    
+    # properly treat boundary conditions for polar angles
+    for val in [7,9]:
+        var_p_eps[val] = var_p_eps[val] % (2*np.pi)
+        if var_p_eps[val] > np.pi:
+            var_p_eps[val] = 2*np.pi - var_p_eps[val] # reflect polar angle on boundary
+            var_p_eps[val+1] += np.pi # flip azimuthal angle
+        elif var_p_eps[val] < 0:
+            var_p_eps[val] = -var_p_eps[val]
+            var_p_eps[val+1] += np.pi
 
     h_delta = waveform_model(*var_p_eps, **waveform_kwargs)
 
@@ -488,8 +500,45 @@ def mismatch_criterion(
         )
     )
     mism = (1.0 - over) / 2.0
-    return mism, ratio
 
+    if not return_fish:
+        return mism, ratio
+    elif return_fish:
+        return mism, ratio, fish
+
+
+def vallisneri_criterion_cdf(num_samples=100, return_cdf = False, fish = None, **mismatch_args):
+    '''
+    Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
+    :param num_samples: number of parameter samples to generate (defaults to 100).
+    :param return_cdf: if True, returns the entire cdf (defaults to False).
+    :param fish: Fisher matrix corresponding to the input event parameters (optional)
+    :param mismatch_args: Arguments to pass to mismatch_criterion() - see for further info.
+    '''
+    
+    ratios = np.zeros(num_samples)
+    
+    j = 0
+    while j < num_samples:
+        try:
+            if fish is None:
+                mism, ratio, fish = mismatch_criterion(return_fish = True, **mismatch_args)
+            else:
+                mism, ratio, fish = mismatch_criterion(return_fish = True, fish = fish, **mismatch_args)
+            ratios[j] = abs(np.log(ratio))
+            j+=1
+        except ValueError:
+            continue
+    
+    quantiles, counts = np.unique(ratios, return_counts=True)
+    cdf = np.cumsum(counts).astype(np.double)/ratios.size
+
+    r_at_90 = np.interp(0.9,cdf,quantiles)
+
+    if return_cdf:
+        return r_at_90, quantiles, cdf
+    else:
+        return r_at_90
 
 def cutler_vallisneri_bias(
     waveform_model_true,
