@@ -447,7 +447,7 @@ def mismatch_criterion(
     x = u / norm #r * u / norm
     # MISMATCH vector
     for l in range(0, d):
-        vec_delta += x[l] * v[:, l] / np.sqrt(w[l])
+        vec_delta[deriv_inds] += x[l] * v[:, l] / np.sqrt(w[l])
 
     # signal perturbed
     var_p_eps = params.copy()
@@ -519,6 +519,7 @@ def vallisneri_criterion_cdf(num_samples=100, return_cdf = False, fish = None, *
     ratios = np.zeros(num_samples)
     
     j = 0
+    errors = 0
     while j < num_samples:
         try:
             if fish is None:
@@ -527,8 +528,9 @@ def vallisneri_criterion_cdf(num_samples=100, return_cdf = False, fish = None, *
                 mism, ratio, fish = mismatch_criterion(return_fish = True, fish = fish, **mismatch_args)
             ratios[j] = abs(np.log(ratio))
             j+=1
-        except ValueError:
-            continue
+        except Exception as err:
+            print('Error generating CDF sample.')
+            raise
     
     quantiles, counts = np.unique(ratios, return_counts=True)
     cdf = np.cumsum(counts).astype(np.double)/ratios.size
