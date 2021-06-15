@@ -388,21 +388,29 @@ def covariance(*fisher_args, diagonalize=False, return_fisher=False, **fisher_kw
 
 
 def mismatch_criterion(
-    waveform_model,
-    params,
-    eps,
-    deriv_inds=None,
-    use_gpu=False,
-    parameter_transforms={},
-    waveform_kwargs={},
-    inner_product_kwargs={},
+    *fisher_args,
     fish=None,
+    eigens = None,
     return_fish = False,
 ):
     """
     return the mismatch criterion of Vallisneri abs(log r)for a zero noise signal approximation
     and the overlap(h_true, h(0 + delta))/(1- 0.5 *delta gamma delta)
     this is a good check for the fisher matrix approximation
+
+    Args:
+        *fisher_args: Arguments to pass to (or were used by) the fisher matrix generation function.
+        fish: Pre-computed fisher matrix, as output by fisher(*fisher_args). Must match supplied *fisher_args.
+        eigens: tuple of pre-computed eigenvalue and right-eigenvector arrays corresponding to the provided fisher matrix.
+        return_fish: If True, returns Fisher matrix (defaults to False).
+
+    Returns:
+        mismatch: double 
+            Mismatch between perturbed and ML waveforms.
+        ratio: double
+            Computed value of |ln(r)| for this instance of parameter perturbation.
+        fish: array
+            Fisher matrix, if return_fish is set to True.
     """
 
     params_true = params.copy()
@@ -422,23 +430,18 @@ def mismatch_criterion(
         eps = np.full_like(params, eps)
 
     if fish is None:
-        fish = fisher(
-            waveform_model,
-            params,
-            eps,
-            use_gpu=use_gpu,
-            deriv_inds=deriv_inds,
-            parameter_transforms=parameter_transforms,
-            waveform_kwargs=waveform_kwargs,
-            inner_product_kwargs=inner_product_kwargs,
-        )
+        fish = fisher(*fisher_args)
     
     try:
         fish = fish.get()    # This works both for use_gpu=True and for passing in a numpy Fisher matrix 
     except AttributeError:
         pass
+    
+    if eigens is None:
+        w, v = np.linalg.eig(fish)
+    else:
+        w, v = eigens
 
-    w, v = np.linalg.eig(fish)
     d = num_fish_params
     vec_delta = np.zeros_like(eps)
     u = np.random.normal(0, 1, d)  # an array of d normally distributed random variables
@@ -493,7 +496,7 @@ def mismatch_criterion(
         - 0.5
         * prod
         / inner_product(
-            [h_delta.real, h_delta.imag],
+            [h_true.real, h_true.imag],
             [h_true.real, h_true.imag],
             **inner_product_kwargs,
             normalize=False
@@ -507,25 +510,40 @@ def mismatch_criterion(
         return mism, ratio, fish
 
 
-def vallisneri_criterion_cdf(num_samples=100, return_cdf = False, fish = None, **mismatch_args):
-    '''
-    Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
-    :param num_samples: number of parameter samples to generate (defaults to 100).
-    :param return_cdf: if True, returns the entire cdf (defaults to False).
-    :param fish: Fisher matrix corresponding to the input event parameters (optional)
-    :param mismatch_args: Arguments to pass to mismatch_criterion() - see for further info.
+def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf = True, fish = None, **mismatch_kwargs):
+    '''Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
+    
+    Args:
+        *mismatch_args: Arguments to pass to the mismatch_criterion() function call.
+        num_samples (int): number of parameter samples to generate (defaults to 100).
+        fish (array): Fisher matrix corresponding to the input event parameters (optional - will be generated if not provided).
+        **mismatch_kwargs: Keyword arguments to be passed to the mismatch_criterion() function call (currently unused).
+
+    Returns:
+        r_at_90: double
+            90th percentile value of the maximum-mismatch CDF.
+        (quantiles, cdf): tuple
+            Cumulative distribution function (x,y) inputs respectively.
+
     '''
     
     ratios = np.zeros(num_samples)
+
+    if fish is None:
+        fish = fisher(*mismatch_args)
     
+    try:
+        fish = fish.get()
+    except AttributeError:
+        pass
+    
+    e_vals, e_vects = np.linalg.eig(fish)
+    eigens = (e_vals, e_vects)
+
     j = 0
-    errors = 0
     while j < num_samples:
         try:
-            if fish is None:
-                mism, ratio, fish = mismatch_criterion(return_fish = True, **mismatch_args)
-            else:
-                mism, ratio, fish = mismatch_criterion(return_fish = True, fish = fish, **mismatch_args)
+            mism, ratio = mismatch_criterion(*mismatch_args, fish=fish, eigens=eigens)
             ratios[j] = abs(np.log(ratio))
             j+=1
         except Exception as err:
@@ -537,10 +555,7 @@ def vallisneri_criterion_cdf(num_samples=100, return_cdf = False, fish = None, *
 
     r_at_90 = np.interp(0.9,cdf,quantiles)
 
-    if return_cdf:
-        return r_at_90, quantiles, cdf
-    else:
-        return r_at_90
+    return r_at_90, (quantiles, cdf)
 
 def cutler_vallisneri_bias(
     waveform_model_true,
