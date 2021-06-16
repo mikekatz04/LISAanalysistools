@@ -356,8 +356,26 @@ def fisher(
         return fish
 
 
-def covariance(*fisher_args, diagonalize=False, return_fisher=False, **fisher_kwargs):
-    fish = fisher(*fisher_args, **fisher_kwargs)
+def covariance(*fisher_args, fish=None, diagonalize=False, return_fisher=False, precision=False, **fisher_kwargs):
+    '''Calculate covariance matrix for a set of EMRI parameters, computing the fisher matrix if not supplied.
+
+    Args:
+        *fisher_args:
+            Set of arguments to pass to fisher(). Not required if fish is not None.
+        fish: array
+            Pre-computed fisher matrix (optional). If supplied, this matrix will be inverted.
+        diagonalize: bool
+            If True, diagonalizes the covariance matrix. Defaults to False.
+        return_fisher: bool
+            If True, also returns the computed fisher matrix.
+        precision: bool
+            If True, uses 500-dps precision to compute the fisher matrix inverse (requires mpmath). This is typically a good idea as the Fisher matrix can be highly ill-conditioned. Defaults to False.
+        **fisher_kwargs:
+            Keyword arguments to pass to fisher().
+    '''
+
+    if fish is None:
+        fish = fisher(*fisher_args, **fisher_kwargs)
 
     if "return_derivs" in fisher_kwargs:
         return_derivs = True
@@ -366,10 +384,24 @@ def covariance(*fisher_args, diagonalize=False, return_fisher=False, **fisher_kw
     else:
         return_derivs = False
 
-    cov = np.linalg.pinv(fish)
+    if precision:
+        try:
+            import mpmath as mp
+            mp.mp.dps = 500
+        except ModuleNotFoundError:
+            print('mpmath module not installed. Defaulting to low precision...')
+            precision=False
+    if precision:
+        hp_fish = mp.matrix(fish.tolist())
+        U,S,V = mp.svd_r(hp_fish)  # singular value decomposition
+        temp = mp.diag([val ** (-1) for val in S])  # get S**-1
+        temp2 = (V.T * temp * U.T)  # construct pseudo-inverse
+        cov = np.array(temp2.tolist(), dtype=np.float64)
+    else:
+        cov = np.linalg.pinv(fish)
 
     if diagonalize:
-        eig_vals, eig_vecs = np.linalg.eig(cov)
+        eig_vals, eig_vecs = get_eigens(cov,high_precision=precision)
 
         cov = np.dot(np.dot(eig_vecs.T, cov), eig_vecs)
 
@@ -386,6 +418,43 @@ def covariance(*fisher_args, diagonalize=False, return_fisher=False, **fisher_kw
 
     return returns
 
+
+def plot_corner(params, cov, nsamp = 25000, filename = 'corner.png', savefig_kwargs = {}, corner_plot_kwargs = {}):
+    '''Construct a corner plot for a given covariance matrix (requires the corner module).
+
+    Args:
+        params: array
+            The set of parameters used for the event (the mean vector of the covariance matrix).
+        cov: array
+            Covariance matrix from which to construct the corner plot.
+        nsamp: int
+            Number of samples to draw from the multivariate distribution (defaults to 25000).
+        filename: str
+            Filename for the output figure to be saved under. Defaults to 'corner.png' in the cwd.
+        savefig_kwargs: dict
+            Dictionary of keyword arguments to pass to matplotlib.pyplot.savefig(), such as dpi. (optional)
+        corner_plot_kwargs dict:
+            Keyword arguments for the corner plot - see the module documentation for more info.
+    Returns:
+        figure: figure object
+            The corner plot figure.
+
+    '''
+
+    import corner
+
+    if corner_plot_kwargs == {}:
+        print('No corner plot kwargs supplied - using defaults.')
+        corner_plot_kwargs = dict(
+            show_titles=True,
+            title_fmt=".2e",
+        )
+
+    samp = np.random.multivariate_normal(params, cov, size=nsamp)
+    fig = corner.corner(samp, **corner_plot_kwargs)
+    fig.savefig(filename,**savefig_kwargs)
+
+    return fig
 
 def mismatch_criterion(
     *fisher_args,
@@ -509,36 +578,85 @@ def mismatch_criterion(
     elif return_fish:
         return mism, ratio, fish
 
+def get_eigens(arr, high_precision=False):
+    '''Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied fisher/covariance matrix.
 
-def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf = True, fish = None, **mismatch_kwargs):
+    Args:
+        arr: array
+            Input matrix for which to perform eigenvalue decomposition.
+        high_precision: bool
+            If True, use 500-dps precision to ensure accurate eigenvalue decomposition (requires mpmath to be installed). Defaults to False.
+    Returns:
+        evals: array
+            Eigenvalues for the supplied array.
+        evects: array
+            Right-eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to the evals[k].
+    '''
+
+    if high_precision:
+        try:
+            import mpmath as mp
+            mp.mp.dps = 500
+        except ModuleNotFoundError:
+            print('mpmath is not installed - using low-precision eigen decomposition.')
+            high_precision = False
+
+    if high_precision:
+        hp_arr = mp.matrix(arr.tolist())
+        E, EL, ER = mp.eig(hp_arr, left=True, right=True)
+
+        evals = np.array(E, dtype=np.float64)
+        evects = np.array(ER.tolist(), dtype=np.float64)
+
+        return evals, evects
+
+    else:
+        evals, evects = np.linalg.eig(arr)
+
+        return evals, evects
+
+def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf = True, return_ratios = False, fish = None, precision=False, **mismatch_kwargs):
     '''Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
     
     Args:
         *mismatch_args: Arguments to pass to the mismatch_criterion() function call.
-        num_samples (int): number of parameter samples to generate (defaults to 100).
-        fish (array): Fisher matrix corresponding to the input event parameters (optional - will be generated if not provided).
+        num_samples: int
+            number of parameter samples to generate (defaults to 100).
+        return_cdf: bool
+            If True, returns the CDF quantiles and values. Defaults to True.
+        return_ratios: bool
+            If True, returns the set of drawn |ln(r)| samples. Defaults to False.
+        fish: array
+            Fisher matrix corresponding to the input event parameters (optional - will be generated if not provided).
+        precision: bool
+            If True, use 500-dps precision to compute eigenvalues/eigenvectors (requires mpmath). Defaults to False.
         **mismatch_kwargs: Keyword arguments to be passed to the mismatch_criterion() function call (currently unused).
 
     Returns:
         r_at_90: double
             90th percentile value of the maximum-mismatch CDF.
-        (quantiles, cdf): tuple
-            Cumulative distribution function (x,y) inputs respectively.
-
+        quantiles: array
+            Cumulative distribution function quantiles.
+        cdf: array
+            Cumulative distribution function values.
+        ratios: array
+            Set of drawn |ln(r)| samples.
     '''
     
     ratios = np.zeros(num_samples)
 
     if fish is None:
         fish = fisher(*mismatch_args)
-    
+
+    # handle CuPy use in Fisher matrix generation
     try:
         fish = fish.get()
     except AttributeError:
         pass
     
-    e_vals, e_vects = np.linalg.eig(fish)
-    eigens = (e_vals, e_vects)
+    w, v = get_eigens(fish, high_precision=precision)
+
+    eigens = (w,v)
 
     j = 0
     while j < num_samples:
@@ -555,7 +673,13 @@ def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf = True,
 
     r_at_90 = np.interp(0.9,cdf,quantiles)
 
-    return r_at_90, (quantiles, cdf)
+    out = (r_at_90,)
+    if return_cdf:
+        out += (quantiles,cdf,)
+    if return_ratios:
+        out += (ratios,)
+
+    return out
 
 def cutler_vallisneri_bias(
     waveform_model_true,
