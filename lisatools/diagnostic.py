@@ -360,18 +360,12 @@ def covariance(*fisher_args, fish=None, diagonalize=False, return_fisher=False, 
     '''Calculate covariance matrix for a set of EMRI parameters, computing the fisher matrix if not supplied.
 
     Args:
-        *fisher_args:
-            Set of arguments to pass to fisher(). Not required if fish is not None.
-        fish: array
-            Pre-computed fisher matrix (optional). If supplied, this matrix will be inverted.
-        diagonalize: bool
-            If True, diagonalizes the covariance matrix. Defaults to False.
-        return_fisher: bool
-            If True, also returns the computed fisher matrix.
-        precision: bool
-            If True, uses 500-dps precision to compute the fisher matrix inverse (requires mpmath). This is typically a good idea as the Fisher matrix can be highly ill-conditioned. Defaults to False.
-        **fisher_kwargs:
-            Keyword arguments to pass to fisher().
+        *fisher_args: Set of arguments to pass to fisher(). Not required if fish is not None.
+        fish (ndarray): Pre-computed fisher matrix (optional). If supplied, this matrix will be inverted.
+        diagonalize (bool): If True, diagonalizes the covariance matrix. Defaults to False.
+        return_fisher (bool): If True, also returns the computed fisher matrix.
+        precision (bool): If True, uses 500-dps precision to compute the fisher matrix inverse (requires mpmath). This is typically a good idea as the Fisher matrix can be highly ill-conditioned. Defaults to False.
+        **fisher_kwargs: Keyword arguments to pass to fisher().
     '''
 
     if fish is None:
@@ -423,21 +417,14 @@ def plot_corner(params, cov, nsamp = 25000, filename = 'corner.png', savefig_kwa
     '''Construct a corner plot for a given covariance matrix (requires the corner module).
 
     Args:
-        params: array
-            The set of parameters used for the event (the mean vector of the covariance matrix).
-        cov: array
-            Covariance matrix from which to construct the corner plot.
-        nsamp: int
-            Number of samples to draw from the multivariate distribution (defaults to 25000).
-        filename: str
-            Filename for the output figure to be saved under. Defaults to 'corner.png' in the cwd.
-        savefig_kwargs: dict
-            Dictionary of keyword arguments to pass to matplotlib.pyplot.savefig(), such as dpi. (optional)
-        corner_plot_kwargs dict:
-            Keyword arguments for the corner plot - see the module documentation for more info.
+        params (ndarray): The set of parameters used for the event (the mean vector of the covariance matrix).
+        cov (ndarray): Covariance matrix from which to construct the corner plot.
+        nsamp (int): Number of samples to draw from the multivariate distribution (defaults to 25000).
+        filename (str): Filename for the output figure to be saved under. Defaults to 'corner.png' in the cwd.
+        savefig_kwargs (dict): Dictionary of keyword arguments to pass to matplotlib.pyplot.savefig(), such as dpi. (optional)
+        corner_plot_kwargs (dict): Keyword arguments for the corner plot - see the module documentation for more info.
     Returns:
-        figure: figure object
-            The corner plot figure.
+        figure (figure object): The corner plot figure.
 
     '''
 
@@ -469,17 +456,14 @@ def mismatch_criterion(
 
     Args:
         *fisher_args: Arguments to pass to (or were used by) the fisher matrix generation function.
-        fish: Pre-computed fisher matrix, as output by fisher(*fisher_args). Must match supplied *fisher_args.
-        eigens: tuple of pre-computed eigenvalue and right-eigenvector arrays corresponding to the provided fisher matrix.
-        return_fish: If True, returns Fisher matrix (defaults to False).
+        fish (ndarray): Pre-computed fisher matrix, as output by fisher(*fisher_args). Must match supplied *fisher_args.
+        eigens (tuple): tuple of pre-computed eigenvalue and right-eigenvector arrays corresponding to the provided fisher matrix.
+        return_fish (bool): If True, returns Fisher matrix (defaults to False).
 
     Returns:
-        mismatch: double 
-            Mismatch between perturbed and ML waveforms.
-        ratio: double
-            Computed value of |ln(r)| for this instance of parameter perturbation.
-        fish: array
-            Fisher matrix, if return_fish is set to True.
+        mismatch (double): Mismatch between perturbed and ML waveforms.
+        ratio (double): Computed value of |ln(r)| for this instance of parameter perturbation.
+        fish (ndarray): Fisher matrix, if return_fish is set to True.
     """
 
     params_true = params.copy()
@@ -582,15 +566,11 @@ def get_eigens(arr, high_precision=False):
     '''Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied fisher/covariance matrix.
 
     Args:
-        arr: array
-            Input matrix for which to perform eigenvalue decomposition.
-        high_precision: bool
-            If True, use 500-dps precision to ensure accurate eigenvalue decomposition (requires mpmath to be installed). Defaults to False.
+        arr (ndarray): Input matrix for which to perform eigenvalue decomposition.
+        high_precision (bool): If True, use 500-dps precision to ensure accurate eigenvalue decomposition (requires mpmath to be installed). Defaults to False.
     Returns:
-        evals: array
-            Eigenvalues for the supplied array.
-        evects: array
-            Right-eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to the evals[k].
+        evals (ndarray): Eigenvalues for the supplied array.
+        evects (ndarray): Right-eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to the evals[k].
     '''
 
     if high_precision:
@@ -620,27 +600,18 @@ def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf = True,
     
     Args:
         *mismatch_args: Arguments to pass to the mismatch_criterion() function call.
-        num_samples: int
-            number of parameter samples to generate (defaults to 100).
-        return_cdf: bool
-            If True, returns the CDF quantiles and values. Defaults to True.
-        return_ratios: bool
-            If True, returns the set of drawn |ln(r)| samples. Defaults to False.
-        fish: array
-            Fisher matrix corresponding to the input event parameters (optional - will be generated if not provided).
-        precision: bool
-            If True, use 500-dps precision to compute eigenvalues/eigenvectors (requires mpmath). Defaults to False.
+        num_samples (int, optional): number of parameter samples to generate (defaults to 100).
+        return_cdf (bool): If True, returns the CDF quantiles and values. Defaults to True.
+        return_ratios (bool): If True, returns the set of drawn |ln(r)| samples. Defaults to False.
+        fish (ndarray): Fisher matrix corresponding to the input event parameters (optional - will be generated if not provided).
+        precision (bool): If True, use 500-dps precision to compute eigenvalues/eigenvectors (requires mpmath). Defaults to False.
         **mismatch_kwargs: Keyword arguments to be passed to the mismatch_criterion() function call (currently unused).
 
     Returns:
-        r_at_90: double
-            90th percentile value of the maximum-mismatch CDF.
-        quantiles: array
-            Cumulative distribution function quantiles.
-        cdf: array
-            Cumulative distribution function values.
-        ratios: array
-            Set of drawn |ln(r)| samples.
+        r_at_90 (double): 90th percentile value of the maximum-mismatch CDF.
+        quantiles (ndarray): Cumulative distribution function quantiles.
+        cdf (ndarray): Cumulative distribution function values.
+        ratios (ndarray): Set of drawn |ln(r)| samples.
     '''
     
     ratios = np.zeros(num_samples)
