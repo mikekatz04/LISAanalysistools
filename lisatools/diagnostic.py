@@ -567,13 +567,21 @@ def mismatch_criterion(
 
     # properly treat boundary conditions for polar angles
     for val in [7, 9]:
-        var_p_eps[val] = var_p_eps[val] % (2 * np.pi)
+        # properly wrap negative values
+        if var_p_eps[val] < 0:
+            mult = -1
+        else:
+            mult = 1
+        var_p_eps[val] = mult * (abs(var_p_eps[val]) % (2*np.pi))  # wrap the angle to [-2pi, 2pi]
+
         if var_p_eps[val] > np.pi:
             var_p_eps[val] = 2 * np.pi - var_p_eps[val]  # reflect polar angle on boundary
-            var_p_eps[val + 1] += np.pi  # flip azimuthal angle
+            if val == 7:  # if qK, both phiS and phiK must be flipped which cancels out. Still need to flip for qS
+                var_p_eps[val + 1] += np.pi  # flip azimuthal angle
         elif var_p_eps[val] < 0:
-            var_p_eps[val] = -var_p_eps[val]
-            var_p_eps[val + 1] += np.pi
+            var_p_eps[val] = -var_p_eps[val]  # reflect polar angle on boundary
+            if val == 7:  # if qK, both phiS and phiK must be flipped which cancels out. Still need to flip for qS
+                var_p_eps[val + 1] += np.pi  # flip azimuthal angle
 
     h_delta = waveform_model(*var_p_eps, **waveform_kwargs)
 
