@@ -366,6 +366,7 @@ def fisher(
             fish[i][j] = inner_product(
                 [dh[i].real, dh[i].imag],
                 [dh[j].real, dh[j].imag],
+                use_gpu=use_gpu,
                 **inner_product_kwargs
             )
             fish[j][i] = fish[i][j]

@@ -145,7 +145,13 @@ class SamplerGuide:
                 self._start_points = np.zeros((self.nwalkers_all, self.ndim))
                 inds_fix = np.arange(self.nwalkers_all)
 
+                num_max_iter = 10000
+                iter_num = 0
                 while len(inds_fix) > 0:
+                    if iter_num > num_max_iter:
+                        raise RuntimeError(
+                            "Covariance matrix walker generation is not generating walkers in the prior range."
+                        )
                     self._start_points[inds_fix] = np.random.multivariate_normal(
                         self.start_mean,
                         self.start_factor * self.cov,
@@ -155,6 +161,8 @@ class SamplerGuide:
                     inds_fix = np.where(
                         np.isinf(self.priors.logpdf(self._start_points))
                     )[0]
+
+                    iter_num += 1
 
         elif isinstance(start_points, np.ndarray):
             self._start_points = start_points
@@ -575,7 +583,7 @@ class GBGuide(SamplerGuide):
 
         default_priors = {
             0: uniform_dist(np.log(1e-24), np.log(1e-20)),
-            1: uniform_dist(1.0, 5.0),
+            1: uniform_dist(1.0, 10.0),
             2: uniform_dist(np.log(1e-20), np.log(1e-15)),
             3: uniform_dist(0.0, 2 * np.pi),
             4: uniform_dist(-1, 1),
@@ -588,7 +596,7 @@ class GBGuide(SamplerGuide):
             default_priors[8] = uniform_dist(1.0, 1000.0)
             default_priors[9] = uniform_dist(0.0, np.pi * 2)
             default_priors[10] = uniform_dist(0.0001, 0.9)
-            default_priors[11] = uniform_dist(0.2, 10.0)
+            default_priors[11] = uniform_dist(0.001, 10.0)
             default_priors[12] = uniform_dist(0.0, 1.0)
 
         default_priors = PriorContainer(default_priors)

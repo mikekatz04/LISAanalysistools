@@ -74,7 +74,7 @@ class PipelineGuide:
         self.module_list = module_list
         self.info_manager = info_manager
 
-    def run(self, progress=False, verbose=False):
+    def run(self, progress=False, verbose=False, **update_kwargs):
         for i, module in enumerate(self.module_list):
             if verbose:
                 print_str = "starting module {}".format(i)
@@ -82,7 +82,7 @@ class PipelineGuide:
                     print_str += ": {}".format(module.name)
                 print(print_str)
 
-            module.update_module(self.info_manager)
+            module.update_module(self.info_manager, **update_kwargs)
             module.run_module(progress=progress)
 
             if verbose:
@@ -140,6 +140,9 @@ class MBHBase(PipelineModule):
             compress=True,
         )
 
+        if "template_kwargs" in kwargs:
+            self.template_kwargs = {**self.template_kwargs, **kwargs["template_kwargs"]}
+
         if self.n_iter_stop is not None:
             stop = SearchConvergeStopping(n_iters=self.n_iter_stop)
             stopping_iter = 10
@@ -194,6 +197,11 @@ class MBHBase(PipelineModule):
             relbin_template = np.zeros(ndim_full)
             relbin_template[test_inds] = start_points[-1]
 
+        if "priors" in kwargs:
+            priors = kwargs["priors"]
+        else:
+            priors = None
+
         self.guide_kwargs = dict(
             dt=info_manager.dt,
             start_points=start_points,
@@ -206,12 +214,13 @@ class MBHBase(PipelineModule):
             verbose=True,
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
+            priors=priors,
         )
 
         self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
 
         # TODO: remove
-        self.mbh_guide.lnprob.template_model.d_d = 2 * 7.5e4
+        # self.mbh_guide.lnprob.template_model.d_d = 2 * 7.5e4
         print(self.mbh_guide.lnprob.template_model.d_d)
 
     def run_module(self, *args, progress=False, **kwargs):
@@ -292,6 +301,11 @@ class MBHRelBinSearch(PipelineModule):
             update=1000,
         )
 
+        if "priors" in kwargs:
+            priors = kwargs["priors"]
+        else:
+            priors = None
+
         self.guide_kwargs = dict(
             dt=info_manager.dt,
             start_points=start_points,
@@ -307,6 +321,7 @@ class MBHRelBinSearch(PipelineModule):
             relbin_template=relbin_template,
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
+            priors=priors,
         )
 
         self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
