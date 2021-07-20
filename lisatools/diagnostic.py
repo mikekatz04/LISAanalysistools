@@ -12,16 +12,17 @@ from lisatools.sensitivity import get_sensitivity
 
 
 def inner_product(
-        sig1,
-        sig2,
-        dt=None,
-        df=None,
-        f_arr=None,
-        PSD="lisasens",
-        PSD_args=(),
-        PSD_kwargs={},
-        normalize=False,
-        use_gpu=False,
+    sig1,
+    sig2,
+    dt=None,
+    df=None,
+    f_arr=None,
+    PSD="lisasens",
+    PSD_args=(),
+    PSD_kwargs={},
+    normalize=False,
+    use_gpu=False,
+    complex=False,
 ):
     if use_gpu:
         xp = cp
@@ -100,7 +101,11 @@ def inner_product(
 
     # account for hp and hx if included in time domain signal
     for temp1, temp2 in zip(ft_sig1, ft_sig2):
-        y = xp.real(temp1.conj() * temp2) / PSD_arr  # assumes right summation rule
+        if complex:
+            func = lambda x: x
+        else:
+            func = xp.real
+        y = func(temp1.conj() * temp2) / PSD_arr  # assumes right summation rule
 
         out += 4 * xp.sum(x_vals * y)
 
@@ -182,7 +187,7 @@ def snr(sig1, *args, data=None, use_gpu=False, **kwargs):
 
 
 def h_var_p_eps(
-        waveform_model, params, step, i, parameter_transforms=None, waveform_kwargs={}
+    waveform_model, params, step, i, parameter_transforms=None, waveform_kwargs={}
 ):
     """
     Calculate the waveform with a perturbation step of the variable V[i]
@@ -200,7 +205,13 @@ def h_var_p_eps(
 
 
 def dh_dlambda(
-        waveform_model, params, eps, i, parameter_transforms=None, waveform_kwargs={}, accuracy=True
+    waveform_model,
+    params,
+    eps,
+    i,
+    parameter_transforms=None,
+    waveform_kwargs={},
+    accuracy=True,
 ):
     """
     Calculate the derivative of the waveform with precision of order (step^4)
@@ -250,10 +261,10 @@ def dh_dlambda(
 
         # error scales as eps^4
         dh_I = (
-                       -h_I_up_2eps[:ind_max]
-                       + h_I_down_2eps[:ind_max]
-                       + 8 * (h_I_up_eps[:ind_max] - h_I_down_eps[:ind_max])
-               ) / (12 * eps)
+            -h_I_up_2eps[:ind_max]
+            + h_I_down_2eps[:ind_max]
+            + 8 * (h_I_up_eps[:ind_max] - h_I_down_eps[:ind_max])
+        ) / (12 * eps)
         # Time thta it takes for one variable: approx 5 minutes
     else:
         # Derivative of the Waveform
@@ -276,9 +287,7 @@ def dh_dlambda(
             parameter_transforms=parameter_transforms,
         )
 
-        ind_max = np.min(
-            [len(h_I_up_eps), len(h_I_down_eps)]
-        )
+        ind_max = np.min([len(h_I_up_eps), len(h_I_down_eps)])
         # print([len(h_I_up_2eps), len(h_I_up_eps), len(h_I_down_2eps), len(h_I_down_eps)])
 
         # error scales as eps^4
@@ -289,16 +298,16 @@ def dh_dlambda(
 
 
 def fisher(
-        waveform_model,
-        params,
-        eps,
-        use_gpu=False,
-        deriv_inds=None,
-        parameter_transforms=None,
-        waveform_kwargs={},
-        inner_product_kwargs={},
-        return_derivs=False,
-        accuracy=True
+    waveform_model,
+    params,
+    eps,
+    use_gpu=False,
+    deriv_inds=None,
+    parameter_transforms=None,
+    waveform_kwargs={},
+    inner_product_kwargs={},
+    return_derivs=False,
+    accuracy=True,
 ):
     """
 
@@ -351,7 +360,7 @@ def fisher(
             i,
             waveform_kwargs=waveform_kwargs,
             parameter_transforms=parameter_transforms,
-            accuracy=accuracy
+            accuracy=accuracy,
         )
         dh.append(temp)
 
@@ -377,8 +386,15 @@ def fisher(
         return fish
 
 
-def covariance(*fisher_args, fish=None, diagonalize=False, return_fisher=False, precision=False, **fisher_kwargs):
-    '''Calculate covariance matrix for a set of EMRI parameters, computing the fisher matrix if not supplied.
+def covariance(
+    *fisher_args,
+    fish=None,
+    diagonalize=False,
+    return_fisher=False,
+    precision=False,
+    **fisher_kwargs
+):
+    """Calculate covariance matrix for a set of EMRI parameters, computing the fisher matrix if not supplied.
 
     Args:
         *fisher_args: Set of arguments to pass to fisher(). Not required if fish is not None.
@@ -387,7 +403,7 @@ def covariance(*fisher_args, fish=None, diagonalize=False, return_fisher=False, 
         return_fisher (bool): If True, also returns the computed fisher matrix.
         precision (bool): If True, uses 500-dps precision to compute the fisher matrix inverse (requires mpmath). This is typically a good idea as the Fisher matrix can be highly ill-conditioned. Defaults to False.
         **fisher_kwargs: Keyword arguments to pass to fisher().
-    '''
+    """
 
     if fish is None:
         fish = fisher(*fisher_args, **fisher_kwargs)
@@ -402,15 +418,16 @@ def covariance(*fisher_args, fish=None, diagonalize=False, return_fisher=False, 
     if precision:
         try:
             import mpmath as mp
+
             mp.mp.dps = 500
         except ModuleNotFoundError:
-            print('mpmath module not installed. Defaulting to low precision...')
+            print("mpmath module not installed. Defaulting to low precision...")
             precision = False
     if precision:
         hp_fish = mp.matrix(fish.tolist())
         U, S, V = mp.svd_r(hp_fish)  # singular value decomposition
         temp = mp.diag([val ** (-1) for val in S])  # get S**-1
-        temp2 = (V.T * temp * U.T)  # construct pseudo-inverse
+        temp2 = V.T * temp * U.T  # construct pseudo-inverse
         cov = np.array(temp2.tolist(), dtype=np.float64)
     else:
         cov = np.linalg.pinv(fish)
@@ -434,8 +451,15 @@ def covariance(*fisher_args, fish=None, diagonalize=False, return_fisher=False, 
     return returns
 
 
-def plot_corner(params, cov, nsamp=25000, filename='corner.png', savefig_kwargs={}, corner_plot_kwargs={}):
-    '''Construct a corner plot for a given covariance matrix (requires the corner module).
+def plot_corner(
+    params,
+    cov,
+    nsamp=25000,
+    filename="corner.png",
+    savefig_kwargs={},
+    corner_plot_kwargs={},
+):
+    """Construct a corner plot for a given covariance matrix (requires the corner module).
 
     Args:
         params (ndarray): The set of parameters used for the event (the mean vector of the covariance matrix).
@@ -447,16 +471,13 @@ def plot_corner(params, cov, nsamp=25000, filename='corner.png', savefig_kwargs=
     Returns:
         figure (figure object): The corner plot figure.
 
-    '''
+    """
 
     import corner
 
     if corner_plot_kwargs == {}:
-        print('No corner plot kwargs supplied - using defaults.')
-        corner_plot_kwargs = dict(
-            show_titles=True,
-            title_fmt=".2e",
-        )
+        print("No corner plot kwargs supplied - using defaults.")
+        corner_plot_kwargs = dict(show_titles=True, title_fmt=".2e",)
 
     samp = np.random.multivariate_normal(params, cov, size=nsamp)
     fig = corner.corner(samp, **corner_plot_kwargs)
@@ -466,17 +487,17 @@ def plot_corner(params, cov, nsamp=25000, filename='corner.png', savefig_kwargs=
 
 
 def mismatch_criterion(
-        waveform_model,
-        params,
-        deriv_inds=None,
-        inner_product_kwargs={},
-        waveform_kwargs={},
-        parameter_transforms=None,
-        fish=None,
-        eps=None,
-        eigens=None,
-        return_fish=False,
-        fisher_kwargs={},
+    waveform_model,
+    params,
+    deriv_inds=None,
+    inner_product_kwargs={},
+    waveform_kwargs={},
+    parameter_transforms=None,
+    fish=None,
+    eps=None,
+    eigens=None,
+    return_fish=False,
+    fisher_kwargs={},
 ):
     """
     return the mismatch criterion of Vallisneri abs(log r)for a zero noise signal approximation
@@ -524,23 +545,29 @@ def mismatch_criterion(
 
     if fish is None:
         if eps is None:
-            print('No numerical derivative step-sizes (eps) supplied for Fisher matrix generation.')
+            print(
+                "No numerical derivative step-sizes (eps) supplied for Fisher matrix generation."
+            )
             raise Exception
 
         elif isinstance(eps, float):
             eps = np.full_like(params, eps)
 
-        fish = fisher(waveform_model=waveform_model,
-                      params=params,
-                      eps=eps,
-                      deriv_inds=deriv_inds,
-                      parameter_transforms=parameter_transforms,
-                      waveform_kwargs=waveform_kwargs,
-                      inner_product_kwargs=inner_product_kwargs,
-                      **fisher_kwargs)
+        fish = fisher(
+            waveform_model=waveform_model,
+            params=params,
+            eps=eps,
+            deriv_inds=deriv_inds,
+            parameter_transforms=parameter_transforms,
+            waveform_kwargs=waveform_kwargs,
+            inner_product_kwargs=inner_product_kwargs,
+            **fisher_kwargs
+        )
 
     try:
-        fish = fish.get()  # This works both for use_gpu=True and for passing in a numpy Fisher matrix
+        fish = (
+            fish.get()
+        )  # This works both for use_gpu=True and for passing in a numpy Fisher matrix
     except AttributeError:
         pass
 
@@ -568,9 +595,11 @@ def mismatch_criterion(
 
     # properly treat boundary conditions for polar angles
     for val in [7, 9]:
-        var_p_eps[val] = var_p_eps[val] % (2*np.pi)  # wrap the angle to [0, 2pi]
+        var_p_eps[val] = var_p_eps[val] % (2 * np.pi)  # wrap the angle to [0, 2pi]
         if var_p_eps[val] > np.pi:
-            var_p_eps[val] = 2 * np.pi - var_p_eps[val]  # reflect polar angle on boundary
+            var_p_eps[val] = (
+                2 * np.pi - var_p_eps[val]
+            )  # reflect polar angle on boundary
             # if val == 7:  # if qK, both phiS and phiK must be flipped which cancels out. Still need to flip for qS --- not sure about this, actually
             var_p_eps[val + 1] += np.pi  # flip azimuthal angle
 
@@ -597,15 +626,15 @@ def mismatch_criterion(
         normalize=True
     )
     ratio = over / (
-            1
-            - 0.5
-            * prod
-            / inner_product(
-        [h_true.real, h_true.imag],
-        [h_true.real, h_true.imag],
-        **inner_product_kwargs,
-        normalize=False
-    )
+        1
+        - 0.5
+        * prod
+        / inner_product(
+            [h_true.real, h_true.imag],
+            [h_true.real, h_true.imag],
+            **inner_product_kwargs,
+            normalize=False
+        )
     )
     mism = (1.0 - over) / 2.0
 
@@ -616,7 +645,7 @@ def mismatch_criterion(
 
 
 def get_eigens(arr, high_precision=False):
-    '''Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied fisher/covariance matrix.
+    """Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied fisher/covariance matrix.
 
     Args:
         arr (ndarray): Input matrix for which to perform eigenvalue decomposition.
@@ -628,14 +657,15 @@ def get_eigens(arr, high_precision=False):
             evals (ndarray): Eigenvalues for the supplied array.
             evects (ndarray): Right-eigenvectors for the supplied array, constructed such that evects[:,k] corresponds
                 to the evals[k].
-    '''
+    """
 
     if high_precision:
         try:
             import mpmath as mp
+
             mp.mp.dps = 500
         except ModuleNotFoundError:
-            print('mpmath is not installed - using low-precision eigen decomposition.')
+            print("mpmath is not installed - using low-precision eigen decomposition.")
             high_precision = False
 
     if high_precision:
@@ -653,9 +683,17 @@ def get_eigens(arr, high_precision=False):
         return evals, evects
 
 
-def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf=True, return_ratios=False, fish=None,
-                             precision=False, fisher_kwargs={}, **mismatch_kwargs):
-    '''Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
+def vallisneri_criterion_cdf(
+    *mismatch_args,
+    num_samples=100,
+    return_cdf=True,
+    return_ratios=False,
+    fish=None,
+    precision=False,
+    fisher_kwargs={},
+    **mismatch_kwargs
+):
+    """Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
 
     Args:
         *mismatch_args: Arguments to pass to the mismatch_criterion() function call.
@@ -673,7 +711,7 @@ def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf=True, r
             quantiles (ndarray): Cumulative distribution function quantiles.
             cdf (ndarray): Cumulative distribution function values.
             ratios (ndarray): Set of drawn |ln(r)| samples.
-    '''
+    """
 
     ratios = np.zeros(num_samples)
 
@@ -693,11 +731,13 @@ def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf=True, r
     j = 0
     while j < num_samples:
         try:
-            mism, ratio = mismatch_criterion(*mismatch_args, fish=fish, eigens=eigens, **mismatch_kwargs)
+            mism, ratio = mismatch_criterion(
+                *mismatch_args, fish=fish, eigens=eigens, **mismatch_kwargs
+            )
             ratios[j] = abs(np.log(ratio))
             j += 1
         except Exception as err:
-            print('Error generating CDF sample: ', err)
+            print("Error generating CDF sample: ", err)
             raise
 
     quantiles, counts = np.unique(ratios, return_counts=True)
@@ -707,7 +747,10 @@ def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf=True, r
 
     out = (r_at_90,)
     if return_cdf:
-        out += (quantiles, cdf,)
+        out += (
+            quantiles,
+            cdf,
+        )
     if return_ratios:
         out += (ratios,)
 
@@ -715,20 +758,20 @@ def vallisneri_criterion_cdf(*mismatch_args, num_samples=100, return_cdf=True, r
 
 
 def cutler_vallisneri_bias(
-        waveform_model_true,
-        waveform_model_approx,
-        params,
-        eps,
-        in_diagnostics=None,
-        fish=None,
-        deriv_inds=None,
-        return_fisher=False,
-        return_derivs=False,
-        return_cov=False,
-        parameter_transforms=None,
-        waveform_true_kwargs={},
-        waveform_approx_kwargs={},
-        inner_product_kwargs={},
+    waveform_model_true,
+    waveform_model_approx,
+    params,
+    eps,
+    in_diagnostics=None,
+    fish=None,
+    deriv_inds=None,
+    return_fisher=False,
+    return_derivs=False,
+    return_cov=False,
+    parameter_transforms=None,
+    waveform_true_kwargs={},
+    waveform_approx_kwargs={},
+    inner_product_kwargs={},
 ):
     num_params = len(params)
 

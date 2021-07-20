@@ -232,9 +232,12 @@ class SamplerGuide:
 
     def perform_test_start_likelihood(self):
         # test starting points:
+        breakpoint()
         test_start = np.zeros((self.start_points.shape[0], self.default_ndim_full))
         test_start[:, self.test_inds] = self.start_points
-        test_start[:, self.fill_inds] = self.fill_values
+
+        if self.fill_inds != np.array([]):
+            test_start[:, self.fill_inds] = self.fill_values
 
         if "subset" in self.sampler_kwargs:
             pts_in = test_start[: self.sampler_kwargs["subset"]]
@@ -581,16 +584,25 @@ class GBGuide(SamplerGuide):
     @property
     def default_priors(self):
 
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            ind_change = 1
+        else:
+            ind_change = 0
+
         default_priors = {
             0: uniform_dist(np.log(1e-24), np.log(1e-20)),
             1: uniform_dist(1.0, 10.0),
             2: uniform_dist(np.log(1e-20), np.log(1e-15)),
-            3: uniform_dist(0.0, 2 * np.pi),
-            4: uniform_dist(-1, 1),
-            5: uniform_dist(0.0, np.pi),
-            6: uniform_dist(0.0, 2 * np.pi),
-            7: uniform_dist(-1, 1),
+            3 + ind_change: uniform_dist(0.0, 2 * np.pi),
+            4 + ind_change: uniform_dist(-1, 1),
+            5 + ind_change: uniform_dist(0.0, np.pi),
+            6 + ind_change: uniform_dist(0.0, 2 * np.pi),
+            7 + ind_change: uniform_dist(-1, 1),
         }
+
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            # TODO check this
+            default_priors[3] = uniform_dist(np.log(1e-30), np.log(1e-25))
 
         if hasattr(self, "include_third") and self.include_third:
             default_priors[8] = uniform_dist(1.0, 1000.0)
@@ -608,7 +620,11 @@ class GBGuide(SamplerGuide):
         if hasattr(self, "include_third") and self.include_third:
             return 13
 
-        return 8
+        elif hasattr(self, "include_fddot") and self.include_fddot:
+            return 9
+
+        else:
+            return 8
 
     @property
     def default_ndim_full(self):
@@ -622,15 +638,25 @@ class GBGuide(SamplerGuide):
         if hasattr(self, "include_third") and self.include_third:
             return np.array([0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
 
-        return np.array([0, 1, 2, 4, 5, 6, 7, 8])
+        elif hasattr(self, "include_fddot") and self.include_fddot:
+            return np.array([0, 1, 2, 3, 4, 5, 6, 7, 8])
+
+        else:
+            return np.array([0, 1, 2, 4, 5, 6, 7, 8])
 
     @property
     def default_fill_inds(self):
-        return np.array([3])
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            return np.array([])
+        else:
+            return np.array([3])
 
     @property
     def default_fill_values(self):
-        return np.array([0.0])
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            return np.array([])
+        else:
+            return np.array([0.0])
 
     @property
     def default_injection_setup_kwargs(self):
@@ -666,11 +692,31 @@ class GBGuide(SamplerGuide):
             # transform from fraction of period for T2 to regular T2
             parameter_transforms[(12, 13)] = lambda x, y: (x, y * x)
 
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            parameter_transforms[3] = lambda x: np.exp(x)
+
+        else:
+            # determine GR fddot
+            parameter_transforms[(1, 2, 3)] = lambda f0, fdot, fddot: (
+                f0,
+                fdot,
+                11.0 / 3.0 * fdot * fdot / f0,
+            )
+
         return parameter_transforms
 
     @property
     def default_periodic(self):
-        periodic = {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            ind_change = 1
+        else:
+            ind_change = 0
+
+        periodic = {
+            3 + ind_change: 2 * np.pi,
+            5 + ind_change: np.pi,
+            6 + ind_change: 2 * np.pi,
+        }
         if hasattr(self, "include_third") and self.include_third:
             periodic[9] = 2 * np.pi
             periodic[12] = 1.0
@@ -692,12 +738,26 @@ class GBGuide(SamplerGuide):
         if self.include_third:
             labels += [r"$A_2$", r"$\bar{\omega}$", r"$e_2$", r"$P_2$", r"$T_2$"]
 
+        if self.include_fddot:
+            labels.insert(3, r"$\ddot{f}_0$")
+
         return labels
 
     def adjust_start_points(self):
-        self.start_points[:, 3] = self.start_points[:, 3] % (2 * np.pi)
-        self.start_points[:, 5] = self.start_points[:, 5] % (np.pi)
-        self.start_points[:, 6] = self.start_points[:, 6] % (2 * np.pi)
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            ind_change = 1
+        else:
+            ind_change = 0
+
+        self.start_points[:, 3 + ind_change] = self.start_points[:, 3 + ind_change] % (
+            2 * np.pi
+        )
+        self.start_points[:, 5 + ind_change] = self.start_points[:, 5 + ind_change] % (
+            np.pi
+        )
+        self.start_points[:, 6 + ind_change] = self.start_points[:, 6 + ind_change] % (
+            2 * np.pi
+        )
 
         if self.include_third:
             self.start_points[:, -1] = np.abs(self.start_points[:, -1])
@@ -714,6 +774,7 @@ class GBGuide(SamplerGuide):
         self,
         *args,
         include_third=False,
+        include_fddot=False,
         use_gpu=False,
         f_arr=None,
         dt=10.0,
@@ -724,6 +785,13 @@ class GBGuide(SamplerGuide):
     ):
 
         self.include_third = include_third
+        self.include_fddot = include_fddot
+
+        if self.include_third and self.include_fddot:
+            raise ValueError(
+                "Running a template with fddot and third body currently unvailable."
+            )
+
         self.nchannels = 2
 
         if f_arr is None:
@@ -980,8 +1048,6 @@ class EMRIGuide(SamplerGuide):
 
     @property
     def default_periodic(self):
-        if hasattr(self, "include_third") and self.include_third:
-            periodic[9] = 2 * np.pi
 
         intrinsic = False
         schwarzschild = False
@@ -1049,7 +1115,6 @@ class EMRIGuide(SamplerGuide):
     def __init__(
         self,
         *args,
-        include_third=False,
         use_gpu=False,
         f_arr=None,
         dt=10.0,
@@ -1059,7 +1124,6 @@ class EMRIGuide(SamplerGuide):
         **kwargs,
     ):
 
-        self.include_third = include_third
         self.nchannels = 2
 
         if f_arr is None:
