@@ -232,7 +232,6 @@ class SamplerGuide:
 
     def perform_test_start_likelihood(self):
         # test starting points:
-        breakpoint()
         test_start = np.zeros((self.start_points.shape[0], self.default_ndim_full))
         test_start[:, self.test_inds] = self.start_points
 
@@ -840,13 +839,8 @@ class GBGuide(SamplerGuide):
         ):
             injection_params = kwargs["injection_params"]
 
-            if (
-                "lnlike_kwargs" in kwargs["sampler_kwargs"]
-                and "parameter_transforms" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
-            ):
-                transform = kwargs["sampler_kwargs"]["lnlike_kwargs"][
-                    "parameter_transforms"
-                ]
+            if "parameter_transforms" in kwargs:
+                transform = TransformContainer(kwargs["parameter_transforms"])
             else:
                 transform = TransformContainer(self.default_parameter_transforms)
 
