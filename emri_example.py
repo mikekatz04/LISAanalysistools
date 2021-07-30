@@ -27,7 +27,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-use_gpu = False
+use_gpu = True
 fast = GenerateEMRIWaveform(
     "FastSchwarzschildEccentricFlux",
     sum_kwargs=dict(pad_output=True),
@@ -82,7 +82,7 @@ injection_params = np.array(
 )
 
 # define other quantities
-T = 14/365  # years
+T = 1.  # years
 dt = 15.0
 
 snr_goal = 30.0
