@@ -144,6 +144,8 @@ class PlotContainer:
         tau = self.reader.get_autocorr_time(tol=0)
         if burn is None or thin is None:
             if burn is None:
+                print("BAD TAU")
+                tau[np.isnan(tau)] = 1.0
                 burn = int(2 * np.max(tau))
 
             if thin is None:
