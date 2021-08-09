@@ -178,36 +178,6 @@ class SSB_to_LISA:
         return (tL, lambdaL, betaL, psiL)
 
 
-class TransformContainer:
-    def __init__(self, parameter_transforms):
-
-        self.base_transforms = {"single_param": {}, "mult_param": {}}
-
-        for key, item in parameter_transforms.items():
-            if isinstance(key, int):
-                self.base_transforms["single_param"][key] = item
-            elif isinstance(key, tuple):
-                self.base_transforms["mult_param"][key] = item
-            else:
-                raise ValueError(
-                    "Parameter transform keys must be int or tuple of ints. {} is neither.".format(
-                        key
-                    )
-                )
-
-    def transform_base_parameters(self, params):
-        params_temp = params.copy().T
-        # regular transforms to waveform domain
-        for ind, trans_fn in self.base_transforms["single_param"].items():
-            params_temp[ind] = trans_fn(params_temp[ind])
-
-        for inds, trans_fn in self.base_transforms["mult_param"].items():
-            temp = trans_fn(*[params_temp[i] for i in inds])
-            for j, i in enumerate(inds):
-                params_temp[i] = temp[j]
-
-        return params_temp
-
 
 def mbh_sky_mode_transform(
     coords, ind_map=None, kind="both", inplace=False, cos_i=False
