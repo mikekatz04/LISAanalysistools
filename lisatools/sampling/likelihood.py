@@ -62,9 +62,11 @@ class Likelihood(object):
             raise ValueError("For single likelihood, template model cannot be a list.")
         if hasattr(self.template_model, "get_ll"):
             self.get_ll = self.template_model.get_ll
+            self.like_here = False
 
         else:
             self.fill_data_noise = False
+            self.like_here = True
 
     # TODO: add previously injected signal from a file for example
     # TODO: add SNR scaling, need to read out new distance
@@ -230,10 +232,7 @@ class Likelihood(object):
 
         else:
             template_channels = self.xp.asarray(
-                [
-                    self.template_model(*params_i, *args, **kwargs)
-                    for params_i in params.T
-                ]
+                [self.template_model(*params_i, *args, **kwargs) for params_i in params]
             )
 
         if self.frequency_domain is False:
