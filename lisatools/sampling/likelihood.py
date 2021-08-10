@@ -27,6 +27,9 @@ class Likelihood(object):
         self.template_model = template_model
 
         self.parameter_transforms = parameter_transforms
+        if not isinstance(self.parameter_transforms, list):
+            self.parameter_transforms = [self.parameter_transforms]
+
         self.fill_data_noise = fill_data_noise
 
         self.use_gpu = use_gpu
@@ -224,7 +227,7 @@ class Likelihood(object):
     def get_ll(self, params, *args, **kwargs):
 
         # TODO: make sure parameter transformations appear in posterior if possible
-        num_likes = params.shape[1]
+        num_likes = params.shape[0]
         if self.vectorized:
             template_channels = self.xp.asarray(
                 self.template_model(*params, *args, **kwargs)
