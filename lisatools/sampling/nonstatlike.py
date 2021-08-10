@@ -10,6 +10,84 @@ except (ModuleNotFoundError, ImportError):
 
 import scipy
 
+
+class NonStationaryContainer(object):
+    def __init__(
+        self,
+        w_t_window,
+        w_t_noise,
+        dt,
+        noise_fn,
+        noise_kwargs,
+        bands=1,
+        use_gpu=False,
+        verbose=-1,
+    ):
+
+        self.use_gpu = use_gpu
+        if use_gpu:
+            self.xp = xp
+        else:
+            self.xp = np
+
+        self.seg_length = len(w_t_window)
+        self.dt = dt
+
+        self.bands = bands
+        self.df = df = 1 / (dt * self.seg_length)
+
+        fft_window = self.xp.fft.rfft(w_t_window + w_t_noise) * dt
+
+        self.fft_length = fft_length = len(fft_window)
+
+        self.mid = mid = int((2 * bands + 1) / 2) - 1  # second -1 for index
+        corr_mats = self.xp.zeros((2 * bands - 1, fft_length), dtype=self.xp.complex128)
+        Sn = noise_fn(self.xp.arange(fft_length) * df, **noise_kwargs)
+
+        # TODO: make options?
+        Sn[0] = Sn[1]
+        for i in range(fft_length):
+            w_i = fft_window[0 : i + 1][::-1]
+
+            if i < fft_length - (bands - 1):
+                n = bands
+            else:
+                n = fft_length - i
+            inds = (
+                self.xp.tile(self.xp.arange(i + 1), (n, 1))
+                + self.xp.arange(i, i + n)[:, None]
+                - i
+            )[:, ::-1]
+
+            bad = inds >= fft_length
+            inds[bad] = 0
+
+            w_j = fft_window[inds]
+
+            w_j[bad] = 0.0
+            temp = (
+                1
+                / (self.seg_length * dt) ** 2
+                * self.xp.sum((Sn[: i + 1] * w_i.conj())[None, :] * w_j, axis=-1)
+            )
+
+            corr_mats[mid : mid + n, i] = temp
+
+            if verbose > 0:
+                if not (i % verbose):
+                    print(i, fft_length)
+
+        if bands > 1:
+            corr_mats[:mid] = corr_mats[mid + 1 :][::-1].conj()
+
+            for b in range(0, mid):
+                corr_mats[b] = self.xp.roll(corr_mats[b], mid - b)
+
+        self.corr_mats = self.xp.asarray(corr_mats)
+        self.Sn = self.xp.asarray(Sn)
+        self.fft_window = self.xp.asarray(fft_window)
+
+
 class NonStationaryLikelihood(object):
     def __init__(
         self,
@@ -69,7 +147,7 @@ class NonStationaryLikelihood(object):
         w_t_noise=None,
         w_t_window=None,
         add_noise=False,
-        bands=1
+        bands=1,
     ):
 
         self.bands = bands
@@ -137,6 +215,7 @@ class NonStationaryLikelihood(object):
             noise_kwargs = [noise_kwargs for _ in range(self.num_channels)]
 
         if self.frequency_domain:
+            raise NotImplementedError
             if self.df is not None:
                 df = self.df
                 can_add_noise = True
@@ -187,20 +266,27 @@ class NonStationaryLikelihood(object):
 
                 sc_last = sc
 
-
             end_of_observing_segments.append(len(single_channel) - 1)
 
             start_of_observing_segments = np.asarray(start_of_observing_segments)
             end_of_observing_segments = np.asarray(end_of_observing_segments)
 
-            observing_segment_length = end_of_observing_segments - start_of_observing_segments + 1
+            observing_segment_length = (
+                end_of_observing_segments - start_of_observing_segments + 1
+            )
             num_segments = len(start_of_observing_segments)
 
             fft_windows = [_ for _ in range(num_segments)]
             fft_data = [_ for _ in range(num_segments)]
             df_segments = [_ for _ in range(num_segments)]
             fft_freqs_length = [_ for _ in range(num_segments)]
-            for j, (start, end, length) in enumerate(zip(start_of_observing_segments, end_of_observing_segments, observing_segment_length)):
+            for j, (start, end, length) in enumerate(
+                zip(
+                    start_of_observing_segments,
+                    end_of_observing_segments,
+                    observing_segment_length,
+                )
+            ):
 
                 fft_freqs = np.fft.rfftfreq(length, dt)
                 df_segments[j] = fft_freqs[1]
@@ -211,43 +297,71 @@ class NonStationaryLikelihood(object):
 
                 for chan in range(self.num_channels):
 
-                    fft_windows[j][chan] = np.fft.rfft(w_t_window[chan][start:end + 1] + w_t_noise[chan][start:end + 1]) * dt
-                    fft_data[j][chan] = np.fft.rfft(data_stream[chan][start:end + 1]) * dt
+                    fft_windows[j] = (
+                        np.fft.rfft(
+                            w_t_window[start : end + 1] + w_t_noise[start : end + 1]
+                        )
+                        * dt
+                    )
+                    fft_data[j] = np.fft.rfft(data_stream[start : end + 1]) * dt
 
-            mid = int((2 * bands + 1) / 2) - 1 # second -1 for index
-            corr_mats = [np.zeros((self.num_channels, 2 * bands - 1, fft_length), dtype=np.complex128) for fft_length in fft_freqs_length]
-            for k, (fft_wind, fft_d, df, fft_length, seg_length) in enumerate(zip(fft_windows, fft_data, df_segments, fft_freqs_length, observing_segment_length)):
+            mid = int((2 * bands + 1) / 2) - 1  # second -1 for index
+            corr_mats = [
+                np.zeros(
+                    (self.num_channels, 2 * bands - 1, fft_length), dtype=np.complex128
+                )
+                for fft_length in fft_freqs_length
+            ]
+            for k, (fft_wind, fft_d, df, fft_length, seg_length) in enumerate(
+                zip(
+                    fft_windows,
+                    fft_data,
+                    df_segments,
+                    fft_freqs_length,
+                    observing_segment_length,
+                )
+            ):
                 for chan in range(self.num_channels):
-                    Sn = noise_fn[chan](np.arange(fft_length) * df, **noise_kwargs[chan])
+                    Sn = noise_fn(np.arange(fft_length) * df, **noise_kwargs)
                     Sn[0] = Sn[1]
                     for i in range(fft_length):
-                        w_i = fft_windows[k][chan][0:i+1][::-1]
+                        w_i = fft_windows[k][0 : i + 1][::-1]
 
                         if i < fft_length - (bands - 1):
                             n = bands
                         else:
                             n = fft_length - i
-                        inds = (np.tile(np.arange(i + 1), (n, 1)) + np.arange(i, i + n)[:, None] - i)[:, ::-1]
+                        inds = (
+                            np.tile(np.arange(i + 1), (n, 1))
+                            + np.arange(i, i + n)[:, None]
+                            - i
+                        )[:, ::-1]
 
                         bad = inds >= fft_length
                         inds[bad] = 0
 
-                        w_j = fft_windows[k][chan][inds]
+                        w_j = fft_windows[k][inds]
 
                         w_j[bad] = 0.0
-                        temp = 1 / (seg_length * dt) ** 2 * np.sum((Sn[:i + 1] * w_i.conj())[None, :] * w_j, axis=-1)
+                        temp = (
+                            1
+                            / (seg_length * dt) ** 2
+                            * np.sum((Sn[: i + 1] * w_i.conj())[None, :] * w_j, axis=-1)
+                        )
 
-
-                        corr_mats[k][chan, mid:mid + n, i] = temp
+                        corr_mats[k][chan, mid : mid + n, i] = temp
 
                     if bands > 1:
-                        corr_mats[k][chan, :mid] = corr_mats[k][chan, mid+1:][::-1].conj()
+                        corr_mats[k][chan, :mid] = corr_mats[k][chan, mid + 1 :][
+                            ::-1
+                        ].conj()
 
                         for b in range(0, mid):
-                            corr_mats[k][chan, b] = np.roll(corr_mats[k][chan, b], mid - b)
+                            corr_mats[k][chan, b] = np.roll(
+                                corr_mats[k][chan, b], mid - b
+                            )
 
                     print(k, chan)
-
 
         self.num_segments = num_segments
         self.start_of_observing_segments = start_of_observing_segments
@@ -315,19 +429,26 @@ class NonStationaryLikelihood(object):
             like_all = np.zeros(num_likes, dtype=np.complex128)
             for bin in range(num_likes):
                 like_bin = 0.0 + 0.0 * 1j
-                for seg, (start, end, df) in enumerate(zip(self.start_of_observing_segments, self.end_of_observing_segments, self.df_segments)):
+                for seg, (start, end, df) in enumerate(
+                    zip(
+                        self.start_of_observing_segments,
+                        self.end_of_observing_segments,
+                        self.df_segments,
+                    )
+                ):
                     like_seg = 0.0 + 0.0 * 1j
                     for chan in range(self.num_channels):
                         like_chan = 0.0 + 0.0 * 1j
-                        h_temp = h[bin, chan, start:end + 1]
+                        h_temp = h[bin, chan, start : end + 1]
                         hf_temp = self.xp.fft.rfft(h_temp) * self.dt
 
-
-                        df_temp = self.fft_data[seg][chan]
-                        cov = self.corr_mats[seg][chan]
+                        df_temp = self.fft_data[seg]
+                        cov = self.corr_mats[seg]
 
                         d_minus_h = df_temp - hf_temp
-                        x = scipy.linalg.solve_banded((self.bands - 1, self.bands - 1), cov, d_minus_h)
+                        x = scipy.linalg.solve_banded(
+                            (self.bands - 1, self.bands - 1), cov, d_minus_h
+                        )
 
                         like_chan = 4 * df * np.dot(d_minus_h.conj(), x)
 
