@@ -36,13 +36,13 @@ class NonStationaryContainer(object):
         self.bands = bands
         self.df = df = 1 / (dt * self.seg_length)
 
-        fft_window = self.xp.fft.rfft(w_t_window + w_t_noise) * dt
+        fft_window = self.xp.fft.rfft(self.xp.asarray(w_t_window + w_t_noise)) * dt
 
         self.fft_length = fft_length = len(fft_window)
 
         self.mid = mid = int((2 * bands + 1) / 2) - 1  # second -1 for index
         corr_mats = self.xp.zeros((2 * bands - 1, fft_length), dtype=self.xp.complex128)
-        Sn = noise_fn(self.xp.arange(fft_length) * df, **noise_kwargs)
+        Sn = self.xp.asarray(noise_fn(np.arange(fft_length) * df, **noise_kwargs))
 
         # TODO: make options?
         Sn[0] = Sn[1]
