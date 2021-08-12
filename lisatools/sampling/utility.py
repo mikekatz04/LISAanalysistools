@@ -229,31 +229,39 @@ class ModifiedHDFBackend(HDFBackend):
             g["betas"][iteration, :] = temps
 
 
-def rel_bin_update(it, sample_state, sampler, lnlike, nwalkers_per_temp=None, **kwargs):
+class RelBinUpdate:
+    def __init__(self, update_kwargs):
+        self.update_kwargs = update_kwargs
 
-    samples = sample_state.coords.reshape(-1, sampler.ndim)
-    lp_max = sample_state.log_prob.argmax()
-    best = samples[lp_max]
+    def __call__(self, it, sample_state, sampler, **kwargs):
 
-    sorted = np.argsort(sample_state.log_prob)
-    inds_best = sorted[-1000:]
-    inds_worst = sorted[:1000]
+        breakpoint()
+        samples = sample_state.branches_coords["mbh"].reshape(-1, sampler.ndims[0])
+        lp_max = sample_state.log_prob.argmax()
+        best = samples[lp_max]
 
-    x_current = lnlike.get_x_in(np.atleast_2d(best))
-    if lnlike.lnlike.parameter_transforms is not None:
-        x_in = lnlike.lnlike.parameter_transforms.transform_base_parameters(x_current)
+        sorted = np.argsort(sample_state.log_prob)
+        inds_best = sorted[-1000:]
+        inds_worst = sorted[:1000]
 
-    else:
-        x_in = x_current.T
+        best_full = sampler.ln_prob_fn.f.parameter_transforms.both_transforms(
+            best, copy=True
+        )
 
-    sampler.log_prob_fn.f.lnlike.template_model._init_rel_bin_info(x_in, **kwargs)
+        sampler.log_prob_fn.f.template_model._init_rel_bin_info(
+            best_full, **self.update_kwargs
+        )
 
-    sampler.log_prob_fn.f.lnlike.template_model.base_d_d = 2 * 7.5e4
-    samples[inds_worst] = samples[inds_best].copy()
-    lp, pp, dh, hh = sampler.log_prob_fn.f(samples).T
+        # sampler.log_prob_fn.f.template_model.base_d_d = 2 * 7.5e4
 
-    sample_state.coords = samples
-    sample_state.log_prob = lp
-    sample_state.blobs = np.array([pp, dh, hh]).T
+        # TODO: make this a general update function in Eryn (?)
+        samples[inds_worst] = samples[inds_best].copy()
+        samples = samples.reshape(sampler.ntemps, sampler.nwalkers, 1, sampler.ndims[0])
+        logp = sampler.compute_log_prior({"mbh": samples})
+        logL_blobs = sampler.compute_log_prob({"mbh": samples}, logp=logp)
 
-    # sampler.backend.save_step(sample_state, np.full_like(lp, True))
+        sample_state.branches["mbh"].coords = samples
+        sample_state.log_prob = logL_blobs[:, 0]
+        sample_state.blobs = logL_blobs[:, 1:]
+
+        # sampler.backend.save_step(sample_state, np.full_like(lp, True))
