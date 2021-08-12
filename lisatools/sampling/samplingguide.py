@@ -120,7 +120,6 @@ class SamplerGuide:
         self.periodic = periodic
         self.sampler_kwargs["periodic"] = self.periodic
         self.likelihood_kwargs["parameter_transforms"] = self.parameter_transforms
-        self.fill_dict = fill_dict
 
         if verbose == False:
             self.test_start_likelihood = False
@@ -301,6 +300,7 @@ class SamplerGuide:
             self._parameter_transforms[key] = TransformContainer(
                 parameter_transforms=temp_transform[key], fill_dict=temp_fill_dict[key]
             )
+        self.fill_dict = temp_fill_dict
 
     @property
     def periodic(self):
@@ -567,14 +567,14 @@ class MBHGuide(SamplerGuide):
                 )
 
             elif isinstance(relbin_template, np.ndarray):
-                if len(relbin_template) > self.fill_dict["ndim_full"]:
+                if len(relbin_template) > self.fill_dict["mbh"]["ndim_full"]:
                     raise ValueError(
                         "More parametes in relbin_template than ndim_full."
                     )
-                elif len(relbin_template) < self.fill_dict["ndim_full"]:
+                elif len(relbin_template) < self.fill_dict["mbh"]["ndim_full"]:
                     if (
-                        len(relbin_template) + len(self.fill_dict["fill_values"])
-                    ) != self.fill_dict["ndim_full"]:
+                        len(relbin_template) + len(self.fill_dict["mbh"]["fill_values"])
+                    ) != self.fill_dict["mbh"]["ndim_full"]:
                         raise ValueError(
                             "relbin_template does not have correct dimensionality."
                         )
@@ -583,9 +583,9 @@ class MBHGuide(SamplerGuide):
                         relbin_template
                     )
 
-            relbin_template = self.parameter_transforms.transform_base_parameters(
-                relbin_template
-            )
+            relbin_template = self.parameter_transforms[
+                "mbh"
+            ].transform_base_parameters(relbin_template)
 
             # TODO: update this
             dataChannels /= noiseFactors

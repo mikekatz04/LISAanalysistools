@@ -9,7 +9,7 @@ from lisatools.sampling.samplingguide import MBHGuide
 from eryn.state import State
 
 # from ldc.waveform.lisabeta import FastMBHB
-from lisatools.sampling.utility import ModifiedHDFBackend
+from eryn.backends import HDFBackend
 from lisatools.sampling.stopping import SNRStopping, SearchConvergeStopping
 
 try:
@@ -149,7 +149,7 @@ class MBHBase(PipelineModule):
             stop = SearchConvergeStopping(n_iters=self.n_iter_stop)
             stopping_iter = 10
         elif self.snr_stopping is not None:
-            stop = SNRStopping(snr_limit=self.snr_stopping)
+            stop = SNRStopping(snr_limit=self.snr_stopping, verbose=True)
             stopping_iter = 10
         else:
             stop = None
@@ -164,7 +164,7 @@ class MBHBase(PipelineModule):
             resume = False
 
         plot_name = self.fp[:-3] + "_output.pdf"
-        # TODO: ADD SUBSET AND d, h
+        # TODO: ADD SUBSET
         self.sampler_kwargs = dict(
             tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
             moves=None,
@@ -186,7 +186,7 @@ class MBHBase(PipelineModule):
         if self.search:
             start_state = None
         else:
-            reader = ModifiedHDFBackend(self.info_manager.fp_search_init)
+            reader = HDFBackend(self.info_manager.fp_search_init)
             log_prob = reader.get_log_prob().flatten()
             start_inds = np.argsort(log_prob)
             uni, inds = np.unique(log_prob[start_inds], return_index=True)
@@ -206,6 +206,7 @@ class MBHBase(PipelineModule):
         else:
             priors = None
 
+        print(info_manager.T, info_manager.dt)
         self.guide_kwargs = dict(
             dt=info_manager.dt,
             start_state=start_state,
@@ -239,7 +240,14 @@ class MBHBase(PipelineModule):
 
 class MBHRelBinSearch(PipelineModule):
     def initialize_module(
-        self, fp_search_rel_bin, nwalkers, ntemps, use_gpu=False, **kwargs
+        self,
+        fp_search_rel_bin,
+        nwalkers,
+        ntemps,
+        n_iter_stop=None,
+        n_iter_update=None,
+        use_gpu=False,
+        **kwargs
     ):
         self.nwalkers = nwalkers
         self.ntemps = ntemps
@@ -256,23 +264,6 @@ class MBHRelBinSearch(PipelineModule):
     def update_module(self, info_manager, *args, **kwargs):
         self.info_manager = info_manager
 
-        reader = ModifiedHDFBackend(self.info_manager.fp_search_init)
-        log_prob = reader.get_log_prob().flatten()
-        start_inds = np.argsort(log_prob)
-        uni, inds = np.unique(log_prob[start_inds], return_index=True)
-        start_inds = start_inds[inds[-int(self.ntemps * self.nwalkers) :]]
-
-        print(log_prob[start_inds])
-
-        ndim = 11
-        ndim_full = 13
-        test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
-
-        start_state = reader.get_chain().reshape(-1, ndim)[start_inds]
-
-        relbin_template = np.zeros(ndim_full)
-        relbin_template[test_inds] = start_state[-1]
-
         self.template_kwargs = dict(
             tBase=0.0,
             t_obs_start=1.0,
@@ -283,7 +274,7 @@ class MBHRelBinSearch(PipelineModule):
         )
 
         # relbin_template = "multi"
-        from lisatools.sampling.utility import rel_bin_update
+        from lisatools.sampling.utility import RelBinUpdate
 
         update_kwargs = dict(
             template_gen_kwargs=self.template_kwargs.copy(),
@@ -291,23 +282,50 @@ class MBHRelBinSearch(PipelineModule):
             noise_kwargs_T={},
         )
 
-        ll_stop = SearchConvergeStopping(n_iters=30)
-        print("\n\ncheck it  22222222\n\n")
+        rel_bin_update = RelBinUpdate(update_kwargs)
+
+        ll_stop = SearchConvergeStopping(n_iters=30, verbose=True)
+
+        plot_name = self.fp_search_rel_bin[:-3] + "_output.pdf"
+
         self.sampler_kwargs = dict(
-            lnlike_kwargs=dict(waveform_kwargs=self.template_kwargs),
-            fp=self.fp_search_rel_bin,
-            resume=False,
-            plot_iterations=-1,
-            stopping_iter=20,
+            tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
+            moves=None,
+            args=None,
+            kwargs=self.template_kwargs,
+            backend=self.fp_search_rel_bin,
+            vectorize=True,
+            autocorr_multiplier=10000,  # TODO: adjust this to 50
+            plot_iterations=100,
+            plot_name=plot_name,
             stopping_fn=ll_stop,
-            plot_source="mbh",
-            ntemps=self.ntemps,
-            get_d_h=True,
-            autocorr_multiplier=10000,
-            update_kwargs=update_kwargs,
+            stopping_iterations=250,
             update_fn=rel_bin_update,
-            update=1000,
+            update_iterations=1000,
+            info={},
+            branch_names=["mbh"],
+            # subset=int(self.nwalkers / 2),
         )
+
+        # TODO: change this
+        ndim = 11
+
+        reader = HDFBackend(self.info_manager.fp_search_init)
+        log_prob = reader.get_log_prob().flatten()
+        start_inds = np.argsort(log_prob)
+        uni, inds = np.unique(log_prob[start_inds], return_index=True)
+        start_inds = start_inds[inds[-int(self.ntemps * self.nwalkers) :]]
+
+        print(log_prob[start_inds])
+
+        start_points = reader.get_chain()["mbh"].reshape(-1, ndim)[start_inds]
+
+        start_state = State(
+            {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
+        )
+        # start_state = reader.get_chain()['mbh'][-1, :2].reshape(-1, ndim)
+
+        relbin_template = start_points[-1]
 
         if "priors" in kwargs:
             priors = kwargs["priors"]
@@ -330,16 +348,20 @@ class MBHRelBinSearch(PipelineModule):
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             priors=priors,
+            global_fit=False,
         )
 
-        self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
+        self.mbh_guide = MBHGuide(self.nwalkers, **self.guide_kwargs)
 
         # TODO: remove
-        self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
+        # self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
         print(self.mbh_guide.lnprob.template_model.base_d_d)
 
     def run_module(self, *args, progress=False, **kwargs):
-        self.mbh_guide.run_sampler(thin=10, iterations=100000, progress=progress)
+        print(progress, "progress")
+        self.mbh_guide.run_sampler(
+            self.mbh_guide.start_state, 10000, thin_by=5, progress=progress
+        )
         self.update_information(self.info_manager, self.fp_search_rel_bin)
 
 
@@ -362,7 +384,7 @@ class MBHRelBinPE(PipelineModule):
     def update_module(self, info_manager, *args, **kwargs):
         self.info_manager = info_manager
 
-        reader = ModifiedHDFBackend(self.info_manager.fp_search)
+        reader = HDFBackend(self.info_manager.fp_search)
         log_prob = reader.get_log_prob().flatten()
         start_inds = np.argsort(log_prob)
         uni, inds = np.unique(log_prob[start_inds], return_index=True)
