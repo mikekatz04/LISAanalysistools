@@ -11,11 +11,10 @@ import matplotlib.pyplot as plt
 #%matplotlib inline
 
 from bbhx.utils.waveformbuild import BBHWaveform
-from lisatools.utils.transform import tLfromSSBframe, TransformContainer
+from lisatools.utils.transform import tLfromSSBframe
 from scipy import constants as ct
 from lisatools.diagnostic import *
 from lisatools.sampling.likelihood import Likelihood
-from lisatools.sampling.samplers.ptemcee import PTEmceeSampler
 from bbhx.utils.likelihood import Likelihood as MBHLikelihood
 from bbhx.utils.likelihood import RelativeBinning
 from lisatools.sensitivity import get_sensitivity
@@ -27,10 +26,14 @@ from lisatools.utils.transform import (
     transfer_tref,
     mbh_sky_mode_transform,
 )
-from lisatools.sampling.prior import uniform_dist
-from lisatools.sampling.utility import ModifiedHDFBackend
+from eryn.prior import uniform_dist
+from eryn.backends import HDFBackend
 from lisatools.utils.constants import *
-from lisatools.sampling.prior import PriorContainer
+from eryn.prior import PriorContainer
+from eryn.utils import TransformContainer, PeriodicContainer
+from eryn.state import State
+from eryn.ensemble import EnsembleSampler
+from eryn.backends import HDFBackend
 
 from gbgpu.gbgpu import GBGPU
 
@@ -48,14 +51,14 @@ except (ModuleNotFoundError, ImportError):
 class SamplerGuide:
     def __init__(
         self,
-        nwalkers_all,
-        start_points=None,
+        nwalkers,
+        start_state=None,
         include_precession=False,
         priors=None,
         sampler_kwargs={},
         data=None,
         injection_params=None,
-        test_inds=None,
+        fill_dict=None,
         likelihood_kwargs={},
         injection_setup_kwargs={},
         waveform_kwargs={},
@@ -83,7 +86,6 @@ class SamplerGuide:
 
         self.start_factor = start_factor
 
-        self.nwalkers_all = nwalkers_all
         self.include_precession = include_precession
         self.injection_params = injection_params
         self.data = data
@@ -102,70 +104,108 @@ class SamplerGuide:
 
         self.sampler_kwargs = sampler_kwargs
 
-        self.initial_setup(priors, start_points, test_inds)
+        self.nwalkers = nwalkers
+        if "tempering_kwargs" in self.sampler_kwargs:
+            if "ntemps" in self.sampler_kwargs["tempering_kwargs"]:
+                self.ntemps = self.sampler_kwargs["tempering_kwargs"]["ntemps"]
+            elif "betas" in self.sampler_kwargs["tempering_kwargs"]:
+                self.ntemps = len(self.sampler_kwargs["tempering_kwargs"]["betas"])
+        else:
+            self.ntemps = 1
 
-        self.parameter_transforms = parameter_transforms
+        self.initial_setup(priors, start_state)
+
+        self._set_parameter_transforms(parameter_transforms, fill_dict)
 
         self.periodic = periodic
         self.sampler_kwargs["periodic"] = self.periodic
         self.likelihood_kwargs["parameter_transforms"] = self.parameter_transforms
-        self.sampler_kwargs["test_inds"] = self.test_inds
-        self.sampler_kwargs["fill_values"] = self.fill_values
+        self.fill_dict = fill_dict
 
         if verbose == False:
             self.test_start_likelihood = False
         else:
             self.test_start_likelihood = True
 
-    def initial_setup(self, priors, start_points, test_inds):
+    def initial_setup(self, priors, start_state):
 
         self.priors = priors
-        self.set_test_inds_info(test_inds)
-        self.start_points = start_points
+        self.start_state = start_state
 
     @property
-    def start_points(self):
-        return self._start_points
+    def start_state(self):
+        return self._start_state
 
-    @start_points.setter
-    def start_points(self, start_points):
+    @start_state.setter
+    def start_state(self, start_state):
         if "resume" in self.sampler_kwargs and self.sampler_kwargs["resume"]:
-            reader = ModifiedHDFBackend(self.sampler_kwargs["fp"])
-            self._start_points = reader.get_last_sample().coords.reshape(-1, self.ndim)
+            reader = HDFBackend(self.sampler_kwargs["fp"])
+            self._start_state = reader.get_last_sample()
 
-        elif isinstance(start_points, str) or start_points is None:
-            if start_points == "prior" or start_points is None:
-                self._start_points = self.priors.rvs(size=self.nwalkers_all)
+        elif isinstance(start_state, State):
+            self._start_state = start_state
 
-            elif start_points == "fisher":
+        elif isinstance(start_state, str) or start_state is None:
+            if start_state == "prior" or start_state is None:
+                self._start_state = State(
+                    {
+                        key: self.priors[key].rvs(
+                            size=(self.ntemps, self.nwalkers, self.nleaves_max[i])
+                        )
+                        for i, key in enumerate(self.priors)
+                    }
+                )
+
+            elif start_state == "fisher":
                 if self.start_mean is None or self.cov is None:
                     raise ValueError(
                         "If generating points from fisher matrix, must store start_mean and cov attributes."
                     )
-                self._start_points = np.zeros((self.nwalkers_all, self.ndim))
-                inds_fix = np.arange(self.nwalkers_all)
+                coords_all = {}
+                for i, key in enumerate(self.branch_names):
 
-                num_max_iter = 10000
-                iter_num = 0
-                while len(inds_fix) > 0:
-                    if iter_num > num_max_iter:
-                        raise RuntimeError(
-                            "Covariance matrix walker generation is not generating walkers in the prior range."
-                        )
-                    self._start_points[inds_fix] = np.random.multivariate_normal(
-                        self.start_mean,
-                        self.start_factor * self.cov,
-                        size=len(inds_fix),
+                    coords_all[key] = np.zeros(
+                        self.ntemps,
+                        self.nwalkers,
+                        self.nleaves_max[i],
+                        self.default_ndims[i],
                     )
+                    for t in range(self.ntemps):
+                        for w in range(self.nwalkers):
+                            for l in range(nleaves_max):
+                                if l >= len(self.start_mean):
+                                    continue
 
-                    inds_fix = np.where(
-                        np.isinf(self.priors.logpdf(self._start_points))
-                    )[0]
+                                coords = np.zeros(
+                                    (self.nleaves_max[i], self.default_ndims[i],)
+                                )
+                                inds_fix = np.arange(self.nleaves_max[i])
 
-                    iter_num += 1
+                                num_max_iter = 1000
+                                iter_num = 0
+                                while len(inds_fix) > 0:
+                                    if iter_num > num_max_iter:
+                                        raise RuntimeError(
+                                            "Covariance matrix walker generation is not generating walkers in the prior range."
+                                        )
+                                    coords[inds_fix] = np.random.multivariate_normal(
+                                        self.start_mean[l],
+                                        self.start_factor * self.cov[l],
+                                        size=len(inds_fix),
+                                    )
 
-        elif isinstance(start_points, np.ndarray):
-            self._start_points = start_points
+                                    inds_fix = np.where(
+                                        np.isinf(self.priors.logpdf(self._start_state))
+                                    )[0]
+
+                                    iter_num += 1
+                                coords_all[key][t, w, l] = coords
+
+                self._start_state = State(coords_all)
+
+        elif isinstance(start_state, np.ndarray):
+            start_state = {self.branch_names[0]: start_state}
+            self._start_state = State(start_state)
 
         else:
             raise ValueError(
@@ -183,42 +223,16 @@ class SamplerGuide:
 
         elif isinstance(priors, dict):
             temp = self.default_priors.priors_in
-            for ind, distribution in priors.items():
-                temp[ind] = distribution
-            self._priors = PriorContainer(temp)
+            for key, priors_sub in priors.items():
+                for ind, distribution in priors_sub.items():
+                    temp[key][ind] = distribution
+
+            self._priors = {name: PriorContainer(temp[name]) for name in temp}
 
         else:
             raise ValueError(
                 "If providing a prior, it must be dictionary to add specific priors into the defaults."
             )
-
-    def set_test_inds_info(self, value):
-        if value is None:
-            self.test_inds = self.default_test_inds
-            self.ndim = len(self.test_inds)
-            self.fill_inds = self.default_fill_inds
-            self.fill_values = self.default_fill_values
-            return
-
-        elif isinstance(value, np.ndarray):
-            pass
-        elif isinstance(value, list):
-            value = np.asarray(value)
-        else:
-            raise ValueError(
-                "test_inds, if provided, needs to be either an np.ndarray or list of indices."
-            )
-
-        if hasattr(self, injection) is False or self.injection is None:
-            raise ValueError(
-                "If providing test_inds, need to provide an injection to get the fill values."
-            )
-
-        self.test_inds = value
-        self.ndim = len(self.test_inds)
-        self.fill_values = np.delete(self.injection, self.test_inds)
-        self.fill_inds = np.delete(self.default_ndim_fill, self.test_inds)
-        return
 
     @property
     def lnprob(self):
@@ -232,38 +246,61 @@ class SamplerGuide:
 
     def perform_test_start_likelihood(self):
         # test starting points:
-        test_start = np.zeros((self.start_points.shape[0], self.default_ndim_full))
-        test_start[:, self.test_inds] = self.start_points
 
-        if self.fill_inds != np.array([]):
-            test_start[:, self.fill_inds] = self.fill_values
-
-        if "subset" in self.sampler_kwargs:
-            pts_in = test_start[: self.sampler_kwargs["subset"]]
-
+        if not self.global_fit:
+            check = self.sampler.compute_log_prob(self.start_state.branches_coords)
         else:
-            pts_in = test_start
+            raise NotImplementedError(
+                "You can check this with the `compute_log_prob` in the sampler."
+            )
 
-        check = self.lnprob.get_ll(pts_in, waveform_kwargs=self.waveform_kwargs)
         print(check)
 
     @property
     def parameter_transforms(self):
         return self._parameter_transforms
 
-    @parameter_transforms.setter
-    def parameter_transforms(self, transform_in):
-        temp = self.default_parameter_transforms
+    def _set_parameter_transforms(self, transform_in, fill_dict_in):
+        temp_transform = self.default_parameter_transforms
+
         if transform_in is None:
             pass
         elif isinstance(transform_in, dict):
-            for ind, fn in transform_in.items():
-                temp[ind] = fn
+            for key, transform_in_sub in transform_in.items():
+                if isinstance(transform_in_sub, TransformContainer):
+                    temp_transform[key] = transform_in_sub
+                elif (isinstance, dict):
+                    for ind, fn in transform_in.items():
+                        temp_transform[key][ind] = fn
+                else:
+                    raise ValueError(
+                        "If providing dict for transform_in, must contain dictionaries or TransformContainer as values."
+                    )
         else:
             raise ValueError(
-                "Transfor function should either be None or dict with index-fn pairs."
+                "Transform function should either be None or dict with index-fn pairs."
             )
-        self._parameter_transforms = TransformContainer(temp)
+
+        temp_fill_dict = self.default_fill_dict
+        if fill_dict_in is None:
+            pass
+        elif isinstance(fill_dict_in, dict):
+            for key, fill_dict_in_sub in transform_in.items():
+                for ind, fn in fill_dict_in_sub.items():
+                    temp_fill_dict[key][ind] = fn
+
+        else:
+            raise ValueError(
+                "fill_dict_in should either be None or dict with index-fn pairs."
+            )
+
+        assert len(temp_fill_dict.keys()) == len(temp_transform.keys())
+
+        self._parameter_transforms = {}
+        for key in temp_transform:
+            self._parameter_transforms[key] = TransformContainer(
+                parameter_transforms=temp_transform[key], fill_dict=temp_fill_dict[key]
+            )
 
     @property
     def periodic(self):
@@ -271,106 +308,93 @@ class SamplerGuide:
 
     @periodic.setter
     def periodic(self, periodic_in):
-        self._periodic = self.default_periodic
+        temp_periodic = self.default_periodic.periodic
         if periodic_in is None:
             pass
 
         # TODO: make every parameter periodic?
-        elif isinstance(transform_in, dict):
-            self._periodic = periodic_in
+        elif isinstance(periodic_in, dict):
+            for key, periodic_temp_sub in temp_periodic.items():
+                if isinstance(periodic_temp_sub, PeriodicContainer):
+                    temp_periodic[key] = periodic_temp_sub
+                elif (isinstance, dict):
+                    for ind, fn in transform_in.items():
+                        temp_periodic[key][ind] = fn
+                else:
+                    raise ValueError(
+                        "If providing dict for periodic_in, must contain dictionaries or PeriodicContainer as values."
+                    )
+
         else:
             raise ValueError(
-                "Transfor function should either be None or dict with index-fn pairs."
+                "Periodic function should either be None or dict with index-fn pairs."
             )
+        self._periodic = PeriodicContainer(temp_periodic)
 
     def setup_sampler(self):
 
-        if "ntemps" in self.sampler_kwargs:
-            ntemps = self.sampler_kwargs["ntemps"]
-        else:
-            ntemps = 1
-
-        self.nwalkers = int(self.nwalkers_all / ntemps)
-
-        # TODO: fix this
-        self.sampler_kwargs["sampler_kwargs"] = {}
-        self.sampler = PTEmceeSampler(
+        self.sampler = EnsembleSampler(
             self.nwalkers,
-            self.ndim,
-            self.default_ndim_full,
+            self.default_ndims,  # assumes ndim_max
             self.lnprob,
             self.priors,
             **self.sampler_kwargs,
         )
 
-    def run_sampler(self, thin_by=1, iterations=10000, progress=True, **kwargs):
-        self.sampler.sample(
-            self.start_points,
-            thin_by=thin_by,
-            iterations=iterations,
-            progress=progress,
-            **kwargs,
-        )
+        self.run_sampler = self.sampler.run_mcmc
 
 
 class MBHGuide(SamplerGuide):
     @property
     def default_priors(self):
         default_priors = {
-            0: uniform_dist(np.log(5e5), np.log(5e7)),
-            1: uniform_dist(0.01, 0.999999999),
-            2: uniform_dist(-0.99999999, +0.99999999),
-            3: uniform_dist(-0.99999999, +0.99999999),
-            4: uniform_dist(0.01, 1000.0),
-            5: uniform_dist(0.0, 2 * np.pi),
-            6: uniform_dist(-1.0, 1.0),
-            7: uniform_dist(0.0, 2 * np.pi),
-            8: uniform_dist(-1.0, 1.0),
-            9: uniform_dist(0.0, np.pi),
-            10: uniform_dist(0.0, self.Tobs),
+            "mbh": PriorContainer(
+                {
+                    0: uniform_dist(np.log(5e5), np.log(5e7)),
+                    1: uniform_dist(0.01, 0.999999999),
+                    2: uniform_dist(-0.99999999, +0.99999999),
+                    3: uniform_dist(-0.99999999, +0.99999999),
+                    4: uniform_dist(0.01, 1000.0),
+                    5: uniform_dist(0.0, 2 * np.pi),
+                    6: uniform_dist(-1.0, 1.0),
+                    7: uniform_dist(0.0, 2 * np.pi),
+                    8: uniform_dist(-1.0, 1.0),
+                    9: uniform_dist(0.0, np.pi),
+                    10: uniform_dist(0.0, self.Tobs),
+                }
+            )
         }
 
         if hasattr(self, "include_precession") and self.include_precession:
             raise NotImplementedError
 
-        default_priors = PriorContainer(default_priors)
-
         return default_priors
 
     @property
-    def default_ndim(self):
+    def default_ndims(self):
         if hasattr(self, "include_precession") and self.include_precession:
-            return 15
+            return [15]
 
-        return 11
+        return [11]
 
     @property
-    def default_ndim_full(self):
+    def default_fill_dict(self):
         if hasattr(self, "include_precession") and self.include_precession:
-            return 17
-
-        return 13
-
-    @property
-    def default_test_inds(self):
-        if hasattr(self, "include_precession") and self.include_precession:
-            return np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15])
-
-        return np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
-
-    @property
-    def default_fill_inds(self):
-        if hasattr(self, "include_precession") and self.include_precession:
-            return np.array([6, 16])
-
-        return np.array([6, 12])
-
-    @property
-    def default_fill_values(self):
-        if hasattr(self, "include_precession") and self.include_precession:
-            return np.array([0.0, 0.0])
-
-        return np.array([0.0, 0.0])
+            return {
+                "mbh": {
+                    "fill_inds": np.array([6, 16]),
+                    "fill_values": np.array([0.0, 0.0]),
+                    "ndim_full": 17,
+                }
+            }
+        else:
+            return {
+                "mbh": {
+                    "fill_inds": np.array([6, 12]),
+                    "fill_values": np.array([0.0, 0.0]),
+                    "ndim_full": 13,
+                }
+            }
 
     @property
     def default_injection_setup_kwargs(self):
@@ -388,17 +412,19 @@ class MBHGuide(SamplerGuide):
     @property
     def default_parameter_transforms(self):
         parameter_transforms = {
-            0: (lambda x: np.exp(x)),
-            (0, 1): mT_q,
-            4: (lambda x: x * PC_SI * 1e9),
-            7: (lambda x: np.arccos(x)),
-            9: (lambda x: np.arcsin(x)),
+            "mbh": {
+                0: (lambda x: np.exp(x)),
+                (0, 1): mT_q,
+                4: (lambda x: x * PC_SI * 1e9),
+                7: (lambda x: np.arccos(x)),
+                9: (lambda x: np.arcsin(x)),
+            }
         }
 
-        parameter_transforms[(11, 12)] = transfer_tref
+        parameter_transforms["mbh"][(11, 12)] = transfer_tref
 
         if self.sampler_frame == "LISA":
-            parameter_transforms[(11, 8, 9, 10)] = LISA_to_SSB(0.0)
+            parameter_transforms["mbh"][(11, 8, 9, 10)] = LISA_to_SSB(0.0)
 
         return parameter_transforms
 
@@ -407,7 +433,7 @@ class MBHGuide(SamplerGuide):
         if hasattr(self, "include_precession") and self.include_precession:
             raise NotImplementedError
 
-        return {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
+        return PeriodicContainer({"mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}})
 
     @property
     def default_relbin_kwargs(self):
@@ -431,6 +457,7 @@ class MBHGuide(SamplerGuide):
         self,
         *args,
         include_precession=False,
+        global_fit=False,
         amp_phase_kwargs={},
         response_kwargs={},
         sampler_frame="LISA",
@@ -447,6 +474,11 @@ class MBHGuide(SamplerGuide):
         **kwargs,
     ):
 
+        self.global_fit = global_fit
+        if global_fit:
+            raise NotImplementedError
+
+        self.nleaves_max = [1]
         self.sampler_frame = sampler_frame
         self.include_precession = include_precession
         self.nchannels = 3
@@ -466,16 +498,20 @@ class MBHGuide(SamplerGuide):
             kwargs["likelihood_kwargs"] = {}
         kwargs["likelihood_kwargs"]["f_arr"] = f_arr
 
+        kwargs["likelihood_kwargs"]["transpose_params"] = True
+
         SamplerGuide.__init__(self, *args, use_gpu=use_gpu, **kwargs)
 
         if multi_mode_start:
-            self.start_points = mbh_sky_mode_transform(
-                self.start_points,
+            self.start_state.branches_coords["mbh"] = mbh_sky_mode_transform(
+                self.start_state.branches_coords["mbh"].reshape(
+                    -1, self.default_ndims[0]
+                ),
                 cos_i=True,
                 inplace=True,
                 ind_map=dict(inc=6, lam=7, beta=8, psi=9),
                 kind="both",
-            )
+            ).reshape(self.ntemps, self.nwalkers, 1, -1)
 
         bbh = BBHWaveform(
             response_kwargs=response_kwargs,
@@ -492,6 +528,9 @@ class MBHGuide(SamplerGuide):
         dataChannels = self.xp.asarray(self.lnprob.injection_channels)
 
         if relbin:
+            if self.global_fit:
+                raise ValueError("Cannot do relative binning for global fit.")
+
             if relbin_args is None:
                 relbin_args = self.default_relbin_args
             if relbin_kwargs is None:
@@ -501,48 +540,48 @@ class MBHGuide(SamplerGuide):
                 raise ValueError(
                     "When using relative binning, relbin_template must be set to 'multi', 'single', or it must be an array of start points."
                 )
-            elif relbin_template in ["multi", "single"]:
+            elif relbin_template == "single":
                 if "resume" in self.sampler_kwargs and self.sampler_kwargs["resume"]:
-                    reader = ModifiedHDFBackend(self.sampler_kwargs["fp"])
-                    if relbin_template == "single":
-                        best_ind = reader.get_log_prob().argmax()
-                        relbin_template = np.zeros(self.default_ndim_full)
-                        relbin_template[self.test_inds] = reader.get_chain().reshape(
-                            -1, self.ndim
-                        )[best_ind]
-                        relbin_template[self.fill_inds] = self.fill_values
+                    reader = HDFBackend(self.sampler_kwargs["fp"])
+                    best_ind = np.where(
+                        reader.get_log_prob().max() == reader.get_log_prob()
+                    )
+                    # assumes mbhs are only or first in dataset
+                    relbin_template = reader.get_chain()
+                    relbin_template = relbin_template[list(relbin_template.keys())[0]][
+                        best_ind
+                    ][0]
+                    relbin_template = self.parameter_transforms["mbh"].fill_values(
+                        relbin_template
+                    )
 
-                    else:
-                        temp = reader.get_log_prob().flatten()
-                        sort = np.argsort(temp)
-                        nwalkers_all = len(self.start_points)
-                        best_ind = sort[-nwalkers_all:]
-                        relbin_template = np.zeros(
-                            (nwalkers_all, self.default_ndim_full)
-                        )
-                        relbin_template[:, self.test_inds] = reader.get_chain().reshape(
-                            -1, self.ndim
-                        )[best_ind]
-                        relbin_template[:, self.fill_inds] = self.fill_values
-                        relbin_template = relbin_template.T
                 else:
-                    if relbin_template == "single":
-                        relbin_template = np.zeros(self.default_ndim_full)
-                        relbin_template[self.test_inds] = self.start_points[0]
-                        relbin_template[self.fill_inds] = self.fill_values
-
-                    else:
-                        nwalkers_all = len(self.start_points)
-                        relbin_template = np.zeros(
-                            (nwalkers_all, self.default_ndim_full)
-                        )
-                        relbin_template[:, self.test_inds] = self.start_points.copy()
-                        relbin_template[:, self.fill_inds] = self.fill_values
+                    relbin_template = self.start_state.branches_coords["mbh"][0, 0, 0]
+                    relbin_template = self.parameter_transforms["mbh"].fill_values(
+                        relbin_template
+                    )
 
             elif not isinstance(relbin_template, np.ndarray):
                 raise ValueError(
                     "When using relative binning, relbin_template must be set to 'multi', 'single', or it must be an array of start points."
                 )
+
+            elif isinstance(relbin_template, np.ndarray):
+                if len(relbin_template) > self.fill_dict["ndim_full"]:
+                    raise ValueError(
+                        "More parametes in relbin_template than ndim_full."
+                    )
+                elif len(relbin_template) < self.fill_dict["ndim_full"]:
+                    if (
+                        len(relbin_template) + len(self.fill_dict["fill_values"])
+                    ) != self.fill_dict["ndim_full"]:
+                        raise ValueError(
+                            "relbin_template does not have correct dimensionality."
+                        )
+
+                    relbin_template = self.parameter_transforms["mbh"].fill_values(
+                        relbin_template
+                    )
 
             relbin_template = self.parameter_transforms.transform_base_parameters(
                 relbin_template
@@ -569,14 +608,15 @@ class MBHGuide(SamplerGuide):
                 dataChannels,
                 noiseFactors,
                 use_gpu=use_gpu,
+                return_extracted_snr=True,
             )
 
         self.lnprob = mbh_like
 
+        self.setup_sampler()
+
         if self.test_start_likelihood:
             self.perform_test_start_likelihood()
-
-        self.setup_sampler()
 
 
 class GBGuide(SamplerGuide):
@@ -742,28 +782,28 @@ class GBGuide(SamplerGuide):
 
         return labels
 
-    def adjust_start_points(self):
+    def adjust_start_state(self):
         if hasattr(self, "include_fddot") and self.include_fddot:
             ind_change = 1
         else:
             ind_change = 0
 
-        self.start_points[:, 3 + ind_change] = self.start_points[:, 3 + ind_change] % (
+        self.start_state[:, 3 + ind_change] = self.start_state[:, 3 + ind_change] % (
             2 * np.pi
         )
-        self.start_points[:, 5 + ind_change] = self.start_points[:, 5 + ind_change] % (
+        self.start_state[:, 5 + ind_change] = self.start_state[:, 5 + ind_change] % (
             np.pi
         )
-        self.start_points[:, 6 + ind_change] = self.start_points[:, 6 + ind_change] % (
+        self.start_state[:, 6 + ind_change] = self.start_state[:, 6 + ind_change] % (
             2 * np.pi
         )
 
         if self.include_third:
-            self.start_points[:, -1] = np.abs(self.start_points[:, -1])
-            self.start_points[:, -4] = np.abs(self.start_points[:, -4])
-            self.start_points[:, 9] = self.start_points[:, 9] % (2 * np.pi)
-            self.start_points[:, 10] = np.abs(self.start_points[:, 10])
-            self.start_points[:, 10] = np.clip(self.start_points[:, 10], 0.02, 0.7)
+            self.start_state[:, -1] = np.abs(self.start_state[:, -1])
+            self.start_state[:, -4] = np.abs(self.start_state[:, -4])
+            self.start_state[:, 9] = self.start_state[:, 9] % (2 * np.pi)
+            self.start_state[:, 10] = np.abs(self.start_state[:, 10])
+            self.start_state[:, 10] = np.clip(self.start_state[:, 10], 0.02, 0.7)
 
     @property
     def default_inner_product_kwargs(self):
@@ -874,7 +914,7 @@ class GBGuide(SamplerGuide):
             ]
             kwargs["data"] = [A_inj, E_inj]
 
-        if "start_points" in kwargs and kwargs["start_points"] == "fisher":
+        if "start_state" in kwargs and kwargs["start_state"] == "fisher":
             mean = injection_params[self.default_test_inds]
 
             fish_kwargs = template_kwargs.copy()
@@ -896,7 +936,7 @@ class GBGuide(SamplerGuide):
             self.perform_test_start_likelihood()
 
         self.setup_sampler()
-        self.adjust_start_points()
+        self.adjust_start_state()
         # check = self.lnprob.get_ll(
         #    np.array([injection_params]), waveform_kwargs=template_kwargs
         # )
@@ -1206,7 +1246,7 @@ class EMRIGuide(SamplerGuide):
             ]
             kwargs["data"] = [A_inj, E_inj]
 
-        if "start_points" in kwargs and kwargs["start_points"] == "fisher":
+        if "start_state" in kwargs and kwargs["start_state"] == "fisher":
             mean = injection_params[self.default_test_inds]
 
             fish_kwargs = template_kwargs.copy()
@@ -1228,7 +1268,7 @@ class EMRIGuide(SamplerGuide):
             self.perform_test_start_likelihood()
 
         self.setup_sampler()
-        self.adjust_start_points()
+        self.adjust_start_state()
         # check = self.lnprob.get_ll(
         #    np.array([injection_params]), waveform_kwargs=template_kwargs
         # )
@@ -1278,7 +1318,7 @@ if __name__ == "__main__":
 
     kwargs = dict(
         dt=dt,
-        start_points="fisher",
+        start_state="fisher",
         Tobs=Tobs,
         sampler_kwargs=sampler_kwargs,
         likelihood_kwargs=dict(separate_d_h=False),
@@ -1441,21 +1481,19 @@ if __name__ == "__main__":
                 )
 
                 factor = 1
-                start_points = injection_params[
+                start_state = injection_params[
                     np.newaxis, test_inds
                 ] + factor * np.random.multivariate_normal(
                     np.zeros(len(test_inds)), cov, size=nwalkers
                 )
 
-                start_points_check = np.zeros((start_points.shape[0], ndim_full))
+                start_state_check = np.zeros((start_state.shape[0], ndim_full))
 
-                start_points_check[:, test_inds] = start_points
-                start_points_check[:, fill_inds] = fill_values
+                start_state_check[:, test_inds] = start_state
+                start_state_check[:, fill_inds] = fill_values
 
                 check = [
-                    like.get_ll(
-                        start_points_check[:subset], waveform_kwargs=wave_kwargs
-                    )
+                    like.get_ll(start_state_check[:subset], waveform_kwargs=wave_kwargs)
                 ]
 
                 # setup sampler
@@ -1484,7 +1522,7 @@ if __name__ == "__main__":
                 max_iter = 20000
 
                 sampler.sample(
-                    start_points,
+                    start_state,
                     iterations=max_iter,
                     progress=False,
                     skip_initial_state_check=False,

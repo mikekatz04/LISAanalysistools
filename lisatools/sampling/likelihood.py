@@ -23,12 +23,13 @@ class Likelihood(object):
         separate_d_h=False,
         return_cupy=False,
         fill_data_noise=False,
+        transpose_params=False,
     ):
+
+        self.transpose_params = transpose_params
         self.template_model = template_model
 
         self.parameter_transforms = parameter_transforms
-        if not isinstance(self.parameter_transforms, list):
-            self.parameter_transforms = [self.parameter_transforms]
 
         self.fill_data_noise = fill_data_noise
 
@@ -295,17 +296,21 @@ class Likelihood(object):
         """
         if self.parameter_transforms is not None:
             for i, (params_i, transform_i) in enumerate(
-                zip(params, self.parameter_transforms)
+                zip(params, self.parameter_transforms.values())
             ):
-                params_temp = transform_i.transform_base_parameters(params_i.copy())
-                params[i] = transform_i.fill_values(params_temp)
+                params_temp = transform_i.fill_values(params_i.copy())
+                params[i] = transform_i.transform_base_parameters(params_temp)
 
         else:
-            params = [params_i.T for params_i in params]
+            params = [params_i for params_i in params]
+
+        if self.transpose_params:
+            params = [arr.T for arr in params]
 
         args_in = params + list(args)
         if self.fill_data_noise:
             args_in += [self.injection_channels, self.noise_factor]
+
         return self.get_ll(*args_in, **kwargs)
 
         # TODO add Subset

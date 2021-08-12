@@ -6,6 +6,8 @@ import h5py
 from lisatools.utils.utility import AET
 from lisatools.sampling.samplingguide import MBHGuide
 
+from eryn.state import State
+
 # from ldc.waveform.lisabeta import FastMBHB
 from lisatools.sampling.utility import ModifiedHDFBackend
 from lisatools.sampling.stopping import SNRStopping, SearchConvergeStopping
@@ -161,23 +163,28 @@ class MBHBase(PipelineModule):
             burn = 1000
             resume = False
 
+        plot_name = self.fp[:-3] + "_output.pdf"
+        # TODO: ADD SUBSET AND d, h
         self.sampler_kwargs = dict(
-            lnlike_kwargs=dict(waveform_kwargs=self.template_kwargs),
-            fp=self.fp,
-            resume=resume,
+            tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
+            moves=None,
+            args=None,
+            kwargs=self.template_kwargs,
+            backend=self.fp,
+            vectorize=True,
+            autocorr_multiplier=10000,  # TODO: adjust this to 50
             plot_iterations=100,
-            stopping_iter=stopping_iter,
+            plot_name=plot_name,
             stopping_fn=stop,
-            plot_source="mbh",
-            ntemps=self.ntemps,
-            get_d_h=True,
-            subset=int(self.nwalkers / 2),
-            autocorr_multiplier=10000,
-            burn=burn,
+            stopping_iterations=stopping_iter,
+            info={},
+            branch_names=["mbh"],
+            # subset=int(self.nwalkers / 2),
         )
 
+        ndim = 11
         if self.search:
-            start_points = None
+            start_state = None
         else:
             reader = ModifiedHDFBackend(self.info_manager.fp_search_init)
             log_prob = reader.get_log_prob().flatten()
@@ -187,15 +194,12 @@ class MBHBase(PipelineModule):
 
             print(log_prob[start_inds])
 
-            ndim = 11
-            ndim_full = 13
-            test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
+            start_points = reader.get_chain()["mbh"].reshape(-1, ndim)[start_inds]
 
-            # start_points = reader.get_chain().reshape(-1, ndim)[start_inds]
-            start_points = reader.get_chain()[-1, :2].reshape(-1, ndim)
+            start_state = State({"mbh": start_points})
+            # start_state = reader.get_chain()['mbh'][-1, :2].reshape(-1, ndim)
 
-            relbin_template = np.zeros(ndim_full)
-            relbin_template[test_inds] = start_points[-1]
+            relbin_template = start_points[-1]
 
         if "priors" in kwargs:
             priors = kwargs["priors"]
@@ -204,7 +208,7 @@ class MBHBase(PipelineModule):
 
         self.guide_kwargs = dict(
             dt=info_manager.dt,
-            start_points=start_points,
+            start_state=start_state,
             Tobs=info_manager.T * info_manager.dt,
             f_arr=info_manager.fd,
             sampler_kwargs=self.sampler_kwargs,
@@ -215,16 +219,20 @@ class MBHBase(PipelineModule):
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             priors=priors,
+            global_fit=False,
         )
 
-        self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
+        self.mbh_guide = MBHGuide(self.nwalkers, **self.guide_kwargs)
 
         # TODO: remove
         # self.mbh_guide.lnprob.template_model.d_d = 2 * 7.5e4
         print(self.mbh_guide.lnprob.template_model.d_d)
 
     def run_module(self, *args, progress=False, **kwargs):
-        self.mbh_guide.run_sampler(thin=5, iterations=100000, progress=progress)
+        print(progress, "progress")
+        self.mbh_guide.run_sampler(
+            self.mbh_guide.start_state, 10000, thin_by=5, progress=progress
+        )
         self.update_information(self.info_manager, self.fp)
         # del self.mbh_guide
 
@@ -260,10 +268,10 @@ class MBHRelBinSearch(PipelineModule):
         ndim_full = 13
         test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
 
-        start_points = reader.get_chain().reshape(-1, ndim)[start_inds]
+        start_state = reader.get_chain().reshape(-1, ndim)[start_inds]
 
         relbin_template = np.zeros(ndim_full)
-        relbin_template[test_inds] = start_points[-1]
+        relbin_template[test_inds] = start_state[-1]
 
         self.template_kwargs = dict(
             tBase=0.0,
@@ -308,7 +316,7 @@ class MBHRelBinSearch(PipelineModule):
 
         self.guide_kwargs = dict(
             dt=info_manager.dt,
-            start_points=start_points,
+            start_state=start_state,
             Tobs=info_manager.T * info_manager.dt,
             f_arr=info_manager.fd,
             sampler_kwargs=self.sampler_kwargs,
@@ -366,10 +374,10 @@ class MBHRelBinPE(PipelineModule):
         ndim_full = 13
         test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
 
-        start_points = reader.get_chain().reshape(-1, ndim)[start_inds]
+        start_state = reader.get_chain().reshape(-1, ndim)[start_inds]
 
         relbin_template = np.zeros(ndim_full)
-        relbin_template[test_inds] = start_points[-1]
+        relbin_template[test_inds] = start_state[-1]
 
         self.template_kwargs = dict(
             tBase=0.0,
@@ -408,7 +416,7 @@ class MBHRelBinPE(PipelineModule):
 
         self.guide_kwargs = dict(
             dt=info_manager.dt,
-            start_points=start_points,
+            start_state=start_state,
             Tobs=info_manager.T * info_manager.dt,
             f_arr=info_manager.fd,
             sampler_kwargs=self.sampler_kwargs,

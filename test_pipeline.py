@@ -5,7 +5,6 @@ from lisatools.utils.utility import AET
 from lisatools.sampling.samplingguide import MBHGuide
 
 # from ldc.waveform.lisabeta import FastMBHB
-from lisatools.sampling.utility import ModifiedHDFBackend
 
 from lisatools.pipeline.pipeline import *
 
@@ -23,14 +22,16 @@ use_gpu = gpu_available
 
 xp = cp if use_gpu else np
 
-nwalkers = 80
-ntemps = 10
+nwalkers = 22
+ntemps = 4
 
 nwalkers_relbin = 400
 ntemps_relbin = 10
 
-fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD.hdf5"
-# fpin = "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
+# fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD.hdf5"
+fpin = (
+    "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
+)
 with h5py.File(fpin, "r") as f:
     grp = f["H5LISA"]["GWSources"]["MBHB-0"]
     print(list(f["H5LISA"]))
@@ -69,14 +70,11 @@ fd, Xfd, Yfd, Zfd = (
 
 Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
 
-
-fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_final_WITH_noise_search.h5"
-fp_search_rel_bin = (
-    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_final_WITH_noise_search_rel_bin.h5"
-)
-fp_pe_rel_bin = (
-    "/projects/b1095/mkatz/ldc2a/mbh_pipeline_final_WITH_noise_pe_rel_bin_testing.h5"
-)
+folder = "/projects/b1095/mkatz/ldc2a/"
+folder = "./"
+fp_search = folder + "mbh_pipeline_final_WITH_noise_search.h5"
+fp_search_rel_bin = folder + "mbh_pipeline_final_WITH_noise_search_rel_bin.h5"
+fp_pe_rel_bin = folder + "mbh_pipeline_final_WITH_noise_pe_rel_bin_testing.h5"
 
 info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=1 / fd[1])
 
@@ -95,12 +93,12 @@ mbh_pe_rel_bin_module.initialize_module(
     fp_pe_rel_bin, nwalkers_relbin, ntemps_relbin, use_gpu=use_gpu
 )
 
-module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
+module_list = [mbh_search_module]  # , mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
 
 
 mbh_pipeline = PipelineGuide(info, module_list)
 
-mbh_pipeline.run(verbose=True, progress=False)
+mbh_pipeline.run(verbose=True, progress=True)
 
 exit()
 fp_search = "/projects/b1095/mkatz/ldc2a/mbh_pipeline_full_NO_noise_search_3.h5"
