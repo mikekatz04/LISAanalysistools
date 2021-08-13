@@ -10,7 +10,9 @@ from eryn.state import State
 
 # from ldc.waveform.lisabeta import FastMBHB
 from eryn.backends import HDFBackend
+from eryn.moves import StretchMove
 from lisatools.sampling.stopping import SNRStopping, SearchConvergeStopping
+from lisatools.sampling.moves.skymodehop import SkyMove
 
 try:
     import cupy as cp
@@ -147,10 +149,10 @@ class MBHBase(PipelineModule):
 
         if self.n_iter_stop is not None:
             stop = SearchConvergeStopping(n_iters=self.n_iter_stop)
-            stopping_iter = 10
+            stopping_iter = 30
         elif self.snr_stopping is not None:
             stop = SNRStopping(snr_limit=self.snr_stopping, verbose=True)
-            stopping_iter = 10
+            stopping_iter = 30
         else:
             stop = None
             stopping_iter = -1
@@ -167,7 +169,12 @@ class MBHBase(PipelineModule):
         # TODO: ADD SUBSET
         self.sampler_kwargs = dict(
             tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
-            moves=None,
+            moves=[
+                (StretchMove(), 0.85),
+                (SkyMove(which="both"), 0.04),
+                (SkyMove(which="lat"), 0.08),
+                (SkyMove(which="long"), 0.03),
+            ],
             args=None,
             kwargs=self.template_kwargs,
             backend=self.fp,
@@ -213,10 +220,10 @@ class MBHBase(PipelineModule):
             Tobs=info_manager.T * info_manager.dt,
             f_arr=info_manager.fd,
             sampler_kwargs=self.sampler_kwargs,
-            likelihood_kwargs=dict(separate_d_h=True),
+            likelihood_kwargs=dict(separate_d_h=True, subset=int(self.nwalkers / 2.0)),
             data=info_manager.data,
             waveform_kwargs=self.template_kwargs,
-            verbose=True,
+            verbose=False,
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             priors=priors,
@@ -259,7 +266,7 @@ class MBHRelBinSearch(PipelineModule):
         self.amp_phase_kwargs = {"run_phenomd": True}
 
     def update_information(self, info_manager, fp_search, *args, **kwargs):
-        info_manager.fp_search = fp_search
+        info_manager.fp_search_rel_bin = fp_search_rel_bin
 
     def update_module(self, info_manager, *args, **kwargs):
         self.info_manager = info_manager
@@ -290,13 +297,18 @@ class MBHRelBinSearch(PipelineModule):
 
         self.sampler_kwargs = dict(
             tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
-            moves=None,
+            moves=[
+                (StretchMove(), 0.85),
+                (SkyMove(which="both"), 0.04),
+                (SkyMove(which="lat"), 0.08),
+                (SkyMove(which="long"), 0.03),
+            ],
             args=None,
             kwargs=self.template_kwargs,
             backend=self.fp_search_rel_bin,
             vectorize=True,
             autocorr_multiplier=10000,  # TODO: adjust this to 50
-            plot_iterations=100,
+            plot_iterations=-1,
             plot_name=plot_name,
             stopping_fn=ll_stop,
             stopping_iterations=250,
@@ -342,7 +354,7 @@ class MBHRelBinSearch(PipelineModule):
             data=info_manager.data,
             waveform_kwargs=self.template_kwargs,
             multi_mode_start=True,
-            verbose=True,
+            verbose=False,
             relbin=True,
             relbin_template=relbin_template,
             use_gpu=use_gpu,
@@ -384,7 +396,9 @@ class MBHRelBinPE(PipelineModule):
     def update_module(self, info_manager, *args, **kwargs):
         self.info_manager = info_manager
 
-        reader = HDFBackend(self.info_manager.fp_search)
+        ndim = 11
+
+        reader = HDFBackend(self.info_manager.fp_search_rel_bin)
         log_prob = reader.get_log_prob().flatten()
         start_inds = np.argsort(log_prob)
         uni, inds = np.unique(log_prob[start_inds], return_index=True)
@@ -392,14 +406,15 @@ class MBHRelBinPE(PipelineModule):
 
         print(log_prob[start_inds])
 
-        ndim = 11
-        ndim_full = 13
-        test_inds = np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])
+        start_points = reader.get_chain()["mbh"].reshape(-1, ndim)[start_inds]
 
-        start_state = reader.get_chain().reshape(-1, ndim)[start_inds]
+        start_state = State(
+            {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
+        )
 
-        relbin_template = np.zeros(ndim_full)
-        relbin_template[test_inds] = start_state[-1]
+        print(log_prob[start_inds])
+
+        relbin_template = start_points[-1]
 
         self.template_kwargs = dict(
             tBase=0.0,
@@ -411,7 +426,7 @@ class MBHRelBinPE(PipelineModule):
         )
 
         # relbin_template = "multi"
-        from lisatools.sampling.utility import rel_bin_update
+        from lisatools.sampling.utility import RelBinUpdate
 
         update_kwargs = dict(
             template_gen_kwargs=self.template_kwargs.copy(),
@@ -419,21 +434,30 @@ class MBHRelBinPE(PipelineModule):
             noise_kwargs_T={},
         )
 
+        rel_bin_update = RelBinUpdate(update_kwargs)
+
+        plot_name = self.fp_pe_rel_bin[:-3] + "_output.pdf"
+
         self.sampler_kwargs = dict(
-            lnlike_kwargs=dict(waveform_kwargs=self.template_kwargs),
-            fp=self.fp_pe_rel_bin,
-            resume=False,
-            plot_iterations=50,
-            # stopping_iter=10,
-            # stopping_fn=ll_stop,
-            plot_source="mbh",
-            ntemps=self.ntemps,
-            get_d_h=True,
-            autocorr_multiplier=10000,
-            update_kwargs=update_kwargs,
+            tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
+            moves=[
+                (StretchMove(), 0.85),
+                (SkyMove(which="both"), 0.04),
+                (SkyMove(which="lat"), 0.08),
+                (SkyMove(which="long"), 0.03),
+            ],
+            args=None,
+            kwargs=self.template_kwargs,
+            backend=self.fp_pe_rel_bin,
+            vectorize=True,
+            autocorr_multiplier=10000,  # TODO: adjust this to 50
+            plot_iterations=1000,
+            plot_name=plot_name,
+            stopping_iterations=-1,
             update_fn=rel_bin_update,
-            update=1000,
-            burn=1000,
+            update_iterations=1000,
+            info={},
+            branch_names=["mbh"],
         )
 
         self.guide_kwargs = dict(
@@ -451,10 +475,18 @@ class MBHRelBinPE(PipelineModule):
             relbin_template=relbin_template,
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
+            global_fit=False,
         )
 
-        self.mbh_guide = MBHGuide(self.nwalkers * self.ntemps, **self.guide_kwargs)
+        self.mbh_guide = MBHGuide(self.nwalkers, **self.guide_kwargs)
+
+        # TODO: remove
+        # self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
+        print(self.mbh_guide.lnprob.template_model.base_d_d)
 
     def run_module(self, *args, progress=False, **kwargs):
-        self.mbh_guide.run_sampler(thin=200, iterations=100000, progress=progress)
+        print(progress, "progress")
+        self.mbh_guide.run_sampler(
+            self.mbh_guide.start_state, 10000, burn=1000, thin_by=5, progress=progress
+        )
         self.update_information(self.info_manager, self.fp_pe_rel_bin)

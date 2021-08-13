@@ -29,9 +29,9 @@ nwalkers_relbin = 400
 ntemps_relbin = 10
 
 fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
-fpin = (
-    "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
-)
+# fpin = (
+#    "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
+# )
 with h5py.File(fpin, "r") as f:
     grp = f["H5LISA"]["GWSources"]["MBHB-0"]
     print(list(f["H5LISA"]))
@@ -70,17 +70,21 @@ fd, Xfd, Yfd, Zfd = (
 
 Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
 
-# folder = "/projects/b1095/mkatz/ldc2a/"
-folder = "./"
-fp_search = folder + "TEST_ERYN_mbh_pipeline_final_NO_noise_search.h5"
-fp_search_rel_bin = folder + "TEST_ERYN_mbh_pipeline_final_NO_noise_search_rel_bin.h5"
-fp_pe_rel_bin = folder + "TEST_ERYN_mbh_pipeline_final_NO_noise_pe_rel_bin_testing.h5"
+folder = "/projects/b1095/mkatz/ldc2a/"
+# sfolder = "./"
+fp_search = folder + "TEST_ERYN_mode_hop_mbh_pipeline_final_NO_noise_search.h5"
+fp_search_rel_bin = (
+    folder + "TEST_ERYN_mode_hop_mbh_pipeline_final_NO_noise_search_rel_bin.h5"
+)
+fp_pe_rel_bin = (
+    folder + "TEST_ERYN_mode_hop_mbh_pipeline_final_NO_noise_pe_rel_bin_testing.h5"
+)
 
 info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=1 / fd[1])
 
 mbh_search_module = MBHBase(name="initial search")
 mbh_search_module.initialize_module(
-    fp_search, nwalkers, ntemps, snr_stopping=10.0, search=True, use_gpu=use_gpu
+    fp_search, nwalkers, ntemps, snr_stopping=100.0, search=True, use_gpu=use_gpu
 )
 
 mbh_search_rel_bin_module = MBHRelBinSearch(name="relbin search")
@@ -93,9 +97,9 @@ mbh_pe_rel_bin_module.initialize_module(
     fp_pe_rel_bin, nwalkers_relbin, ntemps_relbin, use_gpu=use_gpu
 )
 
-info.fp_search_init = fp_search
+# info.fp_search_rel_bin = "TEST_ERYN_mbh_pipeline_final_NO_noise_search_rel_bin.h5"
 module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
-module_list = [mbh_search_rel_bin_module]
+# module_list = [mbh_pe_rel_bin_module]
 
 mbh_pipeline = PipelineGuide(info, module_list)
 

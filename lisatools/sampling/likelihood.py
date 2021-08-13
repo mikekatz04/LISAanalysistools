@@ -24,8 +24,10 @@ class Likelihood(object):
         return_cupy=False,
         fill_data_noise=False,
         transpose_params=False,
+        subset=None,
     ):
 
+        self.subset = subset
         self.transpose_params = transpose_params
         self.template_model = template_model
 
@@ -279,39 +281,45 @@ class Likelihood(object):
             return out
 
     def __call__(self, params, *args, **kwargs):
-        if isinstance(params, np.ndarray):
-            params = [params]
-        elif not isinstance(params, list):
-            raise ValueError("params must be np.ndarray or list of np.ndarray.")
 
-        if len(params) > 1 and self.like_here is True:
-            raise ValueError(
-                "If looking at multiple sources, must use global fit likelihood or have a .get_ll method on your waveform generator."
-            )
-        """
-        # TODO: check
-        if self.get_d_h:
-            d_h_vals = np.full(x.shape[0], 0.0)
-            h_h_vals = np.full(x.shape[0], 0.0)
-        """
+        if not isinstance(params, np.ndarray):
+            raise ValueError("params must be np.ndarray.")
+
         if self.parameter_transforms is not None:
-            for i, (params_i, transform_i) in enumerate(
-                zip(params, self.parameter_transforms.values())
-            ):
-                params_temp = transform_i.fill_values(params_i.copy())
-                params[i] = transform_i.transform_base_parameters(params_temp)
-
-        else:
-            params = [params_i for params_i in params]
+            key = list(self.parameter_transforms.keys())[0]
+            params = self.parameter_transforms[key].both_transforms(params)
 
         if self.transpose_params:
-            params = [arr.T for arr in params]
+            params = params.T
+            subset_axis = 1
+        else:
+            subset_axis = 0
 
-        args_in = params + list(args)
-        if self.fill_data_noise:
-            args_in += [self.injection_channels, self.noise_factor]
+        num_likes = params.shape[subset_axis]
 
-        return self.get_ll(*args_in, **kwargs)
+        inds_likes = np.arange(num_likes)
+        if self.subset is not None:
+            if not isinstance(self.subset, int):
+                raise ValueError("Subset must be int.")
+            subset_sep = np.arange(self.subset, num_likes, self.subset)
+            inds_subset = np.split(inds_likes, subset_sep)
+        else:
+            inds_subset = [inds_likes]
+
+        out_ll = []
+        for inds in inds_subset:
+            if subset_axis == 0:
+                args_in = (params[inds],)
+            else:
+                args_in = (params[:, inds],)
+
+            args_in += args
+
+            if self.fill_data_noise:
+                args_in += (self.injection_channels, self.noise_factor)
+
+            out_ll.append(self.get_ll(*args_in, **kwargs))
+        return np.concatenate(out_ll, axis=0)
 
         # TODO add Subset
         """

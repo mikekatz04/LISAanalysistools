@@ -235,16 +235,16 @@ class RelBinUpdate:
 
     def __call__(self, it, sample_state, sampler, **kwargs):
 
-        breakpoint()
         samples = sample_state.branches_coords["mbh"].reshape(-1, sampler.ndims[0])
         lp_max = sample_state.log_prob.argmax()
         best = samples[lp_max]
 
-        sorted = np.argsort(sample_state.log_prob)
+        lp = sample_state.log_prob.flatten()
+        sorted = np.argsort(lp)
         inds_best = sorted[-1000:]
         inds_worst = sorted[:1000]
 
-        best_full = sampler.ln_prob_fn.f.parameter_transforms.both_transforms(
+        best_full = sampler.log_prob_fn.f.parameter_transforms["mbh"].both_transforms(
             best, copy=True
         )
 
@@ -258,10 +258,10 @@ class RelBinUpdate:
         samples[inds_worst] = samples[inds_best].copy()
         samples = samples.reshape(sampler.ntemps, sampler.nwalkers, 1, sampler.ndims[0])
         logp = sampler.compute_log_prior({"mbh": samples})
-        logL_blobs = sampler.compute_log_prob({"mbh": samples}, logp=logp)
+        logL, blobs = sampler.compute_log_prob({"mbh": samples}, logp=logp)
 
         sample_state.branches["mbh"].coords = samples
-        sample_state.log_prob = logL_blobs[:, 0]
-        sample_state.blobs = logL_blobs[:, 1:]
+        sample_state.log_prob = logL
+        sample_state.blobs = blobs
 
         # sampler.backend.save_step(sample_state, np.full_like(lp, True))
