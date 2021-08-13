@@ -14,8 +14,8 @@ class SNRStopping(Stopping):
 
         log_best = sampler.get_log_prob().max()
         snr_best = sampler.get_blobs()[:, :, :, 0].flatten()[ind]
-        d_h_best = sampler.get_blobs()[:, :, :, 1].flatten()[ind]
-        h_h_best = sampler.get_blobs()[:, :, :, 2].flatten()[ind]
+        # d_h_best = sampler.get_blobs()[:, :, :, 1].flatten()[ind]
+        # h_h_best = sampler.get_blobs()[:, :, :, 2].flatten()[ind]
 
         if self.verbose:
             print(
@@ -25,8 +25,8 @@ class SNRStopping(Stopping):
                 self.snr_limit,
                 "loglike:",
                 log_best,
-                d_h_best,
-                h_h_best,
+                # d_h_best,
+                # h_h_best,
             )
 
         if snr_best > self.snr_limit:
