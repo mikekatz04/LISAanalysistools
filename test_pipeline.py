@@ -72,19 +72,16 @@ Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
 
 folder = "/projects/b1095/mkatz/ldc2a/"
 # sfolder = "./"
-fp_search = folder + "TEST_ERYN_mode_hop_mbh_pipeline_final_NO_noise_search.h5"
-fp_search_rel_bin = (
-    folder + "TEST_ERYN_mode_hop_mbh_pipeline_final_NO_noise_search_rel_bin.h5"
-)
-fp_pe_rel_bin = (
-    folder + "TEST_ERYN_mode_hop_mbh_pipeline_final_NO_noise_pe_rel_bin_testing.h5"
-)
+string = "paper_noiseless"
+fp_search = folder + string + "_search.h5"
+fp_search_rel_bin = folder + string + "_search_rel_bin.h5"
+fp_pe_rel_bin = folder + string + "_pe_rel_bin.h5"
 
 info = InfoManager(name="ldc1data", data=[Afd, Efd, Tfd], fd=fd, dt=dt, T=1 / fd[1])
 
-mbh_search_module = MBHBase(name="initial search")
+mbh_search_module = MBHBase(name="phenomhm pe")
 mbh_search_module.initialize_module(
-    fp_search, nwalkers, ntemps, snr_stopping=100.0, search=True, use_gpu=use_gpu
+    fp_search, nwalkers, ntemps, snr_stopping=400.0, search=True, use_gpu=use_gpu
 )
 
 mbh_search_rel_bin_module = MBHRelBinSearch(name="relbin search")
@@ -98,8 +95,8 @@ mbh_pe_rel_bin_module.initialize_module(
 )
 
 # info.fp_search_rel_bin = "TEST_ERYN_mbh_pipeline_final_NO_noise_search_rel_bin.h5"
-module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
-# module_list = [mbh_pe_rel_bin_module]
+# module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
+module_list = [mbh_search_module]
 
 mbh_pipeline = PipelineGuide(info, module_list)
 
