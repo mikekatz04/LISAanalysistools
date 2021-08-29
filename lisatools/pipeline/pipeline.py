@@ -108,6 +108,7 @@ class MBHBase(PipelineModule):
         snr_stopping=None,
         n_iter_stop=None,
         use_gpu=False,
+        run_phenomd=True,
         **kwargs
     ):
         self.nwalkers = nwalkers
@@ -115,7 +116,7 @@ class MBHBase(PipelineModule):
         self.nwalkers_all = nwalkers * ntemps
         self.use_gpu = use_gpu
 
-        self.amp_phase_kwargs = {"run_phenomd": True}
+        self.amp_phase_kwargs = {"run_phenomd": run_phenomd}
 
         self.fp = fp
 
@@ -139,7 +140,7 @@ class MBHBase(PipelineModule):
             freqs=xp.asarray(info_manager.fd[1:]),
             t_obs_start=1.0,
             t_obs_end=0.0,
-            modes=[(2, 2)],
+            modes=None,
             direct=False,
             compress=True,
         )
@@ -200,10 +201,11 @@ class MBHBase(PipelineModule):
             start_inds = start_inds[inds[-int(self.ntemps * self.nwalkers) :]]
 
             print(log_prob[start_inds])
-
             start_points = reader.get_chain()["mbh"].reshape(-1, ndim)[start_inds]
 
-            start_state = State({"mbh": start_points})
+            start_state = State(
+                {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
+            )
             # start_state = reader.get_chain()['mbh'][-1, :2].reshape(-1, ndim)
 
             relbin_template = start_points[-1]
@@ -222,8 +224,9 @@ class MBHBase(PipelineModule):
             sampler_kwargs=self.sampler_kwargs,
             likelihood_kwargs=dict(separate_d_h=True, subset=int(self.nwalkers / 2.0)),
             data=info_manager.data,
+            multi_mode_start=False,
             waveform_kwargs=self.template_kwargs,
-            verbose=False,
+            verbose=True,
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             priors=priors,
@@ -238,6 +241,7 @@ class MBHBase(PipelineModule):
 
     def run_module(self, *args, progress=False, **kwargs):
         print(progress, "progress")
+        breakpoint()
         self.mbh_guide.run_sampler(
             self.mbh_guide.start_state, 10000, thin_by=5, progress=progress
         )
@@ -275,7 +279,7 @@ class MBHRelBinSearch(PipelineModule):
             tBase=0.0,
             t_obs_start=1.0,
             t_obs_end=0.0,
-            modes=[(2, 2)],
+            modes=None,
             direct=True,
             compress=True,
         )
@@ -379,7 +383,7 @@ class MBHRelBinSearch(PipelineModule):
 
 class MBHRelBinPE(PipelineModule):
     def initialize_module(
-        self, fp_pe_rel_bin, nwalkers, ntemps, use_gpu=False, **kwargs
+        self, fp_pe_rel_bin, nwalkers, ntemps, use_gpu=False, run_phenomd=True, **kwargs
     ):
         self.nwalkers = nwalkers
         self.ntemps = ntemps
@@ -388,7 +392,7 @@ class MBHRelBinPE(PipelineModule):
 
         self.fp_pe_rel_bin = fp_pe_rel_bin
 
-        self.amp_phase_kwargs = {"run_phenomd": True}
+        self.amp_phase_kwargs = {"run_phenomd": run_phenomd}
 
     def update_information(self, info_manager, fp_pe, *args, **kwargs):
         info_manager.fp_pe = fp_pe
@@ -414,13 +418,13 @@ class MBHRelBinPE(PipelineModule):
 
         print(log_prob[start_inds])
 
-        relbin_template = start_points[-1]
+        relbin_template = start_points[-1].copy()
 
         self.template_kwargs = dict(
             tBase=0.0,
             t_obs_start=1.0,
             t_obs_end=0.0,
-            modes=[(2, 2)],
+            modes=None,
             direct=True,
             compress=True,
         )
@@ -469,10 +473,11 @@ class MBHRelBinPE(PipelineModule):
             likelihood_kwargs=dict(separate_d_h=True),
             data=info_manager.data,
             waveform_kwargs=self.template_kwargs,
-            multi_mode_start=True,
+            multi_mode_start=False,
             verbose=True,
             relbin=True,
             relbin_template=relbin_template,
+            relbin_args=(1024,),
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             global_fit=False,

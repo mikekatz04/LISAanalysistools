@@ -253,7 +253,7 @@ class SamplerGuide:
                 "You can check this with the `compute_log_prob` in the sampler."
             )
 
-        print(check)
+        print("start like check:", check)
 
     @property
     def parameter_transforms(self):
@@ -332,7 +332,6 @@ class SamplerGuide:
         self._periodic = PeriodicContainer(temp_periodic)
 
     def setup_sampler(self):
-
         self.sampler = EnsembleSampler(
             self.nwalkers,
             self.default_ndims,  # assumes ndim_max
@@ -350,7 +349,7 @@ class MBHGuide(SamplerGuide):
         default_priors = {
             "mbh": PriorContainer(
                 {
-                    0: uniform_dist(np.log(5e5), np.log(5e7)),
+                    0: uniform_dist(np.log(1e5), np.log(1e8)),
                     1: uniform_dist(0.01, 0.999999999),
                     2: uniform_dist(-0.99999999, +0.99999999),
                     3: uniform_dist(-0.99999999, +0.99999999),
@@ -441,7 +440,7 @@ class MBHGuide(SamplerGuide):
             tBase=0.0,
             t_obs_start=1.0,
             t_obs_end=0.0,
-            modes=[(2, 2)],
+            modes=None,
             direct=True,
             compress=True,
         )
