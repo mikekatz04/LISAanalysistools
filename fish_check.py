@@ -29,14 +29,14 @@ warnings.filterwarnings("ignore")
 
 use_gpu = False
 fast = GenerateEMRIWaveform(
-    "FastSchwarzschildEccentricFlux",
+    "Pn5AAKWaveform",
     sum_kwargs=dict(pad_output=True),
     use_gpu=use_gpu,
     return_list=True,
 )
 
 fast_not_list = GenerateEMRIWaveform(
-    "FastSchwarzschildEccentricFlux",
+    "Pn5AAKWaveform",
     sum_kwargs=dict(pad_output=True),
     use_gpu=use_gpu,
     return_list=False,
@@ -61,9 +61,9 @@ def window_zero(sig,dt):
 
 # injection parameters
 M = 1e6
-mu = 3.e01
-p0 = 1.29984395e01
-e0 = 1.e-01
+mu = 3.012e01
+p0 = 10.0
+e0 = 0.267
 
 print("M,mu,p0,e0", M,mu,p0,e0)
 
@@ -71,20 +71,16 @@ print("M,mu,p0,e0", M,mu,p0,e0)
 Phi_phi0 = np.pi / 4.0
 Phi_r0 = np.pi / 3.0
 dist = 4.10864264e00
-a = 0.0
-Y0 = 1.0
+a = 0.5
+Y0 = 0.7
 qS = np.pi / 3.0
 phiS = np.pi / 5.0
 qK = np.pi / 6.0
 phiK = 5 * np.pi / 12.0
 Phi_theta0 = 0.0
 
-from few.trajectory.flux import RunSchwarzEccFluxInspiral
-traj = RunSchwarzEccFluxInspiral()
-traj(M, mu, p0, e0, T=1)
-
 #
-T = 6/12 # years
+T = 12/12 # years
 dt = 10.0  # seconds
 
 # injection array
@@ -132,18 +128,9 @@ check_params = transform_fn.transform_base_parameters(check_params).T
 #########################################
 # Waveform
 # INJECTION kwargs
-waveform_kwargs = {"T": T, "dt": dt, 'eps':1e-1}#"mode_selection": [(2,2,0)]}
+waveform_kwargs = {"T": T, "dt": dt}#, "mode_selection": [(2,2,0)]}
 
 check_sig = fast(*check_params, **waveform_kwargs)
-
-## another check
-tot_snr_0 = snr(check_sig,**inner_product_kwargs)
-first = inner_product(check_sig[0],check_sig[0],**inner_product_kwargs)
-second = inner_product(check_sig[1],check_sig[1],**inner_product_kwargs)
-tot_snr_1 = np.sqrt(first+second)
-tot_snr_2 = np.sqrt(inner_product(check_sig,check_sig,**inner_product_kwargs))
-print(tot_snr_0, tot_snr_1, tot_snr_2)
-
 
 #########################################
 # adjust distance for SNR goal
@@ -165,7 +152,7 @@ print("snr goal reached",snr(check_sig,**inner_product_kwargs))
 #%% Fisher matrix
 
 # which of the injection parameters you actually want to sample over
-test_inds = np.array([0, 1, 3, 4])
+test_inds = np.array([0, 1, 2, 3, 4, 5, 6])
 
 check_step = False
 if check_step:
@@ -198,7 +185,7 @@ if check_step:
     plt.legend()
     plt.show()
 
-eps = 1e-5
+eps = 1e-6
 cov, fish, dh = covariance(
     fast_not_list,
     injection_params,
@@ -254,17 +241,17 @@ if likelike:
     for i in range(len(test_inds)):
         
         plt.figure()
-        plt.title('Fisher matrix width prediction against likelihood  for parameter '+Tick[i])
+        plt.title('Fisher matrix width prediction against likelihood  for parameter '+str(i))
         for j in np.arange(-2, 2, 1e-1):
             pert_params = injection_params.copy()
             pert_params[test_inds[i]] = pert_params[test_inds[i]] + j * fish[i,i]**(-0.5)
             p1 = plt.plot(j,np.exp(-like.get_ll(np.array([pert_params]),waveform_kwargs=waveform_kwargs)),'r.')
 
-        x = np.arange(-3,3,1e-1)
+        x = np.arange(-2,2,1e-1)
         gaus = np.exp(-x*x/(2))
         plt.plot(x,gaus,label='theoretical likelihood')
         plt.legend()
-        plt.savefig('plot_check_fish_var'+str(i) +'_eps1e-2.png')
+        plt.savefig('plot_check_fish_var'+str(i) +'_aak.png')
         #plt.show()
 
     #
