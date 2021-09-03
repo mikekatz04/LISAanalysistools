@@ -109,13 +109,14 @@ class MBHBase(PipelineModule):
         n_iter_stop=None,
         use_gpu=False,
         run_phenomd=True,
-        **kwargs
+        set_d_d_zero=False,
+        **kwargs,
     ):
         self.nwalkers = nwalkers
         self.ntemps = ntemps
         self.nwalkers_all = nwalkers * ntemps
         self.use_gpu = use_gpu
-
+        self.set_d_d_zero = set_d_d_zero
         self.amp_phase_kwargs = {"run_phenomd": run_phenomd}
 
         self.fp = fp
@@ -166,7 +167,7 @@ class MBHBase(PipelineModule):
             burn = 1000
             resume = False
 
-        plot_name = self.fp[:-3] + "_output.pdf"
+        plot_name = self.fp[:-3] + "_output"
         # TODO: ADD SUBSET
         self.sampler_kwargs = dict(
             tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
@@ -236,12 +237,13 @@ class MBHBase(PipelineModule):
         self.mbh_guide = MBHGuide(self.nwalkers, **self.guide_kwargs)
 
         # TODO: remove
-        # self.mbh_guide.lnprob.template_model.d_d = 2 * 7.5e4
+        if self.set_d_d_zero:
+            self.mbh_guide.lnprob.template_model.d_d = 0.0
+
         print(self.mbh_guide.lnprob.template_model.d_d)
 
     def run_module(self, *args, progress=False, **kwargs):
         print(progress, "progress")
-        breakpoint()
         self.mbh_guide.run_sampler(
             self.mbh_guide.start_state, 10000, thin_by=5, progress=progress
         )
@@ -258,12 +260,14 @@ class MBHRelBinSearch(PipelineModule):
         n_iter_stop=None,
         n_iter_update=None,
         use_gpu=False,
-        **kwargs
+        set_d_d_zero=False,
+        **kwargs,
     ):
         self.nwalkers = nwalkers
         self.ntemps = ntemps
         self.nwalkers_all = nwalkers * ntemps
         self.use_gpu = use_gpu
+        self.set_d_d_zero = set_d_d_zero
 
         self.fp_search_rel_bin = fp_search_rel_bin
 
@@ -293,12 +297,16 @@ class MBHRelBinSearch(PipelineModule):
             noise_kwargs_T={},
         )
 
-        rel_bin_update = RelBinUpdate(update_kwargs)
+        rel_bin_update = RelBinUpdate(update_kwargs, set_d_d_zero=self.set_d_d_zero)
 
         ll_stop = SearchConvergeStopping(n_iters=30, verbose=True)
 
-        plot_name = self.fp_search_rel_bin[:-3] + "_output.pdf"
+        plot_name = self.fp_search_rel_bin[:-3] + "_output"
 
+        exsnr_limit = 380.0
+        self.fp_search_rel_bin = (
+            self.fp_search_rel_bin[:-3] + f"_{int(exsnr_limit)}_limit.h5"
+        )
         self.sampler_kwargs = dict(
             tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
             moves=[
@@ -327,7 +335,14 @@ class MBHRelBinSearch(PipelineModule):
         ndim = 11
 
         reader = HDFBackend(self.info_manager.fp_search_init)
-        log_prob = reader.get_log_prob().flatten()
+        log_prob = reader.get_log_prob().reshape(reader.get_log_prob().shape[0], -1)
+        exsnr = reader.get_blobs().reshape(reader.get_blobs().shape[0], -1)
+
+        ind_start = np.where(exsnr.max(axis=1) < exsnr_limit)[0][-1] + 1
+        print("ind_start:", ind_start)
+
+        exsnr = exsnr[:ind_start].flatten()
+        log_prob = log_prob[:ind_start].flatten()
         start_inds = np.argsort(log_prob)
         uni, inds = np.unique(log_prob[start_inds], return_index=True)
         start_inds = start_inds[inds[-int(self.ntemps * self.nwalkers) :]]
@@ -369,8 +384,8 @@ class MBHRelBinSearch(PipelineModule):
 
         self.mbh_guide = MBHGuide(self.nwalkers, **self.guide_kwargs)
 
-        # TODO: remove
-        # self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
+        if self.set_d_d_zero:
+            self.mbh_guide.lnprob.template_model.base_d_d = 0.0
         print(self.mbh_guide.lnprob.template_model.base_d_d)
 
     def run_module(self, *args, progress=False, **kwargs):
@@ -383,12 +398,20 @@ class MBHRelBinSearch(PipelineModule):
 
 class MBHRelBinPE(PipelineModule):
     def initialize_module(
-        self, fp_pe_rel_bin, nwalkers, ntemps, use_gpu=False, run_phenomd=True, **kwargs
+        self,
+        fp_pe_rel_bin,
+        nwalkers,
+        ntemps,
+        use_gpu=False,
+        run_phenomd=True,
+        set_d_d_zero=False,
+        **kwargs,
     ):
         self.nwalkers = nwalkers
         self.ntemps = ntemps
         self.nwalkers_all = nwalkers * ntemps
         self.use_gpu = use_gpu
+        self.set_d_d_zero = set_d_d_zero
 
         self.fp_pe_rel_bin = fp_pe_rel_bin
 
@@ -438,9 +461,9 @@ class MBHRelBinPE(PipelineModule):
             noise_kwargs_T={},
         )
 
-        rel_bin_update = RelBinUpdate(update_kwargs)
+        rel_bin_update = RelBinUpdate(update_kwargs, set_d_d_zero=self.set_d_d_zero)
 
-        plot_name = self.fp_pe_rel_bin[:-3] + "_output.pdf"
+        plot_name = self.fp_pe_rel_bin[:-3] + "_output"
 
         self.sampler_kwargs = dict(
             tempering_kwargs={"ntemps": self.ntemps, "Tmax": np.inf},
@@ -485,8 +508,9 @@ class MBHRelBinPE(PipelineModule):
 
         self.mbh_guide = MBHGuide(self.nwalkers, **self.guide_kwargs)
 
-        # TODO: remove
-        # self.mbh_guide.lnprob.template_model.base_d_d = 2 * 7.5e4
+        if self.set_d_d_zero:
+            self.mbh_guide.lnprob.template_model.base_d_d = 0.0
+
         print(self.mbh_guide.lnprob.template_model.base_d_d)
 
     def run_module(self, *args, progress=False, **kwargs):

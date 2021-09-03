@@ -230,8 +230,9 @@ class ModifiedHDFBackend(HDFBackend):
 
 
 class RelBinUpdate:
-    def __init__(self, update_kwargs):
+    def __init__(self, update_kwargs, set_d_d_zero=False):
         self.update_kwargs = update_kwargs
+        self.set_d_d_zero = set_d_d_zero
 
     def __call__(self, it, sample_state, sampler, **kwargs):
 
@@ -252,7 +253,8 @@ class RelBinUpdate:
             best_full, **self.update_kwargs
         )
 
-        # sampler.log_prob_fn.f.template_model.base_d_d = 2 * 7.5e4
+        if self.set_d_d_zero:
+            sampler.log_prob_fn.f.template_model.base_d_d = 0.0
 
         # TODO: make this a general update function in Eryn (?)
         samples[inds_worst] = samples[inds_best].copy()

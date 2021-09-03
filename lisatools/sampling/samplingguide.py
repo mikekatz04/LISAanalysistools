@@ -63,6 +63,7 @@ class SamplerGuide:
         injection_setup_kwargs={},
         waveform_kwargs={},
         parameter_transforms=None,
+        transform_container=None,
         periodic=None,
         use_gpu=False,
         mean_and_cov=None,
@@ -115,7 +116,9 @@ class SamplerGuide:
 
         self.initial_setup(priors, start_state)
 
-        self._set_parameter_transforms(parameter_transforms, fill_dict)
+        self._set_parameter_transforms(
+            transform_container, parameter_transforms, fill_dict
+        )
 
         self.periodic = periodic
         self.sampler_kwargs["periodic"] = self.periodic
@@ -221,8 +224,9 @@ class SamplerGuide:
             self._priors = self.default_priors
 
         elif isinstance(priors, dict):
-            temp = self.default_priors.priors_in
+            temp = {}
             for key, priors_sub in priors.items():
+                temp[key] = self.default_priors[key].priors_in
                 for ind, distribution in priors_sub.items():
                     temp[key][ind] = distribution
 
@@ -245,7 +249,6 @@ class SamplerGuide:
 
     def perform_test_start_likelihood(self):
         # test starting points:
-
         if not self.global_fit:
             check = self.sampler.compute_log_prob(self.start_state.branches_coords)
         else:
@@ -259,25 +262,37 @@ class SamplerGuide:
     def parameter_transforms(self):
         return self._parameter_transforms
 
-    def _set_parameter_transforms(self, transform_in, fill_dict_in):
-        temp_transform = self.default_parameter_transforms
+    def _set_parameter_transforms(
+        self, transform_container, parameter_transforms_in, fill_dict_in
+    ):
 
-        if transform_in is None:
+        if transform_container is not None:
+            if isinstance(transform_container, TransformContainer):
+                raise ValueError(
+                    "If directly adding TransformContainer, put it in the form of a dictionary with a key as the branch or model name."
+                )
+            self._parameter_transforms = transform_container
+            return
+
+        temp_transform = self.default_parameter_transforms
+        if parameter_transforms_in is None:
             pass
-        elif isinstance(transform_in, dict):
-            for key, transform_in_sub in transform_in.items():
-                if isinstance(transform_in_sub, TransformContainer):
-                    temp_transform[key] = transform_in_sub
-                elif (isinstance, dict):
-                    for ind, fn in transform_in.items():
+        elif isinstance(parameter_transforms_in, dict):
+            for key, parameter_transforms_sub in parameter_transforms_in.items():
+                if isinstance(parameter_transforms_sub, TransformContainer):
+                    raise ValueError(
+                        "If adding parameter_transforms and/or fill_dict separately, cannot add actual TransformContainer."
+                    )
+                elif isinstance(parameter_transforms_sub, dict):
+                    for ind, fn in parameter_transforms_sub.items():
                         temp_transform[key][ind] = fn
                 else:
                     raise ValueError(
-                        "If providing dict for transform_in, must contain dictionaries or TransformContainer as values."
+                        "If providing dict for parameter_transforms_in, must contain dictionaries."
                     )
         else:
             raise ValueError(
-                "Transform function should either be None or dict with index-fn pairs."
+                "Transform function should either be None or dict with {model_name: {index: fn}}."
             )
 
         temp_fill_dict = self.default_fill_dict
@@ -597,6 +612,7 @@ class MBHGuide(SamplerGuide):
                 # template_gen_args=relbin_template,
                 **relbin_kwargs,
                 use_gpu=use_gpu,
+                return_extracted_snr=True,
             )
 
         else:
@@ -649,9 +665,7 @@ class GBGuide(SamplerGuide):
             default_priors[11] = uniform_dist(0.001, 10.0)
             default_priors[12] = uniform_dist(0.0, 1.0)
 
-        default_priors = PriorContainer(default_priors)
-
-        return default_priors
+        return {"gb": PriorContainer(default_priors)}
 
     @property
     def default_ndim(self):
@@ -665,36 +679,32 @@ class GBGuide(SamplerGuide):
             return 8
 
     @property
-    def default_ndim_full(self):
-        if hasattr(self, "include_third") and self.include_third:
-            return 14
+    def default_fill_dict(self):
 
-        return 9
-
-    @property
-    def default_test_inds(self):
-        if hasattr(self, "include_third") and self.include_third:
-            return np.array([0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
-
-        elif hasattr(self, "include_fddot") and self.include_fddot:
-            return np.array([0, 1, 2, 3, 4, 5, 6, 7, 8])
-
-        else:
-            return np.array([0, 1, 2, 4, 5, 6, 7, 8])
-
-    @property
-    def default_fill_inds(self):
         if hasattr(self, "include_fddot") and self.include_fddot:
-            return np.array([])
+            return {
+                "gb": {
+                    "fill_inds": np.array([]),
+                    "fill_values": np.array([]),
+                    "ndim_full": 9,
+                }
+            }
+        if hasattr(self, "include_third") and self.include_third:
+            return {
+                "gb": {
+                    "fill_inds": np.array([3]),
+                    "fill_values": np.array([0.0]),
+                    "ndim_full": 13,
+                }
+            }
         else:
-            return np.array([3])
-
-    @property
-    def default_fill_values(self):
-        if hasattr(self, "include_fddot") and self.include_fddot:
-            return np.array([])
-        else:
-            return np.array([0.0])
+            return {
+                "gb": {
+                    "fill_inds": np.array([3]),
+                    "fill_values": np.array([0.0]),
+                    "ndim_full": 8,
+                }
+            }
 
     @property
     def default_injection_setup_kwargs(self):
@@ -719,23 +729,25 @@ class GBGuide(SamplerGuide):
     @property
     def default_parameter_transforms(self):
         parameter_transforms = {
-            0: (lambda x: np.exp(x)),
-            1: (lambda x: x * 1e-3),
-            2: (lambda x: np.exp(x)),
-            5: (lambda x: np.arccos(x)),
-            8: (lambda x: np.arcsin(x)),
+            "gb": {
+                0: (lambda x: np.exp(x)),
+                1: (lambda x: x * 1e-3),
+                2: (lambda x: np.exp(x)),
+                5: (lambda x: np.arccos(x)),
+                8: (lambda x: np.arcsin(x)),
+            }
         }
 
         if hasattr(self, "include_third") and self.include_third:
             # transform from fraction of period for T2 to regular T2
-            parameter_transforms[(12, 13)] = lambda x, y: (x, y * x)
+            parameter_transforms["gb"][(12, 13)] = lambda x, y: (x, y * x)
 
         if hasattr(self, "include_fddot") and self.include_fddot:
-            parameter_transforms[3] = lambda x: np.exp(x)
+            parameter_transforms["gb"][3] = lambda x: np.exp(x)
 
         else:
             # determine GR fddot
-            parameter_transforms[(1, 2, 3)] = lambda f0, fdot, fddot: (
+            parameter_transforms["gb"][(1, 2, 3)] = lambda f0, fdot, fddot: (
                 f0,
                 fdot,
                 11.0 / 3.0 * fdot * fdot / f0,
@@ -759,7 +771,17 @@ class GBGuide(SamplerGuide):
             periodic[9] = 2 * np.pi
             periodic[12] = 1.0
 
-        return periodic
+        return PeriodicContainer({"gb": periodic})
+
+    @property
+    def default_ndims(self):
+        if hasattr(self, "include_fddot") and self.include_fddot:
+            return [9]
+
+        elif hasattr(self, "include_third") and self.include_third:
+            return [13]
+
+        return [8]
 
     @property
     def default_plot_labels(self):
@@ -787,22 +809,36 @@ class GBGuide(SamplerGuide):
         else:
             ind_change = 0
 
-        self.start_state[:, 3 + ind_change] = self.start_state[:, 3 + ind_change] % (
+        self.start_state.branches_coords["gb"][
+            :, :, :, 3 + ind_change
+        ] = self.start_state.branches_coords["gb"][:, :, :, 3 + ind_change] % (
             2 * np.pi
         )
-        self.start_state[:, 5 + ind_change] = self.start_state[:, 5 + ind_change] % (
-            np.pi
-        )
-        self.start_state[:, 6 + ind_change] = self.start_state[:, 6 + ind_change] % (
+        self.start_state.branches_coords["gb"][
+            :, :, :, 5 + ind_change
+        ] = self.start_state.branches_coords["gb"][:, :, :, 5 + ind_change] % (np.pi)
+        self.start_state.branches_coords["gb"][
+            :, :, :, 6 + ind_change
+        ] = self.start_state.branches_coords["gb"][:, :, :, 6 + ind_change] % (
             2 * np.pi
         )
 
         if self.include_third:
-            self.start_state[:, -1] = np.abs(self.start_state[:, -1])
-            self.start_state[:, -4] = np.abs(self.start_state[:, -4])
-            self.start_state[:, 9] = self.start_state[:, 9] % (2 * np.pi)
-            self.start_state[:, 10] = np.abs(self.start_state[:, 10])
-            self.start_state[:, 10] = np.clip(self.start_state[:, 10], 0.02, 0.7)
+            self.start_state.branches_coords["gb"][:, :, :, -1] = np.abs(
+                self.start_state.branches_coords["gb"][:, :, :, -1]
+            )
+            self.start_state.branches_coords["gb"][:, :, :, -4] = np.abs(
+                self.start_state.branches_coords["gb"][:, :, :, -4]
+            )
+            self.start_state.branches_coords["gb"][
+                :, :, :, 9
+            ] = self.start_state.branches_coords["gb"][:, :, :, 9] % (2 * np.pi)
+            self.start_state.branches_coords["gb"][:, :, :, 10] = np.abs(
+                self.start_state.branches_coords["gb"][:, :, :, 10]
+            )
+            self.start_state.branches_coords["gb"][:, :, :, 10] = np.clip(
+                self.start_state.branches_coords["gb"][:, :, :, 10], 0.02, 0.7
+            )
 
     @property
     def default_inner_product_kwargs(self):
@@ -819,8 +855,13 @@ class GBGuide(SamplerGuide):
         Tobs=YRSID_SI,
         fix_snr=None,
         inner_product_kwargs={},
+        global_fit=False,
         **kwargs,
     ):
+
+        self.global_fit = global_fit
+        if global_fit:
+            raise NotImplementedError
 
         self.include_third = include_third
         self.include_fddot = include_fddot
@@ -851,16 +892,6 @@ class GBGuide(SamplerGuide):
         if "sampler_kwargs" not in kwargs:
             kwargs["sampler_kwargs"] = {}
 
-        if "plot_kwargs" not in kwargs["sampler_kwargs"]:
-            kwargs["sampler_kwargs"]["plot_kwargs"] = {}
-
-        if "corner_kwargs" not in kwargs["sampler_kwargs"]["plot_kwargs"]:
-            kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"] = {}
-
-        kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"][
-            "labels"
-        ] = self.default_plot_labels
-
         gb = GBGPU(use_gpu=use_gpu, shift_ind=1)
 
         if (
@@ -878,12 +909,21 @@ class GBGuide(SamplerGuide):
         ):
             injection_params = kwargs["injection_params"]
 
-            if "parameter_transforms" in kwargs:
-                transform = TransformContainer(kwargs["parameter_transforms"])
+            if "transform_container" in kwargs:
+                transform = kwargs["transform_container"]
             else:
-                transform = TransformContainer(self.default_parameter_transforms)
+                transform = None
+            if transform is None:
+                transform = {
+                    "gb": TransformContainer(
+                        parameter_transforms=self.default_parameter_transforms["gb"],
+                        fill_dict=self.default_fill_dict,
+                    )
+                }
 
-            make_params = transform.transform_base_parameters(injection_params)
+            make_params = transform["gb"].transform_base_parameters(
+                injection_params, copy=True
+            )
 
             A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs)
 
@@ -908,12 +948,11 @@ class GBGuide(SamplerGuide):
 
                 # print(snr_check2)
 
-            kwargs["sampler_kwargs"]["injection"] = injection_params[
-                self.default_test_inds
-            ]
+            # kwargs["sampler_kwargs"]["injection"] = injection_params
             kwargs["data"] = [A_inj, E_inj]
 
         if "start_state" in kwargs and kwargs["start_state"] == "fisher":
+            raise NotImplementedError("Need to correct for test_inds")
             mean = injection_params[self.default_test_inds]
 
             fish_kwargs = template_kwargs.copy()
@@ -931,11 +970,12 @@ class GBGuide(SamplerGuide):
         self.injection_setup_kwargs["params"] = None
         self.lnprob.inject_signal(**self.injection_setup_kwargs)
 
+        self.setup_sampler()
+        self.adjust_start_state()
+
         if self.test_start_likelihood:
             self.perform_test_start_likelihood()
 
-        self.setup_sampler()
-        self.adjust_start_state()
         # check = self.lnprob.get_ll(
         #    np.array([injection_params]), waveform_kwargs=template_kwargs
         # )
@@ -1178,25 +1218,14 @@ class EMRIGuide(SamplerGuide):
         if "sampler_kwargs" not in kwargs:
             kwargs["sampler_kwargs"] = {}
 
-        if "plot_kwargs" not in kwargs["sampler_kwargs"]:
-            kwargs["sampler_kwargs"]["plot_kwargs"] = {}
-
-        if "corner_kwargs" not in kwargs["sampler_kwargs"]["plot_kwargs"]:
-            kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"] = {}
-
-        kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"][
-            "labels"
-        ] = self.default_plot_labels
+            # kwargs["sampler_kwargs"]["plot_kwargs"]["corner_kwargs"][
+            # "labels"
+        # ] = self.default_plot_labels
 
         gb = GBGPU(use_gpu=use_gpu, shift_ind=1)
 
-        if (
-            "lnlike_kwargs" in kwargs["sampler_kwargs"]
-            and "waveform_kwargs" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
-        ):
-            template_kwargs = kwargs["sampler_kwargs"]["lnlike_kwargs"][
-                "waveform_kwargs"
-            ]
+        if "kwargs" in kwargs["sampler_kwargs"]:
+            template_kwargs = kwargs["sampler_kwargs"]["kwargs"]
         else:
             template_kwargs = self.default_injection_setup_kwargs["waveform_kwargs"]
         # only temperary to help prepare data
