@@ -29,6 +29,7 @@ from lisatools.utils.transform import (
 from eryn.prior import uniform_dist
 from eryn.backends import HDFBackend
 from lisatools.utils.constants import *
+from gbgpu.utils.constants import YEAR
 from eryn.prior import PriorContainer
 from eryn.utils import TransformContainer, PeriodicContainer
 from eryn.state import State
@@ -713,14 +714,10 @@ class GBGuide(SamplerGuide):
             noise_fn=get_sensitivity,
             noise_kwargs=[
                 dict(
-                    sens_fn="noisepsd_AE",
-                    model="SciRDv1",
-                    includewd=self.Tobs / YRSID_SI,
+                    sens_fn="noisepsd_AE", model="SciRDv1", includewd=self.Tobs / YEAR,
                 ),
                 dict(
-                    sens_fn="noisepsd_AE",
-                    model="SciRDv1",
-                    includewd=self.Tobs / YRSID_SI,
+                    sens_fn="noisepsd_AE", model="SciRDv1", includewd=self.Tobs / YEAR,
                 ),
             ],
             add_noise=False,
@@ -842,7 +839,7 @@ class GBGuide(SamplerGuide):
 
     @property
     def default_inner_product_kwargs(self):
-        return dict(PSD="noisepsd_AE", PSD_kwargs={"includewd": self.Tobs / YRSID_SI})
+        return dict(PSD="noisepsd_AE", PSD_kwargs={"includewd": self.Tobs / YEAR})
 
     def __init__(
         self,
@@ -852,7 +849,7 @@ class GBGuide(SamplerGuide):
         use_gpu=False,
         f_arr=None,
         dt=10.0,
-        Tobs=YRSID_SI,
+        Tobs=YEAR,
         fix_snr=None,
         inner_product_kwargs={},
         global_fit=False,
@@ -894,13 +891,8 @@ class GBGuide(SamplerGuide):
 
         gb = GBGPU(use_gpu=use_gpu, shift_ind=1)
 
-        if (
-            "lnlike_kwargs" in kwargs["sampler_kwargs"]
-            and "waveform_kwargs" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
-        ):
-            template_kwargs = kwargs["sampler_kwargs"]["lnlike_kwargs"][
-                "waveform_kwargs"
-            ]
+        if "kwargs" in kwargs["sampler_kwargs"]:
+            template_kwargs = kwargs["sampler_kwargs"]["kwargs"]
         else:
             template_kwargs = self.default_injection_setup_kwargs["waveform_kwargs"]
         # only temperary to help prepare data
@@ -1228,6 +1220,7 @@ class EMRIGuide(SamplerGuide):
             template_kwargs = kwargs["sampler_kwargs"]["kwargs"]
         else:
             template_kwargs = self.default_injection_setup_kwargs["waveform_kwargs"]
+
         # only temperary to help prepare data
         if "injection_params" in kwargs and (
             "data" not in kwargs or kwargs["data"] is None
@@ -1235,12 +1228,10 @@ class EMRIGuide(SamplerGuide):
             injection_params = kwargs["injection_params"]
 
             if (
-                "lnlike_kwargs" in kwargs["sampler_kwargs"]
-                and "parameter_transforms" in kwargs["sampler_kwargs"]["lnlike_kwargs"]
+                "kwargs" in kwargs["sampler_kwargs"]
+                and "parameter_transforms" in kwargs["sampler_kwargs"]["kwargs"]
             ):
-                transform = kwargs["sampler_kwargs"]["lnlike_kwargs"][
-                    "parameter_transforms"
-                ]
+                transform = kwargs["sampler_kwargs"]["kwargs"]["parameter_transforms"]
             else:
                 transform = TransformContainer(self.default_parameter_transforms)
 
@@ -1332,7 +1323,7 @@ if __name__ == "__main__":
     )
 
     sampler_kwargs = dict(
-        lnlike_kwargs=dict(waveform_kwargs=waveform_kwargs),
+        kwargs=dict(waveform_kwargs=waveform_kwargs),
         fp=fp,
         resume=False,
         plot_iterations=1000,
@@ -1532,7 +1523,7 @@ if __name__ == "__main__":
                     like,
                     priors,
                     subset=subset,
-                    lnlike_kwargs={"waveform_kwargs": wave_kwargs},
+                    kwargs={"waveform_kwargs": wave_kwargs},
                     test_inds=test_inds,
                     fill_values=fill_values,
                     ntemps=ntemps,
