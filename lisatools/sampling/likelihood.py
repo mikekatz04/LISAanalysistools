@@ -88,7 +88,8 @@ class Likelihood(object):
 
         if params is not None:
             if self.parameter_transforms is not None:
-                params = self.parameter_transforms.transform_base_parameters(params)
+                key = list(self.parameter_transforms.keys())[0]
+                params = self.parameter_transforms[key].both_transforms(params)
 
             injection_channels = xp.asarray(
                 self.template_model(*params, **waveform_kwargs)
