@@ -257,7 +257,7 @@ class RelBinUpdate:
             sampler.log_prob_fn.f.template_model.base_d_d = 0.0
 
         # TODO: make this a general update function in Eryn (?)
-        samples[inds_worst] = samples[inds_best].copy()
+        # samples[inds_worst] = samples[inds_best].copy()
         samples = samples.reshape(sampler.ntemps, sampler.nwalkers, 1, sampler.ndims[0])
         logp = sampler.compute_log_prior({"mbh": samples})
         logL, blobs = sampler.compute_log_prob({"mbh": samples}, logp=logp)

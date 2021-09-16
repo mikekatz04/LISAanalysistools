@@ -660,7 +660,7 @@ class GBGuide(SamplerGuide):
             default_priors[3] = uniform_dist(np.log(1e-30), np.log(1e-25))
 
         if hasattr(self, "include_third") and self.include_third:
-            default_priors[8] = uniform_dist(1.0, 1000.0)
+            default_priors[8] = uniform_dist(1.0, 20000.0)
             default_priors[9] = uniform_dist(0.0, np.pi * 2)
             default_priors[10] = uniform_dist(0.0001, 0.9)
             default_priors[11] = uniform_dist(0.001, 10.0)

@@ -258,14 +258,16 @@ class Likelihood(object):
                 num_likes, -1
             )
 
-            ll = (
+            ll = -(
                 1.0
                 / 2.0
                 * (4.0 * self.xp.sum((d_minus_h.conj() * d_minus_h).real, axis=1))
             )
 
             if self.noise_has_been_added:
-                ll -= self.noise_likelihood_factor
+                raise NotImplementedError
+                # TODO
+                ll += self.noise_likelihood_factor
 
             out = xp.atleast_1d(ll.squeeze())
 

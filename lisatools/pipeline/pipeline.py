@@ -405,6 +405,7 @@ class MBHRelBinPE(PipelineModule):
         use_gpu=False,
         run_phenomd=True,
         set_d_d_zero=False,
+        injection=None,
         **kwargs,
     ):
         self.nwalkers = nwalkers
@@ -412,6 +413,7 @@ class MBHRelBinPE(PipelineModule):
         self.nwalkers_all = nwalkers * ntemps
         self.use_gpu = use_gpu
         self.set_d_d_zero = set_d_d_zero
+        self.injection = injection
 
         self.fp_pe_rel_bin = fp_pe_rel_bin
 
@@ -425,23 +427,36 @@ class MBHRelBinPE(PipelineModule):
 
         ndim = 11
 
-        reader = HDFBackend(self.info_manager.fp_search_rel_bin)
-        log_prob = reader.get_log_prob().flatten()
-        start_inds = np.argsort(log_prob)
-        uni, inds = np.unique(log_prob[start_inds], return_index=True)
-        start_inds = start_inds[inds[-int(self.ntemps * self.nwalkers) :]]
+        if self.injection is None:
+            reader = HDFBackend(self.info_manager.fp_search_rel_bin)
+            log_prob = reader.get_log_prob().flatten()
+            start_inds = np.argsort(log_prob)
+            uni, inds = np.unique(log_prob[start_inds], return_index=True)
+            start_inds = start_inds[inds[-int(self.ntemps * self.nwalkers) :]]
 
-        print(log_prob[start_inds])
+            print(log_prob[start_inds])
 
-        start_points = reader.get_chain()["mbh"].reshape(-1, ndim)[start_inds]
+            start_points = reader.get_chain()["mbh"].reshape(-1, ndim)[start_inds]
 
-        start_state = State(
-            {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
-        )
+            start_state = State(
+                {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
+            )
 
-        print(log_prob[start_inds])
+            print(log_prob[start_inds])
 
-        relbin_template = start_points[-1].copy()
+            relbin_template = start_points[-1].copy()
+        else:
+            if not isinstance(self.injection, np.ndarray):
+                raise ValueError("injection must be np.ndarray")
+            factor = 1e-9
+
+            start_points = self.injection * (
+                1 + factor * np.random.randn(self.ntemps, self.nwalkers, 1, 11)
+            )
+            start_state = State(
+                {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
+            )
+            relbin_template = self.injection.copy()
 
         self.template_kwargs = dict(
             tBase=0.0,
@@ -478,7 +493,7 @@ class MBHRelBinPE(PipelineModule):
             backend=self.fp_pe_rel_bin,
             vectorize=True,
             autocorr_multiplier=10000,  # TODO: adjust this to 50
-            plot_iterations=1000,
+            plot_iterations=-1,
             plot_name=plot_name,
             stopping_iterations=-1,
             update_fn=rel_bin_update,
@@ -496,11 +511,11 @@ class MBHRelBinPE(PipelineModule):
             likelihood_kwargs=dict(separate_d_h=True),
             data=info_manager.data,
             waveform_kwargs=self.template_kwargs,
-            multi_mode_start=False,
+            multi_mode_start=True,
             verbose=True,
             relbin=True,
             relbin_template=relbin_template,
-            relbin_args=(1024,),
+            relbin_args=(256,),
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             global_fit=False,
