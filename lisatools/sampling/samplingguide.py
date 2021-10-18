@@ -663,7 +663,7 @@ class GBGuide(SamplerGuide):
             default_priors[8] = uniform_dist(1.0, 20000.0)
             default_priors[9] = uniform_dist(0.0, np.pi * 2)
             default_priors[10] = uniform_dist(0.0001, 0.9)
-            default_priors[11] = uniform_dist(0.001, 10.0)
+            default_priors[11] = uniform_dist(0.001, 50.0)
             default_priors[12] = uniform_dist(0.0, 1.0)
 
         return {"gb": PriorContainer(default_priors)}
@@ -895,6 +895,11 @@ class GBGuide(SamplerGuide):
             template_kwargs = kwargs["sampler_kwargs"]["kwargs"]
         else:
             template_kwargs = self.default_injection_setup_kwargs["waveform_kwargs"]
+
+        template_kwargs_in = template_kwargs.copy()
+        if "phase_marginalize" in template_kwargs_in:
+            del template_kwargs_in["phase_marginalize"]
+
         # only temperary to help prepare data
         if "injection_params" in kwargs and (
             "data" not in kwargs or kwargs["data"] is None
@@ -917,7 +922,7 @@ class GBGuide(SamplerGuide):
                 injection_params, copy=True
             )
 
-            A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs)
+            A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs_in)
 
             if fix_snr is not None:
                 temp_inner_product_kwargs = self.default_inner_product_kwargs
@@ -935,7 +940,7 @@ class GBGuide(SamplerGuide):
                 make_params[0] *= factor
                 injection_params[0] = np.log(make_params[0])
 
-                A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs,)
+                A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs_in,)
                 snr_check2 = snr([A_inj, E_inj], **temp_inner_product_kwargs)
 
                 # print(snr_check2)
@@ -947,7 +952,7 @@ class GBGuide(SamplerGuide):
             raise NotImplementedError("Need to correct for test_inds")
             mean = injection_params[self.default_test_inds]
 
-            fish_kwargs = template_kwargs.copy()
+            fish_kwargs = template_kwargs_in.copy()
             fish_kwargs["N"] = 1024
             fish_kwargs["inds"] = self.default_test_inds
             fish_kwargs["parameter_transforms"] = self.default_parameter_transforms

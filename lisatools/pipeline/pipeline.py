@@ -110,6 +110,7 @@ class MBHBase(PipelineModule):
         use_gpu=False,
         run_phenomd=True,
         set_d_d_zero=False,
+        injection=None,
         **kwargs,
     ):
         self.nwalkers = nwalkers
@@ -125,6 +126,7 @@ class MBHBase(PipelineModule):
         self.n_iter_stop = n_iter_stop
 
         self.search = search
+        self.injection = injection
 
     def update_information(self, info_manager, fp, *args, **kwargs):
         if self.search:
@@ -135,12 +137,14 @@ class MBHBase(PipelineModule):
     def update_module(self, info_manager, *args, **kwargs):
         self.info_manager = info_manager
 
+        from bbhx.utils.constants import YRSID_SI
+
         self.template_kwargs = dict(
             tBase=0.0,
             length=1024,
             freqs=xp.asarray(info_manager.fd[1:]),
             t_obs_start=1.0,
-            t_obs_end=0.0,
+            t_obs_end=3600.0 / YRSID_SI,
             modes=None,
             direct=False,
             compress=True,
@@ -182,7 +186,7 @@ class MBHBase(PipelineModule):
             backend=self.fp,
             vectorize=True,
             autocorr_multiplier=10000,  # TODO: adjust this to 50
-            plot_iterations=100,
+            plot_iterations=15,
             plot_name=plot_name,
             stopping_fn=stop,
             stopping_iterations=stopping_iter,
@@ -194,7 +198,7 @@ class MBHBase(PipelineModule):
         ndim = 11
         if self.search:
             start_state = None
-        else:
+        elif self.injection is None:
             reader = HDFBackend(self.info_manager.fp_search_init)
             log_prob = reader.get_log_prob().flatten()
             start_inds = np.argsort(log_prob)
@@ -211,6 +215,19 @@ class MBHBase(PipelineModule):
 
             relbin_template = start_points[-1]
 
+        else:
+            if not isinstance(self.injection, np.ndarray):
+                raise ValueError("injection must be np.ndarray")
+            factor = 1e-9
+
+            start_points = self.injection * (
+                1 + factor * np.random.randn(self.ntemps, self.nwalkers, 1, 11)
+            )
+            start_state = State(
+                {"mbh": start_points.reshape(self.ntemps, self.nwalkers, 1, ndim)}
+            )
+            relbin_template = self.injection.copy()
+
         if "priors" in kwargs:
             priors = kwargs["priors"]
         else:
@@ -225,7 +242,7 @@ class MBHBase(PipelineModule):
             sampler_kwargs=self.sampler_kwargs,
             likelihood_kwargs=dict(separate_d_h=True, subset=int(self.nwalkers / 2.0)),
             data=info_manager.data,
-            multi_mode_start=False,
+            multi_mode_start=True,
             waveform_kwargs=self.template_kwargs,
             verbose=True,
             use_gpu=use_gpu,
@@ -458,10 +475,12 @@ class MBHRelBinPE(PipelineModule):
             )
             relbin_template = self.injection.copy()
 
+        from bbhx.utils.constants import YRSID_SI
+
         self.template_kwargs = dict(
             tBase=0.0,
             t_obs_start=1.0,
-            t_obs_end=0.0,
+            t_obs_end=0.0,  # 3600.0 / YRSID_SI,
             modes=None,
             direct=True,
             compress=True,
@@ -493,7 +512,7 @@ class MBHRelBinPE(PipelineModule):
             backend=self.fp_pe_rel_bin,
             vectorize=True,
             autocorr_multiplier=10000,  # TODO: adjust this to 50
-            plot_iterations=-1,
+            plot_iterations=500,
             plot_name=plot_name,
             stopping_iterations=-1,
             update_fn=rel_bin_update,
@@ -515,7 +534,8 @@ class MBHRelBinPE(PipelineModule):
             verbose=True,
             relbin=True,
             relbin_template=relbin_template,
-            relbin_args=(256,),
+            relbin_args=(1024,),
+            relbin_kwargs=dict(template_gen_kwargs=self.template_kwargs),
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
             global_fit=False,
@@ -531,6 +551,6 @@ class MBHRelBinPE(PipelineModule):
     def run_module(self, *args, progress=False, **kwargs):
         print(progress, "progress")
         self.mbh_guide.run_sampler(
-            self.mbh_guide.start_state, 10000, burn=1000, thin_by=5, progress=progress
+            self.mbh_guide.start_state, 10000, burn=0, thin_by=5, progress=progress
         )
         self.update_information(self.info_manager, self.fp_pe_rel_bin)
