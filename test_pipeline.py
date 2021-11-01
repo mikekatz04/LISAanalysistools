@@ -29,15 +29,17 @@ nwalkers_relbin = 400
 ntemps_relbin = 10
 
 fpin = "/home/mlk667/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
-fpin = (
-    "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
-)
+# fpin = "/Users/michaelkatz/Research/GPU4GW/ldc/datasets/LDC1-1_MBHB_v2_FD_noiseless.hdf5"
 with h5py.File(fpin, "r") as f:
     grp = f["H5LISA"]["GWSources"]["MBHB-0"]
     print(list(f["H5LISA"]))
 
     data = f["H5LISA"]["PreProcess"]["TDIdata"][:]
     t, Xd, Yd, Zd = data[:4194304].T
+
+# Xd, Yd, Zd = np.load("reverse_noise_waveform.npy").T
+
+from lisatools.utils.utility import generate_noise_fd
 
 """
 with h5py.File("data/mbhb-tdi.h5", "r") as f:
@@ -68,11 +70,24 @@ fd, Xfd, Yfd, Zfd = (
     np.fft.rfft(Zd) * dt,
 )
 
+# add noise realization
+Xn, Yn, Zn = [
+    generate_noise_fd(fd, fd[1], sens_fn="noisepsd_X", includewd=None) for _ in range(3)
+]
+"""
+Xfd += Xn
+Yfd += Yn
+Zfd += Zn
+"""
+
 Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
 
 folder = "/projects/b1095/mkatz/ldc2a/"
-folder = "./"
-string = "paper_noiseless"
+# folder = "./"
+
+string = "paper_FINAL_noiseless_check"
+np.save(string + "_data", np.array([fd, Afd, Efd, Tfd]).T)
+
 fp_search = folder + string + "_search.h5"
 fp_search_rel_bin = folder + string + "_search_rel_bin.h5"
 fp_pe_rel_bin = folder + string + "_pe_rel_bin.h5"
@@ -86,7 +101,7 @@ mbh_search_module.initialize_module(
     ntemps,
     snr_stopping=400.0,
     search=True,
-    set_d_d_zero=False,
+    set_d_d_zero=True,
     use_gpu=use_gpu,
 )
 
@@ -95,20 +110,20 @@ mbh_search_rel_bin_module.initialize_module(
     fp_search_rel_bin,
     nwalkers_relbin,
     ntemps_relbin,
-    set_d_d_zero=False,
+    set_d_d_zero=True,
     use_gpu=use_gpu,
 )
 
 mbh_pe_rel_bin_module = MBHRelBinPE(name="relbin pe")
 mbh_pe_rel_bin_module.initialize_module(
-    fp_pe_rel_bin, nwalkers_relbin, ntemps_relbin, set_d_d_zero=False, use_gpu=use_gpu
+    fp_pe_rel_bin, nwalkers_relbin, ntemps_relbin, set_d_d_zero=True, use_gpu=use_gpu
 )
 
 info.fp_search_init = fp_search
-info.fp_search_rel_bin = fp_search_rel_bin[:-3] + "_200_limit.h5"
+info.fp_search_rel_bin = "/projects/b1095/mkatz/ldc2a/paper_noise_search_rel_bin_200_limit.h5"  # fp_search_rel_bin[:-3] + "_200_limit.h5"
 
 # module_list = [mbh_search_module, mbh_search_rel_bin_module, mbh_pe_rel_bin_module]
-module_list = [mbh_search_module]
+module_list = [mbh_pe_rel_bin_module]
 
 mbh_pipeline = PipelineGuide(info, module_list)
 

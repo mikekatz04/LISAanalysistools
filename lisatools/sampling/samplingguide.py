@@ -922,6 +922,15 @@ class GBGuide(SamplerGuide):
                 injection_params, copy=True
             )
 
+            if (
+                "oversample" not in template_kwargs_in
+                and not self.include_third
+                and len(make_params) > 9
+            ):
+                template_kwargs_in["oversample"] = 8
+
+            print("template_kwargs_in check", template_kwargs_in)
+            print("template_kwargs check", template_kwargs)
             A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs_in)
 
             if fix_snr is not None:

@@ -534,7 +534,7 @@ class MBHRelBinPE(PipelineModule):
             verbose=True,
             relbin=True,
             relbin_template=relbin_template,
-            relbin_args=(1024,),
+            relbin_args=(256,),
             relbin_kwargs=dict(template_gen_kwargs=self.template_kwargs),
             use_gpu=use_gpu,
             amp_phase_kwargs=self.amp_phase_kwargs,
@@ -551,6 +551,6 @@ class MBHRelBinPE(PipelineModule):
     def run_module(self, *args, progress=False, **kwargs):
         print(progress, "progress")
         self.mbh_guide.run_sampler(
-            self.mbh_guide.start_state, 10000, burn=0, thin_by=5, progress=progress
+            self.mbh_guide.start_state, 50000, burn=4000, thin_by=10, progress=progress
         )
         self.update_information(self.info_manager, self.fp_pe_rel_bin)

@@ -9,7 +9,7 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
 try:
-    from tdi import *
+    from lisatools.utils.tdi import *
 
     tdi_available = True
 
