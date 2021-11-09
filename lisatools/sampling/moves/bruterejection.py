@@ -2,6 +2,15 @@
 
 import numpy as np
 
+try:
+    import cupy as xp
+
+    gpu_available = True
+except ModuleNotFoundError:
+    import numpy as xp
+
+    gpu_available = False
+
 from eryn.moves import ReversibleJump
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
@@ -11,6 +20,8 @@ __all__ = ["PriorGenerate"]
 
 class BruteRejection(ReversibleJump):
     """Generate Revesible-Jump proposals for GBs with brute-force rejection
+
+    Will use gpu if template generator uses GPU.
 
     Args:
         priors (object): :class:`PriorContainer` object that has ``logpdf``
@@ -39,16 +50,27 @@ class BruteRejection(ReversibleJump):
                 raise ValueError("Priors need to be eryn.priors.PriorContainer object.")
         self.priors = priors
         self.gb = gb
+
+        # use gpu from template generator
+        self.use_gpu = gb.use_gpu
+        if self.use_gpu:
+            self.xp = xp
+        else:
+            self.xp = np
+
         self.num_brute = num_brute
         self.start_freq_ind = start_freq_ind
         self.data_length = data_length
         self.waveform_kwargs = waveform_kwargs
         self.parameter_transforms = parameter_transforms
-        self.noise_factors = np.asarray(noise_factors).copy()
-        self.noise_factors_list = noise_factors
-        self.data = np.asarray(data).copy()
-        self.data_list = data
+        self.noise_factors = self.xp.asarray(noise_factors).copy()
+        self.noise_factors_list = [
+            self.xp.asarray(noise_factors_i) for noise_factors_i in noise_factors
+        ]
+        self.data = self.xp.asarray(data).copy()
+        self.data_list = [self.xp.asarray(data_i) for data_i in data]
         self.search = search
+
         super(BruteRejection, self).__init__(*args, **kwargs)
 
     def get_proposal(self, all_coords, all_inds, all_inds_for_change, random):
@@ -126,8 +148,8 @@ class BruteRejection(ReversibleJump):
             groups = groups_from_inds({name: inds[inds_here[:2]][None, :, :]})[name]
             # TODO: adjust to cupy
 
-            templates = np.zeros(
-                (num_inds_change, 2, self.data_length), dtype=np.complex128
+            templates = self.xp.zeros(
+                (num_inds_change, 2, self.data_length), dtype=self.xp.complex128
             )  # 2 is channels
 
             params = coords[inds_here[:2]][inds[inds_here[:2]]]
@@ -142,8 +164,11 @@ class BruteRejection(ReversibleJump):
                 params_in,
                 groups,
                 templates,
-                start_freq_ind=self.start_freq_ind,
-                **self.waveform_kwargs,
+                # start_freq_ind=self.start_freq_ind,
+                **{
+                    **self.waveform_kwargs,
+                    **{"start_freq_ind": self.start_freq_ind - self.gb.shift_ind},
+                },
             )
 
             # data should not be whitened
@@ -168,21 +193,31 @@ class BruteRejection(ReversibleJump):
                         * self.noise_factors[1]
                     ).copy(),
                 ]
+
                 if self.parameter_transforms is not None:
                     prior_generated_points_in = self.parameter_transforms.both_transforms(
                         prior_generated_points.copy(), return_transpose=True
                     )
 
                 self.gb.d_d = d_h_d_h[j]
+
                 ll = self.gb.get_ll(
                     prior_generated_points_in,
                     data,
                     self.noise_factors_list,
                     calc_d_d=False,
                     phase_marginalize=False,
-                    start_freq_ind=self.start_freq_ind,
-                    **self.waveform_kwargs,
+                    **{
+                        **self.waveform_kwargs,
+                        **{"start_freq_ind": self.start_freq_ind - self.gb.shift_ind},
+                    },
                 )
+
+                if self.use_gpu:
+                    try:
+                        ll = ll.get()
+                    except AttributeError:
+                        pass
 
                 probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
                 if self.search:
@@ -196,12 +231,11 @@ class BruteRejection(ReversibleJump):
                 ll_out[j] = ll[ind_keep]
                 out_temp[j] = prior_generated_points[ind_keep].copy()
                 log_prob_factors[j] = np.log(probs[ind_keep])
-            print(log_prob_factors)
+
             q[name][inds_here] = out_temp
 
             # factor is +log q() for prior
             factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
             # add factor from likelihood draw
             factors[inds_here[:2]] += +1 * log_prob_factors
-
         return q, new_inds, factors

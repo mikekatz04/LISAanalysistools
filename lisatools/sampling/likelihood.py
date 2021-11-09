@@ -570,6 +570,7 @@ class GlobalLikelihood(Likelihood):
         args_in = params + groups + list(args)
         if self.fill_data_noise:
             args_in += [self.injection_channels, self.noise_factor]
+
         return self.get_ll(*args_in, **kwargs)
 
         # TODO add Subset

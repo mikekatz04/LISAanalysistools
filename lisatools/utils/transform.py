@@ -178,7 +178,6 @@ class SSB_to_LISA:
         return (tL, lambdaL, betaL, psiL)
 
 
-
 def mbh_sky_mode_transform(
     coords, ind_map=None, kind="both", inplace=False, cos_i=False
 ):
