@@ -1,3 +1,3 @@
-LISA Analysis Tools (`lisatools`)
+# LISA Analysis Tools (`lisatools`)
 
-Run large-scale and small-scale LISA data analysis
+### Run large-scale and small-scale LISA data analysis
