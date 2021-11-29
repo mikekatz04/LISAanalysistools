@@ -10,20 +10,19 @@ import matplotlib.pyplot as plt
 
 #%matplotlib inline
 
-from bbhx.utils.waveformbuild import BBHWaveform
-from lisatools.utils.transform import tLfromSSBframe
+from bbhx.waveformbuild import BBHWaveformFD
+from bbhx.utils.transform import tLfromSSBframe
 from scipy import constants as ct
 from lisatools.diagnostic import *
 from lisatools.sampling.likelihood import Likelihood
-from bbhx.utils.likelihood import Likelihood as MBHLikelihood
-from bbhx.utils.likelihood import RelativeBinning
+from bbhx.likelihood import Likelihood as MBHLikelihood
+from bbhx.likelihood import HeterodynedLikelihood
 from lisatools.sensitivity import get_sensitivity
 from bbhx.utils.constants import *
-from lisatools.utils.transform import (
+from bbhx.utils.transform import (
     LISA_to_SSB,
     SSB_to_LISA,
     mT_q,
-    transfer_tref,
     mbh_sky_mode_transform,
 )
 from eryn.prior import uniform_dist
@@ -35,6 +34,7 @@ from eryn.utils import TransformContainer, PeriodicContainer
 from eryn.state import State
 from eryn.ensemble import EnsembleSampler
 from eryn.backends import HDFBackend
+from eryn.moves.tempering import make_ladder
 
 from gbgpu.gbgpu import GBGPU
 
@@ -252,6 +252,11 @@ class SamplerGuide:
         # test starting points:
         if not self.global_fit:
             check = self.sampler.compute_log_prob(self.start_state.branches_coords)
+
+            try:
+                self.like_check_before_start = check.copy()
+            except AttributeError:
+                self.like_check_before_start = check[0].copy()
         else:
             raise NotImplementedError(
                 "You can check this with the `compute_log_prob` in the sampler."
@@ -397,17 +402,17 @@ class MBHGuide(SamplerGuide):
         if hasattr(self, "include_precession") and self.include_precession:
             return {
                 "mbh": {
-                    "fill_inds": np.array([6, 16]),
-                    "fill_values": np.array([0.0, 0.0]),
-                    "ndim_full": 17,
+                    "fill_inds": np.array([6]),
+                    "fill_values": np.array([0.0]),
+                    "ndim_full": 16,
                 }
             }
         else:
             return {
                 "mbh": {
-                    "fill_inds": np.array([6, 12]),
-                    "fill_values": np.array([0.0, 0.0]),
-                    "ndim_full": 13,
+                    "fill_inds": np.array([6]),
+                    "fill_values": np.array([0.0]),
+                    "ndim_full": 12,
                 }
             }
 
@@ -436,10 +441,8 @@ class MBHGuide(SamplerGuide):
             }
         }
 
-        parameter_transforms["mbh"][(11, 12)] = transfer_tref
-
         if self.sampler_frame == "LISA":
-            parameter_transforms["mbh"][(11, 8, 9, 10)] = LISA_to_SSB(0.0)
+            parameter_transforms["mbh"][(11, 8, 9, 10)] = LISA_to_SSB
 
         return parameter_transforms
 
@@ -528,7 +531,7 @@ class MBHGuide(SamplerGuide):
                 kind="both",
             ).reshape(self.ntemps, self.nwalkers, 1, -1)
 
-        bbh = BBHWaveform(
+        bbh = BBHWaveformFD(
             response_kwargs=response_kwargs,
             amp_phase_kwargs=amp_phase_kwargs,
             use_gpu=use_gpu,
@@ -604,7 +607,7 @@ class MBHGuide(SamplerGuide):
 
             # TODO: update this
             dataChannels /= noiseFactors
-            mbh_like = RelativeBinning(
+            mbh_like = HeterodynedLikelihood(
                 bbh,
                 self.xp.asarray(f_arr[1:]),
                 dataChannels,
@@ -613,7 +616,6 @@ class MBHGuide(SamplerGuide):
                 # template_gen_args=relbin_template,
                 **relbin_kwargs,
                 use_gpu=use_gpu,
-                return_extracted_snr=True,
             )
 
         else:
@@ -624,7 +626,6 @@ class MBHGuide(SamplerGuide):
                 dataChannels,
                 noiseFactors,
                 use_gpu=use_gpu,
-                return_extracted_snr=True,
             )
 
         self.lnprob = mbh_like
@@ -662,7 +663,7 @@ class GBGuide(SamplerGuide):
         if hasattr(self, "include_third") and self.include_third:
             default_priors[8] = uniform_dist(1.0, 20000.0)
             default_priors[9] = uniform_dist(0.0, np.pi * 2)
-            default_priors[10] = uniform_dist(0.0001, 0.9)
+            default_priors[10] = uniform_dist(0.0001, 0.99)
             default_priors[11] = uniform_dist(0.001, 50.0)
             default_priors[12] = uniform_dist(0.0, 1.0)
 
@@ -833,9 +834,6 @@ class GBGuide(SamplerGuide):
             self.start_state.branches_coords["gb"][:, :, :, 10] = np.abs(
                 self.start_state.branches_coords["gb"][:, :, :, 10]
             )
-            self.start_state.branches_coords["gb"][:, :, :, 10] = np.clip(
-                self.start_state.branches_coords["gb"][:, :, :, 10], 0.02, 0.7
-            )
 
     @property
     def default_inner_product_kwargs(self):
@@ -922,28 +920,26 @@ class GBGuide(SamplerGuide):
                 injection_params, copy=True
             )
 
-            if (
-                "oversample" not in template_kwargs_in
-                and not self.include_third
-                and len(make_params) > 9
-            ):
+            if len(make_params) > 9:
                 template_kwargs_in["oversample"] = 8
 
             print("template_kwargs_in check", template_kwargs_in)
             print("template_kwargs check", template_kwargs)
             A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs_in)
 
+            temp_inner_product_kwargs = self.default_inner_product_kwargs
+
+            if inner_product_kwargs != {}:
+                for key, value in inner_product_kwargs.items():
+                    temp_inner_product_kwargs[key] = value
+
+            temp_inner_product_kwargs["df"] = df
+
+            self.snr_check = snr_check = snr(
+                [A_inj, E_inj], **temp_inner_product_kwargs
+            )
+
             if fix_snr is not None:
-                temp_inner_product_kwargs = self.default_inner_product_kwargs
-
-                if inner_product_kwargs != {}:
-                    for key, value in inner_product_kwargs.items():
-                        temp_inner_product_kwargs[key] = value
-
-                temp_inner_product_kwargs["df"] = df
-
-                snr_check = snr([A_inj, E_inj], **temp_inner_product_kwargs)
-
                 factor = fix_snr / snr_check
 
                 make_params[0] *= factor
@@ -969,6 +965,24 @@ class GBGuide(SamplerGuide):
             cov = np.linalg.pinv(fisher)
             kwargs["mean_and_cov"] = [mean, cov]
 
+        betas = make_ladder(
+            self.default_ndim,
+            ntemps=kwargs["sampler_kwargs"]["tempering_kwargs"]["ntemps"],
+            Tmax=kwargs["sampler_kwargs"]["tempering_kwargs"]["Tmax"],
+        )
+
+        ind = np.where(self.snr_check * np.sqrt(betas) >= 0.0001)[0][-1]
+
+        betas = make_ladder(
+            self.default_ndim,
+            ntemps=kwargs["sampler_kwargs"]["tempering_kwargs"]["ntemps"] - 1,
+            Tmax=1 / betas[ind],
+        )
+        betas = np.concatenate([betas, np.array([0.0])])
+
+        kwargs["sampler_kwargs"]["tempering_kwargs"].pop("ntemps")
+        kwargs["sampler_kwargs"]["tempering_kwargs"]["betas"] = betas
+        print(kwargs["sampler_kwargs"]["tempering_kwargs"])
         SamplerGuide.__init__(self, *args, use_gpu=use_gpu, **kwargs)
 
         self.lnprob = gb

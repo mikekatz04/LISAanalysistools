@@ -140,7 +140,6 @@ class MBHBase(PipelineModule):
         from bbhx.utils.constants import YRSID_SI
 
         self.template_kwargs = dict(
-            tBase=0.0,
             length=1024,
             freqs=xp.asarray(info_manager.fd[1:]),
             t_obs_start=1.0,
@@ -297,12 +296,7 @@ class MBHRelBinSearch(PipelineModule):
         self.info_manager = info_manager
 
         self.template_kwargs = dict(
-            tBase=0.0,
-            t_obs_start=1.0,
-            t_obs_end=0.0,
-            modes=None,
-            direct=True,
-            compress=True,
+            t_obs_start=1.0, t_obs_end=0.0, modes=None, direct=True, compress=True,
         )
 
         # relbin_template = "multi"
@@ -478,7 +472,6 @@ class MBHRelBinPE(PipelineModule):
         from bbhx.utils.constants import YRSID_SI
 
         self.template_kwargs = dict(
-            tBase=0.0,
             t_obs_start=1.0,
             t_obs_end=0.0,  # 3600.0 / YRSID_SI,
             modes=None,

@@ -42,6 +42,7 @@ class BruteRejection(ReversibleJump):
         waveform_kwargs={},
         parameter_transforms=None,
         search=False,
+        search_samples=None,
         **kwargs
     ):
 
@@ -70,6 +71,8 @@ class BruteRejection(ReversibleJump):
         self.data = self.xp.asarray(data).copy()
         self.data_list = [self.xp.asarray(data_i) for data_i in data]
         self.search = search
+
+        self.search_samples = search_samples
 
         super(BruteRejection, self).__init__(*args, **kwargs)
 
@@ -142,100 +145,127 @@ class BruteRejection(ReversibleJump):
             # add coordinates for new leaves
             current_priors = self.priors[name]
             inds_here = tuple(inds_for_change["+1"].T)
-            num_inds_change = len(inds_here[0])
 
-            # group everything
-            groups = groups_from_inds({name: inds[inds_here[:2]][None, :, :]})[name]
-            # TODO: adjust to cupy
+            # it can pile up with low signal binaries at the maximum number (observation so far)
+            if len(inds_here[0]) != 0:
 
-            templates = self.xp.zeros(
-                (num_inds_change, 2, self.data_length), dtype=self.xp.complex128
-            )  # 2 is channels
+                num_inds_change = len(inds_here[0])
 
-            params = coords[inds_here[:2]][inds[inds_here[:2]]]
+                # group everything
+                groups = groups_from_inds({name: inds[inds_here[:2]][None, :, :]})[name]
+                # TODO: adjust to cupy
 
-            if self.parameter_transforms is not None:
-                params_in = self.parameter_transforms.both_transforms(
-                    params.copy(), return_transpose=False
-                )
+                templates = self.xp.zeros(
+                    (num_inds_change, 2, self.data_length), dtype=self.xp.complex128
+                )  # 2 is channels
 
-            # TODO fix error with buffer
-            self.gb.generate_global_template(
-                params_in,
-                groups,
-                templates,
-                # start_freq_ind=self.start_freq_ind,
-                **{
-                    **self.waveform_kwargs,
-                    **{"start_freq_ind": self.start_freq_ind - self.gb.shift_ind},
-                },
-            )
-
-            # data should not be whitened
-            in_vals = (templates - self.data[None, :, :]) * self.noise_factors[
-                None, :, :
-            ]
-            d_h_d_h = 4 * np.sum((in_vals.conj() * in_vals), axis=(1, 2))
-
-            out_temp = np.zeros((num_inds_change, ndim))
-            ll_out = np.zeros((num_inds_change,))
-            log_prob_factors = np.zeros((num_inds_change,))
-            # TODO: take out of loop later?
-            for j in range(num_inds_change):
-                prior_generated_points = current_priors.rvs(size=self.num_brute)
-                data = [
-                    (
-                        (self.data_list[0] - templates[j, 0].copy())
-                        * self.noise_factors[0]
-                    ).copy(),
-                    (
-                        (self.data_list[1] - templates[j, 1].copy())
-                        * self.noise_factors[1]
-                    ).copy(),
-                ]
+                params = coords[inds_here[:2]][inds[inds_here[:2]]]
 
                 if self.parameter_transforms is not None:
-                    prior_generated_points_in = self.parameter_transforms.both_transforms(
-                        prior_generated_points.copy(), return_transpose=True
+                    params_in = self.parameter_transforms.both_transforms(
+                        params.copy(), return_transpose=False
                     )
 
-                self.gb.d_d = d_h_d_h[j]
+                # TODO fix error with buffer
+                try:
+                    self.gb.generate_global_template(
+                        params_in,
+                        groups,
+                        templates,
+                        # start_freq_ind=self.start_freq_ind,
+                        **{
+                            **self.waveform_kwargs,
+                            **{
+                                "start_freq_ind": self.start_freq_ind
+                                - self.gb.shift_ind
+                            },
+                        },
+                    )
+                except ValueError:
+                    breakpoint()
 
-                ll = self.gb.get_ll(
-                    prior_generated_points_in,
-                    data,
-                    self.noise_factors_list,
-                    calc_d_d=False,
-                    phase_marginalize=False,
-                    **{
-                        **self.waveform_kwargs,
-                        **{"start_freq_ind": self.start_freq_ind - self.gb.shift_ind},
-                    },
-                )
+                # data should not be whitened
+                in_vals = (templates - self.data[None, :, :]) * self.noise_factors[
+                    None, :, :
+                ]
+                d_h_d_h = 4 * np.sum((in_vals.conj() * in_vals), axis=(1, 2))
 
-                if self.use_gpu:
-                    try:
-                        ll = ll.get()
-                    except AttributeError:
-                        pass
+                out_temp = np.zeros((num_inds_change, ndim))
+                ll_out = np.zeros((num_inds_change,))
+                log_prob_factors = np.zeros((num_inds_change,))
+                # TODO: take out of loop later?
+                for j in range(num_inds_change):
+                    if self.search_samples is not None:
+                        inds_drawn = random.choice(
+                            len(self.search_samples),
+                            size=self.num_brute,
+                            replace=False,
+                        )
+                        prior_generated_points = self.search_samples[inds_drawn].copy()
+                    else:
+                        prior_generated_points = current_priors.rvs(size=self.num_brute)
+                    data = [
+                        (
+                            (self.data_list[0] - templates[j, 0].copy())
+                            * self.noise_factors[0]
+                        ).copy(),
+                        (
+                            (self.data_list[1] - templates[j, 1].copy())
+                            * self.noise_factors[1]
+                        ).copy(),
+                    ]
 
-                probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
-                if self.search:
-                    # get max
-                    ind_keep = np.argmax(ll)
+                    if self.parameter_transforms is not None:
+                        prior_generated_points_in = self.parameter_transforms.both_transforms(
+                            prior_generated_points.copy(), return_transpose=True
+                        )
 
-                else:
-                    # draw based on likelihood
-                    ind_keep = np.random.choice(np.arange(self.num_brute), p=probs,)
+                    self.gb.d_d = d_h_d_h[j]
 
-                ll_out[j] = ll[ind_keep]
-                out_temp[j] = prior_generated_points[ind_keep].copy()
-                log_prob_factors[j] = np.log(probs[ind_keep])
+                    ll = self.gb.get_ll(
+                        prior_generated_points_in,
+                        data,
+                        self.noise_factors_list,
+                        calc_d_d=False,
+                        phase_marginalize=False,
+                        **{
+                            **self.waveform_kwargs,
+                            **{
+                                "start_freq_ind": self.start_freq_ind
+                                - self.gb.shift_ind
+                            },
+                        },
+                    )
 
-            q[name][inds_here] = out_temp
+                    if self.use_gpu:
+                        try:
+                            ll = ll.get()
+                        except AttributeError:
+                            pass
 
-            # factor is +log q() for prior
-            factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
-            # add factor from likelihood draw
-            factors[inds_here[:2]] += +1 * log_prob_factors
+                    probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
+                    if self.search:
+                        # get max
+                        ind_keep = np.argmax(ll)
+
+                    else:
+                        # draw based on likelihood
+                        if np.any(np.isnan(probs)):
+                            breakpoint()
+                        ind_keep = np.random.choice(np.arange(self.num_brute), p=probs,)
+
+                    ll_out[j] = ll[ind_keep]
+                    out_temp[j] = prior_generated_points[ind_keep].copy()
+                    log_prob_factors[j] = np.log(probs[ind_keep])
+
+                q[name][inds_here] = out_temp
+
+                # factor is +log q() for prior
+                factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
+                # add factor from likelihood draw
+                factors[inds_here[:2]] += +1 * log_prob_factors
+                print("GOOD", num_inds_change)
+
+            else:
+                print("BAD")
         return q, new_inds, factors

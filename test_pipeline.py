@@ -85,7 +85,7 @@ Afd, Efd, Tfd = AET(Xfd, Yfd, Zfd)
 folder = "/projects/b1095/mkatz/ldc2a/"
 # folder = "./"
 
-string = "paper_FINAL_noiseless_check"
+string = "check_new_eryn_Stretch_move"
 np.save(string + "_data", np.array([fd, Afd, Efd, Tfd]).T)
 
 fp_search = folder + string + "_search.h5"
@@ -116,7 +116,7 @@ mbh_search_rel_bin_module.initialize_module(
 
 mbh_pe_rel_bin_module = MBHRelBinPE(name="relbin pe")
 mbh_pe_rel_bin_module.initialize_module(
-    fp_pe_rel_bin, nwalkers_relbin, ntemps_relbin, set_d_d_zero=True, use_gpu=use_gpu
+    fp_pe_rel_bin, nwalkers_relbin, ntemps_relbin, set_d_d_zero=False, use_gpu=use_gpu
 )
 
 info.fp_search_init = fp_search
