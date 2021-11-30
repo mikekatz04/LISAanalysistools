@@ -43,6 +43,10 @@ class BruteRejection(ReversibleJump):
         parameter_transforms=None,
         search=False,
         search_samples=None,
+        search_snrs=None,
+        search_snr_lim=None,
+        search_snr_accept_factor=1.0,
+        take_max_ll=False,
         **kwargs
     ):
 
@@ -72,9 +76,34 @@ class BruteRejection(ReversibleJump):
         self.data_list = [self.xp.asarray(data_i) for data_i in data]
         self.search = search
 
+        if search_snrs is not None or search_snr_lim is not None:
+            if search_snrs is None or search_snr_lim is None:
+                raise ValueError(
+                    "If entering search_snrs or search_snr_lim, must enter both."
+                )
+            if search_samples is None:
+                raise ValueError(
+                    "If providing search_snrs/search_snr_lim, need to provide search_samples."
+                )
+
+            assert len(search_samples) == len(search_snrs)
+
         self.search_samples = search_samples
+        self.search_snrs = search_snrs
+        self.search_snr_lim = search_snr_lim
+        self.search_snr_accept_factor = search_snr_accept_factor
+        self.update_with_new_snr_lim(search_snr_lim)
+        self.take_max_ll = take_max_ll
 
         super(BruteRejection, self).__init__(*args, **kwargs)
+
+    def update_with_new_snr_lim(self, search_snr_lim):
+        self.search_inds = np.arange(len(self.search_snrs))[
+            self.search_snrs > search_snr_lim
+        ]
+        self.search_snr_lim = search_snr_lim
+
+        assert len(self.search_inds) > self.num_brute
 
     def get_proposal(self, all_coords, all_inds, all_inds_for_change, random):
         """Make a proposal
@@ -196,10 +225,9 @@ class BruteRejection(ReversibleJump):
                 # TODO: take out of loop later?
                 for j in range(num_inds_change):
                     if self.search_samples is not None:
+                        # TODO: make replace=True ? in PE
                         inds_drawn = random.choice(
-                            len(self.search_samples),
-                            size=self.num_brute,
-                            replace=False,
+                            self.search_inds, size=self.num_brute, replace=False,
                         )
                         prior_generated_points = self.search_samples[inds_drawn].copy()
                     else:
@@ -222,12 +250,14 @@ class BruteRejection(ReversibleJump):
 
                     self.gb.d_d = d_h_d_h[j]
 
+                    phase_marginalize = self.search
+
                     ll = self.gb.get_ll(
                         prior_generated_points_in,
                         data,
                         self.noise_factors_list,
                         calc_d_d=False,
-                        phase_marginalize=False,
+                        phase_marginalize=phase_marginalize,
                         **{
                             **self.waveform_kwargs,
                             **{
@@ -243,8 +273,28 @@ class BruteRejection(ReversibleJump):
                         except AttributeError:
                             pass
 
-                    probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
                     if self.search:
+                        phase_maximized_snr = (
+                            self.xp.abs(self.gb.d_h) / self.xp.sqrt(self.gb.h_h)
+                        ).real.copy()
+
+                        phase_change = self.xp.angle(self.gb.d_h / xp.sqrt(self.gb.h_h))
+
+                        try:
+                            phase_maximized_snr = phase_maximized_snr.get()
+                            phase_change = phase_change.get()
+
+                        except AttributeError:
+                            pass
+
+                        prior_generated_points[:, 3] -= phase_change
+                        ll[
+                            phase_maximized_snr
+                            < self.search_snr_lim * self.search_snr_accept_factor
+                        ] = -1e300
+
+                    probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
+                    if self.take_max_ll:
                         # get max
                         ind_keep = np.argmax(ll)
 
@@ -264,8 +314,8 @@ class BruteRejection(ReversibleJump):
                 factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
                 # add factor from likelihood draw
                 factors[inds_here[:2]] += +1 * log_prob_factors
+                self.last_run_ok = True
                 print("GOOD", num_inds_change)
-
             else:
-                print("BAD")
+                self.last_run_ok = False
         return q, new_inds, factors

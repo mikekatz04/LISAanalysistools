@@ -227,6 +227,7 @@ class Likelihood(object):
             self.noise_factor = [nf.copy() for nf in self.noise_factor]
 
         self.data_length = len(self.injection_channels[0])
+        self.psd = psd
 
     def get_ll(self, params, *args, **kwargs):
 

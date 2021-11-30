@@ -217,7 +217,7 @@ class MBHBase(PipelineModule):
         else:
             if not isinstance(self.injection, np.ndarray):
                 raise ValueError("injection must be np.ndarray")
-            factor = 1e-9
+            factor = 1e-8
 
             start_points = self.injection * (
                 1 + factor * np.random.randn(self.ntemps, self.nwalkers, 1, 11)
@@ -473,7 +473,7 @@ class MBHRelBinPE(PipelineModule):
 
         self.template_kwargs = dict(
             t_obs_start=1.0,
-            t_obs_end=0.0,  # 3600.0 / YRSID_SI,
+            t_obs_end=3600.0 / YRSID_SI,
             modes=None,
             direct=True,
             compress=True,

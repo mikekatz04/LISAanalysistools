@@ -544,7 +544,7 @@ class MBHGuide(SamplerGuide):
 
         noiseFactors = self.xp.asarray(self.lnprob.noise_factor)
         dataChannels = self.xp.asarray(self.lnprob.injection_channels)
-
+        psd = self.xp.asarray(self.lnprob.psd)
         if relbin:
             if self.global_fit:
                 raise ValueError("Cannot do relative binning for global fit.")
@@ -619,12 +619,12 @@ class MBHGuide(SamplerGuide):
             )
 
         else:
-
+            dataChannels /= noiseFactors  # remove noise factors
             mbh_like = MBHLikelihood(
                 bbh,
                 self.xp.asarray(f_arr[1:]),
                 dataChannels,
-                noiseFactors,
+                psd[:, 1:],
                 use_gpu=use_gpu,
             )
 
@@ -971,7 +971,7 @@ class GBGuide(SamplerGuide):
             Tmax=kwargs["sampler_kwargs"]["tempering_kwargs"]["Tmax"],
         )
 
-        ind = np.where(self.snr_check * np.sqrt(betas) >= 0.0001)[0][-1]
+        ind = np.where(self.snr_check * np.sqrt(betas) >= 0.01)[0][-1]
 
         betas = make_ladder(
             self.default_ndim,
