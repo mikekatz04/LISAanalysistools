@@ -971,7 +971,7 @@ class GBGuide(SamplerGuide):
             Tmax=kwargs["sampler_kwargs"]["tempering_kwargs"]["Tmax"],
         )
 
-        ind = np.where(self.snr_check * np.sqrt(betas) >= 0.01)[0][-1]
+        ind = np.where(self.snr_check * np.sqrt(betas) >= 0.001)[0][-1]
 
         betas = make_ladder(
             self.default_ndim,

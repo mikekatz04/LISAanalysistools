@@ -103,8 +103,6 @@ class BruteRejection(ReversibleJump):
         ]
         self.search_snr_lim = search_snr_lim
 
-        assert len(self.search_inds) > self.num_brute
-
     def get_proposal(self, all_coords, all_inds, all_inds_for_change, random):
         """Make a proposal
 
@@ -177,6 +175,7 @@ class BruteRejection(ReversibleJump):
 
             # it can pile up with low signal binaries at the maximum number (observation so far)
             if len(inds_here[0]) != 0:
+                assert len(self.search_inds) > self.num_brute
 
                 num_inds_change = len(inds_here[0])
 
