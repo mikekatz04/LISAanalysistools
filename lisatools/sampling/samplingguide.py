@@ -965,6 +965,7 @@ class GBGuide(SamplerGuide):
             cov = np.linalg.pinv(fisher)
             kwargs["mean_and_cov"] = [mean, cov]
 
+        """
         betas = make_ladder(
             self.default_ndim,
             ntemps=kwargs["sampler_kwargs"]["tempering_kwargs"]["ntemps"],
@@ -979,6 +980,17 @@ class GBGuide(SamplerGuide):
             Tmax=1 / betas[ind],
         )
         betas = np.concatenate([betas, np.array([0.0])])
+        """
+        ntemps = kwargs["sampler_kwargs"]["tempering_kwargs"]["ntemps"]
+        ntemps_over_5 = int(ntemps / 5)
+
+        ntemps_1 = 4 * ntemps_over_5
+        ntemps_2 = ntemps - ntemps_1
+
+        betas_1 = np.logspace(-4, 0, ntemps_1)[::-1]
+        betas_2 = np.logspace(-10, -4, ntemps_2 - 1, endpoint=False)[::-1]
+
+        betas = np.concatenate([betas_1, betas_2, np.array([0.0])])
 
         kwargs["sampler_kwargs"]["tempering_kwargs"].pop("ntemps")
         kwargs["sampler_kwargs"]["tempering_kwargs"]["betas"] = betas
