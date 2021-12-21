@@ -542,6 +542,40 @@ def noisepsd_AE(f, model="SciRDv1", includewd=None):
     return Sa
 
 
+def noisepsd_AE2(f, model="SciRDv1", includewd=None):
+    """
+    Compute and return analytic PSD of noise for TDI A and E
+     @param frequencydata  numpy array.
+     @param model is the noise model:
+         * 'Proposal': LISA Consortium Proposal for L3 mission: LISA_L3_20170120 (https://atrium.in2p3.fr/13414ec1-c9ac-44b4-bace-7004468f684c)
+         * 'SciRDv1': Science Requirement Document: ESA-L3-EST-SCI-RS-001 14/05/2018 (https://atrium.in2p3.fr/f5a78d3e-9e19-47a5-aa11-51c81d370f5f)
+         * 'MRDv1': Mission Requirement Document: ESA-L3-EST-MIS-RS-001 08/12/2017
+     @param includewd whether to include  GB confusion, if yes should give a duration of observations in years.
+         example: includewd=2.3 - 2.3 yeras of observations
+         if includewd == None: includewd = model.lisaWD
+    """
+    x = 2.0 * math.pi * lisaLT * f
+
+    Spm, Sop = lisanoises(f, model)
+
+    Sa = (
+        32.0
+        * np.sin(x) ** 2
+        * np.sin(2 * x) ** 2
+        * (
+            2.0 * Spm * (3.0 + 2.0 * np.cos(x) + np.cos(2 * x))
+            + Sop * (2.0 + np.cos(x))
+        )
+    )
+
+    if includewd != None:
+        raise NotImplementedError
+        Sa += WDconfusionAE(f, includewd, model=model)
+        # Sa += makewdnoise(f,includewd,'AE')
+
+    return Sa
+
+
 # TODO: currently not including WD background here... probably OK
 def noisepsd_T(f, model="SciRDv1", includewd=None):
     """
