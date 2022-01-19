@@ -1,4 +1,5 @@
 import warnings
+from eryn.state import Branch, BranchSupplimental
 
 import numpy as np
 
@@ -423,8 +424,10 @@ class GlobalLikelihood(Likelihood):
         start_freq_ind=None,
         args_list=None,
         kwargs_list=None,
+        supps=None,
+        branch_supps=None,
     ):
-
+        # get supps
         if not isinstance(params, list):
             params = [params]
         if not isinstance(groups, list):
@@ -432,6 +435,15 @@ class GlobalLikelihood(Likelihood):
 
         assert len(groups) == len(params)
 
+        if branch_supps is not None:
+            if not isinstance(branch_supps, list):
+                branch_supps = [branch_supps]
+
+        else:
+            branch_supps = [None for _ in params]
+        
+        assert len(groups) == len(branch_supps)
+        
         if args_list is None:
             args_list = [[] for _ in params]
 
@@ -469,7 +481,7 @@ class GlobalLikelihood(Likelihood):
             (total_groups, self.num_channels, data_length), dtype=self.xp.complex128,
         )
 
-        for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i) in enumerate(
+        for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i, branch_supp_i) in enumerate(
             zip(
                 params,
                 groups,
@@ -477,8 +489,10 @@ class GlobalLikelihood(Likelihood):
                 kwargs_list,
                 self.template_model,
                 self.vectorized,
+                branch_supps,
             )
         ):
+            # TODO: make fill templates adjustable per model
             if not self.fill_templates:  # False
                 if vec_i:
                     template_channels = self.xp.asarray(
@@ -506,15 +520,21 @@ class GlobalLikelihood(Likelihood):
                     template_all[group_ij] += template_channels[inds1].sum(axis=0)
 
             else:  # model will fill templates
+                kwargs_i_in = kwargs_i.copy()
+                if branch_supps is not None:
+                    kwargs_i_in["branch_supps"] = branch_supp_i
+                if supps is not None:
+                    kwargs_i_in["supps"] = supps
+
                 if vec_i:
                     tm_i.generate_global_template(
-                        params_i, groups_i, template_all, *args_i, **kwargs_i
+                        params_i, groups_i, template_all, *args_i, **kwargs_i_in
                     )
 
                 else:
                     for params_ij, groups_ij in zip(params_i.T, groups_i):
                         tm_i.generate_global_template(
-                            params_ij, groups_ij, template_all, *args_i, **kwargs_i
+                            params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
                         )
 
         inds_slice = slice(start_freq_ind, start_freq_ind + data_length)
