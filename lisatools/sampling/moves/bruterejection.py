@@ -92,7 +92,8 @@ class BruteRejection(ReversibleJump):
         self.search_snrs = search_snrs
         self.search_snr_lim = search_snr_lim
         self.search_snr_accept_factor = search_snr_accept_factor
-        self.update_with_new_snr_lim(search_snr_lim)
+        if search_snr_lim is not None:
+            self.update_with_new_snr_lim(search_snr_lim)
         self.take_max_ll = take_max_ll
 
         super(BruteRejection, self).__init__(*args, **kwargs)
@@ -175,7 +176,7 @@ class BruteRejection(ReversibleJump):
 
             # it can pile up with low signal binaries at the maximum number (observation so far)
             if len(inds_here[0]) != 0:
-                assert len(self.search_inds) > self.num_brute
+                assert len(self.search_inds) >= self.num_brute
 
                 num_inds_change = len(inds_here[0])
 

@@ -72,6 +72,8 @@ class SamplerGuide:
         verbose=False,
     ):
 
+        self.input_start_state = start_state
+
         self.use_gpu = use_gpu
         if self.use_gpu:
             self.xp = cp
@@ -115,7 +117,7 @@ class SamplerGuide:
         else:
             self.ntemps = 1
 
-        self.initial_setup(priors, start_state)
+        self.priors = priors
 
         self._set_parameter_transforms(
             transform_container, parameter_transforms, fill_dict
@@ -129,11 +131,6 @@ class SamplerGuide:
             self.test_start_likelihood = False
         else:
             self.test_start_likelihood = True
-
-    def initial_setup(self, priors, start_state):
-
-        self.priors = priors
-        self.start_state = start_state
 
     @property
     def start_state(self):
@@ -164,45 +161,51 @@ class SamplerGuide:
                     raise ValueError(
                         "If generating points from fisher matrix, must store start_mean and cov attributes."
                     )
-                coords_all = {}
-                for i, key in enumerate(self.branch_names):
+                
+                run_flag = True
+                while run_flag:
+                    coords_all = {}
+                    for i, key in enumerate(self.branch_names):
 
-                    coords_all[key] = np.zeros(
-                        self.ntemps,
-                        self.nwalkers,
-                        self.nleaves_max[i],
-                        self.default_ndims[i],
-                    )
-                    for t in range(self.ntemps):
-                        for w in range(self.nwalkers):
-                            for l in range(nleaves_max):
-                                if l >= len(self.start_mean):
-                                    continue
+                        coords_all[key] = np.zeros(
+                            self.ntemps,
+                            self.nwalkers,
+                            self.nleaves_max[i],
+                            self.default_ndims[i],
+                        )
+                        for t in range(self.ntemps):
+                            for w in range(self.nwalkers):
+                                for l in range(nleaves_max):
+                                    if l >= len(self.start_mean):
+                                        continue
 
-                                coords = np.zeros(
-                                    (self.nleaves_max[i], self.default_ndims[i],)
-                                )
-                                inds_fix = np.arange(self.nleaves_max[i])
-
-                                num_max_iter = 1000
-                                iter_num = 0
-                                while len(inds_fix) > 0:
-                                    if iter_num > num_max_iter:
-                                        raise RuntimeError(
-                                            "Covariance matrix walker generation is not generating walkers in the prior range."
-                                        )
-                                    coords[inds_fix] = np.random.multivariate_normal(
-                                        self.start_mean[l],
-                                        self.start_factor * self.cov[l],
-                                        size=len(inds_fix),
+                                    coords = np.zeros(
+                                        (self.nleaves_max[i], self.default_ndims[i],)
                                     )
+                                    inds_fix = np.arange(self.nleaves_max[i])
 
-                                    inds_fix = np.where(
-                                        np.isinf(self.priors.logpdf(self._start_state))
-                                    )[0]
+                                    num_max_iter = 1000
+                                    iter_num = 0
+                                    while len(inds_fix) > 0:
+                                        if iter_num > num_max_iter:
+                                            raise RuntimeError(
+                                                "Covariance matrix walker generation is not generating walkers in the prior range."
+                                            )
+                                        coords[inds_fix] = np.random.multivariate_normal(
+                                            self.start_mean[l],
+                                            self.start_factor * self.cov[l],
+                                            size=len(inds_fix),
+                                        )
 
-                                    iter_num += 1
-                                coords_all[key][t, w, l] = coords
+                                        inds_fix = np.where(
+                                            np.isinf(self.priors.logpdf(self._start_state))
+                                        )[0]
+
+                                        iter_num += 1
+                                    coords_all[key][t, w, l] = coords
+
+                    temp_state = State(coords_all)
+                    breakpoint()
 
                 self._start_state = State(coords_all)
 
@@ -647,8 +650,8 @@ class GBGuide(SamplerGuide):
 
         default_priors = {
             0: uniform_dist(np.log(1e-24), np.log(1e-20)),
-            1: uniform_dist(1.0, 10.0),
-            2: uniform_dist(np.log(1e-20), np.log(1e-15)),
+            1: uniform_dist(0.5, 20.0),
+            2: uniform_dist(1e-20, 1e-13),
             3 + ind_change: uniform_dist(0.0, 2 * np.pi),
             4 + ind_change: uniform_dist(-1, 1),
             5 + ind_change: uniform_dist(0.0, np.pi),
@@ -657,8 +660,7 @@ class GBGuide(SamplerGuide):
         }
 
         if hasattr(self, "include_fddot") and self.include_fddot:
-            # TODO check this
-            default_priors[3] = uniform_dist(np.log(1e-30), np.log(1e-25))
+            default_priors[3] = uniform_dist(1e-32, 1e-17)
 
         if hasattr(self, "include_third") and self.include_third:
             default_priors[8] = uniform_dist(1.0, 20000.0)
@@ -730,7 +732,6 @@ class GBGuide(SamplerGuide):
             "gb": {
                 0: (lambda x: np.exp(x)),
                 1: (lambda x: x * 1e-3),
-                2: (lambda x: np.exp(x)),
                 5: (lambda x: np.arccos(x)),
                 8: (lambda x: np.arcsin(x)),
             }
@@ -740,10 +741,7 @@ class GBGuide(SamplerGuide):
             # transform from fraction of period for T2 to regular T2
             parameter_transforms["gb"][(12, 13)] = lambda x, y: (x, y * x)
 
-        if hasattr(self, "include_fddot") and self.include_fddot:
-            parameter_transforms["gb"][3] = lambda x: np.exp(x)
-
-        else:
+        if not hasattr(self, "include_fddot"):
             # determine GR fddot
             parameter_transforms["gb"][(1, 2, 3)] = lambda f0, fdot, fddot: (
                 f0,
@@ -851,6 +849,7 @@ class GBGuide(SamplerGuide):
         fix_snr=None,
         inner_product_kwargs={},
         global_fit=False,
+        adjust_betas=False,
         **kwargs,
     ):
 
@@ -940,6 +939,7 @@ class GBGuide(SamplerGuide):
             )
 
             if fix_snr is not None:
+                raise NotImplementedError
                 factor = fix_snr / snr_check
 
                 make_params[0] *= factor
@@ -953,8 +953,10 @@ class GBGuide(SamplerGuide):
             # kwargs["sampler_kwargs"]["injection"] = injection_params
             kwargs["data"] = [A_inj, E_inj]
 
+        """
         if "start_state" in kwargs and kwargs["start_state"] == "fisher":
-            raise NotImplementedError("Need to correct for test_inds")
+            warnings.warn("Not using Fisher currently.")
+            #raise NotImplementedError("Need to correct for test_inds")
             mean = injection_params[self.default_test_inds]
 
             fish_kwargs = template_kwargs_in.copy()
@@ -964,7 +966,7 @@ class GBGuide(SamplerGuide):
             fisher = gb.fisher(np.array([injection_params]).T, **fish_kwargs).squeeze()
             cov = np.linalg.pinv(fisher)
             kwargs["mean_and_cov"] = [mean, cov]
-
+        """
         """
         betas = make_ladder(
             self.default_ndim,
@@ -981,32 +983,36 @@ class GBGuide(SamplerGuide):
         )
         betas = np.concatenate([betas, np.array([0.0])])
         """
-        ntemps = kwargs["sampler_kwargs"]["tempering_kwargs"]["ntemps"]
-        ntemps_over_5 = int(ntemps / 5)
 
-        ntemps_1 = 4 * ntemps_over_5
-        ntemps_2 = ntemps - ntemps_1
+        if adjust_betas:
+            ntemps = kwargs["sampler_kwargs"]["tempering_kwargs"]["ntemps"]
+            ntemps_over_5 = int(ntemps / 5)
 
-        betas_1 = np.logspace(-4, 0, ntemps_1)[::-1]
-        betas_2 = np.logspace(-10, -4, ntemps_2 - 1, endpoint=False)[::-1]
+            ntemps_1 = 4 * ntemps_over_5
+            ntemps_2 = ntemps - ntemps_1
 
-        betas = np.concatenate([betas_1, betas_2, np.array([0.0])])
+            betas_1 = np.logspace(-4, 0, ntemps_1)[::-1]
+            betas_2 = np.logspace(-10, -4, ntemps_2 - 1, endpoint=False)[::-1]
 
-        kwargs["sampler_kwargs"]["tempering_kwargs"].pop("ntemps")
-        kwargs["sampler_kwargs"]["tempering_kwargs"]["betas"] = betas
+            betas = np.concatenate([betas_1, betas_2, np.array([0.0])])
+
+            kwargs["sampler_kwargs"]["tempering_kwargs"].pop("ntemps")
+            kwargs["sampler_kwargs"]["tempering_kwargs"]["betas"] = betas
+
         print(kwargs["sampler_kwargs"]["tempering_kwargs"])
         SamplerGuide.__init__(self, *args, use_gpu=use_gpu, **kwargs)
 
         self.lnprob = gb
 
+        #self.start_state = self.input_start_state
+
         self.injection_setup_kwargs["params"] = None
         self.lnprob.inject_signal(**self.injection_setup_kwargs)
-
         self.setup_sampler()
-        self.adjust_start_state()
+        #self.adjust_start_state()
 
-        if self.test_start_likelihood:
-            self.perform_test_start_likelihood()
+        #if self.test_start_likelihood:
+        #    self.perform_test_start_likelihood()
 
         # check = self.lnprob.get_ll(
         #    np.array([injection_params]), waveform_kwargs=template_kwargs
