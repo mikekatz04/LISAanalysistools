@@ -92,7 +92,7 @@ class Likelihood(object):
                 key = list(self.parameter_transforms.keys())[0]
                 params = self.parameter_transforms[key].both_transforms(params)
 
-            injection_channels = xp.asarray(
+            injection_channels = self.xp.asarray(
                 self.template_model(*params, **waveform_kwargs)
             )
             try:
@@ -537,7 +537,7 @@ class GlobalLikelihood(Likelihood):
                             params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
                         )
 
-        inds_slice = slice(start_freq_ind, start_freq_ind + data_length)
+        inds_slice = slice(start_freq_ind - 2, start_freq_ind - 2 + data_length)
 
         template_all *= self.noise_factor[self.xp.newaxis, :, inds_slice]
 
@@ -553,7 +553,7 @@ class GlobalLikelihood(Likelihood):
         if self.noise_has_been_added:
             ll -= self.noise_likelihood_factor
 
-        out = xp.atleast_1d(ll.squeeze())
+        out = self.xp.atleast_1d(ll.squeeze())
 
         if self.use_gpu:
             if self.return_cupy:

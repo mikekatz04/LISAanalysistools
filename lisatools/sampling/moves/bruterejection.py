@@ -47,6 +47,7 @@ class BruteRejection(ReversibleJump):
         search_snr_lim=None,
         search_snr_accept_factor=1.0,
         take_max_ll=False,
+        global_template_builder=None,
         **kwargs
     ):
 
@@ -75,6 +76,7 @@ class BruteRejection(ReversibleJump):
         self.data = self.xp.asarray(data).copy()
         self.data_list = [self.xp.asarray(data_i) for data_i in data]
         self.search = search
+        self.global_template_builder = global_template_builder
 
         if search_snrs is not None or search_snr_lim is not None:
             if search_snrs is None or search_snr_lim is None:
@@ -104,7 +106,7 @@ class BruteRejection(ReversibleJump):
         ]
         self.search_snr_lim = search_snr_lim
 
-    def get_proposal(self, all_coords, all_inds, all_inds_for_change, random):
+    def get_proposal(self, all_coords, all_inds, all_inds_for_change, random, supp=None, branch_supps=None):
         """Make a proposal
 
         Args:
@@ -162,9 +164,9 @@ class BruteRejection(ReversibleJump):
             inds_here = tuple(inds_for_change["-1"].T)
             new_inds[name][inds_here] = False
 
-            # factor is -log q()
+            # factor is +log q()
             current_priors = self.priors[name]
-            factors[inds_here[:2]] += -1 * current_priors.logpdf(q[name][inds_here])
+            factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
 
             # adjust births from False -> True
             inds_here = tuple(inds_for_change["+1"].T)
@@ -188,31 +190,36 @@ class BruteRejection(ReversibleJump):
                     (num_inds_change, 2, self.data_length), dtype=self.xp.complex128
                 )  # 2 is channels
 
-                params = coords[inds_here[:2]][inds[inds_here[:2]]]
+                branch_supps = None
+                if branch_supps is not None:
+                    # TODO fix error with buffer
+                    self.global_template_builder.generate_global_template(None, groups, templates, branch_supps=branch_supps["gb"][inds])
+                    print("in")
+                else:
+                    params = coords[inds_here[:2]][inds[inds_here[:2]]]
 
-                if self.parameter_transforms is not None:
-                    params_in = self.parameter_transforms.both_transforms(
-                        params.copy(), return_transpose=False
-                    )
-
-                # TODO fix error with buffer
-                try:
-                    self.gb.generate_global_template(
-                        params_in,
-                        groups,
-                        templates,
-                        # start_freq_ind=self.start_freq_ind,
-                        **{
-                            **self.waveform_kwargs,
+                    if self.parameter_transforms is not None:
+                        params_in = self.parameter_transforms.both_transforms(
+                            params.copy(), return_transpose=False
+                        )
+                    
+                    try:
+                        self.gb.generate_global_template(
+                            params_in,
+                            groups,
+                            templates,
+                            # start_freq_ind=self.start_freq_ind,
                             **{
-                                "start_freq_ind": self.start_freq_ind
-                                - self.gb.shift_ind
+                                **self.waveform_kwargs,
+                                **{
+                                    "start_freq_ind": self.start_freq_ind
+                                    - self.gb.shift_ind
+                                },
                             },
-                        },
-                    )
-                except ValueError:
-                    breakpoint()
-
+                        )
+                    except ValueError:
+                        breakpoint()
+                
                 # data should not be whitened
                 in_vals = (templates - self.data[None, :, :]) * self.noise_factors[
                     None, :, :
@@ -278,7 +285,7 @@ class BruteRejection(ReversibleJump):
                             self.xp.abs(self.gb.d_h) / self.xp.sqrt(self.gb.h_h)
                         ).real.copy()
 
-                        phase_change = self.xp.angle(self.gb.d_h / xp.sqrt(self.gb.h_h))
+                        phase_change = self.xp.angle(self.gb.non_marg_d_h / self.xp.sqrt(self.gb.h_h.real))
 
                         try:
                             phase_maximized_snr = phase_maximized_snr.get()
@@ -287,7 +294,7 @@ class BruteRejection(ReversibleJump):
                         except AttributeError:
                             pass
 
-                        prior_generated_points[:, 3] -= phase_change
+                        prior_generated_points[:, 3] += phase_change
                         ll[
                             phase_maximized_snr
                             < self.search_snr_lim * self.search_snr_accept_factor
@@ -308,12 +315,14 @@ class BruteRejection(ReversibleJump):
                     out_temp[j] = prior_generated_points[ind_keep].copy()
                     log_prob_factors[j] = np.log(probs[ind_keep])
 
+                self.ll_out = ll_out.copy()
                 q[name][inds_here] = out_temp
 
-                # factor is +log q() for prior
-                factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
+                # factor is -log q() for prior
+                factors[inds_here[:2]] += -1 * current_priors.logpdf(q[name][inds_here])
                 # add factor from likelihood draw
-                factors[inds_here[:2]] += +1 * log_prob_factors
+                # TODO: CHECK!!!
+                factors[inds_here[:2]] += -1 * log_prob_factors
                 self.last_run_ok = True
                 print("GOOD", num_inds_change)
             else:
