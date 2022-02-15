@@ -521,7 +521,7 @@ class GlobalLikelihood(Likelihood):
 
             else:  # model will fill templates
                 kwargs_i_in = kwargs_i.copy()
-                if branch_supps is not None:
+                if branch_supp_i is not None:
                     kwargs_i_in["branch_supps"] = branch_supp_i
                 if supps is not None:
                     kwargs_i_in["supps"] = supps
@@ -537,7 +537,7 @@ class GlobalLikelihood(Likelihood):
                             params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
                         )
 
-        inds_slice = slice(start_freq_ind - 2, start_freq_ind - 2 + data_length)
+        inds_slice = slice(start_freq_ind, start_freq_ind + data_length)
 
         template_all *= self.noise_factor[self.xp.newaxis, :, inds_slice]
 
