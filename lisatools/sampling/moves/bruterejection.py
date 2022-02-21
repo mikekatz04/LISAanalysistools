@@ -78,15 +78,9 @@ class BruteRejection(ReversibleJump):
         self.search = search
         self.global_template_builder = global_template_builder
 
-        if search_snrs is not None or search_snr_lim is not None:
-            if search_snrs is None or search_snr_lim is None:
-                raise ValueError(
-                    "If entering search_snrs or search_snr_lim, must enter both."
-                )
-            if search_samples is None:
-                raise ValueError(
-                    "If providing search_snrs/search_snr_lim, need to provide search_samples."
-                )
+        if search_snrs is not None:
+            if search_snr_lim is None:
+                search_snr_lim = 0.1
 
             assert len(search_samples) == len(search_snrs)
 
@@ -101,9 +95,10 @@ class BruteRejection(ReversibleJump):
         super(BruteRejection, self).__init__(*args, **kwargs)
 
     def update_with_new_snr_lim(self, search_snr_lim):
-        self.search_inds = np.arange(len(self.search_snrs))[
-            self.search_snrs > search_snr_lim
-        ]
+        if self.search_snrs is not None:
+            self.search_inds = np.arange(len(self.search_snrs))[
+                self.search_snrs > search_snr_lim
+            ]
         self.search_snr_lim = search_snr_lim
 
     def get_proposal(self, all_coords, all_inds, all_inds_for_change, random, supp=None, branch_supps=None):
@@ -178,7 +173,8 @@ class BruteRejection(ReversibleJump):
 
             # it can pile up with low signal binaries at the maximum number (observation so far)
             if len(inds_here[0]) != 0:
-                assert len(self.search_inds) >= self.num_brute
+                if self.search and self.search_samples is not None:
+                    assert len(self.search_inds) >= self.num_brute
 
                 num_inds_change = len(inds_here[0])
 
@@ -194,7 +190,7 @@ class BruteRejection(ReversibleJump):
                 if branch_supps is not None:
                     # TODO fix error with buffer
                     self.global_template_builder.generate_global_template(None, groups, templates, branch_supps=branch_supps["gb"][inds])
-                    print("in")
+
                 else:
                     params = coords[inds_here[:2]][inds[inds_here[:2]]]
 
