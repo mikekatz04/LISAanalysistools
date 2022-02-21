@@ -118,7 +118,7 @@ class Likelihood(object):
 
         for inj in injection_channels:
             if len(inj) != self.injection_length:
-                raise ShapeError("Length of all injection channels must match.")
+                raise ValueError("Length of all injection channels must match.")
 
         if len(injection_channels) != self.num_channels:
             raise ValueError(
@@ -152,8 +152,8 @@ class Likelihood(object):
             if self.df is not None:
                 df = self.df
                 can_add_noise = True
-                freqs = np.arange(self.injection_length)[1:] * df
-                injection_channels = [inj[1:] for inj in injection_channels]
+                freqs = np.arange(self.injection_length) * df
+                injection_channels = [inj for inj in injection_channels]
 
             else:
                 freqs = self.f_arr
@@ -161,7 +161,7 @@ class Likelihood(object):
 
         else:
             dt = self.dt
-            freqs = np.fft.rfftfreq(self.injection_length, dt)[1:]
+            freqs = np.fft.rfftfreq(self.injection_length, dt)
             can_add_noise = True
             df = 1.0 / (self.injection_length * dt)
 
@@ -172,13 +172,16 @@ class Likelihood(object):
 
         if self.frequency_domain is False:
             injection_channels = [
-                np.fft.rfft(inj)[1:] * dt for inj in injection_channels
+                np.fft.rfft(inj) * dt for inj in injection_channels
             ]
 
-        diff_freqs = np.diff(freqs)
+        diff_freqs = np.zeros_like(freqs)
+        diff_freqs[1:] = np.diff(freqs)
+        diff_freqs[0] = diff_freqs[1]
 
         self.base_injections = injection_channels
         if add_noise and can_add_noise and self.noise_has_been_added is False:
+            raise NotImplementedError
             norm = 0.5 * (1.0 / df) ** 0.5
             noise_to_add = [
                 psd_temp ** (1 / 2)
@@ -198,7 +201,7 @@ class Likelihood(object):
             # TODO: need to check this
             self.noise_likelihood_factor = np.sum(
                 [
-                    1.0 / 2.0 * (2 * np.pi) * np.sum(diff_freqs * psd_temp[1:])
+                    1.0 / 2.0 * (2 * np.pi) * np.sum(diff_freqs * psd_temp)
                     for psd_temp in psd
                 ]
             )
@@ -208,17 +211,17 @@ class Likelihood(object):
 
         # noise weighting
         injection_channels = [
-            inj[1:] * (diff_freqs / psd_temp[1:]) ** (1 / 2)
+            inj * (diff_freqs / psd_temp) ** (1 / 2)
             for inj, psd_temp in zip(injection_channels, psd)
         ]
 
         self.noise_factor = self.xp.asarray(
-            [(diff_freqs / psd_temp[1:]) ** (1 / 2) for psd_temp in psd]
+            [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
         )
 
         if hasattr(self, "injection_channels") is False:
             self.injection_channels = self.xp.asarray(injection_channels)
-            self.freqs = self.xp.asarray(freqs)[1:]
+            self.freqs = self.xp.asarray(freqs)
 
         else:
             self.injection_channels += self.xp.asarray(injection_channels)

@@ -186,7 +186,7 @@ class BruteRejection(ReversibleJump):
                     (num_inds_change, 2, self.data_length), dtype=self.xp.complex128
                 )  # 2 is channels
 
-                branch_supps = None
+                # branch_supps = None
                 if branch_supps is not None:
                     # TODO fix error with buffer
                     self.global_template_builder.generate_global_template(None, groups, templates, branch_supps=branch_supps["gb"][inds])
@@ -280,8 +280,8 @@ class BruteRejection(ReversibleJump):
                         phase_maximized_snr = (
                             self.xp.abs(self.gb.d_h) / self.xp.sqrt(self.gb.h_h)
                         ).real.copy()
-
-                        phase_change = self.xp.angle(self.gb.non_marg_d_h / self.xp.sqrt(self.gb.h_h.real))
+                        
+                        phase_change = self.xp.angle(self.xp.asarray(self.gb.non_marg_d_h) / self.xp.sqrt(self.gb.h_h.real))
 
                         try:
                             phase_maximized_snr = phase_maximized_snr.get()
@@ -290,7 +290,7 @@ class BruteRejection(ReversibleJump):
                         except AttributeError:
                             pass
 
-                        prior_generated_points[:, 3] += phase_change
+                        prior_generated_points[:, 3] = (prior_generated_points[:, 3] - phase_change) % (2 * np.pi)
                         ll[
                             phase_maximized_snr
                             < self.search_snr_lim * self.search_snr_accept_factor
@@ -300,16 +300,18 @@ class BruteRejection(ReversibleJump):
                     if self.take_max_ll:
                         # get max
                         ind_keep = np.argmax(ll)
+                        log_prob_factors[j] = 0.0
 
                     else:
                         # draw based on likelihood
                         if np.any(np.isnan(probs)):
                             breakpoint()
                         ind_keep = np.random.choice(np.arange(self.num_brute), p=probs,)
+                        log_prob_factors[j] = np.log(probs[ind_keep])
 
                     ll_out[j] = ll[ind_keep]
                     out_temp[j] = prior_generated_points[ind_keep].copy()
-                    log_prob_factors[j] = np.log(probs[ind_keep])
+                    
 
                 self.ll_out = ll_out.copy()
                 q[name][inds_here] = out_temp
