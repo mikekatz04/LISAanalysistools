@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
+import warnings
 
 try:
     import cupy as xp
@@ -189,7 +190,9 @@ class BruteRejection(ReversibleJump):
                 # branch_supps = None
                 if branch_supps is not None:
                     # TODO fix error with buffer
-                    self.global_template_builder.generate_global_template(None, groups, templates, branch_supps=branch_supps["gb"][inds])
+                    inds_temp_global = np.zeros_like(inds)
+                    inds_temp_global[inds_here[:2]] = inds[inds_here[:2]]
+                    self.global_template_builder.generate_global_template(None, groups, templates, branch_supps=branch_supps["gb"][inds_temp_global].copy())
 
                 else:
                     params = coords[inds_here[:2]][inds[inds_here[:2]]]
@@ -221,7 +224,6 @@ class BruteRejection(ReversibleJump):
                     None, :, :
                 ]
                 d_h_d_h = 4 * np.sum((in_vals.conj() * in_vals), axis=(1, 2))
-
                 out_temp = np.zeros((num_inds_change, ndim))
                 ll_out = np.zeros((num_inds_change,))
                 log_prob_factors = np.zeros((num_inds_change,))
@@ -255,6 +257,7 @@ class BruteRejection(ReversibleJump):
 
                     phase_marginalize = self.search
 
+                    # TODO: add waveform to branch_supps
                     ll = self.gb.get_ll(
                         prior_generated_points_in,
                         data,
@@ -280,49 +283,56 @@ class BruteRejection(ReversibleJump):
                         phase_maximized_snr = (
                             self.xp.abs(self.gb.d_h) / self.xp.sqrt(self.gb.h_h)
                         ).real.copy()
+                        opt_snr = self.xp.sqrt(self.gb.h_h)
                         
                         phase_change = self.xp.angle(self.xp.asarray(self.gb.non_marg_d_h) / self.xp.sqrt(self.gb.h_h.real))
 
                         try:
                             phase_maximized_snr = phase_maximized_snr.get()
                             phase_change = phase_change.get()
+                            opt_snr = opt_snr.get()
 
                         except AttributeError:
                             pass
 
                         prior_generated_points[:, 3] = (prior_generated_points[:, 3] - phase_change) % (2 * np.pi)
                         ll[
-                            phase_maximized_snr
-                            < self.search_snr_lim * self.search_snr_accept_factor
+                            (phase_maximized_snr
+                            < self.search_snr_lim * 0.95)
+                            | (opt_snr
+                            < self.search_snr_lim * self.search_snr_accept_factor)
                         ] = -1e300
 
-                    probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
                     if self.take_max_ll:
                         # get max
                         ind_keep = np.argmax(ll)
                         log_prob_factors[j] = 0.0
 
                     else:
+                        if np.any(np.isnan(ll)):
+                            warnings.warn("Getting nans for ll in brute force.")
+                            ll[np.isnan(ll)] = -1e300
+                        probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
                         # draw based on likelihood
-                        if np.any(np.isnan(probs)):
-                            breakpoint()
+                        
                         ind_keep = np.random.choice(np.arange(self.num_brute), p=probs,)
                         log_prob_factors[j] = np.log(probs[ind_keep])
 
                     ll_out[j] = ll[ind_keep]
                     out_temp[j] = prior_generated_points[ind_keep].copy()
-                    
 
                 self.ll_out = ll_out.copy()
                 q[name][inds_here] = out_temp
-
+                
                 # factor is -log q() for prior
                 factors[inds_here[:2]] += -1 * current_priors.logpdf(q[name][inds_here])
                 # add factor from likelihood draw
                 # TODO: CHECK!!!
                 factors[inds_here[:2]] += -1 * log_prob_factors
                 self.last_run_ok = True
-                print("GOOD", num_inds_change)
+                
             else:
+                print("BAD", num_inds_change)
                 self.last_run_ok = False
+
         return q, new_inds, factors

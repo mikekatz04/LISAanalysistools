@@ -259,8 +259,9 @@ class Likelihood(object):
             raise NotImplementedError
 
         else:
+            # combines all channels into 1D array per likelihood
             d_minus_h = (self.injection_channels[self.xp.newaxis, :, :] - h).reshape(
-                num_likes, -1
+                num_likes, len(self.injection_channels), -1
             )
 
             # TODO: add inds_slice to here from global
@@ -269,7 +270,7 @@ class Likelihood(object):
             ll = -(
                 1.0
                 / 2.0
-                * (4.0 * self.xp.sum((d_minus_h.conj() * d_minus_h).real, axis=1))
+                * (4.0 * self.xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real, axis=(1, 2)))
             )
 
             if self.noise_has_been_added:
@@ -550,12 +551,12 @@ class GlobalLikelihood(Likelihood):
         # accelerate ?
         d_minus_h = (
             self.injection_channels[self.xp.newaxis, :, inds_slice] - template_all
-        ).reshape(total_groups, -1)
+        ).reshape(total_groups, len(self.injection_channels), -1)
 
         start_ind = 1 if np.isnan(self.noise_factor[0, inds_slice][0]) else 0
 
         ll = -(
-            1.0 / 2.0 * (4.0 * self.xp.sum((d_minus_h[start_ind:].conj() * d_minus_h[start_ind:]).real, axis=1))
+            1.0 / 2.0 * (4.0 * self.xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real, axis=(1, 2)))
         )
 
         if self.noise_has_been_added:
