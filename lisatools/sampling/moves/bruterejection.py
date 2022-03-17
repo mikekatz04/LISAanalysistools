@@ -16,10 +16,10 @@ from eryn.moves import ReversibleJump
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
 
-__all__ = ["PriorGenerate"]
+___ = ["BruteRejection"]
 
 
-class BruteRejection(ReversibleJump):
+class BruteRejection:
     """Generate Revesible-Jump proposals for GBs with brute-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -32,93 +32,30 @@ class BruteRejection(ReversibleJump):
 
     def __init__(
         self,
-        gb,
-        priors,
         num_brute,
-        start_freq_ind,
-        data_length,
-        data,
-        noise_factors,
-        *args,
-        waveform_kwargs={},
-        parameter_transforms=None,
-        search=False,
-        search_samples=None,
-        search_snrs=None,
-        search_snr_lim=None,
-        search_snr_accept_factor=1.0,
         take_max_ll=False,
-        global_template_builder=None,
-        **kwargs
     ):
-
-        for key in priors:
-            if not isinstance(priors[key], PriorContainer):
-                raise ValueError("Priors need to be eryn.priors.PriorContainer object.")
-        self.priors = priors
-        self.gb = gb
-
-        # use gpu from template generator
-        self.use_gpu = gb.use_gpu
-        if self.use_gpu:
-            self.xp = xp
-        else:
-            self.xp = np
-
+        # TODO: make priors optional like special generate function? 
         self.num_brute = num_brute
-        self.start_freq_ind = start_freq_ind
-        self.data_length = data_length
-        self.waveform_kwargs = waveform_kwargs
-        self.parameter_transforms = parameter_transforms
-        self.noise_factors = self.xp.asarray(noise_factors).copy()
-        self.noise_factors_list = [
-            self.xp.asarray(noise_factors_i) for noise_factors_i in noise_factors
-        ]
-        self.data = self.xp.asarray(data).copy()
-        self.data_list = [self.xp.asarray(data_i) for data_i in data]
-        self.search = search
-        self.global_template_builder = global_template_builder
-
-        if search_snrs is not None:
-            if search_snr_lim is None:
-                search_snr_lim = 0.1
-
-            assert len(search_samples) == len(search_snrs)
-
-        self.search_samples = search_samples
-        self.search_snrs = search_snrs
-        self.search_snr_lim = search_snr_lim
-        self.search_snr_accept_factor = search_snr_accept_factor
-        if search_snr_lim is not None:
-            self.update_with_new_snr_lim(search_snr_lim)
         self.take_max_ll = take_max_ll
 
-        super(BruteRejection, self).__init__(*args, **kwargs)
-
-    def update_with_new_snr_lim(self, search_snr_lim):
-        if self.search_snrs is not None:
-            self.search_inds = np.arange(len(self.search_snrs))[
-                self.search_snrs > search_snr_lim
-            ]
-        self.search_snr_lim = search_snr_lim
-
-    def get_proposal(self, all_coords, all_inds, all_inds_for_change, random, supp=None, branch_supps=None):
+    def get_bf_proposal(self, coords, nwalkers, random, args_generate=(), kwargs_generate={}, args_like=(), kwargs_like={}):
         """Make a proposal
 
         Args:
-            all_coords (dict): Keys are ``branch_names``. Values are
+            coords (dict): Keys are ``branch_names``. Values are
                 np.ndarray[ntemps, nwalkers, nleaves_max, ndim]. These are the curent
                 coordinates for all the walkers.
-            all_inds (dict): Keys are ``branch_names``. Values are
+            inds (dict): Keys are ``branch_names``. Values are
                 np.ndarray[ntemps, nwalkers, nleaves_max]. These are the boolean
                 arrays marking which leaves are currently used within each walker.
-            all_inds_for_change (dict): Keys are ``branch_names``. Values are
+            inds_for_change (dict): Keys are ``branch_names``. Values are
                 dictionaries. These dictionaries have keys ``"+1"`` and ``"-1"``,
                 indicating waklkers that are adding or removing a leafm respectively.
                 The values for these dicts are ``int`` np.ndarray[..., 3]. The "..." indicates
                 the number of walkers in all temperatures that fall under either adding
                 or removing a leaf. The second dimension, 3, is the indexes into
-                the three-dimensional arrays within ``all_inds`` of the specific leaf
+                the three-dimensional arrays within ``inds`` of the specific leaf
                 that is being added or removed from those leaves currently considered.
             random (object): Current random state of the sampler.
 
@@ -135,204 +72,34 @@ class BruteRejection(ReversibleJump):
                 in the numerator. -log of factors if in the denominator.
 
         """
-        q = {}
-        new_inds = {}
-        factors = {}
 
-        for i, (name, coords, inds, inds_for_change) in enumerate(
-            zip(
-                all_coords.keys(),
-                all_coords.values(),
-                all_inds.values(),
-                all_inds_for_change.values(),
-            )
-        ):
-            ntemps, nwalkers, nleaves_max, ndim = coords.shape
-            new_inds[name] = inds.copy()
-            q[name] = coords.copy()
+        factors = np.zeros((nwalkers,))
 
-            if i == 0:
-                factors = np.zeros((ntemps, nwalkers))
+        # generate new points and get detailed balance info
+        generated_points, generated_factors = self.special_generate_func(coords, nwalkers, *args_generate, random=random, size=self.num_brute, **kwargs_generate)
+        ll = self.special_like_func(generated_points, *args_like, **kwargs_like)
+        if self.take_max_ll:
+            # get max
+            inds_keep = np.argmax(ll, axis=-1)
+            log_prob_factors = np.full(len(inds_keep), 0.0)
 
-            # adjust inds
+        else:
+            if np.any(np.isnan(ll)):
+                warnings.warn("Getting nans for ll in brute force.")
+                ll[np.isnan(ll)] = -1e300
+            temp_probs = np.exp(ll - ll.max(axis=-1, keepdims=True))
+            probs = temp_probs / np.sum(temp_probs, axis=-1, keepdims=True)
+            # draw based on likelihood
+            inds_keep = (probs.cumsum(1) > np.random.rand(probs.shape[0])[:,None]).argmax(1)
+            log_prob_factors = -np.log(probs[(np.arange(len(inds_keep)), inds_keep)])
 
-            # adjust deaths from True -> False
-            inds_here = tuple(inds_for_change["-1"].T)
-            new_inds[name][inds_here] = False
+        #log_prob_factors = np.log(probs[:, ind_keep])
+        inds_tuple = (np.arange(len(inds_keep)), inds_keep)
+        ll_out = ll[inds_tuple]
+        generated_points_out = generated_points[inds_tuple].copy()
 
-            # factor is +log q()
-            current_priors = self.priors[name]
-            factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
+        self.ll_out = ll_out.copy()
+        factors += generated_factors[inds_tuple]
+        factors += log_prob_factors
 
-            # adjust births from False -> True
-            inds_here = tuple(inds_for_change["+1"].T)
-            new_inds[name][inds_here] = True
-
-            # add coordinates for new leaves
-            current_priors = self.priors[name]
-            inds_here = tuple(inds_for_change["+1"].T)
-
-            # it can pile up with low signal binaries at the maximum number (observation so far)
-            if len(inds_here[0]) != 0:
-                if self.search and self.search_samples is not None:
-                    assert len(self.search_inds) >= self.num_brute
-
-                num_inds_change = len(inds_here[0])
-
-                # group everything
-                groups = groups_from_inds({name: inds[inds_here[:2]][None, :, :]})[name]
-                # TODO: adjust to cupy
-
-                templates = self.xp.zeros(
-                    (num_inds_change, 2, self.data_length), dtype=self.xp.complex128
-                )  # 2 is channels
-
-                # branch_supps = None
-                if branch_supps is not None:
-                    # TODO fix error with buffer
-                    inds_temp_global = np.zeros_like(inds)
-                    inds_temp_global[inds_here[:2]] = inds[inds_here[:2]]
-                    self.global_template_builder.generate_global_template(None, groups, templates, branch_supps=branch_supps["gb"][inds_temp_global].copy())
-
-                else:
-                    params = coords[inds_here[:2]][inds[inds_here[:2]]]
-
-                    if self.parameter_transforms is not None:
-                        params_in = self.parameter_transforms.both_transforms(
-                            params.copy(), return_transpose=False
-                        )
-                    
-                    try:
-                        self.gb.generate_global_template(
-                            params_in,
-                            groups,
-                            templates,
-                            # start_freq_ind=self.start_freq_ind,
-                            **{
-                                **self.waveform_kwargs,
-                                **{
-                                    "start_freq_ind": self.start_freq_ind
-                                    - self.gb.shift_ind
-                                },
-                            },
-                        )
-                    except ValueError:
-                        breakpoint()
-                
-                # data should not be whitened
-                in_vals = (templates - self.data[None, :, :]) * self.noise_factors[
-                    None, :, :
-                ]
-                d_h_d_h = 4 * np.sum((in_vals.conj() * in_vals), axis=(1, 2))
-                out_temp = np.zeros((num_inds_change, ndim))
-                ll_out = np.zeros((num_inds_change,))
-                log_prob_factors = np.zeros((num_inds_change,))
-                # TODO: take out of loop later?
-                for j in range(num_inds_change):
-                    if self.search_samples is not None:
-                        # TODO: make replace=True ? in PE
-                        inds_drawn = random.choice(
-                            self.search_inds, size=self.num_brute, replace=False,
-                        )
-                        prior_generated_points = self.search_samples[inds_drawn].copy()
-                    else:
-                        prior_generated_points = current_priors.rvs(size=self.num_brute)
-                    data = [
-                        (
-                            (self.data_list[0] - templates[j, 0].copy())
-                            * self.noise_factors[0]
-                        ).copy(),
-                        (
-                            (self.data_list[1] - templates[j, 1].copy())
-                            * self.noise_factors[1]
-                        ).copy(),
-                    ]
-
-                    if self.parameter_transforms is not None:
-                        prior_generated_points_in = self.parameter_transforms.both_transforms(
-                            prior_generated_points.copy(), return_transpose=True
-                        )
-
-                    self.gb.d_d = d_h_d_h[j]
-
-                    phase_marginalize = self.search
-
-                    # TODO: add waveform to branch_supps
-                    ll = self.gb.get_ll(
-                        prior_generated_points_in,
-                        data,
-                        self.noise_factors_list,
-                        calc_d_d=False,
-                        phase_marginalize=phase_marginalize,
-                        **{
-                            **self.waveform_kwargs,
-                            **{
-                                "start_freq_ind": self.start_freq_ind
-                                - self.gb.shift_ind
-                            },
-                        },
-                    )
-
-                    if self.use_gpu:
-                        try:
-                            ll = ll.get()
-                        except AttributeError:
-                            pass
-
-                    if self.search:
-                        phase_maximized_snr = (
-                            self.xp.abs(self.gb.d_h) / self.xp.sqrt(self.gb.h_h)
-                        ).real.copy()
-                        opt_snr = self.xp.sqrt(self.gb.h_h)
-                        
-                        phase_change = self.xp.angle(self.xp.asarray(self.gb.non_marg_d_h) / self.xp.sqrt(self.gb.h_h.real))
-
-                        try:
-                            phase_maximized_snr = phase_maximized_snr.get()
-                            phase_change = phase_change.get()
-                            opt_snr = opt_snr.get()
-
-                        except AttributeError:
-                            pass
-
-                        prior_generated_points[:, 3] = (prior_generated_points[:, 3] - phase_change) % (2 * np.pi)
-                        ll[
-                            (phase_maximized_snr
-                            < self.search_snr_lim * 0.95)
-                            | (opt_snr
-                            < self.search_snr_lim * self.search_snr_accept_factor)
-                        ] = -1e300
-
-                    if self.take_max_ll:
-                        # get max
-                        ind_keep = np.argmax(ll)
-                        log_prob_factors[j] = 0.0
-
-                    else:
-                        if np.any(np.isnan(ll)):
-                            warnings.warn("Getting nans for ll in brute force.")
-                            ll[np.isnan(ll)] = -1e300
-                        probs = np.exp(ll - ll.max()) / np.sum(np.exp(ll - ll.max()))
-                        # draw based on likelihood
-                        
-                        ind_keep = np.random.choice(np.arange(self.num_brute), p=probs,)
-                        log_prob_factors[j] = np.log(probs[ind_keep])
-
-                    ll_out[j] = ll[ind_keep]
-                    out_temp[j] = prior_generated_points[ind_keep].copy()
-
-                self.ll_out = ll_out.copy()
-                q[name][inds_here] = out_temp
-                
-                # factor is -log q() for prior
-                factors[inds_here[:2]] += -1 * current_priors.logpdf(q[name][inds_here])
-                # add factor from likelihood draw
-                # TODO: CHECK!!!
-                factors[inds_here[:2]] += -1 * log_prob_factors
-                self.last_run_ok = True
-                
-            else:
-                print("BAD", num_inds_change)
-                self.last_run_ok = False
-
-        return q, new_inds, factors
+        return generated_points_out, ll_out, factors
