@@ -41,9 +41,11 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         start_freq_ind,
         data_length,
         data,
-        noise_factors,
+        psd,
+        fd,
         *args,
         waveform_kwargs={},
+        noise_kwargs={},
         parameter_transforms=None,
         search=False,
         search_samples=None,
@@ -53,6 +55,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         take_max_ll=False,
         global_template_builder=None,
         point_generator_func=None,
+        psd_func=None,
         **kwargs
     ):
 
@@ -74,11 +77,15 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         self.start_freq_ind = start_freq_ind
         self.data_length = data_length
         self.waveform_kwargs = waveform_kwargs
+        self.noise_kwargs = noise_kwargs
         self.parameter_transforms = parameter_transforms
-        self.noise_factors = self.xp.asarray(noise_factors).copy()
-        self.noise_factors_list = [
-            self.xp.asarray(noise_factors_i) for noise_factors_i in noise_factors
+        self.psd = self.xp.asarray(psd).copy()
+        self.psd_list = [
+            self.xp.asarray(psd_i) for psd_i in psd
         ]
+        self.psd_func = psd_func
+        self.fd = fd
+        self.df = (fd[1] - fd[0]).item()
         self.data = self.xp.asarray(data).copy()
         self.data_list = [self.xp.asarray(data_i) for data_i in data]
         self.search = search
@@ -131,7 +138,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
 
         return generated_points, generate_factors
         
-    def special_like_func(self, generated_points, coords, inds, branch_supps=None):
+    def special_like_func(self, generated_points, coords, inds, branch_supps=None, noise_params=None):
         # group everything
 
         # GENERATED POINTS MUST BE PASSED IN by reference not copied 
@@ -188,10 +195,25 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                     breakpoint()
             
         # data should not be whitened
-        in_vals = (templates - self.data[None, :, :]) * self.noise_factors[
-            None, :, :
-        ]
-        self.d_h_d_h = d_h_d_h = 4 * np.sum((in_vals.conj() * in_vals), axis=(1, 2))
+        if noise_params is None:
+            use_stock_psd = True
+            psd = self.psd[None, :, :]   
+
+        else:
+            use_stock_psd = False
+            if self.psd_func is None:
+                raise ValueError("When providing noise_params, psd_func kwargs in __init__ function must be given.")
+
+            if noise_params.ndim == 3:
+                noise_params = noise_params[0]
+            try:
+                tmp = self.xp.asarray([self.psd_func(self.fd, *noise_params, **self.noise_kwargs) for _ in range(2)])
+                psd = tmp.transpose((1,0,2))
+            except ValueError:
+                breakpoint()
+        in_vals = (templates - self.data[None, :, :])
+        self.d_h_d_h = d_h_d_h = 4 * self.df * self.xp.sum((in_vals.conj() * in_vals) / psd, axis=(1, 2))
+
         ll_out = np.zeros((num_inds_change, num_brute)).flatten()
         # TODO: take out of loop later?
 
@@ -207,19 +229,28 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
             data = [
                 (
                     (self.data_list[0][None, :] - templates[split * batch_size: (split + 1) * batch_size, 0].copy())
-                    * self.noise_factors[0][None, :]
                 ).copy(),
                 (
                     (self.data_list[1][None, :] - templates[split * batch_size: (split + 1) * batch_size, 1].copy())
-                    * self.noise_factors[1][None, :]
                 ).copy(),
             ]
+
 
             current_batch_size = data[0].shape[0]
 
             self.gb.d_d = self.xp.repeat(d_h_d_h[split * batch_size: (split + 1) * batch_size], self.num_brute)
 
             data_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_brute)
+
+            if use_stock_psd:
+                psd_in = list(psd[0])
+                noise_index = self.xp.zeros(self.num_brute * current_batch_size, dtype=self.xp.int32)
+            
+            else:
+                # moves channel to outside
+                tmp = psd.transpose((1, 0, 2))
+                psd_in = [tmp_i.copy() for tmp_i in tmp]
+                noise_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_brute)
 
             inds_slice = slice(split * batch_size * self.num_brute, (split + 1) * batch_size * self.num_brute)
             
@@ -229,12 +260,14 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                     prior_generated_points_in = self.parameter_transforms.both_transforms(
                         prior_generated_points.copy(), return_transpose=True
                     )
+
             try:
                 ll = self.gb.get_ll(
                     prior_generated_points_in,
                     data,
-                    self.noise_factors_list,
+                    psd_in,
                     data_index=data_index,
+                    noise_index=noise_index,
                     calc_d_d=False,
                     phase_marginalize=phase_marginalize,
                     **{
@@ -286,7 +319,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
 
             generated_points[:] = generated_points_here.reshape(generated_points.shape)
             ll_out[inds_slice] = ll.copy()     
-        
+
         # return gb.d_d
         self.gb.d_d = back_d_d.copy()
         return ll_out.reshape(num_inds_change, num_brute)
@@ -341,8 +374,8 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
             new_inds[name] = inds.copy()
             q[name] = coords.copy()
 
-            if i > 0:
-                raise NotImplementedError
+            if name != "gb":
+                continue
 
             if i == 0:
                 factors = np.zeros((ntemps, nwalkers))
@@ -377,7 +410,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                     random, 
                     kwargs_generate={"current_priors": current_priors}, 
                     args_like=(coords[inds_here[:2]], inds[inds_here[:2]]), 
-                    kwargs_like={"branch_supps": branch_supps[name][inds_here[:2]]}
+                    kwargs_like={"branch_supps": branch_supps[name][inds_here[:2]], "noise_params": all_coords["noise_params"][inds_here[:2]].T}
                 )
                 q[name][inds_here] = generate_points_out.copy()
 

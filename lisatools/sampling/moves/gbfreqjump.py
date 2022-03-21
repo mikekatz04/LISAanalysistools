@@ -169,8 +169,8 @@ class GBFreqJump(MHMove, GBBruteRejectionRJ):
             new_inds[name] = inds.copy()
             q[name] = coords.copy()
 
-            if i > 0:
-                raise NotImplementedError
+            if name != "gb":
+                continue
 
             if i == 0:
                 factors = np.zeros((ntemps, nwalkers))
@@ -190,7 +190,7 @@ class GBFreqJump(MHMove, GBBruteRejectionRJ):
                 args_generate=(inds.reshape(ntemps * nwalkers, nleaves_max),),
                 kwargs_generate={"current_priors": current_priors}, 
                 args_like=(coords.reshape(ntemps * nwalkers, nleaves_max, ndim), inds.reshape(ntemps * nwalkers, nleaves_max)), 
-                kwargs_like={"branch_supps": branch_supps_in}
+                kwargs_like={"branch_supps": branch_supps_in, "noise_params": branches_coords["noise_params"].reshape(ntemps * nwalkers, branches_coords["noise_params"].shape[-1]).T}
             )
             inds_tuple = (
                 np.repeat(np.arange(ntemps), nwalkers), 
