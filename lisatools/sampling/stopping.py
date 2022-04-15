@@ -37,16 +37,17 @@ class SNRStopping(Stopping):
 
 
 class SearchConvergeStopping(Stopping):
-    def __init__(self, n_iters=30, diff=1.0, verbose=False):
+    def __init__(self, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
         self.n_iters = n_iters
         self.iters_consecutive = 0
         self.past_like_best = -np.inf
         self.diff = diff
         self.verbose = verbose
+        self.start_iteration = start_iteration
 
     def __call__(self, iter, sample, sampler):
 
-        like_best = sampler.get_log_prob().max()
+        like_best = sampler.get_log_prob(discard=self.start_iteration).max()
 
         if np.abs(like_best - self.past_like_best) < self.diff:
             self.iters_consecutive += 1
@@ -64,6 +65,7 @@ class SearchConvergeStopping(Stopping):
             )
 
         if self.iters_consecutive >= self.n_iters:
+            self.iters_consecutive = 0
             return True
 
         else:

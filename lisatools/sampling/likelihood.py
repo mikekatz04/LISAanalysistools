@@ -163,7 +163,7 @@ class Likelihood(object):
             noise_args = [noise_args for _ in range(self.num_channels)]
 
         if self.frequency_domain:
-            if self.df is not None:
+            if self.df is not None and self.f_arr is None:
                 df = self.df
                 can_add_noise = True
                 freqs = np.arange(self.injection_length) * df
@@ -669,7 +669,7 @@ class GlobalLikelihood(Likelihood):
 
         ll = self.signal_ll.copy()
         if self.adjust_psd:
-            self.noise_ll = self.xp.sum(self.xp.log(psd), axis=(1, 2))
+            self.noise_ll = -self.xp.sum(self.xp.log(psd), axis=(1, 2))
             ll += self.noise_ll
 
         out = self.xp.atleast_1d(ll.squeeze())

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from copy import deepcopy
+from inspect import Attribute
 from multiprocessing.sharedctypes import Value
 import numpy as np
 import warnings
@@ -56,15 +57,18 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         global_template_builder=None,
         point_generator_func=None,
         psd_func=None,
+        provide_betas=False,
         **kwargs
     ):
 
+        self.is_rj = True
         # TODO: make priors optional like special generate function? 
         for key in priors:
             if not isinstance(priors[key], PriorContainer):
                 raise ValueError("Priors need to be eryn.priors.PriorContainer object.")
         self.priors = priors
         self.gb = gb
+        self.provide_betas = provide_betas
 
         # use gpu from template generator
         self.use_gpu = gb.use_gpu
@@ -79,15 +83,11 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         self.waveform_kwargs = waveform_kwargs
         self.noise_kwargs = noise_kwargs
         self.parameter_transforms = parameter_transforms
-        self.psd = self.xp.asarray(psd).copy()
-        self.psd_list = [
-            self.xp.asarray(psd_i) for psd_i in psd
-        ]
+        self.psd = psd
         self.psd_func = psd_func
         self.fd = fd
         self.df = (fd[1] - fd[0]).item()
-        self.data = self.xp.asarray(data).copy()
-        self.data_list = [self.xp.asarray(data_i) for data_i in data]
+        self.data = data
         self.search = search
         self.global_template_builder = global_template_builder
         self.point_generator_func = point_generator_func
@@ -109,6 +109,26 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         ReversibleJump.__init__(self, *args, **kwargs)
         BruteRejection.__init__(self, self.num_brute, take_max_ll=take_max_ll)
 
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, data):
+        self._data = self.xp.asarray(data).copy()
+        self.data_list = [self.xp.asarray(data_i) for data_i in data]
+        return
+
+    @property
+    def psd(self):
+        return self._psd
+
+    @psd.setter
+    def psd(self, psd):
+        self._psd = self.xp.asarray(psd).copy()
+        self.psd_list = [self.xp.asarray(psd_i) for psd_i in psd]
+        return
+
     def update_with_new_snr_lim(self, search_snr_lim):
         if self.search_snrs is not None:
             self.search_inds = np.arange(len(self.search_snrs))[
@@ -116,7 +136,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
             ]
         self.search_snr_lim = search_snr_lim
 
-    def special_generate_func(self, coords, nwalkers, current_priors=None, random=None, size:int=1):
+    def special_generate_func(self, coords, nwalkers, current_priors=None, random=None, size:int=1, fill=None, fill_inds=None):
 
         if self.search_samples is not None:
             # TODO: make replace=True ? in PE
@@ -132,13 +152,19 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
             if current_priors is None:
                 raise ValueError("If generating from the prior, must provide current_priors kwargs.")
 
-            generated_points = current_priors.rvs(size=nwalkers * size)
-            generate_factors = current_priors.logpdf(generated_points).reshape(nwalkers, size)
-            generated_points = generated_points.reshape(nwalkers, size, -1)
+            generated_points = current_priors.rvs(size=nwalkers * size).reshape(nwalkers, size, -1)
+
+            # fill before getting logpdf
+            if fill is not None or fill_inds is not None:
+                if fill is None or fill_inds is None:
+                    raise ValueError("If providing fill_inds or fill, must provide both.")
+                generated_points[fill_inds] = fill.copy()
+
+            generate_factors = current_priors.logpdf(generated_points.reshape(nwalkers * size, -1)).reshape(nwalkers, size)
 
         return generated_points, generate_factors
         
-    def special_like_func(self, generated_points, coords, inds, branch_supps=None, noise_params=None):
+    def special_like_func(self, generated_points, coords, inds, branch_supps=None, noise_params=None, inds_reverse=None):
         # group everything
 
         # GENERATED POINTS MUST BE PASSED IN by reference not copied 
@@ -287,11 +313,13 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                 except AttributeError:
                     pass
 
+            opt_snr = self.xp.sqrt(self.gb.h_h)
+
             if self.search:
                 phase_maximized_snr = (
                     self.xp.abs(self.gb.d_h) / self.xp.sqrt(self.gb.h_h)
                 ).real.copy()
-                opt_snr = self.xp.sqrt(self.gb.h_h)
+                
                 
                 phase_change = self.xp.angle(self.xp.asarray(self.gb.non_marg_d_h) / self.xp.sqrt(self.gb.h_h.real))
 
@@ -307,22 +335,58 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                     breakpoint()
 
                 # adjust for phase change from maximization
-
                 generated_points_here[inds_slice, 3] = (generated_points_here[inds_slice, 3] - phase_change) % (2 * np.pi)
 
+                snr_comp = phase_maximized_snr
+
+            else:
+                snr_comp = (
+                    self.gb.d_h.real / self.xp.sqrt(self.gb.h_h)
+                ).real.copy()
+                try:
+                    snr_comp = snr_comp.get()
+                    opt_snr = opt_snr.get()
+
+                except AttributeError:
+                    pass
+
+            if self.search_snr_lim is not None:
                 ll[
-                    (phase_maximized_snr
+                    (snr_comp
                     < self.search_snr_lim * 0.95)
                     | (opt_snr
                     < self.search_snr_lim * self.search_snr_accept_factor)
                 ] = -1e300
+                #if np.any(phase_maximized_snr > self.search_snr_lim):
 
             generated_points[:] = generated_points_here.reshape(generated_points.shape)
-            ll_out[inds_slice] = ll.copy()     
+            ll_out[inds_slice] = ll.copy()    
 
+        if inds_reverse is not None:
+            try:
+                tmp_d_h_d_h = d_h_d_h.get()
+            except AttributeError:
+                tmp_d_h_d_h = d_h_d_h
+
+            self.special_aux_ll = (-1./2. * tmp_d_h_d_h[inds_reverse]).real + self.noise_ll[inds_reverse]
+
+        #breakpoint()
         # return gb.d_d
         self.gb.d_d = back_d_d.copy()
-        return ll_out.reshape(num_inds_change, num_brute)
+
+        # add noise term
+        return ll_out.reshape(num_inds_change, num_brute) + self.noise_ll[:, None]
+
+    def special_prior_func(self, generated_points, coords, inds, **kwargs):
+        nwalkers, nleaves_max, ndim = coords.shape
+        lp_old = self.current_model.compute_log_prior_fn({"gb": coords.reshape((1,) + coords.shape)}, inds={"gb": inds.reshape((1,) + inds.shape)}).squeeze()
+
+        lp_new = np.zeros((nwalkers, self.num_brute))
+        lp_new = self.priors["gb"].logpdf(generated_points.reshape(-1, 8)).reshape(nwalkers, self.num_brute)
+        lp_total = lp_old[:, None] + lp_new
+
+        # add noise lp
+        return lp_total + self.noise_lp[:, None]
 
     def get_proposal(self, all_coords, all_inds, all_inds_for_change, random, supp=None, branch_supps=None):
         """Make a proposal
@@ -372,6 +436,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         
             ntemps, nwalkers, nleaves_max, ndim = coords.shape
             new_inds[name] = inds.copy()
+            tmp_inds = inds.copy()
             q[name] = coords.copy()
 
             if name != "gb":
@@ -383,20 +448,31 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
             # adjust inds
 
             # adjust deaths from True -> False
-            inds_here = tuple(inds_for_change["-1"].T)
-            new_inds[name][inds_here] = False
+            inds_reverse = tuple(inds_for_change["-1"].T)
 
-            # factor is +log q()
-            current_priors = self.priors[name]
-            factors[inds_here[:2]] += +1 * current_priors.logpdf(q[name][inds_here])
+            inds_reverse_in = np.arange(len(inds_reverse[0]))
+            inds_reverse_individual = inds_for_change["-1"][:, 2]
+
+            new_inds[name][inds_reverse] = False
+
+            # change for going into the proposal, need to pretend this one is not there
+            # do not need to do this for sources where it is added
+            tmp_inds[inds_reverse] = False
+
 
             # adjust births from False -> True
-            inds_here = tuple(inds_for_change["+1"].T)
-            new_inds[name][inds_here] = True
+            inds_forward = tuple(inds_for_change["+1"].T)
+            new_inds[name][inds_forward] = True
+
+            num_forward = len(inds_forward[0])
+
+            inds_reverse_in += num_forward
+
+            # keep tmp_inds without added value here
 
             # add coordinates for new leaves
             current_priors = self.priors[name]
-            inds_here = tuple(inds_for_change["+1"].T)
+            inds_here = tuple(np.concatenate([inds_for_change["+1"], inds_for_change["-1"]], axis=0).T)
             
             # it can pile up with low signal binaries at the maximum number (observation so far)
             if len(inds_here[0]) != 0:
@@ -404,15 +480,71 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                     assert len(self.search_inds) >= self.num_brute
 
                 num_inds_change = len(inds_here[0])
+
+                if self.provide_betas:  #  and not self.search:
+                    betas = self.temperature_control.betas[inds_here[0]]
+                else:
+                    betas = None
+
+                ll_here = self.current_state.log_prob.copy()[inds_here[:2]]
+                lp_here = self.current_state.log_prior[inds_here[:2]]
+
+                if "noise_params" in all_coords:
+                    noise_params_here = all_coords["noise_params"][all_inds["noise_params"]].reshape(ntemps, nwalkers, -1)[inds_here[:2]]
+
+                    if self.psd_func is None:
+                        raise ValueError("If providing noise_params, need to provide psd_func to __init__ function.")
+                    
+                    psd = self.xp.asarray([self.psd_func(self.fd, *noise_params_here.T, **self.noise_kwargs) for _ in range(2)]).transpose((1, 0, 2))
+                    noise_ll = -self.xp.sum(self.xp.log(psd), axis=(1, 2))
+                    
+                    try:
+                        noise_ll = noise_ll.get()
+                    except AttributeError:
+                        pass
+                
+                    self.noise_ll = noise_ll.copy()
+                    
+                    # TODO: check this
+                    #ll_here -= noise_ll
+
+                    noise_lp = self.priors["noise_params"].logpdf(noise_params_here)
+                    self.noise_lp = noise_lp.copy()
+                    #lp_here -= noise_lp
+
+                rj_info = dict(
+                    ll=ll_here,
+                    lp=lp_here
+                )
+
+                coords_inds = (coords[inds_here[:2]], tmp_inds[inds_here[:2]])
+
                 generate_points_out, ll_out, factors_out = self.get_bf_proposal(
                     coords[inds_here],
                     len(inds_here[0]), 
+                    inds_reverse_in,
+                    inds_reverse_individual,
                     random, 
+                    args_prior=coords_inds,
                     kwargs_generate={"current_priors": current_priors}, 
-                    args_like=(coords[inds_here[:2]], inds[inds_here[:2]]), 
-                    kwargs_like={"branch_supps": branch_supps[name][inds_here[:2]], "noise_params": all_coords["noise_params"][inds_here[:2]].T}
+                    args_like=coords_inds, 
+                    kwargs_like={"branch_supps": branch_supps[name][inds_here[:2]], "noise_params": all_coords["noise_params"][inds_here[:2]].T,
+                    "inds_reverse": inds_reverse_in},
+                    betas=betas,
+                    rj_info=rj_info,
                 )
-                q[name][inds_here] = generate_points_out.copy()
+
+                q[name][inds_forward] = generate_points_out.copy()
+
+                ll_tmp = self.ll_out.copy()
+                lp_tmp = self.lp_out.copy()
+                #if "noise_params" in all_coords:
+                #    ll_tmp += noise_ll
+                #    lp_tmp += noise_lp
+
+                #q["ll"] = ll_tmp
+                #q["lp"] = lp_tmp
+                #q["inds_here"] = inds_here[:2]
 
                 # TODO: make sure detailed balance this will move to detailed balance in brute rejection
                 factors[inds_here[:2]] = factors_out
