@@ -716,9 +716,15 @@ class GlobalLikelihood(Likelihood):
             noise_params = params[-1]
             noise_groups = groups[-1]
 
+            if "branch_supps" in kwargs:
+                assert len(kwargs["branch_supps"]) == len(groups)
+                noise_supps = kwargs["branch_supps"][-1]
+
             params = params[:-1]
             groups = groups[:-1]
 
+            if "branch_supps" in kwargs:
+                kwargs["branch_supps"] = kwargs["branch_supps"][:-1]
         
         args_in = params + groups + list(args)
 
@@ -735,7 +741,7 @@ class GlobalLikelihood(Likelihood):
                 data = self.injection_channels
 
             args_in += [data, psd]
-        
+
         return self.get_ll(*args_in, **kwargs)
 
         # TODO add Subset

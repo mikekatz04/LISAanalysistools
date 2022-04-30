@@ -719,13 +719,24 @@ class PlaceHolderRJ(Move):
 rj_moves = [(bf, 0.1), (PlaceHolderRJ(), 0.9)]
 
 from lisatools.sampling.moves.gbfreqjump import GBFreqJump
+from lisatools.sampling.moves.gbgroupstretch import GBGroupStretchMove
 
 factor = 1e-3
 
 df_freq_jump = 1 / YEAR
 # TODO: adjust these settings over time during search
+nfriends = 40
 moves = [
-    (StretchMoveRJ(live_dangerously=True, a=2.0, gibbs_sampling_leaves_per=1, adjust_supps_pre_logl_func=build_waves), 1.0),
+    #(StretchMoveRJ(live_dangerously=True, a=2.0, gibbs_sampling_leaves_per=1, adjust_supps_pre_logl_func=build_waves), 1.0),
+    (GBGroupStretchMove(
+        gb_args,
+        gb_kwargs,
+        nfriends=nfriends,
+        live_dangerously=True, 
+        a=2.0, 
+        gibbs_sampling_leaves_per=1, 
+        adjust_supps_pre_logl_func=build_waves
+        ), 1.0),
     (
         GBFreqJump(
             df_freq_jump,
@@ -936,13 +947,21 @@ initial_state = State(state, copy=True)
 branch_supps_in = {
     "A": xp.zeros((ntemps, nwalkers, nleaves_max, N), dtype=np.complex128), 
     "E": xp.zeros((ntemps, nwalkers, nleaves_max, N), dtype=np.complex128), 
-    "start_inds": xp.zeros((ntemps, nwalkers, nleaves_max), dtype=np.int32)
+    "start_inds": xp.zeros((ntemps, nwalkers, nleaves_max), dtype=np.int32),
+    "group_move_points": np.zeros((ntemps, nwalkers, nleaves_max, nfriends, ndim))
 }
 from eryn.state import BranchSupplimental
 obj_contained_shape = (ntemps, nwalkers, nleaves_max)
 
 branch_supps = BranchSupplimental(branch_supps_in, obj_contained_shape=obj_contained_shape, copy=True)
 #inds_checking = np.arange(np.prod(obj_contained_shape)).reshape(obj_contained_shape)[initial_state.branches_inds["gb"]]
+
+branch_supps_in_noise = {
+    "group_move_points": np.zeros((ntemps, nwalkers, 1, nfriends, n_noise_params))
+}
+obj_contained_shape_noise = (ntemps, nwalkers, 1)
+
+branch_supps_noise = BranchSupplimental(branch_supps_in_noise, obj_contained_shape=obj_contained_shape_noise, copy=True)
 
 
 # setup data streams to add to and subtract from
@@ -952,6 +971,7 @@ supps_base_shape = (ntemps, nwalkers)
 #supps = BranchSupplimental({"data_streams": xp.zeros(supps_base_shape + supps_shape_in, dtype=complex)}, obj_contained_shape=supps_base_shape, copy=True)
 
 state.branches["gb"].branch_supplimental = branch_supps
+state.branches["noise_params"].branch_supplimental = branch_supps_noise
 #state.supplimental = supps
 
 # add inds_keep
