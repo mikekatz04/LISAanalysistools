@@ -16,15 +16,15 @@ except ModuleNotFoundError:
 from eryn.moves import MHMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
-from .gbbruterejectionrj import GBBruteRejectionRJ
+from .gbmultipletryrj import GBMutlipleTryRJ
 
 
 __all__ = ["GBFreqJump"]
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBFreqJump(MHMove, GBBruteRejectionRJ):
-    """Generate Revesible-Jump proposals for GBs with brute-force rejection
+class GBFreqJump(MHMove, GBMutlipleTryRJ):
+    """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
 
@@ -56,7 +56,7 @@ class GBFreqJump(MHMove, GBBruteRejectionRJ):
 
         self.name = "gbfreqjump"
 
-        GBBruteRejectionRJ.__init__(self, *gb_args, **gb_kwargs)
+        GBMutlipleTryRJ.__init__(self, *gb_args, **gb_kwargs)
         MHMove.__init__(self, *args, **kwargs)
 
     def special_generate_func(self, coords, nwalkers, inds, current_priors=None, random=None, size:int=1):
@@ -204,7 +204,7 @@ class GBFreqJump(MHMove, GBBruteRejectionRJ):
 
             self.global_template_builder(q, inds_keep={"gb": inds_changed}, branch_supps=branch_supps)
 
-            # TODO: make sure detailed balance this will move to detailed balance in brute rejection
+            # TODO: make sure detailed balance this will move to detailed balance in multiple try
             factors[:] = factors_out.reshape(ntemps, nwalkers)
 
         return q, factors

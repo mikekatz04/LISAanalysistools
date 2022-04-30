@@ -9,7 +9,7 @@ from eryn.ensemble import EnsembleSampler
 try:
     import cupy as xp
     from cupy.cuda.runtime import setDevice
-    setDevice(1)
+    setDevice(2)
 
     gpu_available = True
 except ModuleNotFoundError:
@@ -44,7 +44,7 @@ from eryn.prior import PriorContainer
 from eryn.state import State
 from eryn.moves import StretchMoveRJ
 
-from lisatools.sampling.moves.gbbruterejectionrj import GBBruteRejectionRJ
+from lisatools.sampling.moves.gbmultipletryrj import GBMutlipleTryRJ
 
 # from lisatools.sampling.moves.globalfish import MultiSourceFisherProposal
 
@@ -63,8 +63,7 @@ np.random.seed(100)
 use_gpu = gpu_available
 xp = xp if use_gpu else np
 
-shift_ind = 0
-gb = GBGPU(use_gpu=use_gpu, shift_ind=shift_ind)
+gb = GBGPU(use_gpu=use_gpu)
 
 ndim_full = 9
 
@@ -132,12 +131,10 @@ N = get_N(out_params[:, 0], out_params[:, 1], Tobs, oversample=4).max()
 
 amp_in, f0_in, fdot_in, fddot_in, phi0_in, iota_in, psi_in, lam_in, beta_sky_in = out_params.T.copy()
 
-modes = np.array([2])
-
 #N = get_N(1e-23, max(f0_lims), Tobs, oversample=2).item()
 
-waveform_kwargs = dict(modes=modes, N=N, dt=dt, T=Tobs)
-# fish_kwargs = dict(modes=modes, N=1024, dt=dt)
+waveform_kwargs = dict(N=N, dt=dt, T=Tobs)
+# fish_kwargs = dict(N=1024, dt=dt)
 
 transform_fn_in = {
     0: (lambda x: np.exp(x)),
@@ -266,7 +263,6 @@ ll = gb.get_ll(
     params,
     data_sub,
     [xp.asarray(psd), xp.asarray(psd)],
-    calc_d_d=False,
     phase_marginalize=False,
     start_freq_ind=start_freq_ind,
     **waveform_kwargs,
@@ -349,7 +345,6 @@ for i in range(num_rounds):
         params_in,
         data_sub,
         [xp.asarray(psd), xp.asarray(psd)],
-        calc_d_d=False,
         phase_marginalize=True,
         start_freq_ind=start_freq_ind,
         **waveform_kwargs,
@@ -375,7 +370,6 @@ for i in range(num_rounds):
         params_in,
         data_sub,
         [xp.asarray(psd), xp.asarray(psd)],
-        calc_d_d=False,
         phase_marginalize=False,
         start_freq_ind=start_freq_ind,
         **waveform_kwargs,
@@ -451,7 +445,6 @@ while np.std(start_like) < 5.0:
         tmp_in,
         data_sub,
         [xp.asarray(psd), xp.asarray(psd)],
-        calc_d_d=False,
         phase_marginalize=False,
         start_freq_ind=start_freq_ind,
         **waveform_kwargs,
@@ -514,7 +507,7 @@ class ProduceWaveforms:
         params = transform_fn.both_transforms(q["gb"][inds_keep["gb"]])
 
         self.gb.get_ll(params.T, self.data, self.psd, start_freq_ind=self.start_freq_ind, **self.waveform_kwargs)
-        A_temps_start, E_temps_start, start_inds = gb.A[0].copy(), gb.E[0].copy(), gb.start_inds[0].copy()
+        A_temps_start, E_temps_start, start_inds = gb.A.copy(), gb.E.copy(), gb.start_inds.copy()
         N_here = A_temps_start.shape[1]
 
         # TODO: add factor for d_h term?
@@ -551,7 +544,7 @@ class ProduceWaveforms:
             inds_keep = branch_supps["inds_keep"]
             if np.any(inds_keep):
                 self.gb.get_ll(params[inds_keep].T, self.data, self.psd, start_freq_ind=self.start_freq_ind, **self.waveform_kwargs)
-                A_temps_start, E_temps_start, start_inds = gb.A[0].copy(), gb.E[0].copy(), gb.start_inds[0].copy()
+                A_temps_start, E_temps_start, start_inds = gb.A.copy(), gb.E.copy(), gb.start_inds.copy()
                 N_here = A_temps_start.shape[1]
 
                 # TODO: add factor for d_h term?
@@ -614,7 +607,7 @@ class ProduceWaveforms:
                 """
             
         N_here = branch_supps["A"].shape[1]
-        self.gb.fill_global_template(groups.astype(self.xp.int32), templates_all, [branch_supps["A"]], [branch_supps["E"]], [branch_supps["start_inds"]], [N_here], start_freq_ind=start_freq_ind)
+        self.gb.fill_global_template(groups.astype(self.xp.int32), templates_all, branch_supps["A"], branch_supps["E"], branch_supps["start_inds"], [N_here], start_freq_ind=start_freq_ind)
         """
         for group_ij in np.unique(groups):
             inds1 = np.where(groups == group_ij)[0]
@@ -673,7 +666,7 @@ gb_kwargs = dict(
     noise_kwargs=dict(xp=xp),
     provide_betas=True,
 )
-bf = GBBruteRejectionRJ(
+bf = GBMutlipleTryRJ(
     *gb_args,
     **gb_kwargs,
 )
@@ -688,10 +681,10 @@ state = State({"gb": coords_out, "noise_params": coords_start_noise}, inds=dict(
 
 #state = State({"gb": coords_out}, inds=dict(gb=inds_out))
 
-fp = "test_new_brute_no_fddot_15_reload_from_top_pe.h5"
+fp = "test_new_brute_no_fddot_16_reload_from_top_pe.h5"
 folder = "./"
 import os
-fp_old = fp # "test_new_brute_no_fddot_14_reload_from_top.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
+fp_old = "test_new_brute_no_fddot_15_reload_from_top_pe.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
 if fp_old in os.listdir(folder):
     #raise NotImplementedError("need to add noise params to here")
     print("reload", fp)
@@ -787,7 +780,6 @@ like.inject_signal(
 d_d = 4.0 * df * xp.sum(xp.asarray([(temp.conj() * temp) / xp.asarray(psd) for temp in like.injection_channels]))
 
 #### MUST DO THIS #####???
-gb.shift_ind = 0
 params_test = injection_params.T.copy()[:, np.array([0, 1, 2, 4, 5, 6, 7, 8])]
 
 #check = like(
@@ -942,12 +934,13 @@ initial_state = State(state, copy=True)
 """
 
 branch_supps_in = {
-    "A": xp.zeros((ntemps, nwalkers, nleaves_max, 2 * N), dtype=np.complex128), 
-    "E": xp.zeros((ntemps, nwalkers, nleaves_max, 2 * N), dtype=np.complex128), 
+    "A": xp.zeros((ntemps, nwalkers, nleaves_max, N), dtype=np.complex128), 
+    "E": xp.zeros((ntemps, nwalkers, nleaves_max, N), dtype=np.complex128), 
     "start_inds": xp.zeros((ntemps, nwalkers, nleaves_max), dtype=np.int32)
 }
 from eryn.state import BranchSupplimental
 obj_contained_shape = (ntemps, nwalkers, nleaves_max)
+
 branch_supps = BranchSupplimental(branch_supps_in, obj_contained_shape=obj_contained_shape, copy=True)
 #inds_checking = np.arange(np.prod(obj_contained_shape)).reshape(obj_contained_shape)[initial_state.branches_inds["gb"]]
 
@@ -969,7 +962,6 @@ build_waves(state.branches_coords, inds=state.branches_inds, supps=state.supplim
 # remove inds_keep
 state.branches_supplimental["gb"].remove_objects("inds_keep")
 
-gb.shift_ind = 0
 ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)[0]
 
 # group everything
@@ -980,7 +972,6 @@ groups = groups_from_inds({"gb": state.branches_inds["gb"]})["gb"]
 templates = xp.zeros(
     (nwalkers * ntemps, 2, data_length), dtype=xp.complex128
 )  
-gb.shift_ind = 0
 build_waves.generate_global_template(None, groups, templates, branch_supps=state.branches_supplimental["gb"][state.branches_inds["gb"]])
 
 

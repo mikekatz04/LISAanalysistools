@@ -15,16 +15,15 @@ except ModuleNotFoundError:
 
     gpu_available = False
 
-from eryn.moves import ReversibleJump
+from eryn.moves import ReversibleJump, MultipleTryMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
-from .bruterejection import BruteRejection
 
-__all__ = ["GBBruteRejectionRJ"]
+__all__ = ["GBMutlipleTryRJ"]
 
 
-class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
-    """Generate Revesible-Jump proposals for GBs with brute-force rejection
+class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
+    """Generate Revesible-Jump proposals for GBs with multiple try
 
     Will use gpu if template generator uses GPU.
 
@@ -38,7 +37,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         self,
         gb,
         priors,
-        num_brute,
+        num_try,
         start_freq_ind,
         data_length,
         data,
@@ -77,7 +76,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         else:
             self.xp = np
 
-        self.num_brute = num_brute
+        self.num_try = num_try
         self.start_freq_ind = start_freq_ind
         self.data_length = data_length
         self.waveform_kwargs = waveform_kwargs
@@ -107,7 +106,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         self.take_max_ll = take_max_ll
 
         ReversibleJump.__init__(self, *args, **kwargs)
-        BruteRejection.__init__(self, self.num_brute, take_max_ll=take_max_ll)
+        MultipleTryMove.__init__(self, self.num_try, take_max_ll=take_max_ll)
 
     @property
     def data(self):
@@ -169,7 +168,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
 
         # GENERATED POINTS MUST BE PASSED IN by reference not copied 
         num_inds_change, nleaves_max, ndim = coords.shape
-        num_inds_change_gen, num_brute, ndim_gen = generated_points.shape
+        num_inds_change_gen, num_try, ndim_gen = generated_points.shape
         inds_here = inds.copy()
         assert num_inds_change_gen == num_inds_change and ndim == ndim_gen
 
@@ -213,7 +212,6 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                             **self.waveform_kwargs,
                             **{
                                 "start_freq_ind": self.start_freq_ind
-                                - self.gb.shift_ind
                             },
                         },
                     )
@@ -240,7 +238,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         in_vals = (templates - self.data[None, :, :])
         self.d_h_d_h = d_h_d_h = 4 * self.df * self.xp.sum((in_vals.conj() * in_vals) / psd, axis=(1, 2))
 
-        ll_out = np.zeros((num_inds_change, num_brute)).flatten()
+        ll_out = np.zeros((num_inds_change, num_try)).flatten()
         # TODO: take out of loop later?
 
         phase_marginalize = self.search
@@ -264,21 +262,21 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
 
             current_batch_size = data[0].shape[0]
 
-            self.gb.d_d = self.xp.repeat(d_h_d_h[split * batch_size: (split + 1) * batch_size], self.num_brute)
+            self.gb.d_d = self.xp.repeat(d_h_d_h[split * batch_size: (split + 1) * batch_size], self.num_try)
 
-            data_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_brute)
+            data_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_try)
 
             if use_stock_psd:
                 psd_in = list(psd[0])
-                noise_index = self.xp.zeros(self.num_brute * current_batch_size, dtype=self.xp.int32)
+                noise_index = self.xp.zeros(self.num_try * current_batch_size, dtype=self.xp.int32)
             
             else:
                 # moves channel to outside
                 tmp = psd.transpose((1, 0, 2))
                 psd_in = [tmp_i.copy() for tmp_i in tmp]
-                noise_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_brute)
+                noise_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_try)
 
-            inds_slice = slice(split * batch_size * self.num_brute, (split + 1) * batch_size * self.num_brute)
+            inds_slice = slice(split * batch_size * self.num_try, (split + 1) * batch_size * self.num_try)
             
             prior_generated_points = generated_points_here[inds_slice]
 
@@ -294,13 +292,11 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                     psd_in,
                     data_index=data_index,
                     noise_index=noise_index,
-                    calc_d_d=False,
                     phase_marginalize=phase_marginalize,
                     **{
                         **self.waveform_kwargs,
                         **{
                             "start_freq_ind": self.start_freq_ind
-                            - self.gb.shift_ind
                         },
                     },
                 )
@@ -375,14 +371,14 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
         self.gb.d_d = back_d_d.copy()
 
         # add noise term
-        return ll_out.reshape(num_inds_change, num_brute) + self.noise_ll[:, None]
+        return ll_out.reshape(num_inds_change, num_try) + self.noise_ll[:, None]
 
     def special_prior_func(self, generated_points, coords, inds, **kwargs):
         nwalkers, nleaves_max, ndim = coords.shape
         lp_old = self.current_model.compute_log_prior_fn({"gb": coords.reshape((1,) + coords.shape)}, inds={"gb": inds.reshape((1,) + inds.shape)}).squeeze()
 
-        lp_new = np.zeros((nwalkers, self.num_brute))
-        lp_new = self.priors["gb"].logpdf(generated_points.reshape(-1, 8)).reshape(nwalkers, self.num_brute)
+        lp_new = np.zeros((nwalkers, self.num_try))
+        lp_new = self.priors["gb"].logpdf(generated_points.reshape(-1, 8)).reshape(nwalkers, self.num_try)
         lp_total = lp_old[:, None] + lp_new
 
         # add noise lp
@@ -477,7 +473,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
             # it can pile up with low signal binaries at the maximum number (observation so far)
             if len(inds_here[0]) != 0:
                 if self.search and self.search_samples is not None:
-                    assert len(self.search_inds) >= self.num_brute
+                    assert len(self.search_inds) >= self.num_try
 
                 num_inds_change = len(inds_here[0])
 
@@ -546,7 +542,7 @@ class GBBruteRejectionRJ(BruteRejection, ReversibleJump):
                 #q["lp"] = lp_tmp
                 #q["inds_here"] = inds_here[:2]
 
-                # TODO: make sure detailed balance this will move to detailed balance in brute rejection
+                # TODO: make sure detailed balance this will move to detailed balance in multiple try
                 factors[inds_here[:2]] = factors_out
 
         return q, new_inds, factors
