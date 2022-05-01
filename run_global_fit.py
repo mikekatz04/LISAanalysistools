@@ -70,7 +70,7 @@ ndim_full = 9
 num_bin = 12
 
 A_lims = [7e-24, 1e-21]
-f0_lims = [3.99e-3, 3.9965e-3]
+f0_lims = [3.986e-3, 4e-3]
 m_chirp_lims = [0.05, 0.75]
 fdot_lims = [get_fdot(f0_lims[i], Mc=m_chirp_lims[i]) for i in range(len(f0_lims))]
 phi0_lims = [0.0, 2 * np.pi]
@@ -84,13 +84,13 @@ dt = 15.0
 Tobs = int(Tobs / dt) * dt
 df = 1 / Tobs
 
-nleaves_max = 20
+nleaves_max = 70
 ndim = 8
 ntemps = 10
-nwalkers = 40
+nwalkers = 100
 branch_names = ["gb", "noise_params"]
 
-buffer = 2 ** 10
+buffer = 2 ** 12
 fmin = f0_lims[0] - buffer * df
 fmax = f0_lims[1] + buffer * df
 start_freq_ind = int(fmin / df)
@@ -120,7 +120,7 @@ psi_in = np.random.uniform(*psi_lims, size=num_bin)
 lam_in = np.random.uniform(*lam_lims, size=num_bin)
 beta_sky_in = np.arcsin(np.random.uniform(*np.sin(beta_sky_lims), size=num_bin))
 """
-out_params = np.load("out_params.npy")
+out_params = np.load("out_params2.npy")
 assert out_params.shape[1] == 9
 out_params[:, 3] = 0.0
 check_injection = out_params.copy()
@@ -130,6 +130,8 @@ from gbgpu.utils.utility import get_N
 N = get_N(out_params[:, 0], out_params[:, 1], Tobs, oversample=4).max()
 
 amp_in, f0_in, fdot_in, fddot_in, phi0_in, iota_in, psi_in, lam_in, beta_sky_in = out_params.T.copy()
+# phi0 is flipped !
+phi0_in *= -1.
 
 #N = get_N(1e-23, max(f0_lims), Tobs, oversample=2).item()
 
@@ -173,7 +175,7 @@ injection_temp = transform_fn.transform_base_parameters(
     injection_params.T, return_transpose=False
 ).reshape(-1, ndim_full)
 
-
+num_bin = out_params.shape[0]
 A_temp_all = []
 num_bin_injected = num_bin - num_bin
 snrs_individual = []
@@ -208,8 +210,7 @@ for i in range(1, num_bin):
     else:
         A_find += A_temp
         E_find += E_temp
-        print("find", snr([A_temp, E_temp], f_arr=fd, PSD="noisepsd_AE",))
-
+        print(i, "find", snr([A_temp, E_temp], f_arr=fd, PSD="noisepsd_AE",))
 
 from lisatools.utils.utility import generate_noise_fd
 A_noise_orig = generate_noise_fd(fd, df, true_base_psd_val, sens_fn=flat_psd_function).squeeze()
@@ -316,7 +317,7 @@ priors_noise = {
 priors = {"gb": PriorContainer(default_priors_gb), "noise_params": PriorContainer(priors_noise)}
 
 # generate initial search information
-num_total = int(1e6)
+num_total = int(5e6)
 num_per = int(1e5)
 num_rounds = num_total // num_per
 
@@ -325,7 +326,7 @@ data = [
     xp.asarray(E_inj),
 ]
 
-snr_lim = -1e300
+snr_lim = 70.0
 
 import time
 
@@ -684,7 +685,7 @@ state = State({"gb": coords_out, "noise_params": coords_start_noise}, inds=dict(
 fp = "test_new_brute_no_fddot_16_reload_from_top_pe.h5"
 folder = "./"
 import os
-fp_old = "test_new_brute_no_fddot_15_reload_from_top_pe.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
+fp_old = fp  # "test_new_brute_no_fddot_15_reload_from_top_pe.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
 if fp_old in os.listdir(folder):
     #raise NotImplementedError("need to add noise params to here")
     print("reload", fp)
@@ -735,6 +736,7 @@ moves = [
         live_dangerously=True, 
         a=2.0, 
         gibbs_sampling_leaves_per=1, 
+        n_iter_update=10,
         adjust_supps_pre_logl_func=build_waves
         ), 1.0),
     (
@@ -820,16 +822,13 @@ def update_with_snr(i, last_sample, sampler):
 
     snr_lim_tmp = globals()["snr_lim"]
     snr_lim_old = snr_lim_tmp
-    """stop = stop1(i, last_sample, sampler)
+    stop = stop1(i, last_sample, sampler)
     if stop:
-        if snr_lim_tmp > 70.0:
-            snr_lim_tmp -= 25.0
-        elif snr_lim_tmp > 20.0:
+        if snr_lim_tmp > 20.0:
             snr_lim_tmp -= 5.0
         elif snr_lim_tmp > 10.0:
             snr_lim_tmp -= 2.5
         elif snr_lim > 0.0:
-            breakpoint()
             snr_lim_tmp -= 0.5
         else:
             print("converged")
@@ -844,7 +843,7 @@ def update_with_snr(i, last_sample, sampler):
         last_sample.log_prob[:]  = last_sample.log_prob[0].copy()
         last_sample.log_prior[:]  = last_sample.log_prior[0].copy()
         last_sample.branches_supplimental["gb"][:] = last_sample.branches_supplimental["gb"][0]
-    """
+    
     globals()["snr_lim"] = snr_lim_tmp
 
     nleaves = last_sample.branches["gb"].nleaves
