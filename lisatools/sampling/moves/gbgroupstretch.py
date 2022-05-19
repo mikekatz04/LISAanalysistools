@@ -62,6 +62,7 @@ class GBGroupStretchMove(GroupStretchMove, GBMutlipleTryRJ):
         # TODO: make faster?
         points_out = np.zeros((num_remaining, self.nfriends, ndim))
         
+        # info_mat = self.gb.information_matrix()
 
         freqs = all_remaining_coords[:, 1]
 

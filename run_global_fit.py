@@ -9,7 +9,7 @@ from eryn.ensemble import EnsembleSampler
 try:
     import cupy as xp
     from cupy.cuda.runtime import setDevice
-    setDevice(2)
+    setDevice(0)
 
     gpu_available = True
 except ModuleNotFoundError:
@@ -138,12 +138,31 @@ phi0_in *= -1.
 waveform_kwargs = dict(N=N, dt=dt, T=Tobs)
 # fish_kwargs = dict(N=1024, dt=dt)
 
+class AmplitudeFromSNR:
+    def __init__(self, L, Tobs, **noise_kwargs):
+        self.f_star = 1 / (2. * np.pi * L) * Clight
+        self.Tobs = Tobs
+        self.noise_kwargs = noise_kwargs
+
+    def __call__(self, rho, f0):
+        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / get_sensitivity(f0, sens_fn="noisepsd_AE", **self.noise_kwargs))
+        amp = rho / factor
+        return (amp, f0)
+
+    def forward(self, amp, f0):
+        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / get_sensitivity(f0, sens_fn="noisepsd_AE", **self.noise_kwargs))
+        rho = amp * factor
+        return (rho, f0)
+
+L = 2.5e9
+amp_transform = AmplitudeFromSNR(L, Tobs)
 transform_fn_in = {
-    0: (lambda x: np.exp(x)),
+    #0: (lambda x: np.exp(x)),
     1: (lambda x: x * 1e-3),
     5: (lambda x: np.arccos(x)),
     8: (lambda x: np.arcsin(x)),
     #(1, 2, 3): (lambda f0, fdot, fddot: (f0, fdot, 11 / 3.0 * fdot ** 2 / f0)),
+    (0, 1): amp_transform
 }
 
 from eryn.utils import TransformContainer
@@ -155,7 +174,7 @@ transform_fn = TransformContainer(
 
 injection_params = np.array(
     [
-        np.log(amp_in),
+        amp_transform.forward(amp_in, f0_in)[0],
         f0_in * 1e3,
         fdot_in,
         fddot_in,
@@ -229,9 +248,10 @@ plt.semilogy(np.abs(A_inj))
 for tmp in A_temp_all:
     plt.semilogy(np.abs(tmp))
 #plt.semilogy(np.abs(A_inj_orig))
-plt.xlim(900,1300)
+plt.xlim(3900,4700)
 plt.savefig("plot101.png")
 
+# breakpoint()
 
 d_d = inner_product([A_inj, E_inj], [A_inj, E_inj], f_arr=fd, PSD="noisepsd_AE",)
 d_h_d_h = inner_product(
@@ -275,31 +295,75 @@ ll = gb.get_ll(
 from eryn.prior import uniform_dist
 
 class SNRPrior:
-    def __init__(self, snr_cut, Tobs):
-        self.snr_cut = snr_cut
-        self.Tobs = Tobs 
+    def __init__(self, rho_star):
+        self.rho_star = rho_star
 
-    def logpdf(self, vals_in):
-        amp = np.exp(vals_in[:, 0])
-        f0 = vals_in[:, 1] * 1e-3
-        fonfs = f0 / fstar
-        SnX = np.sqrt(get_sensitivity(f0, sens_fn="noisepsd_X"))
+    def pdf(self, rho):
+        p = 3 * rho / (4 * self.rho_star ** 2 * (1 + rho / (4 * self.rho_star)) ** 5)
+        return p
 
-        #  calculate michelson noise
-        Sm = SnX / (4.0 * np.sin(fonfs) * np.sin(fonfs))
+    def logpdf(self, rho):
+        return np.log(self.pdf(rho))
 
-        snr_estimate = amp * np.sqrt(Tobs) / Sm
-        
-        prior_vals_out = np.zeros_like(amp)
-        prior_vals_out[snr_estimate >= self.snr_cut] = 0.0
-        prior_vals_out[snr_estimate < self.snr_cut] = -np.inf
+    def cdf(self, rho):
+        c = 768 * self.rho_star ** 3 * (1 / (768. * self.rho_star ** 3) - (rho + self.rho_star)/(3. * (rho + 4 * self.rho_star) ** 4))
+        return c
 
-        if np.any(np.isinf(prior_vals_out)):
-            breakpoint()
-        return prior_vals_out
+    def rvs(self, size=1):
+        if isinstance(size, int):
+            size = (size,)
+        u = np.random.rand(*size)
 
+        rho = (-4*self.rho_star + np.sqrt(-32*self.rho_star**2 - (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) + 
+      (3072*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)*
+         (self.rho_star**4 - u*self.rho_star**4))/
+       ((-1 + u)**2*np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
+            np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
+              3131031158784*u**3*self.rho_star**12))) + 
+      np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
+          np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
+            3131031158784*u**3*self.rho_star**12))/
+       (3.*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)))/2.
+     + np.sqrt(32*self.rho_star**2 + (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) - 
+      (3072*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)*
+         (self.rho_star**4 - u*self.rho_star**4))/
+       ((-1 + u)**2*np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
+            np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
+              3131031158784*u**3*self.rho_star**12))) - 
+      np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
+          np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
+            3131031158784*u**3*self.rho_star**12))/
+       (3.*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)) + 
+      (2048*self.rho_star**3 - (2048*u*self.rho_star**3)/(-1 + u))/
+       (4.*np.sqrt(-32*self.rho_star**2 - (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) + 
+           (3072*2**0.3333333333333333*
+              np.cbrt(-1 + 3*u - 3*u**2 + u**3)*(self.rho_star**4 - u*self.rho_star**4)
+              )/
+            ((-1 + u)**2*np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
+                 np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
+                   3131031158784*u**3*self.rho_star**12))) + 
+           np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
+               np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
+                 3131031158784*u**3*self.rho_star**12))/
+            (3.*2**0.3333333333333333*
+              np.cbrt(-1 + 3*u - 3*u**2 + u**3)))))/2.)
+
+        return rho
+
+
+rho_star = 5.0
+snr_prior = SNRPrior(5.0)
+"""check = snr_prior.rvs(size=(1000000))
+rho = np.linspace(0.0, 1000, 100000)
+pdf = snr_prior.pdf(rho)
+plt.close()
+plt.hist(check, bins=np.arange(1000), density=True)
+plt.plot(rho, pdf)
+plt.savefig("plot1.png")
+breakpoint()
+"""
 default_priors_gb = {
-    0: uniform_dist(*np.log(A_lims)),
+    0: snr_prior,
     1: uniform_dist(*(np.asarray(f0_lims) * 1e3)),
     2: uniform_dist(*fdot_lims),
     3: uniform_dist(*phi0_lims),
@@ -317,7 +381,7 @@ priors_noise = {
 priors = {"gb": PriorContainer(default_priors_gb), "noise_params": PriorContainer(priors_noise)}
 
 # generate initial search information
-num_total = int(5e6)
+num_total = int(1e6)
 num_per = int(1e5)
 num_rounds = num_total // num_per
 
@@ -326,7 +390,7 @@ data = [
     xp.asarray(E_inj),
 ]
 
-snr_lim = 70.0
+snr_lim = 0.0
 
 import time
 
@@ -682,16 +746,22 @@ state = State({"gb": coords_out, "noise_params": coords_start_noise}, inds=dict(
 
 #state = State({"gb": coords_out}, inds=dict(gb=inds_out))
 
-fp = "test_new_brute_no_fddot_16_reload_from_top_pe.h5"
+fp = "test_new_brute_no_fddot_19_pe_after_run.h5"
 folder = "./"
 import os
-fp_old = fp  # "test_new_brute_no_fddot_15_reload_from_top_pe.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
+fp_old = "test_new_brute_no_fddot_18_pe_after_run.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
 if fp_old in os.listdir(folder):
     #raise NotImplementedError("need to add noise params to here")
     print("reload", fp)
     backend = HDFBackend(folder + fp_old)
     #state = backend.get_a_sample(22550)
     state = backend.get_last_sample()
+
+    fix = state.branches_coords["gb"][0, 0, 0, 0] < 0.0
+    if fix:
+        amps = np.exp(state.branches_coords["gb"][:, :, :, 0])
+        f0 = state.branches_coords["gb"][:, :, :, 1] / 1e3
+        state.branches_coords["gb"][:, :, :, 0] = amp_transform.forward(amps, f0)[0]
 
     for name, coords in state.branches_coords.items():
         coords[np.isnan(coords)] = 0.0
@@ -717,7 +787,7 @@ class PlaceHolderRJ(Move):
         accepted = np.zeros(state.log_prob.shape)
         return state, accepted
 
-rj_moves = [(bf, 0.1), (PlaceHolderRJ(), 0.9)]
+rj_moves = bf  # [(bf, 0.1), (PlaceHolderRJ(), 0.9)]
 
 from lisatools.sampling.moves.gbfreqjump import GBFreqJump
 from lisatools.sampling.moves.gbgroupstretch import GBGroupStretchMove
@@ -736,8 +806,9 @@ moves = [
         live_dangerously=True, 
         a=2.0, 
         gibbs_sampling_leaves_per=1, 
-        n_iter_update=10,
-        adjust_supps_pre_logl_func=build_waves
+        n_iter_update=30,
+        adjust_supps_pre_logl_func=build_waves,
+        skip_supp_names=["group_move_points"]
         ), 1.0),
     (
         GBFreqJump(
@@ -822,6 +893,7 @@ def update_with_snr(i, last_sample, sampler):
 
     snr_lim_tmp = globals()["snr_lim"]
     snr_lim_old = snr_lim_tmp
+    """
     stop = stop1(i, last_sample, sampler)
     if stop:
         if snr_lim_tmp > 20.0:
@@ -843,7 +915,7 @@ def update_with_snr(i, last_sample, sampler):
         last_sample.log_prob[:]  = last_sample.log_prob[0].copy()
         last_sample.log_prior[:]  = last_sample.log_prior[0].copy()
         last_sample.branches_supplimental["gb"][:] = last_sample.branches_supplimental["gb"][0]
-    
+    """
     globals()["snr_lim"] = snr_lim_tmp
 
     nleaves = last_sample.branches["gb"].nleaves
@@ -967,11 +1039,11 @@ branch_supps_noise = BranchSupplimental(branch_supps_in_noise, obj_contained_sha
 supps_shape_in = xp.asarray(data_sub).shape
 
 supps_base_shape = (ntemps, nwalkers)
-#supps = BranchSupplimental({"data_streams": xp.zeros(supps_base_shape + supps_shape_in, dtype=complex)}, obj_contained_shape=supps_base_shape, copy=True)
+supps = BranchSupplimental({"data_streams": xp.zeros(supps_base_shape + supps_shape_in, dtype=complex)}, obj_contained_shape=supps_base_shape, copy=True)
 
 state.branches["gb"].branch_supplimental = branch_supps
 state.branches["noise_params"].branch_supplimental = branch_supps_noise
-#state.supplimental = supps
+state.supplimental = supps
 
 # add inds_keep
 state.branches_supplimental["gb"].add_objects({"inds_keep": state.branches_inds["gb"]})
@@ -981,7 +1053,13 @@ build_waves(state.branches_coords, inds=state.branches_inds, supps=state.supplim
 # remove inds_keep
 state.branches_supplimental["gb"].remove_objects("inds_keep")
 
-ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)[0]
+import time
+num = 10
+st = time.perf_counter()
+for _ in range(num):
+    ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)[0]
+et = time.perf_counter()
+print((et - st)/num)
 
 # group everything
 from eryn.utils.utility import groups_from_inds
