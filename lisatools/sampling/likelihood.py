@@ -673,7 +673,8 @@ class GlobalLikelihood(Likelihood):
             ll += self.noise_ll
 
         out = self.xp.atleast_1d(ll.squeeze())
-
+        if self.xp.any(self.xp.isnan(out)):
+            breakpoint()
         if self.use_gpu:
             if self.return_cupy:
                 return out
@@ -699,15 +700,20 @@ class GlobalLikelihood(Likelihood):
             raise ValueError("groups must be np.ndarray or list of np.ndarray.")
 
 
+        if np.any(np.abs(params[0][:, 4]) > 1.0) or np.any(np.abs(params[0][:, 7]) > 1.0):
+            breakpoint()
+
         if self.parameter_transforms is not None:
             for i, (params_i, transform_i) in enumerate(
                 zip(params, self.parameter_transforms)
             ):
-                params_temp = transform_i.fill_values(params_i.copy())
-                params[i] = transform_i.transform_base_parameters(params_temp)
+                params[i] = transform_i.both_transforms(params_i.copy())
 
         else:
             params = [params_i.T for params_i in params]
+
+        if np.any(np.isnan(params[0])):
+            breakpoint()
 
         if self.adjust_psd:
             assert len(params) > 1

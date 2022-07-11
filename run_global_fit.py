@@ -6,10 +6,13 @@ import matplotlib.pyplot as plt
 from eryn.backends import HDFBackend
 from eryn.ensemble import EnsembleSampler
 
+from eryn.prior import uniform_dist
+from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
+
 try:
     import cupy as xp
     from cupy.cuda.runtime import setDevice
-    setDevice(0)
+    setDevice(5)
 
     gpu_available = True
 except ModuleNotFoundError:
@@ -129,6 +132,7 @@ from gbgpu.utils.utility import get_N
 
 N = get_N(out_params[:, 0], out_params[:, 1], Tobs, oversample=4).max()
 
+breakpoint()
 amp_in, f0_in, fdot_in, fddot_in, phi0_in, iota_in, psi_in, lam_in, beta_sky_in = out_params.T.copy()
 # phi0 is flipped !
 phi0_in *= -1.
@@ -138,21 +142,6 @@ phi0_in *= -1.
 waveform_kwargs = dict(N=N, dt=dt, T=Tobs)
 # fish_kwargs = dict(N=1024, dt=dt)
 
-class AmplitudeFromSNR:
-    def __init__(self, L, Tobs, **noise_kwargs):
-        self.f_star = 1 / (2. * np.pi * L) * Clight
-        self.Tobs = Tobs
-        self.noise_kwargs = noise_kwargs
-
-    def __call__(self, rho, f0):
-        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / get_sensitivity(f0, sens_fn="noisepsd_AE", **self.noise_kwargs))
-        amp = rho / factor
-        return (amp, f0)
-
-    def forward(self, amp, f0):
-        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / get_sensitivity(f0, sens_fn="noisepsd_AE", **self.noise_kwargs))
-        rho = amp * factor
-        return (rho, f0)
 
 L = 2.5e9
 amp_transform = AmplitudeFromSNR(L, Tobs)
@@ -291,68 +280,8 @@ ll = gb.get_ll(
 # state = State({"gb": coords_out, "noise_params": coords_start_noise}, inds=dict(gb=inds_out, noise_params=inds_noise))
 
 
-
-from eryn.prior import uniform_dist
-
-class SNRPrior:
-    def __init__(self, rho_star):
-        self.rho_star = rho_star
-
-    def pdf(self, rho):
-        p = 3 * rho / (4 * self.rho_star ** 2 * (1 + rho / (4 * self.rho_star)) ** 5)
-        return p
-
-    def logpdf(self, rho):
-        return np.log(self.pdf(rho))
-
-    def cdf(self, rho):
-        c = 768 * self.rho_star ** 3 * (1 / (768. * self.rho_star ** 3) - (rho + self.rho_star)/(3. * (rho + 4 * self.rho_star) ** 4))
-        return c
-
-    def rvs(self, size=1):
-        if isinstance(size, int):
-            size = (size,)
-        u = np.random.rand(*size)
-
-        rho = (-4*self.rho_star + np.sqrt(-32*self.rho_star**2 - (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) + 
-      (3072*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)*
-         (self.rho_star**4 - u*self.rho_star**4))/
-       ((-1 + u)**2*np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-            np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-              3131031158784*u**3*self.rho_star**12))) + 
-      np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-          np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-            3131031158784*u**3*self.rho_star**12))/
-       (3.*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)))/2.
-     + np.sqrt(32*self.rho_star**2 + (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) - 
-      (3072*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)*
-         (self.rho_star**4 - u*self.rho_star**4))/
-       ((-1 + u)**2*np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-            np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-              3131031158784*u**3*self.rho_star**12))) - 
-      np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-          np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-            3131031158784*u**3*self.rho_star**12))/
-       (3.*2**0.3333333333333333*np.cbrt(-1 + 3*u - 3*u**2 + u**3)) + 
-      (2048*self.rho_star**3 - (2048*u*self.rho_star**3)/(-1 + u))/
-       (4.*np.sqrt(-32*self.rho_star**2 - (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) + 
-           (3072*2**0.3333333333333333*
-              np.cbrt(-1 + 3*u - 3*u**2 + u**3)*(self.rho_star**4 - u*self.rho_star**4)
-              )/
-            ((-1 + u)**2*np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-                 np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-                   3131031158784*u**3*self.rho_star**12))) + 
-           np.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-               np.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-                 3131031158784*u**3*self.rho_star**12))/
-            (3.*2**0.3333333333333333*
-              np.cbrt(-1 + 3*u - 3*u**2 + u**3)))))/2.)
-
-        return rho
-
-
 rho_star = 5.0
-snr_prior = SNRPrior(5.0)
+snr_prior = SNRPrior(rho_star)
 """check = snr_prior.rvs(size=(1000000))
 rho = np.linspace(0.0, 1000, 100000)
 pdf = snr_prior.pdf(rho)
@@ -374,6 +303,13 @@ default_priors_gb = {
     #(0, 1): SNRPrior(10.0, Tobs),
 }
 
+generate_dists = deepcopy(default_priors_gb)
+
+snr_lim = inital_snr_lim = 57.5  # 85.0
+dSNR = 5.0
+generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
+generate_snr_ladder = PriorContainer(generate_dists)
+
 priors_noise = {
     0: uniform_dist(0.1 * base_psd_val, 10.0 * base_psd_val)
 }
@@ -381,7 +317,7 @@ priors_noise = {
 priors = {"gb": PriorContainer(default_priors_gb), "noise_params": PriorContainer(priors_noise)}
 
 # generate initial search information
-num_total = int(1e6)
+num_total = int(1e7)
 num_per = int(1e5)
 num_rounds = num_total // num_per
 
@@ -389,8 +325,6 @@ data = [
     xp.asarray(A_inj),
     xp.asarray(E_inj),
 ]
-
-snr_lim = 0.0
 
 import time
 
@@ -403,7 +337,7 @@ out_ll = []
 out_snr = []
 out_params = []
 for i in range(num_rounds):
-    params = priors["gb"].rvs(size=num_per)
+    params = generate_snr_ladder.rvs(size=num_per)
     params_in = transform_fn.both_transforms(params, return_transpose=True)
 
     phase_maximized_ll = gb.get_ll(
@@ -719,6 +653,18 @@ gb_args = (
     [nleaves_max, 1],
     [min_k, 1],
 )
+
+class PointGeneratorSNR:
+    def __init__(self, generate_snr_ladder):
+        self.generate_snr_ladder = generate_snr_ladder
+
+    def __call__(self, size=(1,)):
+        new_points = self.generate_snr_ladder.rvs(size=size)
+        logpdf = self.generate_snr_ladder.logpdf(new_points)
+        return (new_points, logpdf)
+
+point_generator = PointGeneratorSNR(generate_snr_ladder)
+
 gb_kwargs = dict(
     waveform_kwargs=waveform_kwargs,
     parameter_transforms=transform_fn,
@@ -730,6 +676,7 @@ gb_kwargs = dict(
     psd_func=flat_psd_function,
     noise_kwargs=dict(xp=xp),
     provide_betas=True,
+    point_generator_func=point_generator,
 )
 bf = GBMutlipleTryRJ(
     *gb_args,
@@ -746,17 +693,16 @@ state = State({"gb": coords_out, "noise_params": coords_start_noise}, inds=dict(
 
 #state = State({"gb": coords_out}, inds=dict(gb=inds_out))
 
-fp = "test_new_brute_no_fddot_19_pe_after_run.h5"
+fp = "test_new_search_for_expanded_bands.h5"
 folder = "./"
 import os
-fp_old = "test_new_brute_no_fddot_18_pe_after_run.h5"  # fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
+fp_old = fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
 if fp_old in os.listdir(folder):
     #raise NotImplementedError("need to add noise params to here")
     print("reload", fp)
     backend = HDFBackend(folder + fp_old)
     #state = backend.get_a_sample(22550)
     state = backend.get_last_sample()
-
     fix = state.branches_coords["gb"][0, 0, 0, 0] < 0.0
     if fix:
         amps = np.exp(state.branches_coords["gb"][:, :, :, 0])
@@ -779,15 +725,15 @@ if fp_old in os.listdir(folder):
 # state, accepted = bf.propose(model, state)
 
 from eryn.moves import Move
-class PlaceHolderRJ(Move):
+class PlaceHolder(Move):
     def __init__(self, *args, **kwargs):
-        super(PlaceHolderRJ, self).__init__(*args, **kwargs)
+        super(PlaceHolder, self).__init__(*args, **kwargs)
 
     def propose(self, model, state):
         accepted = np.zeros(state.log_prob.shape)
         return state, accepted
 
-rj_moves = bf  # [(bf, 0.1), (PlaceHolderRJ(), 0.9)]
+rj_moves = bf  # [(bf, 0.1), (PlaceHolder(), 0.9)]
 
 from lisatools.sampling.moves.gbfreqjump import GBFreqJump
 from lisatools.sampling.moves.gbgroupstretch import GBGroupStretchMove
@@ -809,7 +755,7 @@ moves = [
         n_iter_update=30,
         adjust_supps_pre_logl_func=build_waves,
         skip_supp_names=["group_move_points"]
-        ), 1.0),
+        ), 1.0),  # 0.1666666667),
     (
         GBFreqJump(
             df_freq_jump,
@@ -819,7 +765,8 @@ moves = [
             spread=4
         ),
         0.0,  # 0.1
-    )
+    ),
+    (PlaceHolder(), 0.0)  # 5 * 0.1666666667)
 ]
 #moves = moves[:1]
 """
@@ -879,7 +826,38 @@ periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}, "noise_params": {}}
 backend = HDFBackend(fp)
 
 from lisatools.sampling.stopping import SearchConvergeStopping
-stop1 = SearchConvergeStopping(n_iters=10, verbose=True)
+#stop1 = SearchConvergeStopping(n_iters=10, verbose=True)
+
+
+class SearchRJProposalSuccess: 
+    def __init__(self, n_iter=4, verbose=False):
+        self.n_iter = n_iter
+        self.verbose = verbose
+        self.old_rj_accepted = None
+        self.iters_consecutive = 0
+
+    def __call__(self, iter, sample, sampler):
+        if self.iters_consecutive >= self.n_iter:
+            self.iters_consecutive = 0
+
+        if self.old_rj_accepted is None:
+            self.old_rj_accepted = sampler.backend.rj_accepted.copy()
+            return False
+        
+        diff = sampler.backend.rj_accepted[0] - self.old_rj_accepted[0]
+        if np.all(diff < 1e-10):
+            self.iters_consecutive += 1
+        else:
+            self.iters_consecutive = 0
+            breakpoint()
+
+        self.old_rj_accepted = sampler.backend.rj_accepted.copy()
+        if self.iters_consecutive >= self.n_iter:
+            return True
+        else:
+            return False
+
+stop1 = SearchRJProposalSuccess(verbose=True)
 
 def update_with_snr(i, last_sample, sampler):
     base_psd_val = globals()["base_psd_val"]
@@ -890,32 +868,39 @@ def update_with_snr(i, last_sample, sampler):
     psd = globals()["psd"]
     A_noise = globals()["A_noise"]
     E_noise = globals()["E_noise"]
+    generate_snr_ladder = globals()["generate_snr_ladder"]
 
     snr_lim_tmp = globals()["snr_lim"]
     snr_lim_old = snr_lim_tmp
-    """
+    
     stop = stop1(i, last_sample, sampler)
+    
     if stop:
         if snr_lim_tmp > 20.0:
-            snr_lim_tmp -= 5.0
-        elif snr_lim_tmp > 10.0:
             snr_lim_tmp -= 2.5
+        elif snr_lim_tmp > 10.0:
+            snr_lim_tmp -= 0.5
         elif snr_lim > 0.0:
+            breakpoint()
             snr_lim_tmp -= 0.5
         else:
             print("converged")
             breakpoint()
 
         bf.search_snr_lim = snr_lim_tmp
+        del bf.point_generator_func
+        generate_dists[0] = uniform_dist(snr_lim_tmp, snr_lim_tmp + dSNR)
+        generate_snr_ladder = PriorContainer(generate_dists)
+        bf.point_generator_func = PointGeneratorSNR(generate_snr_ladder)
         build_waves_temp = globals()["build_waves"]
 
         # TODO: use this?
-        last_sample.branches_coords["gb"][:] = last_sample.branches_coords["gb"][0].copy()
-        last_sample.branches_inds["gb"][:] = last_sample.branches_inds["gb"][0].copy()
-        last_sample.log_prob[:]  = last_sample.log_prob[0].copy()
-        last_sample.log_prior[:]  = last_sample.log_prior[0].copy()
-        last_sample.branches_supplimental["gb"][:] = last_sample.branches_supplimental["gb"][0]
-    """
+        #last_sample.branches_coords["gb"][:] = last_sample.branches_coords["gb"][0].copy()
+        #last_sample.branches_inds["gb"][:] = last_sample.branches_inds["gb"][0].copy()
+        #last_sample.log_prob[:]  = last_sample.log_prob[0].copy()
+        #last_sample.log_prior[:]  = last_sample.log_prior[0].copy()
+        #last_sample.branches_supplimental["gb"][:] = last_sample.branches_supplimental["gb"][0]
+
     globals()["snr_lim"] = snr_lim_tmp
 
     nleaves = last_sample.branches["gb"].nleaves
@@ -969,7 +954,7 @@ sampler = EnsembleSampler(
     branch_names=branch_names,
     verbose=False,
     update_fn=update_with_snr,
-    update_iterations=50,
+    update_iterations=5,
     #stopping_fn=stop1,
     #stopping_iterations=10
 )
@@ -1057,9 +1042,9 @@ import time
 num = 10
 st = time.perf_counter()
 for _ in range(num):
-    ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)[0]
+    ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental, logp=lp)[0]
 et = time.perf_counter()
-print((et - st)/num)
+print("timing:", (et - st)/num)
 
 # group everything
 from eryn.utils.utility import groups_from_inds

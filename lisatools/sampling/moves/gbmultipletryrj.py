@@ -57,9 +57,10 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         point_generator_func=None,
         psd_func=None,
         provide_betas=False,
+        alternate_priors=None,
         **kwargs
     ):
-
+    
         self.is_rj = True
         # TODO: make priors optional like special generate function? 
         for key in priors:
@@ -136,7 +137,6 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         self.search_snr_lim = search_snr_lim
 
     def special_generate_func(self, coords, nwalkers, current_priors=None, random=None, size:int=1, fill=None, fill_inds=None):
-
         if self.search_samples is not None:
             # TODO: make replace=True ? in PE
             inds_drawn = random.choice(
@@ -146,7 +146,11 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
             generate_factors = np.zeros((nwalkers, size))
 
         elif self.point_generator_func is not None:
-            generated_points, generate_factors = self.point_generator_func(size=size * nwalkers).reshape(nwalkers, size, -1)
+            generated_points, generate_factors = self.point_generator_func(size=size * nwalkers)
+
+            generated_points = generated_points.reshape(nwalkers, size, -1)
+            generate_factors = generate_factors.reshape(nwalkers, size)
+
         else:
             if current_priors is None:
                 raise ValueError("If generating from the prior, must provide current_priors kwargs.")
