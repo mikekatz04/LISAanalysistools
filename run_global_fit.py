@@ -12,7 +12,7 @@ from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
 try:
     import cupy as xp
     from cupy.cuda.runtime import setDevice
-    setDevice(5)
+    setDevice(3)
 
     gpu_available = True
 except ModuleNotFoundError:
@@ -73,7 +73,7 @@ ndim_full = 9
 num_bin = 12
 
 A_lims = [7e-24, 1e-21]
-f0_lims = [3.986e-3, 4e-3]
+f0_lims = [3.5e-3, 4e-3]
 m_chirp_lims = [0.05, 0.75]
 fdot_lims = [get_fdot(f0_lims[i], Mc=m_chirp_lims[i]) for i in range(len(f0_lims))]
 phi0_lims = [0.0, 2 * np.pi]
@@ -87,9 +87,9 @@ dt = 15.0
 Tobs = int(Tobs / dt) * dt
 df = 1 / Tobs
 
-nleaves_max = 70
+nleaves_max =2500
 ndim = 8
-ntemps = 10
+ntemps = 8
 nwalkers = 100
 branch_names = ["gb", "noise_params"]
 
@@ -123,7 +123,7 @@ psi_in = np.random.uniform(*psi_lims, size=num_bin)
 lam_in = np.random.uniform(*lam_lims, size=num_bin)
 beta_sky_in = np.arcsin(np.random.uniform(*np.sin(beta_sky_lims), size=num_bin))
 """
-out_params = np.load("out_params2.npy")
+out_params = np.load("out_params_3.5_to_4Hz.npy")
 assert out_params.shape[1] == 9
 out_params[:, 3] = 0.0
 check_injection = out_params.copy()
@@ -132,7 +132,6 @@ from gbgpu.utils.utility import get_N
 
 N = get_N(out_params[:, 0], out_params[:, 1], Tobs, oversample=4).max()
 
-breakpoint()
 amp_in, f0_in, fdot_in, fddot_in, phi0_in, iota_in, psi_in, lam_in, beta_sky_in = out_params.T.copy()
 # phi0 is flipped !
 phi0_in *= -1.
@@ -192,6 +191,7 @@ A_inj, E_inj = gb.inject_signal(*injection_temp[0], **waveform_kwargs,)
 A_inj, E_inj = A_inj[start_freq_ind:end_freq_ind + 1], E_inj[start_freq_ind:end_freq_ind + 1]
 
 A_temp_all.append(A_inj)
+
 snrs_individual.append(snr([A_inj, E_inj], f_arr=fd, PSD="noisepsd_AE",))
 if num_bin_injected >= 1:
     A_sub, E_sub = A_inj.copy(), E_inj.copy()
@@ -230,8 +230,8 @@ E_noise = generate_noise_fd(fd, df, base_psd_val, sens_fn=flat_psd_function).squ
 A_inj_orig = A_inj.copy()
 E_inj_orig = E_inj.copy()
 
-A_inj = A_inj + A_noise_orig  #  + A_noise
-E_inj = E_inj + E_noise_orig  #  + E_noise
+A_inj = A_inj  # + A_noise_orig  #  + A_noise
+E_inj = E_inj  # + E_noise_orig  #  + E_noise
 
 plt.semilogy(np.abs(A_inj))
 for tmp in A_temp_all:
@@ -305,8 +305,8 @@ default_priors_gb = {
 
 generate_dists = deepcopy(default_priors_gb)
 
-snr_lim = inital_snr_lim = 57.5  # 85.0
-dSNR = 5.0
+snr_lim = inital_snr_lim = 430.0  # 11.0  # 85.0
+dSNR = 40.0
 generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
 generate_snr_ladder = PriorContainer(generate_dists)
 
@@ -539,74 +539,74 @@ class ProduceWaveforms:
     def generate_global_template(self, params, groups, templates_all, *args, branch_supps=None, **kwargs):
         assert branch_supps is not None
 
-        if "inds_keep" in branch_supps:
-            inds_keep = branch_supps["inds_keep"]
-            if np.any(inds_keep):
-                self.gb.get_ll(params[inds_keep].T, self.data, self.psd, start_freq_ind=self.start_freq_ind, **self.waveform_kwargs)
-                A_temps_start, E_temps_start, start_inds = gb.A.copy(), gb.E.copy(), gb.start_inds.copy()
-                N_here = A_temps_start.shape[1]
+        #if "inds_keep" in branch_supps:
+        #    inds_keep = branch_supps["inds_keep"]
+        #    if np.any(inds_keep):
+        self.gb.get_ll(params.T, self.data, self.psd, start_freq_ind=self.start_freq_ind, **self.waveform_kwargs)
+        A_temps_start, E_temps_start, start_inds = gb.A.copy(), gb.E.copy(), gb.start_inds.copy()
+        N_here = A_temps_start.shape[1]
 
-                # TODO: add factor for d_h term?
-                # set waveforms to ones if not satisfying snr threshold
-                inds_fix = ((self.gb.h_h.real)**(1/2) < snr_lim) | ((self.gb.d_h.real / self.gb.h_h.real ** (1/2)) < (0.95 * snr_lim))
-                A_temps_start[inds_fix] = 1.0
-                E_temps_start[inds_fix] = 1.0
+        # TODO: add factor for d_h term?
+        # set waveforms to ones if not satisfying snr threshold
+        inds_fix = ((self.gb.h_h.real)**(1/2) < snr_lim) | ((self.gb.d_h.real / self.gb.h_h.real ** (1/2)) < (0.95 * snr_lim))
+        A_temps_start[inds_fix] = 1.0
+        E_temps_start[inds_fix] = 1.0
 
-                # TODO: check if it has made it out the otherside
-                branch_supps["A"][inds_keep] = A_temps_start
-                branch_supps["E"][inds_keep] = E_temps_start
-                branch_supps["start_inds"][inds_keep] = start_inds
-                
-                """
-                for i in range(len(A_temps_start)):
-                    Ac, Ec, start_indc = A_temps_start[i], E_temps_start[i], start_inds[i].item()
-                    start_indc -= self.start_freq_ind
-                    A_inj_in = self.data[0][start_indc:start_indc + len(Ac)]
-                    E_inj_in = self.data[1][start_indc:start_indc + len(Ac)]
-                    psd_here = self.psd[0][start_indc:start_indc + len(Ac)]
-                    freqs_here = fd[start_indc:start_indc + len(Ac)]
+        # TODO: check if it has made it out the otherside
+        #branch_supps["A"][inds_keep] = A_temps_start
+        #branch_supps["E"][inds_keep] = E_temps_start
+        #branch_supps["start_inds"][inds_keep] = start_inds
+        
+        """
+        for i in range(len(A_temps_start)):
+            Ac, Ec, start_indc = A_temps_start[i], E_temps_start[i], start_inds[i].item()
+            start_indc -= self.start_freq_ind
+            A_inj_in = self.data[0][start_indc:start_indc + len(Ac)]
+            E_inj_in = self.data[1][start_indc:start_indc + len(Ac)]
+            psd_here = self.psd[0][start_indc:start_indc + len(Ac)]
+            freqs_here = fd[start_indc:start_indc + len(Ac)]
 
-                    check_h = snr([Ac, Ec], f_arr=xp.asarray(freqs_here), PSD=psd_here, use_gpu=True)
-                    check_d = inner_product([Ac, Ec], [A_inj_in, E_inj_in], f_arr=xp.asarray(freqs_here), PSD=psd_here, use_gpu=True)/check_h
-                    if check_h < 1e10 and (check_h < snr_lim or check_d < 0.95 * snr_lim):
-                        breakpoint()
-                """
-                
-                """
-                for i in range(len(branch_supps["A"])):
-                    Ac, Ec, start_indc = branch_supps["A"][i], branch_supps["E"][i], branch_supps["start_inds"][i].item()
+            check_h = snr([Ac, Ec], f_arr=xp.asarray(freqs_here), PSD=psd_here, use_gpu=True)
+            check_d = inner_product([Ac, Ec], [A_inj_in, E_inj_in], f_arr=xp.asarray(freqs_here), PSD=psd_here, use_gpu=True)/check_h
+            if check_h < 1e10 and (check_h < snr_lim or check_d < 0.95 * snr_lim):
+                breakpoint()
+        """
+        
+        """
+        for i in range(len(branch_supps["A"])):
+            Ac, Ec, start_indc = branch_supps["A"][i], branch_supps["E"][i], branch_supps["start_inds"][i].item()
 
-                    if np.all(Ac == 0.0):
-                        continue
+            if np.all(Ac == 0.0):
+                continue
 
-                    start = start_indc - self.start_freq_ind
-                    end = start_indc - self.start_freq_ind + len(Ac)
+            start = start_indc - self.start_freq_ind
+            end = start_indc - self.start_freq_ind + len(Ac)
 
-                    check_h = snr([Ac, Ec], f_arr=self.xp.asarray(self.fd[start:end]), PSD="noisepsd_AE", use_gpu=True)
-                    check_d = inner_product([Ac, Ec], list(self.data_clean[:, start:end]), f_arr=self.xp.asarray(self.fd[start:end]), PSD="noisepsd_AE", use_gpu=True) / check_h
-                    if check_h < 1e10:
-                        if inds_keep.flatten()[i]:
-                            print(check_h, check_d, self.gb.h_h.real[i]**(1/2), self.gb.d_h.real[i]/self.gb.h_h.real[i]**(1/2))
-                        else:
-                            print(check_h, check_d)
+            check_h = snr([Ac, Ec], f_arr=self.xp.asarray(self.fd[start:end]), PSD="noisepsd_AE", use_gpu=True)
+            check_d = inner_product([Ac, Ec], list(self.data_clean[:, start:end]), f_arr=self.xp.asarray(self.fd[start:end]), PSD="noisepsd_AE", use_gpu=True) / check_h
+            if check_h < 1e10:
+                if inds_keep.flatten()[i]:
+                    print(check_h, check_d, self.gb.h_h.real[i]**(1/2), self.gb.d_h.real[i]/self.gb.h_h.real[i]**(1/2))
+                else:
+                    print(check_h, check_d)
 
-                    if (check_h < snr_lim or check_d < 0.95 * snr_lim) and (check_h < 1e10):
-                        breakpoint()
+            if (check_h < snr_lim or check_d < 0.95 * snr_lim) and (check_h < 1e10):
+                breakpoint()
 
-                
-                for i in np.arange(len(inds_keep))[~inds_keep]:
-                    Ac, Ec, start_indc = branch_supps["A"][i], branch_supps["E"][i], branch_supps["start_inds"][i].item()
-                    freqs_here = fd[start_indc:start_indc + len(Ac)]
+        
+        for i in np.arange(len(inds_keep))[~inds_keep]:
+            Ac, Ec, start_indc = branch_supps["A"][i], branch_supps["E"][i], branch_supps["start_inds"][i].item()
+            freqs_here = fd[start_indc:start_indc + len(Ac)]
 
-                    check_h = inner_product([Ac, Ec], [Ac, Ec], f_arr=xp.asarray(freqs_here), PSD="noisepsd_AE", use_gpu=True)
-                    check_d = inner_product([Ac, Ec], [xp.asarray(A_inj[start_indc:start_indc + len(Ac)]), xp.asarray(E_inj[start_indc:start_indc + len(Ac)])], f_arr=xp.asarray(freqs_here), PSD="noisepsd_AE", use_gpu=True)
-                    observed_snr = check_d / xp.sqrt(check_h.real)
-                    if observed_snr < snr_lim or xp.sqrt(check_h.real) < snr_lim:
-                        print(i, check_h, check_d)
-                """
+            check_h = inner_product([Ac, Ec], [Ac, Ec], f_arr=xp.asarray(freqs_here), PSD="noisepsd_AE", use_gpu=True)
+            check_d = inner_product([Ac, Ec], [xp.asarray(A_inj[start_indc:start_indc + len(Ac)]), xp.asarray(E_inj[start_indc:start_indc + len(Ac)])], f_arr=xp.asarray(freqs_here), PSD="noisepsd_AE", use_gpu=True)
+            observed_snr = check_d / xp.sqrt(check_h.real)
+            if observed_snr < snr_lim or xp.sqrt(check_h.real) < snr_lim:
+                print(i, check_h, check_d)
+        """
             
-        N_here = branch_supps["A"].shape[1]
-        self.gb.fill_global_template(groups.astype(self.xp.int32), templates_all, branch_supps["A"], branch_supps["E"], branch_supps["start_inds"], [N_here], start_freq_ind=start_freq_ind)
+        N_here = A_temps_start.shape[1]
+        self.gb.fill_global_template(groups.astype(self.xp.int32), templates_all, A_temps_start, E_temps_start, start_inds, [N_here], start_freq_ind=start_freq_ind)
         """
         for group_ij in np.unique(groups):
             inds1 = np.where(groups == group_ij)[0]
@@ -641,18 +641,7 @@ build_waves = ProduceWaveforms(gb, data_sub, psd_in, start_freq_ind, use_gpu=use
 
 min_k = 1
 
-gb_args = (
-    gb,
-    priors,
-    int(5e3),
-    start_freq_ind,
-    data_length,
-    data_sub,
-    psd_in,
-    xp.asarray(fd),
-    [nleaves_max, 1],
-    [min_k, 1],
-)
+
 
 class PointGeneratorSNR:
     def __init__(self, generate_snr_ladder):
@@ -665,18 +654,33 @@ class PointGeneratorSNR:
 
 point_generator = PointGeneratorSNR(generate_snr_ladder)
 
+gb_args = (
+    gb,
+    priors,
+    int(1e3),
+    start_freq_ind,
+    data_length,
+    data_sub,
+    psd_in,
+    xp.asarray(fd),
+    [nleaves_max, 1],
+    [min_k, 1],
+)
+
 gb_kwargs = dict(
     waveform_kwargs=waveform_kwargs,
     parameter_transforms=transform_fn,
-    search=False,
+    search=True,
     search_samples=None,  # out_params,
     search_snrs=None,  # out_snr,
-    search_snr_lim=None,  # snr_lim,  # 50.0,
+    search_snr_lim=snr_lim,  # 50.0,
     global_template_builder=build_waves,
     psd_func=flat_psd_function,
     noise_kwargs=dict(xp=xp),
     provide_betas=True,
     point_generator_func=point_generator,
+    batch_size=100,
+    skip_supp_names=["group_move_points"]
 )
 bf = GBMutlipleTryRJ(
     *gb_args,
@@ -693,10 +697,10 @@ state = State({"gb": coords_out, "noise_params": coords_start_noise}, inds=dict(
 
 #state = State({"gb": coords_out}, inds=dict(gb=inds_out))
 
-fp = "test_new_search_for_expanded_bands.h5"
+fp = "test_new_GPU_parallel_setup.h5"
 folder = "./"
 import os
-fp_old = fp  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
+fp_old = fp  # "first_full_posterior_large_band.h5"  # "test_global_fit_on_ldc_2.h5"  # "for_fix_test_global_fit_on_ldc_1.h5"
 if fp_old in os.listdir(folder):
     #raise NotImplementedError("need to add noise params to here")
     print("reload", fp)
@@ -733,10 +737,10 @@ class PlaceHolder(Move):
         accepted = np.zeros(state.log_prob.shape)
         return state, accepted
 
-rj_moves = bf  # [(bf, 0.1), (PlaceHolder(), 0.9)]
+rj_moves = bf  # [(bf, 0.0), (PlaceHolder(), 1.0)]
 
 from lisatools.sampling.moves.gbfreqjump import GBFreqJump
-from lisatools.sampling.moves.gbgroupstretch import GBGroupStretchMove
+from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
 
 factor = 1e-3
 
@@ -745,7 +749,7 @@ df_freq_jump = 1 / YEAR
 nfriends = 40
 moves = [
     #(StretchMoveRJ(live_dangerously=True, a=2.0, gibbs_sampling_leaves_per=1, adjust_supps_pre_logl_func=build_waves), 1.0),
-    (GBGroupStretchMove(
+    (GBSpecialGroupStretchMove(  # GBGroupStretchMove(
         gb_args,
         gb_kwargs,
         nfriends=nfriends,
@@ -849,7 +853,6 @@ class SearchRJProposalSuccess:
             self.iters_consecutive += 1
         else:
             self.iters_consecutive = 0
-            breakpoint()
 
         self.old_rj_accepted = sampler.backend.rj_accepted.copy()
         if self.iters_consecutive >= self.n_iter:
@@ -857,7 +860,7 @@ class SearchRJProposalSuccess:
         else:
             return False
 
-stop1 = SearchRJProposalSuccess(verbose=True)
+stop1 = SearchRJProposalSuccess(n_iter=2, verbose=True)
 
 def update_with_snr(i, last_sample, sampler):
     base_psd_val = globals()["base_psd_val"]
@@ -876,7 +879,9 @@ def update_with_snr(i, last_sample, sampler):
     stop = stop1(i, last_sample, sampler)
     
     if stop:
-        if snr_lim_tmp > 20.0:
+        if snr_lim_tmp > 100.0:
+            snr_lim_tmp -= 20.0
+        elif snr_lim_tmp > 20.0:
             snr_lim_tmp -= 2.5
         elif snr_lim_tmp > 10.0:
             snr_lim_tmp -= 0.5
@@ -889,10 +894,18 @@ def update_with_snr(i, last_sample, sampler):
 
         bf.search_snr_lim = snr_lim_tmp
         del bf.point_generator_func
+        if snr_lim_tmp > 200.0:
+            dSNR = 40.0
+
+        else:
+            dSNR = 20.0
+
         generate_dists[0] = uniform_dist(snr_lim_tmp, snr_lim_tmp + dSNR)
         generate_snr_ladder = PriorContainer(generate_dists)
         bf.point_generator_func = PointGeneratorSNR(generate_snr_ladder)
         build_waves_temp = globals()["build_waves"]
+        sampler._rj_moves[0].search_snr_lim = snr_lim_tmp
+        sampler._moves[0].search_snr_lim = snr_lim_tmp
 
         # TODO: use this?
         #last_sample.branches_coords["gb"][:] = last_sample.branches_coords["gb"][0].copy()
@@ -905,8 +918,9 @@ def update_with_snr(i, last_sample, sampler):
 
     nleaves = last_sample.branches["gb"].nleaves
     keep = nleaves[0].argmax()
+    """
     for j in range(nwalkers):
-        tmp =  last_sample.branches_supplimental["gb"][0,j]
+        gb.run_wave(last_sample.branches_coords["gb"][0][last_sample.branches])
         for i in range(len(tmp["A"])):
             Ac, Ec, start_indc = tmp["A"][i], tmp["E"][i], tmp["start_inds"][i].item()
 
@@ -921,6 +935,7 @@ def update_with_snr(i, last_sample, sampler):
             print(j, i, check_h, check_d)
             if check_h < snr_lim_old or check_d < 0.95 * snr_lim_old:
                 breakpoint()
+    """
     stop = False
     print(globals()["fp"], "stop", stop, base_psd_val, true_base_psd_val, globals()["snr_lim"], bf.search_snr_lim, stop1.iters_consecutive)
     print("update max leaves", nleaves[0].max(), last_sample.log_prob[0].min(), last_sample.log_prob[0].mean(), last_sample.log_prob[0].max())
@@ -954,7 +969,7 @@ sampler = EnsembleSampler(
     branch_names=branch_names,
     verbose=False,
     update_fn=update_with_snr,
-    update_iterations=5,
+    update_iterations=1,
     #stopping_fn=stop1,
     #stopping_iterations=10
 )
@@ -1001,9 +1016,6 @@ initial_state = State(state, copy=True)
 """
 
 branch_supps_in = {
-    "A": xp.zeros((ntemps, nwalkers, nleaves_max, N), dtype=np.complex128), 
-    "E": xp.zeros((ntemps, nwalkers, nleaves_max, N), dtype=np.complex128), 
-    "start_inds": xp.zeros((ntemps, nwalkers, nleaves_max), dtype=np.int32),
     "group_move_points": np.zeros((ntemps, nwalkers, nleaves_max, nfriends, ndim))
 }
 from eryn.state import BranchSupplimental
@@ -1024,7 +1036,7 @@ branch_supps_noise = BranchSupplimental(branch_supps_in_noise, obj_contained_sha
 supps_shape_in = xp.asarray(data_sub).shape
 
 supps_base_shape = (ntemps, nwalkers)
-supps = BranchSupplimental({"data_streams": xp.zeros(supps_base_shape + supps_shape_in, dtype=complex)}, obj_contained_shape=supps_base_shape, copy=True)
+supps = BranchSupplimental({"data_minus_template": xp.zeros(supps_base_shape + supps_shape_in, dtype=complex)}, obj_contained_shape=supps_base_shape, copy=True)
 
 state.branches["gb"].branch_supplimental = branch_supps
 state.branches["noise_params"].branch_supplimental = branch_supps_noise
@@ -1033,7 +1045,7 @@ state.supplimental = supps
 # add inds_keep
 state.branches_supplimental["gb"].add_objects({"inds_keep": state.branches_inds["gb"]})
 
-build_waves(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental, inds_keep=state.branches_inds)
+#build_waves(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental, inds_keep=state.branches_inds)
 
 # remove inds_keep
 state.branches_supplimental["gb"].remove_objects("inds_keep")
@@ -1041,8 +1053,9 @@ state.branches_supplimental["gb"].remove_objects("inds_keep")
 import time
 num = 10
 st = time.perf_counter()
+
 for _ in range(num):
-    ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental, logp=lp)[0]
+    ll = sampler.compute_log_prob(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, logp=lp, branch_supps=state.branches_supplimental)[0]
 et = time.perf_counter()
 print("timing:", (et - st)/num)
 
@@ -1054,12 +1067,16 @@ groups = groups_from_inds({"gb": state.branches_inds["gb"]})["gb"]
 templates = xp.zeros(
     (nwalkers * ntemps, 2, data_length), dtype=xp.complex128
 )  
-build_waves.generate_global_template(None, groups, templates, branch_supps=state.branches_supplimental["gb"][state.branches_inds["gb"]])
 
+waveform_kwargs_here = waveform_kwargs.copy()
+if "start_freq_ind" in waveform_kwargs_here:
+    waveform_kwargs_here.pop("start_freq_ind")
+gb.generate_global_template(transform_fn.both_transforms(state.branches_coords["gb"][state.branches_inds["gb"]]), groups, templates, start_freq_ind=start_freq_ind, **waveform_kwargs_here)
 
-in_vals = (templates - xp.asarray(data_sub)[None, :, :])
+in_vals = (xp.asarray(data_sub)[None, :, :] - templates)
 d_h_d_h = 4 * xp.sum((in_vals.conj() * in_vals)/ xp.asarray(psd_in)[None, :, :], axis=(1, 2)) * df
 
+supps.holder["data_minus_template"][:] = in_vals.reshape((ntemps, nwalkers) + xp.asarray(data_sub).shape)
 state.log_prob = ll
 
 
@@ -1109,7 +1126,7 @@ breakpoint()
 """
 
 #state, accepted = bf.propose(sampler.get_model(), state)
-nsteps = 30000
+nsteps = 600
 
 
 check_injection[:, 0] = np.log(check_injection[:, 0])
@@ -1160,6 +1177,6 @@ plt.scatter(out[:, 6], out[:, 7])
 plt.savefig("plot2.png")
 breakpoint()
 """
-out = sampler.run_mcmc(state, nsteps, burn=0, progress=True, thin_by=1)
+out = sampler.run_mcmc(state, nsteps, burn=0, progress=True, thin_by=25)
 print(out.log_prob)
 breakpoint()

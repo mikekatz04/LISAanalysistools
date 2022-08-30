@@ -237,7 +237,7 @@ class Likelihood(object):
             self.psd = psd
 
             if self.like_here is False:
-                self.psd = [nf.copy() for nf in self.psd]
+                self.psd = [self.xp.asarray(nf.copy()) for nf in self.psd]
 
         # if we need to evaluate the psd each time
         else:
@@ -558,7 +558,7 @@ class GlobalLikelihood(Likelihood):
             kwargs_list = [{} for _ in params]
 
         # TODO: make sure parameter transformations appear in posterior if possible
-        total_groups = np.max(groups) + 1
+        total_groups = np.max(np.concatenate(groups)) + 1
 
         if data_length is not None or start_freq_ind is not None:
             if data_length is None:
@@ -585,80 +585,84 @@ class GlobalLikelihood(Likelihood):
             start_freq_ind = self.start_freq_ind
             data_length = self.data_length
 
-        template_all = self.xp.zeros(
-            (total_groups, self.num_channels, data_length), dtype=self.xp.complex128,
-        )
-
-        for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i, branch_supp_i) in enumerate(
-            zip(
-                params,
-                groups,
-                args_list,
-                kwargs_list,
-                self.template_model,
-                self.vectorized,
-                branch_supps,
-            )
-        ):
-            # TODO: make fill templates adjustable per model
-            if not self.fill_templates:  # False
-                if vec_i:
-                    template_channels = self.xp.asarray(
-                        tm_i(params_i, *args_i, **kwargs_i)
-                    )
-
-                else:
-                    template_channels = self.xp.asarray(
-                        [
-                            tm_i(params_ij, *args_i, **kwargs_i)
-                            for params_ij in params_i.T
-                        ]
-                    )
-
-                if self.frequency_domain is False:
-                    # TODO: vectorize this
-                    # 2: is removal of DC component + right summation approximation
-                    template_channels = (
-                        self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
-                    )
-
-                # TODO: could put this in c?
-                for group_ij in np.unique(groups_i):
-                    inds1 = np.where(groups_i == group_ij)
-                    template_all[group_ij] += template_channels[inds1].sum(axis=0)
-
-            else:  # model will fill templates
-                kwargs_i_in = kwargs_i.copy()
-                if branch_supp_i is not None:
-                    kwargs_i_in["branch_supps"] = branch_supp_i
-                if supps is not None:
-                    kwargs_i_in["supps"] = supps
-
-                if vec_i:
-                    tm_i.generate_global_template(
-                        params_i, groups_i, template_all, *args_i, **kwargs_i_in
-                    )
-
-                else:
-                    for params_ij, groups_ij in zip(params_i.T, groups_i):
-                        tm_i.generate_global_template(
-                            params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
-                        )
-
-        start_here = start_freq_ind - self.start_freq_ind
-        end_here = start_here + data_length
-        inds_slice = slice(start_here, end_here)
-
         if data is None:
             data = self.injection_channels[self.xp.newaxis, :, inds_slice]
 
         if psd is None:
             psd = self.psd[self.xp.newaxis, :, inds_slice]
 
-        # accelerate ?
-        d_minus_h = (
-            data - template_all
-        ).reshape(total_groups, len(self.injection_channels), -1)
+        if supps is None or "data_minus_template" not in supps:
+            template_all = self.xp.zeros(
+                (total_groups, self.num_channels, data_length), dtype=self.xp.complex128,
+            )
+
+            for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i, branch_supp_i) in enumerate(
+                zip(
+                    params,
+                    groups,
+                    args_list,
+                    kwargs_list,
+                    self.template_model,
+                    self.vectorized,
+                    branch_supps,
+                )
+            ):
+                # TODO: make fill templates adjustable per model
+                if not self.fill_templates:  # False
+                    if vec_i:
+                        template_channels = self.xp.asarray(
+                            tm_i(params_i, *args_i, **kwargs_i)
+                        )
+
+                    else:
+                        template_channels = self.xp.asarray(
+                            [
+                                tm_i(params_ij, *args_i, **kwargs_i)
+                                for params_ij in params_i.T
+                            ]
+                        )
+
+                    if self.frequency_domain is False:
+                        # TODO: vectorize this
+                        # 2: is removal of DC component + right summation approximation
+                        template_channels = (
+                            self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
+                        )
+
+                    # TODO: could put this in c?
+                    for group_ij in np.unique(groups_i):
+                        inds1 = np.where(groups_i == group_ij)
+                        template_all[group_ij] += template_channels[inds1].sum(axis=0)
+
+                else:  # model will fill templates
+                    kwargs_i_in = kwargs_i.copy()
+                    if branch_supp_i is not None:
+                        kwargs_i_in["branch_supps"] = branch_supp_i
+                    if supps is not None:
+                        kwargs_i_in["supps"] = supps
+
+                    if vec_i:
+                        tm_i.generate_global_template(
+                            params_i, groups_i, template_all, *args_i, **kwargs_i_in
+                        )
+
+                    else:
+                        for params_ij, groups_ij in zip(params_i.T, groups_i):
+                            tm_i.generate_global_template(
+                                params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
+                            )
+                    
+            # accelerate ?
+            d_minus_h = (
+                data - template_all
+            ).reshape(total_groups, len(self.injection_channels), -1)
+
+        else:
+            d_minus_h = supps["data_minus_template"]
+
+        start_here = start_freq_ind - self.start_freq_ind
+        end_here = start_here + data_length
+        inds_slice = slice(start_here, end_here)
 
         # avoid f = 0
         start_ind = 1 if np.isnan(psd[0, 0, inds_slice][0]) else 0
@@ -700,8 +704,8 @@ class GlobalLikelihood(Likelihood):
             raise ValueError("groups must be np.ndarray or list of np.ndarray.")
 
 
-        if np.any(np.abs(params[0][:, 4]) > 1.0) or np.any(np.abs(params[0][:, 7]) > 1.0):
-            breakpoint()
+        #if np.any(np.abs(params[0][:, 4]) > 1.0) or np.any(np.abs(params[0][:, 7]) > 1.0):
+        #    breakpoint()
 
         if self.parameter_transforms is not None:
             for i, (params_i, transform_i) in enumerate(
@@ -712,8 +716,9 @@ class GlobalLikelihood(Likelihood):
         else:
             params = [params_i.T for params_i in params]
 
-        if np.any(np.isnan(params[0])):
-            breakpoint()
+        for par_i in params:
+            if np.any(np.isnan(par_i)):
+                breakpoint()
 
         if self.adjust_psd:
             assert len(params) > 1
@@ -725,20 +730,24 @@ class GlobalLikelihood(Likelihood):
             if "branch_supps" in kwargs:
                 assert len(kwargs["branch_supps"]) == len(groups)
                 noise_supps = kwargs["branch_supps"][-1]
+                kwargs["branch_supps"] = kwargs["branch_supps"][:-1]
 
             params = params[:-1]
             groups = groups[:-1]
 
-            if "branch_supps" in kwargs:
-                kwargs["branch_supps"] = kwargs["branch_supps"][:-1]
-        
-        args_in = params + groups + list(args)
+        else:
+            noise_params = None
+
+        args_in = [params] + [groups] + list(args)
 
         if noise_params is not None:
                 psd = self.evaluate_psd(noise_params.T, noise_groups=noise_groups)
         else:
             if psd is None:
                 psd = self.psd
+            if self.like_here:
+                if isinstance(psd, list):
+                    psd = self.xp.asarray(psd).transpose(1, 0, 2)
 
         args_in += args
 

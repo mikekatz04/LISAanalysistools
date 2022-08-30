@@ -58,6 +58,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         psd_func=None,
         provide_betas=False,
         alternate_priors=None,
+        use_recent_search_samples=False,
+        batch_size=5,
         **kwargs
     ):
     
@@ -69,6 +71,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         self.priors = priors
         self.gb = gb
         self.provide_betas = provide_betas
+        self.batch_size = batch_size
+        self.use_recent_search_samples = use_recent_search_samples
 
         # use gpu from template generator
         self.use_gpu = gb.use_gpu
@@ -139,11 +143,13 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
     def special_generate_func(self, coords, nwalkers, current_priors=None, random=None, size:int=1, fill=None, fill_inds=None):
         if self.search_samples is not None:
             # TODO: make replace=True ? in PE
-            inds_drawn = random.choice(
-                self.search_inds, size=(nwalkers * size), replace=False,
-            )
-            generated_points = self.search_samples[inds_drawn].copy().reshape(nwalkers, size, -1)
-            generate_factors = np.zeros((nwalkers, size))
+            inds_drawn = np.array([random.choice(
+                self.search_inds, size=size, replace=False,
+            ) for w in range(nwalkers)])
+            generated_points = self.search_samples[inds_drawn].copy()  # .reshape(nwalkers, size, -1)
+            # since this is in search only, we will pretend these are coming from the prior
+            # so that they are accepted based on the Likelihood (and not the posterior)
+            generate_factors = current_priors.logpdf(generated_points.reshape(nwalkers * size, -1)).reshape(nwalkers, size)
 
         elif self.point_generator_func is not None:
             generated_points, generate_factors = self.point_generator_func(size=size * nwalkers)
@@ -167,7 +173,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
 
         return generated_points, generate_factors
         
-    def special_like_func(self, generated_points, coords, inds, branch_supps=None, noise_params=None, inds_reverse=None):
+    def special_like_func(self, generated_points, coords, inds, supps=None, branch_supps=None, noise_params=None, inds_reverse=None):
         # group everything
 
         # GENERATED POINTS MUST BE PASSED IN by reference not copied 
@@ -185,7 +191,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         )  # 2 is channels
         
         # guard against having no True values in inds_here
-        if np.any(inds_here):
+        if False:  # np.any(inds_here):
             groups = groups_from_inds({"temp": inds_here[None, :, :]})["temp"]
             
             # branch_supps = None
@@ -239,7 +245,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 psd = tmp.transpose((1,0,2))
             except ValueError:
                 breakpoint()
-        in_vals = (templates - self.data[None, :, :])
+        in_vals =  supps["data_minus_template"] # (templates - self.data[None, :, :])
         self.d_h_d_h = d_h_d_h = 4 * self.df * self.xp.sum((in_vals.conj() * in_vals) / psd, axis=(1, 2))
 
         ll_out = np.zeros((num_inds_change, num_try)).flatten()
@@ -247,8 +253,11 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
 
         phase_marginalize = self.search
         generated_points_here = generated_points.reshape(-1, ndim)
-        batch_size = 5
-        num_splits = int(np.ceil(float(templates.shape[0]) / float(batch_size)))
+        
+        if self.batch_size > 0:
+            num_splits = int(np.ceil(float(templates.shape[0]) / float(self.batch_size)))
+        else:
+            num_splits = 1
 
         back_d_d = self.gb.d_d.copy()
         for split in range(num_splits):
@@ -256,17 +265,16 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
 
             data = [
                 (
-                    (self.data_list[0][None, :] - templates[split * batch_size: (split + 1) * batch_size, 0].copy())
+                    (in_vals[split * self.batch_size: (split + 1) * self.batch_size, 0].copy())
                 ).copy(),
                 (
-                    (self.data_list[1][None, :] - templates[split * batch_size: (split + 1) * batch_size, 1].copy())
+                    (in_vals[split * self.batch_size: (split + 1) * self.batch_size, 1].copy())
                 ).copy(),
             ]
 
-
             current_batch_size = data[0].shape[0]
 
-            self.gb.d_d = self.xp.repeat(d_h_d_h[split * batch_size: (split + 1) * batch_size], self.num_try)
+            self.gb.d_d = self.xp.repeat(d_h_d_h[split * self.batch_size: (split + 1) * self.batch_size], self.num_try)
 
             data_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_try)
 
@@ -280,7 +288,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 psd_in = [tmp_i.copy() for tmp_i in tmp]
                 noise_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_try)
 
-            inds_slice = slice(split * batch_size * self.num_try, (split + 1) * batch_size * self.num_try)
+            inds_slice = slice(split * self.batch_size * self.num_try, (split + 1) * self.batch_size * self.num_try)
             
             prior_generated_points = generated_points_here[inds_slice]
 
@@ -307,6 +315,22 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
             except AssertionError:
                 breakpoint()
 
+            """ll_check = self.gb.get_ll(
+                prior_generated_points_in,
+                data,
+                psd_in,
+                data_index=data_index,
+                noise_index=noise_index,
+                phase_marginalize=phase_marginalize,
+                **{
+                    **self.waveform_kwargs,
+                    **{
+                        "start_freq_ind": self.start_freq_ind,
+                        "use_c_implementation": False,
+                    },
+                },
+            )
+            """
             if self.use_gpu:
                 try:
                     ll = ll.get()
@@ -350,6 +374,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 except AttributeError:
                     pass
 
+            #print(opt_snr[snr_comp.argmax()].real, snr_comp.max(), ll[snr_comp.argmax()].real - -1/2 * self.gb.d_d[snr_comp.argmax()].real)
             if self.search_snr_lim is not None:
                 ll[
                     (snr_comp
@@ -357,10 +382,16 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                     | (opt_snr
                     < self.search_snr_lim * self.search_snr_accept_factor)
                 ] = -1e300
-                #if np.any(phase_maximized_snr > self.search_snr_lim):
+                """if np.any(~((snr_comp
+                    < self.search_snr_lim * 0.95)
+                    | (opt_snr
+                    < self.search_snr_lim * self.search_snr_accept_factor))):
+                    breakpoint()"""
 
             generated_points[:] = generated_points_here.reshape(generated_points.shape)
-            ll_out[inds_slice] = ll.copy()    
+            ll_out[inds_slice] = ll.copy()  
+            #if inds_reverse is not None and len(inds_reverse) != 0 and split == num_splits - 1:
+            #    breakpoint()  
 
         if inds_reverse is not None:
             try:
@@ -373,22 +404,18 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         #breakpoint()
         # return gb.d_d
         self.gb.d_d = back_d_d.copy()
-
         # add noise term
         return ll_out.reshape(num_inds_change, num_try) + self.noise_ll[:, None]
 
     def special_prior_func(self, generated_points, coords, inds, **kwargs):
         nwalkers, nleaves_max, ndim = coords.shape
-        lp_old = self.current_model.compute_log_prior_fn({"gb": coords.reshape((1,) + coords.shape)}, inds={"gb": inds.reshape((1,) + inds.shape)}).squeeze()
-
-        lp_new = np.zeros((nwalkers, self.num_try))
+    
         lp_new = self.priors["gb"].logpdf(generated_points.reshape(-1, 8)).reshape(nwalkers, self.num_try)
-        lp_total = lp_old[:, None] + lp_new
-
+        lp_total = self.lp_old[:, None] + lp_new
         # add noise lp
-        return lp_total + self.noise_lp[:, None]
+        return lp_total
 
-    def get_proposal(self, all_coords, all_inds, all_inds_for_change, random, supp=None, branch_supps=None):
+    def get_proposal(self, all_coords, all_inds, all_inds_for_change, random, supps=None, branch_supps=None):
         """Make a proposal
 
         Args:
@@ -424,7 +451,6 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         q = {}
         new_inds = {}
         factors = {}
-
         for i, (name, coords, inds, inds_for_change) in enumerate(
             zip(
                 all_coords.keys(),
@@ -474,10 +500,15 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
             current_priors = self.priors[name]
             inds_here = tuple(np.concatenate([inds_for_change["+1"], inds_for_change["-1"]], axis=0).T)
             
+            # allows for adjustment during search
+            reset_num_try = False
             # it can pile up with low signal binaries at the maximum number (observation so far)
             if len(inds_here[0]) != 0:
                 if self.search and self.search_samples is not None:
-                    assert len(self.search_inds) >= self.num_try
+                    if len(self.search_inds) >= self.num_try:
+                        reset_num_try = True
+                        old_num_try = self.num_try
+                    self.num_try = len(self.search_inds)
 
                 num_inds_change = len(inds_here[0])
 
@@ -512,10 +543,39 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                     self.noise_lp = noise_lp.copy()
                     #lp_here -= noise_lp
 
+                self.lp_old = lp_here
+
                 rj_info = dict(
                     ll=ll_here,
                     lp=lp_here
                 )
+                
+                new_supps = deepcopy(supps)
+
+                # remove templates from new copy of residuals
+                # that are proposed to be removed. 
+                # This is so that the pretend forward computation is legit. 
+                data_minus_template = new_supps.holder["data_minus_template"]
+
+                if len(inds_reverse[0]) > 0:
+                    parameters_remove = self.parameter_transforms.both_transforms(all_coords["gb"][inds_reverse])
+
+                    templates_to_remove = self.xp.zeros((parameters_remove.shape[0],) + data_minus_template.shape[2:], dtype=complex)
+
+                    self.gb.generate_global_template(
+                        parameters_remove,
+                        self.xp.arange(parameters_remove.shape[0], dtype=self.xp.int32), 
+                        templates_to_remove, 
+                        **self.waveform_kwargs
+                    )
+
+                    self.checkit =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
+                    # this will update it in new_supps for when it is passed through MT
+                    # add new binaries to data d - (h + add) = d - h - add
+                    # remove removed binaries: d - (h - remove) = d - h + remove
+                    data_minus_template[inds_reverse[0], inds_reverse[1]] += templates_to_remove
+
+                    self.checkit2 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
 
                 coords_inds = (coords[inds_here[:2]], tmp_inds[inds_here[:2]])
 
@@ -528,7 +588,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                     args_prior=coords_inds,
                     kwargs_generate={"current_priors": current_priors}, 
                     args_like=coords_inds, 
-                    kwargs_like={"branch_supps": branch_supps[name][inds_here[:2]], "noise_params": all_coords["noise_params"][inds_here[:2]].T,
+                    kwargs_like={"supps": new_supps[inds_here[:2]], "branch_supps": branch_supps[name][inds_here[:2]], "noise_params": all_coords["noise_params"][inds_here[:2]].T,
                     "inds_reverse": inds_reverse_in},
                     betas=betas,
                     rj_info=rj_info,
@@ -536,17 +596,50 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
 
                 q[name][inds_forward] = generate_points_out.copy()
 
+                # TODO: make sure detailed balance this will move to detailed balance in multiple try
+                factors[inds_here[:2]] = factors_out
+
+                wk_temp = self.waveform_kwargs.copy()
+                if "start_freq_ind" not in wk_temp:
+                    wk_temp["start_freq_ind"] = self.start_freq_ind
+
+                tmp_bac = data_minus_template.copy()
+            
+                # need to order like temps and walkers
+                params_for_update = self.parameter_transforms.both_transforms(generate_points_out)
+                
+                templates_to_add = self.xp.zeros((params_for_update.shape[0],) + data_minus_template.shape[2:], dtype=complex)
+
+                self.gb.generate_global_template(
+                    params_for_update,
+                    self.xp.arange(params_for_update.shape[0], dtype=self.xp.int32), 
+                    templates_to_add, 
+                    **self.waveform_kwargs
+                )
+
+                # add new binaries to data d - (h + add) = d - h - add
+                # remove removed binaries: d - (h - remove) = d - h + remove
+                templates_to_add *= -1.0
+                data_minus_template[inds_forward[0], inds_forward[1]] += templates_to_add
+
+                # need to rearrange everything properly because lp_out and 
+                # ll_out are in order of inds_here not the temps/walkers
+                self.new_supps_for_transfer = new_supps
+                self.ll_for_transfer = np.zeros_like(self.current_state.log_prob)
+                self.lp_for_transfer = np.zeros_like(self.current_state.log_prob)
                 ll_tmp = self.ll_out.copy()
                 lp_tmp = self.lp_out.copy()
+                self.lp_for_transfer[inds_here[:2]] = self.lp_out
+                self.ll_for_transfer[inds_here[:2]] = self.ll_out
                 #if "noise_params" in all_coords:
                 #    ll_tmp += noise_ll
                 #    lp_tmp += noise_lp
 
-                #q["ll"] = ll_tmp
-                #q["lp"] = lp_tmp
-                #q["inds_here"] = inds_here[:2]
+                if np.any(self.ll_for_transfer > 1e7):
+                    breakpoint()
 
-                # TODO: make sure detailed balance this will move to detailed balance in multiple try
-                factors[inds_here[:2]] = factors_out
-
+            else:
+                breakpoint()
+        if reset_num_try:
+            self.num_try = old_num_try
         return q, new_inds, factors
