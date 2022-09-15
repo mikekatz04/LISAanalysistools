@@ -1223,6 +1223,12 @@ def noisepsd_T(f):
 # int_0^\infty S_h(f) = (1/T) \int_0^T |h(t)|^2 dt = (2/T) \int_0^\infty |h(f)|^2 df
 # so S_h(f_i) = (2/T) |h(f_i)|^2 = (2/T) |ret(f_i)|^2 / df^2 = (2/df) |ret(f_i)^2|
 
+def flat_psd_function(f, val, *args, xp=None, **kwargs):  
+    if xp is None:
+        xp = np
+    val = xp.atleast_1d(xp.asarray(val))
+    out = xp.repeat(val[:, None], len(f), axis=1)
+    return out
 
 def cornish_lisa_psd(f, sky_averaged=False, use_gpu=False):
     """PSD from https://arxiv.org/pdf/1803.01944.pdf

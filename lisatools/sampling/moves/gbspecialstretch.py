@@ -82,6 +82,7 @@ class GBSpecialStretchMove(StretchMove):
         self.gb = gb
         self.provide_betas = provide_betas
         self.batch_size = batch_size
+        self.stop_here = True
 
         # use gpu from template generator
         self.use_gpu = gb.use_gpu
@@ -471,14 +472,15 @@ class GBSpecialStretchMove(StretchMove):
                     
                 optimized_snr = self.xp.sqrt(self.gb.add_add.real)
                 detected_snr = (self.gb.d_h_add + self.gb.add_remove).real / optimized_snr
-                inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.95 * self.search_snr_lim)))
+                if self.search:
+                    inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
 
-                if self.xp == np:
-                    inds_fix = inds_fix.get()
+                    if self.xp == np:
+                        inds_fix = inds_fix.get()
 
-                if self.xp.any(inds_fix):
-                    logp[keep_here[0][inds_fix]] = -np.inf
-                    delta_ll[keep_here[0][inds_fix]] = -1e300
+                    if self.xp.any(inds_fix):
+                        logp[keep_here[0][inds_fix]] = -np.inf
+                        delta_ll[keep_here[0][inds_fix]] = -1e300
 
                 prev_logl = log_prob_tmp[(temp_inds_keep, walkers_inds_keep)]
                 logl = delta_ll + prev_logl
@@ -513,7 +515,39 @@ class GBSpecialStretchMove(StretchMove):
 
                     # if gibbs sampling, this will say it is accepted if
                     # any of the gibbs proposals were accepted
+
                     accepted_here = keep.copy()
+
+                   
+                    # check freq overlap
+                    nleaves_max = state.branches["gb_fixed"].nleaves_max
+                    if nleaves_max > 1:
+                        check_f0 = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                        #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                        check_f0[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep][:, 1]
+                        #check_f0_old[group] = f0_old
+
+                        check_f0_sorted = self.xp.sort(check_f0, axis=-1)
+                        inds_f0_sorted = self.xp.argsort(check_f0, axis=-1)
+                        check_f0_diff = self.xp.zeros_like(check_f0_sorted, dtype=int)
+                        check_f0_diff[:, :, 1:] = (self.xp.diff(check_f0_sorted, axis=-1) / 1e3 / self.df).astype(int)
+
+                        bad = (check_f0_diff < dbin) & (check_f0_sorted != 0.0)
+                        if self.xp.any(bad):
+                            try:
+                                bad_inds = self.xp.where(bad)
+                                
+                                # fix the last entry of bad inds
+                                inds_bad = (bad_inds[0], bad_inds[1], inds_f0_sorted[bad])
+                                bad_check_val = (inds_bad[0] * 1e10 + inds_bad[1] * 1e5 + inds_bad[2]).astype(int)
+                                # we are going to make this proposal not accepted
+                                # this so far is only ever an accepted-level problem at high temps 
+                                # where large frequency jumps can happen
+                                check_val = (temp_inds_keep[keep] * 1e10 + walkers_inds_keep[keep] * 1e5 + leaf_inds_keep[keep]).astype(int)
+                                fix_keep = self.xp.arange(len(keep))[keep][self.xp.in1d(check_val, bad_check_val)]
+                                keep[fix_keep] = False
+                            except:
+                                breakpoint()
 
                     gb_fixed_coords[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep]
 
@@ -554,9 +588,11 @@ class GBSpecialStretchMove(StretchMove):
 
                     #tmp = data_minus_template.copy()
                     # remove templates by multiplying by "adding them to" d - h + remove =  = d - (h - remove)
+                    
                     self.gb.generate_global_template(points_remove[keep_from_before],
                         group_index, data_minus_template.reshape((-1,) + data_minus_template.shape[2:]), **waveform_kwargs_fill
                     )
+
                     #waveform_kwargs_fill["use_c_implementation"] = False
                     #self.gb.generate_global_template(points_remove[keep_from_before],
                     #    group_index, tmp.reshape((-1,) + tmp.shape[2:]), **waveform_kwargs_fill
@@ -643,6 +679,7 @@ class GBSpecialStretchMove(StretchMove):
             #check = -1/2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / self.xp.asarray(self.psd), axis=(2, 3))
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
             #print(np.abs(new_state.log_prob - ll_after[0]).max())
+
             if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
                 breakpoint()
 

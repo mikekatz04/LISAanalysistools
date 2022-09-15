@@ -256,25 +256,27 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         
         if self.batch_size > 0:
             num_splits = int(np.ceil(float(templates.shape[0]) / float(self.batch_size)))
+            batch_size = self.batch_size
         else:
             num_splits = 1
-
+            batch_size = num_inds_change
+            
         back_d_d = self.gb.d_d.copy()
         for split in range(num_splits):
             # TODO: add waveform to branch_supps
 
             data = [
                 (
-                    (in_vals[split * self.batch_size: (split + 1) * self.batch_size, 0].copy())
+                    (in_vals[split * batch_size: (split + 1) * batch_size, 0].copy())
                 ).copy(),
                 (
-                    (in_vals[split * self.batch_size: (split + 1) * self.batch_size, 1].copy())
+                    (in_vals[split * batch_size: (split + 1) * batch_size, 1].copy())
                 ).copy(),
             ]
 
             current_batch_size = data[0].shape[0]
 
-            self.gb.d_d = self.xp.repeat(d_h_d_h[split * self.batch_size: (split + 1) * self.batch_size], self.num_try)
+            self.gb.d_d = self.xp.repeat(d_h_d_h[split * batch_size: (split + 1) * batch_size], self.num_try)
 
             data_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_try)
 
@@ -288,8 +290,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 psd_in = [tmp_i.copy() for tmp_i in tmp]
                 noise_index = self.xp.repeat(self.xp.arange(current_batch_size, dtype=self.xp.int32), self.num_try)
 
-            inds_slice = slice(split * self.batch_size * self.num_try, (split + 1) * self.batch_size * self.num_try)
-            
+            inds_slice = slice(split * batch_size * self.num_try, (split + 1) * batch_size * self.num_try)
+
+            # TODO: Remove batch_size if GPU only ?
             prior_generated_points = generated_points_here[inds_slice]
 
             if self.parameter_transforms is not None:
@@ -375,10 +378,10 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                     pass
 
             #print(opt_snr[snr_comp.argmax()].real, snr_comp.max(), ll[snr_comp.argmax()].real - -1/2 * self.gb.d_d[snr_comp.argmax()].real)
-            if self.search_snr_lim is not None:
+            if self.search and self.search_snr_lim is not None:
                 ll[
                     (snr_comp
-                    < self.search_snr_lim * 0.95)
+                    < self.search_snr_lim * 0.8)
                     | (opt_snr
                     < self.search_snr_lim * self.search_snr_accept_factor)
                 ] = -1e300
@@ -550,6 +553,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                     lp=lp_here
                 )
                 
+                self.inds_reverse = inds_reverse
+                self.inds_forward = inds_forward
                 new_supps = deepcopy(supps)
 
                 # remove templates from new copy of residuals
@@ -569,13 +574,13 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                         **self.waveform_kwargs
                     )
 
-                    self.checkit =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
+                    self.checkit3 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
                     # this will update it in new_supps for when it is passed through MT
                     # add new binaries to data d - (h + add) = d - h - add
                     # remove removed binaries: d - (h - remove) = d - h + remove
                     data_minus_template[inds_reverse[0], inds_reverse[1]] += templates_to_remove
 
-                    self.checkit2 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
+                    self.checkit4 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
 
                 coords_inds = (coords[inds_here[:2]], tmp_inds[inds_here[:2]])
 
@@ -620,7 +625,10 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 # add new binaries to data d - (h + add) = d - h - add
                 # remove removed binaries: d - (h - remove) = d - h + remove
                 templates_to_add *= -1.0
+                self.checkit1 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3)))  + self.xp.asarray(self.noise_ll).reshape(8, 100)
                 data_minus_template[inds_forward[0], inds_forward[1]] += templates_to_add
+
+                self.checkit2 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3)))  + self.xp.asarray(self.noise_ll).reshape(8, 100)
 
                 # need to rearrange everything properly because lp_out and 
                 # ll_out are in order of inds_here not the temps/walkers
@@ -642,4 +650,5 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 breakpoint()
         if reset_num_try:
             self.num_try = old_num_try
+
         return q, new_inds, factors

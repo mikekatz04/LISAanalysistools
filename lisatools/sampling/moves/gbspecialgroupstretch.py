@@ -49,6 +49,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
         *args,
         **kwargs
     ):
+        self.fixed_like_diff = 0
         self.time = 0
         self.name = "gbgroupstretch"
         self.start_ind_limit = start_ind_limit
@@ -72,20 +73,23 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
         freqs = all_remaining_coords[:, 1]
 
         # TODO: improve this?
-        inds_freqs_sorted = np.arange(len(freqs))[np.argsort(freqs)]
+        inds_freqs_sorted = np.argsort(freqs)
         freqs_sorted = freqs[np.argsort(freqs)]
+        
+        inds_reverse = np.empty_like(inds_freqs_sorted)
+        inds_reverse[inds_freqs_sorted] = np.arange(inds_freqs_sorted.size)
 
-        left = np.full(len(freqs_sorted), int(self.nfriends / 2))
-        right = np.full(len(freqs_sorted), int(self.nfriends / 2))
+        left = np.full(len(freqs_sorted), self.nfriends)
+        right = np.full(len(freqs_sorted), self.nfriends)
         indexes = np.arange(len(freqs_sorted))
+        
+        left = left * (indexes >= self.nfriends) + indexes * (indexes < self.nfriends)
+        right = right * (indexes < len(freqs_sorted) - self.nfriends) + (len(freqs_sorted) - 1 - indexes) * (indexes >= len(freqs_sorted) - self.nfriends)
 
-        left = left * (indexes >= int(self.nfriends / 2)) + indexes * (indexes < int(self.nfriends / 2))
-        right = right * (indexes < len(freqs_sorted) - int(self.nfriends / 2)) + (len(freqs_sorted) - 1 - indexes) * (indexes >= len(freqs_sorted) - int(self.nfriends / 2))
+        left = left * ((left + right == self.nfriends * 2) | (right == self.nfriends)) + (left + self.nfriends - right) * ((left + right < 2 * self.nfriends) & (right != self.nfriends))
 
-        left = left * ((left + right == self.nfriends) | (right == self.nfriends / 2)) + (left + self.nfriends / 2 - right) * ((left + right < self.nfriends) & (right != self.nfriends / 2))
-
-        right = right * ((left + right == self.nfriends) | (left == self.nfriends / 2)) + (right + self.nfriends / 2 - left) * ((left + right < self.nfriends) & (left != self.nfriends / 2))
-        inds_keep = (np.tile(np.arange(self.nfriends), (len(freqs_sorted), 1)) + np.arange(len(freqs_sorted))[:, None] -  left[:, None]).astype(int)
+        right = right * ((left + right == self.nfriends * 2) | (left == self.nfriends)) + (right + self.nfriends - left) * ((left + right < self.nfriends * 2) & (left != self.nfriends))
+        inds_keep = (np.tile(np.arange(2 * self.nfriends), (len(freqs_sorted), 1)) + np.arange(len(freqs_sorted))[:, None] -  left[:, None]).astype(int)
         
         #distances = np.abs(freqs[None, :] - freqs[:, None])
         #distances[distances == 0.0] = 1e300
@@ -135,9 +139,18 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
         """
         """
         """
-        #keep = np.argsort(distances, axis=1)[:, :self.nfriends]
-        keep = inds_freqs_sorted[inds_keep]
-        supps[inds] = {"group_move_points": all_remaining_coords[keep]}
+        try:
+            keep = inds_freqs_sorted[inds_keep][inds_reverse]
+        except IndexError:
+            breakpoint()
+        suggested_friends = all_remaining_coords[keep]
+        distances = np.abs(suggested_friends[:, :, 1] - all_remaining_coords[:, 1][:, None])
+        distances_pretend = np.zeros_like(distances)
+        distances_pretend[distances == 0.0] = 1e300
+        keep = np.argsort(distances_pretend, axis=1)[:, :self.nfriends]
+        friends = np.take_along_axis(suggested_friends, keep[:, :, None], axis=1)
+
+        supps[inds] = {"group_move_points": friends}
 
     def setup_noise_params(self, branch):
         
@@ -179,7 +192,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
         ndim_total = 0
         ntemps, nwalkers, nleaves_, ndim_ = state.branches["gb"].shape 
         
-        if state.branches["gb"].nleaves.sum() < self.nfriends:
+        if state.branches["gb"].nleaves.sum() < 2 * self.nfriends:
             print("Not enough friends yet.")
             accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             self.temperature_control.swaps_accepted = np.zeros(ntemps - 1, dtype=int)
@@ -277,9 +290,12 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
             q_temp, factors_temp = self.get_proposal(
                 {"gb": points_to_move},  {"gb": points_for_move}, model.random
             )
+
             """et = time.perf_counter()
             print("after prop", (et - st))
             st = time.perf_counter()"""
+
+            #breakpoint()
 
             q["gb"][group] = q_temp["gb"]
 
@@ -360,14 +376,16 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
             
             optimized_snr = self.xp.sqrt(self.gb.add_add.real)
             detected_snr = (self.gb.d_h_add + self.gb.add_remove).real / optimized_snr
-            inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.95 * self.search_snr_lim)))
+            
+            if self.search:
+                inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
 
-            """try:
-                inds_fix = inds_fix.get()
-            except AttributeError:
-                pass"""
-            if self.xp.any(inds_fix):
-                delta_ll[keep_here[0][inds_fix]] = -1e300
+                """try:
+                    inds_fix = inds_fix.get()
+                except AttributeError:
+                    pass"""
+                if self.xp.any(inds_fix):
+                    delta_ll[keep_here[0][inds_fix]] = -1e300
 
             prev_logl = log_prob_tmp[(temp_inds, walkers_inds)]
             logl = delta_ll + prev_logl
@@ -394,6 +412,38 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
                 # if gibbs sampling, this will say it is accepted if
                 # any of the gibbs proposals were accepted
                 accepted_here = keep.copy()
+
+                # check freq overlap
+                f0_new = q_temp["gb"][keep, 1]
+                #f0_old = gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])][:, 1]
+                nleaves_max = state.branches["gb"].nleaves_max
+                check_f0 = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                check_f0[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = f0_new
+                #check_f0_old[group] = f0_old
+
+                check_f0_sorted = self.xp.sort(check_f0, axis=-1)
+                inds_f0_sorted = self.xp.argsort(check_f0, axis=-1)
+                check_f0_diff = self.xp.zeros_like(check_f0_sorted, dtype=int)
+                check_f0_diff[:, :, 1:] = (self.xp.diff(check_f0_sorted, axis=-1) / 1e3 / self.df).astype(int)
+
+                bad = (check_f0_diff < dbin) & (check_f0_sorted != 0.0)
+                if self.xp.any(bad):
+                    try:
+                        bad_inds = self.xp.where(bad)
+                        if self.xp.any(bad_inds[0] < 2):
+                            breakpoint()
+                        # fix the last entry of bad inds
+                        inds_bad = (bad_inds[0], bad_inds[1], inds_f0_sorted[bad])
+                        bad_check_val = (inds_bad[0] * 1e10 + inds_bad[1] * 1e5 + inds_bad[2]).astype(int)
+                        # we are going to make this proposal not accepted
+                        # this so far is only ever an accepted-level problem at high temps 
+                        # where large frequency jumps can happen
+                        check_val = (temp_inds[keep] * 1e10 + walkers_inds[keep] * 1e5 + leaf_inds[keep]).astype(int)
+                        fix_keep = self.xp.arange(len(keep))[keep][self.xp.in1d(check_val, bad_check_val)]
+                        keep[fix_keep] = False
+                    except:
+                        breakpoint()
 
                 gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = q_temp["gb"][keep]
 
@@ -486,6 +536,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
                     in_tuple = (accepted_delta_ll[keep], accepted_delta_lp[keep], temp_inds[keep], walkers_inds[keep])
 
                 for i, (dll, dlp, ti, wi) in enumerate(zip(*in_tuple)):
+
                     logl_change_contribution[ti, wi] += dll
                     logp_change_contribution[ti, wi] += dlp
 
@@ -511,7 +562,14 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
             #print(np.abs(new_state.log_prob - ll_after[0]).max(), np.abs(new_state.log_prior - lp_after).max())
             if np.abs(new_state.log_prior - lp_after).max() > 1e-6 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
+                # TODO: need to investigate when this fails
                 breakpoint()
+            """elif np.abs(new_state.log_prior - lp_after).max() > 1e-6 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
+                # TODO: need to investigate when this fails
+                self.fixed_like_diff += 1
+                print("Fixing like diff for now.", self.fixed_like_diff)
+                fix_here = np.abs(new_state.log_prob - ll_after[0]) > 0.1
+                new_state.log_prob[fix_here] = ll_after[0][fix_here]"""
 
             """
             check_logl = model.compute_log_prob_fn(new_state.branches_coords, inds=new_state.branches_inds, branch_supps=new_state.branches_supplimental, supps=new_state.supplimental)
