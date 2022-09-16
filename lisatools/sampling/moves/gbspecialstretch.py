@@ -28,7 +28,15 @@ from eryn.state import State
 
 __all__ = ["GBSpecialStretchMove"]
 
-
+def searchsorted2d_vec(a,b, xp=None, **kwargs):
+    if xp is None:
+        xp = np
+    m,n = a.shape
+    max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
+    r = max_num*xp.arange(a.shape[0])[:,None]
+    p = xp.searchsorted( (a+r).ravel(), (b+r).ravel(), **kwargs).reshape(m,-1)
+    return p - n*(xp.arange(m)[:,None])
+    
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialStretchMove(StretchMove):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
@@ -523,8 +531,42 @@ class GBSpecialStretchMove(StretchMove):
                     nleaves_max = state.branches["gb_fixed"].nleaves_max
                     if nleaves_max > 1:
                         check_f0 = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                        check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
                         #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
                         check_f0[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep][:, 1]
+                        check_f0_old[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = old_points[keep][:, 1]
+
+                        check_f0_old_sorted = self.xp.sort(check_f0_old, axis=-1)
+                        inds_f0_old_sorted = self.xp.argsort(check_f0_old, axis=-1)
+
+                        check_f0_tmp = check_f0.reshape(-1, check_f0.shape[-1])
+                        check_f0_old_sorted_tmp = check_f0_old_sorted.reshape(-1, check_f0_old_sorted.shape[-1])
+
+                        check_f0_in_old_inds = searchsorted2d_vec(check_f0_old_sorted_tmp, check_f0_tmp, xp=self.xp, side="right").reshape(check_f0.shape)
+
+                        zero_check = check_f0_in_old_inds[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])]
+                        f0_new_here = new_points[keep][:, 1]
+                        keep_for_after = keep.copy()
+                        inds_test_here = [-2, -1, 0, 1]
+                        for ind_test_here in inds_test_here:
+                            here_check = zero_check + ind_test_here
+                            do_check = np.ones_like(here_check, dtype=bool)
+                            do_check[here_check < 0] = False
+                            do_check[here_check >= check_f0_old.shape[-1]] = False
+
+                            here_vals = check_f0_old_sorted[(temp_inds_keep[keep], walkers_inds_keep[keep], here_check)]
+                            here_inds = inds_f0_old_sorted[(temp_inds_keep[keep], walkers_inds_keep[keep], here_check)]
+                            here_test = (self.xp.abs(f0_new_here - here_vals) / 1e3 / self.df).astype(int)
+                            fix_bad2_tmp = self.xp.arange(len(keep))[keep]
+                            fix_bad2 = fix_bad2_tmp[(here_test < dbin) & (leaf_inds_keep[keep] != here_inds) & (do_check)]
+                            #if len(fix_bad2) > 0:
+                            #    print("NEW BAD", len(fix_bad2), len(fix_bad2) / len(keep[keep]))
+                            keep_for_after[fix_bad2] = False
+
+                        keep[:] = keep_for_after[:]
+
+                        # TODO: add bad ones to new group?
+
                         #check_f0_old[group] = f0_old
 
                         check_f0_sorted = self.xp.sort(check_f0, axis=-1)
@@ -680,8 +722,35 @@ class GBSpecialStretchMove(StretchMove):
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
             #print(np.abs(new_state.log_prob - ll_after[0]).max())
 
-            if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
+            if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_prob - ll_after[0]).max() > 1e0:
                 breakpoint()
+
+
+            # if any are even remotely getting to be different, reset all (small change)
+            elif np.abs(new_state.log_prob - ll_after[0]).max() > 1e-3:
+                
+                fix_here = np.abs(new_state.log_prob - ll_after[0]) > 1e-6
+                data_minus_template_old = data_minus_template.copy()
+                data_minus_template = self.xp.zeros_like(data_minus_template_old)
+                data_minus_template[:] = self.xp.asarray(self.data)[None, None]
+                templates = self.xp.zeros_like(data_minus_template).reshape(-1, 2, data_minus_template.shape[-1])
+                for name in new_state.branches.keys():
+                    if name not in ["gb", "gb_fixed"]:
+                        continue
+                    new_state_branch = new_state.branches[name]
+                    coords_here = new_state_branch.coords[new_state_branch.inds]
+                    ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
+                    group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+                    coords_here_in = self.parameter_transforms.both_transforms(coords_here, xp=np)
+
+                    self.gb.generate_global_template(coords_here_in, group_index, templates, batch_size=1000, **self.waveform_kwargs)
+
+                data_minus_template -= templates.reshape(ntemps, nwalkers, 2, templates.shape[-1])
+
+                new_like = -1 / 2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / psd, axis=(2, 3)).real.get()
+            
+                new_like += self.noise_ll
+                new_state.log_prob[:] = new_like.reshape(ntemps, nwalkers)
 
         # get accepted fraction 
         accepted_check = np.all(np.abs(new_state.branches_coords["gb_fixed"] - state.branches_coords["gb_fixed"]) > 0.0, axis=-1).sum(axis=(1, 2)) / new_state.branches_inds["gb_fixed"].sum(axis=(1,2))

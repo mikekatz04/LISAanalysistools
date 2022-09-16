@@ -561,9 +561,35 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
             #check = -1/2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / self.xp.asarray(self.psd), axis=(2, 3))
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
             #print(np.abs(new_state.log_prob - ll_after[0]).max(), np.abs(new_state.log_prior - lp_after).max())
-            if np.abs(new_state.log_prior - lp_after).max() > 1e-6 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
-                # TODO: need to investigate when this fails
+            if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_prob - ll_after[0]).max() > 1e0:
                 breakpoint()
+
+            # if any are even remotely getting to be different, reset all (small change)
+            elif np.abs(new_state.log_prob - ll_after[0]).max() > 1e-3:
+                
+                fix_here = np.abs(new_state.log_prob - ll_after[0]) > 1e-6
+                data_minus_template_old = data_minus_template.copy()
+                data_minus_template = self.xp.zeros_like(data_minus_template_old)
+                data_minus_template[:] = self.xp.asarray(self.data)[None, None]
+                templates = self.xp.zeros_like(data_minus_template).reshape(-1, 2, data_minus_template.shape[-1])
+                for name in new_state.branches.keys():
+                    if name not in ["gb", "gb_fixed"]:
+                        continue
+                    new_state_branch = new_state.branches[name]
+                    coords_here = new_state_branch.coords[new_state_branch.inds]
+                    ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
+                    group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+                    coords_here_in = self.parameter_transforms.both_transforms(coords_here, xp=np)
+
+                    self.gb.generate_global_template(coords_here_in, group_index, templates, batch_size=1000, **self.waveform_kwargs)
+
+                data_minus_template -= templates.reshape(ntemps, nwalkers, 2, templates.shape[-1])
+
+                new_like = -1 / 2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / psd, axis=(2, 3)).real.get()
+            
+                new_like += self.noise_ll
+                new_state.log_prob[:] = new_like.reshape(ntemps, nwalkers)
+                
             """elif np.abs(new_state.log_prior - lp_after).max() > 1e-6 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
                 # TODO: need to investigate when this fails
                 self.fixed_like_diff += 1
