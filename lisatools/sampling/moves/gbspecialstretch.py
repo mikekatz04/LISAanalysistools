@@ -80,6 +80,7 @@ class GBSpecialStretchMove(StretchMove):
         StretchMove.__init__(self, **kwargs)  
 
         self.time = 0
+        self.greater_than_1e0 = 0
         self.name = "gbgroupstretch"
 
         # TODO: make priors optional like special generate function? 
@@ -722,12 +723,11 @@ class GBSpecialStretchMove(StretchMove):
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
             #print(np.abs(new_state.log_prob - ll_after[0]).max())
 
-            if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_prob - ll_after[0]).max() > 1e0:
-                breakpoint()
-
-
             # if any are even remotely getting to be different, reset all (small change)
-            elif np.abs(new_state.log_prob - ll_after[0]).max() > 1e-3:
+            if np.abs(new_state.log_prob - ll_after[0]).max() > 1e-3:
+                if np.abs(new_state.log_prob - ll_after[0]).max() > 1e0:
+                    self.greater_than_1e0 += 1
+                    print("Greater:", self.greater_than_1e0)
                 
                 fix_here = np.abs(new_state.log_prob - ll_after[0]) > 1e-6
                 data_minus_template_old = data_minus_template.copy()

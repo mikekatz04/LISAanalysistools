@@ -64,7 +64,7 @@ num_sub_bands = num_f_bins // dbin + int((num_f_bins % dbin) != 0)
 lim_inds = np.concatenate([np.array([0]), np.arange(dbin, num_f_bins, dbin), np.array([num_f_bins - 1])])
 search_f_bin_lims = f0_lims[0] + df * np.arange(num_f_bins)[lim_inds]
 search_f_bin_lims[-1] = f0_lims[-1]
-run_mix_first = False
+run_mix_first = True
 # TODO: adjust the starting points each iteration to avoid issues at gaps
 print(f"num_sub_bands: {num_sub_bands}")
 if fp_mix_final not in os.listdir():
@@ -337,7 +337,6 @@ if fp_mix_final not in os.listdir():
                 gb.d_d = df * 4 * xp.sum(data_minus_templates_mix.conj() * data_minus_templates_mix / xp.asarray(psd)[None, None, :], axis=(1, 2))
             
                 coords_out[:, :, j] = tmp.reshape(ntemps, nwalkers, 8)
-                print(j)
 
             ll = -1/2 * df * 4 * xp.sum(data_minus_templates_mix.conj() * data_minus_templates_mix / xp.asarray(psd)[None, None, :], axis=(1, 2)).real
 
