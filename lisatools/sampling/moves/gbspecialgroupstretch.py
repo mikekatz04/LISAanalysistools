@@ -24,7 +24,7 @@ from .gbgroupstretch import GBGroupStretchMove
 
 from ...diagnostic import inner_product
 from eryn.state import State
-
+from lisatools.utils.utility import searchsorted2d_vec
 
 __all__ = ["GBGroupStretchMove"]
 
@@ -225,7 +225,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
 
         buffer = 0  # 2 ** 8
 
-        dbin = 2 * self.waveform_kwargs["N"] + buffer
+        dbin = int(2 * self.waveform_kwargs["N"] + buffer)
         max_iter = 1000
         i = 0
         total = 0
@@ -270,6 +270,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
         """et = time.perf_counter()
         print("group groups", (et - st))
         st = time.perf_counter()"""
+
         for group in groups:
             temp_inds, walkers_inds, leaf_inds = group
             if self.use_gpu:
@@ -300,24 +301,29 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
             q["gb"][group] = q_temp["gb"]
 
             # data should not be whitened
-            if "noise_params" not in q:
+            # TODO: take this out of the groups loop
+            if "noise_params" not in state.branches:
                 use_stock_psd = True
                 psd = self.xp.tile(self.xp.asarray(self.psd), (ntemps * nwalkers, 1, 1))
 
             else:
                 use_stock_psd = False
-                noise_params = q["noise_params"]
+                noise_params = state.branches["noise_params"].coords
                 if self.psd_func is None:
                     raise ValueError("When providing noise_params, psd_func kwargs in __init__ function must be given.")
 
                 if noise_params.ndim == 3:
                     noise_params = noise_params[0]
+                tmp = self.xp.asarray([self.psd_func(self.fd, *noise_params.reshape(-1, noise_params.shape[-1]).T, **self.noise_kwargs) for _ in range(2)])
+                psd = tmp.transpose((1,0,2))
+                self.noise_ll =  -self.xp.sum(self.xp.log(psd), axis=(1, 2)).reshape(ntemps, nwalkers)
+                
                 try:
-                    tmp = self.xp.asarray([self.psd_func(self.fd, *noise_params.reshape(-1, noise_params.shape[-1]).T, **self.noise_kwargs) for _ in range(2)])
-                    psd = tmp.transpose((1,0,2))
-                    breakpoint()
-                except ValueError:
-                    breakpoint()
+                    self.noise_ll = self.noise_ll.get()
+                except AttributeError:
+                    pass
+
+                noise_ll = self.noise_ll
 
             if self.use_gpu:
                 new_points_prior = q["gb"][group].get()
@@ -415,12 +421,43 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
 
                 # check freq overlap
                 f0_new = q_temp["gb"][keep, 1]
-                #f0_old = gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])][:, 1]
+                f0_old = gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])][:, 1]
                 nleaves_max = state.branches["gb"].nleaves_max
                 check_f0 = self.xp.zeros((ntemps, nwalkers, nleaves_max))
                 #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
                 check_f0[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = f0_new
-                #check_f0_old[group] = f0_old
+                
+                check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                
+                check_f0_old[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = f0_old
+
+                check_f0_old_sorted = self.xp.sort(check_f0_old, axis=-1)
+                inds_f0_old_sorted = self.xp.argsort(check_f0_old, axis=-1)
+
+                check_f0_tmp = check_f0.reshape(-1, check_f0.shape[-1])
+                check_f0_old_sorted_tmp = check_f0_old_sorted.reshape(-1, check_f0_old_sorted.shape[-1])
+
+                check_f0_in_old_inds = searchsorted2d_vec(check_f0_old_sorted_tmp, check_f0_tmp, xp=self.xp, side="right").reshape(check_f0.shape)
+
+                zero_check = check_f0_in_old_inds[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])]
+                f0_new_here = f0_new.copy()
+                keep_for_after = keep.copy()
+                inds_test_here = [-2, -1, 0, 1]
+                for ind_test_here in inds_test_here:
+                    here_check = zero_check + ind_test_here
+                    do_check = np.ones_like(here_check, dtype=bool)
+                    do_check[here_check < 0] = False
+                    do_check[here_check >= check_f0_old.shape[-1]] = False
+
+                    here_vals = check_f0_old_sorted[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])]
+                    here_inds = inds_f0_old_sorted[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])]
+                    here_test = (self.xp.abs(f0_new_here - here_vals) / 1e3 / self.df).astype(int)
+                    fix_bad2_tmp = self.xp.arange(len(keep))[keep]
+                    fix_bad2 = fix_bad2_tmp[(here_test < dbin) & (leaf_inds[keep] != here_inds) & (do_check)]
+
+                    #    print("NEW BAD", len(fix_bad2), len(fix_bad2) / len(keep[keep]))
+                    keep_for_after[fix_bad2] = False
 
                 check_f0_sorted = self.xp.sort(check_f0, axis=-1)
                 inds_f0_sorted = self.xp.argsort(check_f0, axis=-1)
@@ -431,8 +468,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
                 if self.xp.any(bad):
                     try:
                         bad_inds = self.xp.where(bad)
-                        if self.xp.any(bad_inds[0] < 2):
-                            breakpoint()
+
                         # fix the last entry of bad inds
                         inds_bad = (bad_inds[0], bad_inds[1], inds_f0_sorted[bad])
                         bad_check_val = (inds_bad[0] * 1e10 + inds_bad[1] * 1e5 + inds_bad[2]).astype(int)
@@ -578,15 +614,18 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
                     new_state_branch = new_state.branches[name]
                     coords_here = new_state_branch.coords[new_state_branch.inds]
                     ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
-                    group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+
+                    group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max_here, axis=-1)[new_state_branch.inds]
+
                     coords_here_in = self.parameter_transforms.both_transforms(coords_here, xp=np)
 
                     self.gb.generate_global_template(coords_here_in, group_index, templates, batch_size=1000, **self.waveform_kwargs)
 
                 data_minus_template -= templates.reshape(ntemps, nwalkers, 2, templates.shape[-1])
 
-                new_like = -1 / 2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / psd, axis=(2, 3)).real.get()
-            
+                psd_here = psd.reshape(ntemps, nwalkers, 2, templates.shape[-1])
+                new_like = -1 / 2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / psd_here, axis=(2, 3)).real.get()
+                
                 new_like += self.noise_ll
                 new_state.log_prob[:] = new_like.reshape(ntemps, nwalkers)
                 

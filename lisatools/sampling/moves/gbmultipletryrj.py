@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 
     gpu_available = False
 
+from eryn.state import State, BranchSupplimental
 from eryn.moves import ReversibleJump, MultipleTryMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
@@ -63,6 +64,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
         **kwargs
     ):
     
+        self.accepted_points = None
+        self.time = 0
         self.is_rj = True
         # TODO: make priors optional like special generate function? 
         for key in priors:
@@ -172,7 +175,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
             generate_factors = current_priors.logpdf(generated_points.reshape(nwalkers * size, -1)).reshape(nwalkers, size)
 
         return generated_points, generate_factors
-        
+
     def special_like_func(self, generated_points, coords, inds, supps=None, branch_supps=None, noise_params=None, inds_reverse=None):
         # group everything
 
@@ -377,7 +380,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 except AttributeError:
                     pass
 
-            #print(opt_snr[snr_comp.argmax()].real, snr_comp.max(), ll[snr_comp.argmax()].real - -1/2 * self.gb.d_d[snr_comp.argmax()].real)
+            ##print(opt_snr[snr_comp.argmax()].real, snr_comp.max(), ll[snr_comp.argmax()].real - -1/2 * self.gb.d_d[snr_comp.argmax()].real)
             if self.search and self.search_snr_lim is not None:
                 ll[
                     (snr_comp
@@ -574,13 +577,13 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                         **self.waveform_kwargs
                     )
 
-                    self.checkit3 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
+                    self.checkit3 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(ntemps, nwalkers)
                     # this will update it in new_supps for when it is passed through MT
                     # add new binaries to data d - (h + add) = d - h - add
                     # remove removed binaries: d - (h - remove) = d - h + remove
                     data_minus_template[inds_reverse[0], inds_reverse[1]] += templates_to_remove
 
-                    self.checkit4 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(8, 100)
+                    self.checkit4 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3))) + self.xp.asarray(self.noise_ll).reshape(ntemps, nwalkers)
 
                 coords_inds = (coords[inds_here[:2]], tmp_inds[inds_here[:2]])
 
@@ -604,35 +607,6 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
                 # TODO: make sure detailed balance this will move to detailed balance in multiple try
                 factors[inds_here[:2]] = factors_out
 
-                wk_temp = self.waveform_kwargs.copy()
-                if "start_freq_ind" not in wk_temp:
-                    wk_temp["start_freq_ind"] = self.start_freq_ind
-
-                tmp_bac = data_minus_template.copy()
-            
-                # need to order like temps and walkers
-                params_for_update = self.parameter_transforms.both_transforms(generate_points_out)
-                
-                templates_to_add = self.xp.zeros((params_for_update.shape[0],) + data_minus_template.shape[2:], dtype=complex)
-
-                self.gb.generate_global_template(
-                    params_for_update,
-                    self.xp.arange(params_for_update.shape[0], dtype=self.xp.int32), 
-                    templates_to_add, 
-                    **self.waveform_kwargs
-                )
-
-                # add new binaries to data d - (h + add) = d - h - add
-                # remove removed binaries: d - (h - remove) = d - h + remove
-                templates_to_add *= -1.0
-                self.checkit1 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3)))  + self.xp.asarray(self.noise_ll).reshape(8, 100)
-                data_minus_template[inds_forward[0], inds_forward[1]] += templates_to_add
-
-                self.checkit2 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3)))  + self.xp.asarray(self.noise_ll).reshape(8, 100)
-
-                # need to rearrange everything properly because lp_out and 
-                # ll_out are in order of inds_here not the temps/walkers
-                self.new_supps_for_transfer = new_supps
                 self.ll_for_transfer = np.zeros_like(self.current_state.log_prob)
                 self.lp_for_transfer = np.zeros_like(self.current_state.log_prob)
                 ll_tmp = self.ll_out.copy()
@@ -645,10 +619,231 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
 
                 if np.any(self.ll_for_transfer > 1e7):
                     breakpoint()
-
+            
             else:
                 breakpoint()
+        
         if reset_num_try:
             self.num_try = old_num_try
 
         return q, new_inds, factors
+
+    def propose(self, model, state):
+        """Use the move to generate a proposal and compute the acceptance
+
+        Args:
+            model (:class:`eryn.model.Model`): Carrier of sampler information.
+            state (:class:`State`): Current state of the sampler.
+
+        Returns:
+            :class:`State`: State of sampler after proposal is complete.
+
+        """
+        import time
+        # st = time.perf_counter()
+        # TODO: keep this?
+        # this exposes anywhere in the proposal class to this information
+        self.current_state = state
+        self.current_model = model
+
+        # Run any move-specific setup.
+        self.setup(state.branches)
+
+        # ll_before = model.compute_log_prob_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)
+
+        # if not np.allclose(ll_before[0], state.log_prob):
+        #    breakpoint()
+
+        ntemps, nwalkers, _, _ = state.branches[list(state.branches.keys())[0]].shape
+
+        accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+
+        # TODO: do we want an probability that the model count will not change?
+        inds_for_change = self.get_model_change_proposal(state, model)
+
+        coords_propose_in = state.branches_coords
+        inds_propose_in = state.branches_inds
+        branches_supp_propose_in = state.branches_supplimental
+
+        if len(list(coords_propose_in.keys())) == 0:
+            raise ValueError("Right now, no models are getting a reversible jump proposal. Check min_k and max_k or do not use rj proposal.")
+        #et = time.perf_counter()
+        #print("start", et - st)
+        # st = time.perf_counter()
+        # propose new sources and coordinates
+        q, new_inds, factors = self.get_proposal(
+            coords_propose_in, inds_propose_in, inds_for_change, model.random, branch_supps=branches_supp_propose_in, supps=state.supplimental
+        )
+        #et = time.perf_counter()
+        #print("proposal", et - st)
+        # st = time.perf_counter()
+        
+        # TODO: check this
+        edge_factors = np.zeros((ntemps, nwalkers))
+        # get factors for edges
+        for (name, branch), min_k, max_k in zip(
+            state.branches.items(), self.min_k, self.max_k
+        ):
+            nleaves = branch.nleaves
+
+            # do not work on sources with fixed source count
+            if min_k == max_k:
+                continue
+
+            # fix proposal asymmetry at bottom of k range
+            inds_min = np.where(nleaves == min_k)
+            # numerator term so +ln
+            edge_factors[inds_min] += np.log(1 / 2.0)
+
+            # fix proposal asymmetry at top of k range
+            inds_max = np.where(nleaves == max_k)
+            # numerator term so -ln
+            edge_factors[inds_max] += np.log(1 / 2.0)
+
+            # fix proposal asymmetry at bottom of k range (kmin + 1)
+            inds_min = np.where(nleaves == min_k + 1)
+            # numerator term so +ln
+            edge_factors[inds_min] -= np.log(1 / 2.0)
+
+            # fix proposal asymmetry at top of k range (kmax - 1)
+            inds_max = np.where(nleaves == max_k - 1)
+            # numerator term so -ln
+            edge_factors[inds_max] -= np.log(1 / 2.0)
+
+        factors += edge_factors
+        #et = time.perf_counter()
+        #print("edge factors", et - st)
+        # st = time.perf_counter()
+        for name, branch in state.branches.items():
+            if name not in q:
+                q[name] = state.branches[name].coords[:].copy()
+            if name not in new_inds:
+                new_inds[name] = state.branches[name].inds[:].copy()
+
+        #et = time.perf_counter()
+        #print("coords copy", et - st)
+        # st = time.perf_counter()
+        # TODO: change to getting the change in prior
+        logp = model.compute_log_prior_fn(q, inds=new_inds)
+        #et = time.perf_counter()
+        #print("prior", et - st)
+        # st = time.perf_counter()
+        logl = self.ll_for_transfer.reshape(ntemps, nwalkers)
+        #loglcheck, new_blobs = model.compute_log_prob_fn(q, inds=new_inds, logp=logp, supps=new_supps, branch_supps=new_branch_supps)
+        #if not np.all(np.abs(logl[logl != -1e300] - loglcheck[logl != -1e300]) < 1e-5):
+        #    breakpoint()
+        
+        logP = self.compute_log_posterior(logl, logp)
+
+        prev_logl = state.log_prob
+
+        prev_logp = state.log_prior
+
+        # TODO: check about prior = - inf
+        # takes care of tempering
+        prev_logP = self.compute_log_posterior(prev_logl, prev_logp)
+
+        # TODO: fix this
+        # this is where _metropolisk should come in
+        lnpdiff = factors + logP - prev_logP
+
+        accepted = lnpdiff > np.log(model.random.rand(ntemps, nwalkers))
+        #et = time.perf_counter()
+        #print("through accepted", et - st)
+        # st = time.perf_counter()
+        if np.any(accepted):
+            wk_temp = self.waveform_kwargs.copy()
+            if "start_freq_ind" not in wk_temp:
+                wk_temp["start_freq_ind"] = self.start_freq_ind
+
+            data_minus_template = state.supplimental.holder["data_minus_template"]
+            inds_forward = tuple(inds_for_change["gb"]["+1"].T)
+            info_forward = (inds_forward[0] * 1e6 + inds_forward[1]).astype(int)
+
+            inds_reverse = tuple(inds_for_change["gb"]["-1"].T)
+            info_reverse = (inds_reverse[0] * 1e6 + inds_reverse[1]).astype(int)
+            
+            temps_tmp = np.repeat(np.arange(ntemps)[:, None], nwalkers, axis=-1)[accepted]
+            walkers_tmp = np.tile(np.arange(nwalkers), (ntemps, 1))[accepted]
+            accepted_info = (temps_tmp * 1e6 + walkers_tmp).astype(int)
+
+            forward_accepted = np.in1d(info_forward, accepted_info)
+            reverse_accepted = np.in1d(info_reverse, accepted_info)
+
+            tmp_bac = data_minus_template.copy()
+            inds_forward_keep = tuple([tmp[forward_accepted] for tmp in list(inds_forward)])
+            inds_reverse_keep = tuple([tmp[reverse_accepted] for tmp in list(inds_reverse)])
+            params_forward_keep = q["gb"][inds_forward_keep]
+            params_reverse_keep = q["gb"][inds_reverse_keep]
+
+            params_for_update_tmp = np.concatenate([params_forward_keep, params_reverse_keep], axis=0)
+
+            # need to order like temps and walkers
+            params_for_update = self.parameter_transforms.both_transforms(params_for_update_tmp)
+            num_add = params_forward_keep.shape[0]
+            num_remove = params_reverse_keep.shape[0]
+
+            templates_to_add = self.xp.zeros((params_for_update.shape[0],) + data_minus_template.shape[2:], dtype=complex)
+            try:
+                self.gb.generate_global_template(
+                    params_for_update,
+                    self.xp.arange(params_for_update.shape[0], dtype=self.xp.int32), 
+                    templates_to_add, 
+                    **self.waveform_kwargs
+                )
+            except ValueError:
+                breakpoint()
+
+            inds_out = (
+                np.concatenate([inds_forward_keep[0], inds_reverse_keep[0]]),
+                np.concatenate([inds_forward_keep[1], inds_reverse_keep[1]]),
+                np.concatenate([inds_forward_keep[2], inds_reverse_keep[2]])
+            )
+            # reverse
+            # add new binaries to data d - (h + add) = d - h - add
+            # remove removed binaries: d - (h - remove) = d - h + remove
+            templates_to_add[:num_add] *= -1.0
+
+            self.checkit1 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3)))  + self.xp.asarray(self.noise_ll).reshape(ntemps, nwalkers)
+
+            # this will update in place which is also the supplimental
+            data_minus_template[(inds_out[0], inds_out[1])] += templates_to_add
+
+            # update log prob and log prior
+            state.log_prob[(inds_out[0], inds_out[1])] = self.ll_for_transfer[(inds_out[0], inds_out[1])]
+            state.log_prior[(inds_out[0], inds_out[1])] = logp[(inds_out[0], inds_out[1])]
+
+            # top three temps
+            keep_accepted_points = inds_forward_keep[0] <= 2
+            if self.accepted_points is None:
+                # TODO: adjust this (keeps everything in the first 3 temperatures.)
+                self.accepted_points = params_forward_keep[keep_accepted_points].copy()
+            else:
+                self.accepted_points = np.append(self.accepted_points, params_forward_keep[keep_accepted_points], axis=0)
+
+            if (self.time % 100) == 0:
+                np.save("accepted_rj_points", self.accepted_points)
+
+            state.branches["gb"].coords[inds_forward_keep] = params_forward_keep
+            state.branches["gb"].inds[inds_forward_keep] = True
+            state.branches["gb"].inds[inds_reverse_keep] = False
+
+            
+            self.checkit2 =  (-1/2 * self.df * 4 * self.xp.sum(data_minus_template.conj() * data_minus_template / self.psd, axis=(2,3)))  + self.xp.asarray(self.noise_ll).reshape(ntemps, nwalkers)
+
+            if np.abs(state.log_prob - self.checkit2.get()).max() > 1e-3:
+                breakpoint()
+            
+            #et = time.perf_counter()
+            #print("adjusting data", et - st)
+            # st = time.perf_counter()
+        if self.temperature_control is not None and not self.prevent_swaps:
+             state, accepted = self.temperature_control.temper_comps(state, accepted, adapt=False)
+        if np.any(state.log_prob > 1e10):
+            breakpoint()
+        #et = time.perf_counter()
+        #print("swapping", et - st)
+
+        self.time += 1
+        return state, accepted
+

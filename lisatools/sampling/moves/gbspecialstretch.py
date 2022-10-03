@@ -16,6 +16,7 @@ except ModuleNotFoundError:
 
     gpu_available = False
 
+from lisatools.utils.utility import searchsorted2d_vec
 from eryn.moves import StretchMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
@@ -28,15 +29,6 @@ from eryn.state import State
 
 __all__ = ["GBSpecialStretchMove"]
 
-def searchsorted2d_vec(a,b, xp=None, **kwargs):
-    if xp is None:
-        xp = np
-    m,n = a.shape
-    max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
-    r = max_num*xp.arange(a.shape[0])[:,None]
-    p = xp.searchsorted( (a+r).ravel(), (b+r).ravel(), **kwargs).reshape(m,-1)
-    return p - n*(xp.arange(m)[:,None])
-    
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialStretchMove(StretchMove):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
@@ -361,6 +353,7 @@ class GBSpecialStretchMove(StretchMove):
         """et = time.perf_counter()
         print("groups", (et - st))
         st = time.perf_counter()"""
+
         for group in groups:
             split_inds = np.zeros(nwalkers, dtype=int)
             split_inds[1::2] = 1
@@ -728,6 +721,7 @@ class GBSpecialStretchMove(StretchMove):
                 if np.abs(new_state.log_prob - ll_after[0]).max() > 1e0:
                     self.greater_than_1e0 += 1
                     print("Greater:", self.greater_than_1e0)
+                breakpoint()
                 
                 fix_here = np.abs(new_state.log_prob - ll_after[0]) > 1e-6
                 data_minus_template_old = data_minus_template.copy()
@@ -740,7 +734,10 @@ class GBSpecialStretchMove(StretchMove):
                     new_state_branch = new_state.branches[name]
                     coords_here = new_state_branch.coords[new_state_branch.inds]
                     ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
-                    group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+                    try:
+                        group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+                    except IndexError:
+                        breakpoint()
                     coords_here_in = self.parameter_transforms.both_transforms(coords_here, xp=np)
 
                     self.gb.generate_global_template(coords_here_in, group_index, templates, batch_size=1000, **self.waveform_kwargs)

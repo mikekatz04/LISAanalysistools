@@ -1,4 +1,4 @@
-from small_band_global_fit_settings import *
+from global_fit_settings import *
 import cupy as xp
 from cupy.cuda.runtime import setDevice
 
@@ -65,7 +65,8 @@ moves_mix = GBSpecialStretchMove(
 from lisatools.sampling.stopping import SearchConvergeStopping
 stop_converge = SearchConvergeStopping(n_iters=10000, diff=5.0, verbose=True)
 
-start_snr_for_fixed_lim = 15.0
+start_snr_for_fixed_lim = 10.0
+start_snr_for_adjust_lim = 5.0
 
 data_minus_templates = xp.zeros((ntemps_pe * nwalkers, 2, A_inj.shape[0]), dtype=complex)
 data_minus_templates[:, 0] = xp.asarray(A_inj)
@@ -140,8 +141,13 @@ else:
     current_start_points = current_start_points[inds_snr_sort]
     
     keep_fixed = np.arange(len(current_start_snrs))[current_start_snrs > start_snr_for_fixed_lim]
+    keep_adjust = np.arange(len(current_start_snrs))[(current_start_snrs > start_snr_for_adjust_lim) & (current_start_snrs <= start_snr_for_fixed_lim)]
     nleaves_max_fixed = len(keep_fixed)
+    nleaves_max_adjust = len(keep_adjust)
 
+    print(f"Fixed: {nleaves_max_fixed}, Adjust: {nleaves_max_adjust}")
+
+    assert nleaves_max > nleaves_max_adjust
     coords_adjust = np.zeros((ntemps_pe, nwalkers, nleaves_max, ndim))
     inds_adjust = np.zeros((ntemps_pe, nwalkers, nleaves_max)).astype(bool)
 
@@ -150,6 +156,8 @@ else:
     fixed_ind = 0
     adjust_ind = 0
     for j, params in enumerate(current_start_points):
+        if j not in keep_adjust and j not in keep_fixed:
+            continue
         factor = 1e-5
         cov = np.ones(8) * 1e-3
         cov[1] = 1e-7
@@ -193,14 +201,17 @@ else:
         if j in keep_fixed:
             coords_out_fixed[:, :, fixed_ind] = tmp.reshape(ntemps_pe, nwalkers, 8)
             fixed_ind += 1
-        else:
+        elif j in keep_adjust:
             coords_adjust[:, :, adjust_ind] = tmp.reshape(ntemps_pe, nwalkers, 8)
             inds_adjust[:, :, adjust_ind] = True
             adjust_ind += 1
+        else:
+            raise ValueError
 
         if j > 0:
             assert np.allclose(-1/2 * gb.d_d.get(), start_like + old_val)
-    
+        if (j + 1) % 100 == 0:
+            print(j+1)
     
     n_noise_params = 1
     noise_start_factor = 0.0 * 1e-1
@@ -305,7 +316,10 @@ moves_in = [
         ), 0.5)
 ]
 
+num_rj_moves_repeat = 5
 moves = CombineMove(moves_in)
+rj_moves = CombineMove([bf for _ in range(num_rj_moves_repeat)])
+# rj_moves = PlaceHolder()
 #moves = moves[:1]
 # moves = PlaceHolder()
 """
@@ -417,6 +431,6 @@ print("timing:", (et - st)/num)
 nsteps = 10000
 print(noise_ll)
 # TODO: when resuming make sure betas resume as well. 
-out = sampler.run_mcmc(state, nsteps, burn=0, progress=True, thin_by=10)
+out = sampler.run_mcmc(state, nsteps, burn=0, progress=True, thin_by=20)
 print(out.log_prob)
 breakpoint()

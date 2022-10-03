@@ -22,3 +22,14 @@ def AET(X, Y, Z):
         (X - 2.0 * Y + Z) / np.sqrt(6.0),
         (X + Y + Z) / np.sqrt(3.0),
     )
+
+
+def searchsorted2d_vec(a,b, xp=None, **kwargs):
+    if xp is None:
+        xp = np
+    m,n = a.shape
+    max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
+    r = max_num*xp.arange(a.shape[0])[:,None]
+    p = xp.searchsorted( (a+r).ravel(), (b+r).ravel(), **kwargs).reshape(m,-1)
+    return p - n*(xp.arange(m)[:,None])
+    

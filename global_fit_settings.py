@@ -87,7 +87,7 @@ ndim_full = 9
 
 A_lims = [7e-24, 1e-21]
 f0_lims = [3.5e-3, 4e-3]
-m_chirp_lims = [0.05, 0.75]
+m_chirp_lims = [0.01, 1.0]
 fdot_lims = [get_fdot(f0_lims[i], Mc=m_chirp_lims[i]) for i in range(len(f0_lims))]
 phi0_lims = [0.0, 2 * np.pi]
 iota_lims = [0.0, np.pi]
@@ -100,11 +100,17 @@ dt = 15.0
 Tobs = int(Tobs / dt) * dt
 df = 1 / Tobs
 
-nleaves_max = 400
+nleaves_max = 2000
 ndim = 8
 ntemps = 1
+ntemps_pe = 8
 nwalkers = 100
 branch_names = ["gb", "gb_fixed", "noise_params"]
+
+fp = "full_half_mHz_band_pe_output_after_prior_extension.h5"
+folder = "./"
+import os
+fp_old = "full_half_mHz_band_pe_output.h5"
 
 buffer = 2 ** 12
 fmin = f0_lims[0] - buffer * df
@@ -265,12 +271,32 @@ A_inj = A_inj  # + A_noise
 E_inj = E_inj  # + E_noise
 
 """
-plt.semilogy(np.abs(A_inj))
-for tmp in A_temp_all:
-    plt.semilogy(np.abs(tmp))
+plt.semilogy(np.abs(A_inj), color="C0", lw=2)
+#for tmp in A_temp_all:
+#    plt.semilogy(np.abs(tmp))
+
 #plt.semilogy(np.abs(A_inj_orig))
-plt.xlim(3900,4700)
+reader = HDFBackend(fp_old)
+last = reader.get_last_sample()
+
+ind_max = np.where(last.log_prob == last.log_prob.max())
+
+best_coords_gb = last.branches["gb"].coords[ind_max][last.branches["gb"].inds[ind_max]]
+best_coords_gb_fixed = last.branches["gb_fixed"].coords[ind_max][last.branches["gb_fixed"].inds[ind_max]]
+
+best_coords = np.concatenate([best_coords_gb, best_coords_gb_fixed], axis=0)
+best_coords_in = transform_fn.both_transforms(best_coords)
+
+data_index = xp.zeros(len(best_coords), dtype=np.int32)
+templates = xp.zeros((1, 2, psd.shape[0]), dtype=complex)
+gb.generate_global_template(best_coords_in, data_index, templates, start_freq_ind=start_freq_ind, **waveform_kwargs)
+A_best = templates[0, 0].get()
+plt.semilogy(np.abs(A_best), color="C1", lw=2, ls="--")
+
+plt.xlim(4100,6000)
 plt.savefig("plot101.png")
+plt.close()
+np.save("As_out", np.array([fd, A_inj, A_best]))
 """
 
 """check = snr_prior.rvs(size=(1000000))
@@ -282,3 +308,4 @@ plt.plot(rho, pdf)
 plt.savefig("plot1.png")
 breakpoint()
 """
+
