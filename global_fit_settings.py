@@ -107,10 +107,10 @@ ntemps_pe = 8
 nwalkers = 100
 branch_names = ["gb", "gb_fixed", "noise_params"]
 
-fp = "full_half_mHz_band_pe_output_after_prior_extension.h5"
+fp = "full_half_mHz_band_pe_output_after_prior_extension_start_at_6.5.h5"
 folder = "./"
 import os
-fp_old = "full_half_mHz_band_pe_output.h5"
+fp_old = fp  # "full_half_mHz_band_pe_output_after_prior_extension.h5"
 
 buffer = 2 ** 12
 fmin = f0_lims[0] - buffer * df
@@ -261,8 +261,8 @@ else:
     np.save(current_snrs_file[:-4], np.asarray(snrs_individual))
 
 from lisatools.utils.utility import generate_noise_fd
-A_noise = generate_noise_fd(fd, df, base_psd_val, sens_fn=flat_psd_function).squeeze()
-E_noise = generate_noise_fd(fd, df, base_psd_val, sens_fn=flat_psd_function).squeeze()
+A_noise = generate_noise_fd(fd, df, base_psd_val, func=flat_psd_function).squeeze()
+E_noise = generate_noise_fd(fd, df, base_psd_val, func=flat_psd_function).squeeze()
 
 A_inj_orig = A_inj.copy()
 E_inj_orig = E_inj.copy()

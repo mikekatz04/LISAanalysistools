@@ -1292,7 +1292,7 @@ def cornish_lisa_psd(f, sky_averaged=False, use_gpu=False):
     return PSD
 
 
-def get_sensitivity(f, sens_fn="lisasens", return_type="PSD", *args, **kwargs):
+def get_sensitivity(f, *args, sens_fn="lisasens", return_type="PSD", **kwargs):
     """Generic sensitivity generator
 
     Same interface to many sensitivity curves.

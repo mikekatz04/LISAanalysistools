@@ -3,6 +3,12 @@ import os
 
 import numpy as np
 
+try:
+    import cupy as xp
+
+except (ImportError, ModuleNotFoundError) as e:
+    pass
+
 from eryn.state import State, BranchSupplimental
 from eryn.utils.utility import groups_from_inds
 
@@ -181,7 +187,7 @@ class GetLastGBState:
         self.transform_fn = transform_fn
         self.waveform_kwargs = waveform_kwargs
 
-    def __call__(self, data_minus_templates, reader, df, psd, supps_base_shape, fix_temp_initial_ind:int=None, fix_temp_inds:list=None, nleaves_max_in=None, waveform_kwargs={}):
+    def __call__(self, mgh, reader, df, supps_base_shape, fix_temp_initial_ind:int=None, fix_temp_inds:list=None, nleaves_max_in=None, waveform_kwargs={}):
 
         if fix_temp_initial_ind is not None or fix_temp_inds is not None:
             if fix_temp_initial_ind is None or fix_temp_inds is None:
@@ -235,35 +241,42 @@ class GetLastGBState:
                 raise ValueError("new nleaves_max is less than nleaves_max_old.")
 
             # add "gb" if there are any
-            data_index = groups_from_inds({"gb": state.branches_inds["gb"]})["gb"]
+            data_index_in = groups_from_inds({"gb": state.branches_inds["gb"]})["gb"]
+
+            data_index = xp.asarray(mgh.get_mapped_indices(data_index_in)).astype(xp.int32)
 
             params_add_in = self.transform_fn["gb"].both_transforms(state.branches_coords["gb"][state.branches_inds["gb"]])
             
             # batch_size is ignored if waveform_kwargs["use_c_implementation"] is True
             #  -1 is to do -(-d + h) = d - h  
-            data_minus_templates *= -1.
-            self.gb_wave_generator.generate_global_template(params_add_in, data_index, data_minus_templates, batch_size=1000, **waveform_kwargs)
-            data_minus_templates *= -1.
+            mgh.multiply_data(-1.)
+            self.gb_wave_generator.generate_global_template(params_add_in, data_index, mgh.data_list, data_length=mgh.data_length, data_splits=mgh.gpu_splits, batch_size=1000, **waveform_kwargs)
+            mgh.multiply_data(-1.)
+            
 
         except KeyError:
             # no "gb"
             pass
 
-        data_index = groups_from_inds({"gb_fixed": state.branches_inds["gb_fixed"]})["gb_fixed"]
+        data_index_in = groups_from_inds({"gb_fixed": state.branches_inds["gb_fixed"]})["gb_fixed"]
+        data_index = xp.asarray(mgh.get_mapped_indices(data_index_in)).astype(xp.int32)
 
         params_add_in = self.transform_fn["gb_fixed"].both_transforms(state.branches_coords["gb_fixed"][state.branches_inds["gb_fixed"]])
         
         #  -1 is to do -(-d + h) = d - h  
-        data_minus_templates *= -1.
-        self.gb_wave_generator.generate_global_template(params_add_in, data_index, data_minus_templates, batch_size=1000, **waveform_kwargs)
-        data_minus_templates *= -1.
+        mgh.multiply_data(-1.)
+        self.gb_wave_generator.generate_global_template(params_add_in, data_index, mgh.data_list, data_length=mgh.data_length, data_splits=mgh.gpu_splits, batch_size=1000, **waveform_kwargs)
+        mgh.multiply_data(-1.)
 
-        self.gb_wave_generator.d_d = df * 4 * self.xp.sum(data_minus_templates.conj() * data_minus_templates / self.xp.asarray(psd)[None, None, :], axis=(1, 2))
+        self.gb_wave_generator.d_d = np.asarray(mgh.get_inner_product(use_cpu=True))
         
-        data_minus_templates = data_minus_templates.reshape(ntemps, nwalkers, 2, -1).copy()
-        state.log_prob = -1/2 * self.gb_wave_generator.d_d.get().real.reshape(ntemps, nwalkers)
-        
-        supps = BranchSupplimental({"data_minus_template": data_minus_templates}, obj_contained_shape=supps_base_shape, copy=True)
+        state.log_prob = -1/2 * self.gb_wave_generator.d_d.real.reshape(ntemps, nwalkers)
+
+        temp_inds = mgh.temp_indices.copy()
+        walker_inds = mgh.walker_indices.copy()
+        overall_inds = mgh.overall_indices.copy()
+            
+        supps = BranchSupplimental({ "temp_inds": temp_inds, "walker_inds": walker_inds, "overall_inds": overall_inds,}, obj_contained_shape=supps_base_shape, copy=True)
         state.supplimental = supps
 
         return state

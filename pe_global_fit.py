@@ -66,7 +66,7 @@ from lisatools.sampling.stopping import SearchConvergeStopping
 stop_converge = SearchConvergeStopping(n_iters=10000, diff=5.0, verbose=True)
 
 start_snr_for_fixed_lim = 10.0
-start_snr_for_adjust_lim = 5.0
+start_snr_for_adjust_lim = 8.0
 
 data_minus_templates = xp.zeros((ntemps_pe * nwalkers, 2, A_inj.shape[0]), dtype=complex)
 data_minus_templates[:, 0] = xp.asarray(A_inj)
@@ -430,7 +430,9 @@ print("timing:", (et - st)/num)
 #state, accepted = bf.propose(sampler.get_model(), state)
 nsteps = 10000
 print(noise_ll)
+print(fp, (state.log_prob - noise_ll)[0])
 # TODO: when resuming make sure betas resume as well. 
+
 out = sampler.run_mcmc(state, nsteps, burn=0, progress=True, thin_by=20)
 print(out.log_prob)
 breakpoint()

@@ -2,13 +2,13 @@ import numpy as np
 from lisatools.sensitivity import get_sensitivity
 
 
-def generate_noise_fd(freqs, df, *sensitivity_args, sens_fn=None, **sensitivity_kwargs):
+def generate_noise_fd(freqs, df, *sensitivity_args, func=None, **sensitivity_kwargs):
 
-    if sens_fn is None:
-        sens_fn = get_sensitivity
+    if func is None:
+        func = get_sensitivity
 
     norm = 0.5 * (1.0 / df) ** 0.5
-    psd = sens_fn(freqs, *sensitivity_args, **sensitivity_kwargs)
+    psd = func(freqs, *sensitivity_args, **sensitivity_kwargs)
     noise_to_add = psd ** (1 / 2) * (
         np.random.normal(0, norm, len(freqs))
         + 1j * np.random.normal(0, norm, len(freqs))

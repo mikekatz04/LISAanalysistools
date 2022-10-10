@@ -305,7 +305,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump):
 
             try:
                 ll = self.gb.get_ll(
-                    prior_generated_points_in,
+                    prior_generated_points_in.T,
                     data,
                     psd_in,
                     data_index=data_index,

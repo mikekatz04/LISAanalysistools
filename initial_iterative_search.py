@@ -1,26 +1,34 @@
-from global_fit_settings import *
 import cupy as xp
-from cupy.cuda.runtime import setDevice
+import time
+import pickle
 
+mempool = xp.get_default_memory_pool()
+
+from full_band_global_fit_settings import *
+from single_mcmc_run import run_single_band_search
+from lisatools.utils.multigpudataholder import MultiGPUDataHolder
+
+import subprocess
+
+import warnings
+warnings.filterwarnings("ignore")
+
+
+class BasicResidualMGHLikelihood:
+    def __init__(self, mgh):
+        self.mgh = mgh
+    def __call__(self, *args, supps=None, **kwargs):
+        ll_temp = self.mgh.get_ll()
+        overall_inds = supps["overal_inds"]
+        return ll_temp[overall_inds]
 
 data = [
-    xp.asarray(A_inj),
-    xp.asarray(E_inj),
+    np.asarray(A_inj),
+    np.asarray(E_inj),
 ]
 
 # TODO: fix initial setup for mix where it backs up the likelihood
-gb_args = (
-    gb,
-    priors,
-    int(1e3),
-    start_freq_ind,
-    data_length,
-    data,
-    psd_in,
-    xp.asarray(fd),
-    # [nleaves_max, 1],
-    # [min_k, 1],
-)
+
 class PointGeneratorSNR:
     def __init__(self, generate_snr_ladder):
         self.generate_snr_ladder = generate_snr_ladder
@@ -32,41 +40,72 @@ class PointGeneratorSNR:
 
 point_generator = PointGeneratorSNR(generate_snr_ladder)
 
-gb_kwargs = dict(
-    waveform_kwargs=waveform_kwargs,
-    parameter_transforms=transform_fn,
-    search=False,
-    search_samples=None,  # out_params,
-    search_snrs=None,  # out_snr,
-    search_snr_lim=None, # snr_lim,  # 50.0,
-    psd_func=flat_psd_function,
-    noise_kwargs=dict(xp=xp),
-    provide_betas=True,
-    point_generator_func=point_generator,
-    batch_size=-1,
-    skip_supp_names=["group_move_points"]
-)
+snr_lim = 5.0
+gpus = [4, 5, 6]
 
 from lisatools.sampling.stopping import SearchConvergeStopping
-stop_converge = SearchConvergeStopping(n_iters=30, diff=0.01, verbose=False)
-stop_converge_mix = SearchConvergeStopping(n_iters=10, diff=0.01, verbose=True)
+stop_converge_mix = SearchConvergeStopping(n_iters=7, diff=0.5, verbose=True)
 
 generating_priors = deepcopy(priors)
 
 waveform_kwargs["start_freq_ind"] = start_freq_ind
 
-snr_lim = 5.0
-dbin = 2 * N
 
-f_width = f0_lims[1] - f0_lims[0]
+
+dbin = 2 * N
+"""f_width = f0_lims[1] - f0_lims[0]
 num_f_bins = int(np.ceil(f_width / df))
 num_sub_bands = num_f_bins // dbin + int((num_f_bins % dbin) != 0)
 lim_inds = np.concatenate([np.array([0]), np.arange(dbin, num_f_bins, dbin), np.array([num_f_bins - 1])])
-search_f_bin_lims = f0_lims[0] + df * np.arange(num_f_bins)[lim_inds]
-search_f_bin_lims[-1] = f0_lims[-1]
-run_mix_first = True
+"""
+#search_f_bin_lims = f0_lims[0] + df * np.arange(num_f_bins)[lim_inds]
+#search_f_bin_lims[-1] = f0_lims[-1]
+
+# adjust for frequencies
+f0_lims_in = f0_lims.copy()
+
+# TODO: make wider because this is knowning the limits?
+f0_lims_in[0] = 0.3e-3
+#f0_lims_in[1] = 0.8e-3
+low_fs = np.append(np.arange(f0_lims_in[0], 0.001, 2 * 128 * df), np.array([0.001]))
+mid_fs = np.arange(0.001 + 256 * 2 * df, 0.01, 2 * 256 * df)
+high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
+search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
+
+# for testing
+# search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
+
+num_sub_bands = len(search_f_bin_lims)
+
+if sub_band_fails_file not in os.listdir():
+    num_sub_band_fails = np.zeros(num_sub_bands, dtype=int)
+
+else:
+    num_sub_band_fails = np.load(sub_band_fails_file)
+
+assert num_sub_band_fails.shape[0] == num_sub_bands
+num_sub_band_fails_limit = 2
+
+run_mix_first = False
 # TODO: adjust the starting points each iteration to avoid issues at gaps
 print(f"num_sub_bands: {num_sub_bands}")
+
+# TODO:
+# put together a class that holds list of 2 entries - flattened residual arrays (and for noise)
+# this is for each gpu
+# this class can do all the manipulations that would be wanted wthout adding memory!!!
+# put this class inside all of the moves and maybe sub out likelihood function for sampler itself
+# adjust group_index, data_index, noise_index based on the indexing to temperature and walker
+# will need to adjust gbgpu to split properly based on group or dataindex
+# make supplimental with indices for the temperature / walker / (temperature * nwalkers + walker maybe)
+# move around these indices keeping the arrays in the same place. 
+
+# TODO:
+# add phase marginalization carefully to swap likelihoods in proposals
+# update the other tools for pe
+# one of these updates should probably be speeding up rj if possible (gpu priors? swaps no longer an issue)
+
+xp.cuda.runtime.setDevice(gpus[0])
 if fp_mix_final not in os.listdir():
     
     data_minus_templates = xp.asarray([A_inj, E_inj])[None, :, :]
@@ -92,173 +131,169 @@ if fp_mix_final not in os.listdir():
 
     data_minus_templates = data_minus_templates.squeeze()
 
-    nwalkers_prep = 500
+    nwalkers_prep = 100
     ntemps_prep = 10
 
-    from eryn.moves import StretchMove
-    prep_moves = [StretchMove()]
-
     max_iter = 1000
-    snr_break = 0.0
+    snr_break = 5.0
     num_bin_pause = 100
-    like_prep = Likelihood(gb, 2, f_arr=fd, parameter_transforms={"gb": transform_fn}, fill_data_noise=True, vectorized=True, transpose_params=True, use_gpu=use_gpu)
+
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
     max_iter = 1000
+
     for iter_i in range(max_iter):
-        try:
-            del like_prep.injection_channels
-            del like_prep.psd
-        except AttributeError:
-            pass
-        try:
-            del sampler_prep
-            del prep_state
-        except NameError:
-            pass
-        like_prep.inject_signal(
-            data_stream=list(data_minus_templates.get()),
-            noise_fn=flat_psd_function,
-            noise_args=[[base_psd_val]],
-            noise_kwargs={"xp": np},
-            add_noise=False,
-        )
 
-        data_temp = like_prep.injection_channels
-        noise_in = like_prep.psd
+        #gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
 
-        gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
-        print(-1/2 * gb.d_d, "ll going in")
+        #print(-1/2 * gb.d_d, "ll going in")
         tmp_found_this_iter = 0
-        num_total = int(5e6)
-        num_per = int(5e6)
-        num_rounds = num_total // num_per
+        
         start_bin_inds = np.arange(len(search_f_bin_lims) - 1)
         if (iter_i > 0 and run_mix_first) or not run_mix_first:
             for jj in range(2):
+                gb.gpus = None
+                data_temp = [data_minus_templates[0].copy(), data_minus_templates[1].copy()]
+
                 # odd or even
                 start_bin_inds_here = start_bin_inds[jj::2]
                 end_bin_inds_here = start_bin_inds_here + 1
                 lower_f0 = search_f_bin_lims[start_bin_inds_here]
                 upper_f0 = search_f_bin_lims[end_bin_inds_here]
+                inds_sub_bands_here = np.arange(num_sub_bands)[start_bin_inds_here]
+                inds_sub_bands_here = inds_sub_bands_here
+                lower_f0 = lower_f0
+                upper_f0 = upper_f0
+                out_run = []
 
-                for sub_band_i, (sub_band_lower_f0, sub_band_upper_f0) in enumerate(zip(lower_f0, upper_f0)):
-                    new_dist = uniform_dist(sub_band_lower_f0 * 1e3, sub_band_upper_f0 * 1e3)
-                    generating_priors["gb"].priors_in[1] = new_dist
-                    generating_priors["gb"].priors[1][1] = new_dist
-                    
-                    out_ll = []
-                    out_snr = []
-                    out_params = []
-                    for i in range(num_rounds):
-                        params = generating_priors["gb"].rvs(size=(num_per, 1)).reshape(num_per, -1)
+                para_args = []
+                sub_bands_to_run = []
 
-                        params_in = transform_fn.both_transforms(params, return_transpose=True)
+                data_minus_templates_for_para = data_minus_templates.get()
+                np.save(current_residuals_file_iterative_search, data_minus_templates.get())
+                for (sub_band_i, sub_band_lower_f0, sub_band_upper_f0) in zip(inds_sub_bands_here, lower_f0, upper_f0):
 
-                        phase_maximized_ll = gb.get_ll(
-                            params_in,
-                            data_temp,
-                            noise_in,
-                            phase_marginalize=True,
-                            **waveform_kwargs,
-                        )
-                        
-                        phase_maximized_snr = (xp.abs(gb.d_h) / xp.sqrt(gb.h_h.real)).real.copy()
-                        phase_change = np.angle(gb.non_marg_d_h)
-
-                        try:
-                            phase_maximized_snr = phase_maximized_snr.get()
-                            phase_change = phase_change.get()
-
-                        except AttributeError:
-                            pass
-
-                        params[:, 3] -= phase_change
-                        params[:, 3] %= (2 * np.pi)
-
-                        inds_keep = ~np.any(np.isnan(params), axis=-1)
-                        out_ll.append(phase_maximized_ll[inds_keep])  # temp_ll[inds_keep]
-                        out_snr.append(phase_maximized_snr[inds_keep])
-                        out_params.append(params[inds_keep])
-
-                        #if (i + 1) % 100:
-                        #    print(i + 1, num_rounds)
-
-                    out_ll = np.concatenate(out_ll)
-                    out_snr = np.concatenate(out_snr)
-                    out_params = np.concatenate(out_params, axis=0)
-
-                    inds_sort_snr = np.argsort(out_ll)[::-1]
-                    out_ll = out_ll[inds_sort_snr]
-                    out_snr = out_snr[inds_sort_snr]
-                    out_params = out_params[inds_sort_snr]
-
-                    start_coords = out_params[:ntemps_prep * nwalkers_prep].reshape(ntemps_prep, nwalkers_prep, 1, -1)
-                    start_ll = out_ll[:ntemps_prep * nwalkers_prep].reshape(ntemps_prep, nwalkers_prep)
-                    start_snr = out_snr[:ntemps_prep * nwalkers_prep].reshape(ntemps_prep, nwalkers_prep)
-
-                    prep_state = State({"gb": start_coords}, log_prob=start_ll)
-
-                    sampler_prep = EnsembleSampler(
-                        nwalkers_prep,
-                        [ndim],  # assumes ndim_max
-                        like_prep,
-                        generating_priors,
-                        tempering_kwargs={"ntemps": ntemps_prep, "Tmax": np.inf},
-                        nbranches=1,
-                        nleaves_max=[1],
-                        moves=prep_moves,
-                        kwargs={"start_freq_ind": start_freq_ind, **waveform_kwargs},
-                        backend=None,
-                        vectorize=True,
-                        periodic=periodic,  # TODO: add periodic to proposals
-                        branch_names=["gb"],
-                        stopping_fn=stop_converge,
-                        stopping_iterations=50
-                    )
-
-                    nsteps_prep = 50000
-                    out = sampler_prep.run_mcmc(prep_state, nsteps_prep, burn=100, progress=True, thin_by=1)
-                    lp = sampler_prep.get_log_prob()
-                    coords = sampler_prep.get_chain()["gb"]
-                    keep = np.where(lp == lp.max())
-                    keep_coords = coords[keep].squeeze()
-                    if keep_coords.ndim == 2:
-                        keep_coords = keep_coords[0]
-
-                    current_start_points.append(keep_coords)
-
-                    keep_coords_in = transform_fn.both_transforms(np.array([keep_coords]))
-                    
-                    # TODO: fix issue in GBGPU that is issue with not copying data for ll
-                    try:
-                        ll_temp = gb.get_ll(keep_coords_in.T, data_temp, noise_in, **waveform_kwargs)
-                    except ValueError:
-                        breakpoint()
-
-                    det_snr = (gb.d_h.real[0] / np.sqrt(gb.h_h.real[0])).item()
-                    det_snr_finding = det_snr
-                    opt_snr =  (np.sqrt(gb.h_h.real[0])).item()
-
-                    if opt_snr < snr_lim:
-                        print("found source to low in optimal SNR: ", det_snr, opt_snr, f"sub band: {sub_band_i + 1} out of {len(lower_f0)}")
+                    np.save(sub_band_fails_file, num_sub_band_fails)
+                    if num_sub_band_fails[sub_band_i] >= num_sub_band_fails_limit:
                         continue
-                    current_snrs_search.append([det_snr, opt_snr])
 
-                    print("found source: ", det_snr, opt_snr, f"sub band: {sub_band_i + 1} out of {len(lower_f0)}")
+                    #if iter_i == 0:
+                        #if jj < 1:
+                        #    continue
 
-                    num_binaries_current += 1
+                    #if sub_band_i > 10:
+                    #    continue
+                    
+                    para_args.append(
+                        (sub_band_i, nwalkers_prep, ntemps_prep, sub_band_lower_f0, sub_band_upper_f0, deepcopy(generating_priors), Tobs, oversample, deepcopy(waveform_kwargs), data_minus_templates_for_para)
+                    )
+                    sub_bands_to_run.append(sub_band_i)
 
-                    groups = xp.zeros(1, dtype=np.int32)
-                    #  -1 is to do -(-d + h) = d - h  
-                    data_minus_templates *= -1.
-                    gb.generate_global_template(keep_coords_in, groups, data_minus_templates[None, :, :], batch_size=1000, **waveform_kwargs)
-                    data_minus_templates *= -1.
+                num_subs = 12
+                sub_index = 0
+                current_subs = [None for _ in range(num_subs)]
+                current_subs_running_subprocess = [None for _ in range(num_subs)]
+                
 
-                    ll_check = -1/2 * df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
+                num_gpus = len(gpus)
+                temp_files_dir = "tmp_files_dir"
+                # sub_index < len(sub_bands_to_run) -> load all sets
+                # np.all(np.asarray(current_subs) != None) make sure they are cleared out
 
-                    gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
+                while sub_index < len(sub_bands_to_run) or not np.all(np.asarray(current_subs) == None):
+                    time.sleep(0.5)
+                
+                    if None in current_subs and sub_index < len(sub_bands_to_run):
+                        current_index_update = current_subs.index(None)
+                        gpu_index = current_index_update % num_gpus
+                        gpu_here = gpus[gpu_index]
+                        new_sub = sub_bands_to_run[sub_index]
 
+                        para_arg = para_args[sub_index]
+                        # launch run
+                        fp_transfer = current_iterative_search_sub_file_base + f"_search_iter_{iter_i}_band_{new_sub}_transfer.pickle"
+
+                        fp_check = current_iterative_search_sub_file_base + f"_search_iter_{iter_i}_band_{new_sub}.pickle"
+                        assert para_arg[0] == new_sub
+
+                        if fp_check not in os.listdir(temp_files_dir + "/"):
+
+                            with open(temp_files_dir + '/' + fp_transfer, "wb") as fp_tmp:
+                                pickle.dump((current_index_update, gpu_here) + para_arg, fp_tmp, protocol=pickle.HIGHEST_PROTOCOL)
+
+                            current_subs_running_subprocess[current_index_update] = subprocess.Popen(["python", "single_mcmc_run.py", "-si", str(iter_i), "-bi", str(new_sub), "--dir", temp_files_dir]) # , stdin=None, input=None, stdout=None, stderr=None, capture_output=False, shell=False, cwd=None, timeout=None, check=False, encoding=None, errors=None, text=None, env=None, universal_newlines=None)
+                            #out_all.append(out)
+                            print(f"added sub: process: {current_index_update}, gpu: {gpu_here}, sub_band_i: {new_sub}")
+
+                        current_subs[current_index_update] = new_sub
+
+                        print(f"current_subs: {current_subs}\n")
+
+                        sub_index += 1
+                    #else:
+                    #    breakpoint()
+                
+                    for jjj, current_sub in enumerate(current_subs):
+                        if current_sub is None:
+                            continue
+                        fp_check = current_iterative_search_sub_file_base + f"_search_iter_{iter_i}_band_{current_sub}.pickle"
+                        
+                        if fp_check in os.listdir(temp_files_dir + "/"):
+                            time.sleep(0.5)
+                            try:
+                                current_subs_running_subprocess[jjj].terminate()
+                            except AttributeError:
+                                pass
+
+                            # deal with this source and update information
+                            with open(temp_files_dir + '/' + fp_check, "rb") as fp_tmp:
+                                result = pickle.load(fp_tmp)
+                           
+                            sub_band_i = result["sub_band_i"]
+                            new_coords = result["new_coords"]
+                            det_snr  = result["det_snr"]
+                            opt_snr = result["opt_snr"]
+
+                            current_subs[jjj] = None
+
+                            print(f"removed sub: process: {jjj}, gpu: {gpu_here}, sub_band_i: {sub_band_i}\ncurrent_subs: {current_subs}")
+
+                            if opt_snr < snr_lim:
+                                print("found source too low in optimal SNR: ", det_snr, opt_snr, f"sub band: {sub_band_i + 1} out of {len(lower_f0)}")
+                                os.remove(temp_files_dir + "/" + fp_check)
+                                num_sub_band_fails[sub_band_i] += 1
+                                np.save(sub_band_fails_file, num_sub_band_fails)
+                                continue
+
+                            current_start_points.append(new_coords)
+                            current_snrs_search.append([det_snr, opt_snr])
+
+                            print("found source: ", det_snr, opt_snr, f"sub band: {sub_band_i + 1} out of {len(lower_f0)}")
+
+                            num_binaries_current += 1
+
+                            groups = xp.zeros(1, dtype=np.int32)
+                            #  -1 is to do -(-d + h) = d - h  
+                            waveform_kwargs_sub = waveform_kwargs.copy()
+                            data_minus_templates *= -1.
+
+                            new_coords_in = transform_fn.both_transforms(new_coords[None, :])
+                            
+                            gb.generate_global_template(new_coords_in, groups, data_minus_templates[None, :, :], batch_size=1000, **waveform_kwargs_sub)
+                            data_minus_templates *= -1.
+
+                            np.save(current_start_points_snr_file, np.asarray(current_snrs_search))
+                            np.save(current_start_points_file, np.asarray(current_start_points))
+                            np.save(current_residuals_file_iterative_search, data_minus_templates.get())
+
+                            os.remove(temp_files_dir + "/" + fp_check) 
+                            
+                    
+                            ll_check = -1/2 * df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
+
+                            gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
+                
+            
             if num_binaries_current == 0:
                 print("END")
                 breakpoint()
@@ -274,27 +309,46 @@ if fp_mix_final not in os.listdir():
 
         nleaves_max_fix = len(current_start_points)
         coords_out = np.zeros((ntemps, nwalkers, nleaves_max_fix, ndim))
-        data_minus_templates_mix = xp.zeros((ntemps * nwalkers, 2, A_inj.shape[0]), dtype=complex)
-        data_minus_templates_mix[:, 0] = xp.asarray(A_inj)
-        data_minus_templates_mix[:, 1] = xp.asarray(E_inj)
 
-        gb.d_d = df * 4 * xp.sum(data_minus_templates_mix.conj() * data_minus_templates_mix / xp.asarray(psd)[None, :], axis=(1, 2))
+        A_going_in = np.zeros((ntemps, nwalkers, A_inj.shape[0]), dtype=complex)
+        E_going_in = np.zeros((ntemps, nwalkers, E_inj.shape[0]), dtype=complex)
+        A_going_in[:] = np.asarray(A_inj)
+        E_going_in[:] = np.asarray(E_inj)
+
+        A_psd_in = np.zeros((ntemps, nwalkers, A_inj.shape[0]), dtype=np.float64)
+        E_psd_in = np.zeros((ntemps, nwalkers, E_inj.shape[0]), dtype=np.float64)
+        A_psd_in[:] = np.asarray(psd)
+        E_psd_in[:] = np.asarray(psd)
+
+        data_minus_templates_mix = [xp.asarray(A_going_in.flatten()), xp.asarray(E_going_in.flatten())]
+        psd_mix = [xp.asarray(A_psd_in.flatten()), xp.asarray(E_psd_in.flatten())]
+        
+        tmp1 = xp.asarray([dmtm.reshape(ntemps * nwalkers, -1).conj() * dmtm.reshape(ntemps * nwalkers, -1) / psdm.reshape(ntemps * nwalkers, -1) for dmtm, psdm in zip(data_minus_templates_mix, psd_mix)])
+        gb.d_d = 4 * df * xp.sum(tmp1, axis=(0, 2))
+        mempool.free_all_blocks()
         
         # setup data streams to add to and subtract from
-        supps_shape_in = xp.asarray(data_minus_templates_mix).shape
+        supps_shape_in = (ntemps, nwalkers)
 
+        gb.gpus = None
         reader_mix = HDFBackend(fp_mix)
         if fp_mix in os.listdir():
-            state_mix = get_last_gb_state(data_minus_templates_mix, reader_mix, df, psd, supps_base_shape)
+            mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df)
+            gb.gpus = mgh.gpus
+            state_mix = get_last_gb_state(mgh, reader_mix, df, supps_base_shape)
 
         else:
             for j, params in enumerate(current_start_points):
-                factor = 1e-5
+                
+                factor = 1e-1
                 cov = np.ones(8) * 1e-3
                 cov[1] = 1e-7
 
                 start_like = np.zeros((nwalkers * ntemps))
-                data_index = xp.asarray((np.tile(np.arange(nwalkers), (ntemps, 1)) + nwalkers * np.repeat(np.arange(ntemps), nwalkers).reshape(ntemps, nwalkers)).astype(np.int32).flatten())
+                data_index_in = (np.tile(np.arange(nwalkers), (ntemps, 1)) + nwalkers * np.repeat(np.arange(ntemps), nwalkers).reshape(ntemps, nwalkers)).flatten()
+
+                data_index = xp.asarray(data_index_in).astype(xp.int32)  # mgh.get_mapped_indices(data_index_in)).astype(xp.int32)
+                
                 iter_check = 0
                 run_flag = True
                 while np.std(start_like) < 1.0 and run_flag:
@@ -304,21 +358,36 @@ if fp_mix_final not in os.listdir():
                     fix = np.ones((ntemps * nwalkers), dtype=bool)
                     while np.any(fix):
                         tmp[fix] = (params[None, :] * (1. + factor * cov * np.random.randn(nwalkers * ntemps, 8)))[fix]
+
+                        tmp[:, 3] = tmp[:, 3] % (2 * np.pi)
+                        tmp[:, 5] = tmp[:, 5] % (np.pi)
+                        tmp[:, 6] = tmp[:, 6] % (2 * np.pi)
                         logp = priors["gb_fixed"].logpdf(tmp)
+
                         fix = np.isinf(logp)
                         if np.all(fix):
                             breakpoint()
 
                     tmp_in = transform_fn.both_transforms(tmp, return_transpose=True)
-                    
+
                     start_like = gb.get_ll(
-                        tmp_in,
-                        data_minus_templates_mix.transpose(1, 0, 2).copy(),
-                        [xp.asarray(psd), xp.asarray(psd)],
-                        phase_marginalize=False,
+                        tmp_in.T,
+                        data_minus_templates_mix,
+                        psd_mix,
+                        phase_marginalize=True,
                         data_index=data_index,
+                        noise_index=data_index,
+                        data_length=data_length,
+                        # data_splits=mgh.gpu_splits,
                         **waveform_kwargs,
                     )  # - np.sum([np.log(psd), np.log(psd)])
+
+                    phase_change = np.angle(gb.non_marg_d_h)
+                    tmp[:, 3] -= phase_change
+                    tmp[:, 3] = tmp[:, 3] % (2 * np.pi)
+
+                    tmp_in[4] = tmp[:, 3]
+
                     iter_check += 1
                 
                     if j > 0:
@@ -329,50 +398,81 @@ if fp_mix_final not in os.listdir():
                     if factor > 10.0:
                         run_flag = False
 
-                #  -1 is to do -(-d + h) = d - h  
-                data_minus_templates_mix *= -1.
-                gb.generate_global_template(tmp_in.T, data_index, data_minus_templates_mix, batch_size=1000, **waveform_kwargs)
-                data_minus_templates_mix *= -1.
+                #  -1 is to do -(-d + h) = d - h
+                for dat in data_minus_templates_mix:
+                    dat *= -1
+                # data_minus_templates_mix *= -1.
+                #mgh.multiply_data(-1.)
+                gb.generate_global_template(tmp_in.T, data_index, data_minus_templates_mix, batch_size=1000, data_length=data_length, **waveform_kwargs)
+                #mgh.multiply_data(-1.)
+                for dat in data_minus_templates_mix:
+                    dat *= -1
 
-                gb.d_d = df * 4 * xp.sum(data_minus_templates_mix.conj() * data_minus_templates_mix / xp.asarray(psd)[None, None, :], axis=(1, 2))
+                tmp1 = xp.asarray([dmtm.reshape(ntemps * nwalkers, -1).conj() * dmtm.reshape(ntemps * nwalkers, -1) / psdm.reshape(ntemps * nwalkers, -1) for dmtm, psdm in zip(data_minus_templates_mix, psd_mix)])
+                gb.d_d = 4 * df * xp.sum(tmp1, axis=(0, 2))
             
                 coords_out[:, :, j] = tmp.reshape(ntemps, nwalkers, 8)
+                if (j + 1) % 100 == 0:
+                    print((j + 1), len(current_start_points))
 
-            ll = -1/2 * df * 4 * xp.sum(data_minus_templates_mix.conj() * data_minus_templates_mix / xp.asarray(psd)[None, None, :], axis=(1, 2)).real
-
-            data_minus_templates_mix = data_minus_templates_mix.reshape(ntemps, nwalkers, 2, -1).copy()
+            mgh = MultiGPUDataHolder(gpus, data_minus_templates_mix[0].get().reshape(ntemps, nwalkers, -1), data_minus_templates_mix[1].get().reshape(ntemps, nwalkers, -1), A_psd_in, E_psd_in, df)
             
-            supps = BranchSupplimental({"data_minus_template": data_minus_templates_mix}, obj_contained_shape=supps_base_shape, copy=True)
+            gb.gpus = mgh.gpus
 
-            state_mix = State({"gb_fixed": coords_out}, log_prob=ll.reshape(ntemps, nwalkers).get(), supplimental=supps)
+            del data_minus_templates_mix
+            del psd_mix
+            del data_index
+            mempool.free_all_blocks()
+            
+            ll = mgh.get_ll(use_cpu=True)
+
+            temp_inds = mgh.temp_indices.copy()
+            walker_inds = mgh.walker_indices.copy()
+            overall_inds = mgh.overall_indices.copy()
+            
+            supps = BranchSupplimental({ "temp_inds": temp_inds, "walker_inds": walker_inds, "overall_inds": overall_inds,}, obj_contained_shape=supps_base_shape, copy=True)
+
+            state_mix = State({"gb_fixed": coords_out}, log_prob=ll.reshape(ntemps, nwalkers), supplimental=supps)
             check = priors["gb_fixed"].logpdf(coords_out.reshape(-1, 8))
 
             if np.any(np.isinf(check)):
                 breakpoint()
 
+        gb_kwargs = dict(
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=transform_fn,
+            search=True,
+            search_samples=None,  # out_params,
+            search_snrs=None,  # out_snr,
+            search_snr_lim=snr_lim,  # 50.0,
+            psd_func=get_sensitivity,
+            noise_kwargs=dict(sens_fn="noisepsd_AE"),
+            provide_betas=True,
+            point_generator_func=point_generator,
+            batch_size=-1,
+            skip_supp_names=["group_move_points"],
+            random_seed=10,
+        )
+
+        gb_args = (
+            gb,
+            priors,
+            int(1e3),
+            start_freq_ind,
+            data_length,
+            mgh,
+            np.asarray(fd),
+            # [nleaves_max, 1],
+            # [min_k, 1],
+        )
         moves_mix = GBSpecialStretchMove(
             *gb_args,
             **gb_kwargs,
         )
 
-        like_mix = GlobalLikelihood(
-            None,
-            2,
-            f_arr=fd,
-            parameter_transforms=transform_fn,
-            fill_templates=True,
-            vectorized=True,
-            use_gpu=use_gpu,
-            adjust_psd=False
-        )
+        moves_mix.gb.gpus = gpus
 
-        like_mix.inject_signal(
-            data_stream=[A_inj.copy(), E_inj].copy(),
-            noise_fn=flat_psd_function,
-            noise_args=[(base_psd_val,)],
-            #noise_kwargs={"xp": np},
-            add_noise=False,
-        )
+        like_mix = BasicResidualMGHLikelihood(mgh)
 
         sampler_mix = EnsembleSampler(
                 nwalkers,
@@ -394,19 +494,38 @@ if fp_mix_final not in os.listdir():
                 provide_supplimental=True,
             )
 
-        nsteps_mix = 200
+        nsteps_mix = 1000
         print("Starting mix ll best:", state_mix.log_prob.max())
-        out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=50)
+        mempool.free_all_blocks()
+        out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=20, save_first_state=True)
         max_ind = np.where(out.log_prob == out.log_prob.max())
 
-        data_minus_templates = out.supplimental.holder["data_minus_template"][max_ind].squeeze().copy()
+        temp_inds = out.supplimental[:]["temp_inds"]
+        walker_inds = out.supplimental[:]["walker_inds"]
+
+        real_temp_best = temp_inds[max_ind]
+        real_walker_best = walker_inds[max_ind]
+        overall_ind_best = (real_temp_best * nwalkers + real_walker_best).item()
+
+        data_minus_templates = []
+        for gpu_i, split_now in enumerate(mgh.gpu_splits):
+            if overall_ind_best in split_now:
+                ind_keep = np.where(split_now == overall_ind_best)[0].item()
+                for tmp_data in mgh.data_list:
+                    with xp.cuda.device.Device(gpus[0]):
+                        data_minus_templates.append(tmp_data[gpu_i].reshape(len(split_now), -1)[ind_keep].copy())
+        
+        xp.cuda.runtime.setDevice(gpus[0])
+
+        data_minus_templates = xp.concatenate(xp.asarray([data_minus_templates]))
+
         current_start_points = list(out.branches["gb_fixed"].coords[max_ind][out.branches["gb_fixed"].inds[max_ind]])
         
         current_start_points_in = transform_fn.both_transforms(np.asarray(current_start_points))
 
-        gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
+        gb.d_d = mgh.get_inner_product(use_cpu=True)[real_temp_best, real_walker_best].item()
 
-        _ = gb.get_ll(current_start_points_in.T, data_minus_templates, [xp.asarray(psd), xp.asarray(psd)], **waveform_kwargs)
+        _ = gb.get_ll(current_start_points_in, mgh.data_list, mgh.psd_list, data_length=mgh.data_length, data_splits=mgh.gpu_splits, **waveform_kwargs)
 
         det_snr = (gb.d_h.real / np.sqrt(gb.h_h.real)).get()
         opt_snr =  (np.sqrt(gb.h_h.real)).get()
@@ -418,11 +537,13 @@ if fp_mix_final not in os.listdir():
 
         if fp_mix in os.listdir():
             os.remove(fp_mix)
+
+        del mgh
+        mempool.free_all_blocks()
         
         print("DONE MIXING","num sources:", len(current_start_points), "opt snrs:", np.sort(opt_snr))
         #if det_snr_finding < snr_break or len(current_snrs_search) > num_bin_pause:
         #    break
 
 copyfile(fp_mix, fp_mix_final)
-            
-        
+    

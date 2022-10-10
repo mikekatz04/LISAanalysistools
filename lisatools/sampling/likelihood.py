@@ -154,7 +154,7 @@ class Likelihood(object):
         if isinstance(noise_args, list):
             if len(noise_args) != 1 and len(noise_args) != self.num_channels:
                 raise ValueError(
-                    "Number of noise kwargs does not match number of channels declared by user."
+                    "Number of noise args does not match number of channels declared by user."
                 )
             elif len(noise_args) == 1:
                 noise_args = [noise_args[0] for _ in range(self.num_channels)]
@@ -747,7 +747,7 @@ class GlobalLikelihood(Likelihood):
                 psd = self.psd
             if self.like_here:
                 if isinstance(psd, list):
-                    psd = self.xp.asarray(psd).transpose(1, 0, 2)
+                    psd = self.xp.asarray(psd)[None, :, :]  # .transpose(1, 0, 2)
 
         args_in += args
 
