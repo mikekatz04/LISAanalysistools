@@ -191,6 +191,10 @@ class Likelihood(object):
                 for noise_fn_temp, noise_args_temp, noise_kwargs_temp in zip(noise_fn, noise_args, noise_kwargs)
             ]
 
+            if np.isnan(psd[0][0]):
+                for i in range(len(psd)):
+                    psd[i][0] = 1e100
+
             diff_freqs = np.zeros_like(freqs)
             diff_freqs[1:] = np.diff(freqs)
             diff_freqs[0] = diff_freqs[1]
@@ -231,13 +235,13 @@ class Likelihood(object):
             #    for inj, psd_temp in zip(injection_channels, psd)
             #]
 
-            self.psd = self.xp.asarray(
-                [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
-            )
-            self.psd = psd
+            #self.psd = self.xp.asarray(
+            #    [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
+            #)
+            self.psd = self.xp.asarray(psd)
 
-            if self.like_here is False:
-                self.psd = [self.xp.asarray(nf.copy()) for nf in self.psd]
+            #if self.like_here is False:
+            #    self.psd = [self.xp.asarray(nf.copy()) for nf in self.psd]
 
         # if we need to evaluate the psd each time
         else:
@@ -278,16 +282,14 @@ class Likelihood(object):
             )
 
         if self.frequency_domain is False:
-            # TODO: vectorize this
-            # 2: is removal of DC component + right summation approximation
             template_channels = (
-                self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
+                self.xp.fft.rfft(template_channels, axis=-1) * self.dt
             )
 
         if psd.ndim == 2:
             psd = psd[self.xp.newaxis, :, :]
 
-        h = template_channels * psd
+        h = template_channels
         if self.separate_d_h:
             raise NotImplementedError
 
@@ -295,22 +297,23 @@ class Likelihood(object):
             if data.ndim == 2:
                 data = data[self.xp.newaxis, :, :]
 
+            psd[self.xp.any(self.xp.isnan(psd))] = 1e100
             # combines all channels into 1D array per likelihood
-            d_minus_h = ((data - h) / psd ** 2)
+
+            d_minus_h = (data - h)
 
             # TODO: add inds_slice to here from global
-            start_ind = 1 if np.isnan(psd[0, 0]) else 0
+            # start_ind = 1 if np.isnan(psd[0, 0, 0]) else 0
 
             ll = -(
                 1.0
                 / 2.0
-                * (4.0 * self.xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real, axis=(1, 2)))
+                * (4.0 * self.xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
             )
 
             if self.adjust_psd:
                 ll += self.xp.sum(self.xp.log(psd), axis=(1, 2))
 
-            breakpoint()
             if self.noise_has_been_added:
                 raise NotImplementedError
                 # TODO
@@ -627,7 +630,7 @@ class GlobalLikelihood(Likelihood):
                         # TODO: vectorize this
                         # 2: is removal of DC component + right summation approximation
                         template_channels = (
-                            self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
+                            self.xp.fft.rfft(template_channels, axis=-1) * self.dt
                         )
 
                     # TODO: could put this in c?
