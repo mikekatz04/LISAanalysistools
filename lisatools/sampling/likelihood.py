@@ -415,17 +415,18 @@ class Likelihood(object):
             else:
                 args_in = (params[:, inds],)
 
-            if noise_params is not None:
-                # assumes that there is one set of noise parameters per regular parameters
-                psd = self.evaluate_psd(noise_params[:, inds])
-            else:
-                psd = self.psd
-
             args_in += args
 
             if self.fill_data_noise or self.like_here or noise_params is not None:
                 if data is None:
                     data = self.injection_channels
+
+                if noise_params is not None:
+                    # assumes that there is one set of noise parameters per regular parameters
+                    psd = self.evaluate_psd(noise_params[:, inds])
+                else:
+                    psd = self.psd
+
                 args_in += (data, psd)
 
             out_ll.append(self.get_ll(*args_in, **kwargs))

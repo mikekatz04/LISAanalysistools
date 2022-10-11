@@ -3,7 +3,7 @@ import numpy as np
 
 
 class MultiGPUDataHolder:
-    def __init__(self, gpus, channel1_data, channel2_data, channel1_psd, channel2_psd, df, base_injections=None):
+    def __init__(self, gpus, channel1_data, channel2_data, channel1_psd, channel2_psd, df, base_injections=None, base_psd=None):
 
         if isinstance(gpus, int):
             gpus = [gpus]
@@ -25,6 +25,7 @@ class MultiGPUDataHolder:
         self.overall_indices = self.overall_indices_flat.reshape(self.ntemps, self.nwalkers)
 
         self.base_injections = base_injections
+        self.base_psd = base_psd
 
         self.map = self.overall_indices_flat.copy()
 
@@ -166,21 +167,33 @@ class MultiGPUDataHolder:
 
     def restore_base_injections(self):
 
-        if self.base_injections is None:
-            raise ValueError("Must give base_injections kwarg to __init__ to restore.")
+        if self.base_injections is None or self.base_psd is None:
+            raise ValueError("Must give base_injections and base_psd kwarg to __init__ to restore.")
 
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu): 
                 for chan in range(len(self.data_list)):
                     tmp = self.data_list[chan][gpu_i].reshape(self.ntemps * self.nwalkers, -1)
-                    tmp[:] = xp.asarray(self.base_injections[0])[None, :]
+                    tmp[:] = xp.asarray(self.base_injections[chan])[None, :]
                     self.data_list[chan][gpu_i] = tmp.flatten()
+
+                    tmp = self.psd_list[chan][gpu_i].reshape(self.ntemps * self.nwalkers, -1)
+                    tmp[:] = xp.asarray(self.base_psd[chan])[None, :]
+                    self.psd_list[chan][gpu_i] = tmp.flatten()
 
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):
                 xp.cuda.runtime.deviceSynchronize()
 
-    
+    def get_injection_inner_product(self, *args, **kwargs):
+
+        inner_out = self.df * 4 * np.sum(
+            self.base_injections[0].conj() * self.base_injections[0] / self.base_psd[0]
+            + self.base_injections[1].conj() * self.base_injections[1] / self.base_psd[1],
+        )
+
+        return inner_out
+
 
 
 

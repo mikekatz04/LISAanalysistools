@@ -1,6 +1,8 @@
+from multiprocessing.sharedctypes import Value
 import cupy as xp
 import time
 import pickle
+import shutil
 
 mempool = xp.get_default_memory_pool()
 
@@ -13,6 +15,7 @@ import subprocess
 import warnings
 warnings.filterwarnings("ignore")
 
+stop_here = True
 
 class BasicResidualMGHLikelihood:
     def __init__(self, mgh):
@@ -43,8 +46,7 @@ point_generator = PointGeneratorSNR(generate_snr_ladder)
 snr_lim = 5.0
 gpus = [4, 5, 6]
 
-from lisatools.sampling.stopping import SearchConvergeStopping
-stop_converge_mix = SearchConvergeStopping(n_iters=7, diff=0.5, verbose=True)
+from lisatools.sampling.stopping import SearchConvergeStopping2
 
 generating_priors = deepcopy(priors)
 
@@ -113,12 +115,14 @@ if fp_mix_final not in os.listdir():
     if current_start_points_file not in os.listdir():
         current_start_points = []  
         current_snrs_search = []
+        current_found_coords_for_starting_mix = []
         gb.d_d = df * 4 * xp.sum((data_minus_templates.conj() * data_minus_templates) / xp.asarray(psd), axis=(1,2))
 
     else:
         current_start_points = np.load(current_start_points_file)
         current_start_points_in = transform_fn.both_transforms(current_start_points)
         current_snrs_search = list(np.load(current_start_points_snr_file))
+        current_found_coords_for_starting_mix = list(np.load(current_found_coords_for_starting_mix_file))
 
         groups = xp.zeros(len(current_start_points), dtype=np.int32)
 
@@ -151,6 +155,7 @@ if fp_mix_final not in os.listdir():
         
         start_bin_inds = np.arange(len(search_f_bin_lims) - 1)
         if (iter_i > 0 and run_mix_first) or not run_mix_first:
+            
             for jj in range(2):
                 gb.gpus = None
                 data_temp = [data_minus_templates[0].copy(), data_minus_templates[1].copy()]
@@ -177,11 +182,18 @@ if fp_mix_final not in os.listdir():
                     if num_sub_band_fails[sub_band_i] >= num_sub_band_fails_limit:
                         continue
 
-                    #if iter_i == 0:
-                        #if jj < 1:
-                        #    continue
+                    # TODO: get startup time down on single runs
 
-                    #if sub_band_i > 10:
+                    if iter_i == 0:
+                        if jj < 1:
+                            continue
+
+                        if sub_band_i < 285:
+                            continue
+                        if sub_band_i in [287, 289, 291, 293, 295, 299, 301]:
+                            continue
+
+                    # if sub_band_i > 15:
                     #    continue
                     
                     para_args.append(
@@ -253,7 +265,9 @@ if fp_mix_final not in os.listdir():
                             new_coords = result["new_coords"]
                             det_snr  = result["det_snr"]
                             opt_snr = result["opt_snr"]
-
+                            starting_coords = result["starting_coords"]
+                            starting_ll_from_sampler = result["starting_ll_from_sampler"]
+                            
                             current_subs[jjj] = None
 
                             print(f"removed sub: process: {jjj}, gpu: {gpu_here}, sub_band_i: {sub_band_i}\ncurrent_subs: {current_subs}")
@@ -265,6 +279,7 @@ if fp_mix_final not in os.listdir():
                                 np.save(sub_band_fails_file, num_sub_band_fails)
                                 continue
 
+                            current_found_coords_for_starting_mix.append(starting_coords)
                             current_start_points.append(new_coords)
                             current_snrs_search.append([det_snr, opt_snr])
 
@@ -285,7 +300,7 @@ if fp_mix_final not in os.listdir():
                             np.save(current_start_points_snr_file, np.asarray(current_snrs_search))
                             np.save(current_start_points_file, np.asarray(current_start_points))
                             np.save(current_residuals_file_iterative_search, data_minus_templates.get())
-
+                            np.save(current_found_coords_for_starting_mix_file, np.asarray(current_found_coords_for_starting_mix))
                             os.remove(temp_files_dir + "/" + fp_check) 
                             
                     
@@ -301,11 +316,12 @@ if fp_mix_final not in os.listdir():
             # remove the old mixing file if we are adding binaries
             if fp_mix in os.listdir():
                 os.remove(fp_mix)
-
+        
         np.save(current_start_points_snr_file, np.asarray(current_snrs_search))
         np.save(current_start_points_file, np.asarray(current_start_points))
-
+        np.save(current_found_coords_for_starting_mix_file, np.asarray(current_found_coords_for_starting_mix))
         current_start_points = np.load(current_start_points_file)
+        current_found_coords_for_starting_mix = np.load(current_found_coords_for_starting_mix_file)
 
         nleaves_max_fix = len(current_start_points)
         coords_out = np.zeros((ntemps, nwalkers, nleaves_max_fix, ndim))
@@ -325,6 +341,7 @@ if fp_mix_final not in os.listdir():
         
         tmp1 = xp.asarray([dmtm.reshape(ntemps * nwalkers, -1).conj() * dmtm.reshape(ntemps * nwalkers, -1) / psdm.reshape(ntemps * nwalkers, -1) for dmtm, psdm in zip(data_minus_templates_mix, psd_mix)])
         gb.d_d = 4 * df * xp.sum(tmp1, axis=(0, 2))
+
         mempool.free_all_blocks()
         
         # setup data streams to add to and subtract from
@@ -333,11 +350,14 @@ if fp_mix_final not in os.listdir():
         gb.gpus = None
         reader_mix = HDFBackend(fp_mix)
         if fp_mix in os.listdir():
-            mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df)
+            mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df, base_injections=[A_inj, E_inj], base_psd=[psd, psd])
             gb.gpus = mgh.gpus
             state_mix = get_last_gb_state(mgh, reader_mix, df, supps_base_shape)
 
+            gb.injection_d_d = mgh.get_injection_inner_product().item()
+
         else:
+            """
             for j, params in enumerate(current_start_points):
                 
                 factor = 1e-1
@@ -410,15 +430,55 @@ if fp_mix_final not in os.listdir():
 
                 tmp1 = xp.asarray([dmtm.reshape(ntemps * nwalkers, -1).conj() * dmtm.reshape(ntemps * nwalkers, -1) / psdm.reshape(ntemps * nwalkers, -1) for dmtm, psdm in zip(data_minus_templates_mix, psd_mix)])
                 gb.d_d = 4 * df * xp.sum(tmp1, axis=(0, 2))
-            
+                
                 coords_out[:, :, j] = tmp.reshape(ntemps, nwalkers, 8)
                 if (j + 1) % 100 == 0:
                     print((j + 1), len(current_start_points))
+            """
 
-            mgh = MultiGPUDataHolder(gpus, data_minus_templates_mix[0].get().reshape(ntemps, nwalkers, -1), data_minus_templates_mix[1].get().reshape(ntemps, nwalkers, -1), A_psd_in, E_psd_in, df)
+            if fp_mix[:-3] + "_old.h5" in os.listdir():
+                reader_tmp_old = HDFBackend(fp_mix[:-3] + "_old.h5")
+                last_sample = reader_tmp_old.get_last_sample()
+                old_coords = last_sample.branches["gb_fixed"].coords
+
+                old_coords_start = old_coords.shape[2]
+
+            else:
+                old_coords = None
+                old_coords_start = 0
+
+            if current_found_coords_for_starting_mix_file in os.listdir():
+                coords_from_search_runs = np.load(current_found_coords_for_starting_mix_file)
+
+                # skip ones already added and limit to only number of walkers
+                new_coords = coords_from_search_runs[old_coords_start:, :nwalkers].transpose(1, 0, 2)[None, :, :, :]
+
+                if old_coords is not None:
+                    coords_out = np.concatenate([old_coords, new_coords], axis=2)
+
+                else:
+                    coords_out = new_coords
+
+            else:
+                raise ValueError(f"Needs current_found_coords_for_starting_mix_file in cwd.")
+
+            coords_out[:, :, :, 3] = coords_out[:, :, :, 3] % (2 * np.pi)
+            coords_out[:, :, :, 5] = coords_out[:, :, :, 5] % (1 * np.pi)
+            coords_out[:, :, :, 6] = coords_out[:, :, :, 6] % (2 * np.pi)
+            # mgh = MultiGPUDataHolder(gpus, data_minus_templates_mix[0].get().reshape(ntemps, nwalkers, -1), data_minus_templates_mix[1].get().reshape(ntemps, nwalkers, -1), A_psd_in, E_psd_in, df)
             
+            mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df)
+
             gb.gpus = mgh.gpus
 
+            coords_in_in = transform_fn.both_transforms(coords_out.reshape(-1, coords_out.shape[-1]))
+
+            data_index = xp.asarray(np.repeat(np.arange(ntemps * nwalkers)[:, None], nleaves_max_fix, axis=-1).flatten()).astype(xp.int32)
+
+            mgh.multiply_data(-1.)
+            gb.generate_global_template(coords_in_in, data_index, mgh.data_list, batch_size=1000, data_length=data_length, data_splits=mgh.gpu_splits, **waveform_kwargs)
+            mgh.multiply_data(-1.)
+            
             del data_minus_templates_mix
             del psd_mix
             del data_index
@@ -465,10 +525,22 @@ if fp_mix_final not in os.listdir():
             # [nleaves_max, 1],
             # [min_k, 1],
         )
+
+        try:
+            del moves_mix
+            del like_mix
+            del sampler_mix
+            del stop_converge_mix
+
+        except NameError:
+            pass
+
         moves_mix = GBSpecialStretchMove(
             *gb_args,
             **gb_kwargs,
         )
+
+        stop_converge_mix = SearchConvergeStopping2(n_iters=7, diff=0.5, verbose=True, iter_back_check=7)
 
         moves_mix.gb.gpus = gpus
 
@@ -494,6 +566,7 @@ if fp_mix_final not in os.listdir():
                 provide_supplimental=True,
             )
 
+        # equlibrating likelihood check: -4293090.6483655665,
         nsteps_mix = 1000
         print("Starting mix ll best:", state_mix.log_prob.max())
         mempool.free_all_blocks()
@@ -520,6 +593,8 @@ if fp_mix_final not in os.listdir():
         data_minus_templates = xp.concatenate(xp.asarray([data_minus_templates]))
 
         current_start_points = list(out.branches["gb_fixed"].coords[max_ind][out.branches["gb_fixed"].inds[max_ind]])
+
+        current_found_coords_for_starting_mix = list(current_found_coords_for_starting_mix)
         
         current_start_points_in = transform_fn.both_transforms(np.asarray(current_start_points))
 
@@ -536,6 +611,7 @@ if fp_mix_final not in os.listdir():
         num_binaries_current = 0
 
         if fp_mix in os.listdir():
+            shutil.copy(fp_mix, fp_mix[:-3] + "_old.h5")
             os.remove(fp_mix)
 
         del mgh

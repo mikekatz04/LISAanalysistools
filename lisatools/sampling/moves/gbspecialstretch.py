@@ -463,7 +463,7 @@ class GBSpecialStretchMove(StretchMove):
                     waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
                     # time.sleep(0.01)
                     delta_ll[keep_here] = self.gb.swap_likelihood_difference(points_remove,  points_add,  self.mgh.data_list,  self.mgh.psd_list,  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, 
-                    data_splits=self.mgh.gpu_splits, **waveform_kwargs_now)
+                    data_splits=self.mgh.gpu_splits, phase_marginalize=self.search, **waveform_kwargs_now)
 
                     """dhr = self.gb.d_h_remove.copy()
                     dha = self.gb.d_h_add.copy()
@@ -484,6 +484,8 @@ class GBSpecialStretchMove(StretchMove):
                         
                     optimized_snr = self.xp.sqrt(self.gb.add_add.real)
                     detected_snr = (self.gb.d_h_add + self.gb.add_remove).real / optimized_snr
+                    # check_d_h_add = self.gb.d_h_add.copy()
+                    # check_add_remove = self.gb.add_remove.copy()
                     if self.search:
                         inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
 
@@ -493,6 +495,15 @@ class GBSpecialStretchMove(StretchMove):
                         if self.xp.any(inds_fix):
                             logp[keep_here[0][inds_fix]] = -np.inf
                             delta_ll[keep_here[0][inds_fix]] = -1e300
+
+                        phase_change = self.gb.phase_angle
+                        new_points[keep_here, 3] -= phase_change
+                        points_add[:, 4] -= phase_change
+
+                        """
+                        check = self.gb.swap_likelihood_difference(points_remove,  points_add,  self.mgh.data_list,  self.mgh.psd_list,  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, data_splits=self.mgh.gpu_splits, phase_marginalize=False, **waveform_kwargs_now)
+                        breakpoint()
+                        """
 
                     prev_logl = log_prob_tmp[(temp_inds_keep, walkers_inds_keep)]
                     logl = delta_ll + prev_logl
