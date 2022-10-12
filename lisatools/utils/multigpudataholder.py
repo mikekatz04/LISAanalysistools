@@ -40,6 +40,7 @@ class MultiGPUDataHolder:
         self.channel2_data = [_ for _ in range(self.num_gpus)]
         self.channel1_psd = [_ for _ in range(self.num_gpus)]
         self.channel2_psd = [_ for _ in range(self.num_gpus)]
+        return_to_main = xp.cuda.runtime.getDevice()
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             temp_inds_gpu_here = self.temp_indices.flatten()[gpu_split]
             walker_inds_gpu_here = self.walker_indices.flatten()[gpu_split]
@@ -57,6 +58,9 @@ class MultiGPUDataHolder:
                 self.channel2_psd[gpu_i] = xp.asarray(
                     channel2_psd[(temp_inds_gpu_here, walker_inds_gpu_here)].flatten()
                 )
+        
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
 
     def reshape_list(self, input_value):
         return [
@@ -114,9 +118,12 @@ class MultiGPUDataHolder:
 
     def get_inner_product(self, *args, map=True, use_cpu=False, **kwargs):
 
+        return_to_main = xp.cuda.runtime.getDevice()
+
         inner_out = np.zeros((self.ntemps * self.nwalkers))
 
         inner_temp = [_ for _ in range(self.num_gpus)]
+        
         if not use_cpu:
             for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
 
@@ -140,7 +147,8 @@ class MultiGPUDataHolder:
                     )
                 inner_temp[gpu_i] = inner_here
 
-        
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
         inner_temp = np.concatenate(inner_temp)
 
         inner_out[self.map] = inner_temp.real
@@ -153,6 +161,7 @@ class MultiGPUDataHolder:
         return ll_out
 
     def multiply_data(self, val):
+        return_to_main = xp.cuda.runtime.getDevice()
         if not isinstance(val, int) and not isinstance(val, float):
             raise NotImplementedError("val must be an int or float.")
 
@@ -165,8 +174,11 @@ class MultiGPUDataHolder:
             with xp.cuda.device.Device(gpu):
                 xp.cuda.runtime.deviceSynchronize()
 
-    def restore_base_injections(self):
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
 
+    def restore_base_injections(self):
+        return_to_main = xp.cuda.runtime.getDevice()
         if self.base_injections is None or self.base_psd is None:
             raise ValueError("Must give base_injections and base_psd kwarg to __init__ to restore.")
 
@@ -185,13 +197,15 @@ class MultiGPUDataHolder:
             with xp.cuda.device.Device(gpu):
                 xp.cuda.runtime.deviceSynchronize()
 
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
+
     def get_injection_inner_product(self, *args, **kwargs):
 
         inner_out = self.df * 4 * np.sum(
             self.base_injections[0].conj() * self.base_injections[0] / self.base_psd[0]
             + self.base_injections[1].conj() * self.base_injections[1] / self.base_psd[1],
         )
-
         return inner_out
 
 

@@ -189,6 +189,8 @@ class GetLastGBState:
 
     def __call__(self, mgh, reader, df, supps_base_shape, fix_temp_initial_ind:int=None, fix_temp_inds:list=None, nleaves_max_in=None, waveform_kwargs={}):
 
+        xp.cuda.runtime.setDevice(mgh.gpus[0])
+
         if fix_temp_initial_ind is not None or fix_temp_inds is not None:
             if fix_temp_initial_ind is None or fix_temp_inds is None:
                 raise ValueError("If giving fix_temp_initial_ind or fix_temp_inds, must give both.")

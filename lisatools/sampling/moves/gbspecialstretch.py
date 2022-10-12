@@ -254,6 +254,7 @@ class GBSpecialStretchMove(StretchMove):
             :class:`State`: State of sampler after proposal is complete.
 
         """
+        self.xp.cuda.runtime.setDevice(self.mgh.gpus[0])
 
         xp.random.seed(10)
         np.random.seed(10)

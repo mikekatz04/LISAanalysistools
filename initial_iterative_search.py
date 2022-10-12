@@ -88,7 +88,7 @@ else:
 assert num_sub_band_fails.shape[0] == num_sub_bands
 num_sub_band_fails_limit = 2
 
-run_mix_first = False
+run_mix_first = True
 # TODO: adjust the starting points each iteration to avoid issues at gaps
 print(f"num_sub_bands: {num_sub_bands}")
 
@@ -184,14 +184,14 @@ if fp_mix_final not in os.listdir():
 
                     # TODO: get startup time down on single runs
 
-                    if iter_i == 0:
+                    """if iter_i == 0:
                         if jj < 1:
-                            continue
+                            #continue
 
-                        if sub_band_i < 285:
-                            continue
-                        if sub_band_i in [287, 289, 291, 293, 295, 299, 301]:
-                            continue
+                            if sub_band_i < 490:
+                                continue
+                            if sub_band_i in [494, 496, 498, 510]:
+                                continue"""
 
                     # if sub_band_i > 15:
                     #    continue
@@ -570,6 +570,7 @@ if fp_mix_final not in os.listdir():
         nsteps_mix = 1000
         print("Starting mix ll best:", state_mix.log_prob.max())
         mempool.free_all_blocks()
+
         out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=20, save_first_state=True)
         max_ind = np.where(out.log_prob == out.log_prob.max())
 
