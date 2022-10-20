@@ -151,7 +151,8 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
         inner_temp = np.concatenate(inner_temp)
 
-        inner_out[self.map] = inner_temp.real
+        # inner_out[self.map] = inner_temp.real
+        inner_out[:] = inner_temp.real
 
         return inner_out.reshape(self.ntemps, self.nwalkers)
 
@@ -185,11 +186,11 @@ class MultiGPUDataHolder:
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu): 
                 for chan in range(len(self.data_list)):
-                    tmp = self.data_list[chan][gpu_i].reshape(self.ntemps * self.nwalkers, -1)
+                    tmp = self.data_list[chan][gpu_i].reshape(-1, self.data_length)
                     tmp[:] = xp.asarray(self.base_injections[chan])[None, :]
                     self.data_list[chan][gpu_i] = tmp.flatten()
 
-                    tmp = self.psd_list[chan][gpu_i].reshape(self.ntemps * self.nwalkers, -1)
+                    tmp = self.psd_list[chan][gpu_i].reshape(-1, self.data_length)
                     tmp[:] = xp.asarray(self.base_psd[chan])[None, :]
                     self.psd_list[chan][gpu_i] = tmp.flatten()
 

@@ -275,6 +275,7 @@ class GBSpecialStretchMove(StretchMove):
         true_data_map = self.xp.asarray(new_state.supplimental.holder["overall_inds"].flatten())
         
         self.mgh.map = true_data_map.get()
+
         # data should not be whitened
         
         # Split the ensemble in half and iterate over these two halves.
@@ -315,7 +316,7 @@ class GBSpecialStretchMove(StretchMove):
             group_len = []
 
             buffer = 0  # 2 ** 8
-
+            # st = time.perf_counter() 
             dbin = 2 * waveform_kwargs_now["N"] + buffer
             max_iter = 1000
             i = 0
@@ -377,18 +378,42 @@ class GBSpecialStretchMove(StretchMove):
 
 
             """et = time.perf_counter()
-            print("groups", (et - st))
+            print("groups", (et - st), N_now)
             st = time.perf_counter()"""
 
-            for group_iter, group in enumerate(groups):
-                split_inds = np.zeros(nwalkers, dtype=int)
-                split_inds[1::2] = 1
-                np.random.shuffle(split_inds)
-                for split in range(2):
+            split_inds = np.zeros(nwalkers, dtype=int)
+            split_inds[1::2] = 1
+            np.random.shuffle(split_inds)
+            for split in range(2):
+                split_here = split_inds == split
+                walkers_keep = self.xp.arange(nwalkers)[split_here]
+                 
+                points_to_move = gb_fixed_coords[:, split_here]
+                points_for_move = gb_fixed_coords[:, ~split_here]
+                """et = time.perf_counter()
+                print("before prop", (et - st), N_now)
+                st = time.perf_counter()"""
+
+                q_temp, factors_temp = self.get_proposal(
+                    {"gb_fixed": points_to_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)},  
+                    {"gb_fixed": [points_for_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)]}, 
+                    model.random
+                )
+
+                
+                factors = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+                factors[:, split_here] = factors_temp.reshape(ntemps, nleaves_max, int(nwalkers / 2)).transpose(0, 2, 1)
+
+                # use new_state here to get change after 1st round
+                q = {"gb_fixed": gb_fixed_coords.copy()}
+
+                q["gb_fixed"][:, split_here] = q_temp["gb_fixed"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
+
+                """et = time.perf_counter()
+                print("prop", (et - st), N_now)"""
+
+                for group_iter, group in enumerate(groups):
                     # st = time.perf_counter()
-                    
-                    split_here = split_inds == split
-                    walkers_keep = self.xp.arange(nwalkers)[split_here]
                     temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
 
                     keep_inds = self.xp.in1d(walkers_inds, walkers_keep)
@@ -401,27 +426,10 @@ class GBSpecialStretchMove(StretchMove):
                     walkers_inds_keep = walkers_inds[keep_inds]
                     leaf_inds_keep = leaf_inds[keep_inds]                
 
-                    # use new_state here to get change after 1st round
-                    q = {"gb_fixed": gb_fixed_coords.copy()}
-
                     group_here = (temp_inds_keep, walkers_inds_keep, leaf_inds_keep)
                     group_here_for_gen = (temp_inds_for_gen, walkers_inds_for_gen, leaf_inds_for_gen)
 
-                    points_to_move = gb_fixed_coords[:, split_here]
-                    points_for_move = gb_fixed_coords[:, ~split_here]
-                    
-                    q_temp, factors_temp = self.get_proposal(
-                        {"gb_fixed": points_to_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)},  
-                        {"gb_fixed": [points_for_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)]}, 
-                        model.random
-                    )
-
-                    factors = self.xp.zeros((ntemps, nwalkers, nleaves_max))
-                    factors[:, split_here] = factors_temp.reshape(ntemps, nleaves_max, int(nwalkers / 2)).transpose(0, 2, 1)
-
                     factors_here = factors[group_here]
-                    
-                    q["gb_fixed"][:, split_here] = q_temp["gb_fixed"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
 
                     old_points = gb_fixed_coords[group_here]
                     new_points = q["gb_fixed"][group_here]
@@ -463,9 +471,14 @@ class GBSpecialStretchMove(StretchMove):
                     
                     waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
                     # time.sleep(0.01)
-                    delta_ll[keep_here] = self.gb.swap_likelihood_difference(points_remove,  points_add,  self.mgh.data_list,  self.mgh.psd_list,  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, 
+                    """et = time.perf_counter()
+                    print("before like", (et - st), N_now, group_iter, group_len[group_iter])
+                    st = time.perf_counter()"""
+                    delta_ll[keep_here] = self.gb.swap_likelihood_difference(points_remove, points_add, self.mgh.data_list,  self.mgh.psd_list,  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, 
                     data_splits=self.mgh.gpu_splits, phase_marginalize=self.search, **waveform_kwargs_now)
-
+                    """et = time.perf_counter()
+                    print("after like", (et - st), N_now, group_iter, group_len[group_iter])
+                    st = time.perf_counter()"""
                     """dhr = self.gb.d_h_remove.copy()
                     dha = self.gb.d_h_add.copy()
                     aa = self.gb.add_add.copy()
@@ -488,6 +501,9 @@ class GBSpecialStretchMove(StretchMove):
                     # check_d_h_add = self.gb.d_h_add.copy()
                     # check_add_remove = self.gb.add_remove.copy()
                     if self.search:
+                        """et = time.perf_counter()
+                        print("before search stuff", (et - st), N_now, group_iter, group_len[group_iter])
+                        st = time.perf_counter()"""
                         inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
 
                         if self.xp == np:
@@ -501,10 +517,16 @@ class GBSpecialStretchMove(StretchMove):
                         new_points[keep_here, 3] -= phase_change
                         points_add[:, 4] -= phase_change
 
+                        new_points[keep_here, 3] = new_points[keep_here, 3] % (2 * np.pi)
+                        points_add[:, 4] = points_add[:, 4] % (2 * np.pi)
+
                         """
                         check = self.gb.swap_likelihood_difference(points_remove,  points_add,  self.mgh.data_list,  self.mgh.psd_list,  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, data_splits=self.mgh.gpu_splits, phase_marginalize=False, **waveform_kwargs_now)
                         breakpoint()
                         """
+                        """et = time.perf_counter()
+                        print("after search stuff", (et - st), N_now, group_iter, group_len[group_iter])
+                        st = time.perf_counter()"""
 
                     prev_logl = log_prob_tmp[(temp_inds_keep, walkers_inds_keep)]
                     logl = delta_ll + prev_logl
@@ -514,6 +536,9 @@ class GBSpecialStretchMove(StretchMove):
                     #print("multi check: ", (logl - np.load("noise_ll.npy").flatten()))
 
                     prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
+
+                    if np.any(np.isinf(prev_logp)):
+                        breakpoint()
                     
                     """prev_logp[inds_check] = prev_logp[inds_change]
                     logp[inds_check] = logp[inds_change] """
@@ -528,7 +553,9 @@ class GBSpecialStretchMove(StretchMove):
                     lnpdiff = factors_here + logP - prev_logP
 
                     keep = lnpdiff > self.xp.asarray(self.xp.log(self.xp.random.rand(*logP.shape)))
-
+                    """et = time.perf_counter()
+                    print("keep determination", (et - st), N_now, group_iter, group_len[group_iter])
+                    st = time.perf_counter()"""
                     if self.xp.any(keep):
                         # for testing
                         #keep = np.zeros_like(keep, dtype=bool)
@@ -541,8 +568,6 @@ class GBSpecialStretchMove(StretchMove):
                         # any of the gibbs proposals were accepted
 
                         accepted_here = keep.copy()
-
-                    
                         # check freq overlap
                         nleaves_max = state.branches["gb_fixed"].nleaves_max
                         if nleaves_max > 1:
@@ -555,18 +580,22 @@ class GBSpecialStretchMove(StretchMove):
                             check_f0_old_sorted = self.xp.sort(check_f0_old, axis=-1)
                             inds_f0_old_sorted = self.xp.argsort(check_f0_old, axis=-1)
 
-                            check_f0_tmp = check_f0.reshape(-1, check_f0.shape[-1])
-                            check_f0_old_sorted_tmp = check_f0_old_sorted.reshape(-1, check_f0_old_sorted.shape[-1])
+                            check_f0_tmp = self.xp.asarray(check_f0.reshape(-1, check_f0.shape[-1]))
+                            check_f0_old_sorted_tmp = self.xp.asarray(check_f0_old_sorted.reshape(-1, check_f0_old_sorted.shape[-1]))
 
-                            check_f0_in_old_inds = searchsorted2d_vec(check_f0_old_sorted_tmp, check_f0_tmp, xp=self.xp, side="right").reshape(check_f0.shape)
+                            check_f0_in_old_inds = searchsorted2d_vec(check_f0_old_sorted_tmp, check_f0_tmp, xp=self.xp, gpu=self.xp.cuda.runtime.getDevice(), side="right").reshape(check_f0.shape)
 
                             zero_check = check_f0_in_old_inds[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])]
+                            
                             f0_new_here = new_points[keep][:, 1]
+                            
                             keep_for_after = keep.copy()
-                            inds_test_here = [-2, -1, 0, 1]
+                            
+                            inds_test_here = [-2, -1, 0, 1]  # could maybe do -1,0 only
+                            
                             for ind_test_here in inds_test_here:
                                 here_check = zero_check + ind_test_here
-                                do_check = np.ones_like(here_check, dtype=bool)
+                                do_check = self.xp.ones_like(here_check, dtype=bool)
                                 do_check[here_check < 0] = False
                                 do_check[here_check >= check_f0_old.shape[-1]] = False
 
@@ -578,6 +607,11 @@ class GBSpecialStretchMove(StretchMove):
                                 #if len(fix_bad2) > 0:
                                 #    print("NEW BAD", len(fix_bad2), len(fix_bad2) / len(keep[keep]))
                                 keep_for_after[fix_bad2] = False
+
+                            
+                            """et = time.perf_counter()
+                            print("first check", (et - st), N_now, group_iter, group_len[group_iter])
+                            st = time.perf_counter()"""
 
                             keep[:] = keep_for_after[:]
 
@@ -607,6 +641,9 @@ class GBSpecialStretchMove(StretchMove):
                                 except:
                                     breakpoint()
 
+                        """et = time.perf_counter()
+                        print("second check", (et - st), N_now, group_iter, group_len[group_iter])
+                        st = time.perf_counter()"""
                         gb_fixed_coords[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep]
 
                         # parameters were run for all ~np.isinf(logp), need to adjust for those not accepted
@@ -646,9 +683,31 @@ class GBSpecialStretchMove(StretchMove):
 
                         #tmp = data_minus_template.copy()
                         # remove templates by multiplying by "adding them to" d - h + remove =  = d - (h - remove)
-                        
-                        self.gb.generate_global_template(points_remove[keep_from_before],
-                            group_index, self.mgh.data_list, data_length=self.data_length, data_splits=self.mgh.gpu_splits, **waveform_kwargs_fill
+                        """et = time.perf_counter()
+                        print("before generate", (et - st), N_now, group_iter, group_len[group_iter])
+                        st = time.perf_counter()"""
+                        points_for_generate = self.xp.concatenate([
+                            points_remove[keep_from_before],  # factor = +1
+                            points_add[keep_from_before]  # factors = -1
+                        ])
+                        num_add = len(points_remove[keep_from_before])
+                        factors_multiply_generate = self.xp.ones(2 * num_add)
+                        factors_multiply_generate[num_add:] = -1.0  # second half is adding
+                        group_index_add = self.xp.concatenate(
+                            [
+                                group_index,
+                                group_index,
+                            ], dtype=self.xp.int32
+                        )
+
+                        self.gb.generate_global_template(
+                            points_for_generate,
+                            group_index_add, 
+                            self.mgh.data_list, 
+                            data_length=self.data_length, 
+                            data_splits=self.mgh.gpu_splits, 
+                            factors=factors_multiply_generate,
+                            **waveform_kwargs_fill
                         )
 
                         #waveform_kwargs_fill["use_c_implementation"] = False
@@ -683,11 +742,14 @@ class GBSpecialStretchMove(StretchMove):
                         breakpoint()"""
 
                         # add templates by adding to  -(-(d - h) + add) = d - h - add = d - (h + add)
-                        self.mgh.multiply_data(-1.)
-                        self.gb.generate_global_template(points_add[keep_from_before],
-                            group_index, self.mgh.data_list, data_length=self.data_length, data_splits=self.mgh.gpu_splits, **waveform_kwargs_fill
-                        )
-                        self.mgh.multiply_data(-1.)
+                        #self.mgh.multiply_data(-1.)
+                        #self.gb.generate_global_template(points_add[keep_from_before],
+                        #    group_index, self.mgh.data_list, data_length=self.data_length, #data_splits=self.mgh.gpu_splits, **waveform_kwargs_fill
+                        #)
+                        #self.mgh.multiply_data(-1.)
+                        """et = time.perf_counter()
+                        print("after generate", (et - st), N_now, group_iter, group_len[group_iter])
+                        st = time.perf_counter()"""
                         # update likelihoods
 
                         # set unaccepted differences to zero
@@ -706,6 +768,10 @@ class GBSpecialStretchMove(StretchMove):
 
                         log_prob_tmp += self.xp.asarray(logl_change_contribution)
                         log_prior_tmp += self.xp.asarray(logp_change_contribution)
+
+                        """et = time.perf_counter()
+                        print("bookkeeping", (et - st), N_now, group_iter, group_len[group_iter])
+                        st = time.perf_counter()"""
 
                         """
                         data_minus_template_c = np.concatenate(
@@ -727,8 +793,7 @@ class GBSpecialStretchMove(StretchMove):
                         if np.abs(log_prob_tmp.get() - ll_after).max() > 1e-6:
                             breakpoint()
                         
-                        if np.any(new_state.log_prob < -1e100):
-                            breakpoint()
+                        
                         """
 
                         #if np.any(np.abs(new_state.log_prob - (check.get() + self.noise_ll))[:3].max() > 1.0):
@@ -754,14 +819,13 @@ class GBSpecialStretchMove(StretchMove):
 
         self.mempool.free_all_blocks()
 
-        
         if self.time % 25 == 0:
-            ll_after = self.mgh.get_ll(use_cpu=True)
-
-            if np.abs(log_prob_tmp.get() - ll_after).max() > 1e-3:
+            ll_after = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+            
+            if np.abs(log_prob_tmp.get() - ll_after).max()  > 1e0:
                 if np.abs(log_prob_tmp.get() - ll_after).max() > 1e0:
                     breakpoint()
-
+                breakpoint()
                 self.mgh.restore_base_injections()
 
                 for name in new_state.branches.keys():
@@ -771,7 +835,11 @@ class GBSpecialStretchMove(StretchMove):
                     coords_here = new_state_branch.coords[new_state_branch.inds]
                     ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
                     try:
-                        group_index = np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+                        group_index = self.xp.asarray(
+                            self.mgh.get_mapped_indices(
+                                np.repeat(np.arange(ntemps * nwalkers).reshape(ntemps, nwalkers, 1), nleaves_max, axis=-1)[new_state_branch.inds]
+                            ).astype(self.xp.int32)
+                        )
                     except IndexError:
                         breakpoint()
                     coords_here_in = self.parameter_transforms.both_transforms(coords_here, xp=np)
@@ -786,6 +854,8 @@ class GBSpecialStretchMove(StretchMove):
                     self.gb.generate_global_template(coords_here_in, group_index, self.mgh.data_list, data_length=self.data_length, data_splits=self.mgh.gpu_splits, batch_size=1000, **waveform_kwargs_fill)
                     self.mgh.multiply_data(-1.)
 
+                ll_after2 = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+                new_state.log_prob = ll_after2
                    
             """
             data_minus_template = self.xp.concatenate(
@@ -871,8 +941,9 @@ class GBSpecialStretchMove(StretchMove):
 
         if self.temperature_control is not None:
             new_state, accepted = self.temperature_control.temper_comps(new_state, accepted)
-        self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
-
+        else:
+            self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
+        
         if np.any(new_state.log_prob > 1e10):
             breakpoint()
 
@@ -882,8 +953,7 @@ class GBSpecialStretchMove(StretchMove):
         #print("end stretch", (et - st))
 
         true_data_map = np.asarray(new_state.supplimental.holder["overall_inds"].flatten())
-
         self.mgh.map = true_data_map
-        
+        # breakpoint()
         return new_state, accepted
 

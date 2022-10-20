@@ -24,12 +24,25 @@ def AET(X, Y, Z):
     )
 
 
-def searchsorted2d_vec(a,b, xp=None, **kwargs):
+def searchsorted2d_vec(a,b, xp=None, gpu=None, **kwargs):
     if xp is None:
         xp = np
+    else:
+        try:
+            xp.cuda.runtime.setDevice(gpu)
+        except AttributeError:
+            pass
+
     m,n = a.shape
     max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
     r = max_num*xp.arange(a.shape[0])[:,None]
     p = xp.searchsorted( (a+r).ravel(), (b+r).ravel(), **kwargs).reshape(m,-1)
-    return p - n*(xp.arange(m)[:,None])
+
+    out = p - n*(xp.arange(m)[:,None])
+    try:
+        xp.cuda.runtime.deviceSynchronize()
+    except AttributeError:
+        pass
+
+    return out
     
