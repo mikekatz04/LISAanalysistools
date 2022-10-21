@@ -48,7 +48,7 @@ class PointGeneratorSNR:
 point_generator = PointGeneratorSNR(generate_snr_ladder)
 
 snr_lim = 5.0
-gpus = [2, 7]  # [4, 5, 6]
+gpus = [4, 5, 6]
 
 from lisatools.sampling.stopping import SearchConvergeStopping2
 
@@ -73,11 +73,18 @@ f0_lims_in = f0_lims.copy()
 # TODO: make wider because this is knowning the limits?
 f0_lims_in[0] = 0.3e-3
 #f0_lims_in[1] = 0.8e-3
-low_fs = np.append(np.arange(f0_lims_in[0], 0.001, 2 * 128 * df), np.array([0.001]))
-mid_fs = np.arange(0.001 + 256 * 2 * df, 0.01, 2 * 256 * df)
-high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
-search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
 
+low_fs = np.arange(f0_lims_in[0], 0.001 - 4 * 128 * df, 2 * 128 * df)
+mid_fs = np.arange(0.001, 0.01 - 4 * 512 * df, 2 * 256 * df)
+high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
+
+# breakpoint()
+"""
+# low_fs = np.append(np.arange(f0_lims_in[0], 0.001, 2 * 128 * df), np.array([0.001]))
+# mid_fs = np.arange(0.001 + 256 * 2 * df, 0.01, 2 * 256 * df)
+# high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
+"""
+search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
 # for testing
 # search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
 
@@ -522,6 +529,18 @@ if fp_mix_final not in os.listdir():
             if np.any(np.isinf(check)):
                 breakpoint()
 
+        points_start = state_mix.branches["gb_fixed"].coords[state_mix.branches["gb_fixed"].inds]
+        N_vals = np.zeros((ntemps, nwalkers, nleaves_max_fix), dtype=int)
+        points_start_transform = transform_fn.both_transforms(points_start)
+        amp_start = points_start_transform[:, 0]
+        f0_start = points_start_transform[:, 1]
+        from gbgpu.utils.utility import get_N
+        N_temp = get_N(amp_start, f0_start, waveform_kwargs["T"], waveform_kwargs["oversample"])
+
+        N_vals[state_mix.branches["gb_fixed"].inds] = N_temp
+        branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_fix)
+        state_mix.branches["gb_fixed"].branch_supplimental = BranchSupplimental({"N_vals": N_vals}, obj_contained_shape=branch_supp_base_shape, copy=True)
+        
         gb_kwargs = dict(
             waveform_kwargs=waveform_kwargs,
             parameter_transforms=transform_fn,
@@ -546,8 +565,7 @@ if fp_mix_final not in os.listdir():
             data_length,
             mgh,
             np.asarray(fd),
-            # [nleaves_max, 1],
-            # [min_k, 1],
+            search_f_bin_lims,
         )
 
         try:
