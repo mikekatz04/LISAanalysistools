@@ -724,6 +724,12 @@ class GBSpecialStretchMove(StretchMove):
                     log_prob_tmp += self.xp.asarray(logl_change_contribution)
                     log_prior_tmp += self.xp.asarray(logp_change_contribution)
 
+                    """if self.time > 190:
+                        ll_after = self.mgh.get_ll(use_cpu=False).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+                        print("CHECK", np.abs(log_prob_tmp.get() - ll_after).max())
+                        if np.abs(log_prob_tmp.get() - ll_after).max()  > 1e-2:
+                            breakpoint()"""
+
                     """if fix_because_of_N:
                         new_log_prob_tmp = self.mgh.get_ll().flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
                         old_log_prob_tmp = log_prob_tmp.copy()

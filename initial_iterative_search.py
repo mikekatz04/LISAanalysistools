@@ -47,7 +47,7 @@ class PointGeneratorSNR:
 
 point_generator = PointGeneratorSNR(generate_snr_ladder)
 
-snr_lim = 5.0
+snr_lim = 10.0
 gpus = [4, 5, 6]
 
 from lisatools.sampling.stopping import SearchConvergeStopping2
@@ -56,14 +56,6 @@ generating_priors = deepcopy(priors)
 
 waveform_kwargs["start_freq_ind"] = start_freq_ind
 
-
-
-dbin = 2 * N
-"""f_width = f0_lims[1] - f0_lims[0]
-num_f_bins = int(np.ceil(f_width / df))
-num_sub_bands = num_f_bins // dbin + int((num_f_bins % dbin) != 0)
-lim_inds = np.concatenate([np.array([0]), np.arange(dbin, num_f_bins, dbin), np.array([num_f_bins - 1])])
-"""
 #search_f_bin_lims = f0_lims[0] + df * np.arange(num_f_bins)[lim_inds]
 #search_f_bin_lims[-1] = f0_lims[-1]
 
@@ -85,6 +77,7 @@ high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0
 # high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
 """
 search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
+
 # for testing
 # search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
 
@@ -150,13 +143,14 @@ if fp_mix_final not in os.listdir():
     ntemps_prep = 10
 
     max_iter = 1000
-    snr_break = 6.5
+    snr_break = 10.0
     num_bin_pause = 100
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
     max_iter = 1000
     iter_init = 0
+    is_first_iter = True
     for iter_i in range(iter_init, max_iter):
 
         #gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
@@ -165,8 +159,8 @@ if fp_mix_final not in os.listdir():
         tmp_found_this_iter = 0
         
         start_bin_inds = np.arange(len(search_f_bin_lims) - 1)
-        if (iter_i > 0 and run_mix_first) or not run_mix_first:
-            
+        if not is_first_iter or not run_mix_first:
+            is_first_iter = False
             for jj in range(2):
                 gb.gpus = None
                 data_temp = [data_minus_templates[0].copy(), data_minus_templates[1].copy()]
@@ -195,12 +189,14 @@ if fp_mix_final not in os.listdir():
 
                     # TODO: get startup time down on single runs
 
+                    if sub_band_i < 730 and sub_band_i < 800:
+                        continue
+
                     """if iter_i == 0:
                         if jj < 1:
                             #continue
 
-                            if sub_band_i < 490:
-                                continue
+                            
                             if sub_band_i in [494, 496, 498, 510]:
                                 continue"""
 
@@ -217,7 +213,6 @@ if fp_mix_final not in os.listdir():
                 current_subs = [None for _ in range(num_subs)]
                 current_subs_running_subprocess = [None for _ in range(num_subs)]
                 
-
                 num_gpus = len(gpus)
                 temp_files_dir = "tmp_files_dir"
                 # sub_index < len(sub_bands_to_run) -> load all sets
@@ -304,7 +299,7 @@ if fp_mix_final not in os.listdir():
                             data_minus_templates *= -1.
 
                             new_coords_in = transform_fn.both_transforms(new_coords[None, :])
-                            
+                            breakpoint()
                             gb.generate_global_template(new_coords_in, groups, data_minus_templates[None, :, :], batch_size=1000, **waveform_kwargs_sub)
                             data_minus_templates *= -1.
 
@@ -470,6 +465,9 @@ if fp_mix_final not in os.listdir():
                     
                 old_coords_start = old_coords.shape[2]
 
+                # move cold chain to highest temperature
+                old_coords[-1] = old_coords[0].copy()
+
             else:
                 old_coords = None
                 old_coords_start = 0
@@ -549,7 +547,7 @@ if fp_mix_final not in os.listdir():
             search_snrs=None,  # out_snr,
             search_snr_lim=snr_break,  # 50.0,
             psd_func=get_sensitivity,
-            noise_kwargs=dict(sens_fn="noisepsd_AE"),
+            noise_kwargs=dict(sens_fn="noisepsd_AE", model="sangria"),
             provide_betas=True,
             point_generator_func=point_generator,
             batch_size=-1,
@@ -645,8 +643,24 @@ if fp_mix_final not in os.listdir():
 
         _ = gb.get_ll(current_start_points_in, mgh.data_list, mgh.psd_list, data_length=mgh.data_length, data_splits=mgh.gpu_splits, **waveform_kwargs)
 
-        det_snr = (gb.d_h.real / np.sqrt(gb.h_h.real)).get()
+        
+        # TODO: should check if phase marginalize
+        det_snr = (np.abs(gb.d_h) / np.sqrt(gb.h_h.real)).get()
         opt_snr =  (np.sqrt(gb.h_h.real)).get()
+
+        phase_angle = np.angle(gb.d_h)
+
+        try:
+            phase_angle = phase_angle.get()
+        except AttributeError:
+            pass
+
+        tmp_current_start_points = np.asarray(current_start_points)
+
+        tmp_current_start_points[:, 3] -= phase_angle
+        current_start_points_in[:, 4] -= phase_angle
+
+        current_start_points = list(tmp_current_start_points)
 
         current_snrs_search = list(np.array([det_snr, opt_snr]).T)
         np.save(current_start_points_snr_file, np.asarray(current_snrs_search))
@@ -662,7 +676,18 @@ if fp_mix_final not in os.listdir():
                 shutil.copy(fp_temp, "searching_back_results/" + f"old_{iter_i}_" + fp_temp)
 
         del mgh
+        main_gpu = xp.cuda.runtime.getDevice()
         mempool.free_all_blocks()
+        for gpu in gpus:
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+                mempool_tmp = xp.get_default_memory_pool()
+                mempool_tmp.free_all_blocks()
+                xp.cuda.runtime.deviceSynchronize()
+        
+        # back to main GPU
+        xp.cuda.runtime.setDevice(main_gpu)
+        xp.cuda.runtime.deviceSynchronize()
         
         print("DONE MIXING","num sources:", len(current_start_points), "opt snrs:", np.sort(opt_snr))
         #if det_snr_finding < snr_break or len(current_snrs_search) > num_bin_pause:

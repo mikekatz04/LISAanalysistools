@@ -65,6 +65,7 @@ Soms_d_all = {
     "Proposal": (10.0e-12) ** 2,
     "SciRDv1": (15.0e-12) ** 2,
     "MRDv1": (10.0e-12) ** 2,
+    "sangria": (7.9e-12) ** 2
 }  # m^2/Hz
 
 ### Acceleration
@@ -72,6 +73,7 @@ Sa_a_all = {
     "Proposal": (3.0e-15) ** 2,
     "SciRDv1": (3.0e-15) ** 2,
     "MRDv1": (2.4e-15) ** 2,
+    "sangria": (2.4e-15) ** 2,
 }  # m^2/sec^4/Hz
 
 
@@ -813,7 +815,7 @@ def lisanoises(f, model="SciRDv1", unit="relativeFrequency"):
         Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
         Sop = Soms_nu
 
-    elif model == "SciRDv1" or model == "MRDv1":
+    elif model == "SciRDv1" or model == "MRDv1" or model == "sangria":
         frq = f
         ### Acceleration noise
         ## In acceleration
