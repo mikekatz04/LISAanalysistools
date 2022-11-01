@@ -21,8 +21,6 @@ from lisatools.utils.utility import searchsorted2d_vec, get_groups_from_band_str
 from eryn.moves import StretchMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
-from .gbmultipletryrj import GBMutlipleTryRJ
-from .gbgroupstretch import GBGroupStretchMove
 
 from ...diagnostic import inner_product
 from eryn.state import State
@@ -46,7 +44,6 @@ class GBSpecialStretchMove(StretchMove):
         self,
         gb,
         priors,
-        num_try,
         start_freq_ind,
         data_length,
         mgh,
@@ -63,7 +60,6 @@ class GBSpecialStretchMove(StretchMove):
         search_snr_accept_factor=1.0,
         take_max_ll=False,
         global_template_builder=None,
-        point_generator_func=None,
         psd_func=None,
         provide_betas=False,
         alternate_priors=None,
@@ -98,7 +94,6 @@ class GBSpecialStretchMove(StretchMove):
 
         self.band_edges = band_edges
         self.num_bands = len(band_edges) - 1
-        self.num_try = num_try
         self.start_freq_ind = start_freq_ind
         self.data_length = data_length
         self.waveform_kwargs = waveform_kwargs
@@ -110,7 +105,6 @@ class GBSpecialStretchMove(StretchMove):
         self.mgh = mgh
         self.search = search
         self.global_template_builder = global_template_builder
-        self.point_generator_func = point_generator_func
 
         if search_snrs is not None:
             if search_snr_lim is None:
@@ -124,128 +118,6 @@ class GBSpecialStretchMove(StretchMove):
         self.search_snr_accept_factor = search_snr_accept_factor
 
         self.take_max_ll = take_max_ll      
-
-    def setup(self, branches):
-
-        if "noise_params" in branches:
-            ntemps, nwalkers, nleaves, ndim = branches["noise_params"].shape
-            noise_params_here = branches["noise_params"].coords[branches["noise_params"].inds].reshape(ntemps * nwalkers, -1)
-
-            if self.psd_func is None:
-                raise ValueError("If providing noise_params, need to provide psd_func to __init__ function.")
-            
-            psd = self.xp.asarray([self.psd_func(self.fd, *noise_params_here.T, **self.noise_kwargs) for _ in range(2)]).transpose((1, 0, 2))
-            noise_ll = -self.xp.sum(self.xp.log(psd), axis=(1, 2))
-            
-            try:
-                noise_ll = noise_ll.get()
-            except AttributeError:
-                pass
-        
-            self.noise_ll = noise_ll.copy()
-            
-            # TODO: check this
-            #ll_here -= noise_ll
-
-            noise_lp = self.priors["noise_params"].logpdf(noise_params_here)
-            self.noise_lp = noise_lp.copy()
-            #lp_here -= noise_lp
-
-            self.noise_ll = self.noise_ll.reshape(ntemps, nwalkers)
-            self.noise_lp = self.noise_lp.reshape(ntemps, nwalkers)
-        
-        else:
-            self.noise_ll = 0.0
-            self.noise_lp = 0.0
-
-    def setup_gbs(self, branch):
-        coords = branch.coords
-        inds = branch.inds
-        supps = branch.branch_supplimental
-        ntemps, nwalkers, nleaves_max, ndim = branch.shape
-        all_remaining_coords = coords[inds]
-        remaining_wave_info = supps[inds]
-
-        num_remaining = len(all_remaining_coords)
-        # TODO: make faster?
-        points_out = np.zeros((num_remaining, self.nfriends, ndim))
-        
-        # info_mat = self.gb.information_matrix()
-
-        freqs = all_remaining_coords[:, 1]
-
-        distances = np.abs(freqs[None, :] - freqs[:, None])
-        distances[distances == 0.0] = 1e300
-        
-        """
-        distances = self.xp.full((num_remaining,num_remaining), 1e300)
-        for i, coords_here in enumerate(all_remaining_coords):
-            A_here = remaining_wave_info["A"][i]
-            E_here = remaining_wave_info["E"][i]
-            sig_len = len(A_here)
-            start_ind_here = remaining_wave_info["start_inds"][i].item()
-            freqs_here = (self.xp.arange(sig_len) + start_ind_here) * self.df
-            psd_here = self.psd[0][start_ind_here - self.start_freq_ind: start_ind_here - self.start_freq_ind + sig_len]
-    
-            h_h = inner_product([A_here, E_here], [A_here, E_here], f_arr=freqs_here, PSD=psd_here, use_gpu=self.use_gpu)
-            
-            for j in range(i, num_remaining):
-                if j == i:
-                    continue
-                A_check = remaining_wave_info["A"][j]
-                E_check = remaining_wave_info["E"][j]
-                start_ind_check = remaining_wave_info["start_inds"][j].item()
-                if abs(start_ind_here - start_ind_check) > self.start_ind_limit:
-                    continue
-                start_ind = self.xp.max(self.xp.asarray([start_ind_here, start_ind_check])).item()
-                end_ind = self.xp.min(self.xp.asarray([start_ind_here + sig_len, start_ind_check + sig_len])).item()
-                sig_len_new = end_ind - start_ind
-
-                start_ind_now_here = start_ind - start_ind_here
-                slice_here = slice(start_ind_now_here, start_ind_now_here + sig_len_new)
-
-                start_ind_now_check = start_ind - start_ind_check
-                slice_check = slice(start_ind_now_check, start_ind_now_check + sig_len_new)
-                d_h = inner_product([A_here[slice_here], E_here[slice_here]], [A_check[slice_check], E_check[slice_check]], f_arr=freqs_here[slice_here], PSD=psd_here[slice_here], use_gpu=self.use_gpu)
-                
-                distances[i, j] = abs(1.0 - d_h.real / h_h.real)
-                distances[j, i] = distances[i, j]
-            print(i)
-
-        keep = self.xp.argsort(distances)[:self.nfriends]
-        try:
-            keep = keep.get()
-        except AttributeError:
-            pass
-        
-
-        breakpoint()
-        """
-        keep = np.argsort(distances, axis=1)[:, :self.nfriends]
-        supps[inds] = {"group_move_points": all_remaining_coords[keep]}
-
-    def setup_noise_params(self, branch):
-        
-        coords = branch.coords
-        supps = branch.branch_supplimental
-        ntemps, nwalkers, nleaves_max, ndim = branch.shape
-
-        par0 = coords[:, :, :, 0].flatten()
-
-        distances = np.abs(par0[None, :] - par0[:, None])
-        distances[distances == 0.0] = 1e300
-        
-        keep = np.argsort(distances, axis=1)[:, :self.nfriends]
-        supps[:] = {"group_move_points": coords.reshape(-1, 1)[keep].reshape(ntemps, nwalkers, nleaves_max, self.nfriends, ndim)}
-
-    def find_friends(self, branches):
-        for i, (name, branch) in enumerate(branches.items()):
-            if name == "gb_fixed":
-                self.setup_gbs(branch)
-            elif name == "noise_params":
-                self.setup_noise_params(branch)
-            else:
-                raise NotImplementedError
 
     def propose(self, model, state):
         """Use the move to generate a proposal and compute the acceptance
@@ -261,7 +133,6 @@ class GBSpecialStretchMove(StretchMove):
         # st = time.perf_counter()
         self.xp.cuda.runtime.setDevice(self.mgh.gpus[0])
 
-        xp.random.seed(10)
         np.random.seed(10)
         #print("start stretch")
         #st = time.perf_counter()
@@ -277,9 +148,8 @@ class GBSpecialStretchMove(StretchMove):
 
         new_state = State(state, copy=True)
         self.mempool.free_all_blocks()
-        true_data_map = self.xp.asarray(new_state.supplimental.holder["overall_inds"].flatten())
         
-        self.mgh.map = true_data_map.get()
+        self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
         # data should not be whitened
         
@@ -310,8 +180,24 @@ class GBSpecialStretchMove(StretchMove):
         
         groups = get_groups_from_band_structure(f_test, self.band_edges, xp=np)
 
+        if hasattr(self, "keep_bands") and self.keep_bands is not None:
+            band_indices = np.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
+            keep_bands = self.keep_bands
+            assert isinstance(keep_bands, np.ndarray)
+            groups[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = -1
+
         unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
-        num_groups = len(unique_groups)
+
+        # remove information about the bad "-1" group
+        if -1 in unique_groups:
+            group_len = np.delete(group_len, unique_groups == -1)
+            unique_groups = np.delete(unique_groups, unique_groups == -1)
+
+        if len(unique_groups) == 0:
+            return state, accepted
+
+        # needs to be max because some values may be missing due to evens and odds
+        num_groups = unique_groups.max().item() + 1
 
         waveform_kwargs_now = self.waveform_kwargs.copy()
         if "N" in waveform_kwargs_now:
@@ -927,8 +813,7 @@ class GBSpecialStretchMove(StretchMove):
         #et = time.perf_counter()
         #print("end stretch", (et - st))
 
-        true_data_map = np.asarray(new_state.supplimental.holder["overall_inds"].flatten())
-        self.mgh.map = true_data_map
+        self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
         """et = time.perf_counter()
         print("end", (et - st), group_iter, group_len[group_iter])"""

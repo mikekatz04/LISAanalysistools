@@ -16,10 +16,11 @@ except ModuleNotFoundError:
 
     gpu_available = False
 
+from lisatools.utils.utility import searchsorted2d_vec, get_groups_from_band_structure
 from eryn.moves import GroupStretchMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
-from .gbmultipletryrj import GBMutlipleTryRJ
+from .gbspecialstretch import GBSpecialStretchMove
 from .gbgroupstretch import GBGroupStretchMove
 
 from ...diagnostic import inner_product
@@ -30,7 +31,7 @@ __all__ = ["GBGroupStretchMove"]
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
+class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -53,7 +54,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
         self.time = 0
         self.name = "gbgroupstretch"
         self.start_ind_limit = start_ind_limit
-        GBMutlipleTryRJ.__init__(self, *gb_args, **gb_kwargs)
+        GBSpecialStretchMove.__init__(self, *gb_args, **gb_kwargs)
         GroupStretchMove.__init__(self, *args, **kwargs)
 
     def setup_gbs(self, branch):
@@ -152,28 +153,10 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
 
         supps[inds] = {"group_move_points": friends}
 
-    def setup_noise_params(self, branch):
-        
-        coords = branch.coords
-        supps = branch.branch_supplimental
-        ntemps, nwalkers, nleaves_max, ndim = branch.shape
-
-        par0 = coords[:, :, :, 0].flatten()
-
-        distances = np.abs(par0[None, :] - par0[:, None])
-        distances[distances == 0.0] = 1e300
-        
-        keep = np.argsort(distances, axis=1)[:, :self.nfriends]
-        supps[:] = {"group_move_points": coords.reshape(-1, 1)[keep].reshape(ntemps, nwalkers, nleaves_max, self.nfriends, ndim)}
-
     def find_friends(self, branches):
         for i, (name, branch) in enumerate(branches.items()):
             if name == "gb":
                 self.setup_gbs(branch)
-            #elif name == "noise_params":
-            #    self.setup_noise_params(branch)
-            #else:
-            #    raise NotImplementedError
 
     def propose(self, model, state):
         """Use the move to generate a proposal and compute the acceptance
@@ -200,84 +183,101 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
 
         # TODO: deal with more intensive acceptance fractions
         # Run any move-specific setup.
-        self.setup(state.branches)
-        # st = time.perf_counter()
-
-        new_state = State(state, copy=True)
-
-        # ll_before = model.compute_log_prob_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental, branch_supps=new_state.branches_supplimental)
+        
+        # data should not be whitened
         
         # Split the ensemble in half and iterate over these two halves.
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
-        f_test = self.xp.asarray(state.branches_coords["gb"][:, :, :, 1]) / 1e3
-
-        # set any inds == False binary to zero 
-        f_test[~self.xp.asarray(state.branches_inds["gb"])] = 0.0
+        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb"].shape
         
-        f_test[f_test == 0.0] = 1e300
-        
-        f_test_sorted = self.xp.asarray(self.xp.sort(f_test,axis=-1))
+        f_test = state.branches_coords["gb"][:, :, :, 1] / 1e3
 
-        inds_f_sorted = self.xp.asarray(self.xp.argsort(f_test,axis=-1))
-        groups = []
-        group_len = []
+        # TODO: add actual amplitude
+        N_vals = new_state.branches["gb"].branch_supplimental.holder["N_vals"]
 
-        buffer = 0  # 2 ** 8
+        N_vals = self.xp.asarray(N_vals)
 
-        dbin = int(2 * self.waveform_kwargs["N"] + buffer)
-        max_iter = 1000
-        i = 0
-        total = 0
-        while i < max_iter and ~self.xp.all(f_test_sorted > 1e100):
-            diff_along_f = self.xp.zeros_like(f_test_sorted)
-            diff_along_f[:, :, 1:] = self.xp.diff(f_test_sorted, axis=-1)
-            
-            tmp1 = (self.xp.cumsum(diff_along_f, axis=-1) / self.df).astype(int) // dbin
-            tmp1[(tmp1) % 2 == 1] = 0
-            tmp1[:, :, 1:] = self.xp.diff(tmp1, axis=-1)
-            tmp1[tmp1 < 0] = 0
+        N_vals_2_times = self.xp.concatenate([N_vals, N_vals], axis=-1)
 
-            switch_check = self.xp.zeros_like(f_test_sorted, dtype=int)
-            switch_check[:, :, 1:] = self.xp.diff(self.xp.cumsum(tmp1, axis=-1), axis=-1)
-            switch_check[:, :, 0] = 2
-            inds_switch = self.xp.where((switch_check > 0) & (f_test_sorted < 1e100))
-
-            groups.append((inds_switch[0], inds_switch[1], inds_f_sorted[inds_switch]))
-                
-            group_len.append(len(inds_switch[0]))
-
-            #print(f_test_sorted.shape)
-            f_test_sorted[inds_switch] = 1e300
-
-            sort_inds = self.xp.argsort(f_test_sorted, axis=-1)
-            f_test_sorted = self.xp.take_along_axis(f_test_sorted, sort_inds, axis=-1)
-
-            inds_f_sorted = self.xp.take_along_axis(inds_f_sorted, sort_inds, axis=-1)
-            total += len(inds_switch[0])
-            #print(i, len(inds_switch[0]), (f_test_sorted > 1e100).sum(axis=-1))
-            #i += 1
-            #if i % 10 == 0:
-            #    print(i, (f_test_sorted > 1e100).sum() / np.prod(f_test_sorted.shape))
-
-        gb_coords = self.xp.asarray(new_state.branches_coords["gb"].copy())
+        gb_coords = np.zeros((ntemps, nwalkers, nleaves_max, ndim))
+        gb_coords[new_state.branches_inds["gb"]] = new_state.branches_coords["gb"][new_state.branches_inds["gb"]].copy()
 
         log_prob_tmp = self.xp.asarray(new_state.log_prob)
         log_prior_tmp = self.xp.asarray(new_state.log_prior)
+      
+        self.mempool.free_all_blocks()
 
-        data_minus_template = new_state.supplimental.holder["data_minus_template"]
+        unique_N = np.unique(N_vals)
+        
+        groups = get_groups_from_band_structure(f_test, self.band_edges, xp=np)
+        breakpoint()
+        groups[new_state.branches_inds["gb"]] = -1
+        unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
 
-        """et = time.perf_counter()
-        print("group groups", (et - st))
-        st = time.perf_counter()"""
+        # remove information about the bad "-1" group
+        if -1 in unique_groups:
+            group_len = np.delete(group_len, unique_groups == -1)
+            unique_groups = np.delete(unique_groups, unique_groups == -1)
 
-        for group in groups:
-            temp_inds, walkers_inds, leaf_inds = group
-            if self.use_gpu:
-                group_cpu = (temp_inds.get(), walkers_inds.get(), leaf_inds.get())
-            else:
-                group_cpu = group
+        if len(unique_groups) == 0:
+            return state, accepted
 
+        # needs to be max because some values may be missing due to evens and odds
+        num_groups = unique_groups.max().item() + 1
+
+        waveform_kwargs_now = self.waveform_kwargs.copy()
+        if "N" in waveform_kwargs_now:
+            waveform_kwargs_now.pop("N")
+        waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
+
+        points_to_move = q["gb"][group]
+        group_branch_supp_info = new_state.branches_supplimental["gb"][group_cpu]
+        points_for_move = self.xp.asarray(group_branch_supp_info["group_move_points"])
+
+        q_temp, factors_temp = self.get_proposal(
+            {"gb_fixed": points_to_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)},  
+            {"gb_fixed": [points_for_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)]}, 
+            model.random
+        )
+        breakpoint()
+
+        for group_iter in range(num_groups):
+            # st = time.perf_counter()
+            # sometimes you will have an extra odd or even group only
+            # the group_iter may not match the actual running group number in this case
+            if group_iter not in groups:
+                continue
+            group = [grp[groups == group_iter].flatten() for grp in group_temp_finder]
+
+            # st = time.perf_counter()
+            temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
+
+        
+
+        
+        if True:
+            factors = self.xp.zeros((ntemps, nwalkers, nleaves_max))
+            factors[:, split_here] = factors_temp.reshape(ntemps, nleaves_max, int(nwalkers / 2)).transpose(0, 2, 1)
+
+            # use new_state here to get change after 1st round
+            q = {"gb_fixed": gb_fixed_coords.copy()}
+
+            q["gb_fixed"][:, split_here] = q_temp["gb_fixed"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
+
+            """et = time.perf_counter()
+            print("prop", (et - st))"""
+
+            for group_iter in range(num_groups):
+                # st = time.perf_counter()
+                # sometimes you will have an extra odd or even group only
+                # the group_iter may not match the actual running group number in this case
+                if group_iter not in groups:
+                    continue
+                group = [grp[groups == group_iter].flatten() for grp in group_temp_finder]
+
+                # st = time.perf_counter()
+                temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
             q = q = {"gb": gb_coords.copy()}
             # new_inds = deepcopy(new_state.branches_inds)
 
@@ -336,7 +336,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBMutlipleTryRJ):
             logp = self.xp.asarray(self.priors["gb"].logpdf(new_points_prior))
 
             if self.xp.all(self.xp.isinf(logp)):
-                continue
+                pass
 
             keep_here = self.xp.where(~self.xp.isinf(logp))
 

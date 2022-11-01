@@ -60,30 +60,6 @@ waveform_kwargs["start_freq_ind"] = start_freq_ind
 #search_f_bin_lims = f0_lims[0] + df * np.arange(num_f_bins)[lim_inds]
 #search_f_bin_lims[-1] = f0_lims[-1]
 
-# adjust for frequencies
-f0_lims_in = f0_lims.copy()
-
-# TODO: make wider because this is knowning the limits?
-f0_lims_in[0] = 0.3e-3
-#f0_lims_in[1] = 0.8e-3
-
-low_fs = np.arange(f0_lims_in[0], 0.001 - 4 * 128 * df, 2 * 128 * df)
-mid_fs = np.arange(0.001, 0.01 - 4 * 512 * df, 2 * 256 * df)
-high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
-
-# breakpoint()
-"""
-# low_fs = np.append(np.arange(f0_lims_in[0], 0.001, 2 * 128 * df), np.array([0.001]))
-# mid_fs = np.arange(0.001 + 256 * 2 * df, 0.01, 2 * 256 * df)
-# high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
-"""
-search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
-
-# for testing
-# search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
-
-num_sub_bands = len(search_f_bin_lims)
-
 if sub_band_fails_file not in os.listdir():
     num_sub_band_fails = np.zeros(num_sub_bands, dtype=int)
 
@@ -91,7 +67,6 @@ else:
     num_sub_band_fails = np.load(sub_band_fails_file)
 
 assert num_sub_band_fails.shape[0] == num_sub_bands
-num_sub_band_fails_limit = 2
 
 run_mix_first = False
 # TODO: adjust the starting points each iteration to avoid issues at gaps
@@ -170,7 +145,7 @@ try:
         num_binaries_needed_to_mix = 1
         num_binaries_current = 0
         max_iter = 1000
-        iter_init = 5
+        iter_init = 0
         is_first_iter = True
         for iter_i in range(iter_init, max_iter):
 
@@ -200,6 +175,26 @@ try:
 
                     para_args = []
                     sub_bands_to_run = []
+                    if current_start_points_file in os.listdir():
+                        nleaves_max_from_search = np.load(current_start_points_file).shape[0]
+                    else:
+                        nleaves_max_from_search = 0
+
+                    if nleaves_max_from_search > 0:
+                        # make sure mixing adds these binaries before moving on in search
+                        # need to do this every switch between odds and evens
+                        while current_save_state_file not in os.listdir():
+                            time.sleep(0.5)
+                        
+                        nleaves_max_from_mix = -1
+                        
+                        while nleaves_max_from_mix != nleaves_max_from_search:
+                            with open(current_save_state_file, "rb") as fp_temp:
+                                last_state = pickle.load(fp_temp)
+                            nleaves_max_from_mix = last_state.branches["gb_fixed"].nleaves[0, 0].item()
+                            if nleaves_max_from_mix != nleaves_max_from_search:
+                                print("not yet", nleaves_max_from_mix, nleaves_max_from_search)
+                                time.sleep(10.0)
 
                     if current_residuals_file_iterative_search in os.listdir():
                         data_minus_templates_for_para = np.load(current_residuals_file_iterative_search)
@@ -216,15 +211,17 @@ try:
 
                         # TODO: get startup time down on single runs
 
-                        #f iter_i == 0:
+                        # if iter_i == 0:
+                        #    if jj < 1:
+                        #        continue
                         #    if sub_band_i < 166 and sub_band_i != 158:
                         #        continue
 
-                        if iter_i == 5:
-                            if jj < 1:
-                                continue
-                            elif sub_band_i > 109 or sub_band_i in [107, 99]:
-                                continue
+                        #if iter_i == 5:
+                        #    if jj < 1:
+                        #        continue
+                        #    elif sub_band_i > 109 or sub_band_i in [107, 99]:
+                        #        continue
 
                         # if sub_band_i > 15:
                         #    continue
@@ -330,8 +327,8 @@ try:
                                 
                                 ll_check = -1/2 * df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
 
-                                gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])
-                    
+                                gb.d_d = df * 4 * xp.sum(data_minus_templates.conj() * data_minus_templates / xp.asarray(psd)[None, :])                
+
                 if num_binaries_current == 0:
                     print("END")
                     breakpoint()

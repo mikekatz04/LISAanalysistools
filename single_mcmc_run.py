@@ -4,7 +4,6 @@ import pickle
 from eryn.moves import StretchMove
 from lisatools.sampling.stopping import SearchConvergeStopping
 from cupy.cuda.runtime import setDevice
-import time
 
 from gbgpu.utils.utility import get_N
 
@@ -22,7 +21,7 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
     num_per = int(1e7)
     num_rounds = num_total // num_per
 
-    data_minus_templates = xp.asarray(np.load(current_residuals_file_iterative_search))
+    data_minus_templates = xp.asarray(data_minus_templates)
     # print(f"begin - process: {process_i}, sub band: {sub_band_i}")
 
     like_prep = Likelihood(gb, 2, f_arr=fd, parameter_transforms={"gb": transform_fn}, fill_data_noise=True, vectorized=True, transpose_params=False, use_gpu=True)
@@ -117,7 +116,6 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
     out_snr = out_snr[inds_sort_snr]
     out_params = out_params[inds_sort_snr]
 
-    # TODO: this might need to be adjusted when adding noise
     if out_snr[0] < 1.0 or out_params[0, 0] < 1.0:
         return dict(
         sub_band_i=sub_band_i,
@@ -215,10 +213,6 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
         stopping_iterations=1
     )
 
-    # TODO: probably useful to put together a class for this operation if possible that has a "restarter" type method
-    # things like cutting down number of points to where we know things are ok
-    # waiting for mixing to produce high likelihood residual
-
     nsteps_prep = 50000
     progress = False  # True if process_i == 2 else False
     print(f"start - process: {process_i}, sub band: {sub_band_i}, gpu: {gpu_i}")
@@ -234,13 +228,19 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
     keep_coords_in = transform_fn.both_transforms(np.array([keep_coords]))
     
     # TODO: fix issue in GBGPU that is issue with not copying data for ll
-    ll_temp = gb.get_ll(keep_coords_in, data_temp, noise_in, **waveform_kwargs_sub)
+    try:
+        ll_temp = gb.get_ll(keep_coords_in, data_temp, noise_in, **waveform_kwargs_sub)
+    except ValueError:
+        breakpoint()
 
     keep_coords[3] -= np.angle(gb.d_h)[0]    
 
     keep_coords_in = transform_fn.both_transforms(np.array([keep_coords]))
 
-    ll_check = gb.get_ll(keep_coords_in, data_temp, noise_in, **waveform_kwargs_sub)
+    try:
+        ll_check = gb.get_ll(keep_coords_in, data_temp, noise_in, **waveform_kwargs_sub)
+    except ValueError:
+        breakpoint()
 
     det_snr = (gb.d_h.real[0] / np.sqrt(gb.h_h.real[0])).item()
     det_marg_snr = (np.abs(gb.d_h)[0] / np.sqrt(gb.h_h.real[0])).item()
@@ -282,11 +282,13 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('--search-iter', '-si', type=int,
+                        help='an integer identifier', required=True)
 
     #parser.add_argument('--gpu', type=int,
     #                    help='an integer identifier', required=True)
 
-    parser.add_argument('--process-id', '-pi', type=int,
+    parser.add_argument('--band-id', '-bi', type=int,
                         help='an integer identifier', required=True)
 
     parser.add_argument('--dir', type=str,
@@ -294,29 +296,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    while True:
-        fps_in = os.listdir(args.dir + f"/process_{args.process_id}")
-        time.sleep(0.1)
-        if len(fps_in) == 1:
-            fp_in = args.dir + f"/process_{args.process_id}/" + fps_in[0]
+    fp_in = args.dir + "/" + current_iterative_search_sub_file_base + f"_search_iter_{args.search_iter}_band_{args.band_id}_transfer.pickle"
+    fp_out = args.dir + "/" + current_iterative_search_sub_file_base + f"_search_iter_{args.search_iter}_band_{args.band_id}.pickle"
 
-            if fp_in[-15:] == "transfer.pickle":
-                fp_out = fp_in[:-16] + ".pickle"
-                time.sleep(0.1)
-                with open(fp_in, "rb") as fp_tmp:
-                    info_in = pickle.load(fp_tmp)
-            
-                output = run_single_band_search(*info_in)
-                xp.cuda.runtime.setDevice(xp.cuda.runtime.getDevice())
-                mempool = xp.get_default_memory_pool()
-                mempool.free_all_blocks()
+    with open(fp_in, "rb") as fp_tmp:
+        info_in = pickle.load(fp_tmp)
+    
+    output = run_single_band_search(*info_in)
 
-                time.sleep(0.1)
-                with open(fp_out, "wb") as fp_tmp:
-                    pickle.dump(output, fp_tmp, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(fp_out, "wb") as fp_tmp:
+        pickle.dump(output, fp_tmp, protocol=pickle.HIGHEST_PROTOCOL)
 
-                os.remove(fp_in)
-
-        elif len(fps_in) > 1:
-            raise ValueError("More files than allowed in temporary directory.")
- 
+    os.remove(fp_in)

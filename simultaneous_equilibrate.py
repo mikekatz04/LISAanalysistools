@@ -51,7 +51,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
     gpus = gpus_for_equilibrate
 
     # from lisatools.sampling.stopping import SearchConvergeStopping2
-
+    waveform_kwargs = globals()["waveform_kwargs"].copy()
     waveform_kwargs["start_freq_ind"] = start_freq_ind
 
     # for testing
@@ -100,15 +100,15 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
         iter_init = 0
         is_first_iter = True
         
-        if "save_state_temp.pickle" in os.listdir():
-            with open("save_state_temp.pickle", "rb") as fp_out:
+        if current_save_state_file in os.listdir():
+            with open(current_save_state_file, "rb") as fp_out:
                 last_sample = pickle.load(fp_out)
             nleaves_max_fix = last_sample.branches["gb_fixed"].nleaves.max().item()
             old_number = nleaves_max_fix
 
         else:
             old_number = 0
-        number_needed = 20
+        number_needed = 1
         current_iteration = 0
         while True:
             time.sleep(0.1)
@@ -130,7 +130,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                     time.sleep(0.5)
 
             starting_new = False
-            if current_iteration == 0 or current_found_coords_for_starting_mix.shape[0] > old_number + number_needed:
+            if current_iteration == 0 or current_found_coords_for_starting_mix.shape[0] >= old_number + number_needed:
                 
                 nleaves_max_fix = len(current_found_coords_for_starting_mix)
                 coords_out = np.zeros((ntemps, nwalkers, nleaves_max_fix, ndim))
@@ -180,7 +180,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                 gb.gpus = None
                 
                 if old_number > 0:
-                    with open("save_state_temp.pickle", "rb") as fp_out:
+                    with open(current_save_state_file, "rb") as fp_out:
                         last_sample = pickle.load(fp_out)
                     old_coords = last_sample.branches["gb_fixed"].coords
                 
@@ -275,7 +275,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                 N_vals[state_mix.branches["gb_fixed"].inds] = N_temp
                 branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_fix)
                 state_mix.branches["gb_fixed"].branch_supplimental = BranchSupplimental({"N_vals": N_vals}, obj_contained_shape=branch_supp_base_shape, copy=True)
-                
+
                 gb_kwargs = dict(
                     waveform_kwargs=waveform_kwargs,
                     parameter_transforms=transform_fn,
@@ -286,7 +286,6 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                     psd_func=get_sensitivity,
                     noise_kwargs=dict(sens_fn="noisepsd_AE", model="sangria"),
                     provide_betas=True,
-                    point_generator_func=point_generator,
                     batch_size=-1,
                     skip_supp_names=["group_move_points"],
                     random_seed=10,
@@ -295,7 +294,6 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                 gb_args = (
                     gb,
                     priors,
-                    int(1e3),
                     start_freq_ind,
                     data_length,
                     mgh,
@@ -304,7 +302,8 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                 )
 
                 try:
-                    del moves_mix
+                    del moves_mix_going
+                    del moves_mix_old
                     del like_mix
                     del sampler_mix
                     del stop_converge_mix
@@ -312,23 +311,71 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                 except NameError:
                     pass
 
-                moves_mix = GBSpecialStretchMove(
+                moves_mix_going = GBSpecialStretchMove(
                     *gb_args,
                     **gb_kwargs,
                 )
 
+                moves_mix_old = GBSpecialStretchMove(
+                    *gb_args,
+                    **gb_kwargs,
+                )
+
+                # determine which bands to focus on based on which are still alive + immediate neighbors. 
+                sub_band_fails = np.load(sub_band_fails_file)
+
+                band_inds_still_going = np.where(sub_band_fails < num_sub_band_fails_limit)[0]
+                # remove bands below zero and above the number of sub bands
+                band_inds_still_going = np.unique(np.delete(
+                    band_inds_still_going, 
+                    np.where(
+                        (band_inds_still_going < 0) | (band_inds_still_going >= num_sub_bands - 1)  # there is no actual last sub band
+                    )
+                ))
+                band_inds_still_going = np.concatenate([
+                    band_inds_still_going,
+                    band_inds_still_going + 1,  # add upper neighbors to be safe  # these could have no sources
+                    band_inds_still_going - 1   # lower neighbors to be safe  # these could have no sources
+                ])
+
+                # remove bands below zero and above the number of sub bands
+                band_inds_still_going = np.unique(np.delete(
+                    band_inds_still_going, 
+                    np.where(
+                        (band_inds_still_going < 0) | (band_inds_still_going >= num_sub_bands - 1)
+                    )
+                ))
+
+                moves_mix_going.keep_bands = band_inds_still_going
+
+                bands_old = np.delete(np.arange(num_sub_bands), band_inds_still_going)
+
+                moves_mix_old.keep_bands = bands_old
+
+                # add the other
+
                 # stop_converge_mix = SearchConvergeStopping2(n_iters=7, diff=0.5, verbose=True, iter_back_check=7)
 
-                moves_mix.gb.gpus = gpus
+                moves_mix_old.gb.gpus = gpus
+                moves_mix_going.gb.gpus = gpus
+
+                moves_mix = [(moves_mix_going, 0.95), (moves_mix_old, 0.05)]
 
                 like_mix = BasicResidualMGHLikelihood(mgh)
+
+                from eryn.moves.tempering import make_ladder
+
+                if hasattr(state_mix, "betas") and state_mix.betas is not None:
+                    betas = state_mix.betas
+                else:
+                    betas = make_ladder(nleaves_max_fix * ndim, ntemps)
 
                 sampler_mix = EnsembleSampler(
                         nwalkers,
                         [ndim],  # assumes ndim_max
                         like_mix,
                         priors,
-                        tempering_kwargs={"ntemps": ntemps},
+                        tempering_kwargs={"betas": betas},
                         nbranches=1,
                         nleaves_max=[nleaves_max_fix],
                         moves=moves_mix,
@@ -383,7 +430,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                         xp.cuda.runtime.deviceSynchronize()
                 xp.cuda.runtime.setDevice(main_gpu)
 
-            nsteps_mix = 200
+            nsteps_mix = 50
 
             print("Starting mix ll best:", out.log_prob.max(axis=-1))
             mempool.free_all_blocks()
@@ -392,13 +439,6 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
 
             print("ending mix ll best:", out.log_prob.max(axis=-1))
 
-            save_state = State(out.branches_coords, inds=out.branches_inds, log_prob=out.log_prob, log_prior=out.log_prior)
-
-            if "save_state_temp.pickle" in os.listdir():
-                shutil.copyfile("save_state_temp.pickle", "old_save_state_temp.pickle")
-
-            with open("save_state_temp.pickle", "wb") as fp_out:
-                pickle.dump(save_state, fp_out, protocol=pickle.HIGHEST_PROTOCOL)
 
             # needs to be max from mgh or need to map it
             lp_mgh = mgh.get_ll(use_cpu=True)
@@ -422,6 +462,14 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
 
             np.save(current_residuals_file_iterative_search, data_minus_templates.get())
             
+            save_state = State(out.branches_coords, inds=out.branches_inds, log_prob=out.log_prob, log_prior=out.log_prior, betas=out.betas)
+
+            if current_save_state_file in os.listdir():
+                shutil.copyfile(current_save_state_file, "old_" + current_save_state_file)
+
+            with open(current_save_state_file, "wb") as fp_out:
+                pickle.dump(save_state, fp_out, protocol=pickle.HIGHEST_PROTOCOL)
+
             """# current_start_points = list(out.branches["gb_fixed"].coords[max_ind][out.branches["gb_fixed"].inds[max_ind]])
 
             # current_found_coords_for_starting_mix = list(current_found_coords_for_starting_mix)
