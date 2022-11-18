@@ -117,7 +117,203 @@ class GBSpecialStretchMove(StretchMove):
         self.search_snr_lim = search_snr_lim
         self.search_snr_accept_factor = search_snr_accept_factor
 
-        self.take_max_ll = take_max_ll      
+        self.take_max_ll = take_max_ll     
+
+    def run_swap_ll(self, gb_fixed_coords, old_points, new_points, group_here, N_vals, waveform_kwargs_now, factors_here, log_prob_tmp, log_prior_tmp, return_at_logl=False):
+
+        temp_inds_keep, walkers_inds_keep, leaf_inds_keep = group_here
+
+        # st = time.perf_counter()
+        if self.use_gpu:
+            new_points_prior = new_points.get()
+            old_points_prior = old_points.get()
+        else:
+            new_points_prior = new_points
+            old_points_prior = old_points
+
+        logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(new_points_prior))
+        keep_here = self.xp.where((~self.xp.isinf(logp)))
+
+        if len(keep_here[0]) == 0:
+            return
+                
+        points_remove = self.parameter_transforms.both_transforms(old_points[keep_here], xp=self.xp)
+        points_add = self.parameter_transforms.both_transforms(new_points[keep_here], xp=self.xp)
+
+        data_index_tmp = self.xp.asarray((temp_inds_keep[keep_here] * self.nwalkers + walkers_inds_keep[keep_here]).astype(xp.int32))
+        noise_index_tmp = self.xp.asarray((temp_inds_keep[keep_here] * self.nwalkers + walkers_inds_keep[keep_here]).astype(xp.int32))
+        
+        data_index = self.mgh.get_mapped_indices(data_index_tmp).astype(self.xp.int32)
+        noise_index = self.mgh.get_mapped_indices(noise_index_tmp).astype(self.xp.int32)
+
+        assert self.xp.all(data_index == noise_index)
+        nChannels = 2
+
+        delta_ll = self.xp.full(old_points.shape[0], -1e300)
+        
+        N_in_group = N_vals[keep_here]
+        """et = time.perf_counter()
+        print("before like", (et - st), new_points.shape[0])
+        st = time.perf_counter()"""
+
+        delta_ll[keep_here] = self.gb.swap_likelihood_difference(points_remove, points_add, self.mgh.data_list,  self.mgh.psd_list,  N=N_in_group, data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, 
+        data_splits=self.mgh.gpu_splits, phase_marginalize=self.search, **waveform_kwargs_now)
+        """et = time.perf_counter()
+        print("after like", (et - st), new_points.shape[0])
+        st = time.perf_counter()"""
+        
+        if self.xp.any(self.xp.isnan(delta_ll)):
+            warnings.warn("Getting nan in Likelihood function.")
+            breakpoint()
+            logp[self.xp.isnan(delta_ll)] = -np.inf
+            delta_ll[self.xp.isnan(delta_ll)] = -1e300
+            
+        optimized_snr = self.xp.sqrt(self.gb.add_add.real)
+        detected_snr = (self.gb.d_h_add + self.gb.add_remove).real / optimized_snr
+        # check_d_h_add = self.gb.d_h_add.copy()
+        # check_add_remove = self.gb.add_remove.copy()
+        if self.search:
+            """et = time.perf_counter()
+            print("before search stuff", (et - st), N_now, group_iter, group_len[group_iter])
+            st = time.perf_counter()"""
+            inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
+
+            if self.xp == np:
+                inds_fix = inds_fix.get()
+
+            if self.xp.any(inds_fix):
+                logp[keep_here[0][inds_fix]] = -np.inf
+                delta_ll[keep_here[0][inds_fix]] = -1e300
+
+            phase_change = self.gb.phase_angle
+            new_points[keep_here, 3] -= phase_change
+            points_add[:, 4] -= phase_change
+
+            new_points[keep_here, 3] = new_points[keep_here, 3] % (2 * np.pi)
+            points_add[:, 4] = points_add[:, 4] % (2 * np.pi)
+
+            """et = time.perf_counter()
+            print("after search stuff", (et - st), N_now, group_iter, group_len[group_iter])
+            st = time.perf_counter()"""
+
+        prev_logl = log_prob_tmp[(temp_inds_keep, walkers_inds_keep)]
+        logl = delta_ll + prev_logl
+
+        if return_at_logl:
+            return delta_ll
+
+        #if np.any(logl - np.load("noise_ll.npy").flatten() > 0.0):
+        #    breakpoint()    
+        #print("multi check: ", (logl - np.load("noise_ll.npy").flatten()))
+
+        prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
+
+        if np.any(np.isinf(prev_logp)):
+            breakpoint()
+        
+        betas_in = self.xp.asarray(self.temperature_control.betas)[temp_inds_keep]
+        logP = self.compute_log_posterior(logl, logp, betas=betas_in)
+        
+        # TODO: check about prior = - inf
+        # takes care of tempering
+        prev_logP = self.compute_log_posterior(prev_logl, prev_logp, betas=betas_in)
+
+        # TODO: think about factors in tempering
+        lnpdiff = factors_here + logP - prev_logP
+
+        keep = lnpdiff > self.xp.asarray(self.xp.log(self.xp.random.rand(*logP.shape)))
+        """et = time.perf_counter()
+        print("keep determination", (et - st), new_points.shape[0])
+        st = time.perf_counter()"""
+        if self.xp.any(keep):
+            
+
+            accepted_here = keep.copy()
+            
+            gb_fixed_coords[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep]
+
+            # parameters were run for all ~np.isinf(logp), need to adjust for those not accepted
+            keep_from_before = (keep * (~np.isinf(logp)))[keep_here]
+            try:
+                group_index = data_index[keep_from_before]
+            except IndexError:
+                breakpoint()
+
+            waveform_kwargs_fill = waveform_kwargs_now.copy()
+
+            waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
+
+            """et = time.perf_counter()
+            print("before generate", (et - st), new_points.shape[0])
+            st = time.perf_counter()"""
+            
+            N_vals_generate = N_vals[keep]
+            N_vals_generate_in = self.xp.concatenate([
+                N_vals_generate, N_vals_generate
+            ])
+            points_for_generate = self.xp.concatenate([
+                points_remove[keep_from_before],  # factor = +1
+                points_add[keep_from_before]  # factors = -1
+            ])
+
+            num_add = len(points_remove[keep_from_before])
+
+            # check number of points for the waveform to be added
+            """f_N_check = points_for_generate[num_add:, 1].get()
+            N_check = get_N(np.full_like(f_N_check, 1e-30), f_N_check, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"])
+
+            fix_because_of_N = False
+            if np.any(N_check != N_vals_generate_in[num_add:].get()):
+                fix_because_of_N = True
+                inds_fix_here = self.xp.where(self.xp.asarray(N_check) != N_vals_generate_in[num_add:])[0]
+                N_vals_generate_in[inds_fix_here + num_add] = self.xp.asarray(N_check)[inds_fix_here]"""
+
+            
+            factors_multiply_generate = self.xp.ones(2 * num_add)
+            factors_multiply_generate[num_add:] = -1.0  # second half is adding
+            group_index_add = self.xp.concatenate(
+                [
+                    group_index,
+                    group_index,
+                ], dtype=self.xp.int32
+            )
+
+            self.gb.generate_global_template(
+                points_for_generate,
+                group_index_add, 
+                self.mgh.data_list, 
+                N=N_vals_generate_in,
+                data_length=self.data_length, 
+                data_splits=self.mgh.gpu_splits, 
+                factors=factors_multiply_generate,
+                **waveform_kwargs_fill
+            )
+
+            """et = time.perf_counter()
+            print("after generate", (et - st), new_points.shape[0])
+            st = time.perf_counter()"""
+            # update likelihoods
+
+            # set unaccepted differences to zero
+            accepted_delta_ll = delta_ll * (keep)
+            accepted_delta_lp = (logp - prev_logp)
+            accepted_delta_lp[self.xp.isinf(accepted_delta_lp)] = 0.0
+            logl_change_contribution = np.zeros_like(log_prob_tmp.get())
+            logp_change_contribution = np.zeros_like(log_prior_tmp.get())
+            try:
+                in_tuple = (accepted_delta_ll[keep].get(), accepted_delta_lp[keep].get(), temp_inds_keep[keep].get(), walkers_inds_keep[keep].get())
+            except AttributeError:
+                in_tuple = (accepted_delta_ll[keep], accepted_delta_lp[keep], temp_inds_keep[keep], walkers_inds_keep[keep])
+            for i, (dll, dlp, ti, wi) in enumerate(zip(*in_tuple)):
+                logl_change_contribution[ti, wi] += dll
+                logp_change_contribution[ti, wi] += dlp
+
+            log_prob_tmp[:] += self.xp.asarray(logl_change_contribution)
+            log_prior_tmp[:] += self.xp.asarray(logp_change_contribution)
+
+            """et = time.perf_counter()
+            print("bookkeeping", (et - st), new_points.shape[0])"""
+
 
     def propose(self, model, state):
         """Use the move to generate a proposal and compute the acceptance
@@ -142,6 +338,7 @@ class GBSpecialStretchMove(StretchMove):
             ntemps, nwalkers, nleaves_, ndim_ = branch.shape
             ndim_total += ndim_ * nleaves_
 
+        self.nwalkers = nwalkers
         # TODO: deal with more intensive acceptance fractions
         # Run any move-specific setup.
         self.setup(state.branches)
@@ -157,10 +354,6 @@ class GBSpecialStretchMove(StretchMove):
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
         ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb_fixed"].shape
-        
-        f_test = state.branches_coords["gb_fixed"][:, :, :, 1] / 1e3
-        if np.any(f_test == 0):
-            breakpoint()
 
         # TODO: add actual amplitude
         N_vals = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"]
@@ -178,27 +371,6 @@ class GBSpecialStretchMove(StretchMove):
 
         unique_N = np.unique(N_vals)
         
-        groups = get_groups_from_band_structure(f_test, self.band_edges, xp=np)
-
-        if hasattr(self, "keep_bands") and self.keep_bands is not None:
-            band_indices = np.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
-            keep_bands = self.keep_bands
-            assert isinstance(keep_bands, np.ndarray)
-            groups[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = -1
-
-        unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
-
-        # remove information about the bad "-1" group
-        if -1 in unique_groups:
-            group_len = np.delete(group_len, unique_groups == -1)
-            unique_groups = np.delete(unique_groups, unique_groups == -1)
-
-        if len(unique_groups) == 0:
-            return state, accepted
-
-        # needs to be max because some values may be missing due to evens and odds
-        num_groups = unique_groups.max().item() + 1
-
         waveform_kwargs_now = self.waveform_kwargs.copy()
         if "N" in waveform_kwargs_now:
             waveform_kwargs_now.pop("N")
@@ -238,6 +410,38 @@ class GBSpecialStretchMove(StretchMove):
 
             q["gb_fixed"][:, split_here] = q_temp["gb_fixed"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
 
+            f_test = points_to_move.reshape(ntemps, int(nwalkers / 2), -1, ndim)[:, :, :, 1].get() / 1e3
+            f_test_2 = q["gb_fixed"][:, split_here].reshape(ntemps, int(nwalkers / 2), -1, ndim)[:, :, :, 1].get() / 1e3
+            if np.any(f_test == 0):
+                breakpoint()
+
+            # f0_2 will remove and suggested frequency jumps of more than one band
+            # num_groups_base should be three with the way groups are done now
+            # no need to do checks now either
+            
+            # if suggesting to change frequency by more than twice waveform length, do not run
+            fix_f_test = (np.abs(f_test - f_test_2) > (self.df * N_vals[:, split_here].get() * 1.5))
+            if hasattr(self, "keep_bands") and self.keep_bands is not None:
+                band_indices = np.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
+                keep_bands = self.keep_bands
+                assert isinstance(keep_bands, np.ndarray)
+                fix_f_test[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
+
+            groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=np, num_groups_base=4, fix_f_test=fix_f_test)
+
+            unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
+
+            # remove information about the bad "-1" group
+            for check_val in [-1, -2]:
+                group_len = np.delete(group_len, unique_groups == check_val)
+                unique_groups = np.delete(unique_groups, unique_groups == check_val)
+
+            if len(unique_groups) == 0:
+                return state, accepted
+
+            # needs to be max because some values may be missing due to evens and odds
+            num_groups = unique_groups.max().item() + 1
+
             """et = time.perf_counter()
             print("prop", (et - st))"""
 
@@ -247,7 +451,8 @@ class GBSpecialStretchMove(StretchMove):
                 # the group_iter may not match the actual running group number in this case
                 if group_iter not in groups:
                     continue
-                group = [grp[groups == group_iter].flatten() for grp in group_temp_finder]
+
+                group = [grp[:, split_here][groups == group_iter].flatten() for grp in group_temp_finder]
 
                 # st = time.perf_counter()
                 temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
@@ -270,404 +475,10 @@ class GBSpecialStretchMove(StretchMove):
                 old_points = gb_fixed_coords[group_here]
                 new_points = q["gb_fixed"][group_here]
 
-                if self.use_gpu:
-                    new_points_prior = new_points.get()
-                    old_points_prior = old_points.get()
-                else:
-                    new_points_prior = new_points
-                    old_points_prior = old_points
-
-                logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(new_points_prior))
-                keep_here = self.xp.where((~self.xp.isinf(logp)))
-
-                if len(keep_here[0]) == 0:
-                    continue
-                        
-                points_remove = self.parameter_transforms.both_transforms(old_points[keep_here], xp=self.xp)
-                points_add = self.parameter_transforms.both_transforms(new_points[keep_here], xp=self.xp)
-
-                data_index_tmp = self.xp.asarray((temp_inds_keep[keep_here] * nwalkers + walkers_inds_keep[keep_here]).astype(xp.int32))
-                noise_index_tmp = self.xp.asarray((temp_inds_keep[keep_here] * nwalkers + walkers_inds_keep[keep_here]).astype(xp.int32))
-                
-                data_index = self.mgh.get_mapped_indices(data_index_tmp).astype(self.xp.int32)
-                noise_index = self.mgh.get_mapped_indices(noise_index_tmp).astype(self.xp.int32)
-
-                assert self.xp.all(data_index == noise_index)
-                nChannels = 2
-
-                delta_ll = self.xp.full(old_points.shape[0], -1e300)
-                """new_state.log_prob[0, 5] = new_state.log_prob[0, 3]
-                new_state.log_prior[0, 5] = new_state.log_prior[0, 3]
-                inds_change = np.where((temp_inds_keep[keep_here] == 0) & (walkers_inds_keep[keep_here] == 3))
-                inds_check = np.where((temp_inds_keep[keep_here] == 0) & (walkers_inds_keep[keep_here] == 5))
-                factors_here[inds_check] = factors_here[inds_change]
-                
-
-                points_remove[inds_check, :] = points_remove[inds_change, :].copy()
-
-                points_add[inds_check, :] = points_add[inds_change, :].copy()
-                data_minus_template[0, 5] = data_minus_template[0, 3].copy()"""
-                
-                N_in_group = N_vals[group_here][keep_here]
                 """et = time.perf_counter()
-                print("before like", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                st = time.perf_counter()"""
-
-                delta_ll[keep_here] = self.gb.swap_likelihood_difference(points_remove, points_add, self.mgh.data_list,  self.mgh.psd_list,  N=N_in_group, data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, 
-                data_splits=self.mgh.gpu_splits, phase_marginalize=self.search, **waveform_kwargs_now)
-                """et = time.perf_counter()
-                print("after like", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                st = time.perf_counter()"""
-                """dhr = self.gb.d_h_remove.copy()
-                dha = self.gb.d_h_add.copy()
-                aa = self.gb.add_add.copy()
-                rr = self.gb.remove_remove.copy()
-                ar = self.gb.add_remove.copy()
-
-                kwargs_tmp = self.waveform_kwargs.copy()
-                kwargs_tmp["use_c_implementation"] = False
-                check_tmp = self.gb.swap_likelihood_difference(points_remove,  points_add,  data_minus_template.reshape(ntemps * nwalkers, nChannels, -1).copy(),  psd.reshape(ntemps * nwalkers, nChannels, -1).copy(),  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  **kwargs_tmp)
-                breakpoint()"""
-                
-                if self.xp.any(self.xp.isnan(delta_ll)):
-                    warnings.warn("Getting nan in Likelihood function.")
-                    breakpoint()
-                    logp[self.xp.isnan(delta_ll)] = -np.inf
-                    delta_ll[self.xp.isnan(delta_ll)] = -1e300
-                    
-                optimized_snr = self.xp.sqrt(self.gb.add_add.real)
-                detected_snr = (self.gb.d_h_add + self.gb.add_remove).real / optimized_snr
-                # check_d_h_add = self.gb.d_h_add.copy()
-                # check_add_remove = self.gb.add_remove.copy()
-                if self.search:
-                    """et = time.perf_counter()
-                    print("before search stuff", (et - st), N_now, group_iter, group_len[group_iter])
-                    st = time.perf_counter()"""
-                    inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
-
-                    if self.xp == np:
-                        inds_fix = inds_fix.get()
-
-                    if self.xp.any(inds_fix):
-                        logp[keep_here[0][inds_fix]] = -np.inf
-                        delta_ll[keep_here[0][inds_fix]] = -1e300
-
-                    phase_change = self.gb.phase_angle
-                    new_points[keep_here, 3] -= phase_change
-                    points_add[:, 4] -= phase_change
-
-                    new_points[keep_here, 3] = new_points[keep_here, 3] % (2 * np.pi)
-                    points_add[:, 4] = points_add[:, 4] % (2 * np.pi)
-
-                    """
-                    check = self.gb.swap_likelihood_difference(points_remove,  points_add,  self.mgh.data_list,  self.mgh.psd_list,  data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, data_splits=self.mgh.gpu_splits, phase_marginalize=False, **waveform_kwargs_now)
-                    breakpoint()
-                    """
-                    """et = time.perf_counter()
-                    print("after search stuff", (et - st), N_now, group_iter, group_len[group_iter])
-                    st = time.perf_counter()"""
-
-                prev_logl = log_prob_tmp[(temp_inds_keep, walkers_inds_keep)]
-                logl = delta_ll + prev_logl
-
-                #if np.any(logl - np.load("noise_ll.npy").flatten() > 0.0):
-                #    breakpoint()    
-                #print("multi check: ", (logl - np.load("noise_ll.npy").flatten()))
-
-                prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
-
-                if np.any(np.isinf(prev_logp)):
-                    breakpoint()
-                
-                """prev_logp[inds_check] = prev_logp[inds_change]
-                logp[inds_check] = logp[inds_change] """
-                betas_in = self.xp.asarray(self.temperature_control.betas)[temp_inds_keep]
-                logP = self.compute_log_posterior(logl, logp, betas=betas_in)
-                
-                # TODO: check about prior = - inf
-                # takes care of tempering
-                prev_logP = self.compute_log_posterior(prev_logl, prev_logp, betas=betas_in)
-
-                # TODO: think about factors in tempering
-                lnpdiff = factors_here + logP - prev_logP
-
-                keep = lnpdiff > self.xp.asarray(self.xp.log(self.xp.random.rand(*logP.shape)))
-                """et = time.perf_counter()
-                print("keep determination", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                st = time.perf_counter()"""
-                if self.xp.any(keep):
-                    # for testing
-                    #keep = np.zeros_like(keep, dtype=bool)
-                    #keep[np.where((temp_inds_keep == 0) & (walkers_inds_keep == 1))] = True
-                    #keep[np.where((temp_inds_keep == 0) & (walkers_inds_keep == 1))[0][4]] = False
-                    #keep[np.isinf(logp)] = False
-                    # keep[inds_check] = keep[inds_change]
-
-                    # if gibbs sampling, this will say it is accepted if
-                    # any of the gibbs proposals were accepted
-
-                    accepted_here = keep.copy()
-
-                    # check freq overlap
-                    nleaves_max = state.branches["gb_fixed"].nleaves_max
-                    if nleaves_max > 1:
-                        check_f0 = self.xp.zeros((ntemps, nwalkers, nleaves_max))
-                        check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
-                        #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
-                        check_f0[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep][:, 1] / 1e3
-                        check_f0_old[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = old_points[keep][:, 1] / 1e3
-
-                        """check_f0_sorted = self.xp.sort(check_f0, axis=-1)
-                        inds_f0_sorted = self.xp.argsort(check_f0, axis=-1)
-
-                        check_f0_old_sorted = self.xp.sort(check_f0_old, axis=-1)
-                        inds_f0_old_sorted = self.xp.argsort(check_f0_old, axis=-1)
-                        """
-                        check_f0_both = self.xp.concatenate([check_f0, check_f0_old], axis=-1)
-                        check_f0_both_sorted = self.xp.sort(check_f0_both, axis=-1)
-                        inds_f0_both_sorted = self.xp.argsort(check_f0_both, axis=-1)
-
-                        N_vals_both_sorted = self.xp.take_along_axis(N_vals_2_times, inds_f0_both_sorted, axis=-1)
-
-                        diff_f_1 = (check_f0_both_sorted[:, :, 1:] - check_f0_both_sorted[:, :, :-1]) * (((inds_f0_both_sorted[:, :, 1:] % nleaves_max) != (inds_f0_both_sorted[:, :, :-1] % nleaves_max)) & (check_f0_both_sorted[:, :, 1:] != 0.0) & (check_f0_both_sorted[:, :, :-1] != 0.0))
-                        diff_f_2 = check_f0_both_sorted[:, :, 2:] - check_f0_both_sorted[:, :, :-2]
-
-                        N_check_both_1 = N_vals_both_sorted[:, :, 1:]
-
-                        fix_1 = self.xp.zeros_like(check_f0_both_sorted, dtype=bool)
-                        fix_1[:, :, 1:] = ((diff_f_1 / self.df).astype(int) < N_check_both_1) & (diff_f_1 != 0.0)
-                        fix_1[:, :, :-1] = fix_1[:, :, :-1] | (((diff_f_1 / self.df).astype(int) < N_check_both_1) & (diff_f_1 != 0.0))
-
-                        diff_f_2 = (check_f0_both_sorted[:, :, 2:] - check_f0_both_sorted[:, :, :-2]) * (((inds_f0_both_sorted[:, :, 2:] % nleaves_max) != (inds_f0_both_sorted[:, :, :-2] % nleaves_max)) & (check_f0_both_sorted[:, :, 2:] != 0.0) & (check_f0_both_sorted[:, :, :-2] != 0.0))
-
-                        N_check_both_2 = N_vals_both_sorted[:, :, 2:]
-
-                        fix_2 = self.xp.zeros_like(check_f0_both_sorted, dtype=bool)
-                        fix_2[:, :, 2:] = ((diff_f_2 / self.df).astype(int) < N_check_both_2) & (diff_f_2 != 0.0)
-                        fix_2[:, :, :-2] = fix_2[:, :, :-2] | (((diff_f_2 / self.df).astype(int) < N_check_both_2) & (diff_f_2 != 0.0))
-
-                        fix_all = (fix_1 | fix_2)
-
-                        if self.xp.any(fix_all):
-                            # breakpoint()
-                            temp_inds_fix, walkers_inds_fix, leaf_map_inds_fix = self.xp.where(fix_all)
-                            leaf_inds_fix = inds_f0_both_sorted[(temp_inds_fix, walkers_inds_fix, leaf_map_inds_fix)] % nleaves_max
-
-                            bad_check_val = np.unique((temp_inds_fix * 1e12 + walkers_inds_fix * 1e6 + leaf_inds_fix).astype(int))
-                               
-                            # we are going to make this proposal not accepted
-                            # this so far is only ever an accepted-level problem at high temps 
-                            # where large frequency jumps can happen
-                            check_val = (temp_inds_keep[keep] * 1e12 + walkers_inds_keep[keep] * 1e6 + leaf_inds_keep[keep]).astype(int)
-                            fix_keep = self.xp.arange(len(keep))[keep][self.xp.in1d(check_val, bad_check_val)]
-                
-                            keep[fix_keep] = False
-
-                    """et = time.perf_counter()
-                    print("second check", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                    st = time.perf_counter()"""
-                    gb_fixed_coords[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep]
-
-                    # parameters were run for all ~np.isinf(logp), need to adjust for those not accepted
-                    keep_from_before = (keep * (~np.isinf(logp)))[keep_here]
-                    try:
-                        group_index = data_index[keep_from_before]
-                    except IndexError:
-                        breakpoint()
-
-                    waveform_kwargs_fill = waveform_kwargs_now.copy()
-
-                    waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
-
-                    """ll_check_d_h_add = self.gb.get_ll(
-                        points_add.T, 
-                        data_minus_template.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        psd.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        data_index=data_index, 
-                        noise_index=noise_index, 
-                        **self.waveform_kwargs
-                    )
-
-                    h_h_d_h_add = self.gb.h_h.copy()
-                    d_h_d_h_add = self.gb.d_h.copy()
-
-                    ll_check_d_h_remove = self.gb.get_ll(
-                        points_remove.T, 
-                        data_minus_template.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        psd.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        data_index=data_index, 
-                        noise_index=noise_index, 
-                        **self.waveform_kwargs
-                    )
-
-                    h_h_d_h_remove = self.gb.h_h.copy()
-                    d_h_d_h_remove = self.gb.d_h.copy()"""
-
-                    #tmp = data_minus_template.copy()
-                    # remove templates by multiplying by "adding them to" d - h + remove =  = d - (h - remove)
-                    """et = time.perf_counter()
-                    print("before generate", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                    st = time.perf_counter()"""
-                    
-                    N_vals_generate = N_vals[group_here][keep]
-                    N_vals_generate_in = self.xp.concatenate([
-                        N_vals_generate, N_vals_generate
-                    ])
-                    points_for_generate = self.xp.concatenate([
-                        points_remove[keep_from_before],  # factor = +1
-                        points_add[keep_from_before]  # factors = -1
-                    ])
-
-                    num_add = len(points_remove[keep_from_before])
-
-                    # check number of points for the waveform to be added
-                    """f_N_check = points_for_generate[num_add:, 1].get()
-                    N_check = get_N(np.full_like(f_N_check, 1e-30), f_N_check, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"])
-
-                    fix_because_of_N = False
-                    if np.any(N_check != N_vals_generate_in[num_add:].get()):
-                        fix_because_of_N = True
-                        inds_fix_here = self.xp.where(self.xp.asarray(N_check) != N_vals_generate_in[num_add:])[0]
-                        N_vals_generate_in[inds_fix_here + num_add] = self.xp.asarray(N_check)[inds_fix_here]"""
-
-                    
-                    factors_multiply_generate = self.xp.ones(2 * num_add)
-                    factors_multiply_generate[num_add:] = -1.0  # second half is adding
-                    group_index_add = self.xp.concatenate(
-                        [
-                            group_index,
-                            group_index,
-                        ], dtype=self.xp.int32
-                    )
-
-                    self.gb.generate_global_template(
-                        points_for_generate,
-                        group_index_add, 
-                        self.mgh.data_list, 
-                        N=N_vals_generate_in,
-                        data_length=self.data_length, 
-                        data_splits=self.mgh.gpu_splits, 
-                        factors=factors_multiply_generate,
-                        **waveform_kwargs_fill
-                    )
-
-                    #waveform_kwargs_fill["use_c_implementation"] = False
-                    #self.gb.generate_global_template(points_remove[keep_from_before],
-                    #    group_index, tmp.reshape((-1,) + tmp.shape[2:]), **waveform_kwargs_fill
-                    #)
-
-                    """self.gb.d_d = self.xp.asarray(-2 * state.log_prob.flatten())
-                    ll_check_add = self.gb.get_ll(
-                        points_add.T, 
-                        data_minus_template.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        psd.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        data_index=data_index, 
-                        noise_index=noise_index, 
-                        **self.waveform_kwargs
-                    )
-
-                    h_h_add = self.gb.h_h.copy()
-                    d_h_add = self.gb.d_h.copy()
-
-                    ll_check_remove = self.gb.get_ll(
-                        points_remove.T, 
-                        data_minus_template.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        psd.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
-                        data_index=data_index, 
-                        noise_index=noise_index, 
-                        **self.waveform_kwargs
-                    )
-                    
-                    h_h_remove = self.gb.h_h.copy()
-                    d_h_remove = self.gb.d_h.copy()
-                    breakpoint()"""
-
-                    # add templates by adding to  -(-(d - h) + add) = d - h - add = d - (h + add)
-                    #self.mgh.multiply_data(-1.)
-                    #self.gb.generate_global_template(points_add[keep_from_before],
-                    #    group_index, self.mgh.data_list, data_length=self.data_length, #data_splits=self.mgh.gpu_splits, **waveform_kwargs_fill
-                    #)
-                    #self.mgh.multiply_data(-1.)
-                    """et = time.perf_counter()
-                    print("after generate", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                    st = time.perf_counter()"""
-                    # update likelihoods
-
-                    # set unaccepted differences to zero
-                    accepted_delta_ll = delta_ll * (keep)
-                    accepted_delta_lp = (logp - prev_logp)
-                    accepted_delta_lp[self.xp.isinf(accepted_delta_lp)] = 0.0
-                    logl_change_contribution = np.zeros_like(new_state.log_prob)
-                    logp_change_contribution = np.zeros_like(new_state.log_prior)
-                    try:
-                        in_tuple = (accepted_delta_ll[keep].get(), accepted_delta_lp[keep].get(), temp_inds_keep[keep].get(), walkers_inds_keep[keep].get())
-                    except AttributeError:
-                        in_tuple = (accepted_delta_ll[keep], accepted_delta_lp[keep], temp_inds_keep[keep], walkers_inds_keep[keep])
-                    for i, (dll, dlp, ti, wi) in enumerate(zip(*in_tuple)):
-                        logl_change_contribution[ti, wi] += dll
-                        logp_change_contribution[ti, wi] += dlp
-
-                    log_prob_tmp += self.xp.asarray(logl_change_contribution)
-                    log_prior_tmp += self.xp.asarray(logp_change_contribution)
-
-                    """if self.time > 190:
-                        ll_after = self.mgh.get_ll(use_cpu=False).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-                        print("CHECK", np.abs(log_prob_tmp.get() - ll_after).max())
-                        if np.abs(log_prob_tmp.get() - ll_after).max()  > 1e-2:
-                            breakpoint()"""
-
-                    """if fix_because_of_N:
-                        new_log_prob_tmp = self.mgh.get_ll().flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-                        old_log_prob_tmp = log_prob_tmp.copy()
-                        log_prob_tmp = self.xp.asarray(new_log_prob_tmp)
-                        main_gpu = self.xp.cuda.runtime.getDevice()
-                        for gpu in self.mgh.gpus:
-                            with self.xp.cuda.device.Device(gpu):
-                                self.xp.cuda.runtime.deviceSynchronize()
-                                mempool = self.xp.get_default_memory_pool()
-                                mempool.free_all_blocks()
-                                self.xp.cuda.runtime.deviceSynchronize()
-
-                        self.xp.cuda.runtime.setDevice(main_gpu)"""
-                        
-                    """et = time.perf_counter()
-                    print("bookkeeping", (et - st), group_iter, group_len[list(unique_groups).index(group_iter)])
-                    st = time.perf_counter()"""
-
-                    """
-                    data_minus_template_c = np.concatenate(
-                        [
-                            tmp.get().reshape(ntemps, nwalkers, 1, self.data_length) for tmp in data_minus_template_in_swap
-                        ],
-                        axis=2
-                    )
-
-                    psd_c = np.concatenate(
-                        [
-                            tmp.get().reshape(ntemps, nwalkers, 1, self.data_length) for tmp in psd_in_swap
-                        ],
-                        axis=2
-                    )
-
-                    ll_after = (-1/2 * 4 * self.df * np.sum(data_minus_template_c.conj() * data_minus_template_c / psd_c, axis=(2, 3)))
-
-                    if np.abs(log_prob_tmp.get() - ll_after).max() > 1e-6:
-                        breakpoint()
-                    
-                    
-                    """
-
-                    #if np.any(np.abs(new_state.log_prob - (check.get() + self.noise_ll))[:3].max() > 1.0):
-                    #    breakpoint()
-
-                    #if np.any(np.abs(new_state.log_prob - (check.get() + self.noise_ll))[3:].max() > 100.0):
-                    #    breakpoint()
-                    """
-                    check_logl = model.compute_log_prob_fn(new_state.branches_coords, inds=new_state.branches_inds, branch_supps=new_state.branches_supplimental, supps=new_state.supplimental)
-                    sigll = model.log_prob_fn.f.signal_ll.copy()
-                    check_logl2 = model.compute_log_prob_fn(state.branches_coords, inds=state.branches_inds, branch_supps=state.branches_supplimental, supps=state.supplimental)
-                    breakpoint()
-                    """
+                print("before delta ll", (et - st), group_iter, group_len[group_iter])"""
+                self.run_swap_ll(gb_fixed_coords, old_points, new_points, group_here, N_vals[group_here], waveform_kwargs_now, factors_here, log_prob_tmp, log_prior_tmp)
+               
         # st = time.perf_counter()
         try:
             new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
@@ -802,8 +613,212 @@ class GBSpecialStretchMove(StretchMove):
 
         if self.temperature_control is not None:
             new_state, accepted = self.temperature_control.temper_comps(new_state, accepted)
+            
+            """# new_state, accepted = self.temperature_control.temper_comps(new_state, accepted)
+            self.swaps_accepted = np.zeros(ntemps - 1)
+            self.attempted_swaps = np.zeros(ntemps - 1)
+            betas = self.temperature_control.betas
+            for i in range(ntemps - 1, 0, -1):
+                bi = betas[i]
+                bi1 = betas[i - 1]
+
+                dbeta = bi1 - bi
+
+                iperm = np.random.permutation(nwalkers)
+                i1perm = np.random.permutation(nwalkers)
+
+                # need to calculate switch likelihoods
+
+                coords_iperm = new_state.branches["gb_fixed"].coords[i, iperm]
+                coords_i1perm = new_state.branches["gb_fixed"].coords[i - 1, i1perm]
+
+                N_vals_iperm = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i, iperm]
+
+                N_vals_i1perm = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i - 1, i1perm]
+
+                f_test_i = coords_iperm[None, :, :, 1] / 1e3
+                f_test_2_i = coords_i1perm[None, :, :, 1] / 1e3
+                
+                fix_f_test_i = (np.abs(f_test_i - f_test_2_i) > (self.df * N_vals_iperm * 1.5))
+
+                if hasattr(self, "keep_bands") and self.keep_bands is not None:
+                    band_indices = np.searchsorted(self.band_edges, f_test_i.flatten()).reshape(f_test_i.shape) - 1
+                    keep_bands = self.keep_bands
+                    assert isinstance(keep_bands, np.ndarray)
+                    fix_f_test_i[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
+
+
+                groups = get_groups_from_band_structure(f_test_i, self.band_edges, f0_2=f_test_2_i, xp=np, num_groups_base=3, fix_f_test=fix_f_test_i)
+
+                unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
+
+                # remove information about the bad "-1" group
+                for check_val in [-1, -2]:
+                    group_len = np.delete(group_len, unique_groups == check_val)
+                    unique_groups = np.delete(unique_groups, unique_groups == check_val)
+
+                # needs to be max because some values may be missing due to evens and odds
+                num_groups = unique_groups.max().item() + 1
+
+                for group_iter in range(num_groups):
+                    # st = time.perf_counter()
+                    # sometimes you will have an extra odd or even group only
+                    # the group_iter may not match the actual running group number in this case
+                    if group_iter not in groups:
+                        continue
+                        
+                    group = [grp[i:i+1][groups == group_iter].flatten() for grp in group_temp_finder]
+
+                    # st = time.perf_counter()
+                    temp_inds_back, walkers_inds_back, leaf_inds = [self.xp.asarray(grp) for grp in group] 
+
+                    temp_inds_i = temp_inds_back.copy()
+                    walkers_inds_i = walkers_inds_back.copy()
+
+                    temp_inds_i1 = temp_inds_back.copy()
+                    walkers_inds_i1 = walkers_inds_back.copy()
+
+                    temp_inds_i[:] = i
+                    walkers_inds_i[:] = self.xp.asarray(iperm)[walkers_inds_back]
+
+                    temp_inds_i1[:] = i - 1
+                    walkers_inds_i1[:] = self.xp.asarray(i1perm)[walkers_inds_back]
+
+                    group_here_i = (temp_inds_i, walkers_inds_i, leaf_inds)
+
+                    group_here_i1 = (temp_inds_i1, walkers_inds_i1, leaf_inds)
+
+                    # factors_here = factors[group_here]
+                    old_points = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i]
+                    new_points = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
+
+                    N_vals_here_i = N_vals[group_here_i]
+                    
+                    log_prob_tmp = self.xp.asarray(new_state.log_prob.copy())
+                    log_prior_tmp = self.xp.asarray(new_state.log_prior.copy())
+
+                    delta_logl_i = self.run_swap_ll(None, old_points, new_points, group_here_i, N_vals_here_i, waveform_kwargs_now, None, log_prob_tmp, log_prior_tmp, return_at_logl=True)
+
+                    # factors_here = factors[group_here]
+                    old_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
+                    new_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i]
+
+                    N_vals_here_i1 = N_vals[group_here_i1]
+                    
+                    log_prob_tmp[:] = self.xp.asarray(new_state.log_prob.copy())
+                    log_prior_tmp[:] = self.xp.asarray(new_state.log_prior.copy())
+
+                    delta_logl_i1 = self.run_swap_ll(None, old_points, new_points, group_here_i1, N_vals_here_i1, waveform_kwargs_now, None, log_prob_tmp, log_prior_tmp, return_at_logl=True)
+
+                    paccept = dbeta * 1. / 2. * (delta_logl_i - delta_logl_i1)
+                    raccept = np.log(np.random.uniform(size=paccept.shape[0]))
+
+                    # How many swaps were accepted?
+                    sel = paccept > self.xp.asarray(raccept)
+
+                    inds_i_swap = tuple([tmp[sel].get() for tmp in list(group_here_i)])
+                    inds_i1_swap = tuple([tmp[sel].get() for tmp in list(group_here_i1)])
+                    
+                    group_index_i = self.xp.asarray(
+                        self.mgh.get_mapped_indices(
+                            temp_inds_i[sel] + nwalkers * walkers_inds_i[sel]
+                        )
+                    ).astype(self.xp.int32)
+
+                    group_index_i1 = self.xp.asarray(
+                        self.mgh.get_mapped_indices(
+                            temp_inds_i1[sel] + nwalkers * walkers_inds_i1[sel]
+                        )
+                    ).astype(self.xp.int32)
+
+                    N_vals_i = N_vals[inds_i_swap]
+                    params_i = self.xp.asarray(new_state.branches["gb_fixed"].coords)[inds_i_swap]
+                    params_i1 = self.xp.asarray(new_state.branches["gb_fixed"].coords)[inds_i1_swap]
+
+                    params_generate = self.xp.concatenate([
+                        params_i,
+                        params_i1,
+                        params_i1,  # reverse of above
+                        params_i,
+                    ], axis=0)
+
+                    params_generate_in = self.parameter_transforms.both_transforms(params_generate, xp=self.xp)
+
+                    group_index_gen = self.xp.concatenate(
+                        [
+                            group_index_i,
+                            group_index_i,
+                            group_index_i1,
+                            group_index_i1
+                        ], dtype=self.xp.int32
+                    )
+
+                    factors_multiply_generate = self.xp.concatenate([
+                        +1 * self.xp.ones_like(group_index_i, dtype=float),
+                        -1 * self.xp.ones_like(group_index_i, dtype=float),
+                        +1 * self.xp.ones_like(group_index_i, dtype=float),
+                        -1 * self.xp.ones_like(group_index_i, dtype=float),
+                    ])
+
+                    N_vals_in_gen = self.xp.concatenate([
+                        N_vals_i,
+                        N_vals_i,
+                        N_vals_i,
+                        N_vals_i
+                    ])
+                    
+                    waveform_kwargs_fill = waveform_kwargs_now.copy()
+                    waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
+
+                    self.gb.generate_global_template(
+                        params_generate_in,
+                        group_index_gen, 
+                        self.mgh.data_list, 
+                        N=N_vals_in_gen,
+                        data_length=self.data_length, 
+                        data_splits=self.mgh.gpu_splits, 
+                        factors=factors_multiply_generate,
+                        **waveform_kwargs_fill
+                    )
+
+                    # update likelihoods
+
+                    # set unaccepted differences to zero
+                    accepted_delta_ll_i = delta_logl_i * (sel)
+                    accepted_delta_ll_i1 = delta_logl_i1 * (sel)
+
+                    logl_change_contribution = np.zeros_like(log_prob_tmp.get())
+                    try:
+                        in_tuple = (accepted_delta_ll_i[sel].get(), accepted_delta_ll_i1[sel].get(), temp_inds_i[sel].get(), temp_inds_i1[sel].get(), walkers_inds_i[sel].get(), walkers_inds_i[sel].get())
+                    except AttributeError:
+                        in_tuple = (accepted_delta_ll_i[sel], accepted_delta_ll_i1[sel], temp_inds_i[sel], temp_inds_i1[sel], walkers_inds_i[sel], walkers_inds_i[sel])
+                    for j, (dlli, dlli1, ti, ti1, wi, wi1) in enumerate(zip(*in_tuple)):
+                        logl_change_contribution[ti, wi] += dlli
+                        logl_change_contribution[ti1, wi1] += dlli1
+
+                    log_prob_tmp[:] += self.xp.asarray(logl_change_contribution)
+
+                    tmp_swap = new_state.branches["gb_fixed"].coords[inds_i_swap]
+                    new_state.branches["gb_fixed"].coords[inds_i_swap] = new_state.branches["gb_fixed"].coords[inds_i1_swap]
+
+                    new_state.branches["gb_fixed"].coords[inds_i1_swap] = tmp_swap
+
+                    tmp_swap = new_state.branches["gb_fixed"].branch_supplimental[inds_i_swap]
+
+                    new_state.branches["gb_fixed"].branch_supplimental[inds_i_swap] = new_state.branches["gb_fixed"].branch_supplimental[inds_i1_swap]
+
+                    new_state.branches["gb_fixed"].branch_supplimental[inds_i1_swap] = tmp_swap
+
+                    # inds are all non-zero
+                    self.swaps_accepted[i - 1] += np.sum(sel)
+                    self.attempted_swaps[i - 1] += sel.shape[0]
+
+                    ll_after = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+                    breakpoint()
+                    """
         else:
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
+        
         
         if np.any(new_state.log_prob > 1e10):
             breakpoint()

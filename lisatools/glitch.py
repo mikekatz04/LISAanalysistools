@@ -36,7 +36,12 @@ def DiracDelta(x, xp=None):
 
     return out
 
-def tdi_glitch_XYZ1(t_in, T=8.3, tau_1=480.0, tau_2=100.0, Deltav=1e-12, t0=600.0, mtm=1.982, xp=None):
+tau_2_default = 5585.708541201614
+Deltav_default = 1.1079114425597559*10**(-9)
+    
+def tdi_glitch_XYZ1(t_in, T=8.3, tau_2=tau_2_default, Deltav=Deltav_default, t0=600, mtm=1.982, xp=None):    
+
+#def tdi_glitch_XYZ1(t_in, T=8.3, tau_1=480.0, tau_2=100.0, Deltav=1e-12, t0=600.0, mtm=1.982, xp=None):
 
     if xp is None:
         xp = np
@@ -46,18 +51,12 @@ def tdi_glitch_XYZ1(t_in, T=8.3, tau_1=480.0, tau_2=100.0, Deltav=1e-12, t0=600.
     run = ~(xp.isinf(xp.exp((-t_in + t0))) | xp.isnan(xp.exp((-t_in + t0))))
 
     t = t_in[run]
-    tdiX1link12 = (
-        ((mtm*Deltav*(tau_1*(-t + t0 + tau_1 - xp.exp((-t + t0)/tau_1)*tau_1) + tau_2*(t - t0 + (-1 + xp.exp((-t + t0)/tau_2))*tau_2))*DiracDelta(t - t0))/(-tau_1 + tau_2) + 
-          (mtm*Deltav*((-1 + xp.exp((-t + t0)/tau_1))*tau_1 + tau_2 - xp.exp((-t + t0)/tau_2)*tau_2)*HeavisideTheta(t - t0))/(-tau_1 + tau_2))/co - 
-       ((mtm*Deltav*(tau_1*(-t - 4*T + t0 + tau_1 - xp.exp((-t - 4*T + t0)/tau_1)*tau_1) + tau_2*(t + 4*T - t0 + (-1 + xp.exp((-t - 4*T + t0)/tau_2))*tau_2))*DiracDelta(t + 4*T - t0))/(-tau_1 + tau_2) + 
-          (mtm*Deltav*((-1 + xp.exp((-t - 4*T + t0)/tau_1))*tau_1 + tau_2 - xp.exp((-t - 4*T + t0)/tau_2)*tau_2)*HeavisideTheta(t + 4*T - t0))/(-tau_1 + tau_2))/co
-    )
 
+    tdiX1link12 =  (mtm*Deltav*(t - t0 - 2*tau_2 + xp.exp((-t + t0)/tau_2)*(t - t0 + 2*tau_2))*DiracDelta(t - t0) +  mtm*Deltav*(1 + (xp.exp((-t + t0)/tau_2)*(-t + t0 - tau_2))/tau_2)*HeavisideTheta(t - t0))/co - (mtm*Deltav*(t + 4*T - t0 - 2*tau_2 + xp.exp((-t - 4*T + t0)/tau_2)*(t + 4*T - t0 + 2*tau_2))*DiracDelta(t + 4*T - t0) +  mtm*Deltav*(1 - (xp.exp((-t - 4*T + t0)/tau_2)*(t + 4*T - t0 + tau_2))/tau_2)*HeavisideTheta(t + 4*T - t0))/co
     
-    tdiY1link12 = (
-        (-2*((mtm*Deltav*(-(tau_1*(t + T - t0 + (-1 + xp.exp(-(t + T - t0)/tau_1))*tau_1)) + tau_2*(t + T - t0 + (-1 + xp.exp(-(t + T - t0)/tau_2))*tau_2))*DiracDelta(t + T - t0))/(-tau_1 + tau_2) + 
-        (mtm*Deltav*((-1 + xp.exp(-(t + T - t0)/tau_1))*tau_1 + tau_2 - tau_2/xp.exp((t + T - t0)/tau_2))*HeavisideTheta(t + T - t0))/(-tau_1 + tau_2)))/co + (2*((mtm*Deltav*(tau_1*(-t - 3*T + t0 + tau_1 - xp.exp((-t - 3*T + t0)/tau_1)*tau_1) + tau_2*(t + 3*T - t0 + (-1 + xp.exp((-t - 3*T + t0)/tau_2))*tau_2))*DiracDelta(t + 3*T - t0))/        (-tau_1 + tau_2) + (mtm*Deltav*((-1 + xp.exp((-t - 3*T + t0)/tau_1))*tau_1 + tau_2 - xp.exp((-t - 3*T + t0)/tau_2)*tau_2)*HeavisideTheta(t + 3*T - t0))/(-tau_1 + tau_2)))/co
-    )
+
+
+    tdiY1link12 =    (-2*(mtm*Deltav*(t + T - t0 - 2*tau_2 + (t + T - t0 + 2*tau_2)/xp.exp((t + T - t0)/tau_2))*DiracDelta(t + T - t0) + mtm*Deltav*(1 - (t + T - t0 + tau_2)/(xp.exp((t + T - t0)/tau_2)*tau_2))*HeavisideTheta(t + T - t0)))/co + (2*(mtm*Deltav*(t + 3*T - t0 - 2*tau_2 + xp.exp((-t - 3*T + t0)/tau_2)*(t + 3*T - t0 + 2*tau_2))*DiracDelta(t + 3*T - t0) +  mtm*Deltav*(1 - (xp.exp((-t - 3*T + t0)/tau_2)*(t + 3*T - t0 + tau_2))/tau_2)*HeavisideTheta(t + 3*T - t0)))/co
 
     tdiZ1link12 = xp.zeros_like(tdiX1link12)
 
@@ -66,6 +65,7 @@ def tdi_glitch_XYZ1(t_in, T=8.3, tau_1=480.0, tau_2=100.0, Deltav=1e-12, t0=600.
     out[2, run] = tdiZ1link12
 
     return out
+
 
 
 if __name__ == "__main__":

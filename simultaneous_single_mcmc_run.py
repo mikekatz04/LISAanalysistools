@@ -66,7 +66,7 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
     out_ll = []
     out_snr = []
     out_params = []
-    print("start gen")
+    # print("start gen")
     for i in range(num_rounds):
         params = generating_priors["gb"].rvs(size=(num_per, 1)).reshape(num_per, -1)
         
@@ -129,7 +129,7 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
     )
 
     et = time.perf_counter()
-    print("end gen", et - st)
+    # print("end gen", et - st)
 
     factor = 1e-5
     cov = np.ones(8) * 1e-3
@@ -221,9 +221,9 @@ def run_single_band_search(process_i, gpu_i, sub_band_i, nwalkers_prep, ntemps_p
 
     nsteps_prep = 50000
     progress = False  # True if process_i == 2 else False
-    print(f"start - process: {process_i}, sub band: {sub_band_i}, gpu: {gpu_i}")
+    # print(f"start - process: {process_i}, sub band: {sub_band_i}, gpu: {gpu_i}")
     out = sampler_prep.run_mcmc(prep_state, nsteps_prep, burn=100, progress=progress, thin_by=100)
-    print(f"end - process: {process_i}, sub band: {sub_band_i}, gpu: {gpu_i}")
+    # print(f"end - process: {process_i}, sub band: {sub_band_i}, gpu: {gpu_i}")
     lp = sampler_prep.get_log_prob()
     coords = sampler_prep.get_chain()["gb"]
     keep = np.where(lp == lp.max())

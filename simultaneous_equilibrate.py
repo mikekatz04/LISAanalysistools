@@ -56,7 +56,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
 
     # for testing
     # search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
-
+    search_f_bin_lims = propose_f_bin_lims
     num_sub_bands = len(search_f_bin_lims)
 
     xp.cuda.runtime.setDevice(gpus[0])
@@ -112,15 +112,15 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
         current_iteration = 0
         while True:
             time.sleep(0.1)
-            while current_found_coords_for_starting_mix_file not in os.listdir() or np.load(current_found_coords_for_starting_mix_file).shape[0] < number_needed:
-                time.sleep(0.25)
-
-            # to prevent ValueError on read
             max_tries_ValueError = 100
             current_tries_ValueError = 0
             working = False
             while not working:
                 try:
+                    while current_found_coords_for_starting_mix_file not in os.listdir() or np.load(current_found_coords_for_starting_mix_file).shape[0] < number_needed:
+                        time.sleep(0.25)
+
+                    # to prevent ValueError on read
                     current_found_coords_for_starting_mix = np.load(current_found_coords_for_starting_mix_file)
                     working = True
                 except ValueError as e:
@@ -183,6 +183,29 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                     with open(current_save_state_file, "rb") as fp_out:
                         last_sample = pickle.load(fp_out)
                     old_coords = last_sample.branches["gb_fixed"].coords
+
+                    nwalkers_old = old_coords.shape[1]
+                    if nwalkers_old < nwalkers:
+                        nwalkers_added = nwalkers - nwalkers_old
+
+                        old_coords_before = old_coords.copy()
+                        old_coords = np.zeros((old_coords_before.shape[0], nwalkers) + old_coords_before.shape[2:],)
+                        old_coords[:, :nwalkers_old] = old_coords_before[:]
+                        
+                        nwalkers_added_temp = min([nwalkers_added, nwalkers_old])
+                        total_added = 0
+                        while total_added < nwalkers_added:
+                            start_ind =  nwalkers_old + total_added
+                            end_ind = start_ind + nwalkers_added_temp
+                            assert end_ind - start_ind >= 0
+                            old_coords[:, start_ind:end_ind] = old_coords_before[:, :end_ind - start_ind]
+
+                            total_added += nwalkers_added_temp
+                            total_left = nwalkers_added - total_added
+                            nwalkers_added_temp = min([total_left, nwalkers_old])
+
+                    elif nwalkers_old > nwalkers:
+                        old_coords = old_coords[:nwalkers].copy()
                 
                     ntemps_old = old_coords.shape[0]
                     if ntemps_old < ntemps:
@@ -279,7 +302,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                 gb_kwargs = dict(
                     waveform_kwargs=waveform_kwargs,
                     parameter_transforms=transform_fn,
-                    search=True,
+                    search=False,  # True,
                     search_samples=None,  # out_params,
                     search_snrs=None,  # out_snr,
                     search_snr_lim=snr_break,  # 50.0,
@@ -307,6 +330,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                     del like_mix
                     del sampler_mix
                     del stop_converge_mix
+                    del backend_here
 
                 except NameError:
                     pass
@@ -346,20 +370,26 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                     )
                 ))
 
-                moves_mix_going.keep_bands = band_inds_still_going
+                # moves_mix_going.keep_bands = band_inds_still_going
 
                 bands_old = np.delete(np.arange(num_sub_bands), band_inds_still_going)
 
-                moves_mix_old.keep_bands = bands_old
-
+                # moves_mix_old.keep_bands = bands_old
                 # add the other
+
+                # TODO: check where N_vals is set across temperatures, make sure it is the the same for all leaves in gb_fixed
 
                 # stop_converge_mix = SearchConvergeStopping2(n_iters=7, diff=0.5, verbose=True, iter_back_check=7)
 
                 moves_mix_old.gb.gpus = gpus
                 moves_mix_going.gb.gpus = gpus
 
-                moves_mix = [(moves_mix_going, 0.95), (moves_mix_old, 0.05)]
+                moves_mix = moves_mix_going  # [(moves_mix_going, 0.95), (moves_mix_old, 0.05)]
+
+                backend_here = f"test_full_band_posterior_{current_iteration}.h5"
+
+                if backend_here in os.listdir():
+                    os.remove(backend_here)
 
                 like_mix = BasicResidualMGHLikelihood(mgh)
 
@@ -371,27 +401,26 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                     betas = make_ladder(nleaves_max_fix * ndim, ntemps)
 
                 sampler_mix = EnsembleSampler(
-                        nwalkers,
-                        [ndim],  # assumes ndim_max
-                        like_mix,
-                        priors,
-                        tempering_kwargs={"betas": betas},
-                        nbranches=1,
-                        nleaves_max=[nleaves_max_fix],
-                        moves=moves_mix,
-                        kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
-                        backend=None,
-                        vectorize=True,
-                        periodic=periodic,  # TODO: add periodic to proposals
-                        branch_names=["gb_fixed"],
-                        stopping_fn=None,  # stop_converge_mix,
-                        stopping_iterations=-1,
-                        provide_groups=True,
-                        provide_supplimental=True,
-                    )
+                    nwalkers,
+                    [ndim],  # assumes ndim_max
+                    like_mix,
+                    priors,
+                    tempering_kwargs={"betas": betas},
+                    nbranches=1,
+                    nleaves_max=[nleaves_max_fix],
+                    moves=moves_mix,
+                    kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
+                    backend=backend_here,
+                    vectorize=True,
+                    periodic=periodic,  # TODO: add periodic to proposals
+                    branch_names=["gb_fixed"],
+                    stopping_fn=None,  # stop_converge_mix,
+                    stopping_iterations=-1,
+                    provide_groups=True,
+                    provide_supplimental=True,
+                )
 
                 # equlibrating likelihood check: -4293090.6483655665,
-                
                 out = state_mix
                 old_number = nleaves_max_fix
                 starting_new = True
@@ -430,12 +459,12 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
                         xp.cuda.runtime.deviceSynchronize()
                 xp.cuda.runtime.setDevice(main_gpu)
 
-            nsteps_mix = 50
+            nsteps_mix = 200
 
             print("Starting mix ll best:", out.log_prob.max(axis=-1))
             mempool.free_all_blocks()
 
-            out = sampler_mix.run_mcmc(out, nsteps_mix, progress=True, thin_by=1, save_first_state=False, store=False)
+            out = sampler_mix.run_mcmc(out, nsteps_mix, progress=True, thin_by=50, save_first_state=False, store=True)
 
             print("ending mix ll best:", out.log_prob.max(axis=-1))
 
@@ -509,6 +538,7 @@ def run_equilibrate(snr_lim, gpus_for_equilibrate, priors, search_f_bin_lims):
             print("DONE MIXING","num sources:", nleaves_max_fix)
             #if det_snr_finding < snr_break or len(current_snrs_search) > num_bin_pause:
             #    break
+            exit()
             current_iteration += 1
 
     

@@ -188,13 +188,20 @@ try:
                         
                         nleaves_max_from_mix = -1
                         
+                        first_iter = True
                         while nleaves_max_from_mix != nleaves_max_from_search:
                             with open(current_save_state_file, "rb") as fp_temp:
                                 last_state = pickle.load(fp_temp)
                             nleaves_max_from_mix = last_state.branches["gb_fixed"].nleaves[0, 0].item()
                             if nleaves_max_from_mix != nleaves_max_from_search:
-                                print("not yet", nleaves_max_from_mix, nleaves_max_from_search)
+                                if first_iter:
+                                    check_time = time.perf_counter()
+                                else:
+                                    if time.perf_counter() - check_time > 15. * 60.:
+                                        print("not yet", nleaves_max_from_mix, nleaves_max_from_search)
+                                        check_time = time.perf_counter()
                                 time.sleep(10.0)
+                            first_iter = False
 
                     if current_residuals_file_iterative_search in os.listdir():
                         data_minus_templates_for_para = np.load(current_residuals_file_iterative_search)
@@ -212,8 +219,8 @@ try:
                         # TODO: get startup time down on single runs
 
                         # if iter_i == 0:
-                        #    if jj < 1:
-                        #        continue
+                        #     if jj < 1:
+                        #         continue
                         #    if sub_band_i < 166 and sub_band_i != 158:
                         #        continue
 
@@ -257,7 +264,7 @@ try:
                                 with open(temp_files_dir + "/" + f"process_{current_index_update}/" + fp_transfer, "wb") as fp_tmp:
                                     pickle.dump((current_index_update, gpu_here) + para_arg, fp_tmp, protocol=pickle.HIGHEST_PROTOCOL)
 
-                                print(f"added sub: process: {current_index_update}, gpu: {gpu_here}, sub_band_i: {new_sub}")
+                                # print(f"added sub: process: {current_index_update}, gpu: {gpu_here}, sub_band_i: {new_sub}")
 
                             current_subs[current_index_update] = new_sub
 
@@ -293,7 +300,8 @@ try:
                                 
                                 current_subs[jjj] = None
 
-                                print(f"removed sub: process: {jjj}, gpu: {gpu_here}, sub_band_i: {sub_band_i}\ncurrent_subs: {current_subs}")
+                                # print(f"removed sub: process: {jjj}, gpu: {gpu_here}, sub_band_i: {sub_band_i}")
+                                # print(f"current_subs: {current_subs}")
 
                                 if opt_snr < snr_lim:
                                     print("found source too low in optimal SNR: ", det_snr, opt_snr, f"sub band: {sub_band_i + 1} out of {len(lower_f0)}")
