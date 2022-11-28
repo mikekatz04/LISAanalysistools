@@ -284,7 +284,7 @@ class GetLastGBState:
         return state
 
 
-class RelBinUpdate:
+class HeterodynedUpdate:
     def __init__(self, update_kwargs, set_d_d_zero=False):
         self.update_kwargs = update_kwargs
         self.set_d_d_zero = set_d_d_zero
@@ -304,12 +304,12 @@ class RelBinUpdate:
             best, copy=True
         )
 
-        sampler.log_prob_fn.f.template_model._init_rel_bin_info(
+        sampler.log_prob_fn.f.template_model.init_heterodyne_info(
             best_full, **self.update_kwargs
         )
 
         if self.set_d_d_zero:
-            sampler.log_prob_fn.f.template_model.base_d_d = 0.0
+            sampler.log_prob_fn.f.template_model.reference_d_d = 0.0
 
         # TODO: make this a general update function in Eryn (?)
         # samples[inds_worst] = samples[inds_best].copy()

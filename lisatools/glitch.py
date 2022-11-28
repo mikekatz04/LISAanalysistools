@@ -38,6 +38,9 @@ def DiracDelta(x, xp=None):
 
 tau_2_default = 5585.708541201614
 Deltav_default = 1.1079114425597559*10**(-9)
+
+tau_2_default = 1.9394221536001746
+Deltav_default = 2.22616837*10**(-11)
     
 def tdi_glitch_XYZ1(t_in, T=8.3, tau_2=tau_2_default, Deltav=Deltav_default, t0=600, mtm=1.982, xp=None):    
 
