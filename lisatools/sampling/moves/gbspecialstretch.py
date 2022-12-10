@@ -119,7 +119,7 @@ class GBSpecialStretchMove(StretchMove):
 
         self.take_max_ll = take_max_ll     
 
-    def run_swap_ll(self, gb_fixed_coords, old_points, new_points, group_here, N_vals, waveform_kwargs_now, factors_here, log_prob_tmp, log_prior_tmp, return_at_logl=False):
+    def run_swap_ll(self, gb_fixed_coords, old_points, new_points, group_here, N_vals, waveform_kwargs_now, factors_here, log_like_tmp, log_prior_tmp, return_at_logl=False):
 
         temp_inds_keep, walkers_inds_keep, leaf_inds_keep = group_here
 
@@ -196,7 +196,7 @@ class GBSpecialStretchMove(StretchMove):
             print("after search stuff", (et - st), N_now, group_iter, group_len[group_iter])
             st = time.perf_counter()"""
 
-        prev_logl = log_prob_tmp[(temp_inds_keep, walkers_inds_keep)]
+        prev_logl = log_like_tmp[(temp_inds_keep, walkers_inds_keep)]
         logl = delta_ll + prev_logl
 
         if return_at_logl:
@@ -298,7 +298,7 @@ class GBSpecialStretchMove(StretchMove):
             accepted_delta_ll = delta_ll * (keep)
             accepted_delta_lp = (logp - prev_logp)
             accepted_delta_lp[self.xp.isinf(accepted_delta_lp)] = 0.0
-            logl_change_contribution = np.zeros_like(log_prob_tmp.get())
+            logl_change_contribution = np.zeros_like(log_like_tmp.get())
             logp_change_contribution = np.zeros_like(log_prior_tmp.get())
             try:
                 in_tuple = (accepted_delta_ll[keep].get(), accepted_delta_lp[keep].get(), temp_inds_keep[keep].get(), walkers_inds_keep[keep].get())
@@ -308,7 +308,7 @@ class GBSpecialStretchMove(StretchMove):
                 logl_change_contribution[ti, wi] += dll
                 logp_change_contribution[ti, wi] += dlp
 
-            log_prob_tmp[:] += self.xp.asarray(logl_change_contribution)
+            log_like_tmp[:] += self.xp.asarray(logl_change_contribution)
             log_prior_tmp[:] += self.xp.asarray(logp_change_contribution)
 
             """et = time.perf_counter()
@@ -364,7 +364,7 @@ class GBSpecialStretchMove(StretchMove):
 
         gb_fixed_coords = self.xp.asarray(new_state.branches_coords["gb_fixed"].copy())
 
-        log_prob_tmp = self.xp.asarray(new_state.log_prob)
+        log_like_tmp = self.xp.asarray(new_state.log_like)
         log_prior_tmp = self.xp.asarray(new_state.log_prior)
       
         self.mempool.free_all_blocks()
@@ -477,16 +477,16 @@ class GBSpecialStretchMove(StretchMove):
 
                 """et = time.perf_counter()
                 print("before delta ll", (et - st), group_iter, group_len[group_iter])"""
-                self.run_swap_ll(gb_fixed_coords, old_points, new_points, group_here, N_vals[group_here], waveform_kwargs_now, factors_here, log_prob_tmp, log_prior_tmp)
+                self.run_swap_ll(gb_fixed_coords, old_points, new_points, group_here, N_vals[group_here], waveform_kwargs_now, factors_here, log_like_tmp, log_prior_tmp)
                
         # st = time.perf_counter()
         try:
             new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
-            new_state.log_prob[:] = log_prob_tmp.get()
+            new_state.log_like[:] = log_like_tmp.get()
             new_state.log_prior[:] = log_prior_tmp.get()
         except AttributeError:
             new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords
-            new_state.log_prob[:] = log_prob_tmp
+            new_state.log_like[:] = log_like_tmp
             new_state.log_prior[:] = log_prior_tmp
 
         self.mempool.free_all_blocks()
@@ -494,8 +494,8 @@ class GBSpecialStretchMove(StretchMove):
         if self.time % 200 == 0:
             ll_after = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
             
-            if np.abs(log_prob_tmp.get() - ll_after).max()  > 1e0:
-                if np.abs(log_prob_tmp.get() - ll_after).max() > 1e0:
+            if np.abs(log_like_tmp.get() - ll_after).max()  > 1e0:
+                if np.abs(log_like_tmp.get() - ll_after).max() > 1e0:
                     breakpoint()
                 breakpoint()
                 self.mgh.restore_base_injections()
@@ -527,7 +527,7 @@ class GBSpecialStretchMove(StretchMove):
                     self.mgh.multiply_data(-1.)
 
                 ll_after2 = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-                new_state.log_prob = ll_after2
+                new_state.log_like = ll_after2
                    
             """
             data_minus_template = self.xp.concatenate(
@@ -551,18 +551,18 @@ class GBSpecialStretchMove(StretchMove):
 
             lp_after = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds)
             
-            ll_after = (-1/2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / self.xp.asarray(self.psd), axis=(2, 3))).get()  # model.compute_log_prob_fn(new_state.branches_coords, inds=new_state.branches_inds, logp=lp_after, supps=new_state.supplimental, branch_supps=new_state.branches_supplimental)
+            ll_after = (-1/2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / self.xp.asarray(self.psd), axis=(2, 3))).get()  # model.compute_log_like_fn(new_state.branches_coords, inds=new_state.branches_inds, logp=lp_after, supps=new_state.supplimental, branch_supps=new_state.branches_supplimental)
             #check = -1/2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / self.xp.asarray(self.psd), axis=(2, 3))
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
-            #print(np.abs(new_state.log_prob - ll_after[0]).max())
+            #print(np.abs(new_state.log_like - ll_after[0]).max())
 
             # if any are even remotely getting to be different, reset all (small change)
-            if np.abs(new_state.log_prob - ll_after).max() > 1e-1:
-                if np.abs(new_state.log_prob - ll_after).max() > 1e0:
+            if np.abs(new_state.log_like - ll_after).max() > 1e-1:
+                if np.abs(new_state.log_like - ll_after).max() > 1e0:
                     self.greater_than_1e0 += 1
                     print("Greater:", self.greater_than_1e0)
                 breakpoint()
-                fix_here = np.abs(new_state.log_prob - ll_after) > 1e-6
+                fix_here = np.abs(new_state.log_like - ll_after) > 1e-6
                 data_minus_template_old = data_minus_template.copy()
                 data_minus_template = self.xp.zeros_like(data_minus_template_old)
                 data_minus_template[:] = self.xp.asarray(self.data)[None, None]
@@ -586,7 +586,7 @@ class GBSpecialStretchMove(StretchMove):
                 new_like = -1 / 2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / psd, axis=(2, 3)).real.get()
             
                 new_like += self.noise_ll
-                new_state.log_prob[:] = new_like.reshape(ntemps, nwalkers)
+                new_state.log_like[:] = new_like.reshape(ntemps, nwalkers)
 
             self.mempool.free_all_blocks()
             data_minus_template_in_swap = [data_minus_template[:,:, 0, :].flatten().copy(), data_minus_template[:,:, 1, :].flatten().copy()]
@@ -694,10 +694,10 @@ class GBSpecialStretchMove(StretchMove):
 
                     N_vals_here_i = N_vals[group_here_i]
                     
-                    log_prob_tmp = self.xp.asarray(new_state.log_prob.copy())
+                    log_like_tmp = self.xp.asarray(new_state.log_like.copy())
                     log_prior_tmp = self.xp.asarray(new_state.log_prior.copy())
 
-                    delta_logl_i = self.run_swap_ll(None, old_points, new_points, group_here_i, N_vals_here_i, waveform_kwargs_now, None, log_prob_tmp, log_prior_tmp, return_at_logl=True)
+                    delta_logl_i = self.run_swap_ll(None, old_points, new_points, group_here_i, N_vals_here_i, waveform_kwargs_now, None, log_like_tmp, log_prior_tmp, return_at_logl=True)
 
                     # factors_here = factors[group_here]
                     old_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
@@ -705,10 +705,10 @@ class GBSpecialStretchMove(StretchMove):
 
                     N_vals_here_i1 = N_vals[group_here_i1]
                     
-                    log_prob_tmp[:] = self.xp.asarray(new_state.log_prob.copy())
+                    log_like_tmp[:] = self.xp.asarray(new_state.log_like.copy())
                     log_prior_tmp[:] = self.xp.asarray(new_state.log_prior.copy())
 
-                    delta_logl_i1 = self.run_swap_ll(None, old_points, new_points, group_here_i1, N_vals_here_i1, waveform_kwargs_now, None, log_prob_tmp, log_prior_tmp, return_at_logl=True)
+                    delta_logl_i1 = self.run_swap_ll(None, old_points, new_points, group_here_i1, N_vals_here_i1, waveform_kwargs_now, None, log_like_tmp, log_prior_tmp, return_at_logl=True)
 
                     paccept = dbeta * 1. / 2. * (delta_logl_i - delta_logl_i1)
                     raccept = np.log(np.random.uniform(size=paccept.shape[0]))
@@ -787,7 +787,7 @@ class GBSpecialStretchMove(StretchMove):
                     accepted_delta_ll_i = delta_logl_i * (sel)
                     accepted_delta_ll_i1 = delta_logl_i1 * (sel)
 
-                    logl_change_contribution = np.zeros_like(log_prob_tmp.get())
+                    logl_change_contribution = np.zeros_like(log_like_tmp.get())
                     try:
                         in_tuple = (accepted_delta_ll_i[sel].get(), accepted_delta_ll_i1[sel].get(), temp_inds_i[sel].get(), temp_inds_i1[sel].get(), walkers_inds_i[sel].get(), walkers_inds_i[sel].get())
                     except AttributeError:
@@ -796,7 +796,7 @@ class GBSpecialStretchMove(StretchMove):
                         logl_change_contribution[ti, wi] += dlli
                         logl_change_contribution[ti1, wi1] += dlli1
 
-                    log_prob_tmp[:] += self.xp.asarray(logl_change_contribution)
+                    log_like_tmp[:] += self.xp.asarray(logl_change_contribution)
 
                     tmp_swap = new_state.branches["gb_fixed"].coords[inds_i_swap]
                     new_state.branches["gb_fixed"].coords[inds_i_swap] = new_state.branches["gb_fixed"].coords[inds_i1_swap]
@@ -820,7 +820,7 @@ class GBSpecialStretchMove(StretchMove):
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
         
         
-        if np.any(new_state.log_prob > 1e10):
+        if np.any(new_state.log_like > 1e10):
             breakpoint()
 
         self.time += 1

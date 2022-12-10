@@ -331,7 +331,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
             else:
                 betas = None
 
-            ll_here = self.current_state.log_prob.copy()[inds_here[:2]]
+            ll_here = self.current_state.log_like.copy()[inds_here[:2]]
             lp_here = self.current_state.log_prior[inds_here[:2]]
 
             self.lp_old = lp_here
@@ -421,9 +421,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         # Run any move-specific setup.
         self.setup(state.branches)
 
-        # ll_before = model.compute_log_prob_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)
+        # ll_before = model.compute_log_like_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, branch_supps=state.branches_supplimental)
 
-        # if not np.allclose(ll_before[0], state.log_prob):
+        # if not np.allclose(ll_before[0], state.log_like):
         #    breakpoint()
 
         new_state = State(state, copy=True)
@@ -552,7 +552,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                 #print("prior", et - st)
                 # st = time.perf_counter()
                 logl = ll_out
-                #loglcheck, new_blobs = model.compute_log_prob_fn(q, inds=new_inds, logp=logp, supps=new_supps, branch_supps=new_branch_supps)
+                #loglcheck, new_blobs = model.compute_log_like_fn(q, inds=new_inds, logp=logp, supps=new_supps, branch_supps=new_branch_supps)
                 #if not np.all(np.abs(logl[logl != -1e300] - loglcheck[logl != -1e300]) < 1e-5):
                 #    breakpoint()
                 
@@ -560,7 +560,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
                 assert np.allclose(logP, self.logP_out.reshape(ntemps, nwalkers))
 
-                prev_logl = new_state.log_prob
+                prev_logl = new_state.log_like
 
                 prev_logp = new_state.log_prior
 
@@ -597,7 +597,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
             # accepted removals
             new_state.branches["gb"].inds[accepted_inds_reverse] = False
-            new_state.log_prob[accepted_inds_reverse[:2]] = logl[accepted_inds_reverse[:2]]
+            new_state.log_like[accepted_inds_reverse[:2]] = logl[accepted_inds_reverse[:2]]
             new_state.log_prior[accepted_inds_reverse[:2]] = logp[accepted_inds_reverse[:2]]
 
             # accepted additions
@@ -614,7 +614,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
             new_state.branches["gb"].inds[accepted_inds_forward] = True
             new_state.branches["gb"].coords[accepted_inds_forward] = points_accepted_addition
-            new_state.log_prob[accepted_inds_forward[:2]] = logl[accepted_inds_forward[:2]]
+            new_state.log_like[accepted_inds_forward[:2]] = logl[accepted_inds_forward[:2]]
             new_state.log_prior[accepted_inds_forward[:2]] = logp[accepted_inds_forward[:2]]
 
             points_to_add_to_template = np.concatenate([
@@ -663,7 +663,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         breakpoint()
         if self.temperature_control is not None and not self.prevent_swaps:
              new_state, accepted = self.temperature_control.temper_comps(new_state, accepted, adapt=False)
-        if np.any(new_state.log_prob > 1e10):
+        if np.any(new_state.log_like > 1e10):
             breakpoint()
         #et = time.perf_counter()
         #print("swapping", et - st)

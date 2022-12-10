@@ -203,7 +203,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
         gb_coords = np.zeros((ntemps, nwalkers, nleaves_max, ndim))
         gb_coords[new_state.branches_inds["gb"]] = new_state.branches_coords["gb"][new_state.branches_inds["gb"]].copy()
 
-        log_prob_tmp = self.xp.asarray(new_state.log_prob)
+        log_like_tmp = self.xp.asarray(new_state.log_like)
         log_prior_tmp = self.xp.asarray(new_state.log_prior)
       
         self.mempool.free_all_blocks()
@@ -393,7 +393,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                 if self.xp.any(inds_fix):
                     delta_ll[keep_here[0][inds_fix]] = -1e300
 
-            prev_logl = log_prob_tmp[(temp_inds, walkers_inds)]
+            prev_logl = log_like_tmp[(temp_inds, walkers_inds)]
             logl = delta_ll + prev_logl
 
             #if np.any(logl - np.load("noise_ll.npy").flatten() > 0.0):
@@ -523,7 +523,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                     breakpoint()
 
                 
-                """self.gb.d_d = self.xp.asarray(-2 * state.log_prob.flatten())
+                """self.gb.d_d = self.xp.asarray(-2 * state.log_like.flatten())
                 ll_check_add = self.gb.get_ll(
                     points_add.T, 
                     data_minus_template.reshape(ntemps * nwalkers, nChannels, -1).transpose(1, 0, 2), 
@@ -563,7 +563,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                 accepted_delta_ll = delta_ll * (keep)
                 accepted_delta_lp = (logp - prev_logp)
                 accepted_delta_lp[self.xp.isinf(accepted_delta_lp)] = 0.0
-                logl_change_contribution = np.zeros_like(new_state.log_prob)
+                logl_change_contribution = np.zeros_like(new_state.log_like)
                 logp_change_contribution = np.zeros_like(new_state.log_prior)
 
                 try:
@@ -576,7 +576,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                     logl_change_contribution[ti, wi] += dll
                     logp_change_contribution[ti, wi] += dlp
 
-                log_prob_tmp += self.xp.asarray(logl_change_contribution)
+                log_like_tmp += self.xp.asarray(logl_change_contribution)
                 log_prior_tmp += self.xp.asarray(logp_change_contribution)
 
                 if np.any(accepted_delta_ll > 1e8):
@@ -584,26 +584,26 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
 
         try:
             new_state.branches["gb"].coords[:] = gb_coords.get()
-            new_state.log_prob[:] = log_prob_tmp.get()
+            new_state.log_like[:] = log_like_tmp.get()
             new_state.log_prior[:] = log_prior_tmp.get()
         except AttributeError:
             new_state.branches["gb"].coords[:] = gb_coords
-            new_state.log_prob[:] = log_prob_tmp
+            new_state.log_like[:] = log_like_tmp
             new_state.log_prior[:] = log_prior_tmp
 
         if self.time % 1 == 0:
             lp_after = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds)
-            ll_after = model.compute_log_prob_fn(new_state.branches_coords, inds=new_state.branches_inds, logp=lp_after, supps=new_state.supplimental, branch_supps=new_state.branches_supplimental)
+            ll_after = model.compute_log_like_fn(new_state.branches_coords, inds=new_state.branches_inds, logp=lp_after, supps=new_state.supplimental, branch_supps=new_state.branches_supplimental)
             #check = -1/2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / self.xp.asarray(self.psd), axis=(2, 3))
             #check2 = -1/2 * 4 * self.df * self.xp.sum(tmp.conj() * tmp / self.xp.asarray(self.psd), axis=(2, 3))
-            #print(np.abs(new_state.log_prob - ll_after[0]).max(), np.abs(new_state.log_prior - lp_after).max())
-            if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_prob - ll_after[0]).max() > 1e0:
+            #print(np.abs(new_state.log_like - ll_after[0]).max(), np.abs(new_state.log_prior - lp_after).max())
+            if np.abs(new_state.log_prior - lp_after).max() > 0.1 or np.abs(new_state.log_like - ll_after[0]).max() > 1e0:
                 breakpoint()
 
             # if any are even remotely getting to be different, reset all (small change)
-            elif np.abs(new_state.log_prob - ll_after[0]).max() > 1e-3:
+            elif np.abs(new_state.log_like - ll_after[0]).max() > 1e-3:
                 
-                fix_here = np.abs(new_state.log_prob - ll_after[0]) > 1e-6
+                fix_here = np.abs(new_state.log_like - ll_after[0]) > 1e-6
                 data_minus_template_old = data_minus_template.copy()
                 data_minus_template = self.xp.zeros_like(data_minus_template_old)
                 data_minus_template[:] = self.xp.asarray(self.data)[None, None]
@@ -627,19 +627,19 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                 new_like = -1 / 2 * 4 * self.df * self.xp.sum(data_minus_template.conj() * data_minus_template / psd_here, axis=(2, 3)).real.get()
                 
                 new_like += self.noise_ll
-                new_state.log_prob[:] = new_like.reshape(ntemps, nwalkers)
+                new_state.log_like[:] = new_like.reshape(ntemps, nwalkers)
                 
-            """elif np.abs(new_state.log_prior - lp_after).max() > 1e-6 or np.abs(new_state.log_prob - ll_after[0]).max() > 0.1:
+            """elif np.abs(new_state.log_prior - lp_after).max() > 1e-6 or np.abs(new_state.log_like - ll_after[0]).max() > 0.1:
                 # TODO: need to investigate when this fails
                 self.fixed_like_diff += 1
                 print("Fixing like diff for now.", self.fixed_like_diff)
-                fix_here = np.abs(new_state.log_prob - ll_after[0]) > 0.1
-                new_state.log_prob[fix_here] = ll_after[0][fix_here]"""
+                fix_here = np.abs(new_state.log_like - ll_after[0]) > 0.1
+                new_state.log_like[fix_here] = ll_after[0][fix_here]"""
 
             """
-            check_logl = model.compute_log_prob_fn(new_state.branches_coords, inds=new_state.branches_inds, branch_supps=new_state.branches_supplimental, supps=new_state.supplimental)
-            sigll = model.log_prob_fn.f.signal_ll.copy()
-            check_logl2 = model.compute_log_prob_fn(state.branches_coords, inds=state.branches_inds, branch_supps=state.branches_supplimental, supps=state.supplimental)
+            check_logl = model.compute_log_like_fn(new_state.branches_coords, inds=new_state.branches_inds, branch_supps=new_state.branches_supplimental, supps=new_state.supplimental)
+            sigll = model.log_like_fn.f.signal_ll.copy()
+            check_logl2 = model.compute_log_like_fn(state.branches_coords, inds=state.branches_inds, branch_supps=state.branches_supplimental, supps=state.supplimental)
             breakpoint()
             """
         """et = time.perf_counter()
@@ -660,7 +660,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
             new_state, accepted = self.temperature_control.temper_comps(new_state, accepted)
         # self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
 
-        if np.any(new_state.log_prob > 1e10):
+        if np.any(new_state.log_like > 1e10):
             breakpoint()
         self.time += 1
 

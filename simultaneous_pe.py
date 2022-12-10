@@ -84,7 +84,7 @@ def run_equilibrate():
         coords["gb"] = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max, ndim))
         inds["gb"] = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=bool)
 
-        last_sample = State(coords, inds=inds, log_prob=last_sample.log_prob, log_prior=last_sample.log_prior)
+        last_sample = State(coords, inds=inds, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
 
     else:
         raise FileNotFoundError(current_save_state_file + " and " + fp_pe + " not in current directory")
@@ -199,9 +199,9 @@ def run_equilibrate():
     walker_inds = mgh.walker_indices.copy()
     overall_inds = mgh.overall_indices.copy()
     
-    supps = BranchSupplimental({ "temp_inds": temp_inds, "walker_inds": walker_inds, "overall_inds": overall_inds,}, obj_contained_shape=supps_base_shape, copy=True)
+    supps = BranchSupplimental({ "temp_inds": temp_inds, "walker_inds": walker_inds, "overall_inds": overall_inds,}, base_shape=supps_base_shape, copy=True)
 
-    state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, log_prob=ll.reshape(ntemps_pe, nwalkers_pe), supplimental=supps)
+    state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, log_like=ll.reshape(ntemps_pe, nwalkers_pe), supplimental=supps)
     from gbgpu.utils.utility import get_N
 
     for name in ["gb_fixed", "gb"]:
@@ -218,14 +218,14 @@ def run_equilibrate():
 
         N_vals[state_mix.branches[name].inds] = N_temp
         branch_supp_base_shape = (ntemps_pe, nwalkers_pe, nleaves_max_here)
-        state_mix.branches[name].branch_supplimental = BranchSupplimental({"N_vals": N_vals}, obj_contained_shape=branch_supp_base_shape, copy=True)
+        state_mix.branches[name].branch_supplimental = BranchSupplimental({"N_vals": N_vals}, base_shape=branch_supp_base_shape, copy=True)
 
     gb_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=transform_fn,
         search=False,
         provide_betas=True,
-        skip_supp_names=["group_move_points"],
+        skip_supp_names_update=["group_move_points"],
         random_seed=10,
     )
 
@@ -239,16 +239,16 @@ def run_equilibrate():
         search_f_bin_lims,
     )
 
-    gb_fixed_move = GBSpecialStretchMove(
+    """gb_fixed_move = GBSpecialStretchMove(
         *gb_args,
         **gb_kwargs,
-    )
+    )"""
 
-    """gb_move = GBSpecialGroupStretchMove(
+    gb_fixed_move = GBSpecialGroupStretchMove(
         gb_args,
         gb_kwargs,
-        nfriends=40
-    )"""
+        nfriends=100
+    )
 
     # add the other
 
@@ -270,7 +270,7 @@ def run_equilibrate():
         parameter_transforms=transform_fn,
         search=False,
         provide_betas=True,
-        # skip_supp_names=["group_move_points"],
+        # skip_supp_names_update=["group_move_points"],
         random_seed=10,
     )
 
@@ -291,7 +291,7 @@ def run_equilibrate():
         [nleaves_max_fix, nleaves_max],
         [nleaves_max_fix, 0],
         num_try=int(1e1),
-        proposal_branch_names=["gb"],
+        gibbs_sampling_setup=["gb"],
         point_generator_func=point_generator_func
     )
     rj_moves.gb.gpus = gpus
@@ -335,7 +335,7 @@ def run_equilibrate():
         out.branches["gb_fixed"].inds[-1] = out.branches["gb_fixed"].inds[0]
         out.branches["gb_fixed"].branch_supplimental[-1] = out.branches["gb_fixed"].branch_supplimental[0]
         # state_mix.supplimental[-1] = state_mix.supplimental[0]
-        out.log_prob[-1] = out.log_prob[0]
+        out.log_like[-1] = out.log_like[0]
         try:
             out.log_prior[-1] = out.log_prior[0]
             out.betas[-1] = out.betas[0]
@@ -365,12 +365,12 @@ def run_equilibrate():
     """
     nsteps_mix = 200
 
-    print("Starting mix ll best:", state_mix.log_prob.max(axis=-1))
+    print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
 
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, save_first_state=False, store=False)
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=False)
     breakpoint()
-    print("ending mix ll best:", out.log_prob.max(axis=-1))
+    print("ending mix ll best:", out.log_like.max(axis=-1))
 
 
     # needs to be max from mgh or need to map it
@@ -396,7 +396,7 @@ def run_equilibrate():
     np.save(current_residuals_file_iterative_search, data_minus_templates.get())
     
 
-    save_state = State(out.branches_coords, inds=out.branches_inds, log_prob=out.log_prob, log_prior=out.log_prior)
+    save_state = State(out.branches_coords, inds=out.branches_inds, log_like=out.log_like, log_prior=out.log_prior)
 
     if current_save_state_file in os.listdir():
         shutil.copyfile(current_save_state_file, "old_" + current_save_state_file)
