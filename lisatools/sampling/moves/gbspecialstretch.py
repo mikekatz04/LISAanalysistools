@@ -22,6 +22,8 @@ from eryn.moves import StretchMove
 from eryn.prior import PriorContainer
 from eryn.utils.utility import groups_from_inds
 
+from eryn.moves import GroupStretchMove
+
 from ...diagnostic import inner_product
 from eryn.state import State
 
@@ -29,7 +31,7 @@ from eryn.state import State
 __all__ = ["GBSpecialStretchMove"]
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBSpecialStretchMove(StretchMove):
+class GBSpecialStretchMove(GroupStretchMove):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -66,9 +68,8 @@ class GBSpecialStretchMove(StretchMove):
         batch_size=5,
         **kwargs
     ):
-        StretchMove.__init__(self, **kwargs)  
+        GroupStretchMove.__init__(self, *args, **kwargs)
 
-        self.time = 0
         self.greater_than_1e0 = 0
         self.name = "gbgroupstretch"
 
@@ -117,11 +118,157 @@ class GBSpecialStretchMove(StretchMove):
         self.search_snr_lim = search_snr_lim
         self.search_snr_accept_factor = search_snr_accept_factor
 
-        self.take_max_ll = take_max_ll     
+        self.take_max_ll = take_max_ll   
+ 
+    def setup_gbs(self, branch):
+        coords = branch.coords
+        inds = branch.inds
+        supps = branch.branch_supplimental
+        ntemps, nwalkers, nleaves_max, ndim = branch.shape
+        all_remaining_freqs = [coords[i][inds[i]][:, 1] for i in range(coords.shape[0])]
 
-    def run_swap_ll(self, gb_fixed_coords, old_points, new_points, group_here, N_vals, waveform_kwargs_now, factors_here, log_like_tmp, log_prior_tmp, return_at_logl=False):
+        all_remaining_cords = [coords[i][inds[i]] for i in range(coords.shape[0])]
+        
+        num_remaining = [len(tmp) for tmp in all_remaining_freqs]
+        
 
+        # TODO: improve this?
+        self.inds_freqs_sorted = [self.xp.asarray(np.argsort(freqs)) for freqs in all_remaining_freqs]
+        self.freqs_sorted = [self.xp.asarray(np.sort(freqs)) for freqs in all_remaining_freqs]
+        self.all_coords_sorted = [self.xp.asarray(coords)[sort] for coords, sort in zip(all_remaining_cords, self.inds_freqs_sorted)]
+        start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
+        for t in range(ntemps):
+            freqs_sorted_here = self.freqs_sorted[t].get()
+            freqs_remaining_here = all_remaining_freqs[t]
+
+            start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
+
+            best_index = np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right") - 1
+            best_index[best_index < self.nfriends] = self.nfriends
+            best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = len(freqs_sorted_here) - self.nfriends
+            check_inds = best_index[:, None] + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1)) - self.nfriends
+
+            check_freqs = freqs_sorted_here[check_inds]
+            freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
+
+            keep_min_inds = np.argsort(freq_distance, axis=-1)[:, :self.nfriends].min(axis=-1)
+            start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
+            
+            start_inds_freq_out[t, inds[t]] = start_inds_freq
+        
+        if "friend_start_inds" not in supps:
+            supps.add_objects({"friend_start_inds": start_inds_freq_out})
+        else:
+            supps[:] = {"friend_start_inds": start_inds_freq_out}
+
+        self.all_friends_start_inds_sorted = [self.xp.asarray(start_inds_freq_out[t, inds[t]])[sort] for t, sort in enumerate(self.inds_freqs_sorted)]
+        
+        
+    def find_friends(self, name, gb_points_to_move, s_inds=None):
+    
+        if s_inds is None:
+            raise ValueError
+
+        inds_points_to_move = self.xp.asarray(s_inds)
+
+        half_friends = int(self.nfriends / 2)
+
+        gb_points_for_move = gb_points_to_move.copy()
+
+        output_friends = []
+        for t in range(self.ntemps):
+            freqs_to_move = gb_points_to_move[t][inds_points_to_move[t]][:, 1]
+            # freqs_sorted_here = self.freqs_sorted[t]
+            # inds_freqs_sorted_here = self.inds_freqs_sorted[t]
+            inds_start_freq_to_move = self.current_friends_start_inds[t, inds_points_to_move[t].reshape(self.nwalkers, -1)]
+ 
+            deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
+
+            inds_keep_friends = inds_start_freq_to_move + deviation
+
+            inds_keep_friends[inds_keep_friends < 0] = 0
+            inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted[t])] = len(self.all_coords_sorted[t]) - 1
+            
+            gb_points_for_move[t, inds_points_to_move[t]]  = self.all_coords_sorted[t][inds_keep_friends]
+
+        return gb_points_for_move
+
+    def setup(self, branches):
+        for i, (name, branch) in enumerate(branches.items()):
+            if name != "gb_fixed":
+                continue
+            
+            if self.time % self.n_iter_update == 0:
+                self.setup_gbs(branch)
+
+            self.current_friends_start_inds = self.xp.asarray(branch.branch_supplimental.holder["friend_start_inds"][:])
+
+    def run_ll_part_comp(self, data_index, noise_index, start_inds, lengths):
+        assert self.xp.all(data_index == noise_index)
+        lnL = self.xp.zeros_like(data_index, dtype=self.xp.float64)
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        keep_gpu_out = []
+        lnL_out = []
+        for gpu_i, (gpu, inds_gpu_split) in enumerate(zip(self.mgh.gpus, self.mgh.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                self.xp.cuda.runtime.deviceSynchronize()
+                
+                min_ind_split, max_ind_split = inds_gpu_split.min(), inds_gpu_split.max()
+
+                keep_gpu_here = self.xp.where((data_index >= min_ind_split) & (data_index <= max_ind_split))[0]
+                keep_gpu_out.append(keep_gpu_here)
+                num_gpu_here = len(keep_gpu_here)
+                lnL_here = self.xp.zeros(num_gpu_here, dtype=self.xp.float64)
+                lnL_out.append(lnL_here)
+                data_A = self.mgh.data_list[0][gpu_i]
+                data_E = self.mgh.data_list[1][gpu_i]
+                psd_A = self.mgh.psd_list[0][gpu_i]
+                psd_E = self.mgh.psd_list[1][gpu_i]
+
+                data_index_here = data_index[keep_gpu_here].astype(self.xp.int32) - min_ind_split
+                noise_index_here = noise_index[keep_gpu_here].astype(self.xp.int32) - min_ind_split
+
+                start_inds_here = start_inds[keep_gpu_here]
+                lengths_here = lengths[keep_gpu_here]
+                do_synchronize = False
+                self.gb.specialty_piece_wise_likelihoods(
+                    lnL_here,
+                    data_A,
+                    data_E,
+                    psd_A,
+                    psd_E,
+                    data_index_here,
+                    noise_index_here,
+                    start_inds_here,
+                    lengths_here,
+                    self.df, 
+                    num_gpu_here,
+                    self.start_freq_ind,
+                    self.data_length,
+                    do_synchronize,
+                )
+
+        for gpu_i, (gpu, inds_gpu_split) in enumerate(zip(self.mgh.gpus, self.mgh.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                self.xp.cuda.runtime.deviceSynchronize()
+            with xp.cuda.device.Device(main_gpu):
+                self.xp.cuda.runtime.deviceSynchronize()
+                lnL[keep_gpu_out[gpu_i]] = lnL_out[gpu_i]
+
+        self.xp.cuda.runtime.setDevice(main_gpu)
+        self.xp.cuda.runtime.deviceSynchronize()
+        return lnL
+
+    def run_swap_ll(self, num_stack, gb_fixed_coords_new, gb_fixed_coords_old, group_here, N_vals_all, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, return_at_logl=False):
+
+        #st = time.perf_counter()
         temp_inds_keep, walkers_inds_keep, leaf_inds_keep = group_here
+
+        ntemps, nwalkers, nleaves_max, ndim = gb_fixed_coords_new.shape
+
+        new_points = gb_fixed_coords_new[group_here]
+        old_points = gb_fixed_coords_old[group_here]
+        N_vals = N_vals_all[group_here]
 
         # st = time.perf_counter()
         if self.use_gpu:
@@ -132,71 +279,173 @@ class GBSpecialStretchMove(StretchMove):
             old_points_prior = old_points
 
         logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(new_points_prior))
+        prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
+
         keep_here = self.xp.where((~self.xp.isinf(logp)))
 
+        ## log likelihood between the points
         if len(keep_here[0]) == 0:
             return
-                
-        points_remove = self.parameter_transforms.both_transforms(old_points[keep_here], xp=self.xp)
-        points_add = self.parameter_transforms.both_transforms(new_points[keep_here], xp=self.xp)
 
-        data_index_tmp = self.xp.asarray((temp_inds_keep[keep_here] * self.nwalkers + walkers_inds_keep[keep_here]).astype(xp.int32))
-        noise_index_tmp = self.xp.asarray((temp_inds_keep[keep_here] * self.nwalkers + walkers_inds_keep[keep_here]).astype(xp.int32))
+        old_freqs = old_points[:, 1] / 1e3
+        new_freqs = new_points[:, 1] / 1e3
+
+        band_indices = self.xp.searchsorted(self.xp.asarray(self.band_edges), old_freqs) - 1
+
+        buffer = 5  # bins
+
+        special_band_inds = int(1e12) * temp_inds_keep + int(1e6) * walkers_inds_keep + band_indices
+        special_band_inds_sorted = self.xp.sort(special_band_inds)
+        inds_special_band_inds_sorted = self.xp.argsort(special_band_inds)
+
+        unique_special_band_inds, start_special_band_inds, inverse_special_band_inds, counts_special_band_inds = self.xp.unique(special_band_inds_sorted, return_index=True, return_inverse=True, return_counts=True)
+
+        inds_special_map = self.xp.arange(special_band_inds.shape[0])
+        inds_special_map_sorted = inds_special_map - inds_special_map[start_special_band_inds][inverse_special_band_inds]
+
+        which_stack_piece = self.xp.zeros_like(inds_special_band_inds_sorted)
+        
+        which_stack_piece[inds_special_band_inds_sorted] = inds_special_map_sorted
+
+        start_wave_inds_old = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+        end_wave_inds_old = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+
+        prior_all_new = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1, num_stack))
+        prior_all_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = logp
+
+        prior_all_old = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1, num_stack))
+        prior_all_old[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = prev_logp
+
+        prior_per_group_new = prior_all_new.sum(axis=-1)
+        prior_per_group_old = prior_all_old.sum(axis=-1)
+
+        freqs_diff_arranged = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1, num_stack))
+        freqs_diff_arranged[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = (np.abs(new_freqs - old_freqs) / self.df).astype(int) / N_vals
+
+        freqs_diff_arranged_maxs = freqs_diff_arranged.max(axis=-1)
+        
+        start_wave_inds_old[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = ((old_freqs - ((N_vals / 2).astype(int) + buffer) * self.df) / self.df).astype(int)
+        end_wave_inds_old[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = ((old_freqs + ((N_vals / 2).astype(int) + buffer) * self.df) / self.df).astype(int)
+
+        start_wave_inds_new = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+        end_wave_inds_new = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+
+        leaf_inds_new = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+        leaf_inds_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = leaf_inds_keep
+        temp_inds_new = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+        temp_inds_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = temp_inds_keep
+        walkers_inds_new = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+        walkers_inds_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = walkers_inds_keep
+        
+        start_wave_inds_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = ((new_freqs - ((N_vals / 2).astype(int) + buffer) * self.df) / self.df).astype(int)
+        end_wave_inds_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = ((new_freqs + ((N_vals / 2).astype(int) + buffer) * self.df) / self.df).astype(int)
+
+        start_wave_inds_all = self.xp.concatenate([start_wave_inds_old, start_wave_inds_new], axis=-1)
+        end_wave_inds_all = self.xp.concatenate([end_wave_inds_old, end_wave_inds_new], axis=-1)
+        
+        start_wave_inds_all[start_wave_inds_all == -1] = int(1e15)
+
+        start_going_in = start_wave_inds_all.min(axis=-1)
+        end_going_in = end_wave_inds_all.max(axis=-1)
+
+        group_part = self.xp.where((end_going_in != -1) & (~np.isinf(prior_per_group_new)) & (freqs_diff_arranged_maxs < 1.0))
+        
+        temp_part, walker_part, sub_band_part = group_part
+        leaf_part_bin = leaf_inds_new[group_part]
+        keep2 = leaf_part_bin != -1
+        
+        temp_part_bin = temp_inds_new[group_part][keep2]
+        walkers_part_bin = walkers_inds_new[group_part][keep2]
+        leaf_part_bin = leaf_part_bin[keep2]
+
+        group_part_bin = (temp_part_bin, walkers_part_bin, leaf_part_bin)
+        
+        num_parts = len(temp_part)
+
+        old_points_in = gb_fixed_coords_old[group_part_bin]
+        new_points_in = gb_fixed_coords_new[group_part_bin]
+
+        start_inds_final = start_going_in[group_part].astype(self.xp.int32)
+        ends_inds_final = end_going_in[group_part].astype(self.xp.int32)
+        lengths = ((ends_inds_final + 1) - start_inds_final).astype(self.xp.int32)
+                
+        points_remove = self.parameter_transforms.both_transforms(old_points_in, xp=self.xp)
+        points_add = self.parameter_transforms.both_transforms(new_points_in, xp=self.xp)
+
+        special_band_inds_2 = int(1e12) * temp_part + int(1e6) * walker_part + sub_band_part
+        unique_special_band_inds_2, index_special_band_inds_2 = self.xp.unique(special_band_inds_2, return_index=True)
+
+        temp_part_general = temp_part[index_special_band_inds_2]
+        walker_part_general = walker_part[index_special_band_inds_2]
+
+        data_index_tmp = self.xp.asarray((temp_part_general * self.nwalkers + walker_part_general).astype(xp.int32))
+        noise_index_tmp = self.xp.asarray((temp_part_general * self.nwalkers + walker_part_general).astype(xp.int32))
         
         data_index = self.mgh.get_mapped_indices(data_index_tmp).astype(self.xp.int32)
         noise_index = self.mgh.get_mapped_indices(noise_index_tmp).astype(self.xp.int32)
 
-        assert self.xp.all(data_index == noise_index)
-        nChannels = 2
-
-        delta_ll = self.xp.full(old_points.shape[0], -1e300)
-        
-        N_in_group = N_vals[keep_here]
         """et = time.perf_counter()
-        print("before like", (et - st), new_points.shape[0])
+        print("before ll", (et - st))
         st = time.perf_counter()"""
-
-        delta_ll[keep_here] = self.gb.swap_likelihood_difference(points_remove, points_add, self.mgh.data_list,  self.mgh.psd_list,  N=N_in_group, data_index=data_index,  noise_index=noise_index,  adjust_inplace=False,  data_length=self.data_length, 
-        data_splits=self.mgh.gpu_splits, phase_marginalize=self.search, **waveform_kwargs_now)
+        lnL_old = self.run_ll_part_comp(data_index, noise_index, start_inds_final, lengths)
         """et = time.perf_counter()
-        print("after like", (et - st), new_points.shape[0])
+        print("after ll", (et - st))
         st = time.perf_counter()"""
+        N_vals_single = N_vals_all[group_part_bin]
         
-        if self.xp.any(self.xp.isnan(delta_ll)):
-            warnings.warn("Getting nan in Likelihood function.")
-            breakpoint()
-            logp[self.xp.isnan(delta_ll)] = -np.inf
-            delta_ll[self.xp.isnan(delta_ll)] = -1e300
+        N_vals_generate_in = self.xp.concatenate([
+            N_vals_single, N_vals_single
+        ])
+        points_for_generate = self.xp.concatenate([
+            points_remove,  # factor = +1
+            points_add  # factors = -1
+        ])
+
+        num_add = len(points_remove)
             
-        optimized_snr = self.xp.sqrt(self.gb.add_add.real)
-        detected_snr = (self.gb.d_h_add + self.gb.add_remove).real / optimized_snr
-        # check_d_h_add = self.gb.d_h_add.copy()
-        # check_add_remove = self.gb.add_remove.copy()
-        if self.search:
-            """et = time.perf_counter()
-            print("before search stuff", (et - st), N_now, group_iter, group_len[group_iter])
-            st = time.perf_counter()"""
-            inds_fix = ((optimized_snr < self.search_snr_lim) | (detected_snr < (0.8 * self.search_snr_lim)))
+        factors_multiply_generate = self.xp.ones(2 * num_add)
+        factors_multiply_generate[num_add:] = -1.0  # second half is adding
 
-            if self.xp == np:
-                inds_fix = inds_fix.get()
+        group_index_tmp = self.xp.asarray((temp_part_bin * self.nwalkers + walkers_part_bin).astype(xp.int32))
+        group_index = self.mgh.get_mapped_indices(group_index_tmp).astype(self.xp.int32)
+        group_index_add = self.xp.concatenate(
+            [
+                group_index,
+                group_index,
+            ], dtype=self.xp.int32
+        )
 
-            if self.xp.any(inds_fix):
-                logp[keep_here[0][inds_fix]] = -np.inf
-                delta_ll[keep_here[0][inds_fix]] = -1e300
+        waveform_kwargs_fill = waveform_kwargs_now.copy()
 
-            phase_change = self.gb.phase_angle
-            new_points[keep_here, 3] -= phase_change
-            points_add[:, 4] -= phase_change
+        waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
 
-            new_points[keep_here, 3] = new_points[keep_here, 3] % (2 * np.pi)
-            points_add[:, 4] = points_add[:, 4] % (2 * np.pi)
+        """et = time.perf_counter()
+        print("before 1 adjustment", (et - st))
+        st = time.perf_counter()"""
+        self.gb.generate_global_template(
+            points_for_generate,
+            group_index_add, 
+            self.mgh.data_list, 
+            N=N_vals_generate_in,
+            data_length=self.data_length, 
+            data_splits=self.mgh.gpu_splits, 
+            factors=factors_multiply_generate,
+            **waveform_kwargs_fill
+        )
 
-            """et = time.perf_counter()
-            print("after search stuff", (et - st), N_now, group_iter, group_len[group_iter])
-            st = time.perf_counter()"""
+        """et = time.perf_counter()
+        print("after 1 adjustment", (et - st))
+        st = time.perf_counter()"""
+        lnL_new = self.run_ll_part_comp(data_index, noise_index, start_inds_final, lengths)
+        """et = time.perf_counter()
+        print("after second ll", (et - st))
+        st = time.perf_counter()"""
+        delta_ll = lnL_new - lnL_old
 
-        prev_logl = log_like_tmp[(temp_inds_keep, walkers_inds_keep)]
+        logp = prior_per_group_new[(temp_part, walker_part, sub_band_part)]
+        prev_logp = prior_per_group_old[(temp_part, walker_part, sub_band_part)]
+
+        prev_logl = log_like_tmp[(temp_part, walker_part)]
         logl = delta_ll + prev_logl
 
         if return_at_logl:
@@ -206,17 +455,14 @@ class GBSpecialStretchMove(StretchMove):
         #    breakpoint()    
         #print("multi check: ", (logl - np.load("noise_ll.npy").flatten()))
 
-        prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
-
-        if np.any(np.isinf(prev_logp)):
-            breakpoint()
-        
-        betas_in = self.xp.asarray(self.temperature_control.betas)[temp_inds_keep]
+        betas_in = self.xp.asarray(self.temperature_control.betas)[temp_part]
         logP = self.compute_log_posterior(logl, logp, betas=betas_in)
         
         # TODO: check about prior = - inf
         # takes care of tempering
         prev_logP = self.compute_log_posterior(prev_logl, prev_logp, betas=betas_in)
+
+        factors_here = self.xp.asarray(factors)[group_part]
 
         # TODO: think about factors in tempering
         lnpdiff = factors_here + logP - prev_logP
@@ -229,34 +475,40 @@ class GBSpecialStretchMove(StretchMove):
             
 
             accepted_here = keep.copy()
-            
-            gb_fixed_coords[(temp_inds_keep[keep], walkers_inds_keep[keep], leaf_inds_keep[keep])] = new_points[keep]
 
-            # parameters were run for all ~np.isinf(logp), need to adjust for those not accepted
-            keep_from_before = (keep * (~np.isinf(logp)))[keep_here]
-            try:
-                group_index = data_index[keep_from_before]
-            except IndexError:
-                breakpoint()
+            temp_part_accepted = temp_inds_new[group_part][keep]
+            walkers_part_accepted = walkers_inds_new[group_part][keep]
+            leaf_part_accepted = leaf_inds_new[group_part][keep]
+            sub_band_part_accepted = sub_band_part[keep]
 
-            waveform_kwargs_fill = waveform_kwargs_now.copy()
+            temp_part_accepted = temp_part_accepted[leaf_part_accepted != -1]
+            walkers_part_accepted = walkers_part_accepted[leaf_part_accepted != -1]
+            leaf_part_accepted = leaf_part_accepted[leaf_part_accepted != -1]
 
-            waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
+            accepted_mapping = self.xp.zeros((ntemps, nwalkers, nleaves_max), dtype=bool)
+            accepted_mapping[(temp_part_accepted, walkers_part_accepted, leaf_part_accepted)] = True
 
-            """et = time.perf_counter()
-            print("before generate", (et - st), new_points.shape[0])
-            st = time.perf_counter()"""
-            
-            N_vals_generate = N_vals[keep]
-            N_vals_generate_in = self.xp.concatenate([
-                N_vals_generate, N_vals_generate
-            ])
-            points_for_generate = self.xp.concatenate([
-                points_remove[keep_from_before],  # factor = +1
-                points_add[keep_from_before]  # factors = -1
+            keep_binaries = accepted_mapping[group_part_bin]
+
+            gb_fixed_coords_old[(temp_part_accepted, walkers_part_accepted, leaf_part_accepted)] = new_points_in[keep_binaries]
+
+            N_vals_single_reverse = N_vals_single[~keep_binaries]
+
+            N_vals_reverse = self.xp.concatenate([
+                N_vals_single_reverse, N_vals_single_reverse
             ])
 
-            num_add = len(points_remove[keep_from_before])
+            # reverse the factors to put back what we took out
+            points_for_reverse = self.xp.concatenate([
+                points_remove[~keep_binaries],  # factor = +1
+                points_add[~keep_binaries]  # factors = -1
+            ])
+
+            num_reverse = len(points_remove[~keep_binaries])
+                
+            factors_multiply_reverse = self.xp.ones(2 * num_reverse)
+            factors_multiply_reverse[:num_reverse] = -1.0  # second half is adding
+
 
             # check number of points for the waveform to be added
             """f_N_check = points_for_generate[num_add:, 1].get()
@@ -268,51 +520,39 @@ class GBSpecialStretchMove(StretchMove):
                 inds_fix_here = self.xp.where(self.xp.asarray(N_check) != N_vals_generate_in[num_add:])[0]
                 N_vals_generate_in[inds_fix_here + num_add] = self.xp.asarray(N_check)[inds_fix_here]"""
 
-            
-            factors_multiply_generate = self.xp.ones(2 * num_add)
-            factors_multiply_generate[num_add:] = -1.0  # second half is adding
-            group_index_add = self.xp.concatenate(
+            # group_index is already mapped
+            group_index_reverse = self.xp.concatenate(
                 [
-                    group_index,
-                    group_index,
+                    group_index[~keep_binaries],
+                    group_index[~keep_binaries],
                 ], dtype=self.xp.int32
             )
 
             self.gb.generate_global_template(
-                points_for_generate,
-                group_index_add, 
+                points_for_reverse,
+                group_index_reverse, 
                 self.mgh.data_list, 
-                N=N_vals_generate_in,
+                N=N_vals_reverse,
                 data_length=self.data_length, 
                 data_splits=self.mgh.gpu_splits, 
-                factors=factors_multiply_generate,
+                factors=factors_multiply_reverse,
                 **waveform_kwargs_fill
             )
-
             """et = time.perf_counter()
-            print("after generate", (et - st), new_points.shape[0])
+            print("after reverse", (et - st))
             st = time.perf_counter()"""
-            # update likelihoods
+            delta_ll_shaped = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1))
+            delta_lp_shaped = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1))
+            
+            delta_ll_shaped[(temp_part[keep], walker_part[keep], sub_band_part[keep])] = delta_ll[keep]
 
-            # set unaccepted differences to zero
-            accepted_delta_ll = delta_ll * (keep)
-            accepted_delta_lp = (logp - prev_logp)
-            accepted_delta_lp[self.xp.isinf(accepted_delta_lp)] = 0.0
-            logl_change_contribution = np.zeros_like(log_like_tmp.get())
-            logp_change_contribution = np.zeros_like(log_prior_tmp.get())
-            try:
-                in_tuple = (accepted_delta_ll[keep].get(), accepted_delta_lp[keep].get(), temp_inds_keep[keep].get(), walkers_inds_keep[keep].get())
-            except AttributeError:
-                in_tuple = (accepted_delta_ll[keep], accepted_delta_lp[keep], temp_inds_keep[keep], walkers_inds_keep[keep])
-            for i, (dll, dlp, ti, wi) in enumerate(zip(*in_tuple)):
-                logl_change_contribution[ti, wi] += dll
-                logp_change_contribution[ti, wi] += dlp
+            delta_lp_shaped[(temp_part[keep], walker_part[keep], sub_band_part[keep])] = (logp - prev_logp)[keep]
 
-            log_like_tmp[:] += self.xp.asarray(logl_change_contribution)
-            log_prior_tmp[:] += self.xp.asarray(logp_change_contribution)
-
+            log_like_tmp_check = log_like_tmp.copy()
+            log_like_tmp[:] += delta_ll_shaped.sum(axis=-1)
+            log_prior_tmp[:] += delta_lp_shaped.sum(axis=-1)
             """et = time.perf_counter()
-            print("bookkeeping", (et - st), new_points.shape[0])"""
+            print("bookkeeping", (et - st))"""
 
 
     def propose(self, model, state):
@@ -329,6 +569,7 @@ class GBSpecialStretchMove(StretchMove):
         # st = time.perf_counter()
         self.xp.cuda.runtime.setDevice(self.mgh.gpus[0])
 
+        
         np.random.seed(10)
         #print("start stretch")
         #st = time.perf_counter()
@@ -338,10 +579,16 @@ class GBSpecialStretchMove(StretchMove):
             ntemps, nwalkers, nleaves_, ndim_ = branch.shape
             ndim_total += ndim_ * nleaves_
 
+        #ll_after = self.mgh.get_ll(use_cpu=True).flatten()[state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+        #if np.abs(state.log_like - ll_after).max()  > 1e-5:
+        #    breakpoint()
+
         self.nwalkers = nwalkers
         # TODO: deal with more intensive acceptance fractions
         # Run any move-specific setup.
         self.setup(state.branches)
+        
+        st = time.perf_counter()
 
         new_state = State(state, copy=True)
         self.mempool.free_all_blocks()
@@ -382,103 +629,104 @@ class GBSpecialStretchMove(StretchMove):
             self.xp.tile(self.xp.arange(nleaves_max), ((ntemps, nwalkers, 1)))
         ]
 
-        split_inds = np.zeros(nwalkers, dtype=int)
-        split_inds[1::2] = 1
-        np.random.shuffle(split_inds)
+        points_to_move = gb_fixed_coords[new_state.branches_inds["gb_fixed"]]
+
+        gb_fixed_coords_into_proposal = gb_fixed_coords.reshape(ntemps, nwalkers * nleaves_max, 1, ndim).copy()
+        gb_inds_into_proposal = state.branches["gb_fixed"].inds.reshape(ntemps, nwalkers * nleaves_max, 1).copy()
         """et = time.perf_counter()
-        print("setup", (et - st))
+        print("before prop", (et - st))
         st = time.perf_counter()"""
-        for split in range(2):
+        # adjust groups to put some together
+        num_stack = 10
+
+        # TODO: check detailed balance
+        q, factors_temp = self.get_proposal(
+                {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, gibbs_ndim=ndim * num_stack
+        )
+        """et = time.perf_counter()
+        print("after prop", (et - st))
+        st = time.perf_counter()"""
+       
+        factors = factors_temp.reshape(ntemps, nwalkers, nleaves_max)
+        q["gb_fixed"] = self.xp.asarray(q["gb_fixed"].reshape(ntemps, nwalkers, nleaves_max, ndim))
+        f_test = gb_fixed_coords[:, :, :, 1].get() / 1e3
+        f_test_2 = q["gb_fixed"][:, :, :, 1].get() / 1e3
+
+        # f0_2 will remove and suggested frequency jumps of more than one band
+        # num_groups_base should be three with the way groups are done now
+        # no need to do checks now either
+        
+        # if suggesting to change frequency by more than twice waveform length, do not run
+        fix_f_test = (np.abs(f_test - f_test_2) > (self.df * N_vals.get() * 1.5))
+        if hasattr(self, "keep_bands") and self.keep_bands is not None:
+            band_indices = np.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
+            keep_bands = self.keep_bands
+            assert isinstance(keep_bands, np.ndarray)
+            fix_f_test[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
+
+        """et = time.perf_counter()
+        print("pre_groups", (et - st))
+        st = time.perf_counter()"""
+
+        num_groups_base = 4
+        groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=np, num_groups_base=num_groups_base, fix_f_test=fix_f_test)
+
+        unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
+
+        """et = time.perf_counter()
+        print("get_groups", (et - st))"""
+        st = time.perf_counter()
+        groups_check = groups.copy()
+        for remainder_val in range(num_groups_base):
+            stack_groups = unique_groups[(unique_groups >= 0)][remainder_val::num_groups_base]
+            num_stack_groups = len(stack_groups)
+            split_len = int(np.ceil(num_stack_groups / num_stack))
+            current_start_ind = 0
+            current_split_count = 0
+
+            while current_start_ind + current_split_count < num_stack_groups:
+                old_group_number = stack_groups[current_start_ind + current_split_count]
+                new_group_number = stack_groups[current_start_ind]
+                groups[groups == old_group_number] = new_group_number
+
+                current_split_count += 1
+
+                if current_split_count == num_stack:
+                    current_split_count = 0
+                    current_start_ind += num_stack
+
+        # remove information about the bad "-1" group
+        for check_val in [-1, -2]:
+            group_len = np.delete(group_len, unique_groups == check_val)
+            unique_groups = np.delete(unique_groups, unique_groups == check_val)
+
+        if len(unique_groups) == 0:
+            return state, accepted
+
+        # needs to be max because some values may be missing due to evens and odds
+        num_groups = unique_groups.max().item() + 1
+
+        """et = time.perf_counter()
+        print("adjustment", (et - st))"""
+
+        for group_iter in range(num_groups):
             # st = time.perf_counter()
-            split_here = split_inds == split
-            walkers_keep = self.xp.arange(nwalkers)[split_here]
-                
-            points_to_move = gb_fixed_coords[:, split_here]
-            points_for_move = gb_fixed_coords[:, ~split_here]
+            # sometimes you will have an extra odd or even group only
+            # the group_iter may not match the actual running group number in this case
+            if group_iter not in groups:
+                continue
 
-            q_temp, factors_temp = self.get_proposal(
-                {"gb_fixed": points_to_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)},  
-                {"gb_fixed": [points_for_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)]}, 
-                model.random
-            )
+            group = self.xp.where(self.xp.asarray(groups) == group_iter)
 
-            factors = self.xp.zeros((ntemps, nwalkers, nleaves_max))
-            factors[:, split_here] = factors_temp.reshape(ntemps, nleaves_max, int(nwalkers / 2)).transpose(0, 2, 1)
+            # st = time.perf_counter()
+            temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
 
-            # use new_state here to get change after 1st round
-            q = {"gb_fixed": gb_fixed_coords.copy()}
+            self.run_swap_ll(num_stack, q["gb_fixed"], gb_fixed_coords, group, N_vals, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp)
 
-            q["gb_fixed"][:, split_here] = q_temp["gb_fixed"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
+            #ll_after = self.mgh.get_ll(use_cpu=True).flatten()[state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+            #if np.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
+            #    breakpoint()
 
-            f_test = points_to_move.reshape(ntemps, int(nwalkers / 2), -1, ndim)[:, :, :, 1].get() / 1e3
-            f_test_2 = q["gb_fixed"][:, split_here].reshape(ntemps, int(nwalkers / 2), -1, ndim)[:, :, :, 1].get() / 1e3
-            if np.any(f_test == 0):
-                breakpoint()
-
-            # f0_2 will remove and suggested frequency jumps of more than one band
-            # num_groups_base should be three with the way groups are done now
-            # no need to do checks now either
-            
-            # if suggesting to change frequency by more than twice waveform length, do not run
-            fix_f_test = (np.abs(f_test - f_test_2) > (self.df * N_vals[:, split_here].get() * 1.5))
-            if hasattr(self, "keep_bands") and self.keep_bands is not None:
-                band_indices = np.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
-                keep_bands = self.keep_bands
-                assert isinstance(keep_bands, np.ndarray)
-                fix_f_test[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
-
-            groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=np, num_groups_base=4, fix_f_test=fix_f_test)
-
-            unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
-
-            # remove information about the bad "-1" group
-            for check_val in [-1, -2]:
-                group_len = np.delete(group_len, unique_groups == check_val)
-                unique_groups = np.delete(unique_groups, unique_groups == check_val)
-
-            if len(unique_groups) == 0:
-                return state, accepted
-
-            # needs to be max because some values may be missing due to evens and odds
-            num_groups = unique_groups.max().item() + 1
-
-            """et = time.perf_counter()
-            print("prop", (et - st))"""
-
-            for group_iter in range(num_groups):
-                # st = time.perf_counter()
-                # sometimes you will have an extra odd or even group only
-                # the group_iter may not match the actual running group number in this case
-                if group_iter not in groups:
-                    continue
-
-                group = [grp[:, split_here][groups == group_iter].flatten() for grp in group_temp_finder]
-
-                # st = time.perf_counter()
-                temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
-
-                keep_inds = self.xp.in1d(walkers_inds, walkers_keep)
-
-                temp_inds_for_gen = temp_inds[~keep_inds]
-                walkers_inds_for_gen = walkers_inds[~keep_inds]
-                leaf_inds_for_gen = leaf_inds[~keep_inds]
-
-                temp_inds_keep = temp_inds[keep_inds]
-                walkers_inds_keep = walkers_inds[keep_inds]
-                leaf_inds_keep = leaf_inds[keep_inds]                
-
-                group_here = (temp_inds_keep, walkers_inds_keep, leaf_inds_keep)
-                group_here_for_gen = (temp_inds_for_gen, walkers_inds_for_gen, leaf_inds_for_gen)
-
-                factors_here = factors[group_here]
-
-                old_points = gb_fixed_coords[group_here]
-                new_points = q["gb_fixed"][group_here]
-
-                """et = time.perf_counter()
-                print("before delta ll", (et - st), group_iter, group_len[group_iter])"""
-                self.run_swap_ll(gb_fixed_coords, old_points, new_points, group_here, N_vals[group_here], waveform_kwargs_now, factors_here, log_like_tmp, log_prior_tmp)
-               
         # st = time.perf_counter()
         try:
             new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
@@ -493,8 +741,7 @@ class GBSpecialStretchMove(StretchMove):
 
         if self.time % 200 == 0:
             ll_after = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-            
-            if np.abs(log_like_tmp.get() - ll_after).max()  > 1e0:
+            if np.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
                 if np.abs(log_like_tmp.get() - ll_after).max() > 1e0:
                     breakpoint()
                 breakpoint()
@@ -526,8 +773,6 @@ class GBSpecialStretchMove(StretchMove):
                     self.gb.generate_global_template(coords_here_in, group_index, self.mgh.data_list, data_length=self.data_length, data_splits=self.mgh.gpu_splits, batch_size=1000, **waveform_kwargs_fill)
                     self.mgh.multiply_data(-1.)
 
-                ll_after2 = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-                new_state.log_like = ll_after2
                    
             """
             data_minus_template = self.xp.concatenate(
@@ -611,10 +856,22 @@ class GBSpecialStretchMove(StretchMove):
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
         accepted[accepted_inds < number_of_walkers_for_accepted[:, None]] = True
 
+        tmp1 = np.all(np.abs(new_state.branches_coords["gb_fixed"] - state.branches_coords["gb_fixed"]) > 0.0, axis=-1).sum(axis=(2,))
+        tmp2 = new_state.branches_inds["gb_fixed"].sum(axis=(2,))
+
+        # add to move-specific accepted information
+        self.accepted += tmp1
+        if isinstance(self.num_proposals, int):
+            self.num_proposals = tmp2
+        else:
+            self.num_proposals += tmp2
+
         if self.temperature_control is not None:
-            new_state, accepted = self.temperature_control.temper_comps(new_state, accepted)
-            
-            """# new_state, accepted = self.temperature_control.temper_comps(new_state, accepted)
+            #st = time.perf_counter()
+            new_state = self.temperature_control.temper_comps(new_state)
+            #et = time.perf_counter()
+            #print("temps ", (et - st))
+            """# 
             self.swaps_accepted = np.zeros(ntemps - 1)
             self.attempted_swaps = np.zeros(ntemps - 1)
             betas = self.temperature_control.betas

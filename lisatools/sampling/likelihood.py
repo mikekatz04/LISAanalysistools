@@ -277,9 +277,17 @@ class Likelihood(object):
             )
 
         else:
-            template_channels = self.xp.asarray(
-                [self.template_model(*params_i, *args, **kwargs) for params_i in params]
-            )
+            template_channels = [None for _ in range(len(params))]
+            for i, params_i in enumerate(params):
+                np.save("params_last", params_i)
+                template_channels[i] = self.template_model(*params_i, *args, **kwargs)
+            
+            
+            template_channels = self.xp.asarray(template_channels)
+
+            #template_channels = self.xp.asarray(
+            #    [self.template_model(*params_i, *args, **kwargs) for params_i in params]
+            #)
 
         if self.frequency_domain is False:
             template_channels = (
@@ -297,7 +305,7 @@ class Likelihood(object):
             if data.ndim == 2:
                 data = data[self.xp.newaxis, :, :]
 
-            psd[self.xp.any(self.xp.isnan(psd))] = 1e100
+            psd[self.xp.isnan(psd) | self.xp.isinf(psd)] = 1e20
             # combines all channels into 1D array per likelihood
 
             d_minus_h = (data - h)
@@ -308,7 +316,7 @@ class Likelihood(object):
             ll = -(
                 1.0
                 / 2.0
-                * (4.0 * self.xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
+                * (4.0 * self.df * self.xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
             )
 
             if self.adjust_psd:
@@ -655,7 +663,7 @@ class GlobalLikelihood(Likelihood):
                             tm_i.generate_global_template(
                                 params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
                             )
-                    
+            breakpoint()
             # accelerate ?
             d_minus_h = (
                 data - template_all

@@ -4,7 +4,7 @@ import time
 import pickle
 import shutil
 
-from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
+# from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
 
 mempool = xp.get_default_memory_pool()
 
@@ -20,12 +20,24 @@ warnings.filterwarnings("ignore")
 
 stop_here = True
 
+
+from eryn.moves import Move
+class PlaceHolder(Move):
+    def __init__(self, *args, **kwargs):
+        super(PlaceHolder, self).__init__(*args, **kwargs)
+
+    def propose(self, model, state):
+        accepted = np.zeros(state.log_like.shape)
+        self.temperature_control.swaps_accepted = np.zeros(self.temperature_control.ntemps - 1)
+        return state, accepted
+
 class BasicResidualMGHLikelihood:
     def __init__(self, mgh):
         self.mgh = mgh
     def __call__(self, *args, supps=None, **kwargs):
         ll_temp = self.mgh.get_ll()
         overall_inds = supps["overal_inds"]
+        
         return ll_temp[overall_inds]
 
 data = [
@@ -73,6 +85,9 @@ def run_equilibrate():
     if fp_pe in os.listdir():
         reader = HDFBackend(fp_pe)
         last_sample = reader.get_last_sample()
+        nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[-2]  # will all be the same
+
+        nleaves_max_fix_new = nleaves_max_fix
         
     elif current_save_state_file in os.listdir():
         with open(current_save_state_file, "rb") as fp_out:
@@ -86,12 +101,21 @@ def run_equilibrate():
 
         last_sample = State(coords, inds=inds, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
 
+        nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[-2]  # will all be the same
+
+        nleaves_max_fix_new = nleaves_max_fix + 10000
+
     else:
         raise FileNotFoundError(current_save_state_file + " and " + fp_pe + " not in current directory")
 
+    coords_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new, ndim)) 
+    coords_new[:, :, :nleaves_max_fix, :]= last_sample.branches["gb_fixed"].coords[:]
 
-    nleaves_max_fix = last_sample.branches["gb_fixed"].nleaves[0, 0].item()  # will all be the same
-    
+    inds_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool) 
+    inds_new[:, :, :nleaves_max_fix]= last_sample.branches["gb_fixed"].inds[:]
+
+    last_sample = State({"gb_fixed": coords_new, "gb": last_sample.branches_coords["gb"]}, inds={"gb_fixed": inds_new, "gb": last_sample.branches_inds["gb"]}, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
+
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
     A_going_in[:] = np.asarray(A_inj)
@@ -136,24 +160,42 @@ def run_equilibrate():
     supps_shape_in = (ntemps_pe, nwalkers_pe)
 
     gb.gpus = mgh.gpus
-    
-    coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords
 
-    check = priors["gb_fixed"].logpdf(coords_out_gb_fixed.reshape(-1, 8))
+    """waveform_kwargs_in = {'dt': 5.0, 'T': 31457280.0, 'use_c_implementation': True, 'oversample': 4, 'start_freq_ind': 0}
+    data_index = xp.asarray(np.load("data_index.npy")).astype(xp.int32)
+    noise_index = data_index.copy()
+    prior_generated_points_in = np.load("prior_gen_check.npy")
+    N_temp = xp.asarray(np.load("N_temp.npy"))
+
+    inds = xp.where(xp.asarray(prior_generated_points_in)[:, 1] > 1e-5)
+    inds_cpu = [tmp.get() for tmp in list(inds)]
+    gb.d_d = xp.asarray(np.load("gb_d_d.npy"))[inds]
+    gb.get_ll(prior_generated_points_in[inds_cpu], mgh.data_list, mgh.psd_list, data_index=data_index[inds], noise_index=noise_index[inds], phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits,  N=N_temp[inds], **waveform_kwargs_in).shape
+    breakpoint()"""
+    
+    coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds]
+
+    check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
 
     if np.any(np.isinf(check)):
         breakpoint()
 
-    coords_out_gb_fixed[:, :, :, 3] = coords_out_gb_fixed[:, :, :, 3] % (2 * np.pi)
-    coords_out_gb_fixed[:, :, :, 5] = coords_out_gb_fixed[:, :, :, 5] % (1 * np.pi)
-    coords_out_gb_fixed[:, :, :, 6] = coords_out_gb_fixed[:, :, :, 6] % (2 * np.pi)
+    coords_out_gb_fixed[:, 3] = coords_out_gb_fixed[:, 3] % (2 * np.pi)
+    coords_out_gb_fixed[:, 5] = coords_out_gb_fixed[:, 5] % (1 * np.pi)
+    coords_out_gb_fixed[:, 6] = coords_out_gb_fixed[:, 6] % (2 * np.pi)
     # mgh = MultiGPUDataHolder(gpus, data_minus_templates_mix[0].get().reshape(ntemps_pe, nwalkers_pe, -1), data_minus_templates_mix[1].get().reshape(ntemps_pe, nwalkers_pe, -1), A_psd_in, E_psd_in, df)
     
     # mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df)
 
-    coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed.reshape(-1, coords_out_gb_fixed.shape[-1]))
+    coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed)
 
-    data_index = xp.asarray(np.repeat(np.arange(ntemps_pe * nwalkers_pe)[:, None], nleaves_max_fix, axis=-1).flatten()).astype(xp.int32)
+    temp_vals = np.repeat(np.arange(ntemps_pe)[:, None], nleaves_max_fix_new * nwalkers_pe, axis=-1).reshape(ntemps_pe, nwalkers_pe, nleaves_max_fix_new)
+
+    walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps, nleaves_max_fix_new, 1)).transpose((0, 2, 1))
+
+    data_index_1 = temp_vals * nwalkers_pe + walker_vals
+
+    data_index = xp.asarray(data_index_1[last_sample.branches["gb_fixed"].inds]).astype(xp.int32)
 
     # goes in as -h
     factors = -xp.ones_like(data_index, dtype=xp.float64)
@@ -226,7 +268,9 @@ def run_equilibrate():
         search=False,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
-        random_seed=10,
+        random_seed=random_seed,
+        nfriends=nwalkers,
+        a=1.1
     )
 
     gb_args = (
@@ -239,16 +283,16 @@ def run_equilibrate():
         search_f_bin_lims,
     )
 
-    """gb_fixed_move = GBSpecialStretchMove(
+    gb_fixed_move = GBSpecialStretchMove(
         *gb_args,
         **gb_kwargs,
-    )"""
+    )
 
-    gb_fixed_move = GBSpecialGroupStretchMove(
+    """gb_move = GBSpecialGroupStretchMove(
         gb_args,
         gb_kwargs,
-        nfriends=100
-    )
+        nfriends=40
+    )"""
 
     # add the other
 
@@ -259,6 +303,7 @@ def run_equilibrate():
 
 
     moves_in_model = gb_fixed_move  # CombineMove([gb_fixed_move, gb_move])
+    
     point_generator_func_tmp = deepcopy(priors["gb"].priors_in)
     point_generator_func_tmp[0] = uniform_dist(0.0, 1.0)
     point_generator_func_tmp[1] = uniform_dist(0.0, 1.0)
@@ -272,6 +317,8 @@ def run_equilibrate():
         provide_betas=True,
         # skip_supp_names_update=["group_move_points"],
         random_seed=10,
+        nfriends=nwalkers,
+        n_iter_update=20, 
     )
 
     gb_args_rj = (
@@ -288,11 +335,11 @@ def run_equilibrate():
         gb_args_rj,
         gb_kwargs_rj,
         m_chirp_lims,
-        [nleaves_max_fix, nleaves_max],
-        [nleaves_max_fix, 0],
+        [nleaves_max_fix_new, nleaves_max],
+        [0, 0],
         num_try=int(1e1),
-        gibbs_sampling_setup=["gb"],
-        point_generator_func=point_generator_func
+        gibbs_sampling_setup=["gb_fixed"],
+        point_generator_func=point_generator_func,
     )
     rj_moves.gb.gpus = gpus
 
@@ -309,7 +356,7 @@ def run_equilibrate():
             priors,
             tempering_kwargs={"betas": betas},
             nbranches=len(branch_names),
-            nleaves_max=[nleaves_max_fix, nleaves_max],
+            nleaves_max=[nleaves_max_fix_new, nleaves_max],
             moves=moves_in_model,
             rj_moves=rj_moves,
             kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
@@ -326,9 +373,9 @@ def run_equilibrate():
     # equlibrating likelihood check: -4293090.6483655665,
     
     """out = state_mix
-    old_number = nleaves_max_fix
+    old_number = nleaves_max_fix_new
     starting_new = True
-    print("starting new", nleaves_max_fix)
+    print("starting new", nleaves_max_fix_new)
 
     if ((current_iteration + 1) % 40 == 0 or starting_new) and current_iteration != 0:
         out.branches["gb_fixed"].coords[-1] = out.branches["gb_fixed"].coords[0]
@@ -368,8 +415,7 @@ def run_equilibrate():
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
 
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=False)
-    breakpoint()
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=20, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
 
@@ -440,7 +486,7 @@ def run_equilibrate():
 
     num_binaries_current = 0
     
-    print("DONE MIXING","num sources:", nleaves_max_fix)
+    # )
     #if det_snr_finding < snr_break or len(current_snrs_search) > num_bin_pause:
     #    break
     current_iteration += 1
