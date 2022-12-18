@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 from lisatools.utils.utility import searchsorted2d_vec, get_groups_from_band_structure
 from eryn.moves import GroupStretchMove
-from eryn.prior import PriorContainer
+from eryn.prior import ProbDistContainer
 from eryn.utils.utility import groups_from_inds
 from .gbspecialstretch import GBSpecialStretchMove
 from .gbgroupstretch import GBGroupStretchMove
@@ -37,7 +37,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
     Will use gpu if template generator uses GPU.
 
     Args:
-        priors (object): :class:`PriorContainer` object that has ``logpdf``
+        priors (object): :class:`ProbDistContainer` object that has ``logpdf``
             and ``rvs`` methods.
 
     """

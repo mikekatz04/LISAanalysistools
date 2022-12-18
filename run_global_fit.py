@@ -42,7 +42,7 @@ from lisatools.sampling.likelihood import GlobalLikelihood
 
 from lisatools.sensitivity import get_sensitivity
 
-from eryn.prior import PriorContainer
+from eryn.prior import ProbDistContainer
 
 from eryn.state import State
 from eryn.moves import StretchMoveRJ
@@ -308,13 +308,13 @@ generate_dists = deepcopy(default_priors_gb)
 snr_lim = inital_snr_lim = 430.0  # 11.0  # 85.0
 dSNR = 40.0
 generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
-generate_snr_ladder = PriorContainer(generate_dists)
+generate_snr_ladder = ProbDistContainer(generate_dists)
 
 priors_noise = {
     0: uniform_dist(0.1 * base_psd_val, 10.0 * base_psd_val)
 }
 
-priors = {"gb": PriorContainer(default_priors_gb), "noise_params": PriorContainer(priors_noise)}
+priors = {"gb": ProbDistContainer(default_priors_gb), "noise_params": ProbDistContainer(priors_noise)}
 
 # generate initial search information
 num_total = int(1e7)
@@ -901,7 +901,7 @@ def update_with_snr(i, last_sample, sampler):
             dSNR = 20.0
 
         generate_dists[0] = uniform_dist(snr_lim_tmp, snr_lim_tmp + dSNR)
-        generate_snr_ladder = PriorContainer(generate_dists)
+        generate_snr_ladder = ProbDistContainer(generate_dists)
         bf.point_generator_func = PointGeneratorSNR(generate_snr_ladder)
         build_waves_temp = globals()["build_waves"]
         sampler._rj_moves[0].search_snr_lim = snr_lim_tmp

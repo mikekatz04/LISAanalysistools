@@ -14,7 +14,7 @@ except ModuleNotFoundError:
     gpu_available = False
 
 from eryn.moves import MHMove
-from eryn.prior import PriorContainer
+from eryn.prior import ProbDistContainer
 from eryn.utils.utility import groups_from_inds
 from .gbmultipletryrj import GBMutlipleTryRJ
 
@@ -29,7 +29,7 @@ class GBFreqJump(MHMove, GBMutlipleTryRJ):
     Will use gpu if template generator uses GPU.
 
     Args:
-        priors (object): :class:`PriorContainer` object that has ``logpdf``
+        priors (object): :class:`ProbDistContainer` object that has ``logpdf``
             and ``rvs`` methods.
 
     """

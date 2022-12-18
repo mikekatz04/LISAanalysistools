@@ -38,7 +38,7 @@ class PointGeneratorSNR:
 
 max_snr_generate = 25.0
 generate_dists[0] = uniform_dist(1.0, max_snr_generate)
-generate_snr_ladder = PriorContainer(generate_dists)
+generate_snr_ladder = ProbDistContainer(generate_dists)
 point_generator = PointGeneratorSNR(generate_snr_ladder)
 
 gb_kwargs = dict(

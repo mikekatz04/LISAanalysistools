@@ -29,7 +29,7 @@ from eryn.prior import uniform_dist
 from eryn.backends import HDFBackend
 from lisatools.utils.constants import *
 from gbgpu.utils.constants import YEAR
-from eryn.prior import PriorContainer
+from eryn.prior import ProbDistContainer
 from eryn.utils import TransformContainer, PeriodicContainer
 from eryn.state import State
 from eryn.ensemble import EnsembleSampler
@@ -234,7 +234,7 @@ class SamplerGuide:
                 for ind, distribution in priors_sub.items():
                     temp[key][ind] = distribution
 
-            self._priors = {name: PriorContainer(temp[name]) for name in temp}
+            self._priors = {name: ProbDistContainer(temp[name]) for name in temp}
 
         else:
             raise ValueError(
@@ -371,7 +371,7 @@ class MBHGuide(SamplerGuide):
     @property
     def default_priors(self):
         default_priors = {
-            "mbh": PriorContainer(
+            "mbh": ProbDistContainer(
                 {
                     0: uniform_dist(np.log(1e5), np.log(1e8)),
                     1: uniform_dist(0.01, 0.999999999),
@@ -669,7 +669,7 @@ class GBGuide(SamplerGuide):
             default_priors[11] = uniform_dist(0.001, 50.0)
             default_priors[12] = uniform_dist(0.0, 1.0)
 
-        return {"gb": PriorContainer(default_priors)}
+        return {"gb": ProbDistContainer(default_priors)}
 
     @property
     def default_ndim(self):
@@ -1056,7 +1056,7 @@ class EMRIGuide(SamplerGuide):
                 except KeyError:
                     pass
 
-        default_priors = PriorContainer(default_priors)
+        default_priors = ProbDistContainer(default_priors)
 
         return default_priors
 

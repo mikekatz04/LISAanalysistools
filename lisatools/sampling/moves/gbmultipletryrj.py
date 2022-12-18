@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 from eryn.state import State, BranchSupplimental
 from eryn.moves import ReversibleJump, MultipleTryMove
-from eryn.prior import PriorContainer
+from eryn.prior import ProbDistContainer
 from eryn.utils.utility import groups_from_inds
 
 from gbgpu.utils.utility import get_N, get_fdot

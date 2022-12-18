@@ -122,10 +122,10 @@ def get_groups_from_band_structure(f0_1, band_edges, f0_2=None, xp=None):
     return groups_out
 
 """
-def get_groups_from_band_structure(f0, band_edges, f0_2=None, xp=None, num_groups_base=3, fix_f_test=None):
+def get_groups_from_band_structure(f0, band_edges, f0_2=None, xp=None, num_groups_base=3, fix_f_test=None, inds=None):
 
     if num_groups_base not in [2, 3, 4]:
-        raise ValueError("num_groups_base must be 2 or 3.")
+        raise ValueError("num_groups_base must be 2 or 3 or 4.")
     if xp is None:
         xp = np
 
@@ -144,6 +144,7 @@ def get_groups_from_band_structure(f0, band_edges, f0_2=None, xp=None, num_group
 
     # remove any above or below bands
     bad = (f0 < band_edges.min()) | (f0 > band_edges.max())
+
     band_indices = xp.searchsorted(band_edges, f0.flatten()).reshape(shape) - 1
 
     # sort the bands in, but keep places with inds_band_indices

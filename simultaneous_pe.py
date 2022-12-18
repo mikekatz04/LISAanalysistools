@@ -308,7 +308,7 @@ def run_equilibrate():
     point_generator_func_tmp[0] = uniform_dist(0.0, 1.0)
     point_generator_func_tmp[1] = uniform_dist(0.0, 1.0)
 
-    point_generator_func = PriorContainer(point_generator_func_tmp)
+    point_generator_func = ProbDistContainer(point_generator_func_tmp)
 
     gb_kwargs_rj = dict(
         waveform_kwargs=waveform_kwargs,

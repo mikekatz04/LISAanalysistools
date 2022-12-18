@@ -50,7 +50,7 @@ from lisatools.sampling.likelihood import GlobalLikelihood, Likelihood
 from lisatools.sensitivity import get_sensitivity
 from lisatools.sampling.utility import DetermineGBGroups, GetLastGBState
 
-from eryn.prior import PriorContainer
+from eryn.prior import ProbDistContainer
 
 from eryn.state import State
 from eryn.moves import StretchMoveRJ
@@ -213,13 +213,13 @@ generate_dists = deepcopy(default_priors_gb)
 snr_lim = inital_snr_lim = 45.0 # 11.0  # 85.0
 dSNR = 40.0
 generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
-generate_snr_ladder = PriorContainer(generate_dists)
+generate_snr_ladder = ProbDistContainer(generate_dists)
 
 priors_noise = {
     0: uniform_dist(0.1 * base_psd_val, 10.0 * base_psd_val)
 }
 
-priors = {"gb": PriorContainer(default_priors_gb), "gb_fixed": PriorContainer(default_priors_gb), "noise_params": PriorContainer(priors_noise)}
+priors = {"gb": ProbDistContainer(default_priors_gb), "gb_fixed": ProbDistContainer(default_priors_gb), "noise_params": ProbDistContainer(priors_noise)}
 
 # temp = injection_params[:, 0].copy()
 # injection_params[:, 0] = injection_params[:, -1].copy()
