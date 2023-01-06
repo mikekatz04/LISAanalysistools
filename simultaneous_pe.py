@@ -12,6 +12,7 @@ from full_band_global_fit_settings import *
 from single_mcmc_run import run_single_band_search
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
+from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
 
 import subprocess
 
@@ -96,6 +97,16 @@ def run_equilibrate():
         coords = last_sample.branches_coords
         inds = last_sample.branches_inds
 
+        if "psd" in last_sample.branches:
+            print("# TODO: NEED TO ADJUST THIS ONCE ADDED TO SEARCH")
+            breakpoint()
+            
+        else:
+            coords["psd"] = priors["psd"].rvs(size=(ntemps_pe, nwalkers_pe))
+            inds["psd"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
+            coords["galfor"] = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe))
+            inds["galfor"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
+
         coords["gb"] = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max, ndim))
         inds["gb"] = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=bool)
 
@@ -114,7 +125,7 @@ def run_equilibrate():
     inds_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool) 
     inds_new[:, :, :nleaves_max_fix]= last_sample.branches["gb_fixed"].inds[:]
 
-    last_sample = State({"gb_fixed": coords_new, "gb": last_sample.branches_coords["gb"]}, inds={"gb_fixed": inds_new, "gb": last_sample.branches_inds["gb"]}, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
+    last_sample = State({"gb_fixed": coords_new, **{key: last_sample.branches_coords[key] for key in ["gb", "psd", "galfor"]}}, inds={"gb_fixed": inds_new, **{key: last_sample.branches_inds[key] for key in ["gb", "psd", "galfor"]}}, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
 
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -123,8 +134,10 @@ def run_equilibrate():
 
     A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
+
     A_psd_in[:] = np.asarray(psd)
     E_psd_in[:] = np.asarray(psd)
+    
 
     """try:
         del mgh
@@ -149,10 +162,17 @@ def run_equilibrate():
     """
 
     mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df,
-        base_injections=[A_inj, E_inj], base_psd=[psd.copy(), psd.copy()]
+        base_injections=[A_inj, E_inj], base_psd=None  # [psd.copy(), psd.copy()]
     )
 
-    gb.d_d = xp.asarray(mgh.get_inner_product(use_cpu=True).flatten())
+    psd_params = last_sample.branches["psd"].coords.reshape(-1, last_sample.branches["psd"].shape[-1])
+
+    foreground_params = last_sample.branches["galfor"].coords.reshape(-1, last_sample.branches["galfor"].shape[-1])
+
+    mgh.set_psd_vals(psd_params, foreground_params=foreground_params)
+ 
+    gb.d_d = xp.asarray(mgh.get_inner_product().flatten())
+    check = mgh.get_psd_term()
 
     mempool.free_all_blocks()
     
@@ -235,7 +255,7 @@ def run_equilibrate():
         del factors
         mempool.free_all_blocks()
         
-    ll = mgh.get_ll(use_cpu=True)
+    ll = mgh.get_ll(include_psd_info=True)
 
     temp_inds = mgh.temp_indices.copy()
     walker_inds = mgh.walker_indices.copy()
@@ -300,9 +320,6 @@ def run_equilibrate():
 
     gb_fixed_move.gb.gpus = gpus
     #gb_move.gb.gb_move = gpus
-
-
-    moves_in_model = gb_fixed_move  # CombineMove([gb_fixed_move, gb_move])
     
     point_generator_func_tmp = deepcopy(priors["gb"].priors_in)
     point_generator_func_tmp[0] = uniform_dist(0.0, 1.0)
@@ -335,30 +352,58 @@ def run_equilibrate():
         gb_args_rj,
         gb_kwargs_rj,
         m_chirp_lims,
-        [nleaves_max_fix_new, nleaves_max],
-        [0, 0],
+        [nleaves_max_fix_new, nleaves_max, 1, 1],
+        [0, 0, 1, 1],
         num_try=int(1e1),
         gibbs_sampling_setup=["gb_fixed"],
         point_generator_func=point_generator_func,
     )
     rj_moves.gb.gpus = gpus
 
+    foreground_kwargs = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=transform_fn,
+        search=False,
+        provide_betas=True,
+        # skip_supp_names_update=["group_move_points"],
+        random_seed=10,
+    )
+
+    foreground_args = (
+        gb,
+        priors,
+        start_freq_ind,
+        data_length,
+        mgh,
+        np.asarray(fd),
+        search_f_bin_lims,
+    )
+
+    foreground_move = GBForegroundSpecialMove(
+        *foreground_args,
+        gibbs_sampling_setup=[{"galfor": np.ones((1, 2), dtype=bool), "psd": np.ones((1, 5), dtype=bool)}],
+        **foreground_kwargs,
+    )
+    foreground_move.gb.gpus = gpus
+
+    moves_in_model = foreground_move  # CombineMove([foreground_move, gb_fixed_move])  # CombineMove([gb_fixed_move, gb_move])
+
     like_mix = BasicResidualMGHLikelihood(mgh)
-    branch_names = ["gb_fixed", "gb"]
+    branch_names = ["gb_fixed", "gb", "psd", "galfor"]
 
     from eryn.moves.tempering import make_ladder
     betas = make_ladder(10000 * 8, ntemps=ntemps_pe)
 
     sampler_mix = EnsembleSampler(
             nwalkers_pe,
-            [ndim, ndim],  # assumes ndim_max
+            [ndim, ndim, 2, 5],  # assumes ndim_max
             like_mix,
             priors,
             tempering_kwargs={"betas": betas},
             nbranches=len(branch_names),
-            nleaves_max=[nleaves_max_fix_new, nleaves_max],
+            nleaves_max=[nleaves_max_fix_new, nleaves_max, 1, 1],
             moves=moves_in_model,
-            rj_moves=rj_moves,
+            rj_moves=None,  # rj_moves,
             kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
             backend=fp_pe,
             vectorize=True,

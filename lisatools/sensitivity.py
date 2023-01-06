@@ -373,7 +373,7 @@ class TDIf(object):
 #     return prods
 
 
-def simplesnr(f, h, i=None, years=1.0, noisemodel="SciRDv1", includewd=None):
+def simplesnr(f, h, i=None, years=1.0, noisemodel="SciRDv1", includewd=None, foreground_params=None):
     """
     TODO To be described
     @param other is the other TDI data
@@ -392,7 +392,7 @@ def simplesnr(f, h, i=None, years=1.0, noisemodel="SciRDv1", includewd=None):
     return snr
 
 
-def lisasens(f, noiseModel="SciRDv1", includewd=None):
+def lisasens(f, noiseModel="SciRDv1", includewd=None, foreground_params=None):
     """
     Compute LISA sensitivity
     @param f is the frequency array
@@ -422,19 +422,24 @@ def lisasens(f, noiseModel="SciRDv1", includewd=None):
     T = np.sqrt(1 + (f / (a * f0)) ** 2)
     Sens = (AvResp * Proj * T * ALL_m / lisaL) ** 2
 
-    if includewd != None:
+    if includewd is not None or foreground_params is not None:
         day = 86400.0
         year = 365.25 * 24.0 * 3600.0
         if (includewd < day / year) or (includewd > 10.0):
             raise NotImplementedError
-        Sgal = GalConf(f, includewd * year)
+        
+        if includewd is not None:
+            includewd_in = includewd * year
+        else:
+            includewd_in = None
+        Sgal = GalConf(f, Tobs=includewd_in, foreground_params=foreground_params)
         Sens = Sens + Sgal
 
     return Sens
 
 
 # FIXME the model for GB stochastic signal is hardcoded
-def noisepsd_X(f, model="SciRDv1", includewd=None):
+def noisepsd_X(f, model="SciRDv1", includewd=None, foreground_params=None):
     """
     Compute and return analytic PSD of noise for TDI X
      @param frequencydata  numpy array.
@@ -453,8 +458,8 @@ def noisepsd_X(f, model="SciRDv1", includewd=None):
 
     Sx = 16.0 * np.sin(x) ** 2 * (2.0 * (1.0 + np.cos(x) ** 2) * Spm + Sop)
 
-    if includewd != None:
-        Sx += WDconfusionX(f, includewd, model=model)
+    if includewd is not None or foreground_params is not None:
+        Sx += WDconfusionX(f, duration=includewd, foreground_params=foreground_params, model=model)
         # Sx += makewdnoise(f,includewd,'X')
 
     return Sx
@@ -479,14 +484,14 @@ def noisepsd_X2(f, model="SciRDv1"):
     Sx += 256.0 * (3 + np.cos(2 * x)) * np.cos(x) ** 2 * np.sin(x) ** 4 * Spm
 
     ### TODO Incule Galactic Binaries
-    # if includewd != None:
-    #     Sx += WDconfusionX(f, includewd, model=model)
+    # if includewd is not None or foreground_params is not None:
+    #     Sx += WDconfusionX(f, duration=includewd, foreground_params=foreground_params, model=model)
     #     #Sx += makewdnoise(f,includewd,'X')
 
     return Sx
 
 
-def noisepsd_XY(f, model="SciRDv1", includewd=None):
+def noisepsd_XY(f, model="SciRDv1", includewd=None, foreground_params=None):
     """
     Compute and return analytic PSD of noise for the correlation between TDI X-Y
      @param frequencydata  numpy array.
@@ -506,13 +511,13 @@ def noisepsd_XY(f, model="SciRDv1", includewd=None):
     # Sa = Sx - Sxy
     # GB = -0.5 of X
 
-    if includewd != None:
-        Sxy += -0.5 * WDconfusionX(f, includewd, model=model)  # TODO To be checked
+    if includewd is not None or foreground_params is not None:
+        Sxy += -0.5 * WDconfusionX(f, duration=includewd, foreground_params=foreground_params, model=model)  # TODO To be checked
 
     return Sxy
 
 
-def noisepsd_AE(f, model="SciRDv1", includewd=None):
+def noisepsd_AE(f, model="SciRDv1", includewd=None, foreground_params=None, xp=None):
     """
     Compute and return analytic PSD of noise for TDI A and E
      @param frequencydata  numpy array.
@@ -524,27 +529,31 @@ def noisepsd_AE(f, model="SciRDv1", includewd=None):
          example: includewd=2.3 - 2.3 yeras of observations
          if includewd == None: includewd = model.lisaWD
     """
+
+    if xp is None:
+        xp = np
+
     x = 2.0 * math.pi * lisaLT * f
 
     Spm, Sop = lisanoises(f, model)
 
     Sa = (
         8.0
-        * np.sin(x) ** 2
+        * xp.sin(x) ** 2
         * (
-            2.0 * Spm * (3.0 + 2.0 * np.cos(x) + np.cos(2 * x))
-            + Sop * (2.0 + np.cos(x))
+            2.0 * Spm * (3.0 + 2.0 * xp.cos(x) + xp.cos(2 * x))
+            + Sop * (2.0 + xp.cos(x))
         )
     )
 
-    if includewd != None:
-        Sa += WDconfusionAE(f, includewd, model=model)
+    if includewd is not None or foreground_params is not None:
+        Sa += WDconfusionAE(f, duration=includewd, foreground_params=foreground_params, model=model, xp=xp)
         # Sa += makewdnoise(f,includewd,'AE')
 
     return Sa
 
 
-def noisepsd_AE2(f, model="SciRDv1", includewd=None):
+def noisepsd_AE2(f, model="SciRDv1", includewd=None, foreground_params=None):
     """
     Compute and return analytic PSD of noise for TDI A and E
      @param frequencydata  numpy array.
@@ -570,7 +579,7 @@ def noisepsd_AE2(f, model="SciRDv1", includewd=None):
         )
     )
 
-    if includewd != None:
+    if includewd is not None or foreground_params is not None:
         raise NotImplementedError
         Sa += WDconfusionAE(f, includewd, model=model)
         # Sa += makewdnoise(f,includewd,'AE')
@@ -579,7 +588,7 @@ def noisepsd_AE2(f, model="SciRDv1", includewd=None):
 
 
 # TODO: currently not including WD background here... probably OK
-def noisepsd_T(f, model="SciRDv1", includewd=None):
+def noisepsd_T(f, model="SciRDv1", includewd=None, foreground_params=None):
     """
     Compute and return analytic PSD of noise for TDI T
      @param frequencydata  numpy array.
@@ -603,10 +612,12 @@ def noisepsd_T(f, model="SciRDv1", includewd=None):
     return St
 
 
-def SGal(fr, pars):
+def SGal(fr, pars, xp=None):
     """
     TODO To be described
     """
+    if xp is None:
+        xp = np
     # {{{
     Amp = pars[0]
     alpha = pars[1]
@@ -615,20 +626,21 @@ def SGal(fr, pars):
     sl2 = pars[4]
     Sgal = (
         Amp
-        * np.exp(-(fr ** alpha) * sl1)
+        * xp.exp(-(fr ** alpha) * sl1)
         * (fr ** (-7.0 / 3.0))
         * 0.5
-        * (1.0 + np.tanh(-(fr - kn) * sl2))
+        * (1.0 + xp.tanh(-(fr - kn) * sl2))
     )
 
     return Sgal
     # }}}
 
 
-def GalConf(fr, Tobs):
+def GalConf(fr, Tobs=None, foreground_params=None, xp=None):
     """
     TODO To be described
     """
+
     # {{{
     # Tobs should be in sec.
     day = 86400.0
@@ -641,86 +653,106 @@ def GalConf(fr, Tobs):
     # Sgal_2y = 2.2e-44*np.exp(-(fr**1.2)*2.2e3)*(fr**(-7./3.))*0.5*(1.0 + np.tanh(-(fr-2.3e-3)*1.8e3))
     # Sgal_4y = 2.2e-44*np.exp(-(fr**1.2)*2.9e3)*(fr**(-7./3.))*0.5*(1.0 + np.tanh(-(fr-2.0e-3)*1.9e3))
 
-    Amp = 3.26651613e-44
-    alpha = 1.18300266e00
+    if Tobs is not None:
+        Amp = 3.26651613e-44
+        alpha = 1.18300266e00
 
-    Xobs = [
-        1.0 * day,
-        3.0 * month,
-        6.0 * month,
-        1.0 * year,
-        2.0 * year,
-        4.0 * year,
-        10.0 * year,
-    ]
-    Slope1 = [
-        9.41315118e02,
-        1.36887568e03,
-        1.68729474e03,
-        1.76327234e03,
-        2.32678814e03,
-        3.01430978e03,
-        3.74970124e03,
-    ]
-    knee = [
-        1.15120924e-02,
-        4.01884128e-03,
-        3.47302482e-03,
-        2.77606177e-03,
-        2.41178384e-03,
-        2.09278117e-03,
-        1.57362626e-03,
-    ]
-    Slope2 = [
-        1.03239773e02,
-        1.03351646e03,
-        1.62204855e03,
-        1.68631844e03,
-        2.06821665e03,
-        2.95774596e03,
-        3.15199454e03,
-    ]
+        Xobs = [
+            1.0 * day,
+            3.0 * month,
+            6.0 * month,
+            1.0 * year,
+            2.0 * year,
+            4.0 * year,
+            10.0 * year,
+        ]
+        Slope1 = [
+            9.41315118e02,
+            1.36887568e03,
+            1.68729474e03,
+            1.76327234e03,
+            2.32678814e03,
+            3.01430978e03,
+            3.74970124e03,
+        ]
+        knee = [
+            1.15120924e-02,
+            4.01884128e-03,
+            3.47302482e-03,
+            2.77606177e-03,
+            2.41178384e-03,
+            2.09278117e-03,
+            1.57362626e-03,
+        ]
+        Slope2 = [
+            1.03239773e02,
+            1.03351646e03,
+            1.62204855e03,
+            1.68631844e03,
+            2.06821665e03,
+            2.95774596e03,
+            3.15199454e03,
+        ]
 
-    # Slope1 = [9.0e2, 1.7e3, 2.2e3, 2.2e3, 2.9e3]
-    # knee = [1.4e-2, 4.8e-3, 3.1e-3, 2.3e-3, 2.0e-3]
-    # Slope2 = [0.7e2, 5.4e2, 1.3e3, 1.8e3, 1.9e3]
+        # Slope1 = [9.0e2, 1.7e3, 2.2e3, 2.2e3, 2.9e3]
+        # knee = [1.4e-2, 4.8e-3, 3.1e-3, 2.3e-3, 2.0e-3]
+        # Slope2 = [0.7e2, 5.4e2, 1.3e3, 1.8e3, 1.9e3]
 
-    Tmax = 10.0 * year
-    if Tobs > Tmax:
-        print("I do not do extrapolation, Tobs > Tmax:", Tobs, Tmax)
-        sys.exit(1)
+        Tmax = 10.0 * year
+        if Tobs > Tmax:
+            print("I do not do extrapolation, Tobs > Tmax:", Tobs, Tmax)
+            sys.exit(1)
 
-    # Interpolate
-    tck1 = interpolate.splrep(Xobs, Slope1, s=0, k=1)
-    tck2 = interpolate.splrep(Xobs, knee, s=0, k=1)
-    tck3 = interpolate.splrep(Xobs, Slope2, s=0, k=1)
-    sl1 = interpolate.splev(Tobs, tck1, der=0)
-    kn = interpolate.splev(Tobs, tck2, der=0)
-    sl2 = interpolate.splev(Tobs, tck3, der=0)
-    # print "interpolated values: slope1, knee, slope2", sl1, kn, sl2
-    Sgal_int = SGal(fr, [Amp, alpha, sl1, kn, sl2])
+        # Interpolate
+        tck1 = interpolate.splrep(Xobs, Slope1, s=0, k=1)
+        tck2 = interpolate.splrep(Xobs, knee, s=0, k=1)
+        tck3 = interpolate.splrep(Xobs, Slope2, s=0, k=1)
+        sl1 = interpolate.splev(Tobs, tck1, der=0)
+        kn = interpolate.splev(Tobs, tck2, der=0)
+        sl2 = interpolate.splev(Tobs, tck3, der=0)
+        # print "interpolated values: slope1, knee, slope2", sl1, kn, sl2
+
+    elif foreground_params is not None:
+        assert len(foreground_params) == 5
+        Amp, alpha, sl1, kn, sl2 = foreground_params
+
+    else:
+        raise ValueError("Must provide either Tobs or foreground_params.")
+    Sgal_int = SGal(fr, [Amp, alpha, sl1, kn, sl2], xp=xp)
 
     return Sgal_int
 
 
 # TODO check it against the old LISA noise
-def WDconfusionX(f, duration, model="SciRDv1"):
+def WDconfusionX(f, foreground_params=None, duration=None, model="SciRDv1", xp=None):
     """
     TODO To be described
     """
+    if xp is None:
+        xp = np
+
+    if foreground_params is None and duration is None:
+        raise ValueError("Must provide either duration or direct background parameters.")
     # duration is assumed to be in years
     day = 86400.0
     year = 365.25 * 24.0 * 3600.0
-    if (duration < day / year) or (duration > 10.0):
+
+    if duration is not None and ((duration < day / year) or (duration > 10.0)):
         raise NotImplementedError
 
-    if (
-        model == "Proposal" or model == "SciRDv1"
-    ):  ## WANRNING: WD should be regenrate for SciRD
+    if True: #(
+        # model == "Proposal" or model == "SciRDv1" or model == "sangria"
+    #):  ## WANRNING: WD should be regenrate for SciRD
         x = 2.0 * math.pi * lisaLT * f
-        t = 4.0 * x ** 2 * np.sin(x) ** 2
-        Sg_sens = GalConf(f, duration * year)
-        # t = 4 * x**2 * np.sin(x)**2 * (1.0 if obs == 'X' else 1.5)
+        t = 4.0 * x ** 2 * xp.sin(x) ** 2
+        if duration is not None:
+            duration_in = duration * year
+        else:
+            duration_in = None
+
+        Sg_sens = GalConf(f, Tobs=duration_in, foreground_params=foreground_params, xp=xp)
+        
+        # t = 4 * x**2 * xp.sin(x)**2 * (1.0 if obs == 'X' else 1.5)
         return t * Sg_sens
 
         ##return t * ( N.piecewise(f,(f >= 1.0e-4  ) & (f < 1.0e-3  ),[lambda f: 10**-44.62 * f**-2.3, 0]) + \
@@ -737,11 +769,11 @@ def WDconfusionX(f, duration, model="SciRDv1"):
             raise NotImplementedError
 
 
-def WDconfusionAE(f, duration, model="SciRDv1"):
+def WDconfusionAE(f, foreground_params=None, duration=None, model="SciRDv1", xp=None):
     """
     TODO To be described
     """
-    SgX = WDconfusionX(f, duration, model)
+    SgX = WDconfusionX(f, foreground_params=foreground_params, duration=duration, model=model, xp=xp)
     return 1.5 * SgX
 
 
@@ -815,11 +847,20 @@ def lisanoises(f, model="SciRDv1", unit="relativeFrequency"):
         Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
         Sop = Soms_nu
 
-    elif model == "SciRDv1" or model == "MRDv1" or model == "sangria":
+    elif isinstance(model, list) or isinstance(model, np.ndarray) or model == "SciRDv1" or model == "MRDv1" or model == "sangria":
+        if isinstance(model, str):
+            Soms_d_in = Soms_d_all[model]
+            Sa_a_in = Sa_a_all[model]
+
+        else:
+            # square root of the actual value
+            Soms_d_in = model[0] ** 2
+            Sa_a_in = model[1] ** 2
+
         frq = f
         ### Acceleration noise
         ## In acceleration
-        Sa_a = Sa_a_all[model] * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
+        Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
         ## In displacement
         Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
         ## In relative frequency unit
@@ -828,7 +869,7 @@ def lisanoises(f, model="SciRDv1", unit="relativeFrequency"):
 
         ### Optical Metrology System
         ## In displacement
-        Soms_d = Soms_d_all[model] * (1.0 + (2.0e-3 / f) ** 4)
+        Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
         ## In relative frequency unit
         Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
         Sop = Soms_nu
@@ -1161,7 +1202,7 @@ def noisepsd_X(frequencydata,includewd=None):
     # Sxy = -4.0 * N.sin(2*x) * N.sin(x) * (Sop + 4.0*Spm)
     # Sa = Sx - Sxy
 
-    if includewd != None:
+    if includewd is not None or foreground_params is not None:
         Sx += makewdnoise(f,includewd,'X')
 
     return Sx
@@ -1177,7 +1218,7 @@ def noisepsd_AE(f,includewd=None):
     Sa = 8.0 * N.sin(x)**2 * (2.0 * Spm * (3.0 + 2.0*N.cos(x) + N.cos(2*x)) +
                               Sop * (2.0 + N.cos(x)))
 
-    if includewd != None:
+    if includewd is not None or foreground_params is not None:
         Sa += makewdnoise(f,includewd,'AE')
 
     return Sa

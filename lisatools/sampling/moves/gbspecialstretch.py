@@ -261,7 +261,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
     def run_swap_ll(self, num_stack, gb_fixed_coords_new, gb_fixed_coords_old, group_here, N_vals_all, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, return_at_logl=False):
         self.xp.cuda.runtime.deviceSynchronize()
-        #st = time.perf_counter()
+        st = time.perf_counter()
         temp_inds_keep, walkers_inds_keep, leaf_inds_keep = group_here
 
         ntemps, nwalkers, nleaves_max, ndim = gb_fixed_coords_new.shape
@@ -392,14 +392,14 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.xp.cuda.runtime.deviceSynchronize()
 
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("before ll", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         lnL_old = self.run_ll_part_comp(data_index, noise_index, start_inds_final, lengths)
         self.xp.cuda.runtime.deviceSynchronize()
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("after ll", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         N_vals_single = N_vals_all[group_part_bin]
         
         N_vals_generate_in = self.xp.concatenate([
@@ -428,9 +428,9 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
 
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("before 1 adjustment", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         self.xp.cuda.runtime.deviceSynchronize()
         self.gb.generate_global_template(
             points_for_generate,
@@ -443,14 +443,14 @@ class GBSpecialStretchMove(GroupStretchMove):
             **waveform_kwargs_fill
         )
         self.xp.cuda.runtime.deviceSynchronize()
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("after 1 adjustment", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         lnL_new = self.run_ll_part_comp(data_index, noise_index, start_inds_final, lengths)
         self.xp.cuda.runtime.deviceSynchronize()
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("after second ll", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         delta_ll = lnL_new - lnL_old
 
         logp = prior_per_group_new[(temp_part, walker_part, sub_band_part)]
@@ -480,9 +480,9 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.xp.cuda.runtime.deviceSynchronize()
         keep = lnpdiff > self.xp.asarray(self.xp.log(self.xp.random.rand(*logP.shape)))
 
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("keep determination", (et - st), new_points.shape[0])
-        st = time.perf_counter()"""
+        st = time.perf_counter()
             
         accepted_here = keep.copy()
 
@@ -549,9 +549,9 @@ class GBSpecialStretchMove(GroupStretchMove):
             **waveform_kwargs_fill
         )
         self.xp.cuda.runtime.deviceSynchronize()
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("after reverse", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         delta_ll_shaped = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1))
         delta_lp_shaped = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1))
         
@@ -562,8 +562,8 @@ class GBSpecialStretchMove(GroupStretchMove):
         log_like_tmp_check = log_like_tmp.copy()
         log_like_tmp[:] += delta_ll_shaped.sum(axis=-1)
         log_prior_tmp[:] += delta_lp_shaped.sum(axis=-1)
-        """et = time.perf_counter()
-        print("bookkeeping", (et - st))"""
+        et = time.perf_counter()
+        print("bookkeeping", (et - st))
         
         tmp_info = []
         for t in range(ntemps):
@@ -593,7 +593,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.current_state = state
         np.random.seed(10)
         #print("start stretch")
-        #st = time.perf_counter()
+        # st = time.perf_counter()
         # Check that the dimensions are compatible.
         ndim_total = 0
         for branch in state.branches.values():
@@ -654,9 +654,9 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         gb_fixed_coords_into_proposal = gb_fixed_coords.reshape(ntemps, nwalkers * nleaves_max, 1, ndim).copy()
         gb_inds_into_proposal = state.branches["gb_fixed"].inds.reshape(ntemps, nwalkers * nleaves_max, 1).copy()
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("before prop", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
         # adjust groups to put some together
         num_stack = 10
 
@@ -664,9 +664,9 @@ class GBSpecialStretchMove(GroupStretchMove):
         q, factors_temp = self.get_proposal(
                 {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, gibbs_ndim=ndim * num_stack
         )
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("after prop", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
        
         factors = factors_temp.reshape(ntemps, nwalkers, nleaves_max)
         q["gb_fixed"] = self.xp.asarray(q["gb_fixed"].reshape(ntemps, nwalkers, nleaves_max, ndim))
@@ -688,17 +688,17 @@ class GBSpecialStretchMove(GroupStretchMove):
             assert isinstance(keep_bands, np.ndarray)
             fix_f_test[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
 
-        """et = time.perf_counter()
+        et = time.perf_counter()
         print("pre_groups", (et - st))
-        st = time.perf_counter()"""
+        st = time.perf_counter()
 
         num_groups_base = 4
         groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=np, num_groups_base=num_groups_base, fix_f_test=fix_f_test)
 
         unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
 
-        """et = time.perf_counter()
-        print("get_groups", (et - st))"""
+        et = time.perf_counter()
+        print("get_groups", (et - st))
         st = time.perf_counter()
         groups_check = groups.copy()
         for remainder_val in range(num_groups_base):
@@ -730,8 +730,8 @@ class GBSpecialStretchMove(GroupStretchMove):
         # needs to be max because some values may be missing due to evens and odds
         num_groups = unique_groups.max().item() + 1
 
-        """et = time.perf_counter()
-        print("adjustment", (et - st))"""
+        et = time.perf_counter()
+        print("adjustment", (et - st))
 
         for group_iter in range(num_groups):
             # st = time.perf_counter()
@@ -1111,8 +1111,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.time += 1
         #self.xp.cuda.runtime.deviceSynchronize()
-        #et = time.perf_counter()
-        #print("end stretch", (et - st))
+        et = time.perf_counter()
+        print("end stretch", (et - st))
 
         self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
