@@ -204,7 +204,7 @@ class MultiGPUDataHolder:
                     overall_index_here = overall_index - gpu_split.min().item()
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
 
-                    psd_term_here = xp.sum(-2 * np.pi * (xp.log(self.channel1_psd[gpu_i][inds_slice]) + xp.log(self.channel2_psd[gpu_i][inds_slice]))).get().item()
+                    psd_term_here = xp.sum((xp.log(self.channel1_psd[gpu_i][inds_slice]) + xp.log(self.channel2_psd[gpu_i][inds_slice]))).get().item()
                     xp.cuda.runtime.deviceSynchronize()
                     if np.isnan(psd_term_here):
                         breakpoint()
@@ -291,7 +291,7 @@ class MultiGPUDataHolder:
         ll_out = -1/2 * inner_product
 
         if include_psd_info:
-            ll_out += self.get_psd_term(overall_inds=overall_inds)
+            ll_out += -1 / 2 * self.get_psd_term(overall_inds=overall_inds)
         return ll_out
 
     def multiply_data(self, val):

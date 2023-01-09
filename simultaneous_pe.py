@@ -386,7 +386,7 @@ def run_equilibrate():
     )
     foreground_move.gb.gpus = gpus
 
-    moves_in_model = foreground_move  # CombineMove([foreground_move, gb_fixed_move])  # CombineMove([gb_fixed_move, gb_move])
+    moves_in_model = CombineMove([foreground_move, gb_fixed_move])  # CombineMove([gb_fixed_move, gb_move])
 
     like_mix = BasicResidualMGHLikelihood(mgh)
     branch_names = ["gb_fixed", "gb", "psd", "galfor"]
@@ -403,7 +403,7 @@ def run_equilibrate():
             nbranches=len(branch_names),
             nleaves_max=[nleaves_max_fix_new, nleaves_max, 1, 1],
             moves=moves_in_model,
-            rj_moves=None,  # rj_moves,
+            rj_moves=rj_moves,
             kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
             backend=fp_pe,
             vectorize=True,

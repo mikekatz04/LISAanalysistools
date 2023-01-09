@@ -863,7 +863,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                         breakpoint()
 
         if self.time % 100 == 0:
-            ll_after2 = self.mgh.get_ll(use_cpu=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+            ll_after2 = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
             if np.abs(ll_after2 - new_state.log_like).max() > 1e-4:
                     breakpoint()
 
