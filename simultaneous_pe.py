@@ -98,8 +98,12 @@ def run_equilibrate():
         inds = last_sample.branches_inds
 
         if "psd" in last_sample.branches:
-            print("# TODO: NEED TO ADJUST THIS ONCE ADDED TO SEARCH")
-            breakpoint()
+            """print("# TODO: NEED TO ADJUST THIS ONCE ADDED TO SEARCH")
+            coords["psd"] = priors["psd"].rvs(size=(ntemps_pe, nwalkers_pe))
+
+            inds["psd"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
+            coords["galfor"] = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe))
+            inds["galfor"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)"""
             
         else:
             coords["psd"] = priors["psd"].rvs(size=(ntemps_pe, nwalkers_pe))
@@ -381,7 +385,7 @@ def run_equilibrate():
 
     foreground_move = GBForegroundSpecialMove(
         *foreground_args,
-        gibbs_sampling_setup=[{"galfor": np.ones((1, 2), dtype=bool), "psd": np.ones((1, 5), dtype=bool)}],
+        gibbs_sampling_setup=[{"psd": np.ones((1, 2), dtype=bool), "galfor": np.ones((1, 5), dtype=bool)}],
         **foreground_kwargs,
     )
     foreground_move.gb.gpus = gpus
@@ -396,7 +400,7 @@ def run_equilibrate():
 
     sampler_mix = EnsembleSampler(
             nwalkers_pe,
-            [ndim, ndim, 2, 5],  # assumes ndim_max
+            [ndim, ndim, 4, 5],  # assumes ndim_max
             like_mix,
             priors,
             tempering_kwargs={"betas": betas},
@@ -455,12 +459,12 @@ def run_equilibrate():
                 xp.cuda.runtime.deviceSynchronize()
         xp.cuda.runtime.setDevice(main_gpu)
     """
-    nsteps_mix = 200
+    nsteps_mix = 10000
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=20, store=True)
+    
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
 

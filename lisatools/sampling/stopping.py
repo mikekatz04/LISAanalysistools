@@ -1,6 +1,7 @@
 import numpy as np
 
 from eryn.utils.stopping import Stopping
+from eryn.utils.utility import thermodynamic_integration_log_evidence
 
 
 class SNRStopping(Stopping):
@@ -10,9 +11,9 @@ class SNRStopping(Stopping):
 
     def __call__(self, iter, sample, sampler):
 
-        ind = sampler.get_log_prob().argmax()
+        ind = sampler.get_log_like().argmax()
 
-        log_best = sampler.get_log_prob().max()
+        log_best = sampler.get_log_like().max()
         snr_best = sampler.get_blobs()[:, :, :, 0].flatten()[ind]
         # d_h_best = sampler.get_blobs()[:, :, :, 1].flatten()[ind]
         # h_h_best = sampler.get_blobs()[:, :, :, 2].flatten()[ind]
@@ -47,7 +48,7 @@ class SearchConvergeStopping(Stopping):
 
     def __call__(self, iter, sample, sampler):
 
-        like_best = sampler.get_log_prob(discard=self.start_iteration).max()
+        like_best = sampler.get_log_like(discard=self.start_iteration).max()
 
         if np.abs(like_best - self.past_like_best) < self.diff:
             self.iters_consecutive += 1
@@ -95,7 +96,7 @@ class SearchConvergeStopping2(Stopping):
         if sampler.iteration <= self.start_iteration:
             return False
 
-        lps = sampler.get_log_prob(discard=self.start_iteration)[self.last_sampler_iteration - self.start_iteration:]
+        lps = sampler.get_log_like(discard=self.start_iteration)[self.last_sampler_iteration - self.start_iteration:]
         try:
            like_best = lps.max()
         except:
@@ -146,7 +147,41 @@ class SearchConvergeStopping2(Stopping):
         else:
             return False
 
+
+
+class EvidenceStopping(Stopping):
+    def __init__(self, diff=0.5, verbose=False):
+        self.diff = diff
+        self.verbose = verbose
+
+    def __call__(self, iter, sample, sampler):
+
+        betas = sampler.get_betas()[-1]
+        logls = sampler.get_log_like().mean(axis=(0, 2))
+
+        logZ, dlogZ = thermodynamic_integration_log_evidence(betas, logls)
+        print(logZ, dlogZ)
+        return False
         
-            
+
+        if self.verbose:
+            print(
+                "snr_best",
+                snr_best,
+                "limit:",
+                self.snr_limit,
+                "loglike:",
+                log_best,
+                # d_h_best,
+                # h_h_best,
+            )
+
+        if snr_best > self.snr_limit:
+            return True
+
+        else:
+            return False
+
+
 
         

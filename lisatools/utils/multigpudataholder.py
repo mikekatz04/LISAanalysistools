@@ -142,7 +142,8 @@ class MultiGPUDataHolder:
         return_to_main = xp.cuda.runtime.getDevice()
 
         fd_gpu = [None for _ in self.gpus]
-        AE_tmp = [None for _ in self.gpus]
+        A_tmp = [None for _ in self.gpus]
+        E_tmp = [None for _ in self.gpus]
         # st = time.perf_counter()
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):
@@ -155,25 +156,35 @@ class MultiGPUDataHolder:
                         continue
 
                     overall_index_here = overall_index - gpu_split.min().item()
-                    psd_params_in = psd_params[i]
-
+                    
                     if foreground_params is not None:
                         foreground_pars_in = foreground_params[i]
                     else:
                         foreground_pars_in = None
-                    AE_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="noisepsd_AE", model=psd_params_in, foreground_params=foreground_pars_in, xp=xp)
-                    AE_tmp[gpu_i][xp.isnan(AE_tmp[gpu_i])] = 1e10
+
+                    psd_params_A_in = psd_params[i][:2]
+                    
+                    A_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="noisepsd_AE", model=psd_params_A_in, foreground_params=foreground_pars_in, xp=xp)
+                    A_tmp[gpu_i][0] = A_tmp[gpu_i][1]
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
-                    self.channel1_psd[gpu_i][inds_slice] = AE_tmp[gpu_i]
-                    self.channel2_psd[gpu_i][inds_slice] = AE_tmp[gpu_i]
-                    if xp.any(AE_tmp[gpu_i] < 0.0):
+                    self.channel1_psd[gpu_i][inds_slice] = A_tmp[gpu_i]
+                    if xp.any(A_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+                    psd_params_E_in = psd_params[i][2:]
+
+                    E_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="noisepsd_AE", model=psd_params_E_in, foreground_params=foreground_pars_in, xp=xp)
+                    E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel1_psd[gpu_i][inds_slice] = E_tmp[gpu_i]
+                    if xp.any(E_tmp[gpu_i] < 0.0):
                         breakpoint()
 
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):
                 xp.cuda.runtime.deviceSynchronize()
 
-                del fd_gpu[gpu_i], AE_tmp[gpu_i]
+                del fd_gpu[gpu_i], A_tmp[gpu_i], E_tmp[gpu_i]
                 xp.get_default_memory_pool().free_all_blocks()
 
         xp.cuda.runtime.setDevice(return_to_main)
@@ -291,7 +302,7 @@ class MultiGPUDataHolder:
         ll_out = -1/2 * inner_product
 
         if include_psd_info:
-            ll_out += -1 / 2 * self.get_psd_term(overall_inds=overall_inds)
+            ll_out += -self.get_psd_term(overall_inds=overall_inds)
         return ll_out
 
     def multiply_data(self, val):

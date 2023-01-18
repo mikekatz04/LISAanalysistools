@@ -481,7 +481,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         ntemps, nwalkers, _, _ = new_state.branches[list(new_state.branches.keys())[0]].shape
         
         num_consecutive_rj_moves = 1
-        print("starting")
+        # print("starting")
         st = time.perf_counter()
         for rj_move_i in range(num_consecutive_rj_moves):
             accepted = np.zeros((ntemps, nwalkers), dtype=bool)
@@ -868,7 +868,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                     breakpoint()
 
         et = time.perf_counter()
-        print("rj", (et - st) / num_consecutive_rj_moves)
+        # print("rj", (et - st) / num_consecutive_rj_moves)
 
         if self.temperature_control is not None and not self.prevent_swaps:
              new_state = self.temperature_control.temper_comps(new_state, adapt=False)
