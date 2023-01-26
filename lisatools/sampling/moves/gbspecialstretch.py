@@ -259,7 +259,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.xp.cuda.runtime.deviceSynchronize()
         return lnL
 
-    def run_swap_ll(self, num_stack, gb_fixed_coords_new, gb_fixed_coords_old, group_here, N_vals_all, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, return_at_logl=False):
+    def run_swap_ll(self, num_stack, gb_fixed_coords_new, gb_fixed_coords_old, group_here, N_vals_all, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, zz_sampled, return_at_logl=False):
         self.xp.cuda.runtime.deviceSynchronize()
         # st = time.perf_counter()
         temp_inds_keep, walkers_inds_keep, leaf_inds_keep = group_here
@@ -309,6 +309,10 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         start_wave_inds_old = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
         end_wave_inds_old = -self.xp.ones((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=int)
+
+        stack_track = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1, num_stack), dtype=bool)
+
+        stack_track[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = True
 
         prior_all_new = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1, num_stack))
         prior_all_new[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = logp
@@ -484,12 +488,20 @@ class GBSpecialStretchMove(GroupStretchMove):
         # takes care of tempering
         prev_logP = self.compute_log_posterior(prev_logl, prev_logp, betas=betas_in)
 
-        factors_here = self.xp.asarray(factors)[group_part]
-
+        stack_track_here = stack_track[group_part]
+        zz_here = zz_sampled[(temp_part, walker_part)]
+        ndim_here_tmp = stack_track_here.sum(axis=-1) * 8
+        factors_here = (ndim_here_tmp - 1.0) * self.xp.log(zz_here)
+        
         # TODO: think about factors in tempering
+        # TODO: adjust scale factor to band?
         lnpdiff = factors_here + logP - prev_logP
         self.xp.cuda.runtime.deviceSynchronize()
         keep = lnpdiff > self.xp.asarray(self.xp.log(self.xp.random.rand(*logP.shape)))
+
+        """for i in range(1, num_stack + 1):
+            print(i, keep[ndim_here_tmp / 8 == i].shape[0], keep[ndim_here_tmp / 8 == i].sum() / keep[ndim_here_tmp / 8 == i].shape[0])
+        print("\n")"""
 
         """et = time.perf_counter()
         print("keep determination", (et - st), new_points.shape[0])
@@ -658,23 +670,27 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         points_to_move = gb_fixed_coords[new_state.branches_inds["gb_fixed"]]
 
-        gb_fixed_coords_into_proposal = gb_fixed_coords.reshape(ntemps, nwalkers * nleaves_max, 1, ndim).copy()
-        gb_inds_into_proposal = state.branches["gb_fixed"].inds.reshape(ntemps, nwalkers * nleaves_max, 1).copy()
+        gb_fixed_coords_into_proposal = gb_fixed_coords  # .reshape(ntemps, nwalkers * nleaves_max, 1, ndim).copy()
+        gb_inds_into_proposal = state.branches["gb_fixed"].inds  # .reshape(ntemps, nwalkers * nleaves_max, 1).copy()
         """et = time.perf_counter()
         print("before prop", (et - st))
         st = time.perf_counter()"""
         # adjust groups to put some together
-        num_stack = 10
+        num_stack = 4
 
         # TODO: check detailed balance
+        # TODO: consider ordering of selection of new points. Might be better to make sure they are effectively done in order
+
         q, factors_temp = self.get_proposal(
                 {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, gibbs_ndim=ndim * num_stack
         )
+
+        zz_sampled = self.zz.copy()
         """et = time.perf_counter()
         print("after prop", (et - st))
         st = time.perf_counter()"""
        
-        factors = factors_temp.reshape(ntemps, nwalkers, nleaves_max)
+        factors = np.repeat(factors_temp[:, :, None], nleaves_max, axis=-1)
         q["gb_fixed"] = self.xp.asarray(q["gb_fixed"].reshape(ntemps, nwalkers, nleaves_max, ndim))
         f_test = gb_fixed_coords[:, :, :, 1].get() / 1e3
 
@@ -763,7 +779,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             # st = time.perf_counter()
             temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
             
-            self.run_swap_ll(num_stack, q["gb_fixed"], gb_fixed_coords, group, N_vals, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp)
+            self.run_swap_ll(num_stack, q["gb_fixed"], gb_fixed_coords, group, N_vals, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, zz_sampled)
 
             """ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
             if np.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
@@ -782,7 +798,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        if self.time % 200 == 0:
+        if self.time % 100 == 0:
             ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
             if np.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
                 if np.abs(log_like_tmp.get() - ll_after).max() > 1e0:
@@ -909,6 +925,8 @@ class GBSpecialStretchMove(GroupStretchMove):
             self.num_proposals = tmp2
         else:
             self.num_proposals += tmp2
+
+        # print(self.accepted / self.num_proposals)
 
         if self.temperature_control is not None:
             #st = time.perf_counter()
@@ -1134,6 +1152,6 @@ class GBSpecialStretchMove(GroupStretchMove):
         """et = time.perf_counter()
         print("end", (et - st), group_iter, group_len[group_iter])"""
                     
-        # breakpoint()
+        #breakpoint()
         return new_state, accepted
 

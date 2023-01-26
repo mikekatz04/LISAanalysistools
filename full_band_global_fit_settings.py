@@ -12,7 +12,7 @@ from eryn.utils.utility import groups_from_inds
 from eryn.utils import TransformContainer
 
 
-from eryn.prior import uniform_dist
+from eryn.prior import uniform_dist, MappedUniformDistribution
 from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
 from lisatools.sampling.moves.gbspecialstretch import GBSpecialStretchMove
 from lisatools.utils.utility import AET
@@ -95,6 +95,7 @@ current_residuals_file_iterative_search = "full_band_current_residuals_file_iter
 current_iterative_search_sub_file_base = "full_band_current_iterative_search_sub_file_base"
 current_found_coords_for_starting_mix_file = "full_band_current_found_coords_for_starting_mix_file.npy"
 current_save_state_file = "save_state_temp.pickle"
+current_save_state_file_psd = "psd_save_state_temp.pickle"
 
 num_sub_band_fails_limit = 2
 
@@ -124,7 +125,12 @@ ntemps_pe = 8
 nwalkers = 100
 branch_names = ["gb", "gb_fixed", "psd", "galfor"]
 
-fp_pe = "develop_full_band_3.h5"
+
+fp_gb = "last_gb_cold_chain_residuals"
+fp_psd = "last_psd_cold_chain_info"
+
+fp_pe = "develop_full_band_5.h5"
+fp_psd_pe = "develop_full_band_psd.h5"
 folder = "./"
 import os
 fp_old = fp_pe  # "full_half_mHz_band_pe_output_after_prior_extension.h5"
@@ -215,8 +221,8 @@ waveform_kwargs_tmp["start_freq_ind"] = start_freq_ind
 get_last_gb_state = GetLastGBState(gb, transform_fn={"gb": transform_fn, "gb_fixed": transform_fn}, waveform_kwargs=waveform_kwargs_tmp)
 default_priors_gb = {
     0: snr_prior,
-    1: uniform_dist(*(np.asarray(f0_lims) * 1e3)),
-    2: uniform_dist(*fdot_lims),
+    1: MappedUniformDistribution(*(np.asarray(f0_lims) * 1e3)),  # special mapping for RJ (we care about changes in prior, uniform there are no changes)
+    2: MappedUniformDistribution(*fdot_lims),
     3: uniform_dist(*phi0_lims),
     4: uniform_dist(*np.cos(iota_lims)),
     5: uniform_dist(*psi_lims),
@@ -233,18 +239,18 @@ generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
 generate_snr_ladder = ProbDistContainer(generate_dists)
 
 priors_psd = {
-    0: uniform_dist(7.65e-12, 7.9e-12),  # Soms_d
-    1: uniform_dist(3.35e-15, 3.5e-15),  # Sa_a
-    2: uniform_dist(8.0e-12, 8.2e-12),  # Soms_d
-    3: uniform_dist(2.42, 2.485),  # Sa_a
+    0: uniform_dist(6.e-12, 9.e-12),  # Soms_d
+    1: uniform_dist(2.e-15, 6.e-15),  # Sa_a
+    2: uniform_dist(6.0e-12, 9.e-12),  # Soms_d
+    3: uniform_dist(2.e-15, 6.e-15),  # Sa_a
 }
 
 priors_galfor = {
     0: uniform_dist(1e-45, 2e-43),  # amp
-    1: uniform_dist(1.0, 1.4),  # alpha
-    2: uniform_dist(5e1, 4e3),  # Slope1
+    1: uniform_dist(1.0, 3.0),  # alpha
+    2: uniform_dist(5e1, 8e3),  # Slope1
     3: uniform_dist(1e-4, 5e-2),  # knee
-    4: uniform_dist(5e1, 4e3),  # Slope2
+    4: uniform_dist(5e1, 8e3),  # Slope2
 }
 
 priors = {
@@ -444,13 +450,23 @@ np.save("coords_for_video", coords_out)
 
 """print("START")
 fd_here = fd[0::10]
-num = 5
-psd_pars = priors["psd"].rvs(num)
-galfor_pars = priors["galfor"].rvs(num)
-plt.loglog(fd, 2 * df * np.abs(A_inj) ** 2)
+num = 100
+
+psd_pars = priors["psd"].rvs(size=(num, 2))
+galfor_pars = priors["galfor"].rvs(size=(num,))
+
+psds_out = np.zeros((num, 2, len(fd)))
+for i, (psd_par, galfor_par) in enumerate(zip(psd_pars, galfor_pars)):
+    for j in range(2):
+        psds_out[i, j] = get_sensitivity(fd, sens_fn="noisepsd_AE", model=psd_par[j], foreground_params=galfor_par)
+    print(i)
+
+np.save(fp_psd, psds_out)
+
+#plt.loglog(fd, 2 * df * np.abs(A_inj) ** 2)
 # plt.loglog(fd, 2 * df * np.abs(E_inj) ** 2)
-Sn = get_sensitivity(fd_here, sens_fn="noisepsd_AE", model=np.array([7.79e-12, 3.418e-15]))
-plt.loglog(fd_here, Sn)
+#Sn = get_sensitivity(fd_here, sens_fn="noisepsd_AE", model=np.array([7.79e-12, 3.418e-15]))
+#plt.loglog(fd_here, Sn)
 #Sn = get_sensitivity(fd_here, sens_fn="noisepsd_AE", model="sangria", includewd=1.0)
 #plt.loglog(fd_here, Sn, color="k", lw=2, ls="--")
 plt.savefig("check_match_A.png")

@@ -6,6 +6,7 @@ from multiprocessing.sharedctypes import Value
 import numpy as np
 import warnings
 import time
+from scipy.special import logsumexp
 
 try:
     import cupy as xp
@@ -61,6 +62,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         start_ind_limit=10,
         num_try=1,
         point_generator_func=None,
+        fix_change=None,
         **kwargs
     ):
         self.point_generator_func = point_generator_func
@@ -80,6 +82,10 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         self.band_edges_fdot[:-1] = get_fdot(self.band_edges[:-1], Mc=m_chirp_lims[0])
         self.band_edges_fdot[1:] = get_fdot(self.band_edges[1:], Mc=m_chirp_lims[1])
 
+        self.fix_change = fix_change
+        if self.fix_change not in [None, +1, -1]:
+            raise ValueError("fix_change must be None, +1, or -1.")
+
     def special_generate_func(self, coords, nwalkers, current_priors=None, random=None, size:int=1, fill=None, fill_inds=None, band_inds=None):
         """if self.search_samples is not None:
             # TODO: make replace=True ? in PE
@@ -91,16 +97,23 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
             # so that they are accepted based on the Likelihood (and not the posterior)
             generate_factors = current_priors.logpdf(generated_points.reshape(nwalkers * size, -1)).reshape(nwalkers, size)
         """
-
+        st = time.perf_counter()
         if band_inds is None:
             raise ValueError("band_inds needs to be set")
 
         # elif
         if self.point_generator_func is not None:
+            st1 = time.perf_counter()
             generated_points = self.point_generator_func.rvs(size=size * nwalkers)
-            
-            generate_factors = self.point_generator_func.logpdf(generated_points)
+            et1 = time.perf_counter()
+            print("generate rvs:", et1 - st1)
 
+            generated_points[np.isnan(generated_points[:, 0]), 0] = 0.01
+            
+            st2 = time.perf_counter()
+            generate_factors = self.point_generator_func.logpdf(generated_points)
+            et2 = time.perf_counter()
+            print("generate logpdf:", et2 - st2)
             starts = self.band_edges[band_inds]
             ends = self.band_edges[band_inds + 1]
 
@@ -119,14 +132,14 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                 if fill is None or fill_inds is None:
                     raise ValueError("If providing fill_inds or fill, must provide both.")
                 generated_points[fill_inds] = fill.copy()
-
+                
             generated_points = generated_points.reshape(nwalkers, size, -1)
 
             # logpdf contribution from original distribution is zero = log(1/1)
-            generate_factors[:] += (np.log(1 / (ends - starts)))[:, None]
-            generate_factors[:] += (np.log(1 / (ends_fdot - starts_fdot)))[:, None]
-
-            generated_points = generated_points.reshape(nwalkers, size, -1)
+            # THIS HAS BEEN REMOVED TO SIMULATE A PRIOR HERE THAT IS EQUIVALENT TO THE GLOBAL PRIOR VALUE
+            # THE FACT IS THAT THE EFFECTIVE PRIOR HERE WILL BE THE SAME AS THE GENERATING FUNCTION (UP TO THE SNR PRIOR IF THAT IS CHANGED IN THE GENERATING FUNCTION)
+            # generate_factors[:] += (np.log(1 / (ends - starts)))[:, None]
+            # generate_factors[:] += (np.log(1 / (ends_fdot - starts_fdot)))[:, None]
             
         else:
             if current_priors is None:
@@ -140,11 +153,13 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
             generate_factors = current_priors.logpdf(generated_points.reshape(nwalkers * size, -1)).reshape(nwalkers, size)
 
+        et = time.perf_counter()
+        print("GENEARTE:", et - st)
         return generated_points, generate_factors
 
     def special_like_func(self, generated_points, base_shape, inds_reverse=None, old_d_h_d_h=None, overall_inds=None):
-
-        self.xp.cuda.runtime.setDevice(7)
+        st = time.perf_counter()
+        self.xp.cuda.runtime.setDevice(self.xp.cuda.runtime.getDevice())
 
         if overall_inds is None:
             raise ValueError("overall_inds is None.")
@@ -195,9 +210,13 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         main_gpu = self.xp.cuda.runtime.getDevice()
         # TODO: do search sorted and apply that to nearest found for new points found with group
 
+        st3 = time.perf_counter()
         ll = self.gb.get_ll(prior_generated_points_in, self.mgh.data_list, self.mgh.psd_list, data_index=data_index, noise_index=noise_index, phase_marginalize=phase_marginalize, data_length=self.data_length,  data_splits=self.mgh.gpu_splits,  N=N_temp, **waveform_kwargs_in)
         self.xp.cuda.runtime.setDevice(main_gpu)
         self.xp.cuda.runtime.deviceSynchronize()
+
+        et3 = time.perf_counter()
+        print("actual like:", et3 - st3)
         if np.any(np.isnan(ll)):
             assert np.isnan(ll).sum() < 10
             ll[np.isnan(ll)] = -1e300
@@ -261,10 +280,10 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         ll_out = ll_out.reshape(num_inds_change, num_try)
         self.old_ll_out_check = ll_out.copy()
         if inds_reverse is not None:
-            try:
-                tmp_d_h_d_h = d_h_d_h.get()
-            except AttributeError:
-                tmp_d_h_d_h = d_h_d_h
+            #try:
+            #    tmp_d_h_d_h = d_h_d_h.get()
+            #except AttributeError:
+            #    tmp_d_h_d_h = d_h_d_h
 
             # this is special to GBs
             self.special_aux_ll = -ll_out[inds_reverse, 0]
@@ -275,12 +294,18 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         self.gb.d_d = back_d_d.copy()
         # add noise term
         self.xp.cuda.runtime.deviceSynchronize()
-
+        et = time.perf_counter()
+        print("LIKE:", et - st)
         return ll_out #  + self.noise_ll[:, None]
 
     def special_prior_func(self, generated_points, base_shape, inds_reverse=None, **kwargs):
+
+        st = time.perf_counter()
         nwalkers, nleaves_max, ndim = base_shape
+        st2 = time.perf_counter()
         lp_new = self.priors["gb_fixed"].logpdf(generated_points.reshape(-1, 8)).reshape(nwalkers, self.num_try)
+        et2 = time.perf_counter()
+        print("prior logpdf:", et2 - st2)
         lp_total = lp_new  # _old[:, None] + lp_new
 
         self.old_lp_total_check = lp_total.copy()
@@ -291,7 +316,17 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
             lp_total[inds_reverse, :] += self.special_aux_lp[:, None]
 
         # add noise lp
+        et = time.perf_counter()
+        print("PRIOR:", et - st)
         return lp_total
+
+    def readout_adjustment(self, out_vals, all_vals_prop, aux_all_vals, inds_reverse):
+        self.out_vals, self.all_vals_prop, self.aux_all_vals, self.inds_reverse = out_vals, all_vals_prop, aux_all_vals, inds_reverse
+
+        self.logP_out, self.ll_out, self.lp_out, self.log_proposal_pdf_out, self.log_sum_weights = out_vals
+
+        self.ll_out[inds_reverse] = self.special_aux_ll
+        self.lp_out[inds_reverse] = self.special_aux_lp
 
     def get_proposal(self, gb_coords, inds, changes, leaf_inds_for_changes, band_inds, random, supps=None, branch_supps=None):
         """Make a proposal
@@ -371,7 +406,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
             ll_here = self.current_state.log_like.copy()[inds_here[:2]]
             lp_here = self.current_state.log_prior[inds_here[:2]]
-
+            
             self.lp_old = lp_here
 
             rj_info = dict(
@@ -482,8 +517,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         
         num_consecutive_rj_moves = 1
         # print("starting")
-        st = time.perf_counter()
+        
         for rj_move_i in range(num_consecutive_rj_moves):
+            st = time.perf_counter()
             accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             
             coords_propose_in = new_state.branches_coords["gb_fixed"]
@@ -502,8 +538,13 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
             # we are already leaving out the last one
             bands_per_walker = np.tile((np.arange(self.num_bands - 1)), (ntemps, nwalkers, 1))
 
+            et = time.perf_counter()
+            print("initial setup", et - st)
+            st = time.perf_counter()
+
             # odds & evens (evens first)
             for i in range(2):
+                st = time.perf_counter()
                 bands_per_walker_here = bands_per_walker[bands_per_walker % 2 == i].reshape(ntemps, nwalkers, -1)
                 max_band_ind = bands_per_walker_here.max().item()
                 band_inds_here = int(1e12) * temp_inds[band_inds % 2 == i] + int(1e6) * walkers_inds[band_inds % 2 == i] + band_inds[band_inds % 2 == i]
@@ -544,12 +585,15 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                 nleaves_here[(temp_index_count, walkers_index_count, band_index_tmp)] = unique_bands_inds_here_counts
 
                 # setup leaf count change arrays
-                changes = np.random.choice([-1, 1], size=bands_per_walker_here.shape)
+                if self.fix_change is None:
+                    changes = np.random.choice([-1, 1], size=bands_per_walker_here.shape)
+                else:
+                    change = np.full(bands_per_walker_here.shape, self.fix_change)
 
                 # make sure to add a binary if there are None
                 changes[nleaves_here == 0] = +1
 
-                if np.any(nleaves_here >= self.max_k[1]):
+                if np.any(nleaves_here >= self.max_k[all_branch_names.index("gb_fixed")]):
                     raise ValueError("nleaves_here higher than max_k.")
 
                 # number of sub bands
@@ -587,17 +631,17 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
                 # TODO: check that number of available spots is high enough
 
-                #et = time.perf_counter()
-                #print("start", et - st)
-                # st = time.perf_counter()
+                et = time.perf_counter()
+                print("start", et - st)
+                st = time.perf_counter()
                 # propose new sources and coordinates
                 new_coords, ll_out, lp_out, factors, betas, inds_here = self.get_proposal(
                     coords_propose_in, inds_propose_in, changes, leaf_inds_for_change, bands_per_walker_here, model.random, branch_supps=branches_supp_propose_in, supps=new_state.supplimental
                 )
 
-                #et = time.perf_counter()
-                #print("proposal", et - st)
-                # st = time.perf_counter()
+                et = time.perf_counter()
+                print("proposal", et - st)
+                st = time.perf_counter()
 
                 # TODO: check this
                 edge_factors = np.zeros_like(factors)
@@ -631,10 +675,11 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
                 prev_logp = new_state.log_prior[inds_here[:2]]
 
-                #et = time.perf_counter()
-                #print("prior", et - st)
-                # st = time.perf_counter()
+                et = time.perf_counter()
+                print("prior", et - st)
+                st = time.perf_counter()
                 logl = prev_logl + ll_out
+
                 logp = prev_logp + lp_out
                 #loglcheck, new_blobs = model.compute_log_like_fn(q, inds=new_inds, logp=logp, supps=new_supps, branch_supps=new_branch_supps)
                 #if not np.all(np.abs(logl[logl != -1e300] - loglcheck[logl != -1e300]) < 1e-5):
@@ -652,9 +697,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
                 accepted = lnpdiff > np.log(model.random.rand(*lnpdiff.shape))
 
-                #et = time.perf_counter()
-                #print("through accepted", et - st)
-                # st = time.perf_counter()
+                et = time.perf_counter()
+                print("through accepted", et - st)
+                st = time.perf_counter()
                 
                 # bookkeeping
 
@@ -731,7 +776,11 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                 )
                 new_state.branches["gb_fixed"].inds[tuple_accepted_forward] = True
                 new_state.branches["gb_fixed"].coords[tuple_accepted_forward] = new_coords[accepted_forward]
-                
+
+                et = time.perf_counter()
+                print("bookkeeping", et - st)
+                st = time.perf_counter()
+                    
                 if len(accepted_inds_forward) > 0:
                     points_accepted_addition = new_coords[accepted_forward]
 
@@ -824,6 +873,10 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                     points_not_accepted_removal,  # were removed at the start, need to be put back
                 ], axis=0)
 
+                et = time.perf_counter()
+                print("before add", et - st)
+                st = time.perf_counter()
+
                 if points_to_add_to_template.shape[0] > 0:
                     
                     points_to_add_to_template_in = self.parameter_transforms.both_transforms(
@@ -862,12 +915,19 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                     if np.any(new_state.branches_supplimental["gb_fixed"].holder["N_vals"][new_state.branches_inds["gb_fixed"]] == 0):
                         breakpoint()
 
-        if self.time % 100 == 0:
+                    et = time.perf_counter()
+                    print("after add", et - st)
+                    # st = time.perf_counter()
+
+        st = time.perf_counter()
+        if self.time % 1 == 0:
             ll_after2 = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
             if np.abs(ll_after2 - new_state.log_like).max() > 1e-4:
+                if np.abs(ll_after2 - new_state.log_like).max() > 10.0:
                     breakpoint()
+                fix = np.abs(ll_after2 - new_state.log_like) > 1e-4
+                new_state.log_like[fix] = ll_after2[fix]
 
-        et = time.perf_counter()
         # print("rj", (et - st) / num_consecutive_rj_moves)
 
         if self.temperature_control is not None and not self.prevent_swaps:
@@ -878,5 +938,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
         accepted = np.zeros_like(new_state.log_like)
         self.time += 1
+
+        et = time.perf_counter()
+        print("end", et - st)
         return new_state, accepted
 

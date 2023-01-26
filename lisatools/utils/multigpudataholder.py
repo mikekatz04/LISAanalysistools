@@ -135,6 +135,55 @@ class MultiGPUDataHolder:
             xp_here = xp
         return xp_here.asarray(self.map)[inds_in]
 
+    def set_psd_from_arrays(self, A_vals_in, E_vals_in, overall_inds=None):
+
+        if overall_inds is None:
+            overall_inds = np.arange(self.ntemps * self.nwalkers)
+
+        assert len(A_vals_in) == len(E_vals_in) == len(overall_inds)
+        return_to_main = xp.cuda.runtime.getDevice()
+
+        fd_gpu = [None for _ in self.gpus]
+        A_tmp = [None for _ in self.gpus]
+        E_tmp = [None for _ in self.gpus]
+        # st = time.perf_counter()
+        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+
+                fd_gpu[gpu_i] = xp.asarray(self.fd)
+                for i, (overall_index) in enumerate(overall_inds):
+                    
+                    if overall_index not in gpu_split:
+                        continue
+
+                    overall_index_here = overall_index - gpu_split.min().item()
+                    
+                    A_tmp[gpu_i] = xp.asarray(A_vals_in[i])
+                    A_tmp[gpu_i][0] = A_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel1_psd[gpu_i][inds_slice] = A_tmp[gpu_i]
+                    if xp.any(A_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+                    E_tmp[gpu_i] = xp.asarray(E_vals_in[i])
+                    E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel1_psd[gpu_i][inds_slice] = E_tmp[gpu_i]
+                    if xp.any(E_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+
+                del fd_gpu[gpu_i], A_tmp[gpu_i], E_tmp[gpu_i]
+                xp.get_default_memory_pool().free_all_blocks()
+
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
+
+
     def set_psd_vals(self, psd_params, overall_inds=None, foreground_params=None):
 
         if overall_inds is None:
