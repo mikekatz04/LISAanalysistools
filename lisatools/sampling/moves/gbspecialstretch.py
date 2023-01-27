@@ -7,6 +7,7 @@ from scipy import stats
 import warnings
 import time
 from gbgpu.utils.utility import get_N
+# from gbgpu.sharedmem import SharedMemoryMakeMove_wrap
 
 try:
     import cupy as xp
@@ -51,6 +52,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         mgh,
         fd,
         band_edges,
+        gpu_priors,
         *args,
         waveform_kwargs={},
         noise_kwargs={},
@@ -69,6 +71,8 @@ class GBSpecialStretchMove(GroupStretchMove):
         **kwargs
     ):
         GroupStretchMove.__init__(self, *args, **kwargs)
+
+        self.gpu_priors = gpu_priors
 
         self.greater_than_1e0 = 0
         self.name = "gbgroupstretch"
@@ -118,6 +122,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.search_snr_lim = search_snr_lim
         self.search_snr_accept_factor = search_snr_accept_factor
 
+        self.band_edges = self.xp.asarray(self.band_edges)
         self.take_max_ll = take_max_ll   
  
     def setup_gbs(self, branch):
@@ -271,16 +276,14 @@ class GBSpecialStretchMove(GroupStretchMove):
         N_vals = N_vals_all[group_here]
         self.xp.cuda.runtime.deviceSynchronize()
         # st = time.perf_counter()
-        if self.use_gpu:
-            new_points_prior = new_points.get()
-            old_points_prior = old_points.get()
-        else:
-            new_points_prior = new_points
-            old_points_prior = old_points
+        new_points_prior = new_points
+        old_points_prior = old_points
 
-        logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(new_points_prior))
-        prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
-
+        # st = time.perf_counter()
+        logp = self.xp.asarray(self.gpu_priors["gb_fixed"].logpdf(new_points_prior))
+        prev_logp = self.xp.asarray(self.gpu_priors["gb_fixed"].logpdf(old_points_prior))
+        """et = time.perf_counter()
+        print("prior", et - st)"""
         keep_here = self.xp.where((~self.xp.isinf(logp)))
 
         ## log likelihood between the points
@@ -324,7 +327,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         prior_per_group_old = prior_all_old.sum(axis=-1)
 
         freqs_diff_arranged = self.xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1, num_stack))
-        freqs_diff_arranged[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = (np.abs(new_freqs - old_freqs) / self.df).astype(int) / N_vals
+        freqs_diff_arranged[(temp_inds_keep, walkers_inds_keep, band_indices, which_stack_piece)] = (self.xp.abs(new_freqs - old_freqs) / self.df).astype(int) / N_vals
 
         freqs_diff_arranged_maxs = freqs_diff_arranged.max(axis=-1)
         
@@ -353,18 +356,18 @@ class GBSpecialStretchMove(GroupStretchMove):
         start_going_in = start_wave_inds_all.min(axis=-1)
         end_going_in = end_wave_inds_all.max(axis=-1)
 
-        tmp_info = []
+        """tmp_info = []
         for t in range(ntemps):
             for w in range(nwalkers):
                 try:
-                    tmp_info.append(np.diff(np.where(start_going_in[t, w].get() < 1000000)[0]).min())
+                    tmp_info.append(self.xp.diff(self.xp.where(start_going_in[t, w] < 1000000)[0]).min())
                 except ValueError:
                     continue
 
-        if np.any(np.asarray(tmp_info) < 4):
-            breakpoint()
+        if self.xp.any(self.xp.asarray(tmp_info) < 4):
+            breakpoint()"""
 
-        group_part = self.xp.where((end_going_in != -1) & (~np.isinf(prior_per_group_new)) & (freqs_diff_arranged_maxs < 1.0))
+        group_part = self.xp.where((end_going_in != -1) & (~self.xp.isinf(prior_per_group_new)) & (freqs_diff_arranged_maxs < 1.0))
         
         temp_part, walker_part, sub_band_part = group_part
         leaf_part_bin = leaf_inds_new[group_part]
@@ -605,7 +608,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             :class:`State`: State of sampler after proposal is complete.
 
         """
-        # st = time.perf_counter()
+        st = time.perf_counter()
         self.xp.cuda.runtime.setDevice(self.mgh.gpus[0])
 
         self.current_state = state
@@ -627,7 +630,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         # Run any move-specific setup.
         self.setup(state.branches)
         
-        st = time.perf_counter()
+        # st = time.perf_counter()
 
         new_state = State(state, copy=True)
         self.mempool.free_all_blocks()
@@ -655,7 +658,7 @@ class GBSpecialStretchMove(GroupStretchMove):
       
         self.mempool.free_all_blocks()
 
-        unique_N = np.unique(N_vals)
+        unique_N = self.xp.unique(N_vals)
         
         waveform_kwargs_now = self.waveform_kwargs.copy()
         if "N" in waveform_kwargs_now:
@@ -682,42 +685,47 @@ class GBSpecialStretchMove(GroupStretchMove):
         # TODO: consider ordering of selection of new points. Might be better to make sure they are effectively done in order
 
         q, factors_temp = self.get_proposal(
-                {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, gibbs_ndim=ndim * num_stack
+                {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, gibbs_ndim=ndim * num_stack, xp=self.xp
         )
+
+        # do unique for band size as separator between asynchronous kernel launches
+
+        breakpoint()
 
         zz_sampled = self.zz.copy()
         """et = time.perf_counter()
         print("after prop", (et - st))
         st = time.perf_counter()"""
        
-        factors = np.repeat(factors_temp[:, :, None], nleaves_max, axis=-1)
+        factors = self.xp.repeat(factors_temp[:, :, None], nleaves_max, axis=-1)
         q["gb_fixed"] = self.xp.asarray(q["gb_fixed"].reshape(ntemps, nwalkers, nleaves_max, ndim))
-        f_test = gb_fixed_coords[:, :, :, 1].get() / 1e3
+        f_test = gb_fixed_coords[:, :, :, 1] / 1e3
 
         # set frequencies of dead binaries to negative number for grouping
         f_test[~state.branches_inds["gb_fixed"]] = -100.0
-        f_test_2 = q["gb_fixed"][:, :, :, 1].get() / 1e3
+        f_test_2 = q["gb_fixed"][:, :, :, 1] / 1e3
 
         # f0_2 will remove and suggested frequency jumps of more than one band
         # num_groups_base should be three with the way groups are done now
         # no need to do checks now either
         
         # if suggesting to change frequency by more than twice waveform length, do not run
-        fix_f_test = (np.abs(f_test - f_test_2) > (self.df * N_vals.get() * 1.5))
+        fix_f_test = (self.xp.abs(f_test - f_test_2) > (self.df * N_vals * 1.5))
         if hasattr(self, "keep_bands") and self.keep_bands is not None:
-            band_indices = np.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
+            band_indices = self.xp.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
             keep_bands = self.keep_bands
-            assert isinstance(keep_bands, np.ndarray)
-            fix_f_test[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
+            assert isinstance(keep_bands, self.xp.ndarray)
+            fix_f_test[~self.xp.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
 
         """et = time.perf_counter()
         print("pre_groups", (et - st))
         st = time.perf_counter()"""
 
         num_groups_base = 4
-        groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=np, num_groups_base=num_groups_base, fix_f_test=fix_f_test)
 
-        unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
+        groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=self.xp, num_groups_base=num_groups_base, fix_f_test=fix_f_test)
+
+        unique_groups, group_len = self.xp.unique(groups.flatten(), return_counts=True)
 
         """et = time.perf_counter()
         print("get_groups", (et - st))
@@ -726,10 +734,10 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         # TODO: check this further / redo if needed
         for remainder_val in range(num_groups_base):
-            base_stack_groups = np.arange(unique_groups.max() + 1)[remainder_val::num_groups_base]
+            base_stack_groups = self.xp.arange(unique_groups.max() + 1)[remainder_val::num_groups_base]
             stack_groups = unique_groups[(unique_groups >= 0)]
             num_stack_groups = len(base_stack_groups)
-            split_len = int(np.ceil(num_stack_groups / num_stack))
+            split_len = int(self.xp.ceil(num_stack_groups / num_stack))
             current_start_ind = 0
             current_split_count = 0
             
@@ -755,8 +763,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         # remove information about the bad "-1" group
         for check_val in [-1, -2]:
-            group_len = np.delete(group_len, unique_groups == check_val)
-            unique_groups = np.delete(unique_groups, unique_groups == check_val)
+            group_len = group_len[~(unique_groups == check_val)]
+            unique_groups = unique_groups[~(unique_groups == check_val)]
 
         if len(unique_groups) == 0:
             return state, accepted
@@ -770,7 +778,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             # st = time.perf_counter()
             # sometimes you will have an extra odd or even group only
             # the group_iter may not match the actual running group number in this case
-            if group_iter not in groups:
+            if not self.xp.in1d(self.xp.asarray(group_iter), groups).item():
                 continue
             
             # print(group_iter)
@@ -779,10 +787,12 @@ class GBSpecialStretchMove(GroupStretchMove):
             # st = time.perf_counter()
             temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
             
+            # st = time.perf_counter()
             self.run_swap_ll(num_stack, q["gb_fixed"], gb_fixed_coords, group, N_vals, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, zz_sampled)
-
+            # et = time.perf_counter()
+            # print("run_ll", et - st)
             """ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-            if np.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
+            if self.xp.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
                 breakpoint()"""
             # time.sleep(5)
             
@@ -1149,8 +1159,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
-        """et = time.perf_counter()
-        print("end", (et - st), group_iter, group_len[group_iter])"""
+        et = time.perf_counter()
+        print("end", (et - st))
                     
         #breakpoint()
         return new_state, accepted

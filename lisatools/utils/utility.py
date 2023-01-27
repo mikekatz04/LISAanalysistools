@@ -193,8 +193,8 @@ def get_groups_from_band_structure(f0, band_edges, f0_2=None, xp=None, num_group
     combined = band_indices_sorted_special + added_contribution
     groups = (combined - (combined[unique_special_start_inds])[unique_special_reverse])  # .reshape(shape)
 
-    groups_even_odd_tmp = [(num_groups_base * groups + i) * (band_indices_sorted.flatten()[keep] % num_groups_base == i) for i in range(num_groups_base)]
-    groups_even_odd = np.sum(groups_even_odd_tmp, axis=0)
+    groups_even_odd_tmp = xp.asarray([(num_groups_base * groups + i) * (band_indices_sorted.flatten()[keep] % num_groups_base == i) for i in range(num_groups_base)])
+    groups_even_odd = xp.sum(groups_even_odd_tmp, axis=0)
     
     groups_out = -2 * xp.ones_like(f0, dtype=int)
     groups_out[(temp_inds, walker_inds, inds_band_indices.flatten()[keep])] = groups_even_odd
