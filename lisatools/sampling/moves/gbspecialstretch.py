@@ -628,7 +628,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         # Run any move-specific setup.
         self.setup(state.branches)
         
-        for _ in range(2):
+        for _ in range(20):
             st = time.perf_counter()
 
             # st = time.perf_counter()
@@ -762,7 +762,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 params_prop_info = []
                 for N_now in unique_N:
                     N_now = N_now.item()
-                    if N_now != 256:  #  == 0:
+                    if N_now == 0:
                         continue
 
                     keep = (band_indices % 4 == remainder) & (N_vals_in == N_now)  #  & (band_indices == 500) &  (temp_inds == 0) & (walker_inds == 0)
@@ -841,7 +841,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                     
                     num_bands_here = len(band_inds)
 
-                    ll_before = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)[0,0]
+                    # ll_before = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)[0,0]
 
                     assert lengths.min() >= N_now + 2 * buffer
                     inputs_now = (
@@ -891,14 +891,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                     lp_contrib_now = inputs_now[1]
                     accepted_now = inputs_now[19]
 
-                    print(accepted_now.sum(0) / accepted_now.shape[0])
+                    # print(accepted_now.sum(0) / accepted_now.shape[0])
                     temp_tmp, walker_tmp, leaf_tmp = (indiv_info_now[0][accepted_now], indiv_info_now[1][accepted_now], indiv_info_now[2][accepted_now])
 
                     gb_fixed_coords[(temp_tmp, walker_tmp, leaf_tmp)] = params_prop_now[accepted_now]
 
                     ll_change[band_info] = ll_contrib_now
                     
-                    ll_adjustment = ll_change.sum(-1)
+                    ll_adjustment = ll_change.sum(axis=-1)
                     log_like_tmp += ll_adjustment
 
                     """print(ll_adjustment[0,0])
@@ -907,7 +907,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                     lp_change[band_info] = lp_contrib_now
                     
-                    lp_adjustment = lp_change.sum(-1)
+                    lp_adjustment = lp_change.sum(axis=-1)
                     log_prior_tmp += lp_adjustment
 
                 self.xp.cuda.runtime.deviceSynchronize()
