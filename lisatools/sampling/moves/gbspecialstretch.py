@@ -7,7 +7,6 @@ from scipy import stats
 import warnings
 import time
 from gbgpu.utils.utility import get_N
-# from gbgpu.sharedmem import SharedMemoryMakeMove_wrap
 
 try:
     import cupy as xp
@@ -70,7 +69,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         batch_size=5,
         **kwargs
     ):
-        GroupStretchMove.__init__(self, *args, **kwargs)
+        GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
 
         self.gpu_priors = gpu_priors
 
@@ -608,7 +607,6 @@ class GBSpecialStretchMove(GroupStretchMove):
             :class:`State`: State of sampler after proposal is complete.
 
         """
-        st = time.perf_counter()
         self.xp.cuda.runtime.setDevice(self.mgh.gpus[0])
 
         self.current_state = state
@@ -630,171 +628,294 @@ class GBSpecialStretchMove(GroupStretchMove):
         # Run any move-specific setup.
         self.setup(state.branches)
         
-        # st = time.perf_counter()
-
-        new_state = State(state, copy=True)
-        self.mempool.free_all_blocks()
-        
-        self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
-
-        # data should not be whitened
-        
-        # Split the ensemble in half and iterate over these two halves.
-        accepted = np.zeros((ntemps, nwalkers), dtype=bool)
-
-        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb_fixed"].shape
-
-        # TODO: add actual amplitude
-        N_vals = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"]
-
-        N_vals = self.xp.asarray(N_vals)
-
-        N_vals_2_times = self.xp.concatenate([N_vals, N_vals], axis=-1)
-
-        gb_fixed_coords = self.xp.asarray(new_state.branches_coords["gb_fixed"].copy())
-
-        log_like_tmp = self.xp.asarray(new_state.log_like)
-        log_prior_tmp = self.xp.asarray(new_state.log_prior)
-      
-        self.mempool.free_all_blocks()
-
-        unique_N = self.xp.unique(N_vals)
-        
-        waveform_kwargs_now = self.waveform_kwargs.copy()
-        if "N" in waveform_kwargs_now:
-            waveform_kwargs_now.pop("N")
-        waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
-
-        group_temp_finder = [
-            self.xp.repeat(self.xp.arange(ntemps), nwalkers * nleaves_max).reshape(ntemps, nwalkers, nleaves_max),
-            self.xp.tile(self.xp.arange(nwalkers), (ntemps, nleaves_max, 1)).transpose((0, 2, 1)),
-            self.xp.tile(self.xp.arange(nleaves_max), ((ntemps, nwalkers, 1)))
-        ]
-
-        points_to_move = gb_fixed_coords[new_state.branches_inds["gb_fixed"]]
-
-        gb_fixed_coords_into_proposal = gb_fixed_coords  # .reshape(ntemps, nwalkers * nleaves_max, 1, ndim).copy()
-        gb_inds_into_proposal = state.branches["gb_fixed"].inds  # .reshape(ntemps, nwalkers * nleaves_max, 1).copy()
-        """et = time.perf_counter()
-        print("before prop", (et - st))
-        st = time.perf_counter()"""
-        # adjust groups to put some together
-        num_stack = 4
-
-        # TODO: check detailed balance
-        # TODO: consider ordering of selection of new points. Might be better to make sure they are effectively done in order
-
-        q, factors_temp = self.get_proposal(
-                {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, gibbs_ndim=ndim * num_stack, xp=self.xp
-        )
-
-        # do unique for band size as separator between asynchronous kernel launches
-
-        zz_sampled = self.zz.copy()
-        """et = time.perf_counter()
-        print("after prop", (et - st))
-        st = time.perf_counter()"""
-       
-        factors = self.xp.repeat(factors_temp[:, :, None], nleaves_max, axis=-1)
-        q["gb_fixed"] = self.xp.asarray(q["gb_fixed"].reshape(ntemps, nwalkers, nleaves_max, ndim))
-        f_test = gb_fixed_coords[:, :, :, 1] / 1e3
-
-        # set frequencies of dead binaries to negative number for grouping
-        f_test[~state.branches_inds["gb_fixed"]] = -100.0
-        f_test_2 = q["gb_fixed"][:, :, :, 1] / 1e3
-
-        # f0_2 will remove and suggested frequency jumps of more than one band
-        # num_groups_base should be three with the way groups are done now
-        # no need to do checks now either
-        
-        # if suggesting to change frequency by more than twice waveform length, do not run
-        fix_f_test = (self.xp.abs(f_test - f_test_2) > (self.df * N_vals * 1.5))
-        if hasattr(self, "keep_bands") and self.keep_bands is not None:
-            band_indices = self.xp.searchsorted(self.band_edges, f_test.flatten()).reshape(f_test.shape) - 1
-            keep_bands = self.keep_bands
-            assert isinstance(keep_bands, self.xp.ndarray)
-            fix_f_test[~self.xp.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
-
-        """et = time.perf_counter()
-        print("pre_groups", (et - st))
-        st = time.perf_counter()"""
-
-        num_groups_base = 4
-
-        groups = get_groups_from_band_structure(f_test, self.band_edges, f0_2=f_test_2, xp=self.xp, num_groups_base=num_groups_base, fix_f_test=fix_f_test)
-
-        unique_groups, group_len = self.xp.unique(groups.flatten(), return_counts=True)
-
-        """et = time.perf_counter()
-        print("get_groups", (et - st))
-        st = time.perf_counter()"""
-        groups_check = groups.copy()
-
-        # TODO: check this further / redo if needed
-        for remainder_val in range(num_groups_base):
-            base_stack_groups = self.xp.arange(unique_groups.max() + 1)[remainder_val::num_groups_base]
-            stack_groups = unique_groups[(unique_groups >= 0)]
-            num_stack_groups = len(base_stack_groups)
-            split_len = int(self.xp.ceil(num_stack_groups / num_stack))
-            current_start_ind = 0
-            current_split_count = 0
-            
-            while current_start_ind + current_split_count < num_stack_groups:
-                old_group_number = base_stack_groups[current_start_ind + current_split_count]
-
-                if old_group_number not in stack_groups:
-                    current_split_count += 1
-                    if current_split_count == num_stack:
-                        current_split_count = 0
-                        current_start_ind += num_stack
-                    continue
-
-                new_group_number = base_stack_groups[current_start_ind]
-
-                groups[groups == old_group_number] = new_group_number
-
-                current_split_count += 1
-
-                if current_split_count == num_stack:
-                    current_split_count = 0
-                    current_start_ind += num_stack
-
-        # remove information about the bad "-1" group
-        for check_val in [-1, -2]:
-            group_len = group_len[~(unique_groups == check_val)]
-            unique_groups = unique_groups[~(unique_groups == check_val)]
-
-        if len(unique_groups) == 0:
-            return state, accepted
-
-        # needs to be max because some values may be missing due to evens and odds
-        num_groups = unique_groups.max().item() + 1
-
-        """et = time.perf_counter()
-        print("adjustment", (et - st))"""
-        for group_iter in range(num_groups):
-            # st = time.perf_counter()
-            # sometimes you will have an extra odd or even group only
-            # the group_iter may not match the actual running group number in this case
-            if not self.xp.in1d(self.xp.asarray(group_iter), groups).item():
-                continue
-            
-            # print(group_iter)
-            group = self.xp.where(self.xp.asarray(groups) == group_iter)
+        for _ in range(2):
+            st = time.perf_counter()
 
             # st = time.perf_counter()
-            temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
+
+            new_state = State(state, copy=True)
+            self.mempool.free_all_blocks()
             
-            # st = time.perf_counter()
-            self.run_swap_ll(num_stack, q["gb_fixed"], gb_fixed_coords, group, N_vals, waveform_kwargs_now, factors, log_like_tmp, log_prior_tmp, zz_sampled)
-            # et = time.perf_counter()
-            # print("run_ll", et - st)
-            """ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-            if self.xp.abs(log_like_tmp.get() - ll_after).max()  > 1e-5:
-                breakpoint()"""
-            # time.sleep(5)
+            self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
+
+            # data should not be whitened
             
-        # st = time.perf_counter()
+            # Split the ensemble in half and iterate over these two halves.
+            accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+
+            ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb_fixed"].shape
+
+            # TODO: add actual amplitude
+            N_vals = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"]
+
+            N_vals = self.xp.asarray(N_vals)
+
+            gb_fixed_coords = self.xp.asarray(new_state.branches_coords["gb_fixed"].copy())
+
+            log_like_tmp = self.xp.asarray(new_state.log_like)
+            log_prior_tmp = self.xp.asarray(new_state.log_prior)
+        
+            self.mempool.free_all_blocks()
+
+            unique_N = self.xp.unique(N_vals)
+            
+            waveform_kwargs_now = self.waveform_kwargs.copy()
+            if "N" in waveform_kwargs_now:
+                waveform_kwargs_now.pop("N")
+            waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
+
+            gb_fixed_coords_into_proposal = gb_fixed_coords.reshape(ntemps, nwalkers * nleaves_max, 1, ndim)
+            gb_inds_into_proposal = self.xp.asarray(state.branches["gb_fixed"].inds).reshape(ntemps, nwalkers * nleaves_max, 1)
+            """et = time.perf_counter()
+            print("before prop", (et - st))
+            st = time.perf_counter()"""
+        
+            # TODO: check detailed balance
+            q, factors_temp = self.get_proposal(
+                    {"gb_fixed": gb_fixed_coords_into_proposal}, model.random, s_inds_all={"gb_fixed": gb_inds_into_proposal}, xp=self.xp, return_gpu=True
+            )
+            
+            gb_fixed_coords_into_proposal = gb_fixed_coords_into_proposal.reshape(ntemps, nwalkers, nleaves_max, ndim)
+            
+            q["gb_fixed"] = q["gb_fixed"].reshape(ntemps, nwalkers, nleaves_max, ndim)
+
+            gb_inds = gb_inds_into_proposal.reshape(ntemps, nwalkers, nleaves_max)
+            remove = ((gb_fixed_coords_into_proposal[:, :, :, 1] - q["gb_fixed"][:, :, :, 1]) / 1e3 / self.df).astype(int) > 1
+
+            gb_inds = gb_inds_into_proposal.reshape(ntemps, nwalkers, nleaves_max)
+            gb_inds[remove] = False
+
+            points_curr = gb_fixed_coords_into_proposal[gb_inds]
+            points_prop = q["gb_fixed"][gb_inds]
+
+            prior_all_curr = self.gpu_priors["gb_fixed"].logpdf(points_curr)
+            prior_all_prop = self.gpu_priors["gb_fixed"].logpdf(points_prop)
+
+            keep_prior = (~self.xp.isinf(prior_all_prop))
+
+            prior_ok = self.xp.ones_like(gb_inds)
+            prior_ok[gb_inds] = keep_prior
+
+            gb_inds[~prior_ok] = False
+
+            points_curr = points_curr[keep_prior]
+            points_prop = points_prop[keep_prior]
+
+            prior_all_curr = prior_all_curr[keep_prior]
+            prior_all_prop = prior_all_prop[keep_prior]
+
+            factors = factors_temp.reshape(ntemps, nwalkers, nleaves_max)[gb_inds]
+
+            random_vals_all = self.xp.log(self.xp.random.rand(points_prop.shape[0]))
+
+            L_contribution = self.xp.zeros_like(random_vals_all, dtype=complex)
+            p_contribution = self.xp.zeros_like(random_vals_all, dtype=complex)
+
+            data = self.mgh.data_list
+            psd = self.mgh.psd_list
+            # do unique for band size as separator between asynchronous kernel launches
+            band_indices = self.xp.searchsorted(self.band_edges, points_curr[:, 1] / 1e3) - 1
+            
+            group_temp_finder = [
+                self.xp.repeat(self.xp.arange(ntemps), nwalkers * nleaves_max).reshape(ntemps, nwalkers, nleaves_max),
+                self.xp.tile(self.xp.arange(nwalkers), (ntemps, nleaves_max, 1)).transpose((0, 2, 1)),
+                self.xp.tile(self.xp.arange(nleaves_max), ((ntemps, nwalkers, 1)))
+            ]
+
+            temp_inds = group_temp_finder[0][gb_inds]
+            walker_inds = group_temp_finder[1][gb_inds]
+            leaf_inds = group_temp_finder[2][gb_inds]
+
+            N_vals_in = N_vals[gb_inds]
+
+            special_band_inds = int(1e12) * temp_inds + int(1e6) * walker_inds + band_indices
+            sort = self.xp.argsort(special_band_inds)
+            
+            temp_inds = temp_inds[sort]
+            walker_inds = walker_inds[sort]
+            leaf_inds = leaf_inds[sort]
+            band_indices = band_indices[sort]
+            factors = factors[sort]
+            points_curr = points_curr[sort]
+            points_prop = points_prop[sort]
+            N_vals_in = N_vals_in[sort]
+
+            special_band_inds_sorted = special_band_inds[sort]
+
+            uni_special_bands, uni_index_special_bands, uni_count_special_bands = self.xp.unique(special_band_inds_sorted, return_index=True, return_counts=True)
+
+            params_curr = self.parameter_transforms.both_transforms(points_curr, xp=self.xp)
+            params_prop = self.parameter_transforms.both_transforms(points_prop, xp=self.xp)
+
+            accepted_out = self.xp.zeros_like(random_vals_all, dtype=bool)
+
+            ll_change = self.xp.zeros((ntemps, nwalkers, len(self.band_edges)))
+            lp_change = self.xp.zeros((ntemps, nwalkers, len(self.band_edges)))
+
+            do_synchronize = False
+            device = self.xp.cuda.runtime.getDevice()
+            for remainder in range(4):
+                all_inputs = []
+                band_bookkeep_info = []
+                prior_info = []
+                indiv_info = []
+                params_prop_info = []
+                for N_now in unique_N:
+                    N_now = N_now.item()
+                    if N_now != 256:  #  == 0:
+                        continue
+
+                    keep = (band_indices % 4 == remainder) & (N_vals_in == N_now)  #  & (band_indices == 500) &  (temp_inds == 0) & (walker_inds == 0)
+                    # keep[:] = False
+                    # keep[1000:5000:1000] = True
+                    
+                    
+                    params_prop_info.append((points_prop[keep]))
+
+                    params_curr_in = params_curr[keep]
+                    params_prop_in = params_prop[keep]
+
+                    # switch to polar angle
+                    params_curr_in[:, -1] = np.pi / 2. - params_curr_in[:, -1]
+                    params_prop_in[:, -1] = np.pi / 2. - params_prop_in[:, -1]
+
+                    accepted_out_here = accepted_out[keep]
+
+                    params_curr_in_here = params_curr_in.flatten().copy()
+                    params_prop_in_here = params_prop_in.flatten().copy()
+
+                    prior_all_curr_here = prior_all_curr[keep]
+                    prior_all_prop_here = prior_all_prop[keep]
+
+                    prior_info.append((prior_all_curr_here, prior_all_curr_here))
+                    factors_here = factors[keep]
+                    random_vals_here = random_vals_all[keep]
+                    special_band_inds_sorted_here = special_band_inds_sorted[keep]
+                    
+                    uni_special_band_inds_here, uni_index_special_band_inds_here, uni_count_special_band_inds_here = self.xp.unique(special_band_inds_sorted_here, return_index=True, return_counts=True)
+
+                    # for finding the final frequency
+                    finding_final = self.xp.concatenate([uni_index_special_band_inds_here[1:], self.xp.array([len(special_band_inds_sorted_here)])]) - 1
+                    
+                    band_start_bin_ind_here = uni_index_special_band_inds_here.astype(np.int32)
+                    band_num_bins_here = uni_count_special_band_inds_here.astype(np.int32)
+
+                    band_inds = band_indices[keep][uni_index_special_band_inds_here]
+                    band_temps_inds = temp_inds[keep][uni_index_special_band_inds_here]
+                    band_walkers_inds = walker_inds[keep][uni_index_special_band_inds_here]
+
+                    indiv_info.append((temp_inds[keep], walker_inds[keep], leaf_inds[keep]))
+
+                    band_bookkeep_info.append((band_temps_inds, band_walkers_inds, band_inds))
+                    data_index_tmp = band_temps_inds * nwalkers + band_walkers_inds
+
+                    L_contribution_here = L_contribution[keep][uni_index_special_band_inds_here]
+                    p_contribution_here = p_contribution[keep][uni_index_special_band_inds_here]
+
+                    buffer = 5  # bins
+
+                    # determine starting point for each segment
+                    special_for_ind_deter1 = ((temp_inds[keep] * nwalkers + walker_inds[keep]) * len(self.band_edges) + band_indices[keep]) * 1e3 + params_curr_in[:, 1] * 1e3
+                    sort_special_for_ind_deter1 = self.xp.argsort(special_for_ind_deter1)
+                    start_inds1 = ((params_curr_in[:, 1][sort_special_for_ind_deter1][uni_index_special_band_inds_here] / self.df).astype(int) - (N_now / 2) - buffer).astype(int)
+                    
+                    final_inds1 = ((params_curr_in[:, 1][sort_special_for_ind_deter1][finding_final] / self.df).astype(int) + (N_now / 2) + buffer).astype(int)
+                    
+                    special_for_ind_deter2 = ((temp_inds[keep] * nwalkers + walker_inds[keep]) * len(self.band_edges) + band_indices[keep]) * 1e3 + params_prop_in[:, 1] * 1e3
+                    sort_special_for_ind_deter2 = self.xp.argsort(special_for_ind_deter2)
+                    start_inds2 = ((params_prop_in[:, 1][sort_special_for_ind_deter2][uni_index_special_band_inds_here] / self.df).astype(int) - (N_now / 2) - buffer).astype(int)
+
+                    final_inds2 = ((params_prop_in[:, 1][sort_special_for_ind_deter2][finding_final] / self.df).astype(int) + (N_now / 2) + buffer).astype(int)
+
+                    start_inds = self.xp.min(self.xp.asarray([start_inds1, start_inds2]), axis=0).astype(np.int32)
+                    end_inds = self.xp.max(self.xp.asarray([final_inds1, final_inds2]), axis=0).astype(np.int32)
+
+                    lengths = (end_inds - start_inds).astype(np.int32)
+
+                    max_data_store_size = lengths.max().item()
+
+                    band_inv_temp_vals_here = self.xp.asarray(self.temperature_control.betas)[band_temps_inds]
+
+                    data_index_here = self.mgh.get_mapped_indices(data_index_tmp).astype(np.int32)
+                    noise_index_here = data_index_here.copy()
+                    
+                    num_bands_here = len(band_inds)
+
+                    ll_before = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)[0,0]
+
+                    assert lengths.min() >= N_now + 2 * buffer
+                    inputs_now = (
+                        L_contribution_here,
+                        p_contribution_here,
+                        data[0][0],
+                        data[1][0],
+                        psd[0][0],
+                        psd[1][0],
+                        data_index_here, 
+                        noise_index_here,
+                        params_curr_in_here,
+                        params_prop_in_here,
+                        prior_all_curr_here,
+                        prior_all_prop_here,
+                        factors_here,
+                        random_vals_here,
+                        band_start_bin_ind_here, # uni_index
+                        band_num_bins_here, # uni_count
+                        start_inds,
+                        lengths,
+                        band_inv_temp_vals_here,  # band_inv_temp_vals
+                        accepted_out_here,
+                        self.waveform_kwargs["T"],
+                        self.waveform_kwargs["dt"], 
+                        N_now,
+                        0,
+                        self.start_freq_ind,
+                        self.data_length,
+                        num_bands_here,
+                        max_data_store_size,
+                        device,
+                        do_synchronize
+                    )
+                    
+                    all_inputs.append(inputs_now)
+                    self.gb.SharedMemoryMakeMove_wrap(
+                        *inputs_now
+                    )
+                    #self.xp.cuda.runtime.deviceSynchronize()
+                    #ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)[0,0]
+                    # breakpoint()
+                self.xp.cuda.runtime.deviceSynchronize()
+                
+                for inputs_now, band_info, prior_info_now, indiv_info_now, params_prop_now in zip(all_inputs, band_bookkeep_info, prior_info, indiv_info, params_prop_info):
+                    ll_contrib_now = inputs_now[0]
+                    lp_contrib_now = inputs_now[1]
+                    accepted_now = inputs_now[19]
+
+                    print(accepted_now.sum(0) / accepted_now.shape[0])
+                    temp_tmp, walker_tmp, leaf_tmp = (indiv_info_now[0][accepted_now], indiv_info_now[1][accepted_now], indiv_info_now[2][accepted_now])
+
+                    gb_fixed_coords[(temp_tmp, walker_tmp, leaf_tmp)] = params_prop_now[accepted_now]
+
+                    ll_change[band_info] = ll_contrib_now
+                    
+                    ll_adjustment = ll_change.sum(-1)
+                    log_like_tmp += ll_adjustment
+
+                    """print(ll_adjustment[0,0])
+                    ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)[0,0]
+                    breakpoint()"""
+
+                    lp_change[band_info] = lp_contrib_now
+                    
+                    lp_adjustment = lp_change.sum(-1)
+                    log_prior_tmp += lp_adjustment
+
+                self.xp.cuda.runtime.deviceSynchronize()
+
+            et = time.perf_counter()
+            print("CHECKING", et - st)
+        
+        breakpoint()
         try:
             new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
             new_state.log_like[:] = log_like_tmp.get()
@@ -1160,6 +1281,6 @@ class GBSpecialStretchMove(GroupStretchMove):
         et = time.perf_counter()
         print("end", (et - st))
                     
-        #breakpoint()
+        breakpoint()
         return new_state, accepted
 
