@@ -690,8 +690,6 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         # do unique for band size as separator between asynchronous kernel launches
 
-        breakpoint()
-
         zz_sampled = self.zz.copy()
         """et = time.perf_counter()
         print("after prop", (et - st))
