@@ -248,7 +248,7 @@ priors_psd = {
 priors_galfor = {
     0: uniform_dist(1e-45, 2e-43),  # amp
     1: uniform_dist(1.0, 3.0),  # alpha
-    2: uniform_dist(5e1, 8e3),  # Slope1
+    2: uniform_dist(5e1, 1e7),  # Slope1
     3: uniform_dist(1e-4, 5e-2),  # knee
     4: uniform_dist(5e1, 8e3),  # Slope2
 }

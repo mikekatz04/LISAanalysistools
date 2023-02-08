@@ -75,7 +75,7 @@ class SkyMove(MHMove):
         coords = self.long_transform(coords, random)
         return coords
 
-    def get_proposal(self, branches_coords, branches_inds, random, **kwargs):
+    def get_proposal(self, branches_coords, random, branches_inds=None, **kwargs):
         """Get proposal from Gaussian distribution
 
         Args:
