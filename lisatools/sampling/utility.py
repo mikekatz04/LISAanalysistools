@@ -216,7 +216,7 @@ class GetLastGBState:
                     if i < fix_temp_initial_ind:
                         raise ValueError("If providing fix_temp_initial_ind and fix_temp_inds, all values in fix_temp_inds must be greater than fix_temp_initial_ind.")
 
-                    state.log_prob[i] = state.log_prob[fix_temp_initial_ind]
+                    state.log_like[i] = state.log_like[fix_temp_initial_ind]
                     state.log_prior[i] = state.log_prior[fix_temp_initial_ind]
                     state.branches_coords["gb"][i] = state.branches_coords["gb"][fix_temp_initial_ind]
                     state.branches_coords["gb_fixed"][i] = state.branches_coords["gb_fixed"][fix_temp_initial_ind]
@@ -272,7 +272,7 @@ class GetLastGBState:
 
         self.gb_wave_generator.d_d = np.asarray(mgh.get_inner_product(use_cpu=True))
         
-        state.log_prob = -1/2 * self.gb_wave_generator.d_d.real.reshape(ntemps, nwalkers)
+        state.log_like = -1/2 * self.gb_wave_generator.d_d.real.reshape(ntemps, nwalkers)
 
         temp_inds = mgh.temp_indices.copy()
         walker_inds = mgh.walker_indices.copy()
@@ -292,33 +292,33 @@ class HeterodynedUpdate:
     def __call__(self, it, sample_state, sampler, **kwargs):
 
         samples = sample_state.branches_coords["mbh"].reshape(-1, sampler.ndims[0])
-        lp_max = sample_state.log_prob.argmax()
+        lp_max = sample_state.log_like.argmax()
         best = samples[lp_max]
 
-        lp = sample_state.log_prob.flatten()
+        lp = sample_state.log_like.flatten()
         sorted = np.argsort(lp)
         inds_best = sorted[-1000:]
         inds_worst = sorted[:1000]
 
-        best_full = sampler.log_prob_fn.f.parameter_transforms["mbh"].both_transforms(
+        best_full = sampler.log_like_fn.f.parameter_transforms["mbh"].both_transforms(
             best, copy=True
         )
 
-        sampler.log_prob_fn.f.template_model.init_heterodyne_info(
+        sampler.log_like_fn.f.template_model.init_heterodyne_info(
             best_full, **self.update_kwargs
         )
 
         if self.set_d_d_zero:
-            sampler.log_prob_fn.f.template_model.reference_d_d = 0.0
+            sampler.log_like_fn.f.template_model.reference_d_d = 0.0
 
         # TODO: make this a general update function in Eryn (?)
         # samples[inds_worst] = samples[inds_best].copy()
         samples = samples.reshape(sampler.ntemps, sampler.nwalkers, 1, sampler.ndims[0])
         logp = sampler.compute_log_prior({"mbh": samples})
-        logL, blobs = sampler.compute_log_prob({"mbh": samples}, logp=logp)
+        logL, blobs = sampler.compute_log_like({"mbh": samples}, logp=logp)
 
         sample_state.branches["mbh"].coords = samples
-        sample_state.log_prob = logL
+        sample_state.log_like = logL
         sample_state.blobs = blobs
 
         # sampler.backend.save_step(sample_state, np.full_like(lp, True))

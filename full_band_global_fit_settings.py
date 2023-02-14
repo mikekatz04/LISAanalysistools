@@ -126,11 +126,13 @@ nwalkers = 100
 branch_names = ["gb", "gb_fixed", "psd", "galfor"]
 
 
-fp_gb = "last_gb_cold_chain_residuals"
+fp_gb = "last_gb_cold_chain_info"
 fp_psd = "last_psd_cold_chain_info"
+fp_mbh = "last_mbh_cold_chain_info"
 
 fp_pe = "develop_full_band_5.h5"
 fp_psd_pe = "develop_full_band_psd.h5"
+fp_mbh_pe = "develop_full_band_mbh.h5"
 folder = "./"
 import os
 fp_old = fp_pe  # "full_half_mHz_band_pe_output_after_prior_extension.h5"
@@ -139,7 +141,7 @@ with h5py.File("LDC2_sangria_training_v2.h5") as f:
     tXYZ = f["obs"]["tdi"][:]
 
     # remove mbhb and igb
-    for source in ["mbhb", "igb", "vgb"]:
+    for source in ["igb", "vgb"]:  # "mbhb", 
         change_arr = f["sky"][source]["tdi"][:]
         for change in ["X", "Y", "Z"]:
             tXYZ[change] -= change_arr[change]
@@ -173,7 +175,7 @@ A_inj, E_inj = Af[start_freq_ind:end_freq_ind + 1], Ef[start_freq_ind:end_freq_i
 
 fd = np.arange(start_freq_ind, end_freq_ind + 1) * df
 
-np.save("check_sens", np.array([fd, A_inj, E_inj]))
+# np.save("check_sens", np.array([fd, A_inj, E_inj]))
 
 psd = get_sensitivity(fd, **{"sens_fn": "noisepsd_AE", "model": "sangria"}).squeeze()
 
