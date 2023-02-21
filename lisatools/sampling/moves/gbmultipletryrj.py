@@ -263,6 +263,11 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
             except AttributeError:
                 pass
 
+        snr_comp2 = snr_comp.reshape(-1, self.num_try)
+        okay = snr_comp2 >= 1.0
+        okay[inds_reverse.get()] = True
+        ll[~okay.flatten()] = -1e300
+
         ##print(opt_snr[snr_comp.argmax()].real, snr_comp.max(), ll[snr_comp.argmax()].real - -1/2 * self.gb.d_d[snr_comp.argmax()].real)
         if self.search and self.search_snr_lim is not None:
             ll[
@@ -284,7 +289,6 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         
         ll_out = ll_out.reshape(num_inds_change, num_try)
         self.old_ll_out_check = ll_out.copy()
-        breakpoint()
         if inds_reverse is not None:
             #try:
             #    tmp_d_h_d_h = d_h_d_h.get()
@@ -604,7 +608,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
                 if self.fix_change is None:
                     changes = self.xp.random.choice([-1, 1], size=bands_per_walker_here.shape)
                 else:
-                    change = self.xp.full(bands_per_walker_here.shape, self.fix_change)
+                    changes = self.xp.full(bands_per_walker_here.shape, self.fix_change)
 
                 # make sure to add a binary if there are None
                 changes[nleaves_here == 0] = +1
@@ -713,7 +717,6 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
                 accepted = lnpdiff > self.xp.log(self.xp.asarray(model.random.rand(*lnpdiff.shape)))
 
-                breakpoint()
                 """et = time.perf_counter()
                 print("through accepted", et - st)
                 st = time.perf_counter()"""
@@ -965,6 +968,6 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
         et = time.perf_counter()
         print("RJ end", et - st)
-        
+        print(new_state.branches["gb_fixed"].nleaves.mean(axis=-1))
         return new_state, accepted
 

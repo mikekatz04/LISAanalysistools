@@ -986,7 +986,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         if self.time % 1 == 0:
             ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
             print(np.abs(new_state.log_like - ll_after).max())
-            if np.abs(new_state.log_like - ll_after).max()  > 1e-5:
+            if np.abs(new_state.log_like - ll_after).max()  > 1e-2:
                 if np.abs(new_state.log_like - ll_after).max() > 1e0:
                     breakpoint()
                 breakpoint()

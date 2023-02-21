@@ -242,10 +242,10 @@ generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
 generate_snr_ladder = ProbDistContainer(generate_dists)
 
 priors_psd = {
-    0: uniform_dist(6.e-12, 9.e-12),  # Soms_d
-    1: uniform_dist(2.e-15, 6.e-15),  # Sa_a
-    2: uniform_dist(6.0e-12, 9.e-12),  # Soms_d
-    3: uniform_dist(2.e-15, 6.e-15),  # Sa_a
+    0: uniform_dist(6.e-12, 12.e-12),  # Soms_d
+    1: uniform_dist(2.e-15, 8.e-15),  # Sa_a
+    2: uniform_dist(6.0e-12, 12.e-12),  # Soms_d
+    3: uniform_dist(2.e-15, 8.e-15),  # Sa_a
 }
 
 priors_galfor = {

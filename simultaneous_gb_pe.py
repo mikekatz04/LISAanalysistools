@@ -100,7 +100,7 @@ class UpdateNewResiduals(Update):
         )
 
         # ll_bef = self.mgh.get_ll(include_psd_info=True)
-        A_mbh_remove = self.last_mbh_template[0]
+        """A_mbh_remove = self.last_mbh_template[0]
         E_mbh_remove = self.last_mbh_template[1]
         self.mgh.add_templates_from_arrays_to_residuals(
             -1 * A_mbh_remove.reshape(-1, self.psd_shape[-1]),
@@ -108,7 +108,7 @@ class UpdateNewResiduals(Update):
             overall_inds=self.mgh.map
         )
         # ll_af = self.mgh.get_ll(include_psd_info=True)
-        """mbh_inj = np.load(fp_mbh + ".npy")
+        mbh_inj = np.load(fp_mbh + ".npy")
 
         A_mbh_going_in = np.zeros_like(self.last_mbh_template[0])
         E_mbh_going_in = np.zeros_like(self.last_mbh_template[1])
@@ -148,8 +148,8 @@ class UpdateNewResiduals(Update):
 
         data_index = xp.asarray(walker_vals[last_sample.branches["gb_fixed"].inds[0]]).astype(xp.int32)
 
-        # goes in as -h
-        factors = -xp.ones_like(data_index, dtype=xp.float64)
+        # NEEDS TO BE +1
+        factors = +xp.ones_like(data_index, dtype=xp.float64)
 
         templates_out = [[xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()], [xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()]]
         A_out, E_out = templates_out[0][0], templates_out[1][0]
@@ -231,10 +231,10 @@ def run_gb_pe(gpu):
 
     A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
     E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
-
-    A_going_in[:] -= A_mbh_going_in
-    E_going_in[:] -= E_mbh_going_in
-
+    
+    # A_going_in[:] -= A_mbh_going_in
+    # E_going_in[:] -= E_mbh_going_in
+    
     A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
 
@@ -244,6 +244,7 @@ def run_gb_pe(gpu):
     psds[:, :, 0] = psds[:, :, 1]
     A_psd_in[:] = psds[:, 0][None, :]  # A
     E_psd_in[:] = psds[:, 1][None, :]  # A
+
     """try:
         del mgh
         del sampler_mix
@@ -325,6 +326,10 @@ def run_gb_pe(gpu):
     # goes in as -h
     factors = -xp.ones_like(data_index, dtype=xp.float64)
 
+    # gb.d_d = gb.d_d[data_index]
+
+    # ll = gb.get_ll(coords_in_in, mgh.data_list, mgh.psd_list, data_index=data_index, noise_index=data_index.copy(), phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits, return_cupy=True, **waveform_kwargs)
+
     gb.generate_global_template(coords_in_in, data_index, mgh.data_list, batch_size=1000, data_length=data_length, factors=factors, data_splits=mgh.gpu_splits, **waveform_kwargs)
     
     del data_index
@@ -341,6 +346,8 @@ def run_gb_pe(gpu):
 
     state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, log_like=ll.reshape(ntemps_pe, nwalkers_pe), supplimental=supps)
     from gbgpu.utils.utility import get_N
+
+    
 
     for name in ["gb_fixed"]:
         ntemps_pe, nwalkers_pe, nleaves_max_here, _ = state_mix.branches[name].shape
@@ -416,7 +423,6 @@ def run_gb_pe(gpu):
         random_seed=10,
         nfriends=nwalkers,
         n_iter_update=20, 
-        fix_change=None,
         use_gpu=True
     )
 
@@ -440,6 +446,7 @@ def run_gb_pe(gpu):
         num_try=int(3e1),
         gibbs_sampling_setup=["gb_fixed"],
         point_generator_func=point_generator_func,
+        fix_change=None,
     )
     rj_moves.gb.gpus = gpus
 
@@ -471,7 +478,7 @@ def run_gb_pe(gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
-        update_iterations=4,
+        update_iterations=1,
         provide_groups=True,
         provide_supplimental=True,
         num_repeats_in_model=1
