@@ -33,6 +33,9 @@ class MBHSpecialMove(RedBlueMove):
 
         new_state = deepcopy(state)
 
+        # TODO: in TF, can we do multiple together?
+        # TODO: switch to heterodyning
+
         ntemps, nwalkers, nleaves, ndim = new_state.branches["mbh"].shape
 
         temp_inds_base = np.repeat(np.arange(ntemps)[:, None], nwalkers, axis=-1)
@@ -48,11 +51,11 @@ class MBHSpecialMove(RedBlueMove):
 
             # TODO: fix T channel 
             # d - h -> need to add removal waveforms
-            ll_tmp1 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
+            ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
 
             self.data_residuals[:2] += removal_waveforms[:2]
 
-            ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
+            ll_tmp2 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
 
             old_coords = new_state.branches["mbh"].coords[:, :, leaf].reshape(-1, ndim)
             old_coords_in = self.transform_fn.both_transforms(old_coords)
@@ -207,7 +210,7 @@ class MBHSpecialMove(RedBlueMove):
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
 
-        current_ll = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
+        current_ll = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
 
         # TODO: add check with last used logl
 

@@ -68,12 +68,14 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
-    def __init__(self, mgh, fp_psd, fp_gb, psd_shape, waveform_kwargs):
+    def __init__(self, initial_mbhs, mgh, fp_psd, fp_mbh, fp_gb, psd_shape, waveform_kwargs):
         self.mgh = mgh
         self.fp_psd = fp_psd
+        self.fp_mbh = fp_mbh
         self.psd_shape = psd_shape
         self.fp_gb = fp_gb
         self.waveform_kwargs = waveform_kwargs
+        self.last_mbh_template = initial_mbhs
 
     def __call__(self, iter, last_sample, sampler):
         A_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
@@ -89,13 +91,41 @@ class UpdateNewResiduals(Update):
 
         psds[:, :, 0] = psds[:, :, 1]
         A_psd_in[:] = psds[:, 0][None, :]  # A
-        E_psd_in[:] = psds[:, 1][None, :]  # A
+        E_psd_in[:] = psds[:, 1][None, :]  # E
 
         self.mgh.set_psd_from_arrays(
             A_psd_in.reshape(-1, self.psd_shape[-1]),
             E_psd_in.reshape(-1, self.psd_shape[-1]),
             overall_inds=self.mgh.map
         )
+
+        # ll_bef = self.mgh.get_ll(include_psd_info=True)
+        A_mbh_remove = self.last_mbh_template[0]
+        E_mbh_remove = self.last_mbh_template[1]
+        self.mgh.add_templates_from_arrays_to_residuals(
+            -1 * A_mbh_remove.reshape(-1, self.psd_shape[-1]),
+            -1 * E_mbh_remove.reshape(-1, self.psd_shape[-1]),
+            overall_inds=self.mgh.map
+        )
+        # ll_af = self.mgh.get_ll(include_psd_info=True)
+        """mbh_inj = np.load(fp_mbh + ".npy")
+
+        A_mbh_going_in = np.zeros_like(self.last_mbh_template[0])
+        E_mbh_going_in = np.zeros_like(self.last_mbh_template[1])
+
+        A_mbh_going_in[:] = mbh_inj[:, 0][None, :]  # A
+        E_mbh_going_in[:] = mbh_inj[:, 1][None, :]  # A
+
+        # TODO: need to check that everything is aligned
+        ll_bef = self.mgh.get_ll(include_psd_info=True)
+        self.mgh.add_templates_from_arrays_to_residuals(
+            A_mbh_going_in.reshape(-1, self.psd_shape[-1]),
+            E_mbh_going_in.reshape(-1, self.psd_shape[-1]),
+            overall_inds=self.mgh.map
+        )
+        # ll_af = self.mgh.get_ll(include_psd_info=True)
+
+        self.last_mbh_template = [A_mbh_going_in, E_mbh_going_in]"""
 
         ll = self.mgh.get_ll(include_psd_info=True)
 
@@ -193,6 +223,17 @@ def run_gb_pe(gpu):
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
     A_going_in[:] = np.asarray(A_inj)
     E_going_in[:] = np.asarray(E_inj)
+
+    mbh_inj = np.load(fp_mbh + ".npy")
+
+    A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
+    E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
+
+    A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
+    E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
+
+    A_going_in[:] -= A_mbh_going_in
+    E_going_in[:] -= E_mbh_going_in
 
     A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
@@ -412,7 +453,7 @@ def run_gb_pe(gpu):
     # TODO: get betas out of state object from old run if there
     betas = make_ladder(8000 * 8, ntemps=ntemps_pe)
 
-    update = UpdateNewResiduals(mgh, fp_psd + ".npy" , fp_gb, (ntemps_pe, nwalkers_pe, len(fd)), waveform_kwargs)
+    update = UpdateNewResiduals([A_mbh_going_in, E_mbh_going_in], mgh, fp_psd + ".npy" , fp_mbh + ".npy", fp_gb, (ntemps_pe, nwalkers_pe, len(fd)), waveform_kwargs)
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
@@ -430,11 +471,13 @@ def run_gb_pe(gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
-        update_iterations=1,
+        update_iterations=4,
         provide_groups=True,
         provide_supplimental=True,
         num_repeats_in_model=1
     )
+
+    state_mix.betas = sampler_mix.temperature_control.betas
 
     # equlibrating likelihood check: -4293090.6483655665,
     
@@ -480,7 +523,7 @@ def run_gb_pe(gpu):
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=True)
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=25, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     breakpoint()
@@ -507,7 +550,6 @@ def run_gb_pe(gpu):
 
     np.save(current_residuals_file_iterative_search, data_minus_templates.get())
     
-
     save_state = State(out.branches_coords, inds=out.branches_inds, log_like=out.log_like, log_prior=out.log_prior)
 
     if current_save_state_file in os.listdir():

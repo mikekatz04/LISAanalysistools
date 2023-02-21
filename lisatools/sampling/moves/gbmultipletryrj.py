@@ -284,6 +284,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
         
         ll_out = ll_out.reshape(num_inds_change, num_try)
         self.old_ll_out_check = ll_out.copy()
+        breakpoint()
         if inds_reverse is not None:
             #try:
             #    tmp_d_h_d_h = d_h_d_h.get()
@@ -292,7 +293,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
             # this is special to GBs
             self.special_aux_ll = -ll_out[inds_reverse, 0]
-            
+
+            self.check_h_h = self.gb.h_h.reshape(-1, num_try)[inds_reverse]
+            self.check_d_h = self.gb.d_h.reshape(-1, num_try)[inds_reverse]
             ll_out[inds_reverse, :] += self.special_aux_ll[:, None]
 
         # return gb.d_d
@@ -710,6 +713,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
                 accepted = lnpdiff > self.xp.log(self.xp.asarray(model.random.rand(*lnpdiff.shape)))
 
+                breakpoint()
                 """et = time.perf_counter()
                 print("through accepted", et - st)
                 st = time.perf_counter()"""

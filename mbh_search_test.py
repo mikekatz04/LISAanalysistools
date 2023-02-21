@@ -31,7 +31,7 @@ np.random.seed(111222)
 try:
     import cupy as xp
     # set GPU device
-    xp.cuda.runtime.setDevice(5)
+    xp.cuda.runtime.setDevice(3)
     gpu_available = True
 
 except (ImportError, ModuleNotFoundError) as e:
@@ -62,7 +62,17 @@ def run_mbh_search(
     mbh_kwargs={}
 ):
 
-    for run_num in range(20):
+    for run_num in range(15):
+        
+        with h5py.File("LDC2_sangria_training_v2.h5") as f:
+            mbhbs = f["sky"]["mbhb"]["cat"][:]
+
+        total_mass_now = (mbhbs[run_num]["Mass1"] + mbhbs[run_num]["Mass2"]).item()
+        mass_ratio = (mbhbs[run_num]["Mass2"] / mbhbs[run_num]["Mass1"]).item()
+        spin1 = mbhbs[run_num]["Spin1"].item()
+        spin2 = mbhbs[run_num]["Spin2"].item()
+        coal_time = mbhbs[run_num]["CoalescenceTime"].item()
+
         # wave generating class
         wave_gen = BBHWaveformFD(
             amp_phase_kwargs=dict(run_phenomd=True),
@@ -77,21 +87,31 @@ def run_mbh_search(
             "fill_inds": np.array([6]),
         }
 
+        max_mass_ratio = mass_ratio * 1.1 if mass_ratio * 1.1 < 1.0 else 0.99
+
+        max_spin1 = spin1 + 0.1 if spin1 + 0.1 < 1.0 else 0.99
+        max_spin2 = spin2 + 0.1 if spin2 + 0.1 < 1.0 else 0.99
+
+        try:
+            del priors
+        except NameError:
+            pass
+
         # priors
         priors = {
             "mbh": ProbDistContainer(
                 {
-                    0: uniform_dist(np.log(1e5), np.log(1e7)),
-                    1: uniform_dist(0.01, 0.999999999),
-                    2: uniform_dist(-0.99999999, +0.99999999),
-                    3: uniform_dist(-0.99999999, +0.99999999),
+                    0: uniform_dist(np.log(5e4), np.log(5e7)),
+                    1: uniform_dist(0.05, 0.99),
+                    2: uniform_dist(-0.99, 0.99),
+                    3: uniform_dist(-0.99, 0.99),
                     4: uniform_dist(0.01, 1000.0),
                     5: uniform_dist(0.0, 2 * np.pi),
                     6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                     7: uniform_dist(0.0, 2 * np.pi),
                     8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                     9: uniform_dist(0.0, np.pi),
-                    10: uniform_dist(0.0, Tobs + 3600.0),
+                    10: uniform_dist(coal_time - 1000.0, coal_time + 1000.0),
                 }
             ) 
         }
@@ -127,15 +147,14 @@ def run_mbh_search(
 
         psd = xp.asarray([A_psd_in, E_psd_in, np.full_like(A_psd_in, 1e10)])
 
-        fp_gb = "last_gb_cold_chain_residuals.npy"
+        fp_gb = "last_gb_cold_chain_info.npy"
         data_in = np.load(fp_gb)
-        A_going_in = data_in[0, 0]
-        E_going_in = data_in[0, 1]
 
-        fdmbh, A_mbh, E_mbh = np.load("ldc2a_mbh_injections.npy")
+        A_going_in = A_inj.copy()
+        E_going_in = E_inj.copy()
 
-        A_going_in += A_mbh
-        E_going_in += E_mbh
+        A_going_in -= data_in[0, 0]
+        E_going_in -= data_in[0, 1]
 
         fd = xp.asarray(fd1)
         if "mbh_found_points.npy" in os.listdir():
@@ -151,7 +170,32 @@ def run_mbh_search(
                 A_going_in -= data_channels_AET[0].get()
                 E_going_in -= data_channels_AET[1].get()
 
-        data_channels = xp.asarray([A_going_in, E_going_in, np.zeros_like(A_going_in)])
+        Af_here = Af.copy()
+        Ef_here = Ef.copy()
+
+        Af_here[:A_going_in.shape[0]] = A_going_in
+        Ef_here[:E_going_in.shape[0]] = E_going_in
+
+        A_tmp = np.fft.irfft(Af_here)
+        E_tmp = np.fft.irfft(Ef_here)
+
+        t_vals = np.arange(A_tmp.shape[0]) * dt
+
+        start_t = coal_time - 3 * 7 * 24 * 3600.0
+        end_t = coal_time + 1 * 7 * 24 * 3600.0
+
+        A_tmp[(t_vals < start_t) | (t_vals > end_t)] = 0.0
+        E_tmp[(t_vals < start_t) | (t_vals > end_t)] = 0.0
+
+        A_going_in_fin = np.fft.rfft(A_tmp)[:A_going_in.shape[0]]
+        E_going_in_fin = np.fft.rfft(E_tmp)[:E_going_in.shape[0]]
+
+        # fdmbh, A_mbh, E_mbh = np.load("ldc2a_mbh_injections.npy")
+
+        # A_going_in += A_mbh
+        # E_going_in += E_mbh
+
+        data_channels = xp.asarray([A_going_in_fin, E_going_in_fin, np.zeros_like(E_going_in_fin)])
         
         try:
             del like_mbh

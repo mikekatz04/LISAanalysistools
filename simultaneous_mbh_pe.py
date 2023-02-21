@@ -123,7 +123,7 @@ class UpdateNewResiduals(Update):
             coords_in = self.mbh_move.transform_fn.both_transforms(coords)
             waveform_tmp = self.mbh_move.waveform_gen(*coords_in.T, fill=True, freqs=self.mbh_move.fd, **self.mbh_move.mbh_kwargs).transpose(1, 0, 2)
 
-            waveforms[:] = waveform_tmp[:2]
+            waveforms[:] += waveform_tmp[:2]
 
         np.save(self.fp_mbh, waveforms.transpose(1, 0, 2).get())
         del waveforms, waveform_tmp
@@ -247,7 +247,13 @@ def run_mbh_pe(gpu):
     }
     
     fd_gpu = xp.asarray(fd)
-    found_mbh_points = np.load("mbh_found_points.npy")
+    found_mbh_points = np.load("lisa_frame_points_in.npy")
+
+    found_mbh_points[:, 0] = np.log(found_mbh_points[:, 0])
+    found_mbh_points[:, 4] = found_mbh_points[:, 4] / 1e3
+    found_mbh_points[:, 6] = np.cos(found_mbh_points[:, 6])
+    found_mbh_points[:, 8] = np.sin(found_mbh_points[:, 8])
+    
     nleaves_mbh = found_mbh_points.shape[0]
     start_points = np.zeros((ntemps_pe * nwalkers_pe, found_mbh_points.shape[0], 11))
     ndim = 11
@@ -305,7 +311,7 @@ def run_mbh_pe(gpu):
                     noise_index = np.zeros((ntemps_pe * nwalkers_pe), dtype=np.int32)
 
                     if iter_check == 0:
-                        base_like = -1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)).get()
+                        base_like = (-1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psds_fin)), axis=(0, 2))).get()
                         xp.get_default_memory_pool().free_all_blocks()
                         wave_gen.d_d = -2 * base_like[0]
 
@@ -317,7 +323,7 @@ def run_mbh_pe(gpu):
                     iter_check += 1
                     factor *= 1.5
 
-                    print(np.std(start_like))
+                    # print(np.std(start_like))
 
                     if iter_check > max_iter:
                         raise ValueError("Unable to find starting parameters.")
@@ -326,6 +332,8 @@ def run_mbh_pe(gpu):
                 tmp = np.load("start_points_mbh.npy")[:, inj_i]
                 injection_in = transform_fn.both_transforms(tmp, return_transpose=True)
 
+            # print(inj_i, (wave_gen.h_h.real / wave_gen.d_h.real).min(), (wave_gen.h_h.real / wave_gen.d_h.real).max())
+            # breakpoint()
             injection_in_keep = injection_in[:, :nwalkers_pe]
             data_channels_AET = wave_gen(*injection_in_keep, freqs=fd_gpu,
                     modes=[(2,2)], direct=False, fill=True, squeeze=True, length=1024
@@ -334,7 +342,8 @@ def run_mbh_pe(gpu):
             data_fin[:2] -= data_channels_AET.transpose((1, 0, 2))[:2]
             start_points[:, inj_i] = tmp
 
-        start_ll_cold = -1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)).get()
+        np.save("start_points_mbh", start_points)
+        start_ll_cold = (-1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psds_fin)), axis=(0, 2))).get()
 
         start_ll = np.zeros((ntemps_pe, nwalkers_pe))
         start_ll[0] = start_ll_cold
@@ -345,7 +354,7 @@ def run_mbh_pe(gpu):
         start_state = State({"mbh": start_points.reshape(ntemps_pe, nwalkers_pe, nleaves_mbh, ndim)}, log_like=start_ll, log_prior=start_lp)
 
     xp.get_default_memory_pool().free_all_blocks()
-    num_repeats = 1
+    num_repeats = 25
 
     # TODO: start ll needs to be done carefully
 
@@ -378,7 +387,7 @@ def run_mbh_pe(gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
-        update_iterations=1,
+        update_iterations=4,
         provide_groups=False,
         provide_supplimental=False,
     )
@@ -386,7 +395,6 @@ def run_mbh_pe(gpu):
     # equlibrating likelihood check: -4293090.6483655665,
     nsteps_mix = 10000
     mempool.free_all_blocks()
-
     out = sampler_mix.run_mcmc(start_state, nsteps_mix, progress=True, thin_by=1, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 

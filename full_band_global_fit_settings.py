@@ -130,8 +130,8 @@ fp_gb = "last_gb_cold_chain_info"
 fp_psd = "last_psd_cold_chain_info"
 fp_mbh = "last_mbh_cold_chain_info"
 
-fp_pe = "develop_full_band_5.h5"
-fp_psd_pe = "develop_full_band_psd.h5"
+fp_pe = "develop_full_band_6.h5"
+fp_psd_pe = "develop_full_band_psd_2.h5"
 fp_mbh_pe = "develop_full_band_mbh.h5"
 folder = "./"
 import os
@@ -141,7 +141,7 @@ with h5py.File("LDC2_sangria_training_v2.h5") as f:
     tXYZ = f["obs"]["tdi"][:]
 
     # remove mbhb and igb
-    for source in ["igb", "vgb"]:  # "mbhb", 
+    for source in ["mbhb", "igb", "vgb"]:  # "mbhb", 
         change_arr = f["sky"][source]["tdi"][:]
         for change in ["X", "Y", "Z"]:
             tXYZ[change] -= change_arr[change]
@@ -150,6 +150,7 @@ with h5py.File("LDC2_sangria_training_v2.h5") as f:
 
 t, X, Y, Z = tXYZ["t"].squeeze(), tXYZ["X"].squeeze(), tXYZ["Y"].squeeze(), tXYZ["Z"].squeeze()
 dt = t[1] - t[0]
+
 Nobs = len(t)
 if Nobs > int(YEAR / dt):
     Nobs = int(YEAR / dt)

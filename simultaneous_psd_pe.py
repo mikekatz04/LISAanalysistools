@@ -87,11 +87,12 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
-    def __init__(self, fd, fp_gb, fp_psd, nwalkers):
+    def __init__(self, fd, fp_gb, fp_mbh, fp_psd, nwalkers):
         self.fp_gb = fp_gb
         self.fp_psd = fp_psd
         self.nwalkers = nwalkers
         self.fd = xp.asarray(fd)
+        self.fp_mbh = fp_mbh
 
     def __call__(self, iter, last_sample, sampler):
 
@@ -103,8 +104,35 @@ class UpdateNewResiduals(Update):
             except ValueError:
                 time.sleep(1)
 
-        sampler.log_like_fn.args[1][0][:] = xp.asarray(data_in[:, 0])
-        sampler.log_like_fn.args[1][1][:] = xp.asarray(data_in[:, 1])
+        A_going_in = np.zeros((self.nwalkers, A_inj.shape[0]), dtype=complex)
+        E_going_in = np.zeros((self.nwalkers, E_inj.shape[0]), dtype=complex)
+
+        A_going_in[:] = np.asarray(A_inj)
+        E_going_in[:] = np.asarray(E_inj)
+
+        data_in = np.load(fp_gb + ".npy")
+        A_going_in[:] -= data_in[:, 0]
+        E_going_in[:] -= data_in[:, 1]
+
+        imported = False
+        while not imported:
+            try:
+                mbh_inj = np.load(self.fp_mbh)
+                imported = True
+            except ValueError:
+                time.sleep(1)
+        
+        A_mbh_going_in = np.zeros((self.nwalkers, A_inj.shape[0]), dtype=complex)
+        E_mbh_going_in = np.zeros((self.nwalkers, E_inj.shape[0]), dtype=complex)
+
+        A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
+        E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
+
+        A_going_in[:] -= A_mbh_going_in
+        E_going_in[:] -= E_mbh_going_in
+
+        sampler.log_like_fn.args[1][0][:] = xp.asarray(A_going_in)
+        sampler.log_like_fn.args[1][1][:] = xp.asarray(E_going_in)
 
         lp = sampler.compute_log_prior(last_sample.branches_coords, inds=last_sample.branches_inds)
         ll = sampler.compute_log_like(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental, logp=lp)[0]
@@ -129,10 +157,10 @@ class UpdateNewResiduals(Update):
         xp.get_default_memory_pool().free_all_blocks()
 
 
-def run_psd_pe(gpu, fp_gb):
+def run_psd_pe(gpu):
 
-    while fp_gb not in os.listdir():
-        print(f"{fp_gb} not in current directory so far...")
+    while fp_gb + ".npy" not in os.listdir():
+        print(f"{fp_gb + '.npy'} not in current directory so far...")
         time.sleep(20)
 
     branch_names = ["psd", "galfor"]
@@ -188,9 +216,23 @@ def run_psd_pe(gpu, fp_gb):
     A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    data_in = np.load(fp_gb)
-    A_going_in[:] = data_in[:, 0]
-    E_going_in[:] = data_in[:, 1]
+    A_going_in[:] = np.asarray(A_inj)
+    E_going_in[:] = np.asarray(E_inj)
+
+    data_in = np.load(fp_gb + ".npy")
+    A_going_in[:] -= data_in[:, 0]
+    E_going_in[:] -= data_in[:, 1]
+
+    mbh_inj = np.load(fp_mbh + ".npy")
+
+    A_mbh_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
+    E_mbh_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
+
+    A_mbh_going_in[:] = mbh_inj[:, 0]
+    E_mbh_going_in[:] = mbh_inj[:, 1]
+
+    A_going_in[:] -= A_mbh_going_in
+    E_going_in[:] -= E_mbh_going_in
 
     data = [xp.asarray(A_going_in), xp.asarray(E_going_in)]
 
@@ -210,7 +252,7 @@ def run_psd_pe(gpu, fp_gb):
 
     sens_kwargs = dict(sens_fn="noisepsd_AE")
 
-    update = UpdateNewResiduals(fd, fp_gb, fp_psd, nwalkers_pe)
+    update = UpdateNewResiduals(fd, fp_gb + ".npy", fp_mbh + ".npy", fp_psd, nwalkers_pe)
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
@@ -226,7 +268,7 @@ def run_psd_pe(gpu, fp_gb):
         vectorize=False,
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
-        update_fn=update,  # stop_converge_mix,
+        update_fn=update,  # sttop_converge_mix,
         update_iterations=4,
         provide_groups=False,
         provide_supplimental=True,
@@ -254,10 +296,7 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', type=int,
                         help='which gpu', required=True)
 
-    parser.add_argument('--gb-file', '-gf', type=str,
-                        help='which psd file', required=True)
-
     args = parser.parse_args()
 
-    output = run_psd_pe(args.gpu, args.gb_file)
+    output = run_psd_pe(args.gpu)
                 
