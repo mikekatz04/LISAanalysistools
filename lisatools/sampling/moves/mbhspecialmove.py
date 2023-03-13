@@ -5,6 +5,8 @@ from copy import deepcopy
 from eryn.moves import RedBlueMove, StretchMove
 from eryn.state import State
 
+from lisatools.sampling.moves.skymodehop import SkyMove
+
 from tqdm import tqdm
 
 
@@ -43,6 +45,7 @@ class MBHSpecialMove(RedBlueMove):
 
         for leaf in range(nleaves):
             # remove cold chain sources
+            xp.get_default_memory_pool().free_all_blocks()
             removal_coords = new_state.branches["mbh"].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
 
@@ -51,10 +54,11 @@ class MBHSpecialMove(RedBlueMove):
 
             # TODO: fix T channel 
             # d - h -> need to add removal waveforms
-            ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
+            # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
 
             self.data_residuals[:2] += removal_waveforms[:2]
-
+            del removal_waveforms
+            xp.get_default_memory_pool().free_all_blocks()
             ll_tmp2 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
 
             old_coords = new_state.branches["mbh"].coords[:, :, leaf].reshape(-1, ndim)
@@ -64,6 +68,8 @@ class MBHSpecialMove(RedBlueMove):
 
             self.waveform_gen.d_d = xp.asarray(-2 * np.tile(ll_tmp2, (ntemps, 1)).flatten())
 
+            del ll_tmp2
+            xp.get_default_memory_pool().free_all_blocks()
             d_d_store = self.waveform_gen.d_d.reshape(ntemps, nwalkers).get()
 
             # TODO: fix this
@@ -72,10 +78,9 @@ class MBHSpecialMove(RedBlueMove):
             prev_logp = self.mbh_priors["mbh"].logpdf(old_coords).reshape((ntemps, nwalkers))
 
             prev_logP = self.compute_log_posterior(prev_logl, prev_logp)
-
-            xp.get_default_memory_pool().free_all_blocks()
+            
             # fix this need to compute prev_logl for all walkers
-
+            xp.get_default_memory_pool().free_all_blocks()
             for repeat in range(self.num_repeats):
 
                 # pick move
@@ -159,7 +164,7 @@ class MBHSpecialMove(RedBlueMove):
                     accepted[(temp_inds_update, walker_inds_update)] = True
 
                     # update state informatoin
-                    new_state.branches["mbh"].coords[(temp_inds_update, walker_inds_update, np.zeros_like(walker_inds_update))] = new_points[keep].reshape(len(temp_inds_update), ndim)
+                    new_state.branches["mbh"].coords[(temp_inds_update, walker_inds_update, np.full_like(walker_inds_update, leaf))] = new_points[keep].reshape(len(temp_inds_update), ndim)
 
                     prev_logl[(temp_inds_update, walker_inds_update)] = logl[keep].flatten()
                     prev_logp[(temp_inds_update, walker_inds_update)] = logp[keep].flatten()
@@ -191,6 +196,8 @@ class MBHSpecialMove(RedBlueMove):
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
 
             # add back cold chain sources
+            xp.get_default_memory_pool().free_all_blocks()
+
             add_coords = new_state.branches["mbh"].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
 
@@ -200,6 +207,8 @@ class MBHSpecialMove(RedBlueMove):
             # d - h -> need to subtract added waveforms
             self.data_residuals[:2] -= add_waveforms[:2]
 
+            del add_waveforms
+            xp.get_default_memory_pool().free_all_blocks()
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
 
             # print(leaf)
@@ -211,12 +220,13 @@ class MBHSpecialMove(RedBlueMove):
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
 
         current_ll = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
-
+        xp.get_default_memory_pool().free_all_blocks()
         # TODO: add check with last used logl
 
         current_lp = self.mbh_priors["mbh"].logpdf(new_state.branches["mbh"].coords[0, :, :].reshape(-1, ndim)).reshape(new_state.branches["mbh"].shape[1:-1]).sum(axis=-1)
 
         new_state.log_like[0] = current_ll
         new_state.log_prior[0] = current_lp
+        xp.get_default_memory_pool().free_all_blocks()
 
         return new_state, accepted

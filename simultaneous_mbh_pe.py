@@ -106,7 +106,14 @@ class UpdateNewResiduals(Update):
         del gb_removal
         xp.get_default_memory_pool().free_all_blocks()
 
-        gbs_in = np.load(self.fp_gb)
+        imported = False
+        while not imported:
+            try:
+                gbs_in = np.load(self.fp_gb)
+                imported = True
+            except ValueError:
+                time.sleep(1)
+
         self.last_gb_residuals[:] = gbs_in[:]
 
         gb_add = xp.asarray(gbs_in)
@@ -362,10 +369,10 @@ def run_mbh_pe(gpu):
     from lisatools.sampling.moves.skymodehop import SkyMove
 
     inner_moves = [
-        (SkyMove(which="both"), 0.02),
-        (SkyMove(which="long"), 0.01),
-        (SkyMove(which="lat"), 0.01),
-        (StretchMove(), 0.96)
+        (SkyMove(which="both"), 0.00),
+        (SkyMove(which="long"), 0.00),
+        (SkyMove(which="lat"), 0.08),
+        (StretchMove(), 0.92)
     ]
     move = MBHSpecialMove(wave_gen, fd_gpu, data_fin, psds_fin, num_repeats, transform_fn, priors, waveform_kwargs, inner_moves, df)
 
@@ -387,7 +394,7 @@ def run_mbh_pe(gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
-        update_iterations=4,
+        update_iterations=1,
         provide_groups=False,
         provide_supplimental=False,
     )
@@ -400,12 +407,12 @@ def run_mbh_pe(gpu):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
+    """parser = argparse.ArgumentParser()
 
     parser.add_argument('--gpu', type=int,
                         help='which gpu', required=True)
 
-    args = parser.parse_args()
+    args = parser.parse_args()"""
 
-    output = run_mbh_pe(args.gpu)
+    output = run_mbh_pe(7)
                 

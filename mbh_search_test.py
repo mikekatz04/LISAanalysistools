@@ -31,7 +31,7 @@ np.random.seed(111222)
 try:
     import cupy as xp
     # set GPU device
-    xp.cuda.runtime.setDevice(3)
+    xp.cuda.runtime.setDevice(7)
     gpu_available = True
 
 except (ImportError, ModuleNotFoundError) as e:
@@ -54,28 +54,46 @@ def stop(iter, sample, sampler):
     return temp
 
 # function call
-def run_mbh_search(
-    Tobs,
-    fp_in,
-    ntemps,
-    nwalkers,
-    mbh_kwargs={}
-):
+def run_mbh_search():
 
-    for run_num in range(15):
-        
-        with h5py.File("LDC2_sangria_training_v2.h5") as f:
-            mbhbs = f["sky"]["mbhb"]["cat"][:]
+    t_lims = np.linspace(0.0, YEAR, 26)
 
-        total_mass_now = (mbhbs[run_num]["Mass1"] + mbhbs[run_num]["Mass2"]).item()
-        mass_ratio = (mbhbs[run_num]["Mass2"] / mbhbs[run_num]["Mass1"]).item()
-        spin1 = mbhbs[run_num]["Spin1"].item()
-        spin2 = mbhbs[run_num]["Spin2"].item()
-        coal_time = mbhbs[run_num]["CoalescenceTime"].item()
+    for t_i in range(len(t_lims) - 1)[3:]:
+        start_t = t_lims[t_i]
+        end_t = t_lims[t_i + 1]
+        keep_t = (t >= start_t) & (t < end_t)
+        t_here = t[keep_t]
+        X_here = X[keep_t]
+        Y_here = Y[keep_t]
+        Z_here = Z[keep_t]
+
+        Tobs = dt * len(t_here)
+
+        # fucking dt 
+        Xf, Yf, Zf = (np.fft.rfft(X_here) * dt, np.fft.rfft(Y_here) * dt, np.fft.rfft(Z_here) * dt)
+        Af, Ef, Tf = AET(Xf, Yf, Zf)
+
+        A_inj, E_inj = Af, Ef
+        fd = np.fft.rfftfreq(len(X_here), dt)
+        df = fd[1] - fd[0]
+        data_length = len(fd)
+
+        fp = f"test_mbh_search_{start_t:.4e}_{end_t:.4e}.h5"
+
+        ntemps = 10
+        nwalkers = 100
+
+        mbh_kwargs = {
+            "modes": [(2,2)],
+            "length": 1024,
+            "t_obs_start": start_t,
+            "t_obs_end": end_t,
+            "shift_t_limits": True
+        }
 
         # wave generating class
         wave_gen = BBHWaveformFD(
-            amp_phase_kwargs=dict(run_phenomd=True),
+            amp_phase_kwargs=dict(run_phenomd=True, initial_t_val=start_t),
             response_kwargs=dict(TDItag="AET"),
             use_gpu=use_gpu
         )
@@ -86,11 +104,6 @@ def run_mbh_search(
             "fill_values": np.array([0.0]),
             "fill_inds": np.array([6]),
         }
-
-        max_mass_ratio = mass_ratio * 1.1 if mass_ratio * 1.1 < 1.0 else 0.99
-
-        max_spin1 = spin1 + 0.1 if spin1 + 0.1 < 1.0 else 0.99
-        max_spin2 = spin2 + 0.1 if spin2 + 0.1 < 1.0 else 0.99
 
         try:
             del priors
@@ -111,7 +124,7 @@ def run_mbh_search(
                     7: uniform_dist(0.0, 2 * np.pi),
                     8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                     9: uniform_dist(0.0, np.pi),
-                    10: uniform_dist(coal_time - 1000.0, coal_time + 1000.0),
+                    10: uniform_dist(start_t + 1000.0, end_t + 4 * 7 * 24 * 3600), # 4 weeks after end of window
                 }
             ) 
         }
@@ -136,7 +149,17 @@ def run_mbh_search(
             "mbh": {5: 2 * np.pi, 7: np.pi, 8: np.pi}
         }
 
-        # A_psd_in[:] = np.asarray(psd)
+        psd_reader = HDFBackend(fp_psd_search)
+        best_psd_ind = psd_reader.get_log_like().flatten().argmax()
+        best_psd_params = psd_reader.get_chain()["psd"].reshape(-1, 4)[best_psd_ind]
+
+        A_psd = get_sensitivity(fd, sens_fn="noisepsd_AE", model=best_psd_params[:2])
+        E_psd = get_sensitivity(fd, sens_fn="noisepsd_AE", model=best_psd_params[2:])
+
+        A_psd[0] = A_psd[1]
+        E_psd[0] = E_psd[1]
+
+        """# A_psd_in[:] = np.asarray(psd)
         # E_psd_in[:] = np.asarray(psd)
         fp_psd = "last_psd_cold_chain_info.npy"
         psds = np.load(fp_psd)
@@ -168,46 +191,26 @@ def run_mbh_search(
                 )[0]
 
                 A_going_in -= data_channels_AET[0].get()
-                E_going_in -= data_channels_AET[1].get()
+                E_going_in -= data_channels_AET[1].get()"""
 
-        Af_here = Af.copy()
-        Ef_here = Ef.copy()
-
-        Af_here[:A_going_in.shape[0]] = A_going_in
-        Ef_here[:E_going_in.shape[0]] = E_going_in
-
-        A_tmp = np.fft.irfft(Af_here)
-        E_tmp = np.fft.irfft(Ef_here)
-
-        t_vals = np.arange(A_tmp.shape[0]) * dt
-
-        start_t = coal_time - 3 * 7 * 24 * 3600.0
-        end_t = coal_time + 1 * 7 * 24 * 3600.0
-
-        A_tmp[(t_vals < start_t) | (t_vals > end_t)] = 0.0
-        E_tmp[(t_vals < start_t) | (t_vals > end_t)] = 0.0
-
-        A_going_in_fin = np.fft.rfft(A_tmp)[:A_going_in.shape[0]]
-        E_going_in_fin = np.fft.rfft(E_tmp)[:E_going_in.shape[0]]
-
-        # fdmbh, A_mbh, E_mbh = np.load("ldc2a_mbh_injections.npy")
-
-        # A_going_in += A_mbh
-        # E_going_in += E_mbh
-
-        data_channels = xp.asarray([A_going_in_fin, E_going_in_fin, np.zeros_like(E_going_in_fin)])
         
         try:
             del like_mbh
             del like
             del sampler
+            del data_channels
+            del psd
         except NameError:
             pass
 
+        data_channels = xp.asarray([A_inj, E_inj, np.zeros_like(E_inj)])
+
+        psd = xp.asarray([A_psd, E_psd, np.full_like(A_psd, 1e10)])
+        
         xp.get_default_memory_pool().free_all_blocks()
         # initialize Likelihood
         like_mbh = MBHLikelihood(
-            wave_gen, fd, data_channels, psd, use_gpu=use_gpu
+            wave_gen, xp.asarray(fd), data_channels, psd, use_gpu=use_gpu
         )
 
         # this is a parent likelihood class that manages the parameter transforms
@@ -230,10 +233,9 @@ def run_mbh_search(
 
             # generate starting points
             start_params = priors["mbh"].rvs(size=(nwalkers * ntemps,))
-            
+
             # get_ll and not __call__ to work with lisatools
             start_like = like(start_params, **mbh_kwargs)
-
             start_prior = priors["mbh"].logpdf(start_params)
 
             # start state
@@ -244,6 +246,7 @@ def run_mbh_search(
             )
 
         else:
+            raise NotImplementedError
             reader = HDFBackend(fp)
             start_state = reader.get_last_sample()
 
@@ -277,6 +280,7 @@ def run_mbh_search(
 
         nsteps = 10000
         out = sampler.run_mcmc(start_state, nsteps, progress=True, thin_by=50, burn=0)
+        breakpoint()
 
         mbh_injection_params = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
 
@@ -354,27 +358,11 @@ def run_mbh_search(
 if __name__ == "__main__":
     # set parameters
     
-    fp = "test_mbh_search.h5"
+    
 
-    Tobs = 1.0 * YRSID_SI
-
-    ntemps = 10
-    nwalkers = 100
-
-    waveform_kwargs = {
-        "modes": [(2,2)],
-        "length": 1024,
-    }
-
-    print("start", fp)
-    run_mbh_search(
-        Tobs,
-        fp,
-        ntemps,
-        nwalkers,
-        mbh_kwargs=waveform_kwargs
-    )
-    print("end", fp)
+    #print("start", fp)
+    run_mbh_search()
+    #print("end", fp)
         # frequencies to interpolate to
         
         

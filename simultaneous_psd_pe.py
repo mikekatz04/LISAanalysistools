@@ -110,7 +110,6 @@ class UpdateNewResiduals(Update):
         A_going_in[:] = np.asarray(A_inj)
         E_going_in[:] = np.asarray(E_inj)
 
-        data_in = np.load(fp_gb + ".npy")
         A_going_in[:] -= data_in[:, 0]
         E_going_in[:] -= data_in[:, 1]
 
@@ -128,8 +127,8 @@ class UpdateNewResiduals(Update):
         A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
         E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
 
-        # A_going_in[:] -= A_mbh_going_in
-        # E_going_in[:] -= E_mbh_going_in
+        A_going_in[:] -= A_mbh_going_in
+        E_going_in[:] -= E_mbh_going_in
 
         sampler.log_like_fn.args[1][0][:] = xp.asarray(A_going_in)
         sampler.log_like_fn.args[1][1][:] = xp.asarray(E_going_in)
@@ -233,8 +232,8 @@ def run_psd_pe(gpu):
     A_mbh_going_in[:] = mbh_inj[:, 0]
     E_mbh_going_in[:] = mbh_inj[:, 1]
 
-    #A_going_in[:] -= A_mbh_going_in
-    #E_going_in[:] -= E_mbh_going_in
+    A_going_in[:] -= A_mbh_going_in
+    E_going_in[:] -= E_mbh_going_in
 
     data = [xp.asarray(A_going_in), xp.asarray(E_going_in)]
 
@@ -293,12 +292,12 @@ def run_psd_pe(gpu):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
+    """parser = argparse.ArgumentParser()
 
     parser.add_argument('--gpu', type=int,
                         help='which gpu', required=True)
 
-    args = parser.parse_args()
+    args = parser.parse_args()"""
 
-    output = run_psd_pe(args.gpu)
+    output = run_psd_pe(5)
                 

@@ -76,8 +76,20 @@ class UpdateNewResiduals(Update):
         self.fp_gb = fp_gb
         self.waveform_kwargs = waveform_kwargs
         self.last_mbh_template = initial_mbhs
+        self.output_residual_number = 0
 
     def __call__(self, iter, last_sample, sampler):
+
+        """residual_file = "residuals_for_flows"
+        psd_file = "psds_for_flows"
+        freq_file = "freq_for_flows"
+
+        np.save(residual_file, np.asarray([self.mgh.data_shaped[0][0][:100].get(), self.mgh.data_shaped[1][0][:100].get()]).transpose(1, 0, 2))
+        np.save(psd_file, np.asarray([self.mgh.psd_shaped[0][0][:100].get(), self.mgh.psd_shaped[1][0][:100].get()]).transpose(1, 0, 2))
+        np.save(freq_file, self.mgh.fd)
+        breakpoint()"""
+
+        self.output_residual_number += 1
         A_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
         E_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
 
@@ -100,7 +112,7 @@ class UpdateNewResiduals(Update):
         )
 
         # ll_bef = self.mgh.get_ll(include_psd_info=True)
-        """A_mbh_remove = self.last_mbh_template[0]
+        A_mbh_remove = self.last_mbh_template[0]
         E_mbh_remove = self.last_mbh_template[1]
         self.mgh.add_templates_from_arrays_to_residuals(
             -1 * A_mbh_remove.reshape(-1, self.psd_shape[-1]),
@@ -108,7 +120,13 @@ class UpdateNewResiduals(Update):
             overall_inds=self.mgh.map
         )
         # ll_af = self.mgh.get_ll(include_psd_info=True)
-        mbh_inj = np.load(fp_mbh + ".npy")
+        imported = False
+        while not imported:
+            try:
+                mbh_inj = np.load(fp_mbh + ".npy")
+                imported = True
+            except ValueError:
+                time.sleep(1)
 
         A_mbh_going_in = np.zeros_like(self.last_mbh_template[0])
         E_mbh_going_in = np.zeros_like(self.last_mbh_template[1])
@@ -125,7 +143,7 @@ class UpdateNewResiduals(Update):
         )
         # ll_af = self.mgh.get_ll(include_psd_info=True)
 
-        self.last_mbh_template = [A_mbh_going_in, E_mbh_going_in]"""
+        self.last_mbh_template = [A_mbh_going_in, E_mbh_going_in]
 
         ll = self.mgh.get_ll(include_psd_info=True)
 
@@ -231,9 +249,9 @@ def run_gb_pe(gpu):
 
     A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
     E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
-    
-    # A_going_in[:] -= A_mbh_going_in
-    # E_going_in[:] -= E_mbh_going_in
+
+    A_going_in[:] -= A_mbh_going_in
+    E_going_in[:] -= E_mbh_going_in
     
     A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
@@ -530,7 +548,7 @@ def run_gb_pe(gpu):
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=25, store=True)
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     breakpoint()
@@ -610,13 +628,13 @@ def run_gb_pe(gpu):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
+    """parser = argparse.ArgumentParser()
 
     parser.add_argument('--gpu', type=int,
                         help='which gpu', required=True)
 
 
-    args = parser.parse_args()
+    args = parser.parse_args()"""
 
-    output = run_gb_pe(args.gpu)
+    output = run_gb_pe(6)
                 
