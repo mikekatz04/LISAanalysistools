@@ -129,8 +129,12 @@ branch_names = ["gb", "gb_fixed", "psd", "galfor"]
 fp_gb = "last_gb_cold_chain_info"
 fp_psd = "last_psd_cold_chain_info"
 fp_mbh = "last_mbh_cold_chain_info"
+fp_mbh_template_search = "last_mbh_cold_chain_info_search"
+fp_psd_residual_search = "last_psd_cold_chain_info_search"
 
+fp_psd_search_initial = "initial_search_develop_full_band_psd.h5"
 fp_psd_search = "search_develop_full_band_psd.h5"
+fp_mbh_search = "search_develop_full_band_mbh.h5"
 
 fp_pe = "develop_full_band_7.h5"
 fp_psd_pe = "develop_full_band_psd_3.h5"
@@ -244,10 +248,10 @@ generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
 generate_snr_ladder = ProbDistContainer(generate_dists)
 
 priors_psd = {
-    0: uniform_dist(6.e-12, 12.e-12),  # Soms_d
-    1: uniform_dist(2.e-15, 8.e-15),  # Sa_a
-    2: uniform_dist(6.0e-12, 12.e-12),  # Soms_d
-    3: uniform_dist(2.e-15, 8.e-15),  # Sa_a
+    0: uniform_dist(6.e-12, 20.e-12),  # Soms_d
+    1: uniform_dist(2.e-15,20.e-15),  # Sa_a
+    2: uniform_dist(6.0e-12, 20.e-12),  # Soms_d
+    3: uniform_dist(2.e-15, 20.e-15),  # Sa_a
 }
 
 priors_galfor = {

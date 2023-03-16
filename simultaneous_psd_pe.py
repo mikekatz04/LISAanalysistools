@@ -69,8 +69,13 @@ def log_like(x, freqs, data, supps=None, **sens_kwargs):
         raise ValueError("Must provide supps to identify the data streams.")
 
     wi = supps["walker_inds"]
-    psd_pars = x[0]
-    galfor_pars = x[1]
+
+    if isinstance(x, list):
+        psd_pars = x[0]
+        galfor_pars = x[1]
+    else:
+        psd_pars = x
+        galfor_pars = None
 
     psd = [
         get_sensitivity(freqs, model=psd_pars[:2], foreground_params=galfor_pars, **sens_kwargs),
@@ -78,6 +83,7 @@ def log_like(x, freqs, data, supps=None, **sens_kwargs):
     ]
     psd[0][0] = psd[0][1]
     psd[1][0] = psd[1][1]
+
     inner_product = 4 * df * (xp.sum(data[0][wi].conj() * data[0][wi] / psd[0]) + xp.sum(data[1][wi].conj() * data[1][wi] / psd[1])).real
     ll = -1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd)))
     return ll.get()
@@ -87,31 +93,47 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
-    def __init__(self, fd, fp_gb, fp_mbh, fp_psd, nwalkers):
+    def __init__(self, fd, fp_gb, fp_mbh, fp_psd, nwalkers, last_mbhs, include_foreground=True, include_gbs=True):
         self.fp_gb = fp_gb
         self.fp_psd = fp_psd
         self.nwalkers = nwalkers
         self.fd = xp.asarray(fd)
         self.fp_mbh = fp_mbh
+        self.include_foreground = include_foreground
+        self.include_gbs = include_gbs
+        self.last_mbhs = last_mbhs
 
     def __call__(self, iter, last_sample, sampler):
-
-        imported = False
-        while not imported:
-            try:
-                data_in = np.load(self.fp_gb)
-                imported = True
-            except ValueError:
-                time.sleep(1)
-
+        
+        # read out best residual and psd
+        if not self.include_gbs:
+            assert not self.include_foreground
+            best = np.where(last_sample.log_like == last_sample.log_like.max())
+            mbh_index = best[1][0]
+            np.save("best_logl_mbhs_from_psd_run", self.last_mbhs[mbh_index])
+            
+            psd_par = last_sample.branches_coords["psd"][best].squeeze()
+            A_psd_best = get_sensitivity(self.fd, sens_fn="noisepsd_AE", model=psd_par[:2], foreground_params=None, xp=xp).get()
+            E_psd_best = get_sensitivity(self.fd, sens_fn="noisepsd_AE", model=psd_par[2:], foreground_params=None, xp=xp).get()
+            np.save("best_logl_psd_from_psd_run", np.array([A_psd_best, E_psd_best]))
+        
         A_going_in = np.zeros((self.nwalkers, A_inj.shape[0]), dtype=complex)
         E_going_in = np.zeros((self.nwalkers, E_inj.shape[0]), dtype=complex)
 
         A_going_in[:] = np.asarray(A_inj)
         E_going_in[:] = np.asarray(E_inj)
+    
+        if self.include_gbs:
+            imported = False
+            while not imported:
+                try:
+                    data_in = np.load(self.fp_gb)
+                    imported = True
+                except ValueError:
+                    time.sleep(1)
 
-        A_going_in[:] -= data_in[:, 0]
-        E_going_in[:] -= data_in[:, 1]
+            A_going_in[:] -= data_in[:, 0]
+            E_going_in[:] -= data_in[:, 1]
 
         imported = False
         while not imported:
@@ -121,6 +143,8 @@ class UpdateNewResiduals(Update):
             except ValueError:
                 time.sleep(1)
         
+        self.last_mbhs = mbh_inj
+
         A_mbh_going_in = np.zeros((self.nwalkers, A_inj.shape[0]), dtype=complex)
         E_mbh_going_in = np.zeros((self.nwalkers, E_inj.shape[0]), dtype=complex)
 
@@ -141,7 +165,11 @@ class UpdateNewResiduals(Update):
 
         num = self.nwalkers
         psd_pars = last_sample.branches_coords["psd"][0].reshape(-1, 4)
-        galfor_pars = last_sample.branches_coords["galfor"][0].reshape(-1, 5)
+        
+        if self.include_foreground:
+            galfor_pars = last_sample.branches_coords["galfor"][0].reshape(-1, 5)
+        else:
+            galfor_pars = [None for _ in psd_pars]
 
         psds_out = xp.zeros((num, 2, len(self.fd)))
         for i, (psd_par, galfor_par) in enumerate(zip(psd_pars, galfor_pars)):
@@ -157,12 +185,19 @@ class UpdateNewResiduals(Update):
 
 
 def run_psd_pe(gpu):
+    search = True
+    include_gbs = False
+    include_gb_foreground = False
 
-    while fp_gb + ".npy" not in os.listdir():
-        print(f"{fp_gb + '.npy'} not in current directory so far...")
-        time.sleep(20)
+    if include_gbs:
+        while fp_gb + ".npy" not in os.listdir():
+            print(f"{fp_gb + '.npy'} not in current directory so far...")
+            time.sleep(20)
 
-    branch_names = ["psd", "galfor"]
+    if include_gb_foreground:
+        branch_names = ["psd", "galfor"]
+    else:
+        branch_names = ["psd"]
 
     gpus_pe = [gpu]
     gpus = gpus_pe
@@ -182,9 +217,44 @@ def run_psd_pe(gpu):
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
+
+    A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
+    E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
+
+    A_going_in[:] = np.asarray(A_inj)
+    E_going_in[:] = np.asarray(E_inj)
+
+    fp_mbh_here = fp_mbh if not search else fp_mbh_template_search
+    if include_gbs:
+        data_in = np.load(fp_gb + ".npy")
+
+        A_going_in[:] -= data_in[:, 0]
+        E_going_in[:] -= data_in[:, 1]
+
+    mbh_inj = np.load(fp_mbh_here + ".npy")
+
+    A_mbh_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
+    E_mbh_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
+
+    A_mbh_going_in[:] = mbh_inj[:, 0]
+    E_mbh_going_in[:] = mbh_inj[:, 1]
+
+    A_going_in[:] -= A_mbh_going_in
+    E_going_in[:] -= E_mbh_going_in
+
+    data = [xp.asarray(A_going_in), xp.asarray(E_going_in)]
+
+    walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps_pe, 1))
+
+    supps_base_shape = (ntemps_pe, nwalkers_pe)
+    supps = BranchSupplimental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
+
+    fp_psd_pe_here = fp_psd_pe if not search else fp_psd_search
     
-    if fp_psd_pe in os.listdir():
-        reader = HDFBackend(fp_psd_pe)
+    sens_kwargs = dict(sens_fn="noisepsd_AE")
+    
+    if fp_psd_pe_here in os.listdir():
+        reader = HDFBackend(fp_psd_pe_here)
         last_sample = reader.get_last_sample()
 
         coords = {key: last_sample.branches_coords[key] for key in branch_names}
@@ -192,7 +262,7 @@ def run_psd_pe(gpu):
 
         last_sample = State(coords, inds=inds, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
         
-    elif current_save_state_file_psd in os.listdir():
+    elif False:  # current_save_state_file_psd in os.listdir():
         print("LOADING PSD save state")
         with open(current_save_state_file_psd, "rb") as fp_out:
             last_sample = pickle.load(fp_out)
@@ -206,66 +276,75 @@ def run_psd_pe(gpu):
         coords = {}
         inds = {}
 
-        coords["psd"] = priors["psd"].rvs(size=(ntemps_pe, nwalkers_pe))
+        psd_reader = HDFBackend(fp_psd_search_initial)
+        best_psd_ind = psd_reader.get_log_like().flatten().argmax()
+        best_psd_params = psd_reader.get_chain()["psd"].reshape(-1, 4)[best_psd_ind]
+
+        cov = np.ones(len(best_psd_params))
+        factor = 1e-6
+
+        fd_gpu = xp.asarray(fd)
+        iter_check = 0
+        max_iter = 1000
+        start_like = np.zeros(ntemps_pe * nwalkers_pe)
+        while np.std(start_like) < 20.0:
+            
+            logp = np.full_like(start_like, -np.inf)
+            tmp = np.zeros((ntemps_pe * nwalkers_pe, 4))
+            fix = np.ones((ntemps_pe * nwalkers_pe), dtype=bool)
+            while np.any(fix):
+                tmp[fix] = (best_psd_params[None, :] * (1. + factor * cov * np.random.randn(nwalkers_pe * ntemps_pe, 4)))[fix]
+
+                logp = priors["psd"].logpdf(tmp)
+
+                fix = np.isinf(logp)
+                if np.all(fix):
+                    breakpoint()
+
+            start_like = np.asarray([
+                log_like(tmp[i], fd_gpu, data, supps={"walker_inds": supps[:]["walker_inds"].flatten()[i]}, **sens_kwargs)
+            for i in range(len(tmp))])
+
+            iter_check += 1
+            factor *= 1.5
+
+            print(np.std(start_like))
+
+            if iter_check > max_iter:
+                raise ValueError("Unable to find starting parameters.")
+
+        mempool.free_all_blocks()
+        coords["psd"] = tmp.reshape(ntemps_pe, nwalkers_pe, 4)
         inds["psd"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
-        coords["galfor"] = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe))
-        inds["galfor"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
+
+        if include_gb_foreground:
+            coords["galfor"] = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe))
+            inds["galfor"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
 
         last_sample = State(coords, inds=inds)
-
-    A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
-    E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
-
-    A_going_in[:] = np.asarray(A_inj)
-    E_going_in[:] = np.asarray(E_inj)
-
-    data_in = np.load(fp_gb + ".npy")
-
-    A_going_in[:] -= data_in[:, 0]
-    E_going_in[:] -= data_in[:, 1]
-
-    mbh_inj = np.load(fp_mbh + ".npy")
-
-    A_mbh_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
-    E_mbh_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
-
-    A_mbh_going_in[:] = mbh_inj[:, 0]
-    E_mbh_going_in[:] = mbh_inj[:, 1]
-
-    A_going_in[:] -= A_mbh_going_in
-    E_going_in[:] -= E_mbh_going_in
-
-    data = [xp.asarray(A_going_in), xp.asarray(E_going_in)]
-
-    psd_params = last_sample.branches["psd"].coords.reshape(-1, last_sample.branches["psd"].shape[-1])
-
-    foreground_params = last_sample.branches["galfor"].coords.reshape(-1, last_sample.branches["galfor"].shape[-1])
-
-    walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps_pe, 1))
-
-    supps_base_shape = (ntemps_pe, nwalkers_pe)
-    supps = BranchSupplimental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
 
     state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, supplimental=supps)
 
     from eryn.moves.tempering import make_ladder
     betas = make_ladder(7, ntemps=ntemps_pe)
 
-    sens_kwargs = dict(sens_fn="noisepsd_AE")
+    fp_psd_here = fp_psd if not search else fp_psd_residual_search
+    update = UpdateNewResiduals(fd, fp_gb + ".npy", fp_mbh_here + ".npy", fp_psd_here, nwalkers_pe, mbh_inj, include_foreground=include_gb_foreground, include_gbs=include_gbs)
 
-    update = UpdateNewResiduals(fd, fp_gb + ".npy", fp_mbh + ".npy", fp_psd, nwalkers_pe)
+    ndims_in = [4, 5] if include_gb_foreground else [4]
+    nleaves_max_in = [1, 1] if include_gb_foreground else [1]
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
-        [4, 5],  # assumes ndim_max
+        ndims_in,  # assumes ndim_max
         log_like,
         priors,
         tempering_kwargs={"betas": betas, "permute": False, "skip_swap_supp_names": ["walker_inds"]},
         nbranches=len(branch_names),
-        nleaves_max=[1, 1],
+        nleaves_max=nleaves_max_in,
         kwargs=sens_kwargs,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
         args=(xp.asarray(fd), data),
-        backend=fp_psd_pe,
+        backend=fp_psd_pe_here,
         vectorize=False,
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
@@ -299,5 +378,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_psd_pe(5)
+    output = run_psd_pe(2)
                 
