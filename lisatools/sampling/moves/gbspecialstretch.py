@@ -985,7 +985,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         if self.time % 1 == 0:
             ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-            print(np.abs(new_state.log_like - ll_after).max())
+            # print(np.abs(new_state.log_like - ll_after).max())
             if np.abs(new_state.log_like - ll_after).max()  > 1e-2:
                 if np.abs(new_state.log_like - ll_after).max() > 1e0:
                     breakpoint()
@@ -1049,7 +1049,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             new_state = self.temperature_control.temper_comps(new_state)
             #et = time.perf_counter()
             #print("temps ", (et - st))
-            """# 
+            # 
             self.swaps_accepted = np.zeros(ntemps - 1)
             self.attempted_swaps = np.zeros(ntemps - 1)
             betas = self.temperature_control.betas
@@ -1067,190 +1067,228 @@ class GBSpecialStretchMove(GroupStretchMove):
                 coords_iperm = new_state.branches["gb_fixed"].coords[i, iperm]
                 coords_i1perm = new_state.branches["gb_fixed"].coords[i - 1, i1perm]
 
+                walker_map_iperm = np.repeat(iperm[:, None], coords_iperm.shape[-2], axis=-1)
+                walker_map_i1perm = np.repeat(i1perm[:, None], coords_i1perm.shape[-2], axis=-1)
+
+                walker_pre_permute_map_iperm = np.repeat(np.arange(len(iperm))[:, None], coords_iperm.shape[-2], axis=-1)
+                walker_pre_permute_map_i1perm = np.repeat(np.arange(len(i1perm))[:, None], coords_i1perm.shape[-2], axis=-1)
+
                 N_vals_iperm = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i, iperm]
 
                 N_vals_i1perm = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i - 1, i1perm]
 
-                f_test_i = coords_iperm[None, :, :, 1] / 1e3
-                f_test_2_i = coords_i1perm[None, :, :, 1] / 1e3
+                f_iperm = coords_iperm[:, :, 1] / 1e3
+                f_i1perm = coords_i1perm[:, :, 1] / 1e3
+
+                bands_iperm = np.searchsorted(self.band_edges.get(), f_iperm.flatten(), side="right").reshape(f_iperm.shape) - 1
+                bands_i1perm = np.searchsorted(self.band_edges.get(), f_i1perm.flatten(), side="right").reshape(f_i1perm.shape) - 1
+
+                bands_iperm[np.isnan(f_iperm)] = -1
+                bands_i1perm[np.isnan(f_i1perm)] = -1
+                for odds_evens in range(2):
+                    keep_here_i = (bands_iperm % 2 == odds_evens) & (bands_iperm >= 0) & (bands_iperm == 0) & (walker_map_iperm == 0)
+                    keep_here_i1 = (bands_i1perm % 2 == odds_evens) & (bands_i1perm >= 0) & (bands_i1perm == 0) & (walker_map_i1perm == 39)
+
+                    bands_here_i = bands_iperm[keep_here_i]
+                    bands_here_i1 = bands_i1perm[keep_here_i1]
+
+                    walkers_here_i_remove = walker_map_iperm[keep_here_i]
+                    walkers_here_i1_remove = walker_map_i1perm[keep_here_i1]
+
+                    walkers_here_i_add = walker_map_iperm[keep_here_i1]  # i walkers with i1 binaries
+                    walkers_here_i1_add = walker_map_i1perm[keep_here_i]
+
+                    walker_band_map_i = int(1e6) * walkers_here_i_remove + bands_here_i
+                    walker_band_map_i1 = int(1e6) * walkers_here_i1_remove + bands_here_i1
+
+                    walkers_pre_permute_here_i = walker_pre_permute_map_iperm[keep_here_i]
+                    walkers_pre_permute_here_i1 = walker_pre_permute_map_i1perm[keep_here_i1]
+
+                    N_here_i = N_vals_iperm[keep_here_i]
+                    N_here_i1 = N_vals_i1perm[keep_here_i1]
+                    
+                    coords_here_i = coords_iperm[keep_here_i]
+                    coords_here_i1 = coords_i1perm[keep_here_i1]
+
+                    coords_in_here_i = self.parameter_transforms.both_transforms(coords_here_i)
+                    coords_in_here_i1 = self.parameter_transforms.both_transforms(coords_here_i1)
+                    
+                    params_proposal_in = np.concatenate([
+                        coords_in_here_i,  # remove from i
+                        coords_in_here_i1, # add to i
+                        coords_in_here_i1,  # remove form i - 1
+                        coords_in_here_i, # add to i - 1
+                    ], axis=0)
+
+                    N_vals_in = np.concatenate([
+                        N_here_i, 
+                        N_here_i1, 
+                        N_here_i1, 
+                        N_here_i
+                    ])
+
+                    data_index_tmp_i_remove = i * nwalkers + walkers_here_i_remove
+                    data_index_tmp_i1_remove = (i - 1) * nwalkers + walkers_here_i1_remove
+
+                    data_index_tmp_i_add = i * nwalkers + walkers_here_i_add
+                    data_index_tmp_i1_add = (i - 1) * nwalkers + walkers_here_i1_add
+
+                    data_index_tmp_all = np.concatenate([data_index_tmp_i_remove, data_index_tmp_i_add, data_index_tmp_i1_remove, data_index_tmp_i1_add])
+                    data_index_forward = self.xp.asarray(self.mgh.get_mapped_indices(data_index_tmp_all)).astype(self.xp.int32)
+                    
+                    factors_multiply_forward = self.xp.asarray(np.concatenate([
+                        np.full_like(data_index_tmp_i_remove, -1.0, dtype=np.float64),
+                        np.full_like(data_index_tmp_i_add, +1.0, dtype=np.float64),
+                        np.full_like(data_index_tmp_i1_remove, -1.0, dtype=np.float64),
+                        np.full_like(data_index_tmp_i1_add, +1.0, dtype=np.float64), 
+                    ]))
+                    waveform_kwargs_fill = waveform_kwargs_now.copy()
+
+                    f_find = np.concatenate([coords_here_i[:, 1], coords_here_i1[:, 1]]) / 1e3
+                    
+                    walker_find = np.concatenate([walkers_pre_permute_here_i, walkers_pre_permute_here_i1])
+                    N_here_find = np.concatenate([N_here_i, N_here_i1])
+                    band_here_find = np.searchsorted(self.band_edges.get(), f_find, side="right") - 1
+                    walker_band_find = walker_find * int(1e6) + band_here_find
+
+                    f_find_min = f_find - (N_here_find / 2) * self.df
+                    f_find_min_sort = np.argsort(f_find_min)
+                    f_find_min = f_find_min[f_find_min_sort]
+                    walker_band_find_min = walker_band_find[f_find_min_sort]
+                    walker_band_uni_first, walker_band_first = np.unique(walker_band_find_min, return_index=True)
+                    f_min_band = f_find_min[walker_band_first]
+                    
+                    f_find_max = f_find + (N_here_find / 2) * self.df
+                    f_find_max_sort = np.argsort(f_find_max)
+                    f_find_max = f_find_max[f_find_max_sort]
+                    walker_band_find_max = walker_band_find[f_find_max_sort]
+                    walker_band_uni_last, walker_band_last = np.unique(walker_band_find_max[::-1], return_index=True)
+                    f_max_band = f_find_max[::-1][walker_band_last]
+
+                    assert np.all(walker_band_uni_first == walker_band_uni_last)
                 
-                fix_f_test_i = (np.abs(f_test_i - f_test_2_i) > (self.df * N_vals_iperm * 1.5))
+                    start_inds_band = (f_min_band / self.df).astype(int)
+                    end_inds_band = (f_max_band / self.df).astype(int)
+                    lengths_band = end_inds_band - start_inds_band
 
-                if hasattr(self, "keep_bands") and self.keep_bands is not None:
-                    band_indices = np.searchsorted(self.band_edges, f_test_i.flatten()).reshape(f_test_i.shape) - 1
-                    keep_bands = self.keep_bands
-                    assert isinstance(keep_bands, np.ndarray)
-                    fix_f_test_i[~np.in1d(band_indices, keep_bands).reshape(band_indices.shape)] = True
+                    walker_permute = (walker_band_uni_first / 1e6).astype(int)
 
+                    walker_i = iperm[walker_permute]
+                    walker_i1 = i1perm[walker_permute]
 
-                groups = get_groups_from_band_structure(f_test_i, self.band_edges, f0_2=f_test_2_i, xp=np, num_groups_base=3, fix_f_test=fix_f_test_i)
+                    walker_band_in_i = walker_band_uni_first * int(1e6) - walker_permute + walker_i * int(1e6)
+                    walker_band_in_i1 = walker_band_uni_first * int(1e6) - walker_permute + walker_i1 * int(1e6)
 
-                unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
+                    start_inds_all = self.xp.asarray(np.concatenate([start_inds_band, start_inds_band]).astype(np.int32))
+                    lengths_all = self.xp.asarray(np.concatenate([lengths_band, lengths_band]).astype(np.int32))
 
-                # remove information about the bad "-1" group
-                for check_val in [-1, -2]:
-                    group_len = np.delete(group_len, unique_groups == check_val)
-                    unique_groups = np.delete(unique_groups, unique_groups == check_val)
+                    data_index_tmp_all = np.concatenate([i * nwalkers + walker_i, (i - 1) * nwalkers + walker_i1])
 
-                # needs to be max because some values may be missing due to evens and odds
-                num_groups = unique_groups.max().item() + 1
-
-                for group_iter in range(num_groups):
-                    # st = time.perf_counter()
-                    # sometimes you will have an extra odd or even group only
-                    # the group_iter may not match the actual running group number in this case
-                    if group_iter not in groups:
-                        continue
-                        
-                    group = [grp[i:i+1][groups == group_iter].flatten() for grp in group_temp_finder]
-
-                    # st = time.perf_counter()
-                    temp_inds_back, walkers_inds_back, leaf_inds = [self.xp.asarray(grp) for grp in group] 
-
-                    temp_inds_i = temp_inds_back.copy()
-                    walkers_inds_i = walkers_inds_back.copy()
-
-                    temp_inds_i1 = temp_inds_back.copy()
-                    walkers_inds_i1 = walkers_inds_back.copy()
-
-                    temp_inds_i[:] = i
-                    walkers_inds_i[:] = self.xp.asarray(iperm)[walkers_inds_back]
-
-                    temp_inds_i1[:] = i - 1
-                    walkers_inds_i1[:] = self.xp.asarray(i1perm)[walkers_inds_back]
-
-                    group_here_i = (temp_inds_i, walkers_inds_i, leaf_inds)
-
-                    group_here_i1 = (temp_inds_i1, walkers_inds_i1, leaf_inds)
-
-                    # factors_here = factors[group_here]
-                    old_points = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i]
-                    new_points = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
-
-                    N_vals_here_i = N_vals[group_here_i]
+                    data_index_all = self.xp.asarray(self.mgh.get_mapped_indices(data_index_tmp_all).astype(np.int32))
+                    noise_index_all = data_index_all.copy()
                     
-                    log_like_tmp = self.xp.asarray(new_state.log_like.copy())
-                    log_prior_tmp = self.xp.asarray(new_state.log_prior.copy())
+                    ll_contrib_before = self.run_ll_part_comp(
+                        data_index_all, 
+                        noise_index_all, 
+                        start_inds_all, 
+                        lengths_all
+                    )
 
-                    delta_logl_i = self.run_swap_ll(None, old_points, new_points, group_here_i, N_vals_here_i, waveform_kwargs_now, None, log_like_tmp, log_prior_tmp, return_at_logl=True)
+                    self.gb.generate_global_template(
+                        params_proposal_in,
+                        data_index_forward, 
+                        self.mgh.data_list, 
+                        N=self.xp.asarray(N_vals_in),
+                        data_length=self.data_length, 
+                        data_splits=self.mgh.gpu_splits, 
+                        factors=factors_multiply_forward,
+                        **waveform_kwargs_fill
+                    )
 
-                    # factors_here = factors[group_here]
-                    old_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
-                    new_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i]
+                    ll_contrib_after = self.run_ll_part_comp(
+                        data_index_all, 
+                        noise_index_all, 
+                        start_inds_all, 
+                        lengths_all
+                    )
 
-                    N_vals_here_i1 = N_vals[group_here_i1]
-                    
-                    log_like_tmp[:] = self.xp.asarray(new_state.log_like.copy())
-                    log_prior_tmp[:] = self.xp.asarray(new_state.log_prior.copy())
+                    half = start_inds_band.shape[0]
 
-                    delta_logl_i1 = self.run_swap_ll(None, old_points, new_points, group_here_i1, N_vals_here_i1, waveform_kwargs_now, None, log_like_tmp, log_prior_tmp, return_at_logl=True)
+                    delta_logl_i = ll_contrib_after[:half] - ll_contrib_before[:half]
+                    delta_logl_i1 = ll_contrib_after[half:] - ll_contrib_before[half:]
 
                     paccept = dbeta * 1. / 2. * (delta_logl_i - delta_logl_i1)
                     raccept = np.log(np.random.uniform(size=paccept.shape[0]))
 
                     # How many swaps were accepted?
                     sel = paccept > self.xp.asarray(raccept)
+                    sel[:] = False
 
-                    inds_i_swap = tuple([tmp[sel].get() for tmp in list(group_here_i)])
-                    inds_i1_swap = tuple([tmp[sel].get() for tmp in list(group_here_i1)])
+                    keep_walker_band_i = walker_band_in_i[sel.get()]
+                    keep_walker_band_i1 = walker_band_in_i1[sel.get()]
+
+                    reverse_walker_band_i = walker_band_in_i[~sel.get()]
+                    reverse_walker_band_i1 = walker_band_in_i1[~sel.get()]
+
+                    breakpoint()
+                    reverse_i = np.in1d(walker_band_map_i, reverse_walker_band_i)
+                    reverse_i1 = np.in1d(walker_band_map_i1, reverse_walker_band_i1)
                     
-                    group_index_i = self.xp.asarray(
-                        self.mgh.get_mapped_indices(
-                            temp_inds_i[sel] + nwalkers * walkers_inds_i[sel]
-                        )
-                    ).astype(self.xp.int32)
+                    reverse_N_here_i = N_vals_iperm[keep_here_i][reverse_i]
+                    reverse_N_here_i1 = N_vals_i1perm[keep_here_i1][reverse_i1]
+                    
+                    reverse_coords_here_i = coords_iperm[keep_here_i][reverse_i]
+                    reverse_coords_here_i1 = coords_i1perm[keep_here_i1][reverse_i1]
 
-                    group_index_i1 = self.xp.asarray(
-                        self.mgh.get_mapped_indices(
-                            temp_inds_i1[sel] + nwalkers * walkers_inds_i1[sel]
-                        )
-                    ).astype(self.xp.int32)
-
-                    N_vals_i = N_vals[inds_i_swap]
-                    params_i = self.xp.asarray(new_state.branches["gb_fixed"].coords)[inds_i_swap]
-                    params_i1 = self.xp.asarray(new_state.branches["gb_fixed"].coords)[inds_i1_swap]
-
-                    params_generate = self.xp.concatenate([
-                        params_i,
-                        params_i1,
-                        params_i1,  # reverse of above
-                        params_i,
+                    reverse_coords_in_here_i = self.parameter_transforms.both_transforms(reverse_coords_here_i)
+                    reverse_coords_in_here_i1 = self.parameter_transforms.both_transforms(reverse_coords_here_i1)
+                    
+                    reverse_params_proposal_in = np.concatenate([
+                        reverse_coords_in_here_i,  # remove from i
+                        reverse_coords_in_here_i1, # add to i
+                        reverse_coords_in_here_i1,  # remove form i - 1
+                        reverse_coords_in_here_i, # add to i - 1
                     ], axis=0)
 
-                    params_generate_in = self.parameter_transforms.both_transforms(params_generate, xp=self.xp)
-
-                    group_index_gen = self.xp.concatenate(
-                        [
-                            group_index_i,
-                            group_index_i,
-                            group_index_i1,
-                            group_index_i1
-                        ], dtype=self.xp.int32
-                    )
-
-                    factors_multiply_generate = self.xp.concatenate([
-                        +1 * self.xp.ones_like(group_index_i, dtype=float),
-                        -1 * self.xp.ones_like(group_index_i, dtype=float),
-                        +1 * self.xp.ones_like(group_index_i, dtype=float),
-                        -1 * self.xp.ones_like(group_index_i, dtype=float),
+                    reverse_N_vals_in = np.concatenate([
+                        reverse_N_here_i, 
+                        reverse_N_here_i1, 
+                        reverse_N_here_i1, 
+                        reverse_N_here_i
                     ])
 
-                    N_vals_in_gen = self.xp.concatenate([
-                        N_vals_i,
-                        N_vals_i,
-                        N_vals_i,
-                        N_vals_i
-                    ])
+                    reverse_data_index_tmp_i_remove = i * nwalkers + walkers_here_i_remove[reverse_i]
+                    reverse_data_index_tmp_i1_remove = (i - 1) * nwalkers + walkers_here_i1_remove[reverse_i1]
+
+                    reverse_data_index_tmp_i_add = i * nwalkers + walkers_here_i_add[reverse_i1]
+                    reverse_data_index_tmp_i1_add = (i - 1) * nwalkers + walkers_here_i1_add[reverse_i]
+
+                    reverse_data_index_tmp_all = np.concatenate([reverse_data_index_tmp_i_remove, reverse_data_index_tmp_i_add, reverse_data_index_tmp_i1_remove, reverse_data_index_tmp_i1_add])
+                    reverse_data_index = self.xp.asarray(self.mgh.get_mapped_indices(reverse_data_index_tmp_all)).astype(self.xp.int32)
                     
-                    waveform_kwargs_fill = waveform_kwargs_now.copy()
-                    waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
+                    reverse_factors_multiply = self.xp.asarray(np.concatenate([
+                        np.full_like(reverse_data_index_tmp_i_remove, -1.0, dtype=np.float64),
+                        np.full_like(reverse_data_index_tmp_i_add, +1.0, dtype=np.float64),
+                        np.full_like(reverse_data_index_tmp_i1_remove, -1.0, dtype=np.float64),
+                        np.full_like(reverse_data_index_tmp_i1_add, +1.0, dtype=np.float64), 
+                    ]))
 
                     self.gb.generate_global_template(
-                        params_generate_in,
-                        group_index_gen, 
+                        reverse_params_proposal_in,
+                        reverse_data_index, 
                         self.mgh.data_list, 
-                        N=N_vals_in_gen,
+                        N=self.xp.asarray(reverse_N_vals_in),
                         data_length=self.data_length, 
                         data_splits=self.mgh.gpu_splits, 
-                        factors=factors_multiply_generate,
+                        factors=reverse_factors_multiply,
                         **waveform_kwargs_fill
                     )
-
-                    # update likelihoods
-
-                    # set unaccepted differences to zero
-                    accepted_delta_ll_i = delta_logl_i * (sel)
-                    accepted_delta_ll_i1 = delta_logl_i1 * (sel)
-
-                    logl_change_contribution = np.zeros_like(log_like_tmp.get())
-                    try:
-                        in_tuple = (accepted_delta_ll_i[sel].get(), accepted_delta_ll_i1[sel].get(), temp_inds_i[sel].get(), temp_inds_i1[sel].get(), walkers_inds_i[sel].get(), walkers_inds_i[sel].get())
-                    except AttributeError:
-                        in_tuple = (accepted_delta_ll_i[sel], accepted_delta_ll_i1[sel], temp_inds_i[sel], temp_inds_i1[sel], walkers_inds_i[sel], walkers_inds_i[sel])
-                    for j, (dlli, dlli1, ti, ti1, wi, wi1) in enumerate(zip(*in_tuple)):
-                        logl_change_contribution[ti, wi] += dlli
-                        logl_change_contribution[ti1, wi1] += dlli1
-
-                    log_like_tmp[:] += self.xp.asarray(logl_change_contribution)
-
-                    tmp_swap = new_state.branches["gb_fixed"].coords[inds_i_swap]
-                    new_state.branches["gb_fixed"].coords[inds_i_swap] = new_state.branches["gb_fixed"].coords[inds_i1_swap]
-
-                    new_state.branches["gb_fixed"].coords[inds_i1_swap] = tmp_swap
-
-                    tmp_swap = new_state.branches["gb_fixed"].branch_supplimental[inds_i_swap]
-
-                    new_state.branches["gb_fixed"].branch_supplimental[inds_i_swap] = new_state.branches["gb_fixed"].branch_supplimental[inds_i1_swap]
-
-                    new_state.branches["gb_fixed"].branch_supplimental[inds_i1_swap] = tmp_swap
-
-                    # inds are all non-zero
-                    self.swaps_accepted[i - 1] += np.sum(sel)
-                    self.attempted_swaps[i - 1] += sel.shape[0]
-
-                    ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
+                    
                     breakpoint()
-                    """
+                
+                # MAKE SURE TO MOVE PRIORS !!!!
+                # Do adaptations
+
         else:
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
         
@@ -1266,7 +1304,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
         et = time.perf_counter()
-        print("in-model end", (et - st))
+        # print("in-model end", (et - st))
                     
         # breakpoint()
         return new_state, accepted

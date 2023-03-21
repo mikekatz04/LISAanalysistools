@@ -141,15 +141,16 @@ class UpdateNewResiduals(Update):
 
 def run_mbh_pe(gpu):
 
-    include_gbs = False
+    include_gbs = True
     search = True
     fp_psd_here = fp_psd if not search else fp_psd_residual_search
     fp_mbh_here = fp_mbh if not search else fp_mbh_template_search
     fp_mbh_pe_here = fp_mbh_pe if not search else fp_mbh_search
+    fp_gb_here = fp_gb if not search else fp_gb_template_search
     
     if include_gbs:
-        while fp_gb + ".npy" not in os.listdir():
-            print(f"{fp_gb + '.npy'} not in current directory so far...")
+        while fp_gb_here + ".npy" not in os.listdir():
+            print(f"{fp_gb_here + '.npy'} not in current directory so far...")
             time.sleep(20)
 
     branch_names = ["mbh"]
@@ -174,7 +175,7 @@ def run_mbh_pe(gpu):
     E_going_in[:] = np.asarray(E_inj)
     
     if include_gbs:
-        gbs_in = np.load(fp_gb + ".npy")
+        gbs_in = np.load(fp_gb_here + ".npy")
 
         A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
         E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -391,7 +392,7 @@ def run_mbh_pe(gpu):
     ]
     move = MBHSpecialMove(wave_gen, fd_gpu, data_fin, psds_fin, num_repeats, transform_fn, priors, waveform_kwargs, inner_moves, df)
 
-    update = UpdateNewResiduals(move, gbs_in, fp_mbh_here + ".npy", fp_psd_here + ".npy", fp_gb + ".npy", A_psd_in.shape, include_gbs=include_gbs)
+    update = UpdateNewResiduals(move, gbs_in, fp_mbh_here + ".npy", fp_psd_here + ".npy", fp_gb_here + ".npy", A_psd_in.shape, include_gbs=include_gbs)
 
     # key permute is False
     sampler_mix = EnsembleSampler(
@@ -429,5 +430,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_mbh_pe(3)
+    output = run_mbh_pe(2)
                 

@@ -186,12 +186,14 @@ class UpdateNewResiduals(Update):
 
 def run_psd_pe(gpu):
     search = True
-    include_gbs = False
-    include_gb_foreground = False
+    include_gbs = True
+    include_gb_foreground = True
+
+    fp_gb_here = fp_gb if not search else fp_gb_template_search
 
     if include_gbs:
-        while fp_gb + ".npy" not in os.listdir():
-            print(f"{fp_gb + '.npy'} not in current directory so far...")
+        while fp_gb_here + ".npy" not in os.listdir():
+            print(f"{fp_gb_here + '.npy'} not in current directory so far...")
             time.sleep(20)
 
     if include_gb_foreground:
@@ -226,7 +228,7 @@ def run_psd_pe(gpu):
 
     fp_mbh_here = fp_mbh if not search else fp_mbh_template_search
     if include_gbs:
-        data_in = np.load(fp_gb + ".npy")
+        data_in = np.load(fp_gb_here + ".npy")
 
         A_going_in[:] -= data_in[:, 0]
         E_going_in[:] -= data_in[:, 1]
@@ -252,13 +254,22 @@ def run_psd_pe(gpu):
     fp_psd_pe_here = fp_psd_pe if not search else fp_psd_search
     
     sens_kwargs = dict(sens_fn="noisepsd_AE")
-    
+ 
     if fp_psd_pe_here in os.listdir():
         reader = HDFBackend(fp_psd_pe_here)
         last_sample = reader.get_last_sample()
 
-        coords = {key: last_sample.branches_coords[key] for key in branch_names}
-        inds = {key: last_sample.branches_inds[key] for key in branch_names}
+        coords = {key: last_sample.branches_coords[key] for key in last_sample.branches_coords}
+        inds = {key: last_sample.branches_inds[key] for key in last_sample.branches_coords}
+
+        if "galfor" not in coords:
+            if include_gb_foreground:
+                coords["galfor"] = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe))
+                inds["galfor"] = np.ones((ntemps_pe, nwalkers_pe, 1), dtype=bool)
+                os.remove(fp_psd_pe_here)
+
+        coords = {key: coords[key] for key in branch_names}
+        inds = {key: inds[key] for key in branch_names}
 
         last_sample = State(coords, inds=inds, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
         
@@ -326,10 +337,10 @@ def run_psd_pe(gpu):
     state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, supplimental=supps)
 
     from eryn.moves.tempering import make_ladder
-    betas = make_ladder(7, ntemps=ntemps_pe)
+    betas = make_ladder(9, ntemps=ntemps_pe)
 
     fp_psd_here = fp_psd if not search else fp_psd_residual_search
-    update = UpdateNewResiduals(fd, fp_gb + ".npy", fp_mbh_here + ".npy", fp_psd_here, nwalkers_pe, mbh_inj, include_foreground=include_gb_foreground, include_gbs=include_gbs)
+    update = UpdateNewResiduals(fd, fp_gb_here + ".npy", fp_mbh_here + ".npy", fp_psd_here, nwalkers_pe, mbh_inj, include_foreground=include_gb_foreground, include_gbs=include_gbs)
 
     ndims_in = [4, 5] if include_gb_foreground else [4]
     nleaves_max_in = [1, 1] if include_gb_foreground else [1]

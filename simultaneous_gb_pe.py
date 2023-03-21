@@ -636,5 +636,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(6)
+    output = run_gb_pe(7)
                 

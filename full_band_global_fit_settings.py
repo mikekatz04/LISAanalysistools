@@ -131,6 +131,7 @@ fp_psd = "last_psd_cold_chain_info"
 fp_mbh = "last_mbh_cold_chain_info"
 fp_mbh_template_search = "last_mbh_cold_chain_info_search"
 fp_psd_residual_search = "last_psd_cold_chain_info_search"
+fp_gb_template_search = "last_gb_cold_chain_info_search"
 
 fp_psd_search_initial = "initial_search_develop_full_band_psd.h5"
 fp_psd_search = "search_develop_full_band_psd.h5"
@@ -299,7 +300,7 @@ low_fs_propose = np.arange(f0_lims_in[0], 0.001 - 2 * 128 * df, 128 * df)
 mid_fs_propose = np.arange(0.001, 0.01 - 2 * 512 * df, 256 * df)
 high_fs_propose = np.append(np.arange(0.01, f0_lims_in[-1], 1024 * df), np.array([f0_lims_in[-1]]))
 
-propose_f_bin_lims = np.concatenate([low_fs_propose, mid_fs_propose, high_fs])
+propose_f_bin_lims = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])
 search_f_bin_lims = propose_f_bin_lims
 # for testing
 # search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
