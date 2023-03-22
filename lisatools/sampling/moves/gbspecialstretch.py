@@ -1067,8 +1067,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                 coords_iperm = new_state.branches["gb_fixed"].coords[i, iperm]
                 coords_i1perm = new_state.branches["gb_fixed"].coords[i - 1, i1perm]
 
+                leaves_i = new_state.branches["gb_fixed"].inds[i]
+                leaves_i1 = new_state.branches["gb_fixed"].inds[i - 1]
+
                 walker_map_iperm = np.repeat(iperm[:, None], coords_iperm.shape[-2], axis=-1)
                 walker_map_i1perm = np.repeat(i1perm[:, None], coords_i1perm.shape[-2], axis=-1)
+
+                leaf_map_iperm = np.tile(np.arange(coords_iperm.shape[-2]), (len(iperm), 1))
+                leaf_map_i1perm = np.tile(np.arange(coords_iperm.shape[-2]), (len(i1perm), 1))
 
                 walker_pre_permute_map_iperm = np.repeat(np.arange(len(iperm))[:, None], coords_iperm.shape[-2], axis=-1)
                 walker_pre_permute_map_i1perm = np.repeat(np.arange(len(i1perm))[:, None], coords_i1perm.shape[-2], axis=-1)
@@ -1086,8 +1092,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 bands_iperm[np.isnan(f_iperm)] = -1
                 bands_i1perm[np.isnan(f_i1perm)] = -1
                 for odds_evens in range(2):
-                    keep_here_i = (bands_iperm % 2 == odds_evens) & (bands_iperm >= 0) & (bands_iperm == 0) & (walker_map_iperm == 0)
-                    keep_here_i1 = (bands_i1perm % 2 == odds_evens) & (bands_i1perm >= 0) & (bands_i1perm == 0) & (walker_map_i1perm == 39)
+                    keep_here_i = (bands_iperm % 2 == odds_evens) & (bands_iperm >= 0)  #  & (bands_iperm == 400) & (walker_map_iperm == 0)
+                    keep_here_i1 = (bands_i1perm % 2 == odds_evens) & (bands_i1perm >= 0)  #  & (bands_i1perm == 400) & (walker_map_i1perm == 39)
 
                     bands_here_i = bands_iperm[keep_here_i]
                     bands_here_i1 = bands_i1perm[keep_here_i1]
@@ -1097,6 +1103,9 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                     walkers_here_i_add = walker_map_iperm[keep_here_i1]  # i walkers with i1 binaries
                     walkers_here_i1_add = walker_map_i1perm[keep_here_i]
+
+                    leaf_map_here_iperm = leaf_map_iperm[keep_here_i]
+                    leaf_map_here_i1perm = leaf_map_i1perm[keep_here_i1]
 
                     walker_band_map_i = int(1e6) * walkers_here_i_remove + bands_here_i
                     walker_band_map_i1 = int(1e6) * walkers_here_i1_remove + bands_here_i1
@@ -1176,8 +1185,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                     walker_i = iperm[walker_permute]
                     walker_i1 = i1perm[walker_permute]
 
-                    walker_band_in_i = walker_band_uni_first * int(1e6) - walker_permute + walker_i * int(1e6)
-                    walker_band_in_i1 = walker_band_uni_first * int(1e6) - walker_permute + walker_i1 * int(1e6)
+                    walker_band_in_i = walker_band_uni_first - walker_permute * int(1e6) + walker_i * int(1e6)
+                    walker_band_in_i1 = walker_band_uni_first - walker_permute * int(1e6) + walker_i1 * int(1e6)
 
                     start_inds_all = self.xp.asarray(np.concatenate([start_inds_band, start_inds_band]).astype(np.int32))
                     lengths_all = self.xp.asarray(np.concatenate([lengths_band, lengths_band]).astype(np.int32))
@@ -1193,7 +1202,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                         start_inds_all, 
                         lengths_all
                     )
-
+                    ll_before = self.mgh.get_ll(include_psd_info=True).flatten()[data_index_all.get()]
                     self.gb.generate_global_template(
                         params_proposal_in,
                         data_index_forward, 
@@ -1204,7 +1213,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                         factors=factors_multiply_forward,
                         **waveform_kwargs_fill
                     )
-
+                    ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[data_index_all.get()]
                     ll_contrib_after = self.run_ll_part_comp(
                         data_index_all, 
                         noise_index_all, 
@@ -1222,15 +1231,90 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                     # How many swaps were accepted?
                     sel = paccept > self.xp.asarray(raccept)
-                    sel[:] = False
+
+                    self.attempted_swaps[i - 1] = sel.shape[0]
+                    self.swaps_accepted[i - 1] = sel.sum() 
 
                     keep_walker_band_i = walker_band_in_i[sel.get()]
                     keep_walker_band_i1 = walker_band_in_i1[sel.get()]
 
+                    keep_walker_i_band_level = (keep_walker_band_i / 1e6).astype(int)
+                    keep_walker_i1_band_level = (keep_walker_band_i1 / 1e6).astype(int)
+
+                    keep_band_i_band_level = keep_walker_band_i - int(1e6) * keep_walker_i_band_level
+                    keep_band_i1_band_level = keep_walker_band_i1 - int(1e6) * keep_walker_i1_band_level
+
+                    band_ll_diff_i = np.zeros((nwalkers, len(self.band_edges) - 1))
+                    band_ll_diff_i1 = np.zeros((nwalkers, len(self.band_edges) - 1))
+
+                    band_ll_diff_i[(keep_walker_i_band_level, keep_band_i_band_level)] = delta_logl_i[sel].get()
+                    band_ll_diff_i1[(keep_walker_i1_band_level, keep_band_i1_band_level)] = delta_logl_i1[sel].get()
+
+                    new_state.log_like[i] += band_ll_diff_i.sum(axis=-1)
+                    new_state.log_like[i - 1] += band_ll_diff_i1.sum(axis=-1)
+
+                    keep_i = np.in1d(walker_band_map_i, keep_walker_band_i)
+                    keep_i1 = np.in1d(walker_band_map_i1, keep_walker_band_i1)
+
+                    keep_walkers_here_i_remove = walkers_here_i_remove[keep_i]
+                    keep_walkers_here_i1_remove = walkers_here_i1_remove[keep_i1]
+
+                    keep_leaf_here_i_remove = leaf_map_here_iperm[keep_i]
+                    keep_leaf_here_i1_remove = leaf_map_here_i1perm[keep_i1]
+
+                    mapping = np.tile(np.arange(leaves_i.shape[-1]), (leaves_i.shape[0], 1))
+
+                    new_state.branches["gb_fixed"].inds[i, keep_walkers_here_i_remove, keep_leaf_here_i_remove] = False
+                    new_state.branches["gb_fixed"].inds[i - 1, keep_walkers_here_i1_remove, keep_leaf_here_i1_remove] = False
+
+                    leaves_i = new_state.branches["gb_fixed"].inds[i].copy()
+                    leaves_i1 = new_state.branches["gb_fixed"].inds[i - 1].copy()
+
+                    num_leaves_i_to_add_arr = np.zeros_like(leaves_i)
+                    num_leaves_i1_to_add_arr = np.zeros_like(leaves_i1)
+
+                    keep_walkers_here_i1_add = walkers_here_i1_add[keep_i]
+                    keep_walkers_here_i_add = walkers_here_i_add[keep_i1]
+
+                    # opposite i <-> i1
+                    num_leaves_i1_to_add_arr[(keep_walkers_here_i1_add, keep_leaf_here_i_remove)] = True
+                    num_leaves_i_to_add_arr[(keep_walkers_here_i_add, keep_leaf_here_i1_remove)] = True
+
+                    walker_mapping = np.repeat(np.arange(leaves_i.shape[0])[:, None], leaves_i.shape[-1], axis=-1)
+                    walker_add_i1 = walker_mapping[num_leaves_i1_to_add_arr]
+                    walker_add_i = walker_mapping[num_leaves_i_to_add_arr]
+                    
+                    num_leaves_i1_to_add = num_leaves_i1_to_add_arr.sum(axis=-1)
+                    num_leaves_i_to_add = num_leaves_i_to_add_arr.sum(axis=-1)
+
+                    leaves_add_i = np.concatenate([np.arange(leaves_i.shape[-1])[~leaves_i[w]][:num_leaves_i_to_add[w]] for w in range(leaves_i.shape[0])])
+                    leaves_add_i1 = np.concatenate([np.arange(leaves_i1.shape[-1])[~leaves_i1[w]][:num_leaves_i1_to_add[w]] for w in range(leaves_i1.shape[0])])
+
+                    # comment out
+                    old_state_check = State(new_state, copy=True)
+                    # update coords
+                    tmp_coords_i1 = new_state.branches["gb_fixed"].coords[i - 1, keep_walkers_here_i1_remove, keep_leaf_here_i1_remove]
+                    tmp_N_vals_i1 = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i - 1, keep_walkers_here_i1_remove, keep_leaf_here_i1_remove]
+                    new_state.branches["gb_fixed"].inds[i - 1, keep_walkers_here_i1_remove, keep_leaf_here_i1_remove] = False
+
+                    tmp_coords_i = new_state.branches["gb_fixed"].coords[i, keep_walkers_here_i_remove, keep_leaf_here_i_remove]
+                    tmp_N_vals_i = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i, keep_walkers_here_i_remove, keep_leaf_here_i_remove]
+                    new_state.branches["gb_fixed"].inds[i, keep_walkers_here_i_remove, keep_leaf_here_i_remove] = False
+
+                    assert np.all(new_state.branches["gb_fixed"].inds[i - 1, keep_walkers_here_i1_add, leaves_add_i1] == False) 
+                    assert np.all(new_state.branches["gb_fixed"].inds[i, keep_walkers_here_i_add, leaves_add_i] == False) 
+                    
+                    new_state.branches["gb_fixed"].coords[i - 1, keep_walkers_here_i1_add, leaves_add_i1] = tmp_coords_i
+                    new_state.branches["gb_fixed"].inds[i - 1, keep_walkers_here_i1_add, leaves_add_i1] = True
+                    new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i - 1, keep_walkers_here_i1_add, leaves_add_i1] = tmp_N_vals_i
+                    
+                    new_state.branches["gb_fixed"].coords[i, keep_walkers_here_i_add, leaves_add_i] = tmp_coords_i1
+                    new_state.branches["gb_fixed"].inds[i, keep_walkers_here_i_add, leaves_add_i] = True
+                    new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i, keep_walkers_here_i_add, leaves_add_i] = tmp_N_vals_i1
+
                     reverse_walker_band_i = walker_band_in_i[~sel.get()]
                     reverse_walker_band_i1 = walker_band_in_i1[~sel.get()]
-
-                    breakpoint()
+                    
                     reverse_i = np.in1d(walker_band_map_i, reverse_walker_band_i)
                     reverse_i1 = np.in1d(walker_band_map_i1, reverse_walker_band_i1)
                     
@@ -1244,24 +1328,24 @@ class GBSpecialStretchMove(GroupStretchMove):
                     reverse_coords_in_here_i1 = self.parameter_transforms.both_transforms(reverse_coords_here_i1)
                     
                     reverse_params_proposal_in = np.concatenate([
-                        reverse_coords_in_here_i,  # remove from i
-                        reverse_coords_in_here_i1, # add to i
-                        reverse_coords_in_here_i1,  # remove form i - 1
-                        reverse_coords_in_here_i, # add to i - 1
+                        reverse_coords_in_here_i1,  # remove from i
+                        reverse_coords_in_here_i, # add to i
+                        reverse_coords_in_here_i,  # remove form i - 1
+                        reverse_coords_in_here_i1, # add to i - 1
                     ], axis=0)
 
                     reverse_N_vals_in = np.concatenate([
+                        reverse_N_here_i1, 
                         reverse_N_here_i, 
-                        reverse_N_here_i1, 
-                        reverse_N_here_i1, 
-                        reverse_N_here_i
+                        reverse_N_here_i, 
+                        reverse_N_here_i1
                     ])
 
-                    reverse_data_index_tmp_i_remove = i * nwalkers + walkers_here_i_remove[reverse_i]
-                    reverse_data_index_tmp_i1_remove = (i - 1) * nwalkers + walkers_here_i1_remove[reverse_i1]
+                    reverse_data_index_tmp_i_remove = i * nwalkers + walkers_here_i_add[reverse_i1]
+                    reverse_data_index_tmp_i1_remove = (i - 1) * nwalkers + walkers_here_i1_add[reverse_i]
 
-                    reverse_data_index_tmp_i_add = i * nwalkers + walkers_here_i_add[reverse_i1]
-                    reverse_data_index_tmp_i1_add = (i - 1) * nwalkers + walkers_here_i1_add[reverse_i]
+                    reverse_data_index_tmp_i_add = i * nwalkers + walkers_here_i_remove[reverse_i]
+                    reverse_data_index_tmp_i1_add = (i - 1) * nwalkers + walkers_here_i1_remove[reverse_i1]
 
                     reverse_data_index_tmp_all = np.concatenate([reverse_data_index_tmp_i_remove, reverse_data_index_tmp_i_add, reverse_data_index_tmp_i1_remove, reverse_data_index_tmp_i1_add])
                     reverse_data_index = self.xp.asarray(self.mgh.get_mapped_indices(reverse_data_index_tmp_all)).astype(self.xp.int32)
@@ -1283,11 +1367,17 @@ class GBSpecialStretchMove(GroupStretchMove):
                         factors=reverse_factors_multiply,
                         **waveform_kwargs_fill
                     )
-                    
+                    ll_after2 = self.mgh.get_ll(include_psd_info=True).flatten()[data_index_all.get()]
                     breakpoint()
-                
-                # MAKE SURE TO MOVE PRIORS !!!!
-                # Do adaptations
+
+            # adjust prios accordingly
+            log_prior_new_per_bin = np.zeros_like(new_state.branches_inds["gb_fixed"], dtype=np.float64)
+            # self.gpu_priors
+            log_prior_new_per_bin[new_state.branches_inds["gb_fixed"]] = self.priors["gb_fixed"].logpdf(new_state.branches_coords["gb_fixed"][new_state.branches_inds["gb_fixed"]])
+
+            new_state.log_prior = log_prior_new_per_bin.sum(axis=-1)
+
+            self.temperature_control.adapt_temps()    
 
         else:
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))

@@ -955,8 +955,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJump, GBSpecialStretchMove):
 
         # print("rj", (et - st) / num_consecutive_rj_moves)
 
-        if self.temperature_control is not None and not self.prevent_swaps:
-             new_state = self.temperature_control.temper_comps(new_state, adapt=False)
+        if False:  # self.temperature_control is not None and not self.prevent_swaps:
+            # TODO: add swaps?
+            new_state = self.temperature_control.temper_comps(new_state, adapt=False)
 
         #et = time.perf_counter()
         #print("swapping", et - st)

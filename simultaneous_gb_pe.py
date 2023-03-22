@@ -465,6 +465,7 @@ def run_gb_pe(gpu):
         gibbs_sampling_setup=["gb_fixed"],
         point_generator_func=point_generator_func,
         fix_change=None,
+        prevent_swaps=True
     )
     rj_moves.gb.gpus = gpus
 
@@ -548,7 +549,7 @@ def run_gb_pe(gpu):
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=True)
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=False)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     breakpoint()
