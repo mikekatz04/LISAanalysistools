@@ -92,7 +92,7 @@ class UpdateNewResiduals(Update):
         self.output_residual_number += 1
         A_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
         E_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
-
+        xp.get_default_memory_pool().free_all_blocks()
         imported = False
         while not imported:
             try:
@@ -104,13 +104,13 @@ class UpdateNewResiduals(Update):
         psds[:, :, 0] = psds[:, :, 1]
         A_psd_in[:] = psds[:, 0][None, :]  # A
         E_psd_in[:] = psds[:, 1][None, :]  # E
-
+        xp.get_default_memory_pool().free_all_blocks()
         self.mgh.set_psd_from_arrays(
             A_psd_in.reshape(-1, self.psd_shape[-1]),
             E_psd_in.reshape(-1, self.psd_shape[-1]),
             overall_inds=self.mgh.map
         )
-
+        xp.get_default_memory_pool().free_all_blocks()
         # ll_bef = self.mgh.get_ll(include_psd_info=True)
         A_mbh_remove = self.last_mbh_template[0]
         E_mbh_remove = self.last_mbh_template[1]
@@ -133,7 +133,7 @@ class UpdateNewResiduals(Update):
 
         A_mbh_going_in[:] = mbh_inj[:, 0][None, :]  # A
         E_mbh_going_in[:] = mbh_inj[:, 1][None, :]  # A
-
+        xp.get_default_memory_pool().free_all_blocks()
         # TODO: need to check that everything is aligned
         ll_bef = self.mgh.get_ll(include_psd_info=True)
         self.mgh.add_templates_from_arrays_to_residuals(
@@ -148,7 +148,7 @@ class UpdateNewResiduals(Update):
         ll = self.mgh.get_ll(include_psd_info=True)
 
         last_sample.log_like = ll.flatten()[self.mgh.map].reshape(ll.shape)
-
+        xp.get_default_memory_pool().free_all_blocks()
         """tmp = self.mgh.data_shaped
 
         if len(tmp[0]) > 1:
@@ -161,14 +161,14 @@ class UpdateNewResiduals(Update):
         coords_out_gb_fixed = last_sample.branches_coords["gb_fixed"][0]
         coords_in = transform_fn.both_transforms(coords_out_gb_fixed[last_sample.branches["gb_fixed"].inds[0]])
         ntemps_pe, nwalkers_pe, nleaves_max, ndim = last_sample.branches["gb_fixed"].shape
-
+        xp.get_default_memory_pool().free_all_blocks()
         walker_vals = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)
 
         data_index = xp.asarray(walker_vals[last_sample.branches["gb_fixed"].inds[0]]).astype(xp.int32)
-
+        xp.get_default_memory_pool().free_all_blocks()
         # NEEDS TO BE +1
         factors = +xp.ones_like(data_index, dtype=xp.float64)
-
+        xp.get_default_memory_pool().free_all_blocks()
         templates_out = [[xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()], [xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()]]
         A_out, E_out = templates_out[0][0], templates_out[1][0]
         data_splits = [np.arange(nwalkers_pe)]
@@ -546,7 +546,8 @@ def run_gb_pe(gpu):
         xp.cuda.runtime.setDevice(main_gpu)
     """
     nsteps_mix = 10000
-
+    state_mix.betas = make_ladder(10 * 8, ntemps)
+    
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=False)

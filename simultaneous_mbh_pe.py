@@ -51,8 +51,8 @@ class BasicResidualMGHLikelihood:
         return ll_temp[overall_inds]
 
 data = [
-    np.asarray(A_inj),
-    np.asarray(E_inj),
+    np.asarray(A_inj).copy(),
+    np.asarray(E_inj).copy(),
 ]
 
 def shuffle_along_axis(a, axis):
@@ -78,7 +78,7 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
-    def __init__(self, mbh_move, last_gb_residuals, fp_mbh, fp_psd, fp_gb, psd_shape, include_gbs=True):
+    def __init__(self, mbh_move, last_gb_residuals, fp_mbh, fp_psd, fp_gb, psd_shape, include_gbs=True, search=False):
         self.mbh_move = mbh_move
         self.fp_mbh = fp_mbh
         self.fp_psd = fp_psd
@@ -86,17 +86,35 @@ class UpdateNewResiduals(Update):
         self.fp_gb = fp_gb
         self.last_gb_residuals = last_gb_residuals
         self.include_gbs = include_gbs
+        self.search = search
 
     def __call__(self, iter, last_sample, sampler):
-        imported = False
-        while not imported:
-            try:
-                psds = np.load(self.fp_psd)
-                imported = True
-            except ValueError:
-                time.sleep(1)
 
-        psd_tmp = xp.asarray(psds).transpose(1, 0, 2)
+        imported = False
+        if self.search:
+            while not imported:
+                try:
+                    psd_best_search = np.load("best_logl_psd_from_psd_run.npy")
+                    imported = True
+                except ValueError:
+                    time.sleep(1)
+
+            psd_best_search[:, 0] = psd_best_search[:, 1]
+
+            psd_tmp = xp.zeros_like(self.mbh_move.psd[:2])
+
+            psd_tmp[0, :] = xp.asarray(psd_best_search[0])
+            psd_tmp[1, :] = xp.asarray(psd_best_search[1])
+        else:
+            while not imported:
+                try:
+                    psds = np.load(self.fp_psd)
+                    imported = True
+                except ValueError:
+                    time.sleep(1)
+
+            psd_tmp = xp.asarray(psds).transpose(1, 0, 2)
+
         self.mbh_move.psd[:2] = psd_tmp
         del psd_tmp
         xp.get_default_memory_pool().free_all_blocks()
@@ -106,14 +124,26 @@ class UpdateNewResiduals(Update):
             self.mbh_move.data_residuals[:2] += gb_removal
             del gb_removal
             xp.get_default_memory_pool().free_all_blocks()
+            if self.search:
+                gbs_in = np.zeros_like(self.last_gb_residuals)
+                imported = False
+                while not imported:
+                    try:
+                        gbs_tmp = np.load("best_logl_gbs_from_psd_run.npy")
+                        imported = True
+                    except ValueError:
+                        time.sleep(1)
 
-            imported = False
-            while not imported:
-                try:
-                    gbs_in = np.load(self.fp_gb)
-                    imported = True
-                except ValueError:
-                    time.sleep(1)
+                gbs_in[:] = gbs_tmp[None, :, :]
+
+            else:
+                imported = False
+                while not imported:
+                    try:
+                        gbs_in = np.load(self.fp_gb)
+                        imported = True
+                    except ValueError:
+                        time.sleep(1)
 
             self.last_gb_residuals[:] = gbs_in[:]
 
@@ -125,15 +155,19 @@ class UpdateNewResiduals(Update):
 
         ntemps, nwalkers, nleaves_max, ndim = last_sample.branches["mbh"].shape
 
+        ind_best = np.where(last_sample.log_like[0] == last_sample.log_like[0].max())[0][0]
         # TODO: change for adding T
         waveforms = xp.zeros_like(self.mbh_move.data_residuals[:2])
+
+        waveforms_best = xp.zeros_like(self.mbh_move.data_residuals[:2, 0])
         for leaf in range(nleaves_max):
             coords = last_sample.branches["mbh"].coords[0, :, leaf].reshape(-1, ndim)
             coords_in = self.mbh_move.transform_fn.both_transforms(coords)
             waveform_tmp = self.mbh_move.waveform_gen(*coords_in.T, fill=True, freqs=self.mbh_move.fd, **self.mbh_move.mbh_kwargs).transpose(1, 0, 2)
-
+            waveforms_best[:] += waveform_tmp[:2, ind_best]
             waveforms[:] += waveform_tmp[:2]
 
+        np.save("best_logl_mbhs_from_psd_run", waveforms_best)
         np.save(self.fp_mbh, waveforms.transpose(1, 0, 2).get())
         del waveforms, waveform_tmp
         xp.get_default_memory_pool().free_all_blocks()
@@ -149,7 +183,7 @@ def run_mbh_pe(gpu):
     fp_gb_here = fp_gb if not search else fp_gb_template_search
     
     if include_gbs:
-        while fp_gb_here + ".npy" not in os.listdir():
+        while "best_logl_gbs_from_psd_run.npy" not in os.listdir():  # 
             print(f"{fp_gb_here + '.npy'} not in current directory so far...")
             time.sleep(20)
 
@@ -171,11 +205,17 @@ def run_mbh_pe(gpu):
     A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_going_in[:] = np.asarray(A_inj)
-    E_going_in[:] = np.asarray(E_inj)
-    
+    A_going_in[:] = np.asarray(A_inj).copy()
+    E_going_in[:] = np.asarray(E_inj).copy()
+
     if include_gbs:
-        gbs_in = np.load(fp_gb_here + ".npy")
+        if search:
+            gbs_in = np.zeros((nwalkers_pe, 2, A_inj.shape[0]), dtype=complex)
+            gbs_tmp = np.load("best_logl_gbs_from_psd_run.npy")     
+            gbs_in[:] = gbs_tmp[None, :, :]
+
+        else:
+            gbs_in = np.load(fp_gb_here + ".npy")
 
         A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
         E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -189,16 +229,24 @@ def run_mbh_pe(gpu):
     A_psd_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
 
-    # A_psd_in[:] = np.asarray(psd)
-    # E_psd_in[:] = np.asarray(psd)
-    psds = np.load(fp_psd_here + ".npy" )
-    psds[:, :, 0] = psds[:, :, 1]
-    A_psd_in[:] = psds[:, 0] # A
-    E_psd_in[:] = psds[:, 1]  # E
+    if search:
+        psd_best_search = np.load("best_logl_psd_from_psd_run.npy")
+        psd_best_search[:, 0] = psd_best_search[:, 1]
+
+        A_psd_in[:] = np.asarray(psd_best_search[0])
+        E_psd_in[:] = np.asarray(psd_best_search[1])
+    else:
+        psds = np.load(fp_psd_here + ".npy" )
+        psds[:, :, 0] = psds[:, :, 1]
+        A_psd_in[:] = psds[:, 0] # A
+        E_psd_in[:] = psds[:, 1]  # E
 
     data_fin = xp.asarray([A_going_in, E_going_in, np.zeros_like(E_going_in)])
     psds_fin = xp.asarray([A_psd_in, E_psd_in, np.full_like(E_psd_in, 1e10)])
 
+    start_ll_check = (-1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psds_fin)), axis=(0, 2))).get().max()
+
+    # templates_fin = xp.zeros_like(data_fin)
     walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps_pe, 1))
 
     from eryn.moves.tempering import make_ladder
@@ -360,12 +408,15 @@ def run_mbh_pe(gpu):
                 )
 
             data_fin[:2] -= data_channels_AET.transpose((1, 0, 2))[:2]
+            # templates_fin[:2] += data_channels_AET.transpose((1, 0, 2))[:2]
             start_points[:, inj_i] = tmp
-            start_ll_check = (-1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psds_fin)), axis=(0, 2))).get().max()
-            print(start_ll_check, start_ll_check - old_ll)
-            old_ll = start_ll_check
-
+            start_ll_check = (-1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psds_fin)), axis=(0, 2))).get()
+            print(start_ll_check.max(), start_ll_check.max() - old_ll)
+            old_ll = start_ll_check.max()
+            best = start_ll_check.argmax()
+        #np.save("best_check_mbh", templates_fin[:, best].get())
         np.save("start_points_mbh", start_points)
+
         start_ll_cold = (-1/2 * 4 * df * xp.sum(data_fin.conj() * data_fin / psds_fin, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psds_fin)), axis=(0, 2))).get()
 
         start_ll = np.zeros((ntemps_pe, nwalkers_pe))
@@ -377,7 +428,7 @@ def run_mbh_pe(gpu):
         start_state = State({"mbh": start_points.reshape(ntemps_pe, nwalkers_pe, nleaves_mbh, ndim)}, log_like=start_ll, log_prior=start_lp)
 
     xp.get_default_memory_pool().free_all_blocks()
-    num_repeats = 20
+    num_repeats = 10
 
     # TODO: start ll needs to be done carefully
 
@@ -392,7 +443,7 @@ def run_mbh_pe(gpu):
     ]
     move = MBHSpecialMove(wave_gen, fd_gpu, data_fin, psds_fin, num_repeats, transform_fn, priors, waveform_kwargs, inner_moves, df)
 
-    update = UpdateNewResiduals(move, gbs_in, fp_mbh_here + ".npy", fp_psd_here + ".npy", fp_gb_here + ".npy", A_psd_in.shape, include_gbs=include_gbs)
+    update = UpdateNewResiduals(move, gbs_in, fp_mbh_here + ".npy", fp_psd_here + ".npy", fp_gb_here + ".npy", A_psd_in.shape, include_gbs=include_gbs, search=search)
 
     # key permute is False
     sampler_mix = EnsembleSampler(
@@ -430,5 +481,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_mbh_pe(2)
+    output = run_mbh_pe(5)
                 

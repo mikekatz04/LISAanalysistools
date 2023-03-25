@@ -17,7 +17,7 @@ from single_mcmc_run import run_single_band_search
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
-
+from initial_psd_search import run_psd_search
 
 try:
     import cupy as xp
@@ -268,7 +268,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     # best_logl_points_in[keep_binaries, 4] -= xp.asarray(phase_change)
 
     nwalkers_pe = nwalkers
-    ntemps_pe = 6
+    ntemps_pe = 1
     
     factor = 1e-5
     cov = np.ones(ndim) * 1e-3
@@ -358,14 +358,14 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
-    A_going_in[:] = np.asarray(A_inj)
-    E_going_in[:] = np.asarray(E_inj)
+    A_going_in[:] = np.asarray(A_inj).copy()
+    E_going_in[:] = np.asarray(E_inj).copy()
 
     imported = False
 
     while not imported:
         try:
-            mbh_inj = np.load(fp_mbh_template_search + ".npy")
+            mbh_inj = np.load("best_logl_mbhs_from_psd_run.npy")  # fp_mbh_template_search + ".npy")
             imported = True
         except ValueError:
             time.sleep(1)
@@ -373,8 +373,10 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
     A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
-    E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
+    A_mbh_going_in[:] = mbh_inj[0][None, None, :]
+    E_mbh_going_in[:] = mbh_inj[1][None, None, :]
+
+    last_mbh_template = [A_mbh_going_in, E_mbh_going_in]
 
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
@@ -382,19 +384,19 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
     A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
 
-    # A_psd_in[:] = np.asarray(psd)
-    # E_psd_in[:] = np.asarray(psd)
+    A_psd_in[:] = np.asarray(psd)
+    E_psd_in[:] = np.asarray(psd)
     imported = False
     while not imported:
         try:
-            psds = np.load(fp_psd_residual_search + ".npy" )
+            psds = np.load("best_logl_psd_from_psd_run.npy")  # fp_psd_residual_search + ".npy" )
             imported = True
         except ValueError:
             time.sleep(1)
     
-    psds[:, :, 0] = psds[:, :, 1]
-    A_psd_in[:] = psds[:, 0][None, :]  # A
-    E_psd_in[:] = psds[:, 1][None, :]  # A
+    psds[:, 0] = psds[:, 1]
+    A_psd_in[:] = psds[0][None, None, :]  # A
+    E_psd_in[:] = psds[1][None, None, :]  # A
 
     try:
         del mgh
@@ -476,6 +478,22 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
     
     ll = mgh.get_ll(include_psd_info=True)
 
+    # psd fit
+    inds = ll.argmax()
+    # A_going_in_psd_fit, E_going_in_psd_fit = mgh.data_shaped[0][0][inds], mgh.data_shaped[1][0][inds]
+
+    # psd_A, psd_E = run_psd_search(A_going_in_psd_fit, E_going_in_psd_fit, gpus[0])
+    
+    # A_psd_in[:] = np.asarray(psd_A).copy()
+    # E_psd_in[:] = np.asarray(psd_E).copy()
+
+    xp.get_default_memory_pool().free_all_blocks()
+    mgh.set_psd_from_arrays(
+        A_psd_in.reshape(-1, A_psd_in.shape[-1]),
+        E_psd_in.reshape(-1, E_psd_in.shape[-1]),
+        overall_inds=mgh.map
+    )
+    
     temp_inds = mgh.temp_indices.copy()
     walker_inds = mgh.walker_indices.copy()
     overall_inds = mgh.overall_indices.copy()
@@ -531,7 +549,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
         search_f_bin_lims,
         gpu_priors
     )
-
+    betas_mix = np.array([1.0])
     temperature_control_mix = TemperatureControl(8, nwalkers_pe, betas=betas_mix)
     gb_fixed_move = GBSpecialStretchMove(
         *gb_args,
@@ -549,37 +567,127 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
     model_placeholder = TempClass(xp.random)
     print(f"Starting mix for iteration {iter_i}")
-    mixing_steps = 100
-    save_every_steps = 99
+    mixing_steps = 10000
+    save_every_steps = 10
+    iters_maximize = 20
+    max_logl = state_mix.log_like.max()
+    max_logl_iters = 0
     for mix_step in tqdm(range(mixing_steps)):
+        
         state_mix, accepted = gb_fixed_move.propose(model_placeholder, state_mix)
-        if (mix_step + 1) % save_every_steps == 0:
+
+        if state_mix.log_like.max() > max_logl:
+            max_logl_iters = 0
+            max_logl = state_mix.log_like.max()
+        else:
+            max_logl_iters += 1
+
+        save = False
+        if (mix_step) % save_every_steps == 0:
+            save = True
+        if max_logl_iters >= iters_maximize:
+            save = True
+            converged = True
+        else:
+            converged = False
+
+        print("gb status", mix_step, max_logl, max_logl_iters, converged)
+        
+        if save:
+            
+            best_gb = state_mix.log_like[0].argmax()
+            """coords_out_gb_fixed = state_mix.branches_coords["gb_fixed"][0, best_gb]
+            coords_in = transform_fn.both_transforms(coords_out_gb_fixed[state_mix.branches["gb_fixed"].inds[0, best_gb]])
+            ntemps_pe, nwalkers_pe, nleaves_max, ndim = state_mix.branches["gb_fixed"].shape
+            N_vals_here = xp.asarray(state_mix.branches_supplimental["gb_fixed"].holder['N_vals'][0, best_gb][state_mix.branches["gb_fixed"].inds[0, best_gb]])
+            # NEEDS TO BE +1
+            factors = +xp.ones(coords_out_gb_fixed.shape[0], dtype=xp.float64)
+            data_index = xp.zeros(coords_out_gb_fixed.shape[0], dtype=xp.int32)
+            templates_out = [[xp.zeros((fd.shape[0],), dtype=complex).flatten()], [xp.zeros((fd.shape[0],), dtype=complex).flatten()]]
+            A_out, E_out = templates_out[0][0], templates_out[1][0]
+            data_splits = [np.arange(1)]
+
+            main_gpu = xp.cuda.runtime.getDevice()
+            waveform_kwargs_fill = waveform_kwargs.copy()
+            waveform_kwargs_fill.pop("N")
+
+            gb.generate_global_template(coords_in, data_index, templates_out, data_length=data_length, factors=factors, data_splits=data_splits, N=N_vals_here, **waveform_kwargs_fill)
+
+            xp.cuda.runtime.setDevice(main_gpu)
+            np.save("best_logl_gbs_from_psd_run", xp.array([A_out, E_out]).get())
+            del A_out, E_out
+            xp.get_default_memory_pool().free_all_blocks()
+            """
+            xp.get_default_memory_pool().free_all_blocks()
+            
+            imported = False
+            while not imported:
+                try:
+                    psds = np.load("best_logl_psd_from_psd_run" + ".npy")
+                    imported = True
+                except ValueError:
+                    time.sleep(1)
+
+            psds[:, 0] = psds[:, 1]
+            A_psd_in[:] = psds[0][None, None, :]  # A
+            E_psd_in[:] = psds[1][None, None, :]  # E
+            xp.get_default_memory_pool().free_all_blocks()
+            mgh.set_psd_from_arrays(
+                A_psd_in.reshape(-1, psds.shape[-1]),
+                E_psd_in.reshape(-1, psds.shape[-1]),
+                overall_inds=mgh.map
+            )
+            xp.get_default_memory_pool().free_all_blocks()
+            
+            A_mbh_remove = last_mbh_template[0]
+            E_mbh_remove = last_mbh_template[1]
+            mgh.add_templates_from_arrays_to_residuals(
+                -1 * A_mbh_remove.reshape(-1, psds.shape[-1]),
+                -1 * E_mbh_remove.reshape(-1, psds.shape[-1]),
+                overall_inds=mgh.map
+            )
+
+            A_out = (mgh.data_shaped[0][0][best_gb].get() - A_inj)
+            E_out = (mgh.data_shaped[1][0][best_gb].get() - E_inj)
+            np.save("best_logl_gbs_from_psd_run", xp.array([A_out, E_out]))
+            
+            # ll_af = mgh.get_ll(include_psd_info=True)
+            imported = False
+            while not imported:
+                try:
+                    mbh_inj = np.load("best_logl_mbhs_from_psd_run" + ".npy")
+                    imported = True
+                except ValueError:
+                    time.sleep(1)
+
+            A_mbh_going_in = np.zeros_like(last_mbh_template[0])
+            E_mbh_going_in = np.zeros_like(last_mbh_template[1])
+
+            A_mbh_going_in[:] = mbh_inj[0][None, None, :]  # A
+            E_mbh_going_in[:] = mbh_inj[1][None, None, :]  # A
+            xp.get_default_memory_pool().free_all_blocks()
+            # TODO: need to check that everything is aligned
+            ll_bef = mgh.get_ll(include_psd_info=True)
+ 
+            mgh.add_templates_from_arrays_to_residuals(
+                A_mbh_going_in.reshape(-1, psds.shape[-1]),
+                E_mbh_going_in.reshape(-1, psds.shape[-1]),
+                overall_inds=mgh.map
+            )
+            # ll_af = mgh.get_ll(include_psd_info=True)
+
+            last_mbh_template = [A_mbh_going_in, E_mbh_going_in]
+
+            ll = mgh.get_ll(include_psd_info=True)
+
+            state_mix.log_like = ll.flatten()[mgh.map].reshape(ll.shape)
+            xp.get_default_memory_pool().free_all_blocks()
+
             with open(fp_gb_mixing, "wb") as f_tmp:
                 pickle.dump(state_mix, f_tmp, pickle.HIGHEST_PROTOCOL)
 
-    coords_out_gb_fixed = state_mix.branches_coords["gb_fixed"][0]
-    coords_in = transform_fn.both_transforms(coords_out_gb_fixed[state_mix.branches["gb_fixed"].inds[0]])
-    ntemps_pe, nwalkers_pe, nleaves_max, ndim = state_mix.branches["gb_fixed"].shape
-
-    walker_vals = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)
-
-    data_index = xp.asarray(walker_vals[state_mix.branches["gb_fixed"].inds[0]]).astype(xp.int32)
-
-    # NEEDS TO BE +1
-    factors = +xp.ones_like(data_index, dtype=xp.float64)
-
-    templates_out = [[xp.zeros((nwalkers_pe, fd.shape[0]), dtype=complex).flatten()], [xp.zeros((nwalkers_pe, fd.shape[0]), dtype=complex).flatten()]]
-    A_out, E_out = templates_out[0][0], templates_out[1][0]
-    data_splits = [np.arange(nwalkers_pe)]
-
-    main_gpu = xp.cuda.runtime.getDevice()
-
-    gb.generate_global_template(coords_in, data_index, templates_out, data_length=data_length, factors=factors, data_splits=data_splits, **waveform_kwargs)
-
-    xp.cuda.runtime.setDevice(main_gpu)
-    np.save(fp_gb_template_search, xp.array([A_out.reshape(nwalkers_pe, -1), E_out.reshape(nwalkers_pe, -1)]).transpose((1, 0, 2)).get())
-    del A_out, E_out
-    xp.get_default_memory_pool().free_all_blocks()
+        if converged:
+            break
 
     print(f"BEST LOGL AFTER MIX: {state_mix.log_like.max()}")
     best_logl_ind_after_mix = np.argmax(state_mix.log_like.flatten())    
@@ -610,12 +718,12 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
 
 def run_gb_bulk_search():
-    gpus = [3]
+    gpus = [6]
     xp.cuda.runtime.setDevice(gpus[0])
     # max ll combination of psd and mbhs
     # TODO: adjust this to max ll !!!!
-    A_going_in = np.asarray(A_inj)
-    E_going_in = np.asarray(E_inj)
+    A_going_in = np.asarray(A_inj).copy()
+    E_going_in = np.asarray(E_inj).copy()
 
     mbh_inj = np.load("best_logl_mbhs_from_psd_run" + ".npy")
 

@@ -43,7 +43,9 @@ class MBHSpecialMove(RedBlueMove):
         temp_inds_base = np.repeat(np.arange(ntemps)[:, None], nwalkers, axis=-1)
         walker_inds_base = np.tile(np.arange(nwalkers), (ntemps, 1))
 
-        for leaf in range(nleaves):
+        start_leaf = np.random.randint(0, nleaves)
+        for base_leaf in range(nleaves):
+            leaf = (base_leaf + start_leaf) % nleaves
             # remove cold chain sources
             xp.get_default_memory_pool().free_all_blocks()
             removal_coords = new_state.branches["mbh"].coords[0, :, leaf]
@@ -228,5 +230,8 @@ class MBHSpecialMove(RedBlueMove):
         new_state.log_like[0] = current_ll
         new_state.log_prior[0] = current_lp
         xp.get_default_memory_pool().free_all_blocks()
-
+        if not hasattr(self, "best_last_ll"):
+            self.best_last_ll = current_ll.max()
+        print("mbh", self.best_last_ll, current_ll.max(), current_ll.max() - self.best_last_ll)
+        self.best_last_ll = current_ll.max()
         return new_state, accepted
