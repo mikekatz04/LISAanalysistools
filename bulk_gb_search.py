@@ -192,17 +192,26 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
             sel = paccept > raccept
             swaps_accepted[i - 1] = xp.sum(sel, axis=-1)
 
-            coords_tmp_i = old_points[(temp_swap_i, walker_swap_i, band_swap)].copy()
-            logl_tmp_i = prev_logl[(temp_swap_i, walker_swap_i, band_swap)].copy()
-            logp_tmp_i = prev_logp[(temp_swap_i, walker_swap_i, band_swap)].copy()
+            temp_swap_i_keep = temp_swap_i[sel.flatten()]
+            walker_swap_i_keep = walker_swap_i[sel.flatten()]
+            band_swap_keep = band_swap[sel.flatten()]
 
-            old_points[(temp_swap_i, walker_swap_i, band_swap)] = old_points[(temp_swap_i1, walker_swap_i1, band_swap)]
-            prev_logl[(temp_swap_i, walker_swap_i, band_swap)] = prev_logl[(temp_swap_i1, walker_swap_i1, band_swap)]
-            prev_logp[(temp_swap_i, walker_swap_i, band_swap)] = prev_logp[(temp_swap_i1, walker_swap_i1, band_swap)]
+            temp_swap_i1_keep = temp_swap_i1[sel.flatten()]
+            walker_swap_i1_keep = walker_swap_i1[sel.flatten()]
 
-            old_points[(temp_swap_i1, walker_swap_i1, band_swap)] = coords_tmp_i
-            prev_logl[(temp_swap_i1, walker_swap_i1, band_swap)] = logl_tmp_i
-            prev_logp[(temp_swap_i1, walker_swap_i1, band_swap)] = logp_tmp_i
+            coords_tmp_i = old_points[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)].copy()
+            logl_tmp_i = prev_logl[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)].copy()
+            logp_tmp_i = prev_logp[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)].copy()
+
+            old_points[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = old_points[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)]
+            prev_logl[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = prev_logl[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)]
+            prev_logp[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = prev_logp[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)]
+
+            old_points[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = coords_tmp_i
+            prev_logl[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = logl_tmp_i
+            prev_logp[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = logp_tmp_i
+        # print(prev_logl.max(axis=(1, 2)))
+        
         # print(time.perf_counter() - st)
         ratios = swaps_accepted / swaps_proposed
         # adjust temps 
@@ -228,6 +237,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
 
         improvement = (new_best_logl - best_logl > 0.01)
 
+        # print(new_best_logl - best_logl, best_logl)
         best_logl[improvement] = new_best_logl[improvement]
 
         best_logl_ind = prev_logl.reshape(ntemps * nwalkers, len(band_inds_here)).argmax(axis=0)[improvement]
@@ -467,11 +477,9 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
     factors = -xp.ones_like(data_index, dtype=xp.float64)
 
     # gb.d_d = gb.d_d[data_index]
-
     # ll = gb.get_ll(coords_in_in, mgh.data_list, mgh.psd_list, data_index=data_index, noise_index=data_index.copy(), phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits, return_cupy=True, **waveform_kwargs)
-
     gb.generate_global_template(coords_in_in, data_index, mgh.data_list, batch_size=1000, data_length=data_length, factors=factors, data_splits=mgh.gpu_splits, **waveform_kwargs)
-    
+
     del data_index
     del factors
     mempool.free_all_blocks()
@@ -569,7 +577,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
     print(f"Starting mix for iteration {iter_i}")
     mixing_steps = 10000
     save_every_steps = 10
-    iters_maximize = 20
+    iters_maximize = 50
     max_logl = state_mix.log_like.max()
     max_logl_iters = 0
     for mix_step in tqdm(range(mixing_steps)):
@@ -586,6 +594,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
         if (mix_step) % save_every_steps == 0:
             save = True
         if max_logl_iters >= iters_maximize:
+            # TODO: switch to per band likelihood converge
             save = True
             converged = True
         else:
@@ -647,10 +656,13 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
                 overall_inds=mgh.map
             )
 
-            A_out = (mgh.data_shaped[0][0][best_gb].get() - A_inj)
-            E_out = (mgh.data_shaped[1][0][best_gb].get() - E_inj)
+            A_out = -(mgh.data_shaped[0][0][best_gb].get() - A_inj)
+            E_out = -(mgh.data_shaped[1][0][best_gb].get() - E_inj)
+
+            A_out[np.abs(A_out) < 1e-27] = 0.0
+            E_out[np.abs(E_out) < 1e-27] = 0.0
             np.save("best_logl_gbs_from_psd_run", xp.array([A_out, E_out]))
-            
+
             # ll_af = mgh.get_ll(include_psd_info=True)
             imported = False
             while not imported:

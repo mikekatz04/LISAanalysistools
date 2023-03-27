@@ -217,9 +217,6 @@ def run_mbh_pe(gpu):
         else:
             gbs_in = np.load(fp_gb_here + ".npy")
 
-        A_going_in = np.zeros((nwalkers_pe, A_inj.shape[0]), dtype=complex)
-        E_going_in = np.zeros((nwalkers_pe, E_inj.shape[0]), dtype=complex)
-
         A_going_in -= gbs_in[:, 0]
         E_going_in -= gbs_in[:, 1]
 
@@ -428,7 +425,7 @@ def run_mbh_pe(gpu):
         start_state = State({"mbh": start_points.reshape(ntemps_pe, nwalkers_pe, nleaves_mbh, ndim)}, log_like=start_ll, log_prior=start_lp)
 
     xp.get_default_memory_pool().free_all_blocks()
-    num_repeats = 10
+    num_repeats = 5
 
     # TODO: start ll needs to be done carefully
 
@@ -481,5 +478,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_mbh_pe(5)
+    output = run_mbh_pe(3)
                 

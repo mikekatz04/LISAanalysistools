@@ -29,7 +29,7 @@ class MBHSpecialMove(RedBlueMove):
         self.df = df
 
     def get_logl(self):
-        return -1/2 * (4 * self.df * self.xp.sum((self.data_residuals.conj() * self.data_residuals) / self.psd, axis=-1)).get()
+        return -1/2 * (4 * self.df * self.xp.sum((self.data_residuals[:2].conj() * self.data_residuals[:2]) / self.psd[:2], axis=-1)).get()
 
     def propose(self, model, state):
 
@@ -56,12 +56,12 @@ class MBHSpecialMove(RedBlueMove):
 
             # TODO: fix T channel 
             # d - h -> need to add removal waveforms
-            # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
+            # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
 
             self.data_residuals[:2] += removal_waveforms[:2]
             del removal_waveforms
             xp.get_default_memory_pool().free_all_blocks()
-            ll_tmp2 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
+            ll_tmp2 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
 
             old_coords = new_state.branches["mbh"].coords[:, :, leaf].reshape(-1, ndim)
             old_coords_in = self.transform_fn.both_transforms(old_coords)
@@ -195,7 +195,7 @@ class MBHSpecialMove(RedBlueMove):
 
                 new_state.branches_coords["mbh"][:, :, leaf] = coords_for_swap["mbh"][:, :, 0]
 
-            # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
+            # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
 
             # add back cold chain sources
             xp.get_default_memory_pool().free_all_blocks()
@@ -211,17 +211,17 @@ class MBHSpecialMove(RedBlueMove):
 
             del add_waveforms
             xp.get_default_memory_pool().free_all_blocks()
-            # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
+            # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
 
             # print(leaf)
 
-            # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)).get()
+            # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
 
         # udpate at the end
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
 
-        current_ll = (-1/2 * 4 * self.df * xp.sum(self.data_residuals.conj() * self.data_residuals / self.psd, axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd)), axis=(0, 2))).get()
+        current_ll = (-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
         xp.get_default_memory_pool().free_all_blocks()
         # TODO: add check with last used logl
 
