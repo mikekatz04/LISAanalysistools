@@ -267,7 +267,8 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     if not xp.allclose(best_logl, best_logl_check):
         breakpoint()
 
-    keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > 10.0
+    snr_lim = 7.0
+    keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > snr_lim
     # TODO: add in based on sensitivity changing
     # band_inds_running[band_inds_here[~keep_binaries].get()] = False
     keep_coords = best_binaries_coords_with_fs[keep_binaries].get()
