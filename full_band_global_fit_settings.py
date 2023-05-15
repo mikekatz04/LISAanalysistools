@@ -137,7 +137,7 @@ fp_psd_search_initial = "initial_search_develop_full_band_psd.h5"
 fp_psd_search = "search_develop_full_band_psd.h5"
 fp_mbh_search = "search_develop_full_band_mbh.h5"
 
-fp_pe = "develop_full_band_7.h5"
+fp_pe = "develop_full_band_8.h5"
 fp_psd_pe = "develop_full_band_psd_3.h5"
 fp_mbh_pe = "develop_full_band_mbh.h5"
 folder = "./"
@@ -231,8 +231,8 @@ waveform_kwargs_tmp["start_freq_ind"] = start_freq_ind
 get_last_gb_state = GetLastGBState(gb, transform_fn={"gb": transform_fn, "gb_fixed": transform_fn}, waveform_kwargs=waveform_kwargs_tmp)
 default_priors_gb = {
     0: snr_prior,
-    1: MappedUniformDistribution(*(np.asarray(f0_lims) * 1e3)),  # special mapping for RJ (we care about changes in prior, uniform there are no changes)
-    2: MappedUniformDistribution(*fdot_lims),
+    1: uniform_dist(*(np.asarray(f0_lims) * 1e3)),  # special mapping for RJ (we care about changes in prior, uniform there are no changes)
+    2: uniform_dist(*fdot_lims),
     3: uniform_dist(*phi0_lims),
     4: uniform_dist(*np.cos(iota_lims)),
     5: uniform_dist(*psi_lims),

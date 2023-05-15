@@ -398,6 +398,7 @@ def run_gb_pe(gpu):
         skip_supp_names_update=["group_move_points"],
         random_seed=random_seed,
         nfriends=nwalkers,
+        # rj_proposal_distribution=gpu_priors,
         a=1.7,
         use_gpu=True
     )
@@ -422,7 +423,7 @@ def run_gb_pe(gpu):
 
     gb_fixed_move.gb.gpus = gpus
 
-    point_generator_func_tmp = deepcopy(priors["gb"].priors_in)
+    """point_generator_func_tmp = deepcopy(priors["gb"].priors_in)
 
     for key, item in point_generator_func_tmp.items():
         item.use_cupy = True
@@ -466,7 +467,38 @@ def run_gb_pe(gpu):
         point_generator_func=point_generator_func,
         fix_change=None,
         prevent_swaps=True
+    )"""
+
+
+    gb_kwargs_rj = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=transform_fn,
+        search=False,
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=random_seed,
+        nfriends=nwalkers,
+        rj_proposal_distribution=gpu_priors,
+        a=1.7,
+        use_gpu=True
     )
+
+    gb_args_rj = (
+        gb,
+        priors,
+        start_freq_ind,
+        data_length,
+        mgh,
+        np.asarray(fd),
+        search_f_bin_lims,
+        gpu_priors
+    )
+
+    rj_moves = GBSpecialStretchMove(
+        *gb_args_rj,
+        **gb_kwargs_rj,
+    )
+
     rj_moves.gb.gpus = gpus
 
     moves_in_model = gb_fixed_move
@@ -550,7 +582,7 @@ def run_gb_pe(gpu):
     
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=1, store=False)
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=25, store=False)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     breakpoint()
@@ -638,5 +670,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(7)
+    output = run_gb_pe(5)
                 

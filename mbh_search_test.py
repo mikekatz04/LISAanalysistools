@@ -31,7 +31,7 @@ np.random.seed(111222)
 try:
     import cupy as xp
     # set GPU device
-    xp.cuda.runtime.setDevice(7)
+    xp.cuda.runtime.setDevice(5)
     gpu_available = True
 
 except (ImportError, ModuleNotFoundError) as e:
@@ -72,7 +72,12 @@ def run_mbh_search():
     t, X, Y, Z = tXYZ["t"].squeeze(), tXYZ["X"].squeeze(), tXYZ["Y"].squeeze(), tXYZ["Z"].squeeze()
     dt = t[1] - t[0]
 
-    for t_i in range(len(t_lims) - 1)[3:4]:
+    fp_log = "tmp_search_log2.log"
+
+    keep_running = True
+    for t_i in range(len(t_lims) - 1)[1:2]:
+        if not keep_running:
+            continue
         for iter_i in range(3):
             start_t = t_lims[t_i]
             end_t = t_lims[t_i + 1]
@@ -97,7 +102,7 @@ def run_mbh_search():
             df = fd[1] - fd[0]
             data_length = len(fd)
 
-            fp = f"test_mbh_search_{start_t:.4e}_{end_t:.4e}_{iter_i}.h5"
+            fp = f"test_mbh_2_search_{start_t:.4e}_{end_t:.4e}_{iter_i}.h5"
             if fp in os.listdir():
                 continue
 
@@ -344,7 +349,12 @@ def run_mbh_search():
             # may need to add the heterodyning updater
 
             nsteps = 10000
-            out = sampler.run_mcmc(start_state, nsteps, progress=True, thin_by=50, burn=0)
+
+            with open(fp_log, "a") as fptmp:
+                fptmp.write(f"starting initial run, {iter_i}, {start_t}, {end_t}\n")
+            out = sampler.run_mcmc(start_state, nsteps, progress=False, thin_by=50, burn=0)
+            with open(fp_log, "a") as fptmp:
+                fptmp.write(f"finished initial run, {iter_i}, {start_t}, {end_t}\n")
 
             mbh_injection_params = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
 
@@ -397,11 +407,33 @@ def run_mbh_search():
             )
 
             nsteps = 10000
-            print("start second part of run")
-            out = sampler.run_mcmc(start_state, nsteps, progress=True, thin_by=50, burn=0)
-            print("finished iter", iter_i)
-            """mbh_best = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
-            print("found:", mbh_best)
+            with open(fp_log, "a") as fptmp:
+                fptmp.write(f"start second part of run, {iter_i}, {start_t}, {end_t}\n")
+            out = sampler.run_mcmc(start_state, nsteps, progress=False, thin_by=50, burn=0)
+            with open(fp_log, "a") as fptmp:
+                fptmp.write(f"finished iter, {iter_i}, {start_t}, {end_t}\n")
+            mbh_best = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
+
+            like_tmp = like(mbh_best[None, :], phase_marginalize=False, **mbh_kwargs)
+            # print(mbh_best, like.template_model.d_h)
+            phase_change = np.angle(like.template_model.d_h)
+            mbh_best[5] = (mbh_best[5] + 1/ 2 * phase_change) % (2 * np.pi)
+
+            check_like_tmp = like(mbh_best[None, :], phase_marginalize=False, **mbh_kwargs)
+
+            opt_snr = like.template_model.h_h.real ** (1/2)
+            det_snr = like.template_model.d_h.real / like.template_model.h_h.real ** (1/2)
+
+            init_snr_lim = 20.0
+
+            with open(fp_log, "a") as fptmp:
+                fptmp.write(f"opt snr: {opt_snr}, det snr: {det_snr}, {iter_i}, {start_t}, {end_t}\n")
+            if opt_snr < init_snr_lim or det_snr < init_snr_lim:
+                with open(fp_log, "a") as fptmp:
+                    fptmp.write(f"finishing this segment, {iter_i}, {start_t}, {end_t}\n")
+                keep_running = False
+            
+            """print("found:", mbh_best)
             if "mbh_found_points.npy" in os.listdir():
                 imported = False
 
