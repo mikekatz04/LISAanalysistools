@@ -141,103 +141,97 @@ class GBSpecialStretchMove(GroupStretchMove):
         inds = branch.inds
         supps = branch.branch_supplimental
         ntemps, nwalkers, nleaves_max, ndim = branch.shape
-        all_remaining_freqs = [coords[i][inds[i]][:, 1] for i in range(coords.shape[0])]
+        all_remaining_freqs = coords[inds][:, 1]
 
-        all_remaining_cords = [coords[i][inds[i]] for i in range(coords.shape[0])]
+        all_remaining_cords = coords[inds]
 
-        num_remaining = [len(tmp) for tmp in all_remaining_freqs]
+        num_remaining = len(all_remaining_freqs)
 
         # TODO: improve this?
-        self.inds_freqs_sorted = [
-            self.xp.asarray(np.argsort(freqs)) for freqs in all_remaining_freqs
-        ]
-        self.freqs_sorted = [
-            self.xp.asarray(np.sort(freqs)) for freqs in all_remaining_freqs
-        ]
-        self.all_coords_sorted = [
-            self.xp.asarray(coords)[sort]
-            for coords, sort in zip(all_remaining_cords, self.inds_freqs_sorted)
+        self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
+        self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
+        self.all_coords_sorted = self.xp.asarray(all_remaining_cords)[
+            self.inds_freqs_sorted
         ]
 
         start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
-        for t in range(ntemps):
-            freqs_sorted_here = self.freqs_sorted[t].get()
-            freqs_remaining_here = all_remaining_freqs[t]
+        freqs_sorted_here = self.freqs_sorted.get()
+        freqs_remaining_here = all_remaining_freqs
 
-            start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
+        start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
 
-            best_index = (
-                np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right")
-                - 1
-            )
-            best_index[best_index < self.nfriends] = self.nfriends
-            best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = (
-                len(freqs_sorted_here) - self.nfriends
-            )
-            check_inds = (
-                best_index[:, None]
-                + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1))
-                - self.nfriends
-            )
+        best_index = (
+            np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right") - 1
+        )
+        best_index[best_index < self.nfriends] = self.nfriends
+        best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = (
+            len(freqs_sorted_here) - self.nfriends
+        )
+        check_inds = (
+            best_index[:, None]
+            + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1))
+            - self.nfriends
+        )
 
-            check_freqs = freqs_sorted_here[check_inds]
-            freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
+        check_freqs = freqs_sorted_here[check_inds]
+        freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
 
-            keep_min_inds = np.argsort(freq_distance, axis=-1)[:, : self.nfriends].min(
-                axis=-1
-            )
-            start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
+        keep_min_inds = np.argsort(freq_distance, axis=-1)[:, : self.nfriends].min(
+            axis=-1
+        )
+        start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
 
-            start_inds_freq_out[t, inds[t]] = start_inds_freq
+        start_inds_freq_out[inds] = start_inds_freq
+
+        start_inds_freq_out[~inds] = -1
 
         if "friend_start_inds" not in supps:
             supps.add_objects({"friend_start_inds": start_inds_freq_out})
         else:
             supps[:] = {"friend_start_inds": start_inds_freq_out}
 
-        self.all_friends_start_inds_sorted = [
-            self.xp.asarray(start_inds_freq_out[t, inds[t]])[sort]
-            for t, sort in enumerate(self.inds_freqs_sorted)
-        ]
+        self.all_friends_start_inds_sorted = self.xp.asarray(
+            start_inds_freq_out[inds][self.inds_freqs_sorted.get()]
+        )
 
     def find_friends(self, name, gb_points_to_move, s_inds=None):
         if s_inds is None:
             raise ValueError
 
-        inds_points_to_move = self.xp.asarray(s_inds)
+        inds_points_to_move = self.xp.asarray(s_inds.flatten())
 
         half_friends = int(self.nfriends / 2)
 
-        gb_points_for_move = gb_points_to_move.copy()
+        gb_points_for_move = gb_points_to_move.reshape(-1, 8).copy()
 
         if not hasattr(self, "ntemps"):
             self.ntemps = 1
 
-        output_friends = []
-        for t in range(self.ntemps):
-            freqs_to_move = gb_points_to_move[t][inds_points_to_move[t]][:, 1]
-            # freqs_sorted_here = self.freqs_sorted[t]
-            # inds_freqs_sorted_here = self.inds_freqs_sorted[t]
-            inds_start_freq_to_move = self.current_friends_start_inds[
-                t, inds_points_to_move[t].reshape(self.nwalkers, -1)
-            ]
+        # output_friends = []
+        # freqs_to_move = gb_points_to_move[inds_points_to_move][:, 1]
+        # freqs_sorted_here = self.freqs_sorted[t]
+        # inds_freqs_sorted_here = self.inds_freqs_sorted[t]
 
-            deviation = self.xp.random.randint(
-                0, self.nfriends, size=len(inds_start_freq_to_move)
-            )
+        inds_start_freq_to_move = self.current_friends_start_inds[
+            inds_points_to_move.reshape(self.ntemps, self.nwalkers, -1)
+        ]
 
-            inds_keep_friends = inds_start_freq_to_move + deviation
+        deviation = self.xp.random.randint(
+            0, self.nfriends, size=len(inds_start_freq_to_move)
+        )
 
-            inds_keep_friends[inds_keep_friends < 0] = 0
-            inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted[t])] = (
-                len(self.all_coords_sorted[t]) - 1
-            )
+        inds_keep_friends = inds_start_freq_to_move + deviation
 
-            gb_points_for_move[t, inds_points_to_move[t]] = self.all_coords_sorted[t][
-                inds_keep_friends
-            ]
-        breakpoint()
-        return gb_points_for_move
+        inds_keep_friends[inds_keep_friends < 0] = 0
+        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
+            len(self.all_coords_sorted) - 1
+        )
+
+        gb_points_for_move[inds_points_to_move] = self.all_coords_sorted[
+            inds_keep_friends
+        ]
+
+        return gb_points_for_move.reshape(self.ntemps, -1, 1, 8)
 
     def setup(self, branches):
         for i, (name, branch) in enumerate(branches.items()):
@@ -249,9 +243,34 @@ class GBSpecialStretchMove(GroupStretchMove):
 
             # update any shifted start inds due to tempering (need to do this every non-rj move)
             if not self.is_rj_prop:
+                # fix the ones that have been added in RJ
+                fix = (
+                    branch.branch_supplimental.holder["friend_start_inds"][:] == -1
+                ) & branch.inds
+
+                if np.any(fix):
+                    new_freqs = xp.asarray(branch.coords[fix][:, 1])
+                    # TODO: is there a better way of doing this?
+
+                    branch.branch_supplimental.holder["friend_start_inds"][fix] = (
+                        (
+                            xp.searchsorted(self.freqs_sorted, new_freqs, side="right")
+                            - 1
+                        )
+                        * (
+                            (new_freqs > self.freqs_sorted[0])
+                            & (new_freqs < self.freqs_sorted[-1])
+                        )
+                        + 0 * (new_freqs < self.freqs_sorted[0])
+                        + (len(self.freqs_sorted) - 1)
+                        * (new_freqs > self.freqs_sorted[-1])
+                    ).get()
+
                 self.current_friends_start_inds = self.xp.asarray(
                     branch.branch_supplimental.holder["friend_start_inds"][:]
                 )
+
+            self.mempool.free_all_blocks()
 
     def run_ll_part_comp(self, data_index, noise_index, start_inds, lengths):
         assert self.xp.all(data_index == noise_index)
@@ -793,6 +812,9 @@ class GBSpecialStretchMove(GroupStretchMove):
             size=(~gb_inds).sum().item(),
         )
 
+        # for testing removal only
+        # gb_keep_inds_special[~gb_inds] = False
+
         print("num not there yet:", gb_keep_inds_special[~gb_inds].sum())
         gb_coords_orig = gb_coords.copy()
 
@@ -864,7 +886,6 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         # for testing
         #  factors[:] = 1e10
-
         return (
             gb_coords,
             gb_inds,
@@ -923,7 +944,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             ).astype(int)
             > 1
         )
-        breakpoint()
+
         gb_inds = gb_inds_into_proposal.reshape(ntemps, nwalkers, nleaves_max)
         gb_inds[remove] = False
 
@@ -987,6 +1008,13 @@ class GBSpecialStretchMove(GroupStretchMove):
         for branch in state.branches.values():
             ntemps, nwalkers, nleaves_, ndim_ = branch.shape
             ndim_total += ndim_ * nleaves_
+
+        # for testing
+        """if not self.is_rj_prop:
+            self.temperature_control.swaps_accepted = np.zeros(ntemps - 1)
+            self.temperature_control.swaps_proposed = np.zeros(ntemps - 1)
+
+            return state, np.zeros((ntemps, nwalkers))"""
 
         # ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
         # if np.abs(state.log_like - ll_after).max()  > 1e-5:
@@ -1253,25 +1281,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                     + band_indices[keep]
                 ) * 1e3 + params_curr_in[:, 1] * 1e3
                 sort_special_for_ind_deter1 = self.xp.argsort(special_for_ind_deter1)
-                start_inds1 = (
-                    (
-                        params_curr_in[:, 1][sort_special_for_ind_deter1][
-                            uni_index_special_band_inds_here
-                        ]
-                        / self.df
-                    ).astype(int)
-                    - (N_now / 2)
-                    - buffer
-                ).astype(int)
+                start_inds1_tmp = (params_curr_in[:, 1][sort_special_for_ind_deter1][uni_index_special_band_inds_here]/ self.df).astype(int)
+                    
+                final_inds1_tmp = (params_curr_in[:, 1][sort_special_for_ind_deter1][finding_final]/ self.df).astype(int)
 
-                final_inds1 = (
-                    (
-                        params_curr_in[:, 1][sort_special_for_ind_deter1][finding_final]
-                        / self.df
-                    ).astype(int)
-                    + (N_now / 2)
-                    + buffer
-                ).astype(int)
+                inds1_tmp = self.xp.sort(self.xp.asarray([start_inds1_tmp, final_inds1_tmp]).T, axis=-1)
+
+                start_inds1 = (inds1_tmp[:, 0] - (N_now / 2) - buffer).astype(int)
+                final_inds1 = (inds1_tmp[:, 1] + (N_now / 2) + buffer).astype(int)
 
                 special_for_ind_deter2 = (
                     (temp_inds[keep] * nwalkers + walker_inds[keep])
@@ -1279,25 +1296,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                     + band_indices[keep]
                 ) * 1e3 + params_prop_in[:, 1] * 1e3
                 sort_special_for_ind_deter2 = self.xp.argsort(special_for_ind_deter2)
-                start_inds2 = (
-                    (
-                        params_prop_in[:, 1][sort_special_for_ind_deter2][
-                            uni_index_special_band_inds_here
-                        ]
-                        / self.df
-                    ).astype(int)
-                    - (N_now / 2)
-                    - buffer
-                ).astype(int)
 
-                final_inds2 = (
-                    (
-                        params_prop_in[:, 1][sort_special_for_ind_deter2][finding_final]
-                        / self.df
-                    ).astype(int)
-                    + (N_now / 2)
-                    + buffer
-                ).astype(int)
+                start_inds2_tmp = (params_prop_in[:, 1][sort_special_for_ind_deter2][uni_index_special_band_inds_here]/ self.df).astype(int)
+                final_inds2_tmp = (params_prop_in[:, 1][sort_special_for_ind_deter2][finding_final]/ self.df).astype(int)
+
+                inds2_tmp = self.xp.sort(self.xp.asarray([start_inds2_tmp, final_inds2_tmp]).T, axis=-1)
+
+                start_inds2 = (inds2_tmp[:, 0] - (N_now / 2) - buffer).astype(int)
+                final_inds2 = (inds2_tmp[:, 1] + (N_now / 2) + buffer).astype(int)
 
                 start_inds = self.xp.min(
                     self.xp.asarray([start_inds1, start_inds2]), axis=0
@@ -1322,8 +1328,11 @@ class GBSpecialStretchMove(GroupStretchMove):
                 num_bands_here = len(band_inds)
 
                 # ll_before = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
-
-                assert lengths.min() >= N_now + 2 * buffer
+                try:
+                    assert lengths.min() >= N_now + 2 * buffer
+                except AssertionError:
+                    breakpoint()
+                    
                 inputs_now = (
                     L_contribution_here,
                     p_contribution_here,
@@ -1472,6 +1481,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 .reshape(ntemps, nwalkers)
             )
             # print(np.abs(new_state.log_like - ll_after).max())
+            store_max_diff = np.abs(new_state.log_like - ll_after).max()
             if np.abs(new_state.log_like - ll_after).max() > 1e-2:
                 if np.abs(new_state.log_like - ll_after).max() > 1e0:
                     breakpoint()
@@ -1525,14 +1535,25 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         # get accepted fraction
         if not self.is_rj_prop:
-            accepted_check = np.all(
+            assert np.all(
+                new_state.branches_inds["gb_fixed"] == state.branches_inds["gb_fixed"]
+            )
+            accepted_check_tmp = np.zeros_like(
+                new_state.branches_inds["gb_fixed"], dtype=bool
+            )
+            accepted_check_tmp[new_state.branches_inds["gb_fixed"]] = np.all(
                 np.abs(
-                    new_state.branches_coords["gb_fixed"]
-                    - state.branches_coords["gb_fixed"]
+                    new_state.branches_coords["gb_fixed"][
+                        new_state.branches_inds["gb_fixed"]
+                    ]
+                    - state.branches_coords["gb_fixed"][state.branches_inds["gb_fixed"]]
                 )
                 > 0.0,
                 axis=-1,
-            ).sum(axis=(1, 2)) / new_state.branches_inds["gb_fixed"].sum(axis=(1, 2))
+            )
+            accepted_check = accepted_check_tmp.sum(
+                axis=(1, 2)
+            ) / new_state.branches_inds["gb_fixed"].sum(axis=(1, 2))
         else:
             # TODO: fixup based on rj changes
             accepted_check = (
@@ -1543,10 +1564,6 @@ class GBSpecialStretchMove(GroupStretchMove):
                 > 0.0
             ).sum(axis=(1, 2)) / gb_inds.get().sum(axis=(1, 2))
 
-        print(
-            accepted_check,
-            new_state.branches_inds["gb_fixed"].sum(axis=-1).mean(axis=-1),
-        )
         # manually tell temperatures how real overall acceptance fraction is
         number_of_walkers_for_accepted = np.floor(nwalkers * accepted_check).astype(int)
 
@@ -1575,27 +1592,31 @@ class GBSpecialStretchMove(GroupStretchMove):
         # breakpoint()
 
         # print(self.accepted / self.num_proposals)
+
+        self.temperature_control.swaps_accepted = np.zeros(ntemps - 1)
+        self.temperature_control.swaps_proposed = np.zeros(ntemps - 1)
+
         if (
             self.temperature_control is not None
             and self.time % 1 == 0
             and self.ntemps > 1
+            and self.is_rj_prop
+            # and False
         ):
-            st = time.perf_counter()
+            st1 = time.perf_counter()
             # new_state = self.temperature_control.temper_comps(new_state)
             # et = time.perf_counter()
 
             #
-            self.temperature_control.swaps_accepted = np.zeros(ntemps - 1)
-            self.temperature_control.swaps_proposed = np.zeros(ntemps - 1)
+            # self.temperature_control.swaps_accepted = np.zeros(ntemps - 1)
+            # self.temperature_control.swaps_proposed = np.zeros(ntemps - 1)
             betas = self.temperature_control.betas
             for i in range(ntemps - 1, 0, -1):
                 bi = betas[i]
                 bi1 = betas[i - 1]
 
-                dbeta = bi1 - bi
-
-                iperm = xp.random.permutation(nwalkers)
-                i1perm = xp.random.permutation(nwalkers)
+                iperm = xp.arange(nwalkers)  # xp.random.permutation(nwalkers)
+                i1perm = xp.arange(nwalkers)  # xp.random.permutation(nwalkers)
 
                 # need to calculate switch likelihoods
 
@@ -1661,13 +1682,19 @@ class GBSpecialStretchMove(GroupStretchMove):
                 bands_iperm[xp.isnan(f_iperm)] = -1
                 bands_i1perm[xp.isnan(f_i1perm)] = -1
                 # can probably go to 2 iterations, but will need to check Likelihood difference
+
                 for odds_evens in range(3):
                     keep_here_i = (bands_iperm % 3 == odds_evens) & (
                         bands_iperm >= 0
-                    )  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
+                    )  #  & (bands_iperm == 500) & (walker_map_iperm == 0)  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
                     keep_here_i1 = (bands_i1perm % 3 == odds_evens) & (
                         bands_i1perm >= 0
-                    )  # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
+                    )  #  & (bands_i1perm == 500) & (walker_map_i1perm == 0) # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
+
+                    if not xp.any(keep_here_i) and not xp.any(keep_here_i1):
+                        continue
+                    elif not xp.any(keep_here_i) or not xp.any(keep_here_i1):
+                        breakpoint()
 
                     bands_here_i = bands_iperm[keep_here_i]
                     bands_here_i1 = bands_i1perm[keep_here_i1]
@@ -1859,12 +1886,17 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                     half = start_inds_band.shape[0]
 
-                    delta_logl_i = ll_contrib_after[:half] - ll_contrib_before[:half]
-                    delta_logl_i1 = ll_contrib_after[half:] - ll_contrib_before[half:]
+                    logl_i_initial = ll_contrib_before[:half]
+                    logl_i_final = ll_contrib_after[:half]
 
-                    # breakpoint()
+                    logl_i1_initial = ll_contrib_before[half:]
+                    logl_i1_final = ll_contrib_after[half:]
 
-                    paccept = dbeta * 1.0 / 2.0 * (delta_logl_i - delta_logl_i1)
+                    delta_logl_i = (logl_i_final - logl_i_initial)
+                    delta_logl_i1 = (logl_i1_final - logl_i1_initial)
+
+                    # dbeta = bi1 - bi
+                    paccept = bi * delta_logl_i + bi1 * delta_logl_i1
                     raccept = xp.log(xp.random.uniform(size=paccept.shape[0]))
 
                     # How many swaps were accepted?
@@ -2038,7 +2070,6 @@ class GBSpecialStretchMove(GroupStretchMove):
                     new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][
                         i - 1, keep_walkers_here_i1_add.get(), leaves_add_i1.get()
                     ] = tmp_N_vals_i
-                    breakpoint()
                     new_state.branches["gb_fixed"].branch_supplimental.holder[
                         "friend_start_inds"
                     ][
@@ -2190,18 +2221,17 @@ class GBSpecialStretchMove(GroupStretchMove):
             new_state.log_prior = log_prior_new_per_bin.sum(axis=-1).get()
 
             self.temperature_control.adapt_temps()
+            new_state.betas = self.temperature_control.betas.copy()
             # breakpoint()
             self.mempool.free_all_blocks()
-            et = time.perf_counter()
-            print("temps ", (et - st))
-            ll_after = (
+            et1 = time.perf_counter()
+            print("temps ", (et1 - st1), self.temperature_control.betas)
+            """ll_after = (
                 self.mgh.get_ll(include_psd_info=True)
                 .flatten()[new_state.supplimental[:]["overall_inds"]]
                 .reshape(ntemps, nwalkers)
             )
-            check_here = np.abs(new_state.log_like - ll_after).max()
-
-            breakpoint()
+            check_here = np.abs(new_state.log_like - ll_after).max()"""
 
         else:
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
@@ -2217,7 +2247,26 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
         et = time.perf_counter()
-        print("in-model end", (et - st), self.is_rj_prop)
+
+        print(
+            "end",
+            (et - st),
+            "\nrj:",
+            self.is_rj_prop,
+            "\naccepted:",
+            accepted_check,
+            "\nnum binaries:",
+            new_state.branches_inds["gb_fixed"].sum(axis=-1).mean(axis=-1),
+            "\ntemps:",
+            new_state.betas,
+            "\nll:",
+            new_state.log_like.mean(axis=-1),
+            "\nworst comp:",
+            store_max_diff,
+            "\nswap percentage:",
+            self.temperature_control.swaps_accepted / self.temperature_control.swaps_proposed,
+            "\n\n\n",
+        )
 
         # breakpoint()
         return new_state, accepted

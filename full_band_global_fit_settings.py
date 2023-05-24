@@ -20,7 +20,8 @@ from lisatools.utils.utility import AET
 try:
     import cupy as xp
     from cupy.cuda.runtime import setDevice
-    #setDevice(0)
+
+    # setDevice(0)
 
     gpu_available = True
 except ModuleNotFoundError:
@@ -58,9 +59,11 @@ from eryn.state import BranchSupplimental
 
 from lisatools.sampling.moves.gbmultipletryrj import GBMutlipleTryRJ
 from lisatools.sensitivity import flat_psd_function, noisepsd_AE
+
 # from lisatools.sampling.moves.globalfish import MultiSourceFisherProposal
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 from lisatools.sampling.moves.placeholder import PlaceHolder
@@ -69,6 +72,7 @@ from lisatools.sampling.moves.placeholder import PlaceHolder
 try:
     import cupy as xp
     from cupy.cuda.runtime import setDevice
+
     # setDevice(7)
 
     gpu_available = True
@@ -77,7 +81,7 @@ except ModuleNotFoundError:
 
 random_seed = 1024
 np.random.seed(random_seed)
-#warnings.filterwarnings("ignore")
+# warnings.filterwarnings("ignore")
 
 oversample = 4
 
@@ -91,9 +95,15 @@ fp_mix_final = fp_mix[:-3] + "_final.h5"
 current_start_points_file = "full_band_current_start_points.npy"
 current_start_points_snr_file = "full_band_current_snrs_search.npy"
 sub_band_fails_file = "full_band_sub_band_fails.npy"
-current_residuals_file_iterative_search = "full_band_current_residuals_file_iterative_search.npy"
-current_iterative_search_sub_file_base = "full_band_current_iterative_search_sub_file_base"
-current_found_coords_for_starting_mix_file = "full_band_current_found_coords_for_starting_mix_file.npy"
+current_residuals_file_iterative_search = (
+    "full_band_current_residuals_file_iterative_search.npy"
+)
+current_iterative_search_sub_file_base = (
+    "full_band_current_iterative_search_sub_file_base"
+)
+current_found_coords_for_starting_mix_file = (
+    "full_band_current_found_coords_for_starting_mix_file.npy"
+)
 current_save_state_file = "save_state_temp.pickle"
 current_save_state_file_psd = "psd_save_state_temp.pickle"
 
@@ -106,7 +116,7 @@ gb = GBGPU(use_gpu=use_gpu)
 
 ndim_full = 9
 
-delta_safe = 1e-5 
+delta_safe = 1e-5
 
 A_lims = [7e-24, 1e-21]
 f0_lims = [0.05e-3, 2.5e-2]
@@ -133,29 +143,35 @@ fp_mbh_template_search = "last_mbh_cold_chain_info_search"
 fp_psd_residual_search = "last_psd_cold_chain_info_search"
 fp_gb_template_search = "last_gb_cold_chain_info_search"
 
-fp_psd_search_initial = "initial_search_develop_full_band_psd.h5"
+fp_psd_search_initial = "initial_search_develop_full_band_psd_2.h5"
 fp_psd_search = "search_develop_full_band_psd.h5"
 fp_mbh_search = "search_develop_full_band_mbh.h5"
 
-fp_pe = "develop_full_band_8.h5"
+fp_pe = "develop_full_band_13.h5"
 fp_psd_pe = "develop_full_band_psd_3.h5"
 fp_mbh_pe = "develop_full_band_mbh.h5"
 folder = "./"
 import os
+
 fp_old = fp_pe  # "full_half_mHz_band_pe_output_after_prior_extension.h5"
 
 with h5py.File("LDC2_sangria_training_v2.h5") as f:
     tXYZ = f["obs"]["tdi"][:]
 
     # remove mbhb and igb
-    for source in ["igb", "vgb"]:  # "mbhb", 
+    for source in ["igb", "vgb"]:  # "mbhb",
         change_arr = f["sky"][source]["tdi"][:]
         for change in ["X", "Y", "Z"]:
             tXYZ[change] -= change_arr[change]
 
     # tXYZ = f["sky"]["dgb"]["tdi"][:]
 
-t, X, Y, Z = tXYZ["t"].squeeze(), tXYZ["X"].squeeze(), tXYZ["Y"].squeeze(), tXYZ["Z"].squeeze()
+t, X, Y, Z = (
+    tXYZ["t"].squeeze(),
+    tXYZ["X"].squeeze(),
+    tXYZ["Y"].squeeze(),
+    tXYZ["Z"].squeeze(),
+)
 dt = t[1] - t[0]
 
 Nobs = len(t)
@@ -169,17 +185,20 @@ if Nobs > int(YEAR / dt):
 Tobs = Nobs * dt
 df = 1 / Tobs
 
-buffer = 2 ** 12
+buffer = 2**12
 fmin = 0.0  # f0_lims[0] - buffer * df
 fmax = f0_lims[1]
 start_freq_ind = int(fmin / df)
 end_freq_ind = int(fmax / df)
 data_length = int(fmax / df) - start_freq_ind + 1
 
-# fucking dt 
+# fucking dt
 Xf, Yf, Zf = (np.fft.rfft(X) * dt, np.fft.rfft(Y) * dt, np.fft.rfft(Z) * dt)
 Af, Ef, Tf = AET(Xf, Yf, Zf)
-A_inj, E_inj = Af[start_freq_ind:end_freq_ind + 1], Ef[start_freq_ind:end_freq_ind + 1]
+A_inj, E_inj = (
+    Af[start_freq_ind : end_freq_ind + 1],
+    Ef[start_freq_ind : end_freq_ind + 1],
+)
 
 fd = np.arange(start_freq_ind, end_freq_ind + 1) * df
 
@@ -197,7 +216,9 @@ psd_in = [
 supps_base_shape = (ntemps, nwalkers)
 
 # TODO: check beta versus theta
-waveform_kwargs = dict(N=None, dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample)
+waveform_kwargs = dict(
+    N=None, dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample
+)
 
 nfriends = 40
 L = 2.5e9
@@ -208,12 +229,12 @@ amp_transform = AmplitudeFromSNR(L, Tobs, model="sangria")
 # TODO: think about if there is anything else that would nice to store in the backend.
 
 transform_fn_in = {
-    #0: (lambda x: np.exp(x)),
+    # 0: (lambda x: np.exp(x)),
     1: (lambda x: x * 1e-3),
     5: (lambda x: np.arccos(x)),
     8: (lambda x: np.arcsin(x)),
-    #(1, 2, 3): (lambda f0, fdot, fddot: (f0, fdot, 11 / 3.0 * fdot ** 2 / f0)),
-    (0, 1): amp_transform
+    # (1, 2, 3): (lambda f0, fdot, fddot: (f0, fdot, 11 / 3.0 * fdot ** 2 / f0)),
+    (0, 1): amp_transform,
 }
 
 
@@ -225,34 +246,44 @@ transform_fn = TransformContainer(
 rho_star = 5.0
 snr_prior = SNRPrior(rho_star)
 
-det_gb_groups = DetermineGBGroups(gb, transform_fn={"gb": transform_fn, "gb_fixed": transform_fn}, waveform_kwargs=waveform_kwargs)
+det_gb_groups = DetermineGBGroups(
+    gb,
+    transform_fn={"gb": transform_fn, "gb_fixed": transform_fn},
+    waveform_kwargs=waveform_kwargs,
+)
 waveform_kwargs_tmp = waveform_kwargs.copy()
 waveform_kwargs_tmp["start_freq_ind"] = start_freq_ind
-get_last_gb_state = GetLastGBState(gb, transform_fn={"gb": transform_fn, "gb_fixed": transform_fn}, waveform_kwargs=waveform_kwargs_tmp)
+get_last_gb_state = GetLastGBState(
+    gb,
+    transform_fn={"gb": transform_fn, "gb_fixed": transform_fn},
+    waveform_kwargs=waveform_kwargs_tmp,
+)
 default_priors_gb = {
     0: snr_prior,
-    1: uniform_dist(*(np.asarray(f0_lims) * 1e3)),  # special mapping for RJ (we care about changes in prior, uniform there are no changes)
+    1: uniform_dist(
+        *(np.asarray(f0_lims) * 1e3)
+    ),  # special mapping for RJ (we care about changes in prior, uniform there are no changes)
     2: uniform_dist(*fdot_lims),
     3: uniform_dist(*phi0_lims),
     4: uniform_dist(*np.cos(iota_lims)),
     5: uniform_dist(*psi_lims),
     6: uniform_dist(*lam_lims),
     7: uniform_dist(*np.sin(beta_sky_lims)),
-    #(0, 1): SNRPrior(10.0, Tobs),
+    # (0, 1): SNRPrior(10.0, Tobs),
 }
 
 generate_dists = deepcopy(default_priors_gb)
 
-snr_lim = inital_snr_lim = 45.0 # 11.0  # 85.0
+snr_lim = inital_snr_lim = 45.0  # 11.0  # 85.0
 dSNR = 40.0
 generate_dists[0] = uniform_dist(snr_lim, snr_lim + dSNR)
 generate_snr_ladder = ProbDistContainer(generate_dists)
 
 priors_psd = {
-    0: uniform_dist(6.e-12, 20.e-12),  # Soms_d
-    1: uniform_dist(2.e-15,20.e-15),  # Sa_a
-    2: uniform_dist(6.0e-12, 20.e-12),  # Soms_d
-    3: uniform_dist(2.e-15, 20.e-15),  # Sa_a
+    0: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
+    1: uniform_dist(2.0e-15, 20.0e-15),  # Sa_a
+    2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
+    3: uniform_dist(2.0e-15, 20.0e-15),  # Sa_a
 }
 
 priors_galfor = {
@@ -264,8 +295,8 @@ priors_galfor = {
 }
 
 priors = {
-    "gb": ProbDistContainer(default_priors_gb), 
-    "gb_fixed": ProbDistContainer(default_priors_gb), 
+    "gb": ProbDistContainer(default_priors_gb),
+    "gb_fixed": ProbDistContainer(default_priors_gb),
     "psd": ProbDistContainer(priors_psd),
     "galfor": ProbDistContainer(priors_galfor),
 }
@@ -274,7 +305,12 @@ priors = {
 # injection_params[:, 0] = injection_params[:, -1].copy()
 # injection_params[:, -1] = temp.copy()
 
-periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}, "gb_fixed": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}, "psd": {}, "galfor": {}}
+periodic = {
+    "gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi},
+    "gb_fixed": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi},
+    "psd": {},
+    "galfor": {},
+}
 
 
 # adjust for frequencies
@@ -282,11 +318,13 @@ f0_lims_in = f0_lims.copy()
 
 # TODO: make wider because this is knowning the limits?
 f0_lims_in[0] = 0.3e-3
-#f0_lims_in[1] = 0.8e-3
+# f0_lims_in[1] = 0.8e-3
 
 low_fs = np.arange(f0_lims_in[0], 0.001 - 4 * 128 * df, 2 * 128 * df)
 mid_fs = np.arange(0.001, 0.01 - 4 * 512 * df, 2 * 256 * df)
-high_fs = np.append(np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]]))
+high_fs = np.append(
+    np.arange(0.01, f0_lims_in[-1], 2 * 1024 * df), np.array([f0_lims_in[-1]])
+)
 
 # breakpoint()
 """
@@ -298,7 +336,9 @@ search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
 
 low_fs_propose = np.arange(f0_lims_in[0], 0.001 - 2 * 128 * df, 128 * df)
 mid_fs_propose = np.arange(0.001, 0.01 - 2 * 512 * df, 256 * df)
-high_fs_propose = np.append(np.arange(0.01, f0_lims_in[-1], 1024 * df), np.array([f0_lims_in[-1]]))
+high_fs_propose = np.append(
+    np.arange(0.01, f0_lims_in[-1], 1024 * df), np.array([f0_lims_in[-1]])
+)
 
 propose_f_bin_lims = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])
 search_f_bin_lims = propose_f_bin_lims
@@ -312,12 +352,20 @@ if current_snrs_file in os.listdir():
     snrs_individual = list(np.load(current_snrs_file))
 
 else:
-
     with h5py.File("LDC2_sangria_training_v2.h5") as f:
         dgb = f["sky"]["dgb"]["cat"][:]
 
     # out_params = np.load(current_param_file)
-    params_keys = ["Amplitude", "Frequency", "FrequencyDerivative", "InitialPhase", "Inclination", "Polarization", "EclipticLongitude", "EclipticLatitude"]
+    params_keys = [
+        "Amplitude",
+        "Frequency",
+        "FrequencyDerivative",
+        "InitialPhase",
+        "Inclination",
+        "Polarization",
+        "EclipticLongitude",
+        "EclipticLatitude",
+    ]
     f0 = dgb["Frequency"].squeeze()
     keep_inds = np.where((f0 < f0_lims[-1]) & (f0 > f0_lims[0]))[0]
 
@@ -327,17 +375,27 @@ else:
 
     f0 = out_params[:, 1]
 
-    #keep = np.where((f0 > f0_lims[0]) & (f0 < f0_lims[1]))
-    #breakpoint()
-    #out_params = out_params[keep]
+    # keep = np.where((f0 > f0_lims[0]) & (f0 < f0_lims[1]))
+    # breakpoint()
+    # out_params = out_params[keep]
     assert out_params.shape[1] == 9
     out_params[:, 3] = 0.0
     check_injection = out_params.copy()
     num_bin = out_params.shape[0]
 
-    amp_in, f0_in, fdot_in, fddot_in, phi0_in, iota_in, psi_in, lam_in, beta_sky_in = out_params.T.copy()
+    (
+        amp_in,
+        f0_in,
+        fdot_in,
+        fddot_in,
+        phi0_in,
+        iota_in,
+        psi_in,
+        lam_in,
+        beta_sky_in,
+    ) = out_params.T.copy()
     # phi0 is flipped !
-    phi0_in *= -1.
+    phi0_in *= -1.0
 
     injection_params = np.array(
         [
@@ -360,9 +418,15 @@ else:
     xp.cuda.runtime.setDevice(7)
     gb.d_d = 0.0
 
-    _ = gb.get_ll(out_params, xp.asarray([A_inj, E_inj])[None, :], xp.asarray(psd_in)[None, :], start_freq_ind=start_freq_ind, **waveform_kwargs)
+    _ = gb.get_ll(
+        out_params,
+        xp.asarray([A_inj, E_inj])[None, :],
+        xp.asarray(psd_in)[None, :],
+        start_freq_ind=start_freq_ind,
+        **waveform_kwargs
+    )
 
-    optimal_snrs = gb.h_h.real.get() ** (1/2)
+    optimal_snrs = gb.h_h.real.get() ** (1 / 2)
 
     np.save(current_snrs_file[:-4], np.asarray(optimal_snrs))
     snrs_individual = list(np.load(current_snrs_file))
@@ -481,4 +545,3 @@ np.save(fp_psd, psds_out)
 #plt.loglog(fd_here, Sn, color="k", lw=2, ls="--")
 plt.savefig("check_match_A.png")
 breakpoint()"""
-

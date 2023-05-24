@@ -347,9 +347,9 @@ def run_psd_search(A_going_in, E_going_in, gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         stopping_fn=stop,
-        stopping_iterations=-1,
-        update_fn=update,  # sttop_converge_mix,
-        update_iterations=1,
+        stopping_iterations=1,
+        # update_fn=update,  # sttop_converge_mix,
+        # update_iterations=-11,
         provide_groups=False,
         provide_supplimental=False,  # True,
         # TODO: add convergence?
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     E_going_in = np.asarray(E_inj).copy()
 
     # Apsd, Epsd = np.load("best_logl_psd_from_psd_run.npy")
-    mbh_inj = np.load("best_logl_mbhs_from_psd_run.npy")
+    """mbh_inj = np.load("best_logl_mbhs_from_psd_run.npy")
 
     while "best_logl_gbs_from_psd_run.npy" not in os.listdir():  # 
         print(f"best_logl_gbs_from_psd_run.npy not in current directory so far...")
@@ -421,7 +421,7 @@ if __name__ == "__main__":
     E_mbh_going_in = mbh_inj[1]
 
     A_going_in[:] -= A_mbh_going_in
-    E_going_in[:] -= E_mbh_going_in
+    E_going_in[:] -= E_mbh_going_in"""
     
-    output = run_psd_search(A_going_in, E_going_in, 2)
+    output = run_psd_search(A_going_in, E_going_in, 7)
                 

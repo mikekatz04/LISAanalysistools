@@ -17,38 +17,48 @@ from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMo
 import subprocess
 
 import warnings
+
 warnings.filterwarnings("ignore")
 
 stop_here = True
 
 
 from eryn.moves import Move
+
+
 class PlaceHolder(Move):
     def __init__(self, *args, **kwargs):
         super(PlaceHolder, self).__init__(*args, **kwargs)
 
     def propose(self, model, state):
         accepted = np.zeros(state.log_like.shape)
-        self.temperature_control.swaps_accepted = np.zeros(self.temperature_control.ntemps - 1)
+        self.temperature_control.swaps_accepted = np.zeros(
+            self.temperature_control.ntemps - 1
+        )
         return state, accepted
+
 
 class BasicResidualMGHLikelihood:
     def __init__(self, mgh):
         self.mgh = mgh
+
     def __call__(self, *args, supps=None, **kwargs):
         ll_temp = self.mgh.get_ll()
         overall_inds = supps["overal_inds"]
-        
+
         return ll_temp[overall_inds]
+
 
 data = [
     np.asarray(A_inj),
     np.asarray(E_inj),
 ]
 
+
 def shuffle_along_axis(a, axis):
     idx = np.random.rand(*a.shape).argsort(axis=axis)
-    return np.take_along_axis(a,idx,axis=axis)
+    return np.take_along_axis(a, idx, axis=axis)
+
 
 # TODO: fix initial setup for mix where it backs up the likelihood
 
@@ -62,13 +72,16 @@ class PointGeneratorSNR:
         logpdf = self.generate_snr_ladder.logpdf(new_points)
         return (new_points, logpdf)
 
+
 point_generator = PointGeneratorSNR(generate_snr_ladder)
 
 from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
-    def __init__(self, initial_mbhs, mgh, fp_psd, fp_mbh, fp_gb, psd_shape, waveform_kwargs):
+    def __init__(
+        self, initial_mbhs, mgh, fp_psd, fp_mbh, fp_gb, psd_shape, waveform_kwargs
+    ):
         self.mgh = mgh
         self.fp_psd = fp_psd
         self.fp_mbh = fp_mbh
@@ -79,7 +92,6 @@ class UpdateNewResiduals(Update):
         self.output_residual_number = 0
 
     def __call__(self, iter, last_sample, sampler):
-
         """residual_file = "residuals_for_flows"
         psd_file = "psds_for_flows"
         freq_file = "freq_for_flows"
@@ -108,7 +120,7 @@ class UpdateNewResiduals(Update):
         self.mgh.set_psd_from_arrays(
             A_psd_in.reshape(-1, self.psd_shape[-1]),
             E_psd_in.reshape(-1, self.psd_shape[-1]),
-            overall_inds=self.mgh.map
+            overall_inds=self.mgh.map,
         )
         xp.get_default_memory_pool().free_all_blocks()
         # ll_bef = self.mgh.get_ll(include_psd_info=True)
@@ -117,7 +129,7 @@ class UpdateNewResiduals(Update):
         self.mgh.add_templates_from_arrays_to_residuals(
             -1 * A_mbh_remove.reshape(-1, self.psd_shape[-1]),
             -1 * E_mbh_remove.reshape(-1, self.psd_shape[-1]),
-            overall_inds=self.mgh.map
+            overall_inds=self.mgh.map,
         )
         # ll_af = self.mgh.get_ll(include_psd_info=True)
         imported = False
@@ -139,7 +151,7 @@ class UpdateNewResiduals(Update):
         self.mgh.add_templates_from_arrays_to_residuals(
             A_mbh_going_in.reshape(-1, self.psd_shape[-1]),
             E_mbh_going_in.reshape(-1, self.psd_shape[-1]),
-            overall_inds=self.mgh.map
+            overall_inds=self.mgh.map,
         )
         # ll_af = self.mgh.get_ll(include_psd_info=True)
 
@@ -159,30 +171,52 @@ class UpdateNewResiduals(Update):
         E_out = tmp[1][0][self.mgh.map[:nwalkers]].get()
         """
         coords_out_gb_fixed = last_sample.branches_coords["gb_fixed"][0]
-        coords_in = transform_fn.both_transforms(coords_out_gb_fixed[last_sample.branches["gb_fixed"].inds[0]])
-        ntemps_pe, nwalkers_pe, nleaves_max, ndim = last_sample.branches["gb_fixed"].shape
+        coords_in = transform_fn.both_transforms(
+            coords_out_gb_fixed[last_sample.branches["gb_fixed"].inds[0]]
+        )
+        ntemps_pe, nwalkers_pe, nleaves_max, ndim = last_sample.branches[
+            "gb_fixed"
+        ].shape
         xp.get_default_memory_pool().free_all_blocks()
         walker_vals = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)
 
-        data_index = xp.asarray(walker_vals[last_sample.branches["gb_fixed"].inds[0]]).astype(xp.int32)
+        data_index = xp.asarray(
+            walker_vals[last_sample.branches["gb_fixed"].inds[0]]
+        ).astype(xp.int32)
         xp.get_default_memory_pool().free_all_blocks()
         # NEEDS TO BE +1
         factors = +xp.ones_like(data_index, dtype=xp.float64)
         xp.get_default_memory_pool().free_all_blocks()
-        templates_out = [[xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()], [xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()]]
+        templates_out = [
+            [xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()],
+            [xp.zeros((nwalkers_pe, self.psd_shape[-1]), dtype=complex).flatten()],
+        ]
         A_out, E_out = templates_out[0][0], templates_out[1][0]
         data_splits = [np.arange(nwalkers_pe)]
 
         main_gpu = xp.cuda.runtime.getDevice()
 
-        gb.generate_global_template(coords_in, data_index, templates_out, data_length=data_length, factors=factors, data_splits=data_splits, **self.waveform_kwargs)
+        gb.generate_global_template(
+            coords_in,
+            data_index,
+            templates_out,
+            data_length=data_length,
+            factors=factors,
+            data_splits=data_splits,
+            **self.waveform_kwargs,
+        )
 
         xp.cuda.runtime.setDevice(main_gpu)
-        np.save(self.fp_gb, xp.array([A_out.reshape(nwalkers_pe, -1), E_out.reshape(nwalkers_pe, -1)]).transpose((1, 0, 2)).get())
+        np.save(
+            self.fp_gb,
+            xp.array([A_out.reshape(nwalkers_pe, -1), E_out.reshape(nwalkers_pe, -1)])
+            .transpose((1, 0, 2))
+            .get(),
+        )
         xp.get_default_memory_pool().free_all_blocks()
 
-def run_gb_pe(gpu):
 
+def run_gb_pe(gpu):
     while fp_psd + ".npy" not in os.listdir():
         print(f"{fp_psd + '.npy'} not in current directory so far...")
         time.sleep(20)
@@ -205,14 +239,16 @@ def run_gb_pe(gpu):
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
-    
+
     if fp_pe in os.listdir():
         reader = HDFBackend(fp_pe)
         last_sample = reader.get_last_sample()
-        nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[-2]  # will all be the same
+        nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[
+            -2
+        ]  # will all be the same
 
         nleaves_max_fix_new = nleaves_max_fix
-        
+
     elif current_save_state_file in os.listdir():
         with open(current_save_state_file, "rb") as fp_out:
             last_sample = pickle.load(fp_out)
@@ -220,22 +256,62 @@ def run_gb_pe(gpu):
         coords = last_sample.branches_coords
         inds = last_sample.branches_inds
 
-        last_sample = State(coords, inds=inds, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
+        last_sample = State(
+            coords,
+            inds=inds,
+            log_like=last_sample.log_like,
+            log_prior=last_sample.log_prior,
+        )
 
-        nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[-2]  # will all be the same
+        nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[
+            -2
+        ]  # will all be the same
 
         nleaves_max_fix_new = nleaves_max_fix
 
+    elif "mixing_gb_run.pickle" in os.listdir():
+        with open("mixing_gb_run.pickle", "rb") as fp_search_state:
+            end_search_state = pickle.load(fp_search_state)
+
+        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords
+        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds
+
+        start_coords = {
+            "gb_fixed": np.repeat(end_search_gb_coords, repeats=ntemps_pe, axis=0)
+        }
+        start_inds = {
+            "gb_fixed": np.repeat(end_search_gb_inds, repeats=ntemps_pe, axis=0)
+        }
+        start_like = np.repeat(end_search_state.log_like, repeats=ntemps_pe, axis=0)
+        start_prior = np.repeat(end_search_state.log_prior, repeats=ntemps_pe, axis=0)
+
+        last_sample = State(
+            start_coords,
+            inds=start_inds,
+            log_like=start_like,
+            log_prior=start_prior,
+        )
+
+        nleaves_max_fix_new = 15000
+        nleaves_max_fix = end_search_gb_inds.shape[-1]
+
     else:
-        raise FileNotFoundError(current_save_state_file + " and " + fp_pe + " not in current directory")
+        raise FileNotFoundError(
+            current_save_state_file + " and " + fp_pe + " not in current directory"
+        )
 
-    coords_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new, ndim)) 
-    coords_new[:, :, :nleaves_max_fix, :]= last_sample.branches["gb_fixed"].coords[:]
+    coords_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new, ndim))
+    coords_new[:, :, :nleaves_max_fix, :] = last_sample.branches["gb_fixed"].coords[:]
 
-    inds_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool) 
-    inds_new[:, :, :nleaves_max_fix]= last_sample.branches["gb_fixed"].inds[:]
+    inds_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool)
+    inds_new[:, :, :nleaves_max_fix] = last_sample.branches["gb_fixed"].inds[:]
 
-    last_sample = State({"gb_fixed": coords_new}, inds={"gb_fixed": inds_new}, log_like=last_sample.log_like, log_prior=last_sample.log_prior)
+    last_sample = State(
+        {"gb_fixed": coords_new},
+        inds={"gb_fixed": inds_new},
+        log_like=last_sample.log_like,
+        log_prior=last_sample.log_prior,
+    )
 
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -252,13 +328,13 @@ def run_gb_pe(gpu):
 
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
-    
+
     A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
     E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
 
     # A_psd_in[:] = np.asarray(psd)
     # E_psd_in[:] = np.asarray(psd)
-    psds = np.load(fp_psd + ".npy" )
+    psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
     A_psd_in[:] = psds[:, 0][None, :]  # A
     E_psd_in[:] = psds[:, 1][None, :]  # A
@@ -285,8 +361,15 @@ def run_gb_pe(gpu):
         pass
     """
 
-    mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df,
-        base_injections=[A_inj, E_inj], base_psd=None  # [psd.copy(), psd.copy()]
+    mgh = MultiGPUDataHolder(
+        gpus,
+        A_going_in,
+        E_going_in,
+        A_psd_in,
+        E_psd_in,
+        df,
+        base_injections=[A_inj, E_inj],
+        base_psd=None,  # [psd.copy(), psd.copy()]
     )
 
     # psd_params = last_sample.branches["psd"].coords.reshape(-1, last_sample.branches["psd"].shape[-1])
@@ -294,12 +377,12 @@ def run_gb_pe(gpu):
     # foreground_params = last_sample.branches["galfor"].coords.reshape(-1, last_sample.branches["galfor"].shape[-1])
 
     # mgh.set_psd_vals(psd_params, foreground_params=foreground_params)
- 
+
     gb.d_d = xp.asarray(mgh.get_inner_product().flatten())
     check = mgh.get_psd_term()
 
     mempool.free_all_blocks()
-    
+
     # setup data streams to add to and subtract from
     supps_shape_in = (ntemps_pe, nwalkers_pe)
 
@@ -316,8 +399,10 @@ def run_gb_pe(gpu):
     gb.d_d = xp.asarray(np.load("gb_d_d.npy"))[inds]
     gb.get_ll(prior_generated_points_in[inds_cpu], mgh.data_list, mgh.psd_list, data_index=data_index[inds], noise_index=noise_index[inds], phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits,  N=N_temp[inds], **waveform_kwargs_in).shape
     breakpoint()"""
-    
-    coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds]
+
+    coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[
+        last_sample.branches["gb_fixed"].inds
+    ]
 
     check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
 
@@ -328,44 +413,84 @@ def run_gb_pe(gpu):
     coords_out_gb_fixed[:, 5] = coords_out_gb_fixed[:, 5] % (1 * np.pi)
     coords_out_gb_fixed[:, 6] = coords_out_gb_fixed[:, 6] % (2 * np.pi)
     # mgh = MultiGPUDataHolder(gpus, data_minus_templates_mix[0].get().reshape(ntemps_pe, nwalkers_pe, -1), data_minus_templates_mix[1].get().reshape(ntemps_pe, nwalkers_pe, -1), A_psd_in, E_psd_in, df)
-    
+
     # mgh = MultiGPUDataHolder(gpus, A_going_in, E_going_in, A_psd_in, E_psd_in, df)
 
     coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed)
 
-    temp_vals = np.repeat(np.arange(ntemps_pe)[:, None], nleaves_max_fix_new * nwalkers_pe, axis=-1).reshape(ntemps_pe, nwalkers_pe, nleaves_max_fix_new)
+    temp_vals = np.repeat(
+        np.arange(ntemps_pe)[:, None], nleaves_max_fix_new * nwalkers_pe, axis=-1
+    ).reshape(ntemps_pe, nwalkers_pe, nleaves_max_fix_new)
 
-    walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps, nleaves_max_fix_new, 1)).transpose((0, 2, 1))
+    walker_vals = np.tile(
+        np.arange(nwalkers_pe), (ntemps, nleaves_max_fix_new, 1)
+    ).transpose((0, 2, 1))
 
     data_index_1 = temp_vals * nwalkers_pe + walker_vals
 
-    data_index = xp.asarray(data_index_1[last_sample.branches["gb_fixed"].inds]).astype(xp.int32)
+    data_index = xp.asarray(data_index_1[last_sample.branches["gb_fixed"].inds]).astype(
+        xp.int32
+    )
 
     # goes in as -h
     factors = -xp.ones_like(data_index, dtype=xp.float64)
 
-    # gb.d_d = gb.d_d[data_index]
+    """gb.d_d = 0.0  # gb.d_d[data_index]
 
-    # ll = gb.get_ll(coords_in_in, mgh.data_list, mgh.psd_list, data_index=data_index, noise_index=data_index.copy(), phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits, return_cupy=True, **waveform_kwargs)
+    ll = gb.get_ll(
+        coords_in_in,
+        mgh.data_list,
+        mgh.psd_list,
+        data_index=data_index,
+        noise_index=data_index.copy(),
+        phase_marginalize=False,
+        data_length=data_length,
+        data_splits=mgh.gpu_splits,
+        return_cupy=True,
+        **waveform_kwargs,
+    )
 
-    gb.generate_global_template(coords_in_in, data_index, mgh.data_list, batch_size=1000, data_length=data_length, factors=factors, data_splits=mgh.gpu_splits, **waveform_kwargs)
-    
+    breakpoint()"""
+
+    gb.generate_global_template(
+        coords_in_in,
+        data_index,
+        mgh.data_list,
+        batch_size=1000,
+        data_length=data_length,
+        factors=factors,
+        data_splits=mgh.gpu_splits,
+        **waveform_kwargs,
+    )
+
     del data_index
     del factors
     mempool.free_all_blocks()
-    
-    ll = mgh.get_ll(include_psd_info=True)
 
+    ll = mgh.get_ll(include_psd_info=True)
+   
     temp_inds = mgh.temp_indices.copy()
     walker_inds = mgh.walker_indices.copy()
     overall_inds = mgh.overall_indices.copy()
-    
-    supps = BranchSupplimental({ "temp_inds": temp_inds, "walker_inds": walker_inds, "overall_inds": overall_inds,}, base_shape=supps_base_shape, copy=True)
 
-    state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, log_like=ll.reshape(ntemps_pe, nwalkers_pe), supplimental=supps)
+    supps = BranchSupplimental(
+        {
+            "temp_inds": temp_inds,
+            "walker_inds": walker_inds,
+            "overall_inds": overall_inds,
+        },
+        base_shape=supps_base_shape,
+        copy=True,
+    )
+
+    state_mix = State(
+        last_sample.branches_coords,
+        inds=last_sample.branches_inds,
+        log_like=ll.reshape(ntemps_pe, nwalkers_pe),
+        supplimental=supps,
+        betas=last_sample.betas,
+    )
     from gbgpu.utils.utility import get_N
-
-    
 
     for name in ["gb_fixed"]:
         ntemps_pe, nwalkers_pe, nleaves_max_here, _ = state_mix.branches[name].shape
@@ -376,20 +501,23 @@ def run_gb_pe(gpu):
         points_start_transform = transform_fn.both_transforms(points_start)
         amp_start = points_start_transform[:, 0]
         f0_start = points_start_transform[:, 1]
-        
-        N_temp = get_N(amp_start, f0_start, waveform_kwargs["T"], waveform_kwargs["oversample"])
+
+        N_temp = get_N(
+            amp_start, f0_start, waveform_kwargs["T"], waveform_kwargs["oversample"]
+        )
 
         N_vals[state_mix.branches[name].inds] = N_temp
         branch_supp_base_shape = (ntemps_pe, nwalkers_pe, nleaves_max_here)
-        state_mix.branches[name].branch_supplimental = BranchSupplimental({"N_vals": N_vals}, base_shape=branch_supp_base_shape, copy=True)
+        state_mix.branches[name].branch_supplimental = BranchSupplimental(
+            {"N_vals": N_vals}, base_shape=branch_supp_base_shape, copy=True
+        )
 
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for key, item in gpu_priors_in.items():
         item.use_cupy = True
 
     gpu_priors = {"gb_fixed": ProbDistContainer(gpu_priors_in, use_cupy=True)}
-    
-    
+
     gb_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=transform_fn,
@@ -398,9 +526,10 @@ def run_gb_pe(gpu):
         skip_supp_names_update=["group_move_points"],
         random_seed=random_seed,
         nfriends=nwalkers,
+        n_iter_update=30,
         # rj_proposal_distribution=gpu_priors,
         a=1.7,
-        use_gpu=True
+        use_gpu=True,
     )
 
     gb_args = (
@@ -411,7 +540,7 @@ def run_gb_pe(gpu):
         mgh,
         np.asarray(fd),
         search_f_bin_lims,
-        gpu_priors
+        gpu_priors,
     )
 
     gb_fixed_move = GBSpecialStretchMove(
@@ -469,7 +598,6 @@ def run_gb_pe(gpu):
         prevent_swaps=True
     )"""
 
-
     gb_kwargs_rj = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=transform_fn,
@@ -480,7 +608,7 @@ def run_gb_pe(gpu):
         nfriends=nwalkers,
         rj_proposal_distribution=gpu_priors,
         a=1.7,
-        use_gpu=True
+        use_gpu=True,
     )
 
     gb_args_rj = (
@@ -491,7 +619,7 @@ def run_gb_pe(gpu):
         mgh,
         np.asarray(fd),
         search_f_bin_lims,
-        gpu_priors
+        gpu_priors,
     )
 
     rj_moves = GBSpecialStretchMove(
@@ -509,16 +637,28 @@ def run_gb_pe(gpu):
     from eryn.moves.tempering import make_ladder
 
     # TODO: get betas out of state object from old run if there
-    betas = make_ladder(8000 * 8, ntemps=ntemps_pe)
+    if not hasattr(state_mix, "betas") or state_mix.betas is None:
+        betas = make_ladder(10 * 8, Tmax=2.0, ntemps=ntemps_pe)
+    else:
+        betas = state_mix.betas
 
-    update = UpdateNewResiduals([A_mbh_going_in, E_mbh_going_in], mgh, fp_psd + ".npy" , fp_mbh + ".npy", fp_gb, (ntemps_pe, nwalkers_pe, len(fd)), waveform_kwargs)
+    state_mix.betas = betas
+    update = UpdateNewResiduals(
+        [A_mbh_going_in, E_mbh_going_in],
+        mgh,
+        fp_psd + ".npy",
+        fp_mbh + ".npy",
+        fp_gb,
+        (ntemps_pe, nwalkers_pe, len(fd)),
+        waveform_kwargs,
+    )
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
         [ndim],  # assumes ndim_max
         like_mix,
         priors,
-        tempering_kwargs={"betas": betas},
+        tempering_kwargs={"betas": betas, "adaptation_time": 10},
         nbranches=len(branch_names),
         nleaves_max=[nleaves_max_fix_new],
         moves=moves_in_model,
@@ -532,13 +672,11 @@ def run_gb_pe(gpu):
         update_iterations=1,
         provide_groups=True,
         provide_supplimental=True,
-        num_repeats_in_model=1
+        num_repeats_in_model=1,
     )
 
-    state_mix.betas = sampler_mix.temperature_control.betas
-
     # equlibrating likelihood check: -4293090.6483655665,
-    
+
     """out = state_mix
     old_number = nleaves_max_fix_new
     starting_new = True
@@ -578,11 +716,12 @@ def run_gb_pe(gpu):
         xp.cuda.runtime.setDevice(main_gpu)
     """
     nsteps_mix = 10000
-    state_mix.betas = make_ladder(10 * 8, ntemps)
-    
+
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=True, thin_by=25, store=False)
+    out = sampler_mix.run_mcmc(
+        state_mix, nsteps_mix, progress=True, thin_by=25, store=True
+    )
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     breakpoint()
@@ -594,22 +733,29 @@ def run_gb_pe(gpu):
     max_temp = max_ind[0][0]
     max_walker = max_ind[1][0]
     overall_ind_best = max_temp * nwalkers_pe + max_walker
-    
+
     data_minus_templates = []
     for gpu_i, split_now in enumerate(mgh.gpu_splits):
         if overall_ind_best in split_now:
             ind_keep = np.where(split_now == overall_ind_best)[0].item()
             for tmp_data in mgh.data_list:
                 with xp.cuda.device.Device(gpus[0]):
-                    data_minus_templates.append(tmp_data[gpu_i].reshape(len(split_now), -1)[ind_keep].copy())
-    
+                    data_minus_templates.append(
+                        tmp_data[gpu_i].reshape(len(split_now), -1)[ind_keep].copy()
+                    )
+
     xp.cuda.runtime.setDevice(gpus[0])
 
     data_minus_templates = xp.asarray(data_minus_templates)
 
     np.save(current_residuals_file_iterative_search, data_minus_templates.get())
-    
-    save_state = State(out.branches_coords, inds=out.branches_inds, log_like=out.log_like, log_prior=out.log_prior)
+
+    save_state = State(
+        out.branches_coords,
+        inds=out.branches_inds,
+        log_like=out.log_like,
+        log_prior=out.log_prior,
+    )
 
     if current_save_state_file in os.listdir():
         shutil.copyfile(current_save_state_file, "old_" + current_save_state_file)
@@ -650,18 +796,17 @@ def run_gb_pe(gpu):
     # np.save(current_start_points_snr_file, np.asarray(current_snrs_search))
     # np.save(current_start_points_file, np.asarray(current_start_points))"""
 
-
     num_binaries_current = 0
-    
+
     # )
-    #if det_snr_finding < snr_break or len(current_snrs_search) > num_bin_pause:
+    # if det_snr_finding < snr_break or len(current_snrs_search) > num_bin_pause:
     #    break
     current_iteration += 1
 
 
-
 if __name__ == "__main__":
     import argparse
+
     """parser = argparse.ArgumentParser()
 
     parser.add_argument('--gpu', type=int,
@@ -670,5 +815,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(5)
-                
+    output = run_gb_pe(6)

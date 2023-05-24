@@ -25,20 +25,23 @@ from lisatools.sampling.utility import HeterodynedUpdate
 from eryn.utils import TransformContainer
 
 from full_band_global_fit_settings import *
+
 fd1 = fd.copy()
 np.random.seed(111222)
 
 try:
     import cupy as xp
+
     # set GPU device
-    xp.cuda.runtime.setDevice(5)
+    xp.cuda.runtime.setDevice(6)
     gpu_available = True
 
 except (ImportError, ModuleNotFoundError) as e:
     import numpy as xp
+
     gpu_available = False
 
-# whether you are using 
+# whether you are using
 use_gpu = True
 
 if use_gpu is False:
@@ -48,14 +51,16 @@ if use_gpu and not gpu_available:
     raise ValueError("Requesting gpu with no GPU available or cupy issue.")
 
 stop1 = SearchConvergeStopping(n_iters=50, diff=0.01, verbose=True)
+
+
 def stop(iter, sample, sampler):
     print("LL MAX:", sampler.get_log_like().max())
     temp = stop1(iter, sample, sampler)
     return temp
 
+
 # function call
 def run_mbh_search():
-
     t_lims = np.linspace(0.0, YEAR, 26)
 
     """with h5py.File("LDC2_sangria_training_v2.h5") as f:
@@ -69,16 +74,21 @@ def run_mbh_search():
 
         tXYZ = f["sky"]["mbhb"]["tdi"][:]"""
 
-    t, X, Y, Z = tXYZ["t"].squeeze(), tXYZ["X"].squeeze(), tXYZ["Y"].squeeze(), tXYZ["Z"].squeeze()
+    t, X, Y, Z = (
+        tXYZ["t"].squeeze(),
+        tXYZ["X"].squeeze(),
+        tXYZ["Y"].squeeze(),
+        tXYZ["Z"].squeeze(),
+    )
     dt = t[1] - t[0]
 
-    fp_log = "tmp_search_log2.log"
+    fp_log = "tmp_search_log5.log"
 
     keep_running = True
-    for t_i in range(len(t_lims) - 1)[1:2]:
+    for t_i in range(len(t_lims) - 1)[0:1]:
         if not keep_running:
             continue
-        for iter_i in range(3):
+        for iter_i in range(5):
             start_t = t_lims[t_i]
             end_t = t_lims[t_i + 1]
             # start_t = 0.0
@@ -93,8 +103,12 @@ def run_mbh_search():
             plt.close()
             Tobs = dt * len(t_here)
 
-            # fucking dt 
-            Xf, Yf, Zf = (np.fft.rfft(X_here) * dt, np.fft.rfft(Y_here) * dt, np.fft.rfft(Z_here) * dt)
+            # fucking dt
+            Xf, Yf, Zf = (
+                np.fft.rfft(X_here) * dt,
+                np.fft.rfft(Y_here) * dt,
+                np.fft.rfft(Z_here) * dt,
+            )
             Af, Ef, Tf = AET(Xf, Yf, Zf)
 
             A_inj, E_inj = Af, Ef
@@ -110,18 +124,18 @@ def run_mbh_search():
             nwalkers = 100
 
             mbh_kwargs = {
-                "modes": [(2,2)],
+                "modes": [(2, 2)],
                 "length": 1024,
                 "t_obs_start": start_t / YRSID_SI,
                 "t_obs_end": end_t / YRSID_SI,
-                "shift_t_limits": True
+                "shift_t_limits": True,
             }
 
             # wave generating class
             wave_gen = BBHWaveformFD(
                 amp_phase_kwargs=dict(run_phenomd=True, initial_t_val=start_t),
                 response_kwargs=dict(TDItag="AET"),
-                use_gpu=use_gpu
+                use_gpu=use_gpu,
             )
 
             # for transforms
@@ -150,9 +164,11 @@ def run_mbh_search():
                         7: uniform_dist(0.0, 2 * np.pi),
                         8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                         9: uniform_dist(0.0, np.pi),
-                        10: uniform_dist(start_t + 1000.0, end_t + 4 * 7 * 24 * 3600), # 4 weeks after end of window
+                        10: uniform_dist(
+                            start_t + 1000.0, end_t + 4 * 7 * 24 * 3600
+                        ),  # 4 weeks after end of window
                     }
-                ) 
+                )
             }
 
             # transforms from pe to waveform generation
@@ -171,16 +187,19 @@ def run_mbh_search():
             )
 
             # sampler treats periodic variables by wrapping them properly
-            periodic = {
-                "mbh": {5: 2 * np.pi, 7: np.pi, 8: np.pi}
-            }
+            periodic = {"mbh": {5: 2 * np.pi, 7: np.pi, 8: np.pi}}
 
-            psd_reader = HDFBackend(fp_psd_search)
+            psd_reader = HDFBackend(fp_psd_search_initial)
             best_psd_ind = psd_reader.get_log_like().flatten().argmax()
             best_psd_params = psd_reader.get_chain()["psd"].reshape(-1, 4)[best_psd_ind]
+            best_galfor_params = psd_reader.get_chain()["galfor"].reshape(-1, 5)[best_psd_ind]
 
-            A_psd = get_sensitivity(fd, sens_fn="noisepsd_AE", model=best_psd_params[:2])
-            E_psd = get_sensitivity(fd, sens_fn="noisepsd_AE", model=best_psd_params[2:])
+            A_psd = get_sensitivity(
+                fd, sens_fn="noisepsd_AE", model=best_psd_params[:2], foreground_params=best_galfor_params
+            )
+            E_psd = get_sensitivity(
+                fd, sens_fn="noisepsd_AE", model=best_psd_params[2:], foreground_params=best_galfor_params
+            )
 
             A_psd[0] = A_psd[1]
             E_psd[0] = E_psd[1]
@@ -218,7 +237,7 @@ def run_mbh_search():
             data_channels = xp.asarray([A_inj, E_inj, np.zeros_like(E_inj)])
 
             psd = xp.asarray([A_psd, E_psd, np.full_like(A_psd, 1e10)])
-            
+
             xp.get_default_memory_pool().free_all_blocks()
             # initialize Likelihood
             like_mbh = MBHLikelihood(
@@ -242,54 +261,71 @@ def run_mbh_search():
             ndim = 11
             # fd = xp.asarray(fd1)
             if iter_i > 0:  # "mbh_found_points.npy" in os.listdir():
-                
                 for inject_i in range(iter_i):
                     fp_old = f"test_mbh_search_{start_t:.4e}_{end_t:.4e}_{inject_i}.h5"
                     old_reader = HDFBackend(fp_old)
                     out = old_reader.get_last_sample()
-                    mbh_best = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
+                    mbh_best = out.branches_coords["mbh"][
+                        0, np.argmax(out.log_like[0]), 0
+                    ]
 
-                    like_tmp = like(mbh_best[None, :], phase_marginalize=False, **mbh_kwargs)
+                    like_tmp = like(
+                        mbh_best[None, :], phase_marginalize=False, **mbh_kwargs
+                    )
                     # print(mbh_best, like.template_model.d_h)
                     phase_change = np.angle(like.template_model.d_h)
-                    mbh_best[5] = (mbh_best[5] + 1/ 2 * phase_change) % (2 * np.pi)
+                    mbh_best[5] = (mbh_best[5] + 1 / 2 * phase_change) % (2 * np.pi)
 
-                    check_like_tmp = like(mbh_best[None, :], phase_marginalize=False, **mbh_kwargs)
-                    # print(mbh_best, like.template_model.d_h)
+                    check_like_tmp = like(
+                        mbh_best[None, :], phase_marginalize=False, **mbh_kwargs
+                    )
+                    print(
+                        inject_i,
+                        mbh_best,
+                        like.template_model.d_h,
+                        like.template_model.h_h,
+                        like.template_model.h_h ** (1 / 2),
+                    )
+                    breakpoint()
+                    injection_in = transform_fn.both_transforms(
+                        mbh_best[None, :], return_transpose=True
+                    )
 
-                    # breakpoint()
-                    injection_in = transform_fn.both_transforms(mbh_best[None, :], return_transpose=True)
-                
                     # get XYZ
-                    data_channels_AET = wave_gen(*injection_in, freqs=xp.asarray(fd),
-                        modes=[(2,2)], direct=False, fill=True, squeeze=True, length=1024
+                    data_channels_AET = wave_gen(
+                        *injection_in,
+                        freqs=xp.asarray(fd),
+                        modes=[(2, 2)],
+                        direct=False,
+                        fill=True,
+                        squeeze=True,
+                        length=1024,
                     )[0]
 
                     A_inj -= data_channels_AET[0].get()
                     E_inj -= data_channels_AET[1].get()
 
-                del like_mbh, data_channels, like
-                data_channels = xp.asarray([A_inj, E_inj, np.zeros_like(E_inj)])
-                xp.get_default_memory_pool().free_all_blocks()
-                # initialize Likelihood
-                like_mbh = MBHLikelihood(
-                    wave_gen, xp.asarray(fd), data_channels, psd, use_gpu=use_gpu
-                )
-                like = Likelihood(
-                    like_mbh,
-                    3,
-                    dt=None,
-                    df=None,
-                    f_arr=fd,
-                    parameter_transforms={"mbh": transform_fn},
-                    use_gpu=use_gpu,
-                    vectorized=True,
-                    transpose_params=True,
-                    subset=100,
-                )
+                    del like_mbh, data_channels, like
+                    data_channels = xp.asarray([A_inj, E_inj, np.zeros_like(E_inj)])
+                    xp.get_default_memory_pool().free_all_blocks()
+                    # initialize Likelihood
+                    like_mbh = MBHLikelihood(
+                        wave_gen, xp.asarray(fd), data_channels, psd, use_gpu=use_gpu
+                    )
+                    like = Likelihood(
+                        like_mbh,
+                        3,
+                        dt=None,
+                        df=None,
+                        f_arr=fd,
+                        parameter_transforms={"mbh": transform_fn},
+                        use_gpu=use_gpu,
+                        vectorized=True,
+                        transpose_params=True,
+                        subset=100,
+                    )
 
             if fp not in os.listdir():
-
                 # generate starting points
                 start_params = priors["mbh"].rvs(size=(nwalkers * ntemps,))
                 """
@@ -310,9 +346,9 @@ def run_mbh_search():
 
                 # start state
                 start_state = State(
-                    {"mbh": start_params.reshape(ntemps, nwalkers, 1, ndim)}, 
-                    log_like=start_like.reshape(ntemps, nwalkers), 
-                    log_prior=start_prior.reshape(ntemps, nwalkers)
+                    {"mbh": start_params.reshape(ntemps, nwalkers, 1, ndim)},
+                    log_like=start_like.reshape(ntemps, nwalkers),
+                    log_prior=start_prior.reshape(ntemps, nwalkers),
                 )
 
             else:
@@ -325,7 +361,7 @@ def run_mbh_search():
                 (SkyMove(which="both"), 0.02),
                 (SkyMove(which="long"), 0.01),
                 (SkyMove(which="lat"), 0.01),
-                (StretchMove(), 0.96)
+                (StretchMove(), 0.96),
             ]
 
             # prepare sampler
@@ -352,11 +388,15 @@ def run_mbh_search():
 
             with open(fp_log, "a") as fptmp:
                 fptmp.write(f"starting initial run, {iter_i}, {start_t}, {end_t}\n")
-            out = sampler.run_mcmc(start_state, nsteps, progress=False, thin_by=50, burn=0)
+            out = sampler.run_mcmc(
+                start_state, nsteps, progress=False, thin_by=50, burn=0
+            )
             with open(fp_log, "a") as fptmp:
                 fptmp.write(f"finished initial run, {iter_i}, {start_t}, {end_t}\n")
 
-            mbh_injection_params = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
+            mbh_injection_params = out.branches_coords["mbh"][
+                0, np.argmax(out.log_like[0]), 0
+            ]
 
             # generate starting points
             factor = 1e-5
@@ -365,16 +405,21 @@ def run_mbh_search():
             cov[-1] = 1e-5
 
             start_like = np.zeros((nwalkers * ntemps))
-            
+
             iter_check = 0
             max_iter = 1000
             while np.std(start_like) < 5.0:
-                
                 logp = np.full_like(start_like, -np.inf)
                 tmp = np.zeros((ntemps * nwalkers, ndim))
                 fix = np.ones((ntemps * nwalkers), dtype=bool)
                 while np.any(fix):
-                    tmp[fix] = (mbh_injection_params[None, :] * (1. + factor * cov * np.random.randn(nwalkers * ntemps, ndim)))[fix]
+                    tmp[fix] = (
+                        mbh_injection_params[None, :]
+                        * (
+                            1.0
+                            + factor * cov * np.random.randn(nwalkers * ntemps, ndim)
+                        )
+                    )[fix]
 
                     tmp[:, 5] = tmp[:, 5] % (2 * np.pi)
                     tmp[:, 7] = tmp[:, 7] % (2 * np.pi)
@@ -401,15 +446,17 @@ def run_mbh_search():
 
             # start state
             start_state = State(
-                {"mbh": start_params.reshape(ntemps, nwalkers, 1, ndim)}, 
-                log_like=start_like.reshape(ntemps, nwalkers), 
-                log_prior=start_prior.reshape(ntemps, nwalkers)
+                {"mbh": start_params.reshape(ntemps, nwalkers, 1, ndim)},
+                log_like=start_like.reshape(ntemps, nwalkers),
+                log_prior=start_prior.reshape(ntemps, nwalkers),
             )
 
             nsteps = 10000
             with open(fp_log, "a") as fptmp:
                 fptmp.write(f"start second part of run, {iter_i}, {start_t}, {end_t}\n")
-            out = sampler.run_mcmc(start_state, nsteps, progress=False, thin_by=50, burn=0)
+            out = sampler.run_mcmc(
+                start_state, nsteps, progress=False, thin_by=50, burn=0
+            )
             with open(fp_log, "a") as fptmp:
                 fptmp.write(f"finished iter, {iter_i}, {start_t}, {end_t}\n")
             mbh_best = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
@@ -417,22 +464,30 @@ def run_mbh_search():
             like_tmp = like(mbh_best[None, :], phase_marginalize=False, **mbh_kwargs)
             # print(mbh_best, like.template_model.d_h)
             phase_change = np.angle(like.template_model.d_h)
-            mbh_best[5] = (mbh_best[5] + 1/ 2 * phase_change) % (2 * np.pi)
+            mbh_best[5] = (mbh_best[5] + 1 / 2 * phase_change) % (2 * np.pi)
 
-            check_like_tmp = like(mbh_best[None, :], phase_marginalize=False, **mbh_kwargs)
+            check_like_tmp = like(
+                mbh_best[None, :], phase_marginalize=False, **mbh_kwargs
+            )
 
-            opt_snr = like.template_model.h_h.real ** (1/2)
-            det_snr = like.template_model.d_h.real / like.template_model.h_h.real ** (1/2)
+            opt_snr = like.template_model.h_h.real ** (1 / 2)
+            det_snr = like.template_model.d_h.real / like.template_model.h_h.real ** (
+                1 / 2
+            )
 
             init_snr_lim = 20.0
 
             with open(fp_log, "a") as fptmp:
-                fptmp.write(f"opt snr: {opt_snr}, det snr: {det_snr}, {iter_i}, {start_t}, {end_t}\n")
+                fptmp.write(
+                    f"opt snr: {opt_snr}, det snr: {det_snr}, {iter_i}, {start_t}, {end_t}, h/h: {like.template_model.h_h}, d/h: {like.template_model.d_h}\n"
+                )
             if opt_snr < init_snr_lim or det_snr < init_snr_lim:
                 with open(fp_log, "a") as fptmp:
-                    fptmp.write(f"finishing this segment, {iter_i}, {start_t}, {end_t}\n")
+                    fptmp.write(
+                        f"finishing this segment, {iter_i}, {start_t}, {end_t}\n"
+                    )
                 keep_running = False
-            
+
             """print("found:", mbh_best)
             if "mbh_found_points.npy" in os.listdir():
                 imported = False
@@ -461,14 +516,11 @@ def run_mbh_search():
 
     return
 
+
 if __name__ == "__main__":
     # set parameters
-    
-    
 
-    #print("start", fp)
+    # print("start", fp)
     run_mbh_search()
-    #print("end", fp)
-        # frequencies to interpolate to
-        
-        
+    # print("end", fp)
+    # frequencies to interpolate to
