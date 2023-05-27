@@ -101,6 +101,8 @@ class UpdateNewResiduals(Update):
         np.save(freq_file, self.mgh.fd)
         breakpoint()"""
 
+        nwalkers_pe = self.psd_shape[1]
+
         self.output_residual_number += 1
         A_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
         E_psd_in = np.zeros(self.psd_shape, dtype=np.float64)
@@ -114,8 +116,8 @@ class UpdateNewResiduals(Update):
                 time.sleep(1)
 
         psds[:, :, 0] = psds[:, :, 1]
-        A_psd_in[:] = psds[:, 0][None, :]  # A
-        E_psd_in[:] = psds[:, 1][None, :]  # E
+        A_psd_in[:] = psds[:, 0][None, :nwalkers_pe]  # A
+        E_psd_in[:] = psds[:, 1][None, :nwalkers_pe]  # E
         xp.get_default_memory_pool().free_all_blocks()
         self.mgh.set_psd_from_arrays(
             A_psd_in.reshape(-1, self.psd_shape[-1]),
@@ -143,8 +145,8 @@ class UpdateNewResiduals(Update):
         A_mbh_going_in = np.zeros_like(self.last_mbh_template[0])
         E_mbh_going_in = np.zeros_like(self.last_mbh_template[1])
 
-        A_mbh_going_in[:] = mbh_inj[:, 0][None, :]  # A
-        E_mbh_going_in[:] = mbh_inj[:, 1][None, :]  # A
+        A_mbh_going_in[:] = mbh_inj[:, 0][None, :nwalkers_pe]  # A
+        E_mbh_going_in[:] = mbh_inj[:, 1][None, :nwalkers_pe]  # A
         xp.get_default_memory_pool().free_all_blocks()
         # TODO: need to check that everything is aligned
         ll_bef = self.mgh.get_ll(include_psd_info=True)
@@ -234,8 +236,8 @@ def run_gb_pe(gpu):
 
     xp.cuda.runtime.setDevice(gpus[0])
 
-    nwalkers_pe = 100
-    ntemps_pe = 6
+    nwalkers_pe = 25
+    ntemps_pe = 18
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
@@ -273,8 +275,8 @@ def run_gb_pe(gpu):
         with open("mixing_gb_run.pickle", "rb") as fp_search_state:
             end_search_state = pickle.load(fp_search_state)
 
-        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords
-        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds
+        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords[:, :nwalkers_pe]
+        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds[:, :nwalkers_pe]
 
         start_coords = {
             "gb_fixed": np.repeat(end_search_gb_coords, repeats=ntemps_pe, axis=0)
@@ -323,8 +325,8 @@ def run_gb_pe(gpu):
     A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_mbh_going_in[:] = mbh_inj[:, 0][None, :]
-    E_mbh_going_in[:] = mbh_inj[:, 1][None, :]
+    A_mbh_going_in[:] = mbh_inj[:, 0][None, :nwalkers_pe]
+    E_mbh_going_in[:] = mbh_inj[:, 1][None, :nwalkers_pe]
 
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
@@ -336,8 +338,8 @@ def run_gb_pe(gpu):
     # E_psd_in[:] = np.asarray(psd)
     psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
-    A_psd_in[:] = psds[:, 0][None, :]  # A
-    E_psd_in[:] = psds[:, 1][None, :]  # A
+    A_psd_in[:] = psds[:, 0][None, :nwalkers_pe]  # A
+    E_psd_in[:] = psds[:, 1][None, :nwalkers_pe]  # A
 
     """try:
         del mgh
@@ -423,7 +425,7 @@ def run_gb_pe(gpu):
     ).reshape(ntemps_pe, nwalkers_pe, nleaves_max_fix_new)
 
     walker_vals = np.tile(
-        np.arange(nwalkers_pe), (ntemps, nleaves_max_fix_new, 1)
+        np.arange(nwalkers_pe), (ntemps_pe, nleaves_max_fix_new, 1)
     ).transpose((0, 2, 1))
 
     data_index_1 = temp_vals * nwalkers_pe + walker_vals
@@ -528,7 +530,7 @@ def run_gb_pe(gpu):
         nfriends=nwalkers,
         n_iter_update=30,
         # rj_proposal_distribution=gpu_priors,
-        a=1.7,
+        a=1.75,
         use_gpu=True,
     )
 
@@ -638,7 +640,7 @@ def run_gb_pe(gpu):
 
     # TODO: get betas out of state object from old run if there
     if not hasattr(state_mix, "betas") or state_mix.betas is None:
-        betas = make_ladder(10 * 8, Tmax=2.0, ntemps=ntemps_pe)
+        betas = make_ladder(20 * 8, Tmax=5000.0, ntemps=ntemps_pe)
     else:
         betas = state_mix.betas
 
@@ -658,7 +660,7 @@ def run_gb_pe(gpu):
         [ndim],  # assumes ndim_max
         like_mix,
         priors,
-        tempering_kwargs={"betas": betas, "adaptation_time": 10},
+        tempering_kwargs={"betas": betas, "adaptation_time": 2},
         nbranches=len(branch_names),
         nleaves_max=[nleaves_max_fix_new],
         moves=moves_in_model,
@@ -815,4 +817,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(6)
+    output = run_gb_pe(4)

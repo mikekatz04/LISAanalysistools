@@ -125,6 +125,14 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.search_snr_accept_factor = search_snr_accept_factor
 
         self.band_edges = self.xp.asarray(self.band_edges)
+        # insert two sets of midpoints
+        self.rj_band_edges = self.band_edges.copy()
+        # for divide in range(2):
+        #     midpoints = (self.rj_band_edges[1:] + self.rj_band_edges[:-1]) / 2
+        #     self.rj_band_edges = self.xp.sort(self.xp.concatenate([self.rj_band_edges, midpoints])).copy()
+        # print(self.rj_band_edges[1500], self.rj_band_edges[1501])
+        # self.rj_band_edges = self.band_edges.copy()
+
         self.take_max_ll = take_max_ll
 
         self.rj_proposal_distribution = rj_proposal_distribution
@@ -885,7 +893,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         factors = all_factors[gb_keep_inds_special]
 
         # for testing
-        #  factors[:] = 1e10
+        # factors[:] = -1e10
         return (
             gb_coords,
             gb_inds,
@@ -947,6 +955,13 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         gb_inds = gb_inds_into_proposal.reshape(ntemps, nwalkers, nleaves_max)
         gb_inds[remove] = False
+
+        """remove2 = (
+            (gb_fixed_coords_into_proposal[:, :, :, 1] / 1e3 < 0.00469466145833332) | (gb_fixed_coords_into_proposal[:, :, :, 1] / 1e3 > 0.0046966959635416534)
+        )
+        gb_inds[remove2] = False
+        gb_inds[:-1, :, :] = False
+        gb_inds[-1, 1:, :] = False"""
 
         points_curr = gb_fixed_coords_into_proposal[gb_inds]
         points_prop = q["gb_fixed"][gb_inds]
@@ -1474,65 +1489,6 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        if self.time % 1 == 0:
-            ll_after = (
-                self.mgh.get_ll(include_psd_info=True)
-                .flatten()[new_state.supplimental[:]["overall_inds"]]
-                .reshape(ntemps, nwalkers)
-            )
-            # print(np.abs(new_state.log_like - ll_after).max())
-            store_max_diff = np.abs(new_state.log_like - ll_after).max()
-            if np.abs(new_state.log_like - ll_after).max() > 1e-2:
-                if np.abs(new_state.log_like - ll_after).max() > 1e0:
-                    breakpoint()
-                breakpoint()
-                self.mgh.restore_base_injections()
-
-                for name in new_state.branches.keys():
-                    if name not in ["gb", "gb_fixed"]:
-                        continue
-                    new_state_branch = new_state.branches[name]
-                    coords_here = new_state_branch.coords[new_state_branch.inds]
-                    ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
-                    try:
-                        group_index = self.xp.asarray(
-                            self.mgh.get_mapped_indices(
-                                np.repeat(
-                                    np.arange(ntemps * nwalkers).reshape(
-                                        ntemps, nwalkers, 1
-                                    ),
-                                    nleaves_max,
-                                    axis=-1,
-                                )[new_state_branch.inds]
-                            ).astype(self.xp.int32)
-                        )
-                    except IndexError:
-                        breakpoint()
-                    coords_here_in = self.parameter_transforms.both_transforms(
-                        coords_here, xp=np
-                    )
-
-                    waveform_kwargs_fill = self.waveform_kwargs.copy()
-                    waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
-
-                    if "N" in waveform_kwargs_fill:
-                        waveform_kwargs_fill.pop("N")
-
-                    self.mgh.multiply_data(-1.0)
-                    self.gb.generate_global_template(
-                        coords_here_in,
-                        group_index,
-                        self.mgh.data_list,
-                        data_length=self.data_length,
-                        data_splits=self.mgh.gpu_splits,
-                        batch_size=1000,
-                        **waveform_kwargs_fill
-                    )
-                    self.xp.cuda.runtime.deviceSynchronize()
-                    self.mgh.multiply_data(-1.0)
-
-        self.mempool.free_all_blocks()
-
         # get accepted fraction
         if not self.is_rj_prop:
             assert np.all(
@@ -1601,8 +1557,12 @@ class GBSpecialStretchMove(GroupStretchMove):
             and self.time % 1 == 0
             and self.ntemps > 1
             and self.is_rj_prop
-            # and False
+            # and Falses
         ):
+            if not hasattr(self, "band_swaps_accepted"):
+                self.band_swaps_accepted = np.zeros((len(self.rj_band_edges) - 1, self.ntemps))
+                self.band_swaps_proposed = np.zeros((len(self.rj_band_edges) - 1, self.ntemps))
+
             st1 = time.perf_counter()
             # new_state = self.temperature_control.temper_comps(new_state)
             # et = time.perf_counter()
@@ -1615,8 +1575,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 bi = betas[i]
                 bi1 = betas[i - 1]
 
-                iperm = xp.arange(nwalkers)  # xp.random.permutation(nwalkers)
-                i1perm = xp.arange(nwalkers)  # xp.random.permutation(nwalkers)
+                iperm = xp.random.permutation(nwalkers)  #  xp.arange(nwalkers)  # 
+                i1perm = xp.random.permutation(nwalkers)  # xp.arange(nwalkers)  # 
 
                 # need to calculate switch likelihoods
 
@@ -1668,13 +1628,13 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 bands_iperm = (
                     xp.searchsorted(
-                        self.band_edges, f_iperm.flatten(), side="right"
+                        self.rj_band_edges, f_iperm.flatten(), side="right"
                     ).reshape(f_iperm.shape)
                     - 1
                 )
                 bands_i1perm = (
                     xp.searchsorted(
-                        self.band_edges, f_i1perm.flatten(), side="right"
+                        self.rj_band_edges, f_i1perm.flatten(), side="right"
                     ).reshape(f_i1perm.shape)
                     - 1
                 )
@@ -1683,13 +1643,13 @@ class GBSpecialStretchMove(GroupStretchMove):
                 bands_i1perm[xp.isnan(f_i1perm)] = -1
                 # can probably go to 2 iterations, but will need to check Likelihood difference
 
-                for odds_evens in range(3):
-                    keep_here_i = (bands_iperm % 3 == odds_evens) & (
-                        bands_iperm >= 0
-                    )  #  & (bands_iperm == 500) & (walker_map_iperm == 0)  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
-                    keep_here_i1 = (bands_i1perm % 3 == odds_evens) & (
+                unit_temps = 3
+                for odds_evens in range(unit_temps):
+                    keep_here_i = (bands_iperm % unit_temps == odds_evens) & (bands_iperm >= 0)  #  & (walker_map_iperm == 0)  # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
+                
+                    keep_here_i1 = (bands_i1perm % unit_temps == odds_evens) & (
                         bands_i1perm >= 0
-                    )  #  & (bands_i1perm == 500) & (walker_map_i1perm == 0) # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
+                    )  #  & (walker_map_i1perm == 0) # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
 
                     if not xp.any(keep_here_i) and not xp.any(keep_here_i1):
                         continue
@@ -1773,16 +1733,16 @@ class GBSpecialStretchMove(GroupStretchMove):
                         xp.concatenate(
                             [
                                 xp.full_like(
-                                    data_index_tmp_i_remove, -1.0, dtype=xp.float64
+                                    data_index_tmp_i_remove, +1.0, dtype=xp.float64
                                 ),
                                 xp.full_like(
-                                    data_index_tmp_i_add, +1.0, dtype=xp.float64
+                                    data_index_tmp_i_add, -1.0, dtype=xp.float64
                                 ),
                                 xp.full_like(
-                                    data_index_tmp_i1_remove, -1.0, dtype=xp.float64
+                                    data_index_tmp_i1_remove, +1.0, dtype=xp.float64
                                 ),
                                 xp.full_like(
-                                    data_index_tmp_i1_add, +1.0, dtype=xp.float64
+                                    data_index_tmp_i1_add, -1.0, dtype=xp.float64
                                 ),
                             ]
                         )
@@ -1799,7 +1759,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                     )
                     N_here_find = xp.concatenate([N_here_i, N_here_i1])
                     band_here_find = (
-                        xp.searchsorted(self.band_edges, f_find, side="right") - 1
+                        xp.searchsorted(self.rj_band_edges, f_find, side="right") - 1
                     )
                     walker_band_find = walker_find * int(1e6) + band_here_find
 
@@ -1852,12 +1812,12 @@ class GBSpecialStretchMove(GroupStretchMove):
                         xp.concatenate([lengths_band, lengths_band]).astype(xp.int32)
                     )
 
-                    data_index_tmp_all = xp.concatenate(
+                    data_index_tmp_all2 = xp.concatenate(
                         [i * nwalkers + walker_i, (i - 1) * nwalkers + walker_i1]
                     )
 
                     data_index_all = self.xp.asarray(
-                        self.mgh.get_mapped_indices(data_index_tmp_all).astype(xp.int32)
+                        self.mgh.get_mapped_indices(data_index_tmp_all2).astype(xp.int32)
                     )
                     noise_index_all = data_index_all.copy()
 
@@ -1876,13 +1836,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                         **waveform_kwargs_fill
                     )
                     xp.cuda.runtime.deviceSynchronize()
-                    # ll_after = self.mgh.get_ll(include_psd_info=True).flatten()[data_index_all.get()]
+                    # ll = self.mgh.get_ll(include_psd_info=True).flatten()[data_index_all.get()]
                     # ll_after3 = self.mgh.get_ll(include_psd_info=True).flatten()[new_state.supplimental[:]["overall_inds"]].reshape(ntemps, nwalkers)
                     # check_here = xp.abs(new_state.log_like - ll_after3)
-                    # breakpoint()
+
                     ll_contrib_after = self.run_ll_part_comp(
                         data_index_all, noise_index_all, start_inds_all, lengths_all
                     )
+                    # breakpoint()
 
                     half = start_inds_band.shape[0]
 
@@ -1905,6 +1866,12 @@ class GBSpecialStretchMove(GroupStretchMove):
                     self.temperature_control.swaps_proposed[i - 1] += sel.shape[0]
                     self.temperature_control.swaps_accepted[i - 1] += sel.sum()
 
+                    walkers_proposed_i = (walker_band_in_i / 1e6).astype(int)
+                    walkers_proposed_i1 = (walker_band_in_i1 / 1e6).astype(int)
+
+                    bands_proposed_i = walker_band_in_i - int(1e6) * walkers_proposed_i
+                    bands_proposed_i1 = walker_band_in_i1 - int(1e6) * walkers_proposed_i1
+
                     keep_walker_band_i = walker_band_in_i[sel.get()]
                     keep_walker_band_i1 = walker_band_in_i1[sel.get()]
 
@@ -1918,8 +1885,19 @@ class GBSpecialStretchMove(GroupStretchMove):
                         keep_walker_band_i1 - int(1e6) * keep_walker_i1_band_level
                     )
 
-                    band_ll_diff_i = xp.zeros((nwalkers, len(self.band_edges) - 1))
-                    band_ll_diff_i1 = xp.zeros((nwalkers, len(self.band_edges) - 1))
+                    unique_band_i_proposed, unique_band_i_proposed_count = np.unique(bands_proposed_i.get(), return_counts=True)
+                    unique_band_i1_proposed, unique_band_i1_proposed_count = np.unique(bands_proposed_i1.get(), return_counts=True)
+                    
+                    unique_keep_band_i_proposed, unique_keep_band_i_proposed_count = np.unique(keep_band_i_band_level.get(), return_counts=True)
+                    unique_keep_band_i1_proposed, unique_keep_band_i1_proposed_count = np.unique(keep_band_i1_band_level.get(), return_counts=True)
+                    
+                    self.band_swaps_accepted[unique_keep_band_i_proposed, i] += unique_keep_band_i_proposed_count
+                    self.band_swaps_accepted[unique_keep_band_i1_proposed, i - 1] += unique_keep_band_i1_proposed_count
+                    self.band_swaps_proposed[unique_band_i_proposed, i] += unique_band_i_proposed_count
+                    self.band_swaps_proposed[unique_band_i1_proposed, i - 1] += unique_band_i1_proposed_count
+
+                    band_ll_diff_i = xp.zeros((nwalkers, len(self.rj_band_edges) - 1))
+                    band_ll_diff_i1 = xp.zeros((nwalkers, len(self.rj_band_edges) - 1))
 
                     band_ll_diff_i[
                         (keep_walker_i_band_level, keep_band_i_band_level)
@@ -2047,7 +2025,6 @@ class GBSpecialStretchMove(GroupStretchMove):
                         keep_leaf_here_i_remove.get(),
                     ]
                     # new_state.branches["gb_fixed"].inds[i, keep_walkers_here_i_remove, keep_leaf_here_i_remove] = False
-
                     assert np.all(
                         new_state.branches["gb_fixed"].inds[
                             i - 1, keep_walkers_here_i1_add.get(), leaves_add_i1.get()
@@ -2166,20 +2143,20 @@ class GBSpecialStretchMove(GroupStretchMove):
                             [
                                 xp.full_like(
                                     reverse_data_index_tmp_i_remove,
-                                    -1.0,
+                                    +1.0,
                                     dtype=xp.float64,
                                 ),
                                 xp.full_like(
-                                    reverse_data_index_tmp_i_add, +1.0, dtype=xp.float64
+                                    reverse_data_index_tmp_i_add, -1.0, dtype=xp.float64
                                 ),
                                 xp.full_like(
                                     reverse_data_index_tmp_i1_remove,
-                                    -1.0,
+                                    +1.0,
                                     dtype=xp.float64,
                                 ),
                                 xp.full_like(
                                     reverse_data_index_tmp_i1_add,
-                                    +1.0,
+                                    -1.0,
                                     dtype=xp.float64,
                                 ),
                             ]
@@ -2198,7 +2175,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                     )
                     # ll_after2 = self.mgh.get_ll(include_psd_info=True).flatten()[data_index_all.get()]
                     # print(i, odds_evens, new_state.branches_inds["gb_fixed"].sum(), state.branches_inds["gb_fixed"].sum(), new_state.branches_inds["gb_fixed"].sum() - state.branches_inds["gb_fixed"].sum())
-
+                    # breakpoint()
                 new_state.branches["gb_fixed"].coords[
                     ~new_state.branches["gb_fixed"].inds
                 ] = self.xp.nan
@@ -2219,7 +2196,6 @@ class GBSpecialStretchMove(GroupStretchMove):
             )
 
             new_state.log_prior = log_prior_new_per_bin.sum(axis=-1).get()
-
             self.temperature_control.adapt_temps()
             new_state.betas = self.temperature_control.betas.copy()
             # breakpoint()
@@ -2236,8 +2212,71 @@ class GBSpecialStretchMove(GroupStretchMove):
         else:
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
 
+        if hasattr(self, "band_swaps_accepted"):
+            np.save("temp_band_swaps_percentage", self.band_swaps_accepted / self.band_swaps_proposed)
+
         if np.any(new_state.log_like > 1e10):
             breakpoint()
+
+        self.mempool.free_all_blocks()
+
+        if self.time % 1 == 0:
+            ll_after = (
+                self.mgh.get_ll(include_psd_info=True)
+                .flatten()[new_state.supplimental[:]["overall_inds"]]
+                .reshape(ntemps, nwalkers)
+            )
+            # print(np.abs(new_state.log_like - ll_after).max())
+            store_max_diff = np.abs(new_state.log_like - ll_after).max()
+            if np.abs(new_state.log_like - ll_after).max() > 1e-2:
+                if np.abs(new_state.log_like - ll_after).max() > 1e0:
+                    breakpoint()
+                breakpoint()
+                self.mgh.restore_base_injections()
+
+                for name in new_state.branches.keys():
+                    if name not in ["gb", "gb_fixed"]:
+                        continue
+                    new_state_branch = new_state.branches[name]
+                    coords_here = new_state_branch.coords[new_state_branch.inds]
+                    ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
+                    try:
+                        group_index = self.xp.asarray(
+                            self.mgh.get_mapped_indices(
+                                np.repeat(
+                                    np.arange(ntemps * nwalkers).reshape(
+                                        ntemps, nwalkers, 1
+                                    ),
+                                    nleaves_max,
+                                    axis=-1,
+                                )[new_state_branch.inds]
+                            ).astype(self.xp.int32)
+                        )
+                    except IndexError:
+                        breakpoint()
+                    coords_here_in = self.parameter_transforms.both_transforms(
+                        coords_here, xp=np
+                    )
+
+                    waveform_kwargs_fill = self.waveform_kwargs.copy()
+                    waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
+
+                    if "N" in waveform_kwargs_fill:
+                        waveform_kwargs_fill.pop("N")
+
+                    self.mgh.multiply_data(-1.0)
+                    self.gb.generate_global_template(
+                        coords_here_in,
+                        group_index,
+                        self.mgh.data_list,
+                        data_length=self.data_length,
+                        data_splits=self.mgh.gpu_splits,
+                        batch_size=1000,
+                        **waveform_kwargs_fill
+                    )
+                    self.xp.cuda.runtime.deviceSynchronize()
+                    self.mgh.multiply_data(-1.0)
+
 
         self.time += 1
         # self.xp.cuda.runtime.deviceSynchronize()
@@ -2266,7 +2305,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             "\nswap percentage:",
             self.temperature_control.swaps_accepted / self.temperature_control.swaps_proposed,
             "\n\n\n",
-        )
+        ) 
 
         # breakpoint()
         return new_state, accepted
