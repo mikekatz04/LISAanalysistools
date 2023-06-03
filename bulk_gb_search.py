@@ -65,6 +65,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
         new_points[fix == True] = tmp
         fix = xp.any(xp.isinf(new_points), axis=-1) | xp.any(xp.isnan(new_points), axis=-1)
 
+    # TODO: fix fs stuff
     prev_logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
     assert not xp.any(xp.isinf(prev_logp))
     new_points_with_fs = new_points.copy()

@@ -236,8 +236,11 @@ def run_gb_pe(gpu):
 
     xp.cuda.runtime.setDevice(gpus[0])
 
-    nwalkers_pe = 25
-    ntemps_pe = 18
+    nwalkers_pe = 800
+
+    snrs_ladder = np.array([1.])  # , 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.5, 4.5, 5.5, 6., 6.5, 7., 8.0, 9., 10.0])
+        
+    ntemps_pe = len(snrs_ladder)
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
@@ -278,14 +281,16 @@ def run_gb_pe(gpu):
         end_search_gb_coords = end_search_state.branches["gb_fixed"].coords[:, :nwalkers_pe]
         end_search_gb_inds = end_search_state.branches["gb_fixed"].inds[:, :nwalkers_pe]
 
+        walker_factor = int(nwalkers_pe / end_search_gb_coords.shape[1])
+        assert float(walker_factor) == float(nwalkers_pe) / float(end_search_gb_coords.shape[1])
         start_coords = {
-            "gb_fixed": np.repeat(end_search_gb_coords, repeats=ntemps_pe, axis=0)
+            "gb_fixed": np.repeat(end_search_gb_coords, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:])
         }
         start_inds = {
-            "gb_fixed": np.repeat(end_search_gb_inds, repeats=ntemps_pe, axis=0)
+            "gb_fixed": np.repeat(end_search_gb_inds, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:3])
         }
-        start_like = np.repeat(end_search_state.log_like, repeats=ntemps_pe, axis=0)
-        start_prior = np.repeat(end_search_state.log_prior, repeats=ntemps_pe, axis=0)
+        start_like = np.repeat(end_search_state.log_like, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,))
+        start_prior = np.repeat(end_search_state.log_prior, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,))
 
         last_sample = State(
             start_coords,
@@ -325,8 +330,11 @@ def run_gb_pe(gpu):
     A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_mbh_going_in[:] = mbh_inj[:, 0][None, :nwalkers_pe]
-    E_mbh_going_in[:] = mbh_inj[:, 1][None, :nwalkers_pe]
+    walker_factor = int(nwalkers_pe / mbh_inj[:, 0].shape[0])
+    assert float(walker_factor) == float(nwalkers_pe) / float(mbh_inj[:, 0].shape[0])
+        
+    A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 0].shape[1])
+    E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 1].shape[1])
 
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
@@ -338,8 +346,9 @@ def run_gb_pe(gpu):
     # E_psd_in[:] = np.asarray(psd)
     psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
-    A_psd_in[:] = psds[:, 0][None, :nwalkers_pe]  # A
-    E_psd_in[:] = psds[:, 1][None, :nwalkers_pe]  # A
+
+    A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
+    E_psd_in[:] = np.repeat(psds[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 1].shape[1])  # E
 
     """try:
         del mgh
@@ -640,7 +649,9 @@ def run_gb_pe(gpu):
 
     # TODO: get betas out of state object from old run if there
     if not hasattr(state_mix, "betas") or state_mix.betas is None:
-        betas = make_ladder(20 * 8, Tmax=5000.0, ntemps=ntemps_pe)
+        # betas = make_ladder(20 * 8, Tmax=5000.0, ntemps=ntemps_pe)
+        betas = 1 / snrs_ladder ** 2
+
     else:
         betas = state_mix.betas
 
@@ -671,10 +682,10 @@ def run_gb_pe(gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
-        update_iterations=1,
+        update_iterations=-1,
         provide_groups=True,
         provide_supplimental=True,
-        num_repeats_in_model=20,
+        num_repeats_in_model=5,
     )
 
     # equlibrating likelihood check: -4293090.6483655665,
@@ -722,7 +733,7 @@ def run_gb_pe(gpu):
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=True, thin_by=5, store=True
+        state_mix, nsteps_mix, progress=True, thin_by=25, store=True
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
@@ -817,4 +828,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(4)
+    output = run_gb_pe(6)
