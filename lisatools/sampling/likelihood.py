@@ -4,10 +4,10 @@ from eryn.state import Branch, BranchSupplimental
 import numpy as np
 
 try:
-    import cupy as xp
+    import cupy as cp
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as xp
+    pass
 
 
 class Likelihood(object):
@@ -56,11 +56,6 @@ class Likelihood(object):
             self.frequency_domain = False
 
         self.return_cupy = return_cupy
-        if use_gpu:
-            self.xp = xp
-
-        else:
-            self.xp = np
 
         self.noise_has_been_added = False
         self._specific_likelihood_setup()
@@ -90,12 +85,14 @@ class Likelihood(object):
         add_noise=False,
     ):
 
+        xp = cp if self.use_gpu else np
+
         if params is not None:
             if self.parameter_transforms is not None:
                 key = list(self.parameter_transforms.keys())[0]
                 params = self.parameter_transforms[key].both_transforms(params)
 
-            injection_channels = self.xp.asarray(
+            injection_channels = xp.asarray(
                 self.template_model(*params, **waveform_kwargs)
             )
             try:
@@ -108,7 +105,7 @@ class Likelihood(object):
             if isinstance(data_stream, list) is False:
                 raise ValueError("If data_stream is provided, it must be as a list.")
             try:
-                injection_channels = self.xp.asarray(data_stream).get()
+                injection_channels = xp.asarray(data_stream).get()
             except AttributeError:
                 injection_channels = np.asarray(data_stream)
 
@@ -235,24 +232,24 @@ class Likelihood(object):
             #    for inj, psd_temp in zip(injection_channels, psd)
             #]
 
-            #self.psd = self.xp.asarray(
+            #self.psd = xp.asarray(
             #    [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
             #)
-            self.psd = self.xp.asarray(psd)
+            self.psd = xp.asarray(psd)
 
             #if self.like_here is False:
-            #    self.psd = [self.xp.asarray(nf.copy()) for nf in self.psd]
+            #    self.psd = [xp.asarray(nf.copy()) for nf in self.psd]
 
         # if we need to evaluate the psd each time
         else:
             self.noise_fn, self.noise_args, self.noise_kwargs = noise_fn, noise_args, noise_kwargs
             
-        self.freqs = self.xp.asarray(freqs)
+        self.freqs = xp.asarray(freqs)
 
         if hasattr(self, "injection_channels") is False:
-            self.injection_channels = self.xp.asarray(injection_channels)
+            self.injection_channels = xp.asarray(injection_channels)
         else:
-            self.injection_channels += self.xp.asarray(injection_channels)
+            self.injection_channels += xp.asarray(injection_channels)
 
         if self.like_here is False:
             self.injection_channels = [inj.copy() for inj in self.injection_channels]
@@ -262,6 +259,7 @@ class Likelihood(object):
         self.start_freq_ind = int(self.freqs[0] / self.df)
 
     def get_ll(self, params, data, psd, *args, **kwargs):
+        xp = cp if self.use_gpu else np
 
         if psd is None:
             psd = self.psd
@@ -272,7 +270,7 @@ class Likelihood(object):
         # TODO: make sure parameter transformations appear in posterior if possible
         num_likes = params.shape[0]
         if self.vectorized:
-            template_channels = self.xp.asarray(
+            template_channels = xp.asarray(
                 self.template_model(*params, *args, **kwargs)
             )
 
@@ -283,19 +281,19 @@ class Likelihood(object):
                 template_channels[i] = self.template_model(*params_i, *args, **kwargs)
             
             
-            template_channels = self.xp.asarray(template_channels)
+            template_channels = xp.asarray(template_channels)
 
-            #template_channels = self.xp.asarray(
+            #template_channels = xp.asarray(
             #    [self.template_model(*params_i, *args, **kwargs) for params_i in params]
             #)
 
         if self.frequency_domain is False:
             template_channels = (
-                self.xp.fft.rfft(template_channels, axis=-1) * self.dt
+                xp.fft.rfft(template_channels, axis=-1) * self.dt
             )
 
         if psd.ndim == 2:
-            psd = psd[self.xp.newaxis, :, :]
+            psd = psd[xp.newaxis, :, :]
 
         h = template_channels
         if self.separate_d_h:
@@ -303,9 +301,9 @@ class Likelihood(object):
 
         else:
             if data.ndim == 2:
-                data = data[self.xp.newaxis, :, :]
+                data = data[xp.newaxis, :, :]
 
-            psd[self.xp.isnan(psd) | self.xp.isinf(psd)] = 1e20
+            psd[xp.isnan(psd) | xp.isinf(psd)] = 1e20
             # combines all channels into 1D array per likelihood
 
             d_minus_h = (data - h)
@@ -316,11 +314,11 @@ class Likelihood(object):
             ll = -(
                 1.0
                 / 2.0
-                * (4.0 * self.df * self.xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
+                * (4.0 * self.df * xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
             )
 
             if self.adjust_psd:
-                ll += self.xp.sum(self.xp.log(psd), axis=(1, 2))
+                ll += xp.sum(xp.log(psd), axis=(1, 2))
 
             if self.noise_has_been_added:
                 raise NotImplementedError
@@ -342,6 +340,7 @@ class Likelihood(object):
             return out
 
     def evaluate_psd(self, noise_params, f_arr=None, noise_fn: list=None, noise_kwargs: list=None, noise_groups=None):
+        xp = cp if self.use_gpu else np
 
         if noise_groups is None:
             if len(np.unique(noise_groups)) != len(noise_groups):
@@ -349,7 +348,7 @@ class Likelihood(object):
         if f_arr is None:
             f_arr = self.freqs
 
-        assert isinstance(f_arr, self.xp.ndarray)
+        assert isinstance(f_arr, xp.ndarray)
         
         if noise_fn is None:
             # must be a list 
@@ -359,7 +358,7 @@ class Likelihood(object):
             # must be a list
             noise_kwargs = self.noise_kwargs
 
-        psd = self.xp.asarray(
+        psd = xp.asarray(
             [
                 noise_fn_temp(f_arr, *noise_params, **noise_kwargs_temp)
                 for noise_fn_temp, noise_kwargs_temp in zip(noise_fn, noise_kwargs)
@@ -368,7 +367,7 @@ class Likelihood(object):
         return psd
 
     def __call__(self, params, data=None, psd=None, *args, **kwargs):
-
+        xp = cp if self.use_gpu else np
         if isinstance(params, list):
             if len(params) != 2:
                 ValueError("If providing params for a single source Likelihood, must be an array if just parameters or a list of length 2 where the first entry in the parameter array and the second entry is the parameterization of the noise curve.")
@@ -598,14 +597,14 @@ class GlobalLikelihood(Likelihood):
             data_length = self.data_length
 
         if data is None:
-            data = self.injection_channels[self.xp.newaxis, :, inds_slice]
+            data = self.injection_channels[xp.newaxis, :, inds_slice]
 
         if psd is None:
-            psd = self.psd[self.xp.newaxis, :, inds_slice]
+            psd = self.psd[xp.newaxis, :, inds_slice]
 
         if supps is None or "data_minus_template" not in supps:
-            template_all = self.xp.zeros(
-                (total_groups, self.num_channels, data_length), dtype=self.xp.complex128,
+            template_all = xp.zeros(
+                (total_groups, self.num_channels, data_length), dtype=xp.complex128,
             )
 
             for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i, branch_supp_i) in enumerate(
@@ -622,12 +621,12 @@ class GlobalLikelihood(Likelihood):
                 # TODO: make fill templates adjustable per model
                 if not self.fill_templates:  # False
                     if vec_i:
-                        template_channels = self.xp.asarray(
+                        template_channels = xp.asarray(
                             tm_i(params_i, *args_i, **kwargs_i)
                         )
 
                     else:
-                        template_channels = self.xp.asarray(
+                        template_channels = xp.asarray(
                             [
                                 tm_i(params_ij, *args_i, **kwargs_i)
                                 for params_ij in params_i.T
@@ -638,7 +637,7 @@ class GlobalLikelihood(Likelihood):
                         # TODO: vectorize this
                         # 2: is removal of DC component + right summation approximation
                         template_channels = (
-                            self.xp.fft.rfft(template_channels, axis=-1) * self.dt
+                            xp.fft.rfft(template_channels, axis=-1) * self.dt
                         )
 
                     # TODO: could put this in c?
@@ -680,16 +679,16 @@ class GlobalLikelihood(Likelihood):
         start_ind = 1 if np.isnan(psd[0, 0, inds_slice][0]) else 0
 
         self.signal_ll = -(
-            1.0 / 2.0 * (4.0 * self.df * self.xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real / psd[:, :, start_ind:], axis=(1, 2)))
+            1.0 / 2.0 * (4.0 * self.df * xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real / psd[:, :, start_ind:], axis=(1, 2)))
         )
 
         ll = self.signal_ll.copy()
         if self.adjust_psd:
-            self.noise_ll = -self.xp.sum(self.xp.log(psd), axis=(1, 2))
+            self.noise_ll = -xp.sum(xp.log(psd), axis=(1, 2))
             ll += self.noise_ll
 
-        out = self.xp.atleast_1d(ll.squeeze())
-        if self.xp.any(self.xp.isnan(out)):
+        out = xp.atleast_1d(ll.squeeze())
+        if xp.any(xp.isnan(out)):
             breakpoint()
         if self.use_gpu:
             if self.return_cupy:
@@ -759,7 +758,7 @@ class GlobalLikelihood(Likelihood):
                 psd = self.psd
             if self.like_here:
                 if isinstance(psd, list):
-                    psd = self.xp.asarray(psd)[None, :, :]  # .transpose(1, 0, 2)
+                    psd = xp.asarray(psd)[None, :, :]  # .transpose(1, 0, 2)
 
         args_in += args
 
