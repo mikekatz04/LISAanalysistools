@@ -28,7 +28,6 @@ class Likelihood(object):
         subset=None,
         adjust_psd=False,
     ):
-
         self.subset = subset
         self.adjust_psd = adjust_psd
         self.transpose_params = transpose_params
@@ -61,7 +60,6 @@ class Likelihood(object):
         self._specific_likelihood_setup()
 
     def _specific_likelihood_setup(self):
-
         if isinstance(self.template_model, list):
             raise ValueError("For single likelihood, template model cannot be a list.")
         if hasattr(self.template_model, "get_ll"):
@@ -84,7 +82,6 @@ class Likelihood(object):
         noise_kwargs={},
         add_noise=False,
     ):
-
         xp = cp if self.use_gpu else np
 
         if params is not None:
@@ -178,14 +175,14 @@ class Likelihood(object):
             self.df = df = 1.0 / (self.injection_length * dt)
 
         if self.frequency_domain is False:
-            injection_channels = [
-                np.fft.rfft(inj) * dt for inj in injection_channels
-            ]
+            injection_channels = [np.fft.rfft(inj) * dt for inj in injection_channels]
 
         if not self.adjust_psd:
             psd = [
                 noise_fn_temp(freqs, *noise_args_temp, **noise_kwargs_temp)
-                for noise_fn_temp, noise_args_temp, noise_kwargs_temp in zip(noise_fn, noise_args, noise_kwargs)
+                for noise_fn_temp, noise_args_temp, noise_kwargs_temp in zip(
+                    noise_fn, noise_args, noise_kwargs
+                )
             ]
 
             if np.isnan(psd[0][0]):
@@ -227,23 +224,27 @@ class Likelihood(object):
                 self.noise_added_base_injections = injection_channels
 
             # noise weighting
-            #injection_channels = [
+            # injection_channels = [
             #    inj * (diff_freqs / psd_temp) ** (1 / 2)
             #    for inj, psd_temp in zip(injection_channels, psd)
-            #]
+            # ]
 
-            #self.psd = xp.asarray(
+            # self.psd = xp.asarray(
             #    [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
-            #)
+            # )
             self.psd = xp.asarray(psd)
 
-            #if self.like_here is False:
+            # if self.like_here is False:
             #    self.psd = [xp.asarray(nf.copy()) for nf in self.psd]
 
         # if we need to evaluate the psd each time
         else:
-            self.noise_fn, self.noise_args, self.noise_kwargs = noise_fn, noise_args, noise_kwargs
-            
+            self.noise_fn, self.noise_args, self.noise_kwargs = (
+                noise_fn,
+                noise_args,
+                noise_kwargs,
+            )
+
         self.freqs = xp.asarray(freqs)
 
         if hasattr(self, "injection_channels") is False:
@@ -253,7 +254,7 @@ class Likelihood(object):
 
         if self.like_here is False:
             self.injection_channels = [inj.copy() for inj in self.injection_channels]
-            
+
         self.data_length = len(self.injection_channels[0])
 
         self.start_freq_ind = int(self.freqs[0] / self.df)
@@ -275,22 +276,21 @@ class Likelihood(object):
             )
 
         else:
+            if isinstance(params[0], np.float64):
+                params = [params]
             template_channels = [None for _ in range(len(params))]
             for i, params_i in enumerate(params):
-                np.save("params_last", params_i)
+                # np.save("params_last", params_i)
                 template_channels[i] = self.template_model(*params_i, *args, **kwargs)
-            
-            
+
             template_channels = xp.asarray(template_channels)
 
-            #template_channels = xp.asarray(
+            # template_channels = xp.asarray(
             #    [self.template_model(*params_i, *args, **kwargs) for params_i in params]
-            #)
+            # )
 
         if self.frequency_domain is False:
-            template_channels = (
-                xp.fft.rfft(template_channels, axis=-1) * self.dt
-            )
+            template_channels = xp.fft.rfft(template_channels, axis=-1) * self.dt
 
         if psd.ndim == 2:
             psd = psd[xp.newaxis, :, :]
@@ -306,7 +306,7 @@ class Likelihood(object):
             psd[xp.isnan(psd) | xp.isinf(psd)] = 1e20
             # combines all channels into 1D array per likelihood
 
-            d_minus_h = (data - h)
+            d_minus_h = data - h
 
             # TODO: add inds_slice to here from global
             # start_ind = 1 if np.isnan(psd[0, 0, 0]) else 0
@@ -314,7 +314,11 @@ class Likelihood(object):
             ll = -(
                 1.0
                 / 2.0
-                * (4.0 * self.df * xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
+                * (
+                    4.0
+                    * self.df
+                    * xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2))
+                )
             )
 
             if self.adjust_psd:
@@ -339,19 +343,28 @@ class Likelihood(object):
         else:
             return out
 
-    def evaluate_psd(self, noise_params, f_arr=None, noise_fn: list=None, noise_kwargs: list=None, noise_groups=None):
+    def evaluate_psd(
+        self,
+        noise_params,
+        f_arr=None,
+        noise_fn: list = None,
+        noise_kwargs: list = None,
+        noise_groups=None,
+    ):
         xp = cp if self.use_gpu else np
 
         if noise_groups is None:
             if len(np.unique(noise_groups)) != len(noise_groups):
-                raise ValueError("If providing noise_groups with adjustable leaf count, need to write custom evaluate_psd function.")
+                raise ValueError(
+                    "If providing noise_groups with adjustable leaf count, need to write custom evaluate_psd function."
+                )
         if f_arr is None:
             f_arr = self.freqs
 
         assert isinstance(f_arr, xp.ndarray)
-        
+
         if noise_fn is None:
-            # must be a list 
+            # must be a list
             noise_fn = self.noise_fn
 
         if noise_kwargs is None:
@@ -370,35 +383,47 @@ class Likelihood(object):
         xp = cp if self.use_gpu else np
         if isinstance(params, list):
             if len(params) != 2:
-                ValueError("If providing params for a single source Likelihood, must be an array if just parameters or a list of length 2 where the first entry in the parameter array and the second entry is the parameterization of the noise curve.")
-            
+                ValueError(
+                    "If providing params for a single source Likelihood, must be an array if just parameters or a list of length 2 where the first entry in the parameter array and the second entry is the parameterization of the noise curve."
+                )
+
             if not self.adjust_psd:
-                raise ValueError("If providing a list with noise parameters, adjust_psd kwarg in __init__ method must be true.")
-             # must be transpose for noise
+                raise ValueError(
+                    "If providing a list with noise parameters, adjust_psd kwarg in __init__ method must be true."
+                )
+            # must be transpose for noise
             noise_params = params[1].T
-            
+
             params = params[0]
 
             if psd is not None:
-                raise ValueError("If providing noise parameters to likelihood, cannot also provide psd kwarg.")
-                
+                raise ValueError(
+                    "If providing noise parameters to likelihood, cannot also provide psd kwarg."
+                )
+
         else:
             noise_params = None
 
         assert isinstance(params, np.ndarray)
 
         if self.parameter_transforms is not None:
-            keys =  list(self.parameter_transforms.keys())
+            keys = list(self.parameter_transforms.keys())
             if len(keys) > 1:
                 if len(keys) > 2:
-                    raise ValueError("parameter_transforms should only contain transforms for the parameters and the noise parameters.")
+                    raise ValueError(
+                        "parameter_transforms should only contain transforms for the parameters and the noise parameters."
+                    )
                 if "noise_params" not in keys or "noise_params" != keys[0]:
-                    raise ValueError("'noise_params' must be the model name given for noise information to maintain consistency. It must be provided in the second position in the parameter_transforms dictionary.")
-            
+                    raise ValueError(
+                        "'noise_params' must be the model name given for noise information to maintain consistency. It must be provided in the second position in the parameter_transforms dictionary."
+                    )
+
             params = self.parameter_transforms[keys[0]].both_transforms(params)
 
             if "noise_params" in keys:
-                noise_params = self.parameter_transforms["noise_params"].both_transforms(noise_params)
+                noise_params = self.parameter_transforms[
+                    "noise_params"
+                ].both_transforms(noise_params)
 
         # only has to do with params, not noise params
         if self.transpose_params:
@@ -507,14 +532,15 @@ class Likelihood(object):
 
 class GlobalLikelihood(Likelihood):
     def __init__(
-        self, *args, fill_templates=False, **kwargs,
+        self,
+        *args,
+        fill_templates=False,
+        **kwargs,
     ):
-
         super(GlobalLikelihood, self).__init__(*args, **kwargs)
         self.fill_templates = fill_templates
 
     def _specific_likelihood_setup(self):
-
         if not isinstance(self.template_model, list):
             self.template_model = [self.template_model]
 
@@ -536,7 +562,7 @@ class GlobalLikelihood(Likelihood):
         self,
         params,
         groups,
-        data, 
+        data,
         psd,
         data_length=None,
         start_freq_ind=None,
@@ -559,9 +585,9 @@ class GlobalLikelihood(Likelihood):
 
         else:
             branch_supps = [None for _ in params]
-        
+
         assert len(groups) == len(branch_supps)
-        
+
         if args_list is None:
             args_list = [[] for _ in params]
 
@@ -604,10 +630,19 @@ class GlobalLikelihood(Likelihood):
 
         if supps is None or "data_minus_template" not in supps:
             template_all = xp.zeros(
-                (total_groups, self.num_channels, data_length), dtype=xp.complex128,
+                (total_groups, self.num_channels, data_length),
+                dtype=xp.complex128,
             )
 
-            for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i, branch_supp_i) in enumerate(
+            for i, (
+                params_i,
+                groups_i,
+                args_i,
+                kwargs_i,
+                tm_i,
+                vec_i,
+                branch_supp_i,
+            ) in enumerate(
                 zip(
                     params,
                     groups,
@@ -660,13 +695,17 @@ class GlobalLikelihood(Likelihood):
                     else:
                         for params_ij, groups_ij in zip(params_i.T, groups_i):
                             tm_i.generate_global_template(
-                                params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
+                                params_ij,
+                                groups_ij,
+                                template_all,
+                                *args_i,
+                                **kwargs_i_in,
                             )
             breakpoint()
             # accelerate ?
-            d_minus_h = (
-                data - template_all
-            ).reshape(total_groups, len(self.injection_channels), -1)
+            d_minus_h = (data - template_all).reshape(
+                total_groups, len(self.injection_channels), -1
+            )
 
         else:
             d_minus_h = supps["data_minus_template"]
@@ -679,7 +718,19 @@ class GlobalLikelihood(Likelihood):
         start_ind = 1 if np.isnan(psd[0, 0, inds_slice][0]) else 0
 
         self.signal_ll = -(
-            1.0 / 2.0 * (4.0 * self.df * xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real / psd[:, :, start_ind:], axis=(1, 2)))
+            1.0
+            / 2.0
+            * (
+                4.0
+                * self.df
+                * xp.sum(
+                    (
+                        d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]
+                    ).real
+                    / psd[:, :, start_ind:],
+                    axis=(1, 2),
+                )
+            )
         )
 
         ll = self.signal_ll.copy()
@@ -703,7 +754,6 @@ class GlobalLikelihood(Likelihood):
             return out
 
     def __call__(self, params, groups, *args, data=None, psd=None, **kwargs):
-        
         if isinstance(params, np.ndarray):
             params = [params]
         elif not isinstance(params, list):
@@ -714,8 +764,7 @@ class GlobalLikelihood(Likelihood):
         elif not isinstance(groups, list):
             raise ValueError("groups must be np.ndarray or list of np.ndarray.")
 
-
-        #if np.any(np.abs(params[0][:, 4]) > 1.0) or np.any(np.abs(params[0][:, 7]) > 1.0):
+        # if np.any(np.abs(params[0][:, 4]) > 1.0) or np.any(np.abs(params[0][:, 7]) > 1.0):
         #    breakpoint()
 
         if self.parameter_transforms is not None:
@@ -752,7 +801,7 @@ class GlobalLikelihood(Likelihood):
         args_in = [params] + [groups] + list(args)
 
         if noise_params is not None:
-                psd = self.evaluate_psd(noise_params.T, noise_groups=noise_groups)
+            psd = self.evaluate_psd(noise_params.T, noise_groups=noise_groups)
         else:
             if psd is None:
                 psd = self.psd
