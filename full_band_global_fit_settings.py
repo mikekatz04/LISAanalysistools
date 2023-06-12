@@ -144,7 +144,7 @@ fp_psd_residual_search = "last_psd_cold_chain_info_search"
 fp_gb_template_search = "last_gb_cold_chain_info_search"
 
 fp_psd_search_initial = "initial_search_develop_full_band_psd_2.h5"
-fp_psd_search = "search_develop_full_band_psd.h5"
+fp_psd_search = "search_develop_full_band_psd_3.h5"
 fp_mbh_search = "search_develop_full_band_mbh.h5"
 
 fp_pe = "develop_zero_temps_full_band_19.h5"

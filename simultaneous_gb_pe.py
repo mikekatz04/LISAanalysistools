@@ -728,7 +728,7 @@ def run_gb_pe(gpu):
                 xp.cuda.runtime.deviceSynchronize()
         xp.cuda.runtime.setDevice(main_gpu)
     """
-    nsteps_mix = 10000
+    nsteps_mix = 1000
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()

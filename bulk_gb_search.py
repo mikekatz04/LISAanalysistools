@@ -46,6 +46,7 @@ def shuffle_along_axis(a, axis, xp=None):
     idx = xp.random.rand(*a.shape).argsort(axis=axis)
     return xp.take_along_axis(a,idx,axis=axis)
 
+
 def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_running, evens_odds, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, binaries_found):
     xp.cuda.runtime.setDevice(xp.cuda.runtime.getDevice())
     temperature_control = TemperatureControl(ndim, nwalkers, ntemps=ntemps)
@@ -55,7 +56,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
 
     move_proposal = StretchMove(periodic=PeriodicContainer(periodic), temperature_control=temperature_control, return_gpu=True, use_gpu=True)
     
-    band_inds_here = xp.where(xp.asarray(band_inds_running) & (xp.arange(len(band_inds_running)) % 2 == evens_odds))[0]
+    band_inds_here = xp.where(xp.asarray(band_inds_running) & (xp.arange(len(band_inds_running)) % 1 == evens_odds))[0]  #  % 2 == evens_odds))[0]
 
     new_points = priors_good.rvs(size=(ntemps, nwalkers, len(band_inds_here)))
 
@@ -73,7 +74,11 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     new_points_with_fs[:, :, :, 2] = (fdot_maxs[band_inds_here] - fdot_mins[band_inds_here]) * new_points_with_fs[:, :, :, 2] + fdot_mins[band_inds_here]
 
     new_points_in = transform_fn.both_transforms(new_points_with_fs.reshape(-1, ndim), xp=xp).reshape(new_points_with_fs.shape[:-1] + (ndim + 1,)).reshape(-1, ndim + 1)
-    gb.d_d = 0.0
+    inner_product = 4 * df * (xp.sum(data_in[0].conj() * data_in[0] / psd_in[0]) + xp.sum(data_in[1].conj() * data_in[1] / psd_in[1])).real
+    ll = (-1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd_in)))).item()
+    gb.d_d = ll
+
+    print(ll)
 
     prev_logl = xp.asarray(gb.get_ll(new_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs).reshape(prev_logp.shape))
 
@@ -98,6 +103,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     iter_count = np.zeros_like(still_going_here, dtype=int)
     betas = xp.repeat(xp.asarray(temperature_control.betas[:, None].copy()), len(band_inds_here), axis=-1)
 
+    run_number = 0
     for prop_i in range(num_max_proposals):  # tqdm(range(num_max_proposals)):
         # st = time.perf_counter()
         num_still_going_here = still_going_here.sum().item()
@@ -244,17 +250,77 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
         best_logl_ind = prev_logl.reshape(ntemps * nwalkers, len(band_inds_here)).argmax(axis=0)[improvement]
         best_logl_coords[improvement] = old_points.reshape(ntemps * nwalkers, len(band_inds_here), ndim)[(best_logl_ind, xp.arange(len(band_inds_here))[improvement])]
 
-        if prop_i > 500:
+        if prop_i > convergence_iter_count:
             iter_count[improvement] = 0
             iter_count[~improvement] += 1
 
         num_proposals_per[still_going_here] += 1
         still_going_here[iter_count >= convergence_iter_count] = False
         
-        if prop_i % 500 == 0:
+        if prop_i % convergence_iter_count == 0:
             print(f"Proposal {prop_i}, Still going:", still_going_here.sum().item())
         if still_going_here.sum().item() == 0:
-            break
+            if run_number == 0:
+                old_points[:] = best_logl_coords[None, None, :]
+
+                gen_points = old_points.transpose(2, 0, 1, 3).reshape(best_logl_coords.shape[0], -1, ndim).copy()
+                iter_count[:] = 0
+                still_going_here[:] = True
+
+                factor = 1e-5
+                cov = xp.ones(ndim) * 1e-3
+                cov[1] = 1e-8
+
+                still_going_start_like = xp.ones(best_logl_coords.shape[0], dtype=bool)
+                starting_points = np.zeros((best_logl_coords.shape[0], nwalkers * ntemps, ndim))
+
+                iter_check = 0
+                max_iter = 10000
+                while np.any(still_going_start_like):
+                    num_still_going_start_like = still_going_start_like.sum().item()
+                    
+                    start_like = np.zeros((num_still_going_start_like, nwalkers * ntemps))
+                
+                    logp = np.full_like(start_like, -np.inf)
+                    tmp = xp.zeros((num_still_going_start_like, ntemps * nwalkers, ndim))
+                    fix = xp.ones((num_still_going_start_like, ntemps * nwalkers), dtype=bool)
+                    while xp.any(fix):
+                        tmp[fix] = (gen_points[still_going_start_like, :] * (1. + factor * cov * xp.random.randn(num_still_going_start_like, nwalkers * ntemps, ndim)))[fix]
+
+                        tmp[:, :, 3] = tmp[:, :, 3] % (2 * np.pi)
+                        tmp[:, :, 5] = tmp[:, :, 5] % (np.pi)
+                        tmp[:, :, 6] = tmp[:, :, 6] % (2 * np.pi)
+                        logp = priors_good.logpdf(tmp.reshape(-1, ndim)).reshape(tmp.shape[:-1])
+
+                        fix = xp.isinf(logp)
+                        if xp.all(fix):
+                            breakpoint()
+
+                    new_points_with_fs = tmp.copy()
+
+                    new_points_with_fs[:, :, 1] = (f0_maxs[None, band_inds_here[still_going_start_like]] - f0_mins[None, band_inds_here[still_going_start_like]]).T * new_points_with_fs[:, :, 1] + f0_mins[None, band_inds_here[still_going_start_like]].T
+                    new_points_with_fs[:, :, 2] = (fdot_maxs[None, band_inds_here[still_going_start_like]] - fdot_mins[None, band_inds_here[still_going_start_like]]).T * new_points_with_fs[:, :, 2] + fdot_mins[None, band_inds_here[still_going_start_like]].T
+
+                    new_points_in = transform_fn.both_transforms(new_points_with_fs.reshape(-1, ndim), xp=xp)
+
+                    start_like = xp.asarray(gb.get_ll(new_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs)).reshape(new_points_with_fs.shape[:-1])
+
+                    old_points[:, :, still_going_start_like, :] = tmp.transpose(1, 0, 2).reshape(ntemps, nwalkers, -1, ndim)
+                    prev_logl[:, :, still_going_start_like] = start_like.T.reshape(ntemps, nwalkers, -1)
+                    prev_logp[:, :, still_going_start_like] = logp.T.reshape(ntemps, nwalkers, -1)
+                    # fix any nans that may come up
+                    start_like[xp.isnan(start_like)] = -1e300
+                    
+                    update = xp.arange(still_going_start_like.shape[0])[still_going_start_like][xp.std(start_like, axis=-1) > 5.0]
+                    still_going_start_like[update] = False 
+
+                    iter_check += 1
+                    factor *= 1.5
+                    print(iter_check, still_going_start_like.sum())
+
+                run_number += 1
+            else:
+                break
 
     best_binaries_coords_with_fs = best_logl_coords.copy()
 
@@ -270,6 +336,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
 
     snr_lim = 7.0
     keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > snr_lim
+
     # TODO: add in based on sensitivity changing
     # band_inds_running[band_inds_here[~keep_binaries].get()] = False
     keep_coords = best_binaries_coords_with_fs[keep_binaries].get()
@@ -279,6 +346,45 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     keep_coords[:, 3] -= phase_change
     # best_logl_points_in[keep_binaries, 4] -= xp.asarray(phase_change)
 
+    # check if there are sources near band edges that are overlapping
+    assert np.all(keep_coords[:, 1] == np.sort(keep_coords[:, 1]))
+    f_found = keep_coords[:, 1] / 1e3
+    N = get_N(np.full_like(f_found, 1e-30), f_found, Tobs=waveform_kwargs["T"], oversample=waveform_kwargs["oversample"])
+    inds_check = np.where((np.diff(f_found) / df).astype(int) < N[:-1])[0]
+
+    params_add = keep_coords[inds_check]
+    params_remove = keep_coords[inds_check + 1]
+    N_check = N[inds_check]
+
+    params_add_in = transform_fn.both_transforms(params_add)
+    params_remove_in = transform_fn.both_transforms(params_remove)
+
+    waveform_kwargs_tmp = waveform_kwargs.copy()
+    if "N" in waveform_kwargs_tmp:
+        waveform_kwargs_tmp.pop("N")
+    waveform_kwargs_tmp["use_c_implementation"] = False
+
+    gb.swap_likelihood_difference(params_add_in, params_remove_in, data_in, psd_in, N=256, **waveform_kwargs_tmp)
+
+    likelihood_difference = -1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real.get()
+    overlap = (gb.add_remove.real / np.sqrt(gb.add_add.real * gb.remove_remove.real)).get()
+
+    fix = np.where((likelihood_difference > -100.0) | (overlap > 0.4))
+
+    if np.any(fix):
+        params_comp_add = params_add[fix]
+        params_comp_remove = params_remove[fix]
+
+        # not actually in the data yet, just using swap for quick likelihood comp
+        snr_add = (gb.d_h_add.real[fix] / gb.add_add.real[fix] ** (1/2)).get()
+        snr_remove = (gb.d_h_remove.real[fix] / gb.remove_remove.real[fix] ** (1/2)).get()
+
+        inds_add = inds_check[fix]
+        inds_remove = inds_add + 1
+
+        inds_delete = (inds_add) * (snr_add < snr_remove) + (inds_remove) * (snr_remove < snr_add)
+        keep_coords = np.delete(keep_coords, inds_delete, axis=0)
+        
     nwalkers_pe = nwalkers
     ntemps_pe = 1
     
@@ -289,7 +395,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     still_going_start_like = np.ones(keep_coords.shape[0], dtype=bool)
     starting_points = np.zeros((keep_coords.shape[0], nwalkers_pe * ntemps_pe, ndim))
     iter_check = 0
-    max_iter = 1000
+    max_iter = 10000
     while np.any(still_going_start_like):
         num_still_going_start_like = still_going_start_like.sum().item()
         
@@ -337,10 +443,13 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
 
     num_binaries_found_this_iteration = keep_binaries.sum().item()
 
+    np.save("starting_points_last_batch", starting_points)
     return starting_points
 
 def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration, starting_points):
     ntemps_pe, nwalkers_pe = starting_points.shape[:2]
+    # ntemps_pe, nwalkers_pe = 1, 100
+
     ndim = 8
     if fp_gb_mixing in os.listdir():
         with open(fp_gb_mixing, "rb") as f_tmp:
@@ -363,8 +472,10 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
         coords_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new, ndim))
         betas_mix = np.linspace(1.0, 0.95, ntemps_pe)
 
-    inds_new = np.ones((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool) 
-    coords_new[:, :, nleaves_max_fix:] = starting_points
+    inds_new = np.ones((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool)
+
+    if starting_points.shape[2] > 0: 
+        coords_new[:, :, nleaves_max_fix:] = starting_points
     
     last_sample = State({"gb_fixed": coords_new}, inds={"gb_fixed": inds_new})
 
@@ -377,7 +488,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
     while not imported:
         try:
-            mbh_inj = np.load("best_logl_mbhs_from_psd_run.npy")  # fp_mbh_template_search + ".npy")
+            mbh_inj = np.load("best_logl_mbhs_from_psd_run_4.npy")  # fp_mbh_template_search + ".npy")
             imported = True
         except ValueError:
             time.sleep(1)
@@ -401,7 +512,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
     imported = False
     while not imported:
         try:
-            psds = np.load("best_logl_psd_from_psd_run.npy")  # fp_psd_residual_search + ".npy" )
+            psds = np.load("best_logl_psd_from_psd_run_4.npy")  # fp_psd_residual_search + ".npy" )
             imported = True
         except ValueError:
             time.sleep(1)
@@ -512,7 +623,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
     lp = priors["gb"].logpdf(last_sample.branches_coords["gb_fixed"].reshape(-1, 8)).reshape(last_sample.branches_coords["gb_fixed"].shape[:-1]).sum(axis=-1)
 
-    state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, log_like=ll.reshape(ntemps_pe, nwalkers_pe), supplimental=supps, log_prior=lp)
+    state_mix = State(last_sample.branches_coords, inds=last_sample.branches_inds, log_like=ll.reshape(ntemps_pe, nwalkers_pe), supplimental=supps, log_prior=lp, betas=np.array([1.0]))
     from gbgpu.utils.utility import get_N
 
     for name in ["gb_fixed"]:
@@ -577,35 +688,64 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
     model_placeholder = TempClass(xp.random)
     print(f"Starting mix for iteration {iter_i}")
-    mixing_steps = 10000
-    save_every_steps = 10
+    mixing_steps = 50000
+    save_every_steps = 100
     iters_maximize = 50
-    max_logl = state_mix.log_like.max()
+    max_logl = state_mix.log_like.copy()
+    converged_iters = np.zeros_like(max_logl, dtype=int)
     max_logl_iters = 0
+
     for mix_step in tqdm(range(mixing_steps)):
         
         state_mix, accepted = gb_fixed_move.propose(model_placeholder, state_mix)
 
-        if state_mix.log_like.max() > max_logl:
-            max_logl_iters = 0
-            max_logl = state_mix.log_like.max()
-        else:
-            max_logl_iters += 1
-
+        converged_iters[state_mix.log_like > max_logl] = 0
+        converged_iters[state_mix.log_like < max_logl] += 1
+        max_logl[state_mix.log_like > max_logl] = state_mix.log_like[state_mix.log_like > max_logl]
+        
         save = False
         if (mix_step) % save_every_steps == 0:
             save = True
-        if max_logl_iters >= iters_maximize:
+
+        if np.all(converged_iters >= iters_maximize):
             # TODO: switch to per band likelihood converge
             save = True
             converged = True
         else:
             converged = False
 
-        print("gb status", mix_step, max_logl, max_logl_iters, converged)
-        
         if save:
+            logls = state_mix.log_like.flatten()
+            logps = state_mix.log_prior.flatten()
+            ntemps_pe, nwalkers_pe, nleaves_max, ndim = state_mix.branches["gb_fixed"].shape
             
+            coords = state_mix.branches["gb_fixed"].coords.reshape(nwalkers_pe * ntemps_pe, nleaves_max, ndim)
+
+            best_logls_inds_sorted = xp.argsort(logls)[::-1]  # descending order
+
+            repeat_num = 20
+            inds_stored = best_logls_inds_sorted[:repeat_num]
+            repeats = int(ntemps_pe * nwalkers_pe / repeat_num)
+            assert float(repeats) == float(ntemps_pe * nwalkers_pe) / float(repeat_num)
+            for repeat_i in range(repeats - 1):
+                inds_to_adjust = np.random.permutation(best_logls_inds_sorted[repeat_num * (repeat_i + 1):repeat_num * (repeat_i + 2)])
+
+                logls[inds_to_adjust] = logls[inds_stored]
+                logps[inds_to_adjust] = logps[inds_stored]
+                coords[inds_to_adjust] = coords[inds_stored]
+
+                mgh.data_shaped[0][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_to_adjust] = mgh.data_shaped[0][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_stored]
+                mgh.data_shaped[1][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_to_adjust] = mgh.data_shaped[1][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_stored]
+                
+                mgh.psd_shaped[0][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_to_adjust] = mgh.psd_shaped[0][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_stored]
+                mgh.psd_shaped[1][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_to_adjust] = mgh.psd_shaped[1][0].reshape(ntemps_pe * nwalkers_pe, -1)[inds_stored]
+
+            state_mix.log_like[0, :] = logls 
+            state_mix.log_prior[0, :] = logps 
+            state_mix.branches["gb_fixed"].coords[0, :] = coords
+
+            print("gb status", mix_step, max_logl_iters, converged)
+            print(np.sort(converged_iters))
             best_gb = state_mix.log_like[0].argmax()
             """coords_out_gb_fixed = state_mix.branches_coords["gb_fixed"][0, best_gb]
             coords_in = transform_fn.both_transforms(coords_out_gb_fixed[state_mix.branches["gb_fixed"].inds[0, best_gb]])
@@ -634,7 +774,7 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
             imported = False
             while not imported:
                 try:
-                    psds = np.load("best_logl_psd_from_psd_run" + ".npy")
+                    psds = np.load("best_logl_psd_from_psd_run_4" + ".npy")
                     imported = True
                 except ValueError:
                     time.sleep(1)
@@ -663,13 +803,13 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
             A_out[np.abs(A_out) < 1e-27] = 0.0
             E_out[np.abs(E_out) < 1e-27] = 0.0
-            np.save("best_logl_gbs_from_psd_run", xp.array([A_out, E_out]))
+            np.save("best_logl_gbs_from_psd_run_4", xp.array([A_out, E_out]))
 
             # ll_af = mgh.get_ll(include_psd_info=True)
             imported = False
             while not imported:
                 try:
-                    mbh_inj = np.load("best_logl_mbhs_from_psd_run" + ".npy")
+                    mbh_inj = np.load("best_logl_mbhs_from_psd_run_4" + ".npy")
                     imported = True
                 except ValueError:
                     time.sleep(1)
@@ -699,6 +839,8 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
             with open(fp_gb_mixing, "wb") as f_tmp:
                 pickle.dump(state_mix, f_tmp, pickle.HIGHEST_PROTOCOL)
+            with open(fp_gb_mixing[:-7] + f"_{iter_i}.pickle", "wb") as f_tmp:
+                pickle.dump(state_mix, f_tmp, pickle.HIGHEST_PROTOCOL)
 
         if converged:
             break
@@ -717,9 +859,9 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
     removals = []
     
-
     # TODO: read out residuals for GBs
-
+    os.remove("starting_points_last_batch.npy")
+    
     del mgh.data_list[0][0]
     del mgh.data_list[1][0]
     del mgh.psd_list[0][0]
@@ -732,14 +874,14 @@ def run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration,
 
 
 def run_gb_bulk_search():
-    gpus = [6]
+    gpus = [7]
     xp.cuda.runtime.setDevice(gpus[0])
     # max ll combination of psd and mbhs
     # TODO: adjust this to max ll !!!!
     A_going_in = np.asarray(A_inj).copy()
     E_going_in = np.asarray(E_inj).copy()
 
-    mbh_inj = np.load("best_logl_mbhs_from_psd_run" + ".npy")
+    mbh_inj = np.load("best_logl_mbhs_from_psd_run_4" + ".npy")
 
     A_mbh_going_in = mbh_inj[0].squeeze()
     E_mbh_going_in = mbh_inj[1].squeeze()
@@ -747,7 +889,7 @@ def run_gb_bulk_search():
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
 
-    psds = np.load("best_logl_psd_from_psd_run" + ".npy")
+    psds = np.load("best_logl_psd_from_psd_run_4" + ".npy")
     psds[:, 0] = psds[:, 1]
     A_psd_in = psds[0].squeeze() # A
     E_psd_in = psds[1].squeeze()  # E
@@ -755,7 +897,7 @@ def run_gb_bulk_search():
     data_in = [xp.asarray(A_going_in), xp.asarray(E_going_in)]
     psd_in = [xp.asarray(A_psd_in), xp.asarray(E_psd_in)]
     
-    fp_gb_mixing = "mixing_gb_run.pickle"
+    fp_gb_mixing = "mixing_gb_run_4.pickle"
 
     if fp_gb_mixing in os.listdir():
         with open(fp_gb_mixing, "rb") as f_tmp:
@@ -804,11 +946,22 @@ def run_gb_bulk_search():
     # do not run the last band
     band_inds_running[-1] = False
     num_binaries_total = num_previously_found
-    for iter_i in range(iters):
-        for evens_odds in range(2):
-            starting_points = run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_running, evens_odds, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, binaries_found)
+    for iter_i in range(46, iters + 100):
+        # for evens_odds in range(2):
+        if True:
+            evens_odds = 0
+            if not "starting_points_last_batch.npy" in os.listdir():
+                starting_points = run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_running, evens_odds, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, binaries_found)
+            
+            else:
+                starting_points = np.load("starting_points_last_batch.npy")
+                starting_points = np.full((1, 100, 0, 0), np.array([]))
+
             num_binaries_found_this_iteration = starting_points.shape[2]
             num_binaries_total += num_binaries_found_this_iteration
+
+            # starting_points = None
+            # num_binaries_found_this_iteration = 0
             print(iter_i, f"Number of bands running: {band_inds_running.sum().item()}, found {num_binaries_found_this_iteration} binaries. Total binaries: {num_binaries_total}")
 
             data_in, psd_in = run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration, starting_points)

@@ -2533,7 +2533,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        if self.time % 1 == 0:
+        if self.time % 50 == 0:
             ll_after = (
                 self.mgh.get_ll(include_psd_info=True)
                 .flatten()[new_state.supplimental[:]["overall_inds"]]
