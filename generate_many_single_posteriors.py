@@ -238,6 +238,7 @@ def run_many_posteriors(gpu):
     else:
         # pass
         current_readout_iter = 1
+        print("starting file save")
         with h5py.File(individual_posterior_fp, "w") as fp:
             fp.create_dataset("samples", data=np.zeros((num_file_adds,) + old_points.shape), dtype=np.float64, compression="gzip", compression_opts=9)
             fp["samples"][0] = old_points.get()
@@ -333,12 +334,9 @@ def run_many_posteriors(gpu):
             
             print("changeover", prop_i + 1)
 
-            if (prop_i + 1 ) % 5000 == 0:
-                breakpoint()
-
 
 if __name__ == "__main__":
-    gpu = 7
+    gpu = 6
     xp.cuda.runtime.setDevice(gpu)
     
     run_many_posteriors(gpu)

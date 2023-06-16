@@ -147,7 +147,7 @@ fp_psd_search_initial = "initial_search_develop_full_band_psd_2.h5"
 fp_psd_search = "search_develop_full_band_psd_3.h5"
 fp_mbh_search = "search_develop_full_band_mbh.h5"
 
-fp_pe = "develop_zero_temps_full_band_19.h5"
+fp_pe = "develop_full_band_gmm_21.h5"
 fp_psd_pe = "develop_full_band_psd_3.h5"
 fp_mbh_pe = "develop_full_band_mbh.h5"
 folder = "./"
@@ -317,7 +317,7 @@ periodic = {
 f0_lims_in = f0_lims.copy()
 
 # TODO: make wider because this is knowning the limits?
-f0_lims_in[0] = 0.3e-3
+f0_lims_in[0] = 0.05e-3 # 0.3e-3
 # f0_lims_in[1] = 0.8e-3
 
 low_fs = np.arange(f0_lims_in[0], 0.001 - 4 * 128 * df, 2 * 128 * df)

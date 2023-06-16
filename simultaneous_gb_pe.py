@@ -13,6 +13,7 @@ from single_mcmc_run import run_single_band_search
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
+from lisatools.sampling.prior import FullGaussianMixtureModel
 
 import subprocess
 
@@ -236,9 +237,9 @@ def run_gb_pe(gpu):
 
     xp.cuda.runtime.setDevice(gpus[0])
 
-    nwalkers_pe = 800
+    nwalkers_pe = 25
 
-    snrs_ladder = np.array([1.])  # , 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.5, 4.5, 5.5, 6., 6.5, 7., 8.0, 9., 10.0])
+    snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 5e2])
         
     ntemps_pe = len(snrs_ladder)
 
@@ -252,7 +253,7 @@ def run_gb_pe(gpu):
             -2
         ]  # will all be the same
 
-        nleaves_max_fix_new = nleaves_max_fix
+        nleaves_max_fix_new = 20000  # nleaves_max_fix
 
     elif current_save_state_file in os.listdir():
         with open(current_save_state_file, "rb") as fp_out:
@@ -272,25 +273,26 @@ def run_gb_pe(gpu):
             -2
         ]  # will all be the same
 
-        nleaves_max_fix_new = nleaves_max_fix
+        nleaves_max_fix_new = 20000  # nleaves_max_fix
 
     elif "mixing_gb_run.pickle" in os.listdir():
         with open("mixing_gb_run.pickle", "rb") as fp_search_state:
             end_search_state = pickle.load(fp_search_state)
 
-        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords[:, :nwalkers_pe]
-        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds[:, :nwalkers_pe]
+        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords  # [:, :nwalkers_pe]
+        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds  # [:, :nwalkers_pe]
 
-        walker_factor = int(nwalkers_pe / end_search_gb_coords.shape[1])
-        assert float(walker_factor) == float(nwalkers_pe) / float(end_search_gb_coords.shape[1])
+        walker_factor = nwalkers_pe / end_search_gb_coords.shape[1]
+        # assert float(walker_factor) == float(nwalkers_pe) / float(end_search_gb_coords.shape[1])
         start_coords = {
-            "gb_fixed": np.repeat(end_search_gb_coords, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:])
+            "gb_fixed": np.repeat(end_search_gb_coords, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:])
         }
         start_inds = {
-            "gb_fixed": np.repeat(end_search_gb_inds, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:3])
+            "gb_fixed": np.repeat(end_search_gb_inds, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:3])
         }
-        start_like = np.repeat(end_search_state.log_like, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,))
-        start_prior = np.repeat(end_search_state.log_prior, repeats=ntemps_pe * walker_factor, axis=0).reshape((ntemps_pe, nwalkers_pe,))
+        breakpoint()
+        start_like = np.repeat(end_search_state.log_like, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,))
+        start_prior = np.repeat(end_search_state.log_prior, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,))
 
         last_sample = State(
             start_coords,
@@ -299,7 +301,7 @@ def run_gb_pe(gpu):
             log_prior=start_prior,
         )
 
-        nleaves_max_fix_new = 15000
+        nleaves_max_fix_new = 20000
         nleaves_max_fix = end_search_gb_inds.shape[-1]
 
     else:
@@ -330,11 +332,15 @@ def run_gb_pe(gpu):
     A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
+    A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
+    E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
+    
     walker_factor = int(nwalkers_pe / mbh_inj[:, 0].shape[0])
-    assert float(walker_factor) == float(nwalkers_pe) / float(mbh_inj[:, 0].shape[0])
-        
-    A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 0].shape[1])
-    E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 1].shape[1])
+    if walker_factor > 1:
+        assert float(walker_factor) == float(nwalkers_pe) / float(mbh_inj[:, 0].shape[0])
+            
+        A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 0].shape[1])
+        E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 1].shape[1])
 
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
@@ -347,8 +353,12 @@ def run_gb_pe(gpu):
     psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
 
-    A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
-    E_psd_in[:] = np.repeat(psds[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 1].shape[1])  # E
+    A_psd_in[:] = np.repeat(psds[:, 0], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
+    E_psd_in[:] = np.repeat(psds[:, 1], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
+    
+    if walker_factor > 1:
+        A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
+        E_psd_in[:] = np.repeat(psds[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 1].shape[1])  # E
 
     """try:
         del mgh
@@ -609,6 +619,24 @@ def run_gb_pe(gpu):
         prevent_swaps=True
     )"""
 
+    with open("gmm_info.pickle", "rb") as fp:
+        gmm_info = pickle.load(fp)
+
+
+    gmm_all = FullGaussianMixtureModel(gb, *gmm_info, use_cupy=True)
+
+    probs_in = {
+        (0, 1, 2, 4, 6, 7): gmm_all,
+        3: uniform_dist(0.0, 2 * np.pi, use_cupy=True),
+        5: uniform_dist(0.0, np.pi, use_cupy=True)
+    }
+    gen_dist = ProbDistContainer(probs_in, use_cupy=True)
+
+    tmp = gen_dist.rvs(size=1000)
+
+    tmp[::20, 1] = 500.0
+    tmp_logpdf = gen_dist.logpdf(tmp)
+    
     gb_kwargs_rj = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=transform_fn,
@@ -617,7 +645,7 @@ def run_gb_pe(gpu):
         skip_supp_names_update=["group_move_points"],
         random_seed=random_seed,
         nfriends=nwalkers,
-        rj_proposal_distribution=gpu_priors,
+        rj_proposal_distribution={"gb_fixed": gen_dist},  # gpu_priors,
         a=1.7,
         use_gpu=True,
     )
@@ -828,4 +856,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(6)
+    output = run_gb_pe(7)
