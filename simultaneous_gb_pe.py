@@ -14,6 +14,7 @@ from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
 from lisatools.sampling.prior import FullGaussianMixtureModel
+from eryn.moves.tempering import make_ladder
 
 import subprocess
 
@@ -240,8 +241,10 @@ def run_gb_pe(gpu):
     nwalkers_pe = 25
 
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 5e2])
-        
-    ntemps_pe = len(snrs_ladder)
+    ntemps_pe = 16  # len(snrs_ladder)
+    # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
+    betas = 1 / 1.2 ** np.arange(16)
+    # betas[-1] = 0.0
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
@@ -253,7 +256,7 @@ def run_gb_pe(gpu):
             -2
         ]  # will all be the same
 
-        nleaves_max_fix_new = 20000  # nleaves_max_fix
+        nleaves_max_fix_new = nleaves_max_fix
 
     elif current_save_state_file in os.listdir():
         with open(current_save_state_file, "rb") as fp_out:
@@ -273,14 +276,15 @@ def run_gb_pe(gpu):
             -2
         ]  # will all be the same
 
-        nleaves_max_fix_new = 20000  # nleaves_max_fix
+        nleaves_max_fix_new = 15000  # nleaves_max_fix
 
     elif "mixing_gb_run.pickle" in os.listdir():
         with open("mixing_gb_run.pickle", "rb") as fp_search_state:
             end_search_state = pickle.load(fp_search_state)
 
-        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords  # [:, :nwalkers_pe]
-        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds  # [:, :nwalkers_pe]
+        # TODO: check this!!!
+        end_search_gb_coords = end_search_state.branches["gb_fixed"].coords[:, :nwalkers_pe]
+        end_search_gb_inds = end_search_state.branches["gb_fixed"].inds[:, :nwalkers_pe]
 
         walker_factor = nwalkers_pe / end_search_gb_coords.shape[1]
         # assert float(walker_factor) == float(nwalkers_pe) / float(end_search_gb_coords.shape[1])
@@ -290,9 +294,9 @@ def run_gb_pe(gpu):
         start_inds = {
             "gb_fixed": np.repeat(end_search_gb_inds, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,) + end_search_gb_coords.shape[2:3])
         }
-        breakpoint()
-        start_like = np.repeat(end_search_state.log_like, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,))
-        start_prior = np.repeat(end_search_state.log_prior, repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,))
+        # breakpoint()
+        start_like = np.repeat(end_search_state.log_like[:, :nwalkers_pe], repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,))
+        start_prior = np.repeat(end_search_state.log_prior[:, :nwalkers_pe], repeats=int(ntemps_pe * walker_factor), axis=0).reshape((ntemps_pe, nwalkers_pe,))
 
         last_sample = State(
             start_coords,
@@ -301,7 +305,7 @@ def run_gb_pe(gpu):
             log_prior=start_prior,
         )
 
-        nleaves_max_fix_new = 20000
+        nleaves_max_fix_new = 15000
         nleaves_max_fix = end_search_gb_inds.shape[-1]
 
     else:
@@ -332,15 +336,15 @@ def run_gb_pe(gpu):
     A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
-    E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
+    A_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 0], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    E_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 1], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
     
-    walker_factor = int(nwalkers_pe / mbh_inj[:, 0].shape[0])
-    if walker_factor > 1:
-        assert float(walker_factor) == float(nwalkers_pe) / float(mbh_inj[:, 0].shape[0])
+    # walker_factor = int(nwalkers_pe / mbh_inj[:, 0].shape[0])
+    # if walker_factor > 1:
+    #     assert float(walker_factor) == float(nwalkers_pe) / float(mbh_inj[:, 0].shape[0])
             
-        A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 0].shape[1])
-        E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 1].shape[1])
+    #     A_mbh_going_in[:] = np.repeat(mbh_inj[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 0].shape[1])
+    #     E_mbh_going_in[:] = np.repeat(mbh_inj[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, mbh_inj[:, 1].shape[1])
 
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
@@ -353,12 +357,12 @@ def run_gb_pe(gpu):
     psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
 
-    A_psd_in[:] = np.repeat(psds[:, 0], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
-    E_psd_in[:] = np.repeat(psds[:, 1], 4, axis=0).reshape(ntemps_pe, nwalkers_pe, A_inj.shape[0])
+    A_psd_in[:] = np.repeat(psds[:nwalkers_pe, 0], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    E_psd_in[:] = np.repeat(psds[:nwalkers_pe, 1], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
     
-    if walker_factor > 1:
-        A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
-        E_psd_in[:] = np.repeat(psds[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 1].shape[1])  # E
+    # if walker_factor > 1:
+    #     A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
+    #     E_psd_in[:] = np.repeat(psds[:, 1][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 1].shape[1])  # E
 
     """try:
         del mgh
@@ -661,24 +665,42 @@ def run_gb_pe(gpu):
         gpu_priors,
     )
 
-    rj_moves = GBSpecialStretchMove(
+    rj_move_1 = GBSpecialStretchMove(
         *gb_args_rj,
         **gb_kwargs_rj,
     )
 
-    rj_moves.gb.gpus = gpus
+    gb_kwargs_rj_2 = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=transform_fn,
+        search=False,
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=random_seed,
+        nfriends=nwalkers,
+        rj_proposal_distribution=gpu_priors,
+        a=1.7,
+        use_gpu=True,
+    )
+
+    rj_move_2 = GBSpecialStretchMove(
+        *gb_args_rj,
+        **gb_kwargs_rj_2,
+    )
+    rj_moves = [(rj_move_1, 0.8), (rj_move_2, 0.2)]
+
+    for rj_move in rj_moves:
+        rj_move[0].gb.gpus = gpus
 
     moves_in_model = gb_fixed_move
 
     like_mix = BasicResidualMGHLikelihood(mgh)
     branch_names = ["gb_fixed"]
 
-    from eryn.moves.tempering import make_ladder
-
     # TODO: get betas out of state object from old run if there
     if not hasattr(state_mix, "betas") or state_mix.betas is None:
         # betas = make_ladder(20 * 8, Tmax=5000.0, ntemps=ntemps_pe)
-        betas = 1 / snrs_ladder ** 2
+        betas = betas  #  1 / snrs_ladder ** 2
 
     else:
         betas = state_mix.betas
@@ -856,4 +878,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(7)
+    output = run_gb_pe(5)

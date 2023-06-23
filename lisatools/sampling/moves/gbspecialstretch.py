@@ -818,7 +818,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         gb_keep_inds_special[~gb_inds] = self.xp.random.choice(
             self.xp.asarray([True, False]),
-            p=self.xp.asarray([1.0, 0.0]),
+            p=self.xp.asarray([0.1, 0.9]),
             size=(~gb_inds).sum().item(),
         )
 
@@ -942,7 +942,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         """
         # for testing
         # factors[:] = -1e10
-        breakpoint()
+
         return (
             gb_coords,
             gb_inds,
@@ -1424,7 +1424,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                     (band_indices % units == remainder)
                     & (N_vals_in == N_now)
                     & (band_indices < len(self.band_edges) - 2)
-                )  # & (N_vals_in <= 256) & (temp_inds == checkit[0].item()) & (walker_inds == checkit[1].item()) # & (band_indices == 530) #   & (band_indices < 540)  #  &  (temp_inds == 0) & (walker_inds == 0)
+                )  #  & (band_indices == 501) #  # & (N_vals_in <= 256) & (temp_inds == checkit[0].item()) & (walker_inds == checkit[1].item()) #    & (band_indices < 540)  #  &  (temp_inds == 0) & (walker_inds == 0)
 
                 if keep.sum().item() == 0:
                     continue
@@ -1485,7 +1485,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 band_inv_temp_vals_here = self.band_temps[(band_inds_indiv, temp_inds_indiv)]  # self.xp.asarray(self.temperature_control.betas)[temp_inds_indiv]  #
 
-                fix_change_temps = self.xp.where((band_inds_final_indiv != band_inds_indiv) & (temp_inds_indiv > 0))[0]
+                fix_change_temps = self.xp.where((band_inds_final_indiv != band_inds_indiv))[0]  #  & (temp_inds_indiv >= 0))[0]
                 
                 if len(fix_change_temps) > 0:
                     temp_current = band_inv_temp_vals_here[fix_change_temps]
@@ -1493,6 +1493,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                     temp_prop_same_index = self.band_temps[(band_inds_final_indiv[fix_change_temps], temp_inds_indiv[fix_change_temps])]
                     average_temp = (temp_current + temp_prop_same_index) / 2.
                     band_inv_temp_vals_here[fix_change_temps] = average_temp
+
+                    factors_here[fix_change_temps] = -1e300
                     # fix_temp_check_info.append([fix_change_temps, new_temp_ind, new_temp_val])
                     """temp_current = band_inv_temp_vals_here[fix_change_temps]
                     temp_inds_indiv_current = temp_inds_indiv[fix_change_temps]
@@ -1601,6 +1603,9 @@ class GBSpecialStretchMove(GroupStretchMove):
                     assert lengths.min() >= N_now + 2 * buffer
                 except AssertionError:
                     breakpoint()
+
+                # if not self.is_rj_prop:
+                #    band_inv_temp_vals_here[:] = 1.0
                     
                 inputs_now = (
                     L_contribution_here,
@@ -2017,7 +2022,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             and self.time % 1 == 0
             and self.ntemps > 1
             and self.is_rj_prop
-            # and Falses
+            # and False
         ):
 
             self.band_swaps_accepted = np.zeros((len(self.rj_band_edges) - 1, self.ntemps - 1))
@@ -2036,8 +2041,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # bi = betas[i]
                 # bi1 = betas[i - 1]
 
-                iperm = xp.random.permutation(nwalkers)  #  xp.arange(nwalkers)  # 
-                i1perm = xp.random.permutation(nwalkers)  # xp.arange(nwalkers)  # 
+                iperm = xp.arange(nwalkers)  # xp.random.permutation(nwalkers)  #    
+                i1perm = xp.arange(nwalkers)  # xp.random.permutation(nwalkers)  # 
 
                 # need to calculate switch likelihoods
                 
@@ -2111,11 +2116,11 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 unit_temps = 3
                 for odds_evens in range(unit_temps):
-                    keep_here_i = (bands_iperm % unit_temps == odds_evens) & (bands_iperm >= 0)  #  & (walker_map_iperm == 0)  # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
+                    keep_here_i = (bands_iperm % unit_temps == odds_evens) & (bands_iperm >= 0)  #  & (bands_i1perm == 501)  #  & (walker_map_iperm == 0)  # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
                 
                     keep_here_i1 = (bands_i1perm % unit_temps == odds_evens) & (
                         bands_i1perm >= 0
-                    )  #  & (walker_map_i1perm == 0) # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
+                    )  # & (bands_i1perm == 501) #  & (walker_map_i1perm == 0) # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
 
                     if not xp.any(keep_here_i) and not xp.any(keep_here_i1):
                         continue
@@ -2692,26 +2697,27 @@ class GBSpecialStretchMove(GroupStretchMove):
             # adapt if desired
             # if self.temperature_control.adaptive and self.temperature_control.ntemps > 1:
                 # if self.temperature_control.stop_adaptation < 0 or self.time < self.temperature_control.stop_adaptation:
-            betas0 = self.band_temps.copy().T.get()
-            betas1 = betas0.copy()
+            if self.time > 50:
+                betas0 = self.band_temps.copy().T.get()
+                betas1 = betas0.copy()
 
-            # Modulate temperature adjustments with a hyperbolic decay.
-            decay = self.temperature_control.adaptation_lag / (self.time + self.temperature_control.adaptation_lag)
-            kappa = decay / self.temperature_control.adaptation_time
+                # Modulate temperature adjustments with a hyperbolic decay.
+                decay = self.temperature_control.adaptation_lag / (self.time + self.temperature_control.adaptation_lag)
+                kappa = decay / self.temperature_control.adaptation_time
 
-            # Construct temperature adjustments.
-            dSs = kappa * (ratios[:-1] - ratios[1:])
+                # Construct temperature adjustments.
+                dSs = kappa * (ratios[:-1] - ratios[1:])
 
-            # Compute new ladder (hottest and coldest chains don't move).
-            deltaTs = np.diff(1 / betas1[:-1], axis=0)
+                # Compute new ladder (hottest and coldest chains don't move).
+                deltaTs = np.diff(1 / betas1[:-1], axis=0)
 
-            deltaTs *= np.exp(dSs)
-            betas1[1:-1] = 1 / (np.cumsum(deltaTs, axis=0) + 1 / betas1[0])
+                deltaTs *= np.exp(dSs)
+                betas1[1:-1] = 1 / (np.cumsum(deltaTs, axis=0) + 1 / betas1[0])
 
-            # Don't mutate the ladder here; let the client code do that.
-            dbetas = betas1 - betas0
+                # Don't mutate the ladder here; let the client code do that.
+                dbetas = betas1 - betas0
 
-            self.band_temps += self.xp.asarray(dbetas.T)
+                self.band_temps += self.xp.asarray(dbetas.T)
 
             # only increase time if it is adaptive.
             self.time += 1
@@ -2719,7 +2725,14 @@ class GBSpecialStretchMove(GroupStretchMove):
             # breakpoint()
             self.mempool.free_all_blocks()
             et1 = time.perf_counter()
-            print("temps ", (et1 - st1), self.temperature_control.betas)
+            print(
+                self.is_rj_prop,
+                self.band_swaps_accepted[350] / self.band_swaps_proposed[350],
+                self.band_swaps_accepted[450] / self.band_swaps_proposed[450],
+                self.band_swaps_accepted[501] / self.band_swaps_proposed[501]
+            )
+                
+            # print("temps ", (et1 - st1), self.temperature_control.betas)
             """ll_after = (
                 self.mgh.get_ll(include_psd_info=True)
                 .flatten()[new_state.supplimental[:]["overall_inds"]]
@@ -2731,7 +2744,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             self.temperature_control.swaps_accepted = np.zeros((ntemps - 1))
 
         if hasattr(self, "band_swaps_accepted"):
-            np.save("temp_band_swaps_percentage", self.band_swaps_accepted / self.band_swaps_proposed)
+            np.save("temp_band_swaps_percentage_3", self.band_swaps_accepted / self.band_swaps_proposed)
 
         if np.any(new_state.log_like > 1e10):
             breakpoint()
@@ -2807,7 +2820,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         if self.is_rj_prop:
             import os
-            gb_file = "gb_pe_log.log"
+            gb_file = "gb_pe_log_3.log"
             if gb_file not in os.listdir():
                 with open(gb_file, "w") as fp:
                     fp.write("Start:\n")

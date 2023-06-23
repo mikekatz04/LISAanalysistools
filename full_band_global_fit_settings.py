@@ -147,7 +147,7 @@ fp_psd_search_initial = "initial_search_develop_full_band_psd_2.h5"
 fp_psd_search = "search_develop_full_band_psd_3.h5"
 fp_mbh_search = "search_develop_full_band_mbh.h5"
 
-fp_pe = "develop_full_band_gmm_21.h5"
+fp_pe = "develop_full_band_gmm_25.h5"
 fp_psd_pe = "develop_full_band_psd_3.h5"
 fp_mbh_pe = "develop_full_band_mbh.h5"
 folder = "./"

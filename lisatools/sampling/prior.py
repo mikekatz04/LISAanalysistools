@@ -138,6 +138,9 @@ class FullGaussianMixtureModel:
         self.min_limit_f = self.map_back_frequency(-1. * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]) 
         self.max_limit_f = self.map_back_frequency(+1. * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]) 
 
+        # compute the jacobian
+        self.log_det_J = (self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1))[self.indexing].copy()
+
         """self.inds_sort_min_limit_f = xp.argsort(self.min_limit_f)
         self.inds_sort_max_limit_f = xp.argsort(self.max_limit_f)
         self.sorted_min_limit_f = self.min_limit_f[self.inds_sort_min_limit_f]
@@ -185,8 +188,9 @@ class FullGaussianMixtureModel:
         points_sorted_in = points_sorted[unique_points]
 
         logpdf_out_tmp = xp.zeros(points_sorted_in.shape[0])
+
         self.gb.compute_logpdf(logpdf_out_tmp, components_keep_in.astype(xp.int32), points_sorted_in,
-                    self.weights, self.mins_in_pdf, self.maxs_in_pdf, self.means_in_pdf, self.invcovs_in_pdf, self.dets, 
+                    self.weights, self.mins_in_pdf, self.maxs_in_pdf, self.means_in_pdf, self.invcovs_in_pdf, self.dets, self.log_det_J, 
                     points_sorted_in.shape[0], start_index_in_pdf, self.weights.shape[0], x.shape[1])
 
         # need to reverse the sort
