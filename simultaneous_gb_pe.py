@@ -24,9 +24,11 @@ warnings.filterwarnings("ignore")
 
 stop_here = True
 
-
 from eryn.moves import Move
+from lisatools.globalfit.state import State
+from lisatools.globalfit.hdfbackend import HDFBackend
 
+band_edges = search_f_bin_lims
 
 class PlaceHolder(Move):
     def __init__(self, *args, **kwargs):
@@ -243,7 +245,7 @@ def run_gb_pe(gpu):
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 5e2])
     ntemps_pe = 16  # len(snrs_ladder)
     # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
-    betas = 1 / 1.2 ** np.arange(16)
+    betas = 1 / 1.2 ** np.arange(ntemps_pe)
     # betas[-1] = 0.0
 
     num_binaries_needed_to_mix = 1
@@ -319,12 +321,16 @@ def run_gb_pe(gpu):
     inds_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool)
     inds_new[:, :, :nleaves_max_fix] = last_sample.branches["gb_fixed"].inds[:]
 
-    last_sample = State(
+    new_sample = State(
         {"gb_fixed": coords_new},
         inds={"gb_fixed": inds_new},
         log_like=last_sample.log_like,
         log_prior=last_sample.log_prior,
     )
+
+    band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
+
+    new_sample.initialize_band_information(nwalkers_pe, ntemps_pe, search_f_bin_lims, band_temps)
 
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -397,9 +403,9 @@ def run_gb_pe(gpu):
         base_psd=None,  # [psd.copy(), psd.copy()]
     )
 
-    # psd_params = last_sample.branches["psd"].coords.reshape(-1, last_sample.branches["psd"].shape[-1])
+    # psd_params = new_sample.branches["psd"].coords.reshape(-1, new_sample.branches["psd"].shape[-1])
 
-    # foreground_params = last_sample.branches["galfor"].coords.reshape(-1, last_sample.branches["galfor"].shape[-1])
+    # foreground_params = new_sample.branches["galfor"].coords.reshape(-1, new_sample.branches["galfor"].shape[-1])
 
     # mgh.set_psd_vals(psd_params, foreground_params=foreground_params)
 
@@ -425,8 +431,8 @@ def run_gb_pe(gpu):
     gb.get_ll(prior_generated_points_in[inds_cpu], mgh.data_list, mgh.psd_list, data_index=data_index[inds], noise_index=noise_index[inds], phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits,  N=N_temp[inds], **waveform_kwargs_in).shape
     breakpoint()"""
 
-    coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[
-        last_sample.branches["gb_fixed"].inds
+    coords_out_gb_fixed = new_sample.branches["gb_fixed"].coords[
+        new_sample.branches["gb_fixed"].inds
     ]
 
     check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
@@ -453,7 +459,7 @@ def run_gb_pe(gpu):
 
     data_index_1 = temp_vals * nwalkers_pe + walker_vals
 
-    data_index = xp.asarray(data_index_1[last_sample.branches["gb_fixed"].inds]).astype(
+    data_index = xp.asarray(data_index_1[new_sample.branches["gb_fixed"].inds]).astype(
         xp.int32
     )
 
@@ -509,12 +515,15 @@ def run_gb_pe(gpu):
     )
 
     state_mix = State(
-        last_sample.branches_coords,
-        inds=last_sample.branches_inds,
+        new_sample.branches_coords,
+        inds=new_sample.branches_inds,
         log_like=ll.reshape(ntemps_pe, nwalkers_pe),
         supplimental=supps,
-        betas=last_sample.betas,
+        betas=new_sample.betas,
     )
+
+    state_mix.band_info = new_sample.band_info
+
     from gbgpu.utils.utility import get_N
 
     for name in ["gb_fixed"]:
@@ -692,7 +701,7 @@ def run_gb_pe(gpu):
     for rj_move in rj_moves:
         rj_move[0].gb.gpus = gpus
 
-    moves_in_model = gb_fixed_move
+    moves_in_model = [gb_fixed_move]
 
     like_mix = BasicResidualMGHLikelihood(mgh)
     branch_names = ["gb_fixed"]
@@ -716,18 +725,42 @@ def run_gb_pe(gpu):
         waveform_kwargs,
     )
 
+    ndims = {"gb_fixed": ndim}
+    nleaves_max = {"gb_fixed": nleaves_max_fix_new}
+        
+    moves = moves_in_model + rj_moves
+    backend = HDFBackend(
+        fp_pe,
+        compression="gzip",
+        compression_opts=9,
+    )
+    
+    if not backend.initialized:
+        backend.reset(
+            nwalkers_pe,
+            ndims,
+            nleaves_max=nleaves_max,
+            ntemps=ntemps_pe,
+            branch_names=branch_names,
+            nbranches=len(branch_names),
+            rj=True,
+            moves=None,
+            num_bands=len(band_edges) - 1,
+            band_edges=band_edges
+        )
+
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
-        [ndim],  # assumes ndim_max
+        ndims,  # assumes ndim_max
         like_mix,
         priors,
-        tempering_kwargs={"betas": betas, "adaptation_time": 2},
+        tempering_kwargs={"betas": betas, "adaptation_time": 2, "permute": True},
         nbranches=len(branch_names),
-        nleaves_max=[nleaves_max_fix_new],
+        nleaves_max=nleaves_max,
         moves=moves_in_model,
         rj_moves=rj_moves,
         kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
-        backend=fp_pe,
+        backend=backend,
         vectorize=True,
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
@@ -736,6 +769,7 @@ def run_gb_pe(gpu):
         provide_groups=True,
         provide_supplimental=True,
         num_repeats_in_model=5,
+        track_moves=False
     )
 
     # equlibrating likelihood check: -4293090.6483655665,
@@ -878,4 +912,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(5)
+    output = run_gb_pe(7)
