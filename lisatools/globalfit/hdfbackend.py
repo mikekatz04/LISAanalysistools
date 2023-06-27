@@ -15,10 +15,17 @@ class HDFBackend(eryn_HDFBackend):
         with self.open("a") as f:
             g = f[self.name]
 
-            g.attrs["num_bands"] = num_bands
-            g.attrs["num_bands"] = band_edges
-
             band_info = g.create_group("band_info")
+
+            band_info.create_dataset(
+                "band_edges",
+                data=band_edges,
+                dtype=self.dtype,
+                compression=self.compression,
+                compression_opts=self.compression_opts,
+            )
+
+            band_info.attrs["num_bands"] = len(band_edges)
 
             band_info.create_dataset(
                 "band_temps",
@@ -96,7 +103,7 @@ class HDFBackend(eryn_HDFBackend):
     def num_bands(self):
         """Get num_bands from h5 file."""
         with self.open() as f:
-            return f[self.name].attrs["num_bands"]
+            return f[self.name]["band_info"].attrs["num_bands"]
 
     @property
     def band_edges(self):

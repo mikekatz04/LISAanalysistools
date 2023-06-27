@@ -30,6 +30,9 @@ from lisatools.globalfit.hdfbackend import HDFBackend
 
 band_edges = search_f_bin_lims
 
+# for _ in range(2):
+#     band_edges = np.sort(np.concatenate([band_edges, (band_edges[:-1] + band_edges[1:]) / 2]))
+
 class PlaceHolder(Move):
     def __init__(self, *args, **kwargs):
         super(PlaceHolder, self).__init__(*args, **kwargs)
@@ -234,9 +237,9 @@ def run_gb_pe(gpu):
     waveform_kwargs["start_freq_ind"] = start_freq_ind
 
     # for testing
-    # search_f_bin_lims = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
+    # band_edges = np.arange(f0_lims_in[0], f0_lims_in[1], 2 * 128 * df)
 
-    num_sub_bands = len(search_f_bin_lims)
+    num_sub_bands = len(band_edges)
 
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -246,7 +249,7 @@ def run_gb_pe(gpu):
     ntemps_pe = 16  # len(snrs_ladder)
     # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
     betas = 1 / 1.2 ** np.arange(ntemps_pe)
-    # betas[-1] = 0.0
+    betas[-1] = 0.01
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
@@ -330,7 +333,7 @@ def run_gb_pe(gpu):
 
     band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
 
-    new_sample.initialize_band_information(nwalkers_pe, ntemps_pe, search_f_bin_lims, band_temps)
+    new_sample.initialize_band_information(nwalkers_pe, ntemps_pe, band_edges, band_temps)
 
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -573,7 +576,7 @@ def run_gb_pe(gpu):
         data_length,
         mgh,
         np.asarray(fd),
-        search_f_bin_lims,
+        band_edges,
         gpu_priors,
     )
 
@@ -615,7 +618,7 @@ def run_gb_pe(gpu):
         data_length,
         mgh,
         np.asarray(fd),
-        search_f_bin_lims,
+        band_edges,
         gpu_priors
     )
 
@@ -670,7 +673,7 @@ def run_gb_pe(gpu):
         data_length,
         mgh,
         np.asarray(fd),
-        search_f_bin_lims,
+        band_edges,
         gpu_priors,
     )
 
@@ -912,4 +915,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(7)
+    output = run_gb_pe(5)

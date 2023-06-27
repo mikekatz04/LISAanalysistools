@@ -731,13 +731,13 @@ class GBSpecialStretchMove(GroupStretchMove):
                 fix_change_temps = self.xp.where((band_inds_final_indiv != band_inds_indiv))[0]  #  & (temp_inds_indiv >= 0))[0]
                 
                 if len(fix_change_temps) > 0:
-                    """temp_current = band_inv_temp_vals_here[fix_change_temps]
+                    temp_current = band_inv_temp_vals_here[fix_change_temps]
                     temp_inds_indiv_current = temp_inds_indiv[fix_change_temps]
                     temp_prop_same_index = band_temps[(band_inds_final_indiv[fix_change_temps], temp_inds_indiv[fix_change_temps])]
                     average_temp = (temp_current + temp_prop_same_index) / 2.
-                    band_inv_temp_vals_here[fix_change_temps] = average_temp"""
+                    band_inv_temp_vals_here[fix_change_temps] = average_temp
 
-                    factors_here[fix_change_temps] = -1e300
+                    # factors_here[fix_change_temps] = -1e300
                     
                 band_inds = band_indices[keep][uni_index_special_band_inds_here]
                 band_temps_inds = temp_inds[keep][uni_index_special_band_inds_here]
@@ -883,10 +883,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # updates related to newly added sources
                 if self.is_rj_prop:
                     gb_inds_orig_check = gb_inds_orig.copy()
-                    gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)] = (
-                        (gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)].astype(int) + 1)
-                        % 2
-                    ).astype(bool)
+                    gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)] = (~gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)])
                     new_state.branches_supplimental["gb_fixed"].holder["N_vals"][
                         (temp_tmp.get(), walker_tmp.get(), leaf_tmp.get())
                     ] = inputs_now[22]
@@ -922,6 +919,109 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.mempool.free_all_blocks()
 
         # get accepted fraction
+        if not self.is_rj_prop:
+            assert np.all(
+                new_state.branches_inds["gb_fixed"] == state.branches_inds["gb_fixed"]
+            )
+            accepted_check_tmp = np.zeros_like(
+                new_state.branches_inds["gb_fixed"], dtype=bool
+            )
+            accepted_check_tmp[new_state.branches_inds["gb_fixed"]] = np.all(
+                np.abs(
+                    new_state.branches_coords["gb_fixed"][
+                        new_state.branches_inds["gb_fixed"]
+                    ]
+                    - state.branches_coords["gb_fixed"][state.branches_inds["gb_fixed"]]
+                )
+                > 0.0,
+                axis=-1,
+            )
+            proposed = gb_inds.get()
+            accepted_check = accepted_check_tmp.sum(
+                axis=(1, 2)
+            ) / proposed.sum(axis=(1, 2))
+        else:
+            accepted_check_tmp = (
+                new_state.branches_inds["gb_fixed"] == (~state.branches_inds["gb_fixed"])
+            )
+
+            proposed = gb_inds.get()
+            accepted_check = accepted_check_tmp.sum(axis=(1, 2)) / proposed.sum(axis=(1, 2))
+            
+        # manually tell temperatures how real overall acceptance fraction is
+        number_of_walkers_for_accepted = np.floor(nwalkers * accepted_check).astype(int)
+
+        accepted_inds = np.tile(np.arange(nwalkers), (ntemps, 1))
+
+        accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+        accepted[accepted_inds < number_of_walkers_for_accepted[:, None]] = True
+
+        tmp1 = np.all(
+            np.abs(
+                new_state.branches_coords["gb_fixed"]
+                - state.branches_coords["gb_fixed"]
+            )
+            > 0.0,
+            axis=-1,
+        ).sum(axis=(2,))
+        tmp2 = new_state.branches_inds["gb_fixed"].sum(axis=(2,))
+
+        # add to move-specific accepted information
+        self.accepted += tmp1
+        if isinstance(self.num_proposals, int):
+            self.num_proposals = tmp2
+        else:
+            self.num_proposals += tmp2
+
+        new_inds = xp.asarray(new_state.branches_inds["gb_fixed"])
+            
+        # in-model inds will not change
+        tmp_freqs_find_bands = xp.asarray(new_state.branches_coords["gb_fixed"][:, :, :, 1])
+        if not self.is_rj_prop:
+            count_inds = new_inds
+            proposed_inds = new_inds
+            accepted_inds = accepted_check_tmp
+
+        else:
+            count_inds = new_inds
+            proposed_inds = gb_inds
+            accepted_inds = accepted_check_tmp
+
+        # calculate current band counts
+        band_here = (xp.searchsorted(self.band_edges, tmp_freqs_find_bands.flatten() / 1e3, side="right") - 1).reshape(tmp_freqs_find_bands.shape)
+
+        # get binaries per band
+        special_band_here_num_per_band = ((group_temp_finder[0] * nwalkers + group_temp_finder[1]) * int(1e6) + band_here)[count_inds]
+        unique_special_band_here_num_per_band, unique_special_band_here_num_per_band_count = xp.unique(special_band_here_num_per_band, return_counts=True)
+        temp_walker_index_num_per_band = (unique_special_band_here_num_per_band / 1e6).astype(int)
+        temp_index_num_per_band = (temp_walker_index_num_per_band / nwalkers).astype(int)
+        walker_index_num_per_band = temp_walker_index_num_per_band - temp_index_num_per_band * nwalkers
+        band_index_num_per_band = unique_special_band_here_num_per_band - temp_walker_index_num_per_band * int(1e6)
+
+        per_walker_band_counts = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
+        per_walker_band_counts[temp_index_num_per_band, walker_index_num_per_band, band_index_num_per_band] = unique_special_band_here_num_per_band_count
+        
+        # repeat now for num_proposals per band
+        special_band_here_num_props = ((group_temp_finder[0] * nwalkers + group_temp_finder[1]) * int(1e6) + band_here)[proposed_inds]
+        unique_special_band_here_num_props, unique_special_band_here_num_props_count = xp.unique(special_band_here_num_props, return_counts=True)
+        temp_walker_index_num_props = (unique_special_band_here_num_props / 1e6).astype(int)
+        temp_index_num_props = (temp_walker_index_num_props / nwalkers).astype(int)
+        walker_index_num_props = temp_walker_index_num_props - temp_index_num_props * nwalkers
+        band_index_num_props = unique_special_band_here_num_props - temp_walker_index_num_props * int(1e6)
+
+        per_walker_band_proposals = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
+        per_walker_band_proposals[temp_index_num_props, walker_index_num_props, band_index_num_props] = unique_special_band_here_num_props_count
+        
+        # repeat now for accepted proposals per band
+        special_band_here_num_accepted = ((group_temp_finder[0] * nwalkers + group_temp_finder[1]) * int(1e6) + band_here)[accepted_inds]
+        unique_special_band_here_num_accepted, unique_special_band_here_num_accepted_count = xp.unique(special_band_here_num_accepted, return_counts=True)
+        temp_walker_index_num_accepted = (unique_special_band_here_num_accepted / 1e6).astype(int)
+        temp_index_num_accepted = (temp_walker_index_num_accepted / nwalkers).astype(int)
+        walker_index_num_accepted = temp_walker_index_num_accepted - temp_index_num_accepted * nwalkers
+        band_index_num_accepted = unique_special_band_here_num_accepted - temp_walker_index_num_accepted * int(1e6)
+
+        per_walker_band_accepted = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
+        per_walker_band_accepted[temp_index_num_accepted, walker_index_num_accepted, band_index_num_accepted] = unique_special_band_here_num_accepted_count
         
         # TEMPERING
         self.temperature_control.swaps_accepted = np.zeros(ntemps - 1)
@@ -1597,6 +1697,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 band_temps += self.xp.asarray(dbetas.T)
 
+            band_temps[:] = band_temps[553, :][None, :]
+
             # only increase time if it is adaptive.
             new_state.betas = self.temperature_control.betas.copy()
             
@@ -1626,115 +1728,6 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
-        if not self.is_rj_prop:
-            assert np.all(
-                new_state.branches_inds["gb_fixed"] == state.branches_inds["gb_fixed"]
-            )
-            accepted_check_tmp = np.zeros_like(
-                new_state.branches_inds["gb_fixed"], dtype=bool
-            )
-            accepted_check_tmp[new_state.branches_inds["gb_fixed"]] = np.all(
-                np.abs(
-                    new_state.branches_coords["gb_fixed"][
-                        new_state.branches_inds["gb_fixed"]
-                    ]
-                    - state.branches_coords["gb_fixed"][state.branches_inds["gb_fixed"]]
-                )
-                > 0.0,
-                axis=-1,
-            )
-            proposed = gb_inds.get()
-            accepted_check = accepted_check_tmp.sum(
-                axis=(1, 2)
-            ) / proposed.sum(axis=(1, 2))
-        else:
-            accepted_check_tmp = (
-                np.abs(
-                    new_state.branches_inds["gb_fixed"].astype(int)
-                    - state.branches_inds["gb_fixed"].astype(int)
-                )
-                > 0.0
-            )
-            proposed = gb_inds.get()
-            accepted_check = accepted_check_tmp.sum(axis=(1, 2)) / proposed.sum(axis=(1, 2))
-            
-        # manually tell temperatures how real overall acceptance fraction is
-        number_of_walkers_for_accepted = np.floor(nwalkers * accepted_check).astype(int)
-
-        accepted_inds = np.tile(np.arange(nwalkers), (ntemps, 1))
-
-        accepted = np.zeros((ntemps, nwalkers), dtype=bool)
-        accepted[accepted_inds < number_of_walkers_for_accepted[:, None]] = True
-
-        tmp1 = np.all(
-            np.abs(
-                new_state.branches_coords["gb_fixed"]
-                - state.branches_coords["gb_fixed"]
-            )
-            > 0.0,
-            axis=-1,
-        ).sum(axis=(2,))
-        tmp2 = new_state.branches_inds["gb_fixed"].sum(axis=(2,))
-
-        # add to move-specific accepted information
-        self.accepted += tmp1
-        if isinstance(self.num_proposals, int):
-            self.num_proposals = tmp2
-        else:
-            self.num_proposals += tmp2
-
-        new_inds = xp.asarray(new_state.branches_inds["gb_fixed"])
-            
-        # in-model inds will not change
-        if not self.is_rj_prop:
-            tmp_freqs_find_bands = xp.asarray(new_state.branches_coords["gb_fixed"][:, :, :, 1])
-            count_inds = new_inds
-            proposed_inds = new_inds
-            accepted_inds = accepted_check_tmp
-
-        else:
-            tmp_freqs_find_bands = -xp.ones((ntemps, nwalkers, nleaves_max))
-            tmp_freqs_find_bands[gb_inds] = points_curr[:, 1]
-            count_inds = new_inds
-            proposed_inds = gb_inds
-            accepted_inds = accepted_check_tmp
-
-        # calculate current band counts
-        band_here = (xp.searchsorted(self.band_edges, tmp_freqs_find_bands.flatten() / 1e3, side="right") - 1).reshape(tmp_freqs_find_bands.shape)
-
-        # get binaries per band
-        special_band_here_num_per_band = ((group_temp_finder[0] * nwalkers + group_temp_finder[1]) * int(1e6) + band_here)[count_inds]
-        unique_special_band_here_num_per_band, unique_special_band_here_num_per_band_count = xp.unique(special_band_here_num_per_band, return_counts=True)
-        temp_walker_index_num_per_band = (unique_special_band_here_num_per_band / 1e6).astype(int)
-        temp_index_num_per_band = (temp_walker_index_num_per_band / nwalkers).astype(int)
-        walker_index_num_per_band = temp_walker_index_num_per_band - temp_index_num_per_band * nwalkers
-        band_index_num_per_band = unique_special_band_here_num_per_band - temp_walker_index_num_per_band * int(1e6)
-
-        per_walker_band_counts = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
-        per_walker_band_counts[temp_index_num_per_band, walker_index_num_per_band, band_index_num_per_band] = unique_special_band_here_num_per_band_count
-        
-        # repeat now for num_proposals per band
-        special_band_here_num_props = ((group_temp_finder[0] * nwalkers + group_temp_finder[1]) * int(1e6) + band_here)[proposed_inds]
-        unique_special_band_here_num_props, unique_special_band_here_num_props_count = xp.unique(special_band_here_num_props, return_counts=True)
-        temp_walker_index_num_props = (unique_special_band_here_num_props / 1e6).astype(int)
-        temp_index_num_props = (temp_walker_index_num_props / nwalkers).astype(int)
-        walker_index_num_props = temp_walker_index_num_props - temp_index_num_props * nwalkers
-        band_index_num_props = unique_special_band_here_num_props - temp_walker_index_num_props * int(1e6)
-
-        per_walker_band_proposals = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
-        per_walker_band_proposals[temp_index_num_props, walker_index_num_props, band_index_num_props] = unique_special_band_here_num_props_count
-        
-        # repeat now for accepted proposals per band
-        special_band_here_num_accepted = ((group_temp_finder[0] * nwalkers + group_temp_finder[1]) * int(1e6) + band_here)[accepted_inds]
-        unique_special_band_here_num_accepted, unique_special_band_here_num_accepted_count = xp.unique(special_band_here_num_accepted, return_counts=True)
-        temp_walker_index_num_accepted = (unique_special_band_here_num_accepted / 1e6).astype(int)
-        temp_index_num_accepted = (temp_walker_index_num_accepted / nwalkers).astype(int)
-        walker_index_num_accepted = temp_walker_index_num_accepted - temp_index_num_accepted * nwalkers
-        band_index_num_accepted = unique_special_band_here_num_accepted - temp_walker_index_num_accepted * int(1e6)
-
-        per_walker_band_accepted = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
-        per_walker_band_accepted[temp_index_num_accepted, walker_index_num_accepted, band_index_num_accepted] = unique_special_band_here_num_accepted_count
-        
         new_state.update_band_information(
             band_temps.get(), per_walker_band_proposals.sum(axis=1).get().T, per_walker_band_accepted.sum(axis=1).get().T, band_swaps_proposed, band_swaps_accepted,
             per_walker_band_counts.get(), self.is_rj_prop
