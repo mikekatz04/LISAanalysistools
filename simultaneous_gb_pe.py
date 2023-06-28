@@ -243,13 +243,13 @@ def run_gb_pe(gpu):
 
     xp.cuda.runtime.setDevice(gpus[0])
 
-    nwalkers_pe = 25
+    nwalkers_pe = 18
 
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 5e2])
-    ntemps_pe = 16  # len(snrs_ladder)
+    ntemps_pe = 24  # len(snrs_ladder)
     # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
     betas = 1 / 1.2 ** np.arange(ntemps_pe)
-    betas[-1] = 0.01
+    betas[-1] = 0.0001
 
     num_binaries_needed_to_mix = 1
     num_binaries_current = 0
@@ -283,13 +283,53 @@ def run_gb_pe(gpu):
 
         nleaves_max_fix_new = 15000  # nleaves_max_fix
 
-    elif "mixing_gb_run.pickle" in os.listdir():
-        with open("mixing_gb_run.pickle", "rb") as fp_search_state:
+    elif "final_search_mixing_copy_4.pickle" in os.listdir():
+        with open("final_search_mixing_copy_4.pickle", "rb") as fp_search_state:
             end_search_state = pickle.load(fp_search_state)
 
         # TODO: check this!!!
         end_search_gb_coords = end_search_state.branches["gb_fixed"].coords[:, :nwalkers_pe]
         end_search_gb_inds = end_search_state.branches["gb_fixed"].inds[:, :nwalkers_pe]
+
+        test_coords = end_search_gb_coords[0, 0]
+        test_inds = end_search_gb_inds[0, 0]
+        for num in range(6):
+            
+            # test_coords = test_coords[test_coords[:, 1] > 15.0]
+            # order = np.arange(test_coords.shape[0])  # np.argsort(test_coords[:, 1])
+            # test_coords = test_coords[order]
+
+            test_template = xp.asarray([[A_inj, E_inj]])
+            last_test_template = test_template.copy()
+            last_h_h_test = (-1/2 * 4 * df * xp.sum(test_template.conj() * test_template / xp.asarray(psd_in))).real
+            for i, test_coord in enumerate(test_coords):
+                if not test_inds[i]:
+                    continue
+                test_coord_in = transform_fn.both_transforms(np.array([test_coord]))
+                waveform_kwargs_test = waveform_kwargs.copy()
+                waveform_kwargs_test['use_c_implementation'] = False
+
+                gb.generate_global_template(
+                    test_coord_in,
+                    xp.zeros(test_coord_in.shape[0], dtype=xp.int32),
+                    test_template,
+                    factors=-xp.ones(test_coord_in.shape[0]),
+                    **waveform_kwargs,
+                )
+
+                h_h_test = -1/2 * 4 * df * xp.sum(test_template.conj() * test_template / xp.asarray(psd_in))
+                diff_temp = -(test_template - last_test_template)
+                h_h_new_test = 4 * df * xp.sum(diff_temp.conj() * diff_temp / xp.asarray(psd_in))
+                ll_diff = h_h_test.real - last_h_h_test
+                if ll_diff < num * 20.0:
+                    test_inds[i] = False
+                    test_template[:] = last_test_template[:]
+                else:
+                    last_h_h_test = h_h_test.real
+                    last_test_template[:] = test_template[:]
+            print(test_inds.sum())
+        
+        end_search_gb_inds[:, :, :] = test_inds[:]
 
         walker_factor = nwalkers_pe / end_search_gb_coords.shape[1]
         # assert float(walker_factor) == float(nwalkers_pe) / float(end_search_gb_coords.shape[1])
@@ -345,8 +385,8 @@ def run_gb_pe(gpu):
     A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 0], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
-    E_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 1], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    A_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 0], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    E_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 1], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
     
     # walker_factor = int(nwalkers_pe / mbh_inj[:, 0].shape[0])
     # if walker_factor > 1:
@@ -366,8 +406,8 @@ def run_gb_pe(gpu):
     psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
 
-    A_psd_in[:] = np.repeat(psds[:nwalkers_pe, 0], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
-    E_psd_in[:] = np.repeat(psds[:nwalkers_pe, 1], 16, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    A_psd_in[:] = np.repeat(psds[:nwalkers_pe, 0], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    E_psd_in[:] = np.repeat(psds[:nwalkers_pe, 1], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
     
     # if walker_factor > 1:
     #     A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
@@ -699,7 +739,7 @@ def run_gb_pe(gpu):
         *gb_args_rj,
         **gb_kwargs_rj_2,
     )
-    rj_moves = [(rj_move_1, 0.8), (rj_move_2, 0.2)]
+    rj_moves = [(rj_move_1, 0.2), (rj_move_2, 0.8)]
 
     for rj_move in rj_moves:
         rj_move[0].gb.gpus = gpus
@@ -915,4 +955,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(5)
+    output = run_gb_pe(7)

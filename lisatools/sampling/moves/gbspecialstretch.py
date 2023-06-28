@@ -813,7 +813,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # makes in-model effectively not tempered 
                 # if not self.is_rj_prop:
                 #    band_inv_temp_vals_here[:] = 1.0
-                    
+
                 inputs_now = (
                     L_contribution_here,
                     p_contribution_here,
@@ -1697,7 +1697,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 band_temps += self.xp.asarray(dbetas.T)
 
-            band_temps[:] = band_temps[553, :][None, :]
+            # band_temps[:] = band_temps[553, :][None, :]
 
             # only increase time if it is adaptive.
             new_state.betas = self.temperature_control.betas.copy()
