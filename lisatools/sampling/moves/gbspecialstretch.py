@@ -652,7 +652,8 @@ class GBSpecialStretchMove(GroupStretchMove):
             indiv_info = []
             params_prop_info = []
             fix_temp_check_info = []
-            
+            N_vals_list = []
+            output_info = []
             for N_now in unique_N:
                 N_now = N_now.item()
                 if N_now == 0:
@@ -813,42 +814,78 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # makes in-model effectively not tempered 
                 # if not self.is_rj_prop:
                 #    band_inv_temp_vals_here[:] = 1.0
+                params_curr_separated = tuple([params_curr_in[:, i].copy() for i in range(params_curr_in.shape[1])])
+                params_extra_params = (
+                    self.waveform_kwargs["T"],
+                    self.waveform_kwargs["dt"],
+                    N_now,
+                    params_curr_in.shape[0],
+                    self.start_freq_ind
+                )
+                gb_params_curr_in = self.gb.pyGalacticBinaryParams(
+                    *(params_curr_separated + params_extra_params)
+                )
 
-                inputs_now = (
-                    L_contribution_here,
-                    p_contribution_here,
+                params_prop_separated = tuple([params_prop_in[:, i].copy() for i in range(params_prop_in.shape[1])])
+                params_prop_extra_params = (
+                    self.waveform_kwargs["T"],
+                    self.waveform_kwargs["dt"],
+                    N_now,
+                    params_prop_in.shape[0],
+                    self.start_freq_ind
+                )
+                gb_params_prop_in = self.gb.pyGalacticBinaryParams(
+                    *(params_prop_separated + params_extra_params)
+                )
+
+                data_package = self.gb.pyDataPackage(
                     data[0][0],
                     data[1][0],
                     psd[0][0],
                     psd[1][0],
+                    self.df,
+                    self.data_length,
+                    self.nwalkers * self.ntemps,
+                    self.nwalkers * self.ntemps
+                )
+
+                band_package = self.gb.pyBandPackage(
                     data_index_here,
                     noise_index_here,
-                    params_curr_in_here,
-                    params_prop_in_here,
-                    prior_all_curr_here,
-                    prior_all_prop_here,
-                    factors_here,
-                    random_vals_here,
                     band_start_bin_ind_here,  # uni_index
                     band_num_bins_here,  # uni_count
                     start_inds,
                     lengths,
-                    band_inv_temp_vals_here,  # band_inv_temp_vals
-                    accepted_out_here,
-                    self.waveform_kwargs["T"],
-                    self.waveform_kwargs["dt"],
-                    N_now,
-                    0,
-                    self.start_freq_ind,
-                    self.data_length,
                     num_bands_here,
                     max_data_store_size,
-                    device,
-                    do_synchronize,
+                )
+
+                mcmc_info = self.gb.pyMCMCInfo(
+                    L_contribution_here,
+                    p_contribution_here,
+                    prior_all_curr_here,
+                    prior_all_prop_here,
+                    factors_here,
+                    random_vals_here,
+                    accepted_out_here,
+                    band_inv_temp_vals_here,  # band_inv_temp_vals
                     self.is_rj_prop,
                     self.snr_lim,
                 )
 
+                output_info.append([L_contribution_here, p_contribution_here, accepted_out_here])
+
+                inputs_now = (
+                    data_package,
+                    band_package,
+                    gb_params_curr_in,
+                    gb_params_prop_in,
+                    mcmc_info,
+                    device,
+                    do_synchronize,
+                )
+
+                N_vals_list.append(N_now)
                 all_inputs.append(inputs_now)
                 self.gb.SharedMemoryMakeMove_wrap(*inputs_now)
                 
@@ -862,12 +899,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                 prior_info_now,
                 indiv_info_now,
                 params_prop_now,
+                N_now,
+                outputs,
             ) in zip(
-                all_inputs, band_bookkeep_info, prior_info, indiv_info, params_prop_info,
+                all_inputs, band_bookkeep_info, prior_info, indiv_info, params_prop_info, N_vals_list, output_info
             ):
-                ll_contrib_now = inputs_now[0]
-                lp_contrib_now = inputs_now[1]
-                accepted_now = inputs_now[19]
+                ll_contrib_now = outputs[0]
+                lp_contrib_now = outputs[1]
+                accepted_now = outputs[2]
 
                 # print(accepted_now.sum(0) / accepted_now.shape[0])
                 temp_tmp, walker_tmp, leaf_tmp = (
@@ -886,7 +925,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                     gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)] = (~gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)])
                     new_state.branches_supplimental["gb_fixed"].holder["N_vals"][
                         (temp_tmp.get(), walker_tmp.get(), leaf_tmp.get())
-                    ] = inputs_now[22]
+                    ] = N_now
 
                     is_new_rj = params_prop_now[accepted_now][:, 0] > 1e-7
                     new_point_info.append([params_prop_now[accepted_now][is_new_rj], temp_tmp[is_new_rj], walker_tmp[is_new_rj], leaf_tmp[is_new_rj], self.xp.asarray(new_state.branches_supplimental["gb_fixed"].holder["N_vals"])[(temp_tmp[is_new_rj], walker_tmp[is_new_rj], leaf_tmp[is_new_rj])]])
@@ -1118,11 +1157,11 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 unit_temps = 3
                 for odds_evens in range(unit_temps):
-                    keep_here_i = (bands_iperm % unit_temps == odds_evens) & (bands_iperm >= 0)  #  & (bands_i1perm == 501)  #  & (walker_map_iperm == 0)  # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
+                    keep_here_i = (bands_iperm % unit_temps == odds_evens) & (bands_iperm >= 0) & (bands_iperm == 612)  #  & (walker_map_iperm == 0)  # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  #  & ((walker_map_iperm == 18)) # | (walker_map_iperm == 0) | (walker_map_iperm == 83))  #  & (bands_iperm == 0)
                 
                     keep_here_i1 = (bands_i1perm % unit_temps == odds_evens) & (
                         bands_i1perm >= 0
-                    )  # & (bands_i1perm == 501) #  & (walker_map_i1perm == 0) # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
+                    ) & (bands_i1perm == 612) #  & (walker_map_i1perm == 0) # & ((bands_i1perm == 2500) | (bands_i1perm == 2501))  # & ((walker_map_i1perm == 51)) # | (walker_map_i1perm == 39) | (walker_map_i1perm == 0))  #  & (bands_i1perm == 0)
 
                     if not xp.any(keep_here_i) and not xp.any(keep_here_i1):
                         continue
@@ -1379,6 +1418,9 @@ class GBSpecialStretchMove(GroupStretchMove):
                     band_swaps_accepted[unique_all_bands_in_accept.get(), i - 1] += unique_all_bands_in_count_accept.get()
                     band_swaps_proposed[unique_all_bands_in_prop.get(), i - 1] += unique_all_bands_in_count_prop.get()
                     
+                    if i <= 5:
+                        breakpoint()
+
                     band_ll_diff_i = xp.zeros((nwalkers, len(self.band_edges) - 1))
                     band_ll_diff_i1 = xp.zeros((nwalkers, len(self.band_edges) - 1))
 

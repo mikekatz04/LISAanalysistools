@@ -12,7 +12,7 @@ class State(eryn_State):
         else:
             return False
 
-    def __init__(self, possible_state, *args, **kwargs):
+    def __init__(self, possible_state, *args, band_info=None, **kwargs):
 
         super().__init__(possible_state, *args, **kwargs)
 
@@ -22,6 +22,8 @@ class State(eryn_State):
             dc = deepcopy if copy else lambda x: x
             if possible_state.band_initialized and hasattr(possible_state, "band_info"):
                 self.band_info = dc(possible_state.band_info)
+        elif band_info is not None:
+            self.band_info = band_info
 
     def initialize_band_information(self, nwalkers, ntemps, band_edges, band_temps):
         

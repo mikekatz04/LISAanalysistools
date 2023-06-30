@@ -99,6 +99,11 @@ class UpdateNewResiduals(Update):
         self.output_residual_number = 0
 
     def __call__(self, iter, last_sample, sampler):
+
+        with open(current_save_state_file, "wb") as fp:
+            pickle.dump(last_sample, fp, pickle.HIGHEST_PROTOCOL)
+
+        return
         """residual_file = "residuals_for_flows"
         psd_file = "psds_for_flows"
         freq_file = "freq_for_flows"
@@ -269,12 +274,12 @@ def run_gb_pe(gpu):
 
         coords = last_sample.branches_coords
         inds = last_sample.branches_inds
-
         last_sample = State(
             coords,
             inds=inds,
             log_like=last_sample.log_like,
             log_prior=last_sample.log_prior,
+            band_info=last_sample.band_info
         )
 
         nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[
@@ -369,11 +374,12 @@ def run_gb_pe(gpu):
         inds={"gb_fixed": inds_new},
         log_like=last_sample.log_like,
         log_prior=last_sample.log_prior,
+        band_info=last_sample.band_info
     )
 
-    band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
-
-    new_sample.initialize_band_information(nwalkers_pe, ntemps_pe, band_edges, band_temps)
+    if not hasattr(new_sample, "band_info"):
+        band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
+        new_sample.initialize_band_information(nwalkers_pe, ntemps_pe, band_edges, band_temps)
 
     A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
     E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
@@ -563,6 +569,7 @@ def run_gb_pe(gpu):
         log_like=ll.reshape(ntemps_pe, nwalkers_pe),
         supplimental=supps,
         betas=new_sample.betas,
+        band_info=new_sample.band_info
     )
 
     state_mix.band_info = new_sample.band_info
@@ -808,7 +815,7 @@ def run_gb_pe(gpu):
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
-        update_iterations=-1,
+        update_iterations=1,
         provide_groups=True,
         provide_supplimental=True,
         num_repeats_in_model=5,
@@ -856,6 +863,8 @@ def run_gb_pe(gpu):
         xp.cuda.runtime.setDevice(main_gpu)
     """
     nsteps_mix = 1000
+    with open(current_save_state_file, "wb") as fp:
+        pickle.dump(state_mix, fp, pickle.HIGHEST_PROTOCOL)
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
