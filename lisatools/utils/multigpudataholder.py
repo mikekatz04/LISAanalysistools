@@ -5,7 +5,7 @@ import time
 
 
 class MultiGPUDataHolder:
-    def __init__(self, gpus, channel1_data, channel2_data, channel1_psd, channel2_psd, df, base_injections=None, base_psd=None):
+    def __init__(self, gpus, channel1_data, channel2_data, channel1_base_data, channel2_base_data, channel1_psd, channel2_psd, df, base_injections=None, base_psd=None):
 
         if isinstance(gpus, int):
             gpus = [gpus]
@@ -19,11 +19,9 @@ class MultiGPUDataHolder:
         self.num_gpus = len(gpus)
         # need to be numpy coming in to now make memory large
         self.ntemps, self.nwalkers, self.data_length = channel1_data.shape
-        self.total_number = self.ntemps * self.nwalkers
-        self.temp_indices = np.repeat(np.arange(self.ntemps), self.nwalkers).reshape(self.ntemps, self.nwalkers)
-        self.walker_indices = np.tile(np.arange(self.nwalkers), (self.ntemps, 1)).flatten().reshape(self.ntemps, self.nwalkers)
-        self.overall_indices_flat = np.arange(self.ntemps * self.nwalkers)
-        self.overall_indices = self.overall_indices_flat.reshape(self.ntemps, self.nwalkers)
+        self.total_number = self.nwalkers
+        self.walker_indices = np.arange(self.nwalkers)
+        self.overall_indices_flat = np.arange(2 * self.nwalkers)  # evens and odds
 
         self.fd = np.arange(self.data_length) * df
 
@@ -36,44 +34,77 @@ class MultiGPUDataHolder:
         # gpu arangement
         self.gpu_split_inds = np.arange(num_per_split, self.total_number, num_per_split)
 
-        self.gpu_splits = np.split(self.overall_indices_flat, self.gpu_split_inds)
+        self.gpu_splits = [
+            np.split(self.overall_indices_flat[:self.nwalkers], self.gpu_split_inds),
+            np.split(self.overall_indices_flat[self.nwalkers:], self.gpu_split_inds)
+        ]
+        self.gpu_splits = [np.concatenate([self.gpu_splits[0][i], self.gpu_splits[1][i]]) for i in range(len(self.gpu_splits[0]))]
+
         self.gpus_for_each_data = [np.full_like(gpu_split, gpu) for gpu_split, gpu in zip( self.gpu_splits, self.gpus)]
         self.mempool = xp.get_default_memory_pool()
 
         self.channel1_data = [None for _ in range(self.num_gpus)]
         self.channel2_data = [None for _ in range(self.num_gpus)]
+        self.channel1_base_data = [None for _ in range(self.num_gpus)]
+        self.channel2_base_data = [None for _ in range(self.num_gpus)]
         self.channel1_psd = [None for _ in range(self.num_gpus)]
         self.channel2_psd = [None for _ in range(self.num_gpus)]
         return_to_main = xp.cuda.runtime.getDevice()
-        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
-            temp_inds_gpu_here = self.temp_indices.flatten()[gpu_split]
-            walker_inds_gpu_here = self.walker_indices.flatten()[gpu_split]
+        for gpu_i, (gpu, gpu_split_tmp) in enumerate(zip(self.gpus, self.gpu_splits)):
+            gpu_split = gpu_split_tmp[gpu_split_tmp < self.nwalkers]
+            walker_inds_gpu_here = self.walker_indices[gpu_split]
 
             with xp.cuda.device.Device(gpu):
                 
-                self.channel1_data[gpu_i] = xp.zeros(temp_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
-                self.channel2_data[gpu_i] = xp.zeros(temp_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
-                self.channel1_psd[gpu_i] = xp.zeros(temp_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_psd.dtype)
-                self.channel2_psd[gpu_i] = xp.zeros(temp_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel2_psd.dtype)
+                self.channel1_data[gpu_i] = xp.zeros(2 * walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
+                self.channel2_data[gpu_i] = xp.zeros(2 * walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
+                self.channel1_base_data[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
+                self.channel2_base_data[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
+                self.channel1_psd[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_psd.dtype)
+                self.channel2_psd[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel2_psd.dtype)
                 
-                for data_i, (temp_ind, walker_ind) in enumerate(zip(temp_inds_gpu_here, walker_inds_gpu_here)):
+                for data_i, walker_ind in enumerate(walker_inds_gpu_here):
                     inds_slice = slice(data_i * channel1_data.shape[-1], (data_i + 1) * channel1_data.shape[-1])
-                    tmp_data1 = xp.asarray(channel1_data[temp_ind, walker_ind])
-                    self.channel1_data[gpu_i][inds_slice] = tmp_data1
+                    inds_slice_even = slice(data_i * channel1_data.shape[-1], (data_i + 1) * channel1_data.shape[-1])
+                    inds_slice_odd = slice((self.nwalkers + data_i) * channel1_data.shape[-1], (self.nwalkers + data_i + 1) * channel1_data.shape[-1])
+                    
+                    tmp_data1 = xp.asarray(channel1_data[0, walker_ind])
+                    self.channel1_data[gpu_i][inds_slice_even] = tmp_data1
                     del tmp_data1
                     self.mempool.free_all_blocks()
 
-                    tmp_data2 = xp.asarray(channel2_data[temp_ind, walker_ind])
-                    self.channel2_data[gpu_i][inds_slice] = tmp_data2
+                    tmp_data1 = xp.asarray(channel1_data[1, walker_ind])
+                    self.channel1_data[gpu_i][inds_slice_odd] = tmp_data1
+                    del tmp_data1
+                    self.mempool.free_all_blocks()
+
+                    tmp_data2 = xp.asarray(channel2_data[0, walker_ind])
+                    self.channel2_data[gpu_i][inds_slice_even] = tmp_data2
                     del tmp_data2
                     self.mempool.free_all_blocks()
 
-                    tmp_psd1 = xp.asarray(channel1_psd[temp_ind, walker_ind])
+                    tmp_data2 = xp.asarray(channel2_data[1, walker_ind])
+                    self.channel2_data[gpu_i][inds_slice_odd] = tmp_data2
+                    del tmp_data2
+                    self.mempool.free_all_blocks()
+
+                    # TODO: reconsider use of this data since it is just for checking LL
+                    tmp_base_data1 = xp.asarray(channel1_base_data[0, walker_ind])
+                    self.channel1_base_data[gpu_i][inds_slice_even] = tmp_base_data1
+                    del tmp_base_data1
+                    self.mempool.free_all_blocks()
+
+                    tmp_base_data2 = xp.asarray(channel2_base_data[0, walker_ind])
+                    self.channel2_base_data[gpu_i][inds_slice_even] = tmp_base_data2
+                    del tmp_base_data2
+                    self.mempool.free_all_blocks()
+
+                    tmp_psd1 = xp.asarray(channel1_psd[0, walker_ind])
                     self.channel1_psd[gpu_i][inds_slice] = tmp_psd1
                     del tmp_psd1
                     self.mempool.free_all_blocks()
 
-                    tmp_psd2 = xp.asarray(channel2_psd[temp_ind, walker_ind])
+                    tmp_psd2 = xp.asarray(channel2_psd[0, walker_ind])
                     self.channel2_psd[gpu_i][inds_slice] = tmp_psd2
                     del tmp_psd2
                     self.mempool.free_all_blocks()
@@ -117,7 +148,7 @@ class MultiGPUDataHolder:
 
     @map.setter
     def map(self, map):
-        if not isinstance(map, np.ndarray) or len(map) != self.total_number or map.dtype != np.int64:
+        if not isinstance(map, np.ndarray) or len(map) != 2 * self.total_number or map.dtype != np.int64:
             raise ValueError("map input must be a numpy array of np.int64 that is the same length as the number of gpu holder slots.")
         self._map = map
 
@@ -294,7 +325,7 @@ class MultiGPUDataHolder:
         reshape = False
         if overall_inds is None:
             reshape = True
-            overall_inds = np.arange(self.ntemps * self.nwalkers)
+            overall_inds = np.arange(self.nwalkers)
                 
         return_to_main = xp.cuda.runtime.getDevice()
 
@@ -327,11 +358,11 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.setDevice(return_to_main)
         xp.cuda.runtime.deviceSynchronize()
 
-        if reshape:
-            psd_term = psd_term.reshape(self.ntemps, self.nwalkers)
+        # if reshape:
+        #     psd_term = psd_term.reshape(self.ntemps, self.nwalkers)
             
         # et = time.perf_counter()
-        # print("get psd term", et - st)  
+        # print("get psd term", et - st)
         return psd_term
         
 
@@ -340,7 +371,7 @@ class MultiGPUDataHolder:
         reshape = False
         if overall_inds is None:
             reshape = True
-            overall_inds = np.arange(self.ntemps * self.nwalkers)
+            overall_inds = np.arange(self.nwalkers)
                 
         return_to_main = xp.cuda.runtime.getDevice()
 
@@ -361,10 +392,12 @@ class MultiGPUDataHolder:
 
                     overall_index_here = overall_index - gpu_split.min().item()
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    inds_slice_even = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    inds_slice_odd = slice((self.nwalkers + overall_index_here) * self.data_length, (self.nwalkers + overall_index_here + 1) * self.data_length)
 
-                    data_tmp1[gpu_i] = self.channel1_data[gpu_i][inds_slice]
+                    data_tmp1[gpu_i] = self.channel1_data[gpu_i][inds_slice_even] + self.channel1_data[gpu_i][inds_slice_odd] - self.channel1_base_data[gpu_i][inds_slice]
                     psd_tmp1[gpu_i] = self.channel1_psd[gpu_i][inds_slice]
-                    data_tmp2[gpu_i] = self.channel2_data[gpu_i][inds_slice]
+                    data_tmp2[gpu_i] = self.channel2_data[gpu_i][inds_slice_even] + self.channel2_data[gpu_i][inds_slice_odd] - self.channel2_base_data[gpu_i][inds_slice]
                     psd_tmp2[gpu_i] = self.channel2_psd[gpu_i][inds_slice]
                     inner_here = self.df * 4 * xp.sum(
                             data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
@@ -386,8 +419,8 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.setDevice(return_to_main)
         xp.cuda.runtime.deviceSynchronize()
 
-        if reshape:
-            inner_term = inner_term.reshape(self.ntemps, self.nwalkers)
+        # if reshape:
+        #     inner_term = inner_term.reshape(self.ntemps, self.nwalkers)
             
         # et = time.perf_counter()
         # print("inner prod", et - st)  

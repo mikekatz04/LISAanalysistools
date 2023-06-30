@@ -168,7 +168,7 @@ class UpdateNewResiduals(Update):
             overall_inds=self.mgh.map,
         )
         # ll_af = self.mgh.get_ll(include_psd_info=True)
-
+        
         self.last_mbh_template = [A_mbh_going_in, E_mbh_going_in]
 
         ll = self.mgh.get_ll(include_psd_info=True)
@@ -381,18 +381,18 @@ def run_gb_pe(gpu):
         band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
         new_sample.initialize_band_information(nwalkers_pe, ntemps_pe, band_edges, band_temps)
 
-    A_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
-    E_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
+    A_going_in = np.zeros((2, nwalkers_pe, A_inj.shape[0]), dtype=complex)
+    E_going_in = np.zeros((2, nwalkers_pe, E_inj.shape[0]), dtype=complex)
     A_going_in[:] = np.asarray(A_inj)
     E_going_in[:] = np.asarray(E_inj)
 
     mbh_inj = np.load(fp_mbh + ".npy")
 
-    A_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=complex)
-    E_mbh_going_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=complex)
+    A_mbh_going_in = np.zeros((2, nwalkers_pe, A_inj.shape[0]), dtype=complex)
+    E_mbh_going_in = np.zeros((2, nwalkers_pe, E_inj.shape[0]), dtype=complex)
 
-    A_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 0], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
-    E_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 1], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    A_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 0], 2, axis=0).reshape(nwalkers_pe, 2, A_inj.shape[0]).transpose(1, 0, 2)
+    E_mbh_going_in[:] = np.repeat(mbh_inj[:nwalkers_pe, 1], 2, axis=0).reshape(nwalkers_pe, 2, A_inj.shape[0]).transpose(1, 0, 2)
     
     # walker_factor = int(nwalkers_pe / mbh_inj[:, 0].shape[0])
     # if walker_factor > 1:
@@ -404,16 +404,16 @@ def run_gb_pe(gpu):
     A_going_in[:] -= A_mbh_going_in
     E_going_in[:] -= E_mbh_going_in
 
-    A_psd_in = np.zeros((ntemps_pe, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
-    E_psd_in = np.zeros((ntemps_pe, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
+    A_psd_in = np.zeros((1, nwalkers_pe, A_inj.shape[0]), dtype=np.float64)
+    E_psd_in = np.zeros((1, nwalkers_pe, E_inj.shape[0]), dtype=np.float64)
 
     # A_psd_in[:] = np.asarray(psd)
     # E_psd_in[:] = np.asarray(psd)
     psds = np.load(fp_psd + ".npy")
     psds[:, :, 0] = psds[:, :, 1]
 
-    A_psd_in[:] = np.repeat(psds[:nwalkers_pe, 0], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
-    E_psd_in[:] = np.repeat(psds[:nwalkers_pe, 1], ntemps_pe, axis=0).reshape(nwalkers_pe, ntemps_pe, A_inj.shape[0]).transpose(1, 0, 2)
+    A_psd_in[:] = np.repeat(psds[:nwalkers_pe, 0], 1, axis=0).reshape(nwalkers_pe, 1, A_inj.shape[0]).transpose(1, 0, 2)
+    E_psd_in[:] = np.repeat(psds[:nwalkers_pe, 1], 1, axis=0).reshape(nwalkers_pe, 1, A_inj.shape[0]).transpose(1, 0, 2)
     
     # if walker_factor > 1:
     #     A_psd_in[:] = np.repeat(psds[:, 0][None, :], repeats=ntemps_pe * walker_factor, axis=0).reshape(ntemps_pe, nwalkers_pe, psds[:, 0].shape[1])  # A
@@ -445,6 +445,8 @@ def run_gb_pe(gpu):
         gpus,
         A_going_in,
         E_going_in,
+        A_going_in, # store as base
+        E_going_in, # store as base
         A_psd_in,
         E_psd_in,
         df,
@@ -480,8 +482,8 @@ def run_gb_pe(gpu):
     gb.get_ll(prior_generated_points_in[inds_cpu], mgh.data_list, mgh.psd_list, data_index=data_index[inds], noise_index=noise_index[inds], phase_marginalize=False, data_length=data_length,  data_splits=mgh.gpu_splits,  N=N_temp[inds], **waveform_kwargs_in).shape
     breakpoint()"""
 
-    coords_out_gb_fixed = new_sample.branches["gb_fixed"].coords[
-        new_sample.branches["gb_fixed"].inds
+    coords_out_gb_fixed = new_sample.branches["gb_fixed"].coords[0,
+        new_sample.branches["gb_fixed"].inds[0]
     ]
 
     check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
@@ -498,17 +500,19 @@ def run_gb_pe(gpu):
 
     coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed)
 
-    temp_vals = np.repeat(
+    band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+
+    odd_even_vals = np.repeat(
         np.arange(ntemps_pe)[:, None], nleaves_max_fix_new * nwalkers_pe, axis=-1
     ).reshape(ntemps_pe, nwalkers_pe, nleaves_max_fix_new)
 
     walker_vals = np.tile(
-        np.arange(nwalkers_pe), (ntemps_pe, nleaves_max_fix_new, 1)
-    ).transpose((0, 2, 1))
+        np.arange(nwalkers_pe), (nleaves_max_fix_new, 1)
+    ).transpose((1, 0))[new_sample.branches["gb_fixed"].inds[0]]
 
-    data_index_1 = temp_vals * nwalkers_pe + walker_vals
+    data_index_1 = ((band_inds % 2) + 0) * nwalkers_pe + walker_vals
 
-    data_index = xp.asarray(data_index_1[new_sample.branches["gb_fixed"].inds]).astype(
+    data_index = xp.asarray(data_index_1).astype(
         xp.int32
     )
 
@@ -547,27 +551,13 @@ def run_gb_pe(gpu):
     del factors
     mempool.free_all_blocks()
 
-    ll = mgh.get_ll(include_psd_info=True)
-   
-    temp_inds = mgh.temp_indices.copy()
-    walker_inds = mgh.walker_indices.copy()
-    overall_inds = mgh.overall_indices.copy()
-
-    supps = BranchSupplimental(
-        {
-            "temp_inds": temp_inds,
-            "walker_inds": walker_inds,
-            "overall_inds": overall_inds,
-        },
-        base_shape=supps_base_shape,
-        copy=True,
-    )
+    ll = np.tile(mgh.get_ll(include_psd_info=True), (ntemps_pe, 1))
 
     state_mix = State(
         new_sample.branches_coords,
         inds=new_sample.branches_inds,
-        log_like=ll.reshape(ntemps_pe, nwalkers_pe),
-        supplimental=supps,
+        log_like=ll,
+        # supplimental=supps,
         betas=new_sample.betas,
         band_info=new_sample.band_info
     )

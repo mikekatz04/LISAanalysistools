@@ -531,7 +531,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
+        # self.mgh.map = new_state.supplimental.holder["overall_inds"].flatten()
 
         # data should not be whitened
 
@@ -659,7 +659,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 if N_now == 0:
                     continue
 
-                checkit = np.where(new_state.supplimental[:]["overall_inds"] == 0)
+                # checkit = np.where(new_state.supplimental[:]["overall_inds"] == 0)
 
                 # TODO; check the maximum allowable band
                 keep = (
@@ -749,7 +749,9 @@ class GBSpecialStretchMove(GroupStretchMove):
                 band_bookkeep_info.append(
                     (band_temps_inds, band_walkers_inds, band_inds)
                 )
-                data_index_tmp = band_temps_inds * nwalkers + band_walkers_inds
+
+                data_index_here = ((band_inds % 2) * nwalkers + band_walkers_inds).astype(np.int32)
+                noise_index_here = (band_walkers_inds).astype(np.int32)
 
                 L_contribution_here = L_contribution[keep][
                     uni_index_special_band_inds_here
@@ -800,12 +802,19 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 lengths = (end_inds - start_inds).astype(np.int32)
 
-                max_data_store_size = lengths.max().item()
+                start_band_index = ((self.band_edges[band_inds] / self.df).astype(int) - N_now).astype(np.int32)
+                end_band_index = (((self.band_edges[band_inds + 1]) / self.df).astype(int) + N_now).astype(np.int32)
+                
+                start_band_index[start_band_index < 0] = 0
+                end_band_index[end_band_index >= len(self.fd)] = len(self.fd) - 1
+                
+                band_lengths = end_band_index - start_band_index
 
-                data_index_here = self.mgh.get_mapped_indices(data_index_tmp).astype(
-                    np.int32
-                )
-                noise_index_here = data_index_here.copy()
+                max_data_store_size = band_lengths.max().item()
+
+                # data_index_here = self.mgh.get_mapped_indices(data_index_tmp).astype(
+                #     np.int32
+                # )
 
                 num_bands_here = len(band_inds)
 
@@ -854,8 +863,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                     noise_index_here,
                     band_start_bin_ind_here,  # uni_index
                     band_num_bins_here,  # uni_count
-                    start_inds,
-                    lengths,
+                    start_band_index,
+                    band_lengths,
                     num_bands_here,
                     max_data_store_size,
                 )
@@ -887,9 +896,10 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 N_vals_list.append(N_now)
                 all_inputs.append(inputs_now)
-                self.gb.SharedMemoryMakeMove_wrap(*inputs_now)
+                self.gb.SharedMemoryMakeNewMove_wrap(*inputs_now)
                 
                 self.xp.cuda.runtime.deviceSynchronize()
+                breakpoint()
                 
             self.xp.cuda.runtime.deviceSynchronize()
             new_point_info = []
@@ -957,6 +967,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         
         self.mempool.free_all_blocks()
 
+        breakpoint()
         # get accepted fraction
         if not self.is_rj_prop:
             assert np.all(
