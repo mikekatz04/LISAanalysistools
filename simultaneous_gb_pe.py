@@ -582,8 +582,16 @@ def run_gb_pe(gpu):
 
         N_vals[state_mix.branches[name].inds] = N_temp
         branch_supp_base_shape = (ntemps_pe, nwalkers_pe, nleaves_max_here)
+
+        # get band information
+        band_inds = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_here), dtype=int)
+        
+        band_temp = np.searchsorted(band_edges, f0_start, side="right") - 1
+
+        band_inds[state_mix.branches[name].inds] = band_temp
+
         state_mix.branches[name].branch_supplimental = BranchSupplimental(
-            {"N_vals": N_vals}, base_shape=branch_supp_base_shape, copy=True
+            {"N_vals": N_vals, "band_inds": band_inds}, base_shape=branch_supp_base_shape, copy=True
         )
 
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
@@ -954,4 +962,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(7)
+    output = run_gb_pe(4)
