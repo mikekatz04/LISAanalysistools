@@ -816,7 +816,7 @@ def run_gb_pe(gpu):
         update_iterations=1,
         provide_groups=True,
         provide_supplimental=True,
-        num_repeats_in_model=5,
+        num_repeats_in_model=1,
         track_moves=False
     )
 

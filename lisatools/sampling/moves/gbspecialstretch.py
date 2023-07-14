@@ -119,6 +119,10 @@ class GBSpecialStretchMove(GroupStretchMove):
         else:
             self.get_special_proposal_setup = self.new_in_model_proposal  # self.in_model_proposal
 
+        # setup N vals for bands
+        band_mean_f = (self.band_edges[1:] + self.band_edges[:-1]).get() / 2
+        self.band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"]))
+
     def setup_gbs(self, branch):
         coords = branch.coords
         inds = branch.inds
@@ -686,21 +690,61 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.mempool.free_all_blocks()
 
         gb_inds = self.xp.asarray(new_state.branches["gb_fixed"].inds)
-        N_vals_in = self.xp.asarray(new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"])[gb_inds]
-
-        unique_N = self.xp.unique(N_vals_in)
-        # remove 0
-        unique_N = unique_N[unique_N != 0]
+        gb_inds_orig = gb_inds.copy()
 
         data = self.mgh.data_list
         psd = self.mgh.psd_list
 
         # do unique for band size as separator between asynchronous kernel launches
-        points_curr = self.xp.asarray(new_state.branches["gb_fixed"].coords)[gb_inds]
-        band_indices = self.xp.asarray(new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"])[gb_inds]
+        band_indices = self.xp.asarray(new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"])
+        # N_vals_in = self.xp.asarray(new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"])
+        points_curr = self.xp.asarray(new_state.branches["gb_fixed"].coords)
+        points_curr_orig = points_curr.copy()
+        # N_vals_in_orig = N_vals_in.copy()
+        band_indices_orig = band_indices.copy()
+        
+        if self.is_rj_prop:
+            new_sources = xp.full_like(points_curr[~gb_inds], np.nan)
+            fix = xp.full(new_sources.shape[0], True)
+            while xp.any(fix):
+                new_sources[fix] = self.rj_proposal_distribution["gb_fixed"].rvs(
+                    size=fix.sum()
+                )
+                fix = xp.any(xp.isinf(new_sources) | xp.isnan(new_sources), axis=-1)
+            points_curr[~gb_inds] = new_sources
+            band_indices[~gb_inds] = self.xp.searchsorted(self.band_edges, new_sources[:, 1] / 1e3, side="right") - 1
+            # N_vals_in[~gb_inds] = self.xp.asarray(
+            #     get_N(
+            #         xp.full_like(new_sources[:, 1], 1e-30),
+            #         new_sources[:, 1] / 1e3,
+            #         self.waveform_kwargs["T"],
+            #         self.waveform_kwargs["oversample"],
+            #         xp=self.xp
+            #     )
+            # )
+
+            # change gb_inds
+            gb_inds[:] = True
+            proposal_logpdf = self.rj_proposal_distribution["gb_fixed"].logpdf(
+                points_curr[gb_inds]
+            )
+            factors = (proposal_logpdf * -1) * (~gb_inds_orig).flatten() + (proposal_logpdf * +1) * (gb_inds_orig).flatten()
+
+        else:
+            factors = xp.zeros(gb_inds_orig.sum().item())
+
+        points_curr = points_curr[gb_inds]
+        # N_vals_in = N_vals_in[gb_inds]
+        band_indices = band_indices[gb_inds]
+        gb_inds_in = gb_inds_orig[gb_inds]
+
         temp_indices = group_temp_finder[0][gb_inds]
         walker_indices = group_temp_finder[1][gb_inds]
         leaf_indices = group_temp_finder[2][gb_inds]
+        
+        unique_N = self.xp.unique(self.band_N_vals)
+        # remove 0
+        unique_N = unique_N[unique_N != 0]
 
         do_synchronize = False
         device = self.xp.cuda.runtime.getDevice()
@@ -708,18 +752,17 @@ class GBSpecialStretchMove(GroupStretchMove):
         units = 4 if not self.is_rj_prop else 2
         # random start to rotation around 
         start_unit = model.random.randint(units)
-
+        
         for tmp in range(units):
             remainder = (start_unit + tmp) % units
             all_inputs = []
             band_bookkeep_info = []
-            prior_info = []
             indiv_info = []
-            params_prop_info = []
             current_parameter_arrays = []
-            fix_temp_check_info = []
             N_vals_list = []
             output_info = []
+            inds_list = []
+            bands_list = []
             for N_now in unique_N:
                 N_now = N_now.item()
                 if N_now == 0:
@@ -731,7 +774,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 keep = (
                     (band_indices % units == remainder)
                     # & (band_indices != 0)
-                    & (N_vals_in == N_now)
+                    & (self.band_N_vals[band_indices] == N_now)
                     & (band_indices < len(self.band_edges) - 2)
                 )  #  & (band_indices == 501) #  # & (N_vals_in <= 256) & (temp_inds == checkit[0].item()) & (walker_inds == checkit[1].item()) #    & (band_indices < 540)  #  &  (temp_inds == 0) & (walker_inds == 0)
 
@@ -746,6 +789,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # permutate for rj just in case
                 permute_inds = xp.random.permutation(xp.arange(keep.sum()))
                 params_curr = points_curr[keep][permute_inds]
+                inds_here = gb_inds_in[keep][permute_inds]
+                factors_here = factors[keep][permute_inds]
                 prior_all_curr_here = self.gpu_priors["gb_fixed"].logpdf(params_curr)
                 assert xp.all(~xp.isinf(prior_all_curr_here))
                 temp_inds_here = temp_indices[keep][permute_inds]
@@ -758,6 +803,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 sort_special = xp.argsort(special_band_inds)
 
                 params_curr = params_curr[sort_special]
+                inds_here = inds_here[permute_inds]
+                factors_here = factors_here[permute_inds]
                 prior_all_curr_here = prior_all_curr_here[sort_special]
                 temp_inds_here = temp_inds_here[sort_special]
                 walker_inds_here = walker_inds_here[sort_special]
@@ -867,7 +914,13 @@ class GBSpecialStretchMove(GroupStretchMove):
                     max_data_store_size,
                     fmin_allow,
                     fmax_allow,
-                    update_data_index_here
+                    update_data_index_here,
+                    self.ntemps,
+                    band_inds.astype(np.int32),
+                    band_walkers_inds.astype(np.int32),
+                    band_temps_inds.astype(np.int32),
+                    xp.zeros_like(band_temps_inds, dtype=np.int32),  # swaps propsoed
+                    xp.zeros_like(band_temps_inds, dtype=np.int32)     # swaps accepted
                 )
 
                 accepted_out_here = xp.zeros_like(band_start_bin_ind_here, dtype=xp.int32)
@@ -882,9 +935,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                     self.snr_lim,
                 )
 
-                num_proposals_here = 100
+                if not self.is_rj_prop:
+                    num_proposals_here = 5
+                    
+                else:
+                    num_proposals_here = 1
+
                 proposal_info = self.gb.pyStretchProposalPackage(
-                    *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim))
+                    *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here))
                 )
 
                 output_info.append([L_contribution_here, p_contribution_here, accepted_out_here])
@@ -902,6 +960,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 )
 
                 N_vals_list.append(N_now)
+                inds_list.append(inds_here)
+                bands_list.append(band_inds_here)
                 all_inputs.append(inputs_now)
                 st = time.perf_counter()
                 print(params_curr_separated[0].shape[0])
@@ -918,9 +978,11 @@ class GBSpecialStretchMove(GroupStretchMove):
                 indiv_info_now,
                 N_now,
                 outputs,
-                current_parameters
+                current_parameters,
+                inds,
+                bands
             ) in zip(
-                band_bookkeep_info, indiv_info, N_vals_list, output_info, current_parameter_arrays
+                band_bookkeep_info, indiv_info, N_vals_list, output_info, current_parameter_arrays, inds_list, bands_list
             ):
                 ll_contrib_now = outputs[0]
                 lp_contrib_now = outputs[1]
@@ -938,11 +1000,15 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 # updates related to newly added sources
                 if self.is_rj_prop:
+                    breakpoint()
                     gb_inds_orig_check = gb_inds_orig.copy()
-                    gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)] = (~gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)])
+                    gb_inds_orig[(temp_tmp, walker_tmp, leaf_tmp)] = inds
                     new_state.branches_supplimental["gb_fixed"].holder["N_vals"][
                         (temp_tmp.get(), walker_tmp.get(), leaf_tmp.get())
                     ] = N_now
+                    new_state.branches_supplimental["gb_fixed"].holder["band_inds"][
+                        (temp_tmp.get(), walker_tmp.get(), leaf_tmp.get())
+                    ] = bands
 
                     is_new_rj = params_prop_now[accepted_now][:, 0] > 1e-7
                     new_point_info.append([params_prop_now[accepted_now][is_new_rj], temp_tmp[is_new_rj], walker_tmp[is_new_rj], leaf_tmp[is_new_rj], self.xp.asarray(new_state.branches_supplimental["gb_fixed"].holder["N_vals"])[(temp_tmp[is_new_rj], walker_tmp[is_new_rj], leaf_tmp[is_new_rj])]])
@@ -965,7 +1031,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 log_prior_tmp += lp_adjustment
 
             self.xp.cuda.runtime.deviceSynchronize()
-            
+
         new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
         if self.is_rj_prop:
             new_state.branches["gb_fixed"].inds[:] = gb_inds_orig.get()
@@ -976,7 +1042,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         # propogate changes to higher temperatures
         new_freqs = gb_fixed_coords[gb_inds_orig, 1]
         new_band_inds = (xp.searchsorted(self.band_edges, new_freqs / 1e3, side="right") - 1)
-        new_state.branches["gb_fixed"].branch_supplimental["band_inds"][gb_inds_orig.get()] = new_band_inds.get()
+        new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][gb_inds_orig.get()] = new_band_inds.get()
 
         if not self.is_rj_prop:
             old_band_inds_cold_chain = state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0] * state.branches["gb_fixed"].inds[0]
@@ -985,7 +1051,6 @@ class GBSpecialStretchMove(GroupStretchMove):
 
             # when adjusting temperatures, be careful here
             if len(inds_band_change_cold_chain[0]) > 0:
-                breakpoint()
                 walker_inds_change_cold_chain = np.tile(inds_band_change_cold_chain[0], (self.ntemps - 1, 1)).flatten()
                 old_leaf_inds_change_cold_chain = np.tile(inds_band_change_cold_chain[1], (self.ntemps - 1, 1)).flatten()
                 new_temp_inds_change_cold_chain = np.repeat(np.arange(1, self.ntemps), len(inds_band_change_cold_chain[0]))
@@ -995,10 +1060,12 @@ class GBSpecialStretchMove(GroupStretchMove):
                 uni_special_check, uni_special_check_count = np.unique(special_check, return_counts=True)
 
                 # get new leaf positions
-                temp_leaves = np.ones(group_temp_finder[2].reshape(self.ntemps * self.nwalkers, -1)[uni_special_check], dtype=int) * new_state.branches["gb_fixed"].inds.reshape(self.ntemps * self.nwalkers, -1)[uni_special_check]
-                temp_leaves_2 = np.cumsum(temp_leaves_2, axis=-1)
-                temp_leaves_2[~new_state.branches["gb_fixed"].inds.reshape(self.ntemps * self.nwalkers, -1)[uni_special_check]] = -1
-                new_leaf_inds_change_cold_chain = temp_leaves_2[((temp_leaves_2 >= 0) & (temp_leaves_2 < uni_special_check_count[:, None]))]
+                temp_leaves = np.ones_like(group_temp_finder[2].reshape(self.ntemps * self.nwalkers, -1).get()[uni_special_check], dtype=int) * (~new_state.branches["gb_fixed"].inds.reshape(self.ntemps * self.nwalkers, -1)[uni_special_check])
+                temp_leaves_2 = np.cumsum(temp_leaves, axis=-1)
+                temp_leaves_2[new_state.branches["gb_fixed"].inds.reshape(self.ntemps * self.nwalkers, -1)[uni_special_check]] = -1
+                
+                leaf_guide_here = np.tile(np.arange(nleaves_max), (len(uni_special_check), 1))
+                new_leaf_inds_change_cold_chain = leaf_guide_here[((temp_leaves_2 >= 0) & (temp_leaves_2 <= uni_special_check_count[:, None]))]
 
                 assert np.all(~new_state.branches["gb_fixed"].inds[new_temp_inds_change_cold_chain, walker_inds_change_cold_chain, new_leaf_inds_change_cold_chain])
                 new_state.branches["gb_fixed"].inds[new_temp_inds_change_cold_chain, walker_inds_change_cold_chain, new_leaf_inds_change_cold_chain] = True
@@ -1008,34 +1075,40 @@ class GBSpecialStretchMove(GroupStretchMove):
                 new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][new_temp_inds_change_cold_chain, walker_inds_change_cold_chain, new_leaf_inds_change_cold_chain] = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][np.zeros_like(walker_inds_change_cold_chain), walker_inds_change_cold_chain, old_leaf_inds_change_cold_chain]
             
                 # adjust data
-                adjust_binaries = xp.asarray(new_state.branches["gb_fixed"].coords[0, inds_band_change_cold_chain])
+                adjust_binaries = xp.asarray(new_state.branches["gb_fixed"].coords[0, inds_band_change_cold_chain[0], inds_band_change_cold_chain[1]])
                 adjust_binaries_in = self.parameter_transforms.both_transforms(
-                    re_add_binaries, xp=xp
+                    adjust_binaries, xp=xp
                 )
                 adjust_walker_inds = inds_band_change_cold_chain[0]
-                adjust_band_new = new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0, inds_band_change_cold_chain]
-                adjust_band_old = old_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0, inds_band_change_cold_chain]
-                N_vals_in = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][0, new_state.branches["gb_fixed"].inds[0]]
+                adjust_band_new = new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0, inds_band_change_cold_chain[0], inds_band_change_cold_chain[1]]
+                adjust_band_old = state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0, inds_band_change_cold_chain[0], inds_band_change_cold_chain[1]]
+                N_vals_in = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][0, inds_band_change_cold_chain[0], inds_band_change_cold_chain[1]]
                 
-                adjust_binaries_in_in = xp.conatenate([
+                adjust_binaries_in_in = xp.concatenate([
                     adjust_binaries_in,
                     adjust_binaries_in
                 ], axis=0)
 
                 data_index = xp.concatenate([
-                    xp.asarray((adjust_band_old % 2) * self.data_length + adjust_walker_inds),
-                    xp.asarray((adjust_band_new % 2) * self.data_length + adjust_walker_inds)
+                    xp.asarray((adjust_band_old % 2) + adjust_walker_inds),
+                    xp.asarray((adjust_band_new % 2) + adjust_walker_inds)
                 ]).astype(xp.int32)
+
+                N_vals_in_in = xp.concatenate([
+                    xp.asarray(N_vals_in),
+                    xp.asarray(N_vals_in)
+                ])
 
                 factors = xp.concatenate([
                     +xp.ones_like(adjust_band_old, dtype=xp.float64),
                     -xp.ones_like(adjust_band_old, dtype=xp.float64)
                 ])
+
                 self.gb.generate_global_template(
-                    re_add_binaries_in,
+                    adjust_binaries_in_in,
                     data_index,
                     self.mgh.data_list,
-                    N=N_vals_in,
+                    N=N_vals_in_in,
                     factors=factors,
                     data_length=self.mgh.data_length,
                     data_splits=self.mgh.gpu_splits,
@@ -1044,19 +1117,15 @@ class GBSpecialStretchMove(GroupStretchMove):
                 
         self.mempool.free_all_blocks()
 
-        breakpoint()
         # get accepted fraction
         if not self.is_rj_prop:
-            assert np.all(
-                new_state.branches_inds["gb_fixed"] == state.branches_inds["gb_fixed"]
-            )
             accepted_check_tmp = np.zeros_like(
-                new_state.branches_inds["gb_fixed"], dtype=bool
+                state.branches_inds["gb_fixed"], dtype=bool
             )
-            accepted_check_tmp[new_state.branches_inds["gb_fixed"]] = np.all(
+            accepted_check_tmp[state.branches_inds["gb_fixed"]] = np.all(
                 np.abs(
                     new_state.branches_coords["gb_fixed"][
-                        new_state.branches_inds["gb_fixed"]
+                        state.branches_inds["gb_fixed"]
                     ]
                     - state.branches_coords["gb_fixed"][state.branches_inds["gb_fixed"]]
                 )
@@ -1162,12 +1231,204 @@ class GBSpecialStretchMove(GroupStretchMove):
             self.temperature_control is not None
             and self.time % 1 == 0
             and self.ntemps > 1
-            and self.is_rj_prop
+            # and self.is_rj_prop
             # and False
         ):
 
+            # TODO: check if N changes / need to deal with that
             betas = self.temperature_control.betas
-            for i in range(ntemps - 1, 0, -1):
+
+            band_inds_temp = new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][new_state.branches["gb_fixed"].inds]
+            temp_inds_temp = group_temp_finder[0].get()[new_state.branches["gb_fixed"].inds]
+            walker_inds_temp = group_temp_finder[1].get()[new_state.branches["gb_fixed"].inds]
+
+            bands_guide = np.tile(np.arange(self.num_bands), (self.ntemps, self.nwalkers, 1)).transpose(2, 1, 0).flatten()
+            temps_guide = np.repeat(np.arange(self.ntemps)[:, None], self.nwalkers * self.num_bands).reshape(self.ntemps, self.nwalkers, self.num_bands).transpose(2, 1, 0).flatten()
+            walkers_guide = np.repeat(np.arange(self.nwalkers)[:, None], self.ntemps * self.num_bands).reshape(self.nwalkers, self.ntemps, self.num_bands).transpose(2, 0, 1).flatten()
+            
+            walkers_permuted = np.asarray([np.random.permutation(np.arange(self.nwalkers)) for _ in range(self.ntemps * self.num_bands)]).reshape(self.num_bands, self.ntemps, self.nwalkers).transpose(0, 2, 1).flatten()
+
+            # special_inds_guide = bands_guide * int(1e6) + walkers_permuted * int(1e3) + temps_guide
+
+            coords_in = new_state.branches["gb_fixed"].coords[new_state.branches["gb_fixed"].inds]
+            
+            # N_vals_in = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][new_state.branches["gb_fixed"].inds]
+            unique_N = np.unique(self.band_N_vals).get()
+            # remove 0
+            unique_N = unique_N[unique_N != 0]
+
+            bands_in = band_inds_temp
+            temps_in = temp_inds_temp
+            walkers_in = walker_inds_temp
+
+            main_gpu = self.xp.cuda.runtime.getDevice()
+
+            walkers_info = walkers_permuted if self.temperature_control.permute else walkers_guide
+            units = 2
+            start_unit = np.random.randint(0, units)
+            for unit in range(units):
+                current_band_remainder = (start_unit + unit) % units
+                for N_now in unique_N:
+                    keep = (bands_in % units == current_band_remainder) & (self.band_N_vals[xp.asarray(bands_in)].get() == N_now)
+                    keep_base = (bands_guide % units == current_band_remainder) & (self.band_N_vals[xp.asarray(bands_guide)].get() == N_now)
+                    bands_in_tmp = bands_in[keep]
+                    temps_in_tmp = temps_in[keep]
+                    walkers_in_tmp = walkers_in[keep]
+                    coords_in_tmp = coords_in[keep]
+
+                    # adjust for N_val
+                    special_inds_bins = bands_in_tmp * int(1e8) + walkers_in_tmp * int(1e4) + temps_in_tmp
+
+                    bands_guide_keep = bands_guide[keep_base]
+                    temps_guide_keep = temps_guide[keep_base]
+                    walkers_info_keep = walkers_info[keep_base]
+
+                    special_inds_guide_keep = bands_guide_keep * int(1e8) + walkers_info_keep * int(1e4) + temps_guide_keep
+
+                    sorting_info = np.searchsorted(special_inds_guide_keep, special_inds_bins, side="left")
+                    
+                    args_sorting = np.argsort(sorting_info)
+                    bands_in_tmp = bands_in_tmp[args_sorting]
+                    temps_in_tmp = temps_in_tmp[args_sorting]
+                    walkers_in_tmp = walkers_in_tmp[args_sorting]
+                    coords_in_tmp = coords_in_tmp[args_sorting]
+                    sorting_info = sorting_info[args_sorting]
+
+                    uni_sorted, uni_index, uni_counts = xp.unique(xp.asarray(sorting_info), return_index=True, return_counts=True)
+                    
+                    band_info_start_index_bin = xp.zeros_like(bands_guide_keep, dtype=np.int32)
+                    band_info_num_bin = xp.zeros_like(bands_guide_keep, dtype=np.int32)
+
+                    band_info_start_index_bin[uni_sorted] = uni_index.astype(np.int32)
+                    band_info_num_bin[uni_sorted] = uni_counts.astype(np.int32)
+
+                    params_curr_separated = tuple([xp.asarray(coords_in_tmp[:, i].copy()) for i in range(coords_in_tmp.shape[1])])
+                    params_curr_separated_orig = tuple([xp.asarray(coords_in_tmp[:, i].copy()) for i in range(coords_in_tmp.shape[1])])
+                    params_extra_params = (
+                        self.waveform_kwargs["T"],
+                        self.waveform_kwargs["dt"],
+                        N_now,
+                        coords_in.shape[0],
+                        self.start_freq_ind, 
+                        Soms_d_all["sangria"] ** (1/2),
+                        Sa_a_all["sangria"] ** (1/2),
+                        1e-100, 0.0, 0.0, 0.0, 0.0,  # foreground params for snr -> amp transform
+                    )
+
+                    gb_params_curr_in = self.gb.pyGalacticBinaryParams(
+                        *(params_curr_separated + params_curr_separated_orig + params_extra_params)
+                    )
+
+                    # current_parameter_arrays.append(params_curr_separated)
+
+                    data_package = self.gb.pyDataPackage(
+                        data[0][0],
+                        data[1][0],
+                        psd[0][0],
+                        psd[1][0],
+                        self.df,
+                        self.data_length,
+                        self.nwalkers * self.ntemps,
+                        self.nwalkers * self.ntemps
+                    )
+
+                    data_index_here = xp.asarray(((bands_guide_keep % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
+                    noise_index_here = xp.asarray(walkers_info_keep.copy()).astype(np.int32)
+                    update_data_index_here = xp.asarray((((bands_guide_keep + 1) % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
+                    
+                    start_band_index = xp.asarray(((self.band_edges[bands_guide_keep] / self.df).astype(int) - N_now)).astype(np.int32)
+                    end_band_index = xp.asarray((((self.band_edges[bands_guide_keep + 1]) / self.df).astype(int) + N_now)).astype(np.int32)
+                    
+                    start_band_index[start_band_index < 0] = 0
+                    end_band_index[end_band_index >= len(self.fd)] = len(self.fd) - 1
+                    
+                    band_lengths = end_band_index - start_band_index
+
+                    # proposal limits in a band
+                    fmin_allow = xp.asarray(((self.band_edges[bands_guide_keep] / self.df).astype(int) - (N_now / 2))) * self.df
+                    fmax_allow = xp.asarray(((self.band_edges[bands_guide_keep + 1] / self.df).astype(int) + (N_now / 2))) * self.df
+
+                    fmin_allow[fmin_allow < self.band_edges[0]] = self.band_edges[0]
+                    fmax_allow[fmax_allow > self.band_edges[-1]] = self.band_edges[-1]
+
+                    max_data_store_size = band_lengths.max().item()
+
+                    num_bands_here = len(band_info_start_index_bin)
+
+                    num_swap_setups = np.unique(bands_in_tmp).shape[0] * self.nwalkers
+                    
+                    swaps_proposed_here = xp.zeros(num_swap_setups, dtype=np.int32)
+                    swaps_accepted_here = xp.zeros(num_swap_setups, dtype=np.int32)
+                    
+                    bands_guide_keep = xp.asarray(bands_guide_keep).astype(np.int32)
+                    walkers_info_keep = xp.asarray(walkers_info_keep).astype(np.int32)
+                    temps_guide_keep = xp.asarray(temps_guide_keep).astype(np.int32)
+                    
+                    before_walkers_info_keep = walkers_info_keep.copy()
+                    before_temps_guide_keep = temps_guide_keep.copy()
+
+                    band_package = self.gb.pyBandPackage(
+                        data_index_here,
+                        noise_index_here,
+                        band_info_start_index_bin,  # uni_index
+                        band_info_num_bin,  # uni_count
+                        start_band_index,
+                        band_lengths,
+                        num_bands_here,
+                        max_data_store_size,
+                        fmin_allow,
+                        fmax_allow,
+                        update_data_index_here,
+                        self.ntemps,
+                        bands_guide_keep, 
+                        walkers_info_keep,
+                        temps_guide_keep,
+                        swaps_proposed_here,
+                        swaps_accepted_here
+                    )
+
+                    band_inv_temp_vals_here = band_temps[bands_guide_keep, temps_guide_keep]
+
+                    accepted_out_here = xp.zeros_like(bands_guide_keep, dtype=xp.int32)
+                    L_contribution_here = xp.zeros_like(bands_guide_keep, dtype=complex)
+                    p_contribution_here = xp.zeros_like(bands_guide_keep, dtype=complex)
+                    prior_all_curr_here = xp.zeros_like(bands_guide_keep, dtype=np.float64)
+                    
+                    mcmc_info = self.gb.pyMCMCInfo(
+                        L_contribution_here,
+                        p_contribution_here,
+                        prior_all_curr_here,
+                        accepted_out_here,
+                        band_inv_temp_vals_here,  # band_inv_temp_vals
+                        self.is_rj_prop,
+                        self.snr_lim,
+                    )
+
+                    inds_here = xp.ones_like(temps_in_tmp, dtype=bool)
+                    factors_here = xp.zeros_like(temps_in_tmp, dtype=float)
+                    num_proposals_here = 1
+                    proposal_info = self.gb.pyStretchProposalPackage(
+                        *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here))
+                    )
+
+                    inputs_now = (
+                        data_package,
+                        band_package,
+                        gb_params_curr_in,
+                        mcmc_info,
+                        self.gpu_cuda_priors,
+                        proposal_info,
+                        self.gpu_cuda_wrap,
+                        num_swap_setups,
+                        device,
+                        do_synchronize,
+                    )
+                    breakpoint()
+                    self.gb.SharedMemoryMakeTemperingMove_wrap(*inputs_now)
+
+                    self.xp.cuda.runtime.deviceSynchronize()
+                    breakpoint()
+            """for i in range(ntemps - 1, 0, -1):
                 if self.temperature_control.permute:
                     iperm = xp.random.permutation(nwalkers)
                     i1perm = xp.random.permutation(nwalkers)
@@ -1783,7 +2044,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 new_state.branches["gb_fixed"].coords[
                     ~new_state.branches["gb_fixed"].inds
                 ] = self.xp.nan
-
+                """
             # adjust priors accordingly
             log_prior_new_per_bin = xp.zeros_like(
                 new_state.branches_inds["gb_fixed"], dtype=xp.float64
@@ -1842,7 +2103,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        if self.time % 1 == 0:
+        if False:  # self.time % 1 == 0:
             ll_after = (
                 self.mgh.get_ll(include_psd_info=True)
                 .flatten()[new_state.supplimental[:]["overall_inds"]]
