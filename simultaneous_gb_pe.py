@@ -369,12 +369,18 @@ def run_gb_pe(gpu):
     inds_new = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max_fix_new), dtype=bool)
     inds_new[:, :, :nleaves_max_fix] = last_sample.branches["gb_fixed"].inds[:]
 
-    new_sample = State(
-        {"gb_fixed": coords_new},
+    kwargs = dict(
         inds={"gb_fixed": inds_new},
         log_like=last_sample.log_like,
         log_prior=last_sample.log_prior,
-        band_info=last_sample.band_info
+    )
+
+    if hasattr(last_sample, "band_info"):
+        kwargs["band_info"] = last_sample.band_info
+
+    new_sample = State(
+        {"gb_fixed": coords_new},
+        **kwargs
     )
 
     if not hasattr(new_sample, "band_info"):
@@ -962,4 +968,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(4)
+    output = run_gb_pe(7)
