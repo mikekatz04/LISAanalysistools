@@ -753,7 +753,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         # random start to rotation around 
         start_unit = model.random.randint(units)
 
-        breakpoint()
+        check1 = self.mgh.get_ll()
         
         for tmp in range(units):
             remainder = (start_unit + tmp) % units
@@ -945,11 +945,13 @@ class GBSpecialStretchMove(GroupStretchMove):
                 else:
                     num_proposals_here = 1
 
+                num_proposals_per_band = band_num_bins_here * num_proposals_here
+
                 proposal_info = self.gb.pyStretchProposalPackage(
                     *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here))
                 )
 
-                output_info.append([L_contribution_here, p_contribution_here, accepted_out_here])
+                output_info.append([L_contribution_here, p_contribution_here, accepted_out_here, num_proposals_per_band])
 
                 inputs_now = (
                     data_package,
@@ -991,6 +993,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 ll_contrib_now = outputs[0]
                 lp_contrib_now = outputs[1]
                 accepted_now = outputs[2]
+                num_proposals_now = outputs[3]
 
                 # remove accepted
                 # print(accepted_now.sum(0) / accepted_now.shape[0])
@@ -1023,7 +1026,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 self.xp.cuda.runtime.deviceSynchronize()
 
                 ll_change[band_info] = ll_contrib_now
-
+                
                 ll_adjustment = ll_change.sum(axis=-1)
                 log_like_tmp += ll_adjustment
 
@@ -1049,6 +1052,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][gb_inds_orig.get()] = new_band_inds.get()
 
         if not self.is_rj_prop:
+            # check2 = self.mgh.get_ll()
             old_band_inds_cold_chain = state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0] * state.branches["gb_fixed"].inds[0]
             new_band_inds_cold_chain = new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][0] * state.branches["gb_fixed"].inds[0]
             inds_band_change_cold_chain = np.where(new_band_inds_cold_chain != old_band_inds_cold_chain)
@@ -1094,8 +1098,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 ], axis=0)
 
                 data_index = xp.concatenate([
-                    xp.asarray((adjust_band_old % 2) + adjust_walker_inds),
-                    xp.asarray((adjust_band_new % 2) + adjust_walker_inds)
+                    xp.asarray(((adjust_band_old + 0) % 2) * nwalkers + adjust_walker_inds),
+                    xp.asarray(((adjust_band_new + 0) % 2) * nwalkers + adjust_walker_inds)
                 ]).astype(xp.int32)
 
                 N_vals_in_in = xp.concatenate([
@@ -1104,8 +1108,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 ])
 
                 factors = xp.concatenate([
-                    +xp.ones_like(adjust_band_old, dtype=xp.float64),
-                    -xp.ones_like(adjust_band_old, dtype=xp.float64)
+                    +xp.ones_like(adjust_band_old, dtype=xp.float64),  # remove
+                    -xp.ones_like(adjust_band_old, dtype=xp.float64)  # add
                 ])
 
                 self.gb.generate_global_template(
@@ -1118,9 +1122,10 @@ class GBSpecialStretchMove(GroupStretchMove):
                     data_splits=self.mgh.gpu_splits,
                     **waveform_kwargs_now
                 )
+            # check3 = self.mgh.get_ll()
+            
                 
         self.mempool.free_all_blocks()
-        breakpoint()
         # get accepted fraction
         if not self.is_rj_prop:
             accepted_check_tmp = np.zeros_like(
@@ -1272,7 +1277,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             main_gpu = self.xp.cuda.runtime.getDevice()
 
             walkers_info = walkers_permuted if self.temperature_control.permute else walkers_guide
-            units = 2
+            units = 3
             start_unit = np.random.randint(0, units)
             for unit in range(units):
                 current_band_remainder = (start_unit + unit) % units
@@ -1302,6 +1307,10 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                     sort_bins = np.argsort(sorting_info)
 
+                    # p1 = self.mgh.psd_shaped[0][0][8, 19748:20132]
+                    # p2 = self.mgh.psd_shaped[1][0][8, 19748:20132]
+                    # c2 =  self.mgh.data_shaped[1][0][26, 19748:20132] + self.mgh.data_shaped[1][0][8, 19748:20132]- self.mgh.channel2_base_data[0][8 * self.data_length + 19748:8 * self.data_length + 20132]
+                    # c1 =  self.mgh.data_shaped[0][0][26, 19748:20132] + self.mgh.data_shaped[0][0][8, 19748:20132]- self.mgh.channel1_base_data[0][8 * self.data_length + 19748:8 * self.data_length + 20132]
                     # args_sorting = np.arange(len(sorting_info))  # np.argsort(sorting_info)
                     bands_in_tmp = bands_in_tmp[sort_bins]
                     temps_in_tmp = temps_in_tmp[sort_bins]
@@ -1347,9 +1356,9 @@ class GBSpecialStretchMove(GroupStretchMove):
                         self.nwalkers * self.ntemps
                     )
 
-                    data_index_here = xp.asarray(((bands_guide_keep % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
+                    data_index_here = xp.asarray((((bands_guide_keep + 1) % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
                     noise_index_here = xp.asarray(walkers_info_keep.copy()).astype(np.int32)
-                    update_data_index_here = xp.asarray((((bands_guide_keep + 1) % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
+                    update_data_index_here = xp.asarray((((bands_guide_keep + 0) % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
                     
                     start_band_index = xp.asarray(((self.band_edges[bands_guide_keep] / self.df).astype(int) - N_now)).astype(np.int32)
                     end_band_index = xp.asarray((((self.band_edges[bands_guide_keep + 1]) / self.df).astype(int) + N_now)).astype(np.int32)
@@ -1440,6 +1449,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                         num_swap_setups,
                         device,
                         do_synchronize,
+                        -1, 
+                        100000
                     )
 
                     self.gb.SharedMemoryMakeTemperingMove_wrap(*inputs_now)
@@ -1478,6 +1489,16 @@ class GBSpecialStretchMove(GroupStretchMove):
                     bands_unique_here = np.unique(bands_guide_keep).get()
                     band_swaps_accepted[bands_unique_here] += swaps_accepted_here.reshape(bands_unique_here.shape[0], self.nwalkers, self.ntemps - 1).sum(axis=1).get()
                     band_swaps_proposed[bands_unique_here] += swaps_proposed_here.reshape(bands_unique_here.shape[0], self.nwalkers, self.ntemps - 1).sum(axis=1).get()
+
+                    ll_change = self.xp.zeros((ntemps, nwalkers, len(self.band_edges)))
+
+                    self.xp.cuda.runtime.deviceSynchronize()
+
+                    ll_change[(temps_guide_keep,walkers_info_keep,bands_guide_keep)] = L_contribution_here
+                    
+                    ll_adjustment = ll_change.sum(axis=-1)
+                    log_like_tmp += ll_adjustment
+        
                     
             new_state.branches["gb_fixed"].coords[:] = new_coords_after_tempering.get()
             new_state.branches["gb_fixed"].inds[:] = new_inds_after_tempering.get()
@@ -1501,6 +1522,10 @@ class GBSpecialStretchMove(GroupStretchMove):
             
             ratios = (band_swaps_accepted / band_swaps_proposed).T #  self.swaps_accepted / self.swaps_proposed
             ratios[np.isnan(ratios)] = 0.0
+
+            breakpoint()
+
+            # only change those with a binary in them
 
             # adapt if desired
             if True:  # self.time > 50:
