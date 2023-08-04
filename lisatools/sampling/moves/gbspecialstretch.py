@@ -773,7 +773,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         do_synchronize = False
         device = self.xp.cuda.runtime.getDevice()
 
-        units = 4 if not self.is_rj_prop else 3
+        units = 2 if not self.is_rj_prop else 2
         # random start to rotation around 
         start_unit = model.random.randint(units)
 
@@ -801,7 +801,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             bands_list = []
             for N_now in unique_N:
                 N_now = N_now.item()
-                if N_now == 0 or N_now != 128:
+                if N_now == 0:  #  or N_now != 128:
                     continue
 
                 old_data_1 = self.mgh.data_shaped[0][0][11].copy()
@@ -810,7 +810,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # TODO; check the maximum allowable band
                 keep = (
                     (band_indices % units == remainder)
-                    & (temp_indices == 0) & (walker_indices == 11) & (band_indices < 20) & (band_indices > 15)
+                    # & (temp_indices == 0) & (walker_indices == 11)  #  & (band_indices < 50)
                     & (self.band_N_vals[band_indices] == N_now)
                     & (band_indices < len(self.band_edges) - 2)
                 )  #  & (band_indices == 501) #  # & (N_vals_in <= 256) & (temp_inds == checkit[0].item()) & (walker_inds == checkit[1].item()) #    & (band_indices < 540)  #  &  (temp_inds == 0) & (walker_inds == 0)
@@ -899,8 +899,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                 buffer = 5  # bins
 
-                start_band_index = ((self.band_edges[band_inds - 1] / self.df).astype(int)).astype(np.int32)  #  - N_now).astype(np.int32)
-                end_band_index = (((self.band_edges[band_inds + 2]) / self.df).astype(int)).astype(np.int32)  #  + N_now).astype(np.int32)
+                start_band_index = ((self.band_edges[band_inds] / self.df).astype(int) - N_now - 1).astype(np.int32)
+                end_band_index = (((self.band_edges[band_inds + 1]) / self.df).astype(int) + N_now + 1).astype(np.int32)
                 
                 start_band_index[start_band_index < 0] = 0
                 end_band_index[end_band_index >= len(self.fd)] = len(self.fd) - 1
@@ -1047,14 +1047,14 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # if self.is_rj_prop:
                 #     breakpoint()
 
-                tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
-                print(f"BEFORE {tmp_check}, {self.mgh.channel1_data[0][11 * self.data_length + 3911].real} , {self.mgh.channel1_data[0][29 * self.data_length + 3911].real} , {self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real} ")
-                print(f"BEFORE2 {params_curr_separated[1].min().item()} ")
+                # tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
+                # print(f"BEFORE {tmp_check}, {self.mgh.channel1_data[0][11 * self.data_length + 3911].real} , {self.mgh.channel1_data[0][29 * self.data_length + 3911].real} , {self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real} ")
+                # print(f"BEFORE2 {params_curr_separated[1].min().item()} ")
                 self.gb.SharedMemoryMakeNewMove_wrap(*inputs_now)
                 self.xp.cuda.runtime.deviceSynchronize()
-                tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
-                print(f"After {tmp_check}, {self.mgh.channel1_data[0][11 * self.data_length + 3911].real} , {self.mgh.channel1_data[0][29 * self.data_length + 3911].real} , {self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real} ")
-                print(f"After2 {params_curr_separated[1].min().item()} ")
+                # tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
+                # print(f"After {tmp_check}, {self.mgh.channel1_data[0][11 * self.data_length + 3911].real} , {self.mgh.channel1_data[0][29 * self.data_length + 3911].real} , {self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real} ")
+                # print(f"After2 {params_curr_separated[1].min().item()} ")
                 
                 et = time.perf_counter()
                 print(et - st, N_now)
@@ -1109,8 +1109,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
                     new_band_inds = self.xp.searchsorted(self.band_edges, xp.asarray(current_parameters).T[:, 1] / 1e3, side="right") - 1
 
-                    if np.any(new_band_inds != bands):
-                        print(new_band_inds, bands)
+                    # if np.any(new_band_inds != bands):
+                    #     print(new_band_inds, bands)
                 ll_change = self.xp.zeros((ntemps, nwalkers, len(self.band_edges)))
                 lp_change = self.xp.zeros((ntemps, nwalkers, len(self.band_edges)))
 
@@ -1138,7 +1138,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # print(np.abs(new_state.log_like - ll_after).max())
                 store_max_diff = np.abs(log_like_tmp[0].get() - ll_after).max()
                 print("CHECKING in:", tmp, store_max_diff)
-                if store_max_diff > 1e-7:
+                if store_max_diff > 1e-5:
+                    self.mgh.get_ll(include_psd_info=True, stop=True)
                     breakpoint()
         new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
         if self.is_rj_prop:
@@ -1172,6 +1173,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             inds_band_change_cold_chain = np.where(new_band_inds_cold_chain != old_band_inds_cold_chain)
             # when adjusting temperatures, be careful here
             if len(inds_band_change_cold_chain[0]) > 0:
+                check2 = self.mgh.get_ll(include_psd_info=True)
                 print("SWITCH", len(inds_band_change_cold_chain[0]))
                 walker_inds_change_cold_chain = np.tile(inds_band_change_cold_chain[0], (self.ntemps - 1, 1)).flatten()
                 old_leaf_inds_change_cold_chain = np.tile(inds_band_change_cold_chain[1], (self.ntemps - 1, 1)).flatten()
@@ -1239,7 +1241,21 @@ class GBSpecialStretchMove(GroupStretchMove):
                     data_splits=self.mgh.gpu_splits,
                     **waveform_kwargs_now
                 )
-            # check3 = self.mgh.get_ll()
+                check3 = self.mgh.get_ll(include_psd_info=True)
+
+                print(check3 - check2)
+
+                if np.any(
+                    self.band_N_vals[adjust_band_old] !=
+                    self.band_N_vals[adjust_band_new]
+                ):
+                    walkers_focus = np.unique(inds_band_change_cold_chain[0][
+                        self.band_N_vals.get()[adjust_band_old] !=
+                        self.band_N_vals.get()[adjust_band_new]
+                    ])
+                    print(f"specific change in N across boundary: {walkers_focus}")
+                    new_state.log_like[0, walkers_focus] = self.mgh.get_ll(include_psd_info=True)[walkers_focus]
+
         # self.check_ll_inject(new_state)
         # breakpoint()
         ll_after = (
@@ -1335,8 +1351,8 @@ class GBSpecialStretchMove(GroupStretchMove):
             self.temperature_control is not None
             and self.time % 1 == 0
             and self.ntemps > 1
-            # and self.is_rj_prop
-            and False
+            and self.is_rj_prop
+            # and False
         ):
 
             new_coords_after_tempering = xp.asarray(np.zeros_like(new_state.branches["gb_fixed"].coords))
@@ -1442,6 +1458,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                     data_package = self.gb.pyDataPackage(
                         data[0][0],
                         data[1][0],
+                        base_data[0][0],
+                        base_data[1][0],
                         psd[0][0],
                         psd[1][0],
                         self.df,
@@ -1454,13 +1472,22 @@ class GBSpecialStretchMove(GroupStretchMove):
                     noise_index_here = xp.asarray(walkers_info_keep.copy()).astype(np.int32)
                     update_data_index_here = xp.asarray((((bands_guide_keep + 0) % 2) * self.nwalkers + walkers_info_keep)).astype(np.int32)
                     
-                    start_band_index = xp.asarray(((self.band_edges[bands_guide_keep] / self.df).astype(int) - N_now)).astype(np.int32)
-                    end_band_index = xp.asarray((((self.band_edges[bands_guide_keep + 1]) / self.df).astype(int) + N_now)).astype(np.int32)
+                    start_band_index = ((self.band_edges[bands_guide_keep] / self.df).astype(int) - N_now - 1).astype(np.int32)
+                    end_band_index = (((self.band_edges[bands_guide_keep + 1]) / self.df).astype(int) + N_now + 1).astype(np.int32)
                     
                     start_band_index[start_band_index < 0] = 0
                     end_band_index[end_band_index >= len(self.fd)] = len(self.fd) - 1
                     
                     band_lengths = end_band_index - start_band_index
+
+                    start_interest_band_index = ((self.band_edges[bands_guide_keep] / self.df).astype(int)).astype(np.int32)  #  - N_now).astype(np.int32)
+                    end_interest_band_index = (((self.band_edges[bands_guide_keep + 1]) / self.df).astype(int)).astype(np.int32)  #  + N_now).astype(np.int32)
+                    
+                    start_interest_band_index[start_interest_band_index < 0] = 0
+                    end_interest_band_index[end_interest_band_index >= len(self.fd)] = len(self.fd) - 1
+                    
+                    band_interest_lengths = end_interest_band_index - start_interest_band_index
+
 
                     # proposal limits in a band
                     fmin_allow = xp.asarray(((self.band_edges[bands_guide_keep] / self.df).astype(int) - (N_now / 2))) * self.df
@@ -1495,6 +1522,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                         band_info_num_bin,  # uni_count
                         start_band_index,
                         band_lengths,
+                        start_interest_band_index,
+                        band_interest_lengths,
                         num_bands_here,
                         max_data_store_size,
                         fmin_allow,

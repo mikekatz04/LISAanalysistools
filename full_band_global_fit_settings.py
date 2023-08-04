@@ -334,9 +334,9 @@ high_fs = np.append(
 """
 search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
 
-width_low = 140
-width_mid = 280
-width_high = 1050
+width_low = 256 + 10
+width_mid = 512 + 10
+width_high = 1024 + 10
 
 first_barrier = (0.001 / df).astype(int) * df
 second_barrier = (0.01 / df).astype(int) * df
