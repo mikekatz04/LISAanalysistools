@@ -125,14 +125,35 @@ class MultiGPUDataHolder:
         return [self.channel1_data, self.channel2_data]
 
     @property
+    def base_data_list(self):
+        return [self.channel1_base_data, self.channel2_base_data]
+
+    @property
     def psd_list(self):
         return [self.channel1_psd, self.channel2_psd]
 
     @property
     def data_shaped(self):
+        tmp1 = [self.channel1_data[i][:self.nwalkers * self.data_length] + self.channel1_data[i][self.nwalkers * self.data_length:] - self.channel1_base_data[i][:] for i in range(len(self.channel1_data))]
+        tmp2 = [self.channel2_data[i][:self.nwalkers * self.data_length] + self.channel2_data[i][self.nwalkers * self.data_length:] - self.channel2_base_data[i][:] for i in range(len(self.channel2_data))]
+            
+        return [
+            self.reshape_list(tmp1),
+            self.reshape_list(tmp2),
+        ]
+
+    @property
+    def data_shaped_2_parts(self):
         return [
             self.reshape_list(self.channel1_data),
             self.reshape_list(self.channel2_data),
+        ]
+
+    @property
+    def data_shaped_base(self):
+        return [
+            self.reshape_list(self.channel1_base_data),
+            self.reshape_list(self.channel2_base_data),
         ]
 
     @property
@@ -403,6 +424,16 @@ class MultiGPUDataHolder:
                             data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
                             + data_tmp2[gpu_i].conj() * data_tmp2[gpu_i] / psd_tmp2[gpu_i],
                     ).real.item()
+
+                    if overall_index_here == 11:
+                        for w in [3911]: # range(3811, 3811 + 420, 25):
+                            print(f"{w} {data_tmp1[gpu_i][w].real} {data_tmp1[gpu_i][w].imag}, {self.channel1_data[gpu_i][inds_slice_even][w].real} {self.channel1_data[gpu_i][inds_slice_even][w].imag}, {self.channel1_data[gpu_i][inds_slice_odd][w].real} {self.channel1_data[gpu_i][inds_slice_odd][w].imag}, {self.channel1_base_data[gpu_i][inds_slice][w].real} {self.channel1_base_data[gpu_i][inds_slice][w].imag}")
+                        inner_here_check = self.df * 4 * xp.sum(
+                                data_tmp1[gpu_i][3811:3811 + 420].conj() * data_tmp1[gpu_i][3811:3811 + 420] / psd_tmp1[gpu_i][3811:3811 + 420]
+                                + data_tmp2[gpu_i][3811:3811 + 420].conj() * data_tmp2[gpu_i][3811:3811 + 420] / psd_tmp2[gpu_i][3811:3811 + 420],
+                        ).real.item()
+                        print("INSIDE INNER: ", -1/2 * inner_here_check, data_tmp1[gpu_i][3811], self.channel1_data[gpu_i][inds_slice_even][3811], self.channel1_data[gpu_i][inds_slice_odd][3811], self.channel1_base_data[gpu_i][inds_slice][3811])
+                    
                     xp.cuda.runtime.deviceSynchronize()
                     if np.isnan(inner_here):
                         breakpoint()

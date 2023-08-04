@@ -317,8 +317,8 @@ periodic = {
 f0_lims_in = f0_lims.copy()
 
 # TODO: make wider because this is knowning the limits?
-f0_lims_in[0] = 0.05e-3 # 0.3e-3
-# f0_lims_in[1] = 0.8e-3
+f0_lims_in[0] = (0.05e-3 / df).astype(int) * df # 0.3e-3
+f0_lims_in[1] = (f0_lims_in[1] / df).astype(int) * df
 
 low_fs = np.arange(f0_lims_in[0], 0.001 - 4 * 128 * df, 2 * 128 * df)
 mid_fs = np.arange(0.001, 0.01 - 4 * 512 * df, 2 * 256 * df)
@@ -334,10 +334,17 @@ high_fs = np.append(
 """
 search_f_bin_lims = np.concatenate([low_fs, mid_fs, high_fs])
 
-low_fs_propose = np.arange(f0_lims_in[0], 0.001 - 2 * 128 * df, 128 * df)
-mid_fs_propose = np.arange(0.001, 0.01 - 2 * 512 * df, 256 * df)
+width_low = 140
+width_mid = 280
+width_high = 1050
+
+first_barrier = (0.001 / df).astype(int) * df
+second_barrier = (0.01 / df).astype(int) * df
+
+low_fs_propose = np.arange(f0_lims_in[0], first_barrier - width_mid * df, width_low * df)
+mid_fs_propose = np.arange(first_barrier, second_barrier - width_high * df, width_mid * df)
 high_fs_propose = np.append(
-    np.arange(0.01, f0_lims_in[-1], 1024 * df), np.array([f0_lims_in[-1]])
+    np.arange(second_barrier, f0_lims_in[-1], width_high * df)[:-1], np.array([f0_lims_in[-1]])
 )
 
 propose_f_bin_lims = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])

@@ -99,7 +99,7 @@ class UpdateNewResiduals(Update):
         self.output_residual_number = 0
 
     def __call__(self, iter, last_sample, sampler):
-
+        raise NotImplementedError
         with open(current_save_state_file, "wb") as fp:
             pickle.dump(last_sample, fp, pickle.HIGHEST_PROTOCOL)
 
@@ -274,12 +274,17 @@ def run_gb_pe(gpu):
 
         coords = last_sample.branches_coords
         inds = last_sample.branches_inds
-        last_sample = State(
-            coords,
+        kwargs = dict(
             inds=inds,
             log_like=last_sample.log_like,
             log_prior=last_sample.log_prior,
-            band_info=last_sample.band_info
+        )
+
+        if hasattr(last_sample, "band_info"):
+            kwargs["band_info"] = last_sample.band_info
+        last_sample = State(
+            coords,
+            **kwargs
         )
 
         nleaves_max_fix = last_sample.branches["gb_fixed"].coords.shape[
@@ -508,10 +513,6 @@ def run_gb_pe(gpu):
 
     band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
 
-    odd_even_vals = np.repeat(
-        np.arange(ntemps_pe)[:, None], nleaves_max_fix_new * nwalkers_pe, axis=-1
-    ).reshape(ntemps_pe, nwalkers_pe, nleaves_max_fix_new)
-
     walker_vals = np.tile(
         np.arange(nwalkers_pe), (nleaves_max_fix_new, 1)
     ).transpose((1, 0))[new_sample.branches["gb_fixed"].inds[0]]
@@ -542,6 +543,14 @@ def run_gb_pe(gpu):
 
     breakpoint()"""
 
+    band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
+    
+    from gbgpu.utils.utility import get_N
+    band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
+
+    N_vals = band_N_vals[band_inds]
+
+    waveform_kwargs.pop("N")
     gb.generate_global_template(
         coords_in_in,
         data_index,
@@ -550,6 +559,7 @@ def run_gb_pe(gpu):
         data_length=data_length,
         factors=factors,
         data_splits=mgh.gpu_splits,
+        N=N_vals,
         **waveform_kwargs,
     )
 
@@ -618,6 +628,7 @@ def run_gb_pe(gpu):
         # rj_proposal_distribution=gpu_priors,
         a=1.75,
         use_gpu=True,
+        num_repeat_proposals=20
     )
 
     gb_args = (
@@ -750,7 +761,7 @@ def run_gb_pe(gpu):
         *gb_args_rj,
         **gb_kwargs_rj_2,
     )
-    rj_moves = [(rj_move_1, 0.2), (rj_move_2, 0.8)]
+    rj_moves = [(rj_move_1, 0.0), (rj_move_2, 1.0)]
 
     for rj_move in rj_moves:
         rj_move[0].gb.gpus = gpus
@@ -818,8 +829,8 @@ def run_gb_pe(gpu):
         vectorize=True,
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
-        update_fn=update,  # stop_converge_mix,
-        update_iterations=1,
+        update_fn=None,  # update,  # stop_converge_mix,
+        update_iterations=-1,
         provide_groups=True,
         provide_supplimental=True,
         num_repeats_in_model=1,
@@ -873,7 +884,7 @@ def run_gb_pe(gpu):
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=True, thin_by=25, store=True
+        state_mix, nsteps_mix, progress=True, thin_by=30, store=True
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
@@ -968,4 +979,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(7)
+    output = run_gb_pe(4)
