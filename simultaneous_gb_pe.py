@@ -268,6 +268,8 @@ def run_gb_pe(gpu):
 
         nleaves_max_fix_new = nleaves_max_fix
 
+        assert hasattr(last_sample, "band_info")
+
     elif current_save_state_file in os.listdir():
         with open(current_save_state_file, "rb") as fp_out:
             last_sample = pickle.load(fp_out)
@@ -500,7 +502,7 @@ def run_gb_pe(gpu):
     check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
 
     if np.any(np.isinf(check)):
-        breakpoint()
+        raise ValueError("Starting priors are inf.")
 
     coords_out_gb_fixed[:, 3] = coords_out_gb_fixed[:, 3] % (2 * np.pi)
     coords_out_gb_fixed[:, 5] = coords_out_gb_fixed[:, 5] % (1 * np.pi)
@@ -563,6 +565,7 @@ def run_gb_pe(gpu):
         **waveform_kwargs,
     )
 
+    # breakpoint()
     del data_index
     del factors
     mempool.free_all_blocks()
@@ -884,7 +887,7 @@ def run_gb_pe(gpu):
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=True, thin_by=30, store=True
+        state_mix, nsteps_mix, progress=True, thin_by=2, store=True
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
 

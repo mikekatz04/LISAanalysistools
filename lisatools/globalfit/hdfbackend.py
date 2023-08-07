@@ -134,6 +134,8 @@ class HDFBackend(eryn_HDFBackend):
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
             for key in g["band_info"]:
+                if key == "band_edges":
+                    continue
                 g["band_info"][key].resize(ntot, axis=0)
 
     def get_value(self, name, thin=1, discard=0, slice_vals=None):

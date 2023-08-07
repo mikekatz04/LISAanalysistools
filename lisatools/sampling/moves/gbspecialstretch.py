@@ -801,7 +801,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             bands_list = []
             for N_now in unique_N:
                 N_now = N_now.item()
-                if N_now == 0:  #  or N_now != 128:
+                if N_now == 0:  #  or N_now != 1024:
                     continue
 
                 old_data_1 = self.mgh.data_shaped[0][0][11].copy()
@@ -810,7 +810,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # TODO; check the maximum allowable band
                 keep = (
                     (band_indices % units == remainder)
-                    # & (temp_indices == 0) & (walker_indices == 11)  #  & (band_indices < 50)
+                    # & (temp_indices == 0)  #  & (walker_indices == 2)  #  & (band_indices < 50)
                     & (self.band_N_vals[band_indices] == N_now)
                     & (band_indices < len(self.band_edges) - 2)
                 )  #  & (band_indices == 501) #  # & (N_vals_in <= 256) & (temp_inds == checkit[0].item()) & (walker_inds == checkit[1].item()) #    & (band_indices < 540)  #  &  (temp_inds == 0) & (walker_inds == 0)
@@ -1732,6 +1732,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
+        if self.is_rj_prop:
+            print("count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1))
         return new_state, accepted
 
     def check_ll_inject(self, new_state):
@@ -1777,9 +1779,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         check_ll_diff1 = check_ll_new - check_ll
         print(check_ll_diff1)
 
-        self.last_state = State(new_state, copy=True)
         # breakpoint()
-
         return check_ll_new
 
         # breakpoint()
