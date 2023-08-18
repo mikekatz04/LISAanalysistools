@@ -729,29 +729,51 @@ class GBSpecialStretchMove(GroupStretchMove):
         band_indices_orig = band_indices.copy()
         
         if self.is_rj_prop:
-            new_sources = xp.full_like(points_curr[~gb_inds], np.nan)
-            fix = xp.full(new_sources.shape[0], True)
-            while xp.any(fix):
-                new_sources[fix] = self.rj_proposal_distribution["gb_fixed"].rvs(size=fix.sum().item())
-                fix = xp.any(xp.isnan(new_sources), axis=-1)
-            points_curr[~gb_inds] = new_sources
+            if isinstance(self.rj_proposal_distribution["gb_fixed"], list):
+                assert len(self.rj_proposal_distribution["gb_fixed"]) == ntemps
+                proposal_logpdf = xp.zeros((points_curr.shape[0], np.prod(points_curr.shape[1:-1])))
+                for t in range(ntemps):
+                    new_sources = xp.full_like(points_curr[t, ~gb_inds[t]], np.nan)
+                    fix = xp.full(new_sources.shape[0], True)
+                    while xp.any(fix):
+                        new_sources[fix] = self.rj_proposal_distribution["gb_fixed"][t].rvs(size=fix.sum().item())
+                        fix = xp.any(xp.isnan(new_sources), axis=-1)
+                    points_curr[t, ~gb_inds[t]] = new_sources
+                    band_indices[t, ~gb_inds[t]] = self.xp.searchsorted(self.band_edges, new_sources[:, 1] / 1e3, side="right") - 1
+                    # change gb_inds
+                    gb_inds[t, :] = True
+                    assert np.all(gb_inds[t])
+                    proposal_logpdf[t] = self.rj_proposal_distribution["gb_fixed"][t].logpdf(
+                        points_curr[t, gb_inds[t]]
+                    )
 
-            band_indices[~gb_inds] = self.xp.searchsorted(self.band_edges, new_sources[:, 1] / 1e3, side="right") - 1
-            # N_vals_in[~gb_inds] = self.xp.asarray(
-            #     get_N(
-            #         xp.full_like(new_sources[:, 1], 1e-30),
-            #         new_sources[:, 1] / 1e3,
-            #         self.waveform_kwargs["T"],
-            #         self.waveform_kwargs["oversample"],
-            #         xp=self.xp
-            #     )
-            # )
+                proposal_logpdf = proposal_logpdf.flatten().copy()
+            
+            else:
+                new_sources = xp.full_like(points_curr[~gb_inds], np.nan)
+                fix = xp.full(new_sources.shape[0], True)
+                while xp.any(fix):
+                    new_sources[fix] = self.rj_proposal_distribution["gb_fixed"].rvs(size=fix.sum().item())
+                    fix = xp.any(xp.isnan(new_sources), axis=-1)
+                points_curr[~gb_inds] = new_sources
 
-            # change gb_inds
-            gb_inds[:] = True
-            proposal_logpdf = self.rj_proposal_distribution["gb_fixed"].logpdf(
-                points_curr[gb_inds]
-            )
+                band_indices[~gb_inds] = self.xp.searchsorted(self.band_edges, new_sources[:, 1] / 1e3, side="right") - 1
+                # N_vals_in[~gb_inds] = self.xp.asarray(
+                #     get_N(
+                #         xp.full_like(new_sources[:, 1], 1e-30),
+                #         new_sources[:, 1] / 1e3,
+                #         self.waveform_kwargs["T"],
+                #         self.waveform_kwargs["oversample"],
+                #         xp=self.xp
+                #     )
+                # )
+
+                # change gb_inds
+                gb_inds[:] = True
+                assert np.all(gb_inds)
+                proposal_logpdf = self.rj_proposal_distribution["gb_fixed"].logpdf(
+                    points_curr[gb_inds]
+                )
             factors = (proposal_logpdf * -1) * (~gb_inds_orig).flatten() + (proposal_logpdf * +1) * (gb_inds_orig).flatten()
 
         else:
@@ -783,6 +805,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         # print(np.abs(new_state.log_like - ll_after).max())
         store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
         print("CHECKING 0:", store_max_diff, self.is_rj_prop)
+        self.check_ll_inject(new_state)
 
         per_walker_band_proposals = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         per_walker_band_accepted = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
@@ -813,8 +836,11 @@ class GBSpecialStretchMove(GroupStretchMove):
                     # & (temp_indices == 0)  #  & (walker_indices == 2)  #  & (band_indices < 50)
                     & (self.band_N_vals[band_indices] == N_now)
                     & (band_indices < len(self.band_edges) - 2)
+                    # & (band_indices == 1)
                 )  #  & (band_indices == 501) #  # & (N_vals_in <= 256) & (temp_inds == checkit[0].item()) & (walker_inds == checkit[1].item()) #    & (band_indices < 540)  #  &  (temp_inds == 0) & (walker_inds == 0)
 
+                # if self.time > 0:
+                #     keep[np.where(keep)[0][1:]] = False
                 """if self.time > 0:
                     keep = (
                         (band_indices % units == remainder)
@@ -840,7 +866,9 @@ class GBSpecialStretchMove(GroupStretchMove):
                 inds_here = gb_inds_in[keep][permute_inds]
                 factors_here = factors[keep][permute_inds]
                 prior_all_curr_here = self.gpu_priors["gb_fixed"].logpdf(params_curr)
-                assert xp.all(~xp.isinf(prior_all_curr_here))
+                if not self.is_rj_prop:
+                    assert xp.all(~xp.isinf(prior_all_curr_here))
+
                 temp_inds_here = temp_indices[keep][permute_inds]
                 walker_inds_here = walker_indices[keep][permute_inds]
                 leaf_inds_here = leaf_indices[keep][permute_inds]
@@ -1045,6 +1073,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 st = time.perf_counter()
                 # print(params_curr_separated[0].shape[0])
                 # if self.is_rj_prop:
+                # if self.time > 0:
                 #     breakpoint()
 
                 # tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
@@ -1138,8 +1167,9 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # print(np.abs(new_state.log_like - ll_after).max())
                 store_max_diff = np.abs(log_like_tmp[0].get() - ll_after).max()
                 print("CHECKING in:", tmp, store_max_diff)
-                if store_max_diff > 1e-5:
-                    self.mgh.get_ll(include_psd_info=True, stop=True)
+                if store_max_diff > 3e-4:
+                    self.check_ll_inject(new_state)
+                    # self.mgh.get_ll(include_psd_info=True, stop=True)
                     breakpoint()
         new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
         if self.is_rj_prop:
@@ -1361,6 +1391,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             # TODO: check if N changes / need to deal with that
             betas = self.temperature_control.betas
 
+            # cannot find them yourself because of higher temps moving across band edge / need supplimental band inds
             band_inds_temp = new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"][new_state.branches["gb_fixed"].inds]
             temp_inds_temp = group_temp_finder[0].get()[new_state.branches["gb_fixed"].inds]
             walker_inds_temp = group_temp_finder[1].get()[new_state.branches["gb_fixed"].inds]
@@ -1711,7 +1742,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 ll_after = (
                     self.mgh.get_ll(include_psd_info=True, stop=True)
                 )
-                breakpoint()
+
                 if store_max_diff > 1.0:
                     breakpoint()
 

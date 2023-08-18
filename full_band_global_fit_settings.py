@@ -104,7 +104,7 @@ current_iterative_search_sub_file_base = (
 current_found_coords_for_starting_mix_file = (
     "full_band_current_found_coords_for_starting_mix_file.npy"
 )
-current_save_state_file = "save_state_temp_2.pickle"
+current_save_state_file = "save_state_new_gmm.pickle"
 current_save_state_file_psd = "psd_save_state_temp.pickle"
 
 num_sub_band_fails_limit = 2
@@ -228,11 +228,16 @@ amp_transform = AmplitudeFromSNR(L, Tobs, model="sangria")
 # TODO: special move storage of information in backend
 # TODO: think about if there is anything else that would nice to store in the backend.
 
+
+def f_ms_to_s(x):
+    return x * 1e-3
+
+
 transform_fn_in = {
     # 0: (lambda x: np.exp(x)),
-    1: (lambda x: x * 1e-3),
-    5: (lambda x: np.arccos(x)),
-    8: (lambda x: np.arcsin(x)),
+    1: f_ms_to_s,
+    5: np.arccos,
+    8: np.arcsin,
     # (1, 2, 3): (lambda f0, fdot, fddot: (f0, fdot, 11 / 3.0 * fdot ** 2 / f0)),
     (0, 1): amp_transform,
 }

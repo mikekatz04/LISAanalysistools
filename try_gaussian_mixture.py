@@ -83,10 +83,13 @@ def fit_each_leaf(samples):
             continue
         #fit_gaussian_mixture_model(n_components, samples)
         #breakpoint()
-        mixture = GaussianMixture(n_components=n_components, verbose=False, verbose_interval=2)
+        try:
+            mixture = GaussianMixture(n_components=n_components, verbose=False, verbose_interval=2)
 
-        mixture.fit(samples)
-        test_bic = mixture.bic(samples)
+            mixture.fit(samples)
+            test_bic = mixture.bic(samples)
+        except ValueError:
+            breakpoint()
         # print(n_components, test_bic)
         if test_bic < min_bic:
             min_bic = test_bic
@@ -112,50 +115,66 @@ def fit_each_leaf(samples):
 
 if __name__ == "__main__":
     
-    start = 50
-    end = 400
+    start = 10
+    end = 10000
     index = 1000
     keep = np.array([0, 1, 2, 4, 6, 7])
+
+    fp_input = "new_search_find_individual_posteriors_8.h5"
     
-    with h5py.File("search_find_individual_posteriors_3.h5", "r") as fp:
-        num_iters, num_leaves, num_temps, num_walkers, _ = fp["samples"].shape
+    with h5py.File(fp_input, "r") as fp:
+        ntemps, num_iters, num_bands, num_walkers, _ = fp["samples"].shape
     
-    ndim = len(keep)
+    print(ntemps, num_iters, num_bands, num_walkers)
     output = []
-    import time
-    st1 = time.perf_counter()
-    change = 200
-    start_ind = 4800
-    for end_ind in range(change + start_ind, num_leaves, change):
-        with h5py.File("search_find_individual_posteriors_3.h5", "r") as fp:
-            samples_all = fp["samples"][start:, start_ind:end_ind, 0, :, keep].transpose(1, 0, 2, 3)
+    for t in range(ntemps):
+        ndim = len(keep)
+        import time
+        st1 = time.perf_counter()
+        change = 200
+        start_ind = 0
+        weights = []
+        means = []
+        covs = []
+        invcovs = []
+        dets = []
+        mins = []
+        maxs = []
+
+        for end_ind in range(change + start_ind, num_bands + change, change):
+            with h5py.File(fp_input, "r") as fp:
+                samples_all = fp["samples"][t, start:, start_ind:end_ind, :, keep].transpose(1, 0, 2, 3)
+                delta_logl = fp["delta_logl"][t, start:, start_ind:end_ind, :].transpose(1, 0, 2)
+
+            if np.any(np.isnan(samples_all) | np.isinf(samples_all)):
+                breakpoint()
+            num_here = samples_all.shape[0]
+            args = []
+            for band in range(num_here): 
+                args.append((samples_all[band].reshape(-1, ndim),))
+
+            with mp.Pool(10) as pool:
+                gmm_info = pool.starmap(fit_each_leaf, args)
             
-        args = []
-        for leaf in range(change): 
-            args.append((samples_all[leaf].reshape(-1, ndim),))
+            # gmm_info = [None for tmp in args]
+            
+            # for leaf, tmp in enumerate(args):
+            #     gmm_info[leaf] = fit_each_leaf(*tmp)
+            #     print(leaf)
 
-        with mp.Pool(10) as pool:
-            gmm_info = pool.starmap(fit_each_leaf, args)
+            weights += [tmp[0] for tmp in gmm_info]
+            means += [tmp[1] for tmp in gmm_info]
+            covs += [tmp[2] for tmp in gmm_info]
+            invcovs += [tmp[3] for tmp in gmm_info]
+            dets += [tmp[4] for tmp in gmm_info]
+            mins += [tmp[5] for tmp in gmm_info]
+            maxs += [tmp[6] for tmp in gmm_info]
+
+            print(start_ind, end_ind -1)
+            start_ind = end_ind
+
+        output.append([weights, means, covs, invcovs, dets, mins, maxs])
         
-        """gmm_info = [None for tmp in args]
-        
-        for leaf, tmp in enumerate(args):
-            gmm_info[leaf] = fit_each_leaf(*tmp)
-            print(leaf)"""
-
-        weights = [tmp[0] for tmp in gmm_info]
-        means = [tmp[1] for tmp in gmm_info]
-        covs = [tmp[2] for tmp in gmm_info]
-        invcovs = [tmp[3] for tmp in gmm_info]
-        dets = [tmp[4] for tmp in gmm_info]
-        mins = [tmp[5] for tmp in gmm_info]
-        maxs = [tmp[6] for tmp in gmm_info]
-
-        output = [weights, means, covs, invcovs, dets, mins, maxs]
-        
-        import pickle
-        with open(f"gmm_info_numbers_{start_ind}_to_{end_ind - 1}.pickle", "wb") as fp:
-            pickle.dump(output, fp, pickle.HIGHEST_PROTOCOL)
-
-        print(start_ind, end_ind -1)
-        start_ind = end_ind
+    import pickle
+    with open(f"new_3_gmm_info.pickle", "wb") as fp:
+        pickle.dump(output, fp, pickle.HIGHEST_PROTOCOL)

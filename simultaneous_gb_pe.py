@@ -3,6 +3,7 @@ import cupy as xp
 import time
 import pickle
 import shutil
+from mpi4py import MPI
 
 # from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
 
@@ -87,8 +88,9 @@ from eryn.utils.updates import Update
 
 class UpdateNewResiduals(Update):
     def __init__(
-        self, initial_mbhs, mgh, fp_psd, fp_mbh, fp_gb, psd_shape, waveform_kwargs
+        self, comm, initial_mbhs, mgh, fp_psd, fp_mbh, fp_gb, psd_shape, waveform_kwargs
     ):
+        self.comm = comm
         self.mgh = mgh
         self.fp_psd = fp_psd
         self.fp_mbh = fp_mbh
@@ -99,6 +101,19 @@ class UpdateNewResiduals(Update):
         self.output_residual_number = 0
 
     def __call__(self, iter, last_sample, sampler):
+        self.comm.send({"send": ["psd", "mbh"]}, dest=0, tag=110)
+        data = self.comm.recv(source=0, tag=101)
+        print("DATA", data)
+
+        print("waiting for GMM info")
+        gmm_info = self.comm.recv(source=2, tag=221)
+        print("received GMM info")
+        if len(gmm_info) > 1:
+            gmm_all = [FullGaussianMixtureModel(gb, *tmp, use_cupy=True) for tmp in gmm_info]
+        else:
+            tmp = gmm_info[0]
+            gmm_all = [FullGaussianMixtureModel(gb, *tmp, use_cupy=True) for _ in range(ntemps_pe)]
+        return
         raise NotImplementedError
         with open(current_save_state_file, "wb") as fp:
             pickle.dump(last_sample, fp, pickle.HIGHEST_PROTOCOL)
@@ -230,10 +245,7 @@ class UpdateNewResiduals(Update):
         xp.get_default_memory_pool().free_all_blocks()
 
 
-def run_gb_pe(gpu):
-    while fp_psd + ".npy" not in os.listdir():
-        print(f"{fp_psd + '.npy'} not in current directory so far...")
-        time.sleep(20)
+def run_gb_pe(gpu, comm):
 
     gpus_pe = [gpu]
     gpus = gpus_pe
@@ -700,23 +712,27 @@ def run_gb_pe(gpu):
         prevent_swaps=True
     )"""
 
-    with open("gmm_info.pickle", "rb") as fp:
+    with open("new_3_gmm_info.pickle", "rb") as fp:
         gmm_info = pickle.load(fp)
 
+    if len(gmm_info) > 1:
+        gmm_all = [FullGaussianMixtureModel(gb, *tmp, use_cupy=True) for tmp in gmm_info]
+    else:
+        tmp = gmm_info[0]
+        gmm_all = [FullGaussianMixtureModel(gb, *tmp, use_cupy=True) for _ in range(ntemps_pe)]
 
-    gmm_all = FullGaussianMixtureModel(gb, *gmm_info, use_cupy=True)
-
-    probs_in = {
-        (0, 1, 2, 4, 6, 7): gmm_all,
+    probs_in = [{
+        (0, 1, 2, 4, 6, 7): gmm_i,
         3: uniform_dist(0.0, 2 * np.pi, use_cupy=True),
         5: uniform_dist(0.0, np.pi, use_cupy=True)
-    }
-    gen_dist = ProbDistContainer(probs_in, use_cupy=True)
+    } for gmm_i in gmm_all]
+    gen_dist = [ProbDistContainer(probs_in_i, use_cupy=True) for probs_in_i in probs_in]
 
-    tmp = gen_dist.rvs(size=1000)
+    for i in range(len(gen_dist)):
+        tmp = gen_dist[i].rvs(size=1000)
 
-    tmp[::20, 1] = 500.0
-    tmp_logpdf = gen_dist.logpdf(tmp)
+        # tmp[::20, 1] = 500.0
+        tmp_logpdf = gen_dist[i].logpdf(tmp)
     
     gb_kwargs_rj = dict(
         waveform_kwargs=waveform_kwargs,
@@ -764,7 +780,7 @@ def run_gb_pe(gpu):
         *gb_args_rj,
         **gb_kwargs_rj_2,
     )
-    rj_moves = [(rj_move_1, 0.0), (rj_move_2, 1.0)]
+    rj_moves = [(rj_move_1, 0.2), (rj_move_2, 0.8)]
 
     for rj_move in rj_moves:
         rj_move[0].gb.gpus = gpus
@@ -784,6 +800,7 @@ def run_gb_pe(gpu):
 
     state_mix.betas = betas
     update = UpdateNewResiduals(
+        comm,
         [A_mbh_going_in, E_mbh_going_in],
         mgh,
         fp_psd + ".npy",
@@ -832,8 +849,8 @@ def run_gb_pe(gpu):
         vectorize=True,
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
-        update_fn=None,  # update,  # stop_converge_mix,
-        update_iterations=-1,
+        update_fn=update,  # stop_converge_mix,
+        update_iterations=1,
         provide_groups=True,
         provide_supplimental=True,
         num_repeats_in_model=1,
@@ -887,7 +904,7 @@ def run_gb_pe(gpu):
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=True, thin_by=2, store=True
+        state_mix, nsteps_mix, progress=True, thin_by=1, store=True
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
@@ -982,4 +999,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()"""
 
-    output = run_gb_pe(4)
+    output = run_gb_pe(3)
