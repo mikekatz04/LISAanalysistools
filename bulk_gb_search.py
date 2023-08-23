@@ -58,7 +58,7 @@ def fit_gmm(samples, comm, comm_info):
 
         args = []
         for band in range(num_keep): 
-            args.append((band, samples[band].reshape(-1, ndim),))
+            args.append(samples[band].reshape(-1, ndim)[:, keep])
 
     elif samples.ndim == 2:
         max_groups = samples[:, 0].astype(int).max()
@@ -67,69 +67,93 @@ def fit_gmm(samples, comm, comm_info):
         for group in range(max_groups): 
             keep_samp = samples[:, 0].astype(int) == group
             if keep_samp.sum() > 0:
+                if np.any(np.isnan(samples[keep_samp, 2:])) or np.any(np.isinf(samples[keep_samp, 2:])):
+                    breakpoint()
                 args.append(samples[keep_samp, 2:][:, keep])
 
     else:
         raise ValueError
-    # import multiprocessing as mp
-
-    # with mp.Pool(10) as pool:
-    #     gmm_info = pool.starmap(fit_each_leaf, args)
     
-    gmm_info = [None for tmp in args]
+    # for debugging
+    # args = args[:1000]
 
+    batch = 10000
+    breaks = np.arange(0, len(args) + batch, batch)
+    print("BREAKS", breaks)
     process_ranks_for_fit = comm_info["process_ranks_for_fit"]
+    gmm_info_all = []
+    for i in range(len(breaks) - 1):
+        start = breaks[i]
+        end = breaks[i + 1]
+        args_tmp = args[start:end]
+        gmm_info = [None for tmp in args_tmp]
+        gmm_complete = np.zeros(len(gmm_info), dtype=bool)
+        
 
-    # OPPOSITE
-    # send_tags = comm_info["rec_tags"]
-    # rec_tags = comm_info["send_tags"]
+        # OPPOSITE
+        # send_tags = comm_info["rec_tags"]
+        # rec_tags = comm_info["send_tags"]
+        outer_iteration = 0
+        current_send_arg_index = 0
+        current_status = [False for _ in process_ranks_for_fit]
 
-    num_args_complete = 0
-    current_send_arg_index = 0
-    current_status = [False for _ in process_ranks_for_fit]
-    while num_args_complete < len(args):
-        clear_out = True
-        while clear_out:
-            check_output = comm.irecv()
+        while np.any(~gmm_complete):
+            time.sleep(0.1)
+            if current_send_arg_index >= len(args_tmp) and np.all(~np.asarray(current_status)):
+                current_send_arg_index = 0
 
-            if not check_output.get_status():
-                check_output.cancel()
-                clear_out = False
-            else:
-                output_info = check_output.wait()
-                if isinstance(output_info, str):
-                    breakpoint()
-                # print(output_info)
-                arg_index = output_info["arg"]
-                rank_recv = output_info["rank"]
-                output_list = output_info["output"]
+            outer_iteration += 1
+            if outer_iteration % 500 == 0:
+                print(f"ITERATION: {outer_iteration}, need:", np.sum(~gmm_complete), current_status)
 
-                gmm_info[arg_index] = output_list
+            for proc_i, proc_rank in enumerate(process_ranks_for_fit):
+                # time.sleep(0.6)
+                if current_status[proc_i]:
+                    rec_tag = int(str(proc_rank) + "4545")
+                    check_output = comm.irecv(source=proc_rank, tag=rec_tag)
 
-                which_process = process_ranks_for_fit.index(rank_recv)
+                    if not check_output.get_status():
+                        check_output.cancel()
+                    else:
+                        # first two give some delay for the processor that messes up
+                        try:
+                            output_info = check_output.wait()
+                        except (pickle.UnpicklingError, UnicodeDecodeError, ValueError, OverflowError) as e:
+                            current_status[proc_i] = False
+                            print("BAD error on return")
+                            continue
+                        if "BAD" in output_info:
+                            current_status[proc_i] = False
+                            print("BAD", output_info["BAD"])
+                            continue
+                        # print(output_info)
 
-                current_status[which_process] = False
-                num_args_complete += 1
+                        arg_index = output_info["arg"]
+                        rank_recv = output_info["rank"]
+                        output_list = output_info["output"]
 
-        add_info = not np.all(current_status)
-        while add_info:
-            if current_send_arg_index == len(args):
-                add_info = False
-            else:
-                index_add = current_status.index(False)
+                        gmm_info[arg_index] = output_list
+                        gmm_complete[arg_index] = True
+                        current_status[proc_i] = False
 
-                send_info = {"samples": args[current_send_arg_index], "arg": current_send_arg_index}
-                # print("sending", process_ranks_for_fit[index_add])
-                comm.isend(send_info, dest=process_ranks_for_fit[index_add])
-                current_status[index_add] = True
-                current_send_arg_index += 1
-                add_info = not np.all(current_status)
+                        if gmm_complete.sum() + 25 > len(args):
+                            print(proc_i, current_status)
+                        
+                if not current_status[proc_i]:
+                    while current_send_arg_index < len(args_tmp) and gmm_complete[current_send_arg_index]:
+                        current_send_arg_index += 1
 
-                # print(current_status, current_send_arg_index, num_args_complete)
+                    if current_send_arg_index < len(args_tmp):
+                        send_info = {"samples": args_tmp[current_send_arg_index], "arg": current_send_arg_index}
+                        # print("sending", process_ranks_for_fit[index_add])
+                        send_tag = int(str(proc_rank) + "67676")
+                        comm.send(send_info, dest=proc_rank, tag=send_tag)
+                        current_status[proc_i] = True
+                        if gmm_complete.sum() + 25 > len(args):
+                            print(proc_i, current_status)
+                        current_send_arg_index += 1
 
-    breakpoint()
-    for rank in process_ranks_for_fit:
-        comm.isend("end", dest=rank)
+        gmm_info_all.append(gmm_info)
 
     weights = [tmp[0] for tmp in gmm_info]
     means = [tmp[1] for tmp in gmm_info]
@@ -149,12 +173,15 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
 
     run_process = True
 
+    rec_tag = int(str(rank) + "67676")
+    send_tag = int(str(rank) + "4545")
     while run_process:
         try:
-            check = comm.recv(source=gather_rank)  # , tag=tag)
-        except:
-            print("BAD BAD ", rank)
-            comm.isend("BAD", dest=gather_rank)
+            check = comm.recv(source=gather_rank, tag=rec_tag)
+        except (pickle.UnpicklingError, UnicodeDecodeError, ValueError, OverflowError) as e:
+            # print("BAD BAD ", rank)
+            comm.send({"BAD": "receiving issue"}, dest=gather_rank, tag=send_tag)
+            continue
 
         if isinstance(check, str):
             if check == "end":
@@ -163,10 +190,14 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
 
         assert isinstance(check, dict)
 
-        arg_index = check["arg"]
+        try:
+            arg_index = check["arg"]
 
-        # print("INSIDE", rank, arg_index)
-        samples = check["samples"]
+            # print("INSIDE", rank, arg_index)
+            samples = check["samples"]
+        except KeyError:
+            comm.send({"BAD":  "KeyError"}, dest=gather_rank, tag=send_tag)
+            continue
 
         assert isinstance(samples, np.ndarray)
 
@@ -175,6 +206,7 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
         sample_mins = samples.min(axis=0)
         sample_maxs = samples.max(axis=0)
         samples[:] = ((samples - sample_mins) / (sample_maxs - sample_mins)) * 2 - 1
+        bad = False
         for n_components in range(1, 20):
             if not run:
                 continue
@@ -186,7 +218,10 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
                 mixture.fit(samples)
                 test_bic = mixture.bic(samples)
             except ValueError:
-                breakpoint()
+                # print("ValueError", samples)
+                run = False
+                bad = True
+                continue
             # print(n_components, test_bic)
             if test_bic < min_bic:
                 min_bic = test_bic
@@ -207,22 +242,25 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
                 plt.close()
                 breakpoint()"""
 
+        if bad:
+            comm.send({"BAD": "ValueError"}, dest=gather_rank, tag=send_tag)
+            continue
         if keep_components >= 19:
             print(keep_components)
         output_list = [keep_mix.weights_, keep_mix.means_, keep_mix.covariances_, np.array([np.linalg.inv(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), np.array([np.linalg.det(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), sample_mins, sample_maxs]
-        comm.isend({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank)
+        comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank, tag=send_tag)
     return
 
-def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_running, evens_odds, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, binaries_found, comm):
+def run_iterative_subtraction_mcmc(ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, comm, comm_info):
     xp.cuda.runtime.setDevice(xp.cuda.runtime.getDevice())
     temperature_control = TemperatureControl(ndim, nwalkers, ntemps=ntemps)
 
     num_max_proposals = 100000
-    convergence_iter_count = 50
+    convergence_iter_count = 500
 
     move_proposal = StretchMove(periodic=PeriodicContainer(periodic), temperature_control=temperature_control, return_gpu=True, use_gpu=True)
     
-    band_inds_here = xp.where(xp.asarray(band_inds_running) & (xp.arange(len(band_inds_running)) % 1 == evens_odds))[0]  #  % 2 == evens_odds))[0]
+    band_inds_here = xp.where(xp.asarray(band_inds_running))[0]
 
     new_points = priors_good.rvs(size=(ntemps, nwalkers, len(band_inds_here)))
 
@@ -245,6 +283,9 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
     gb.d_d = ll
 
     print(ll)
+
+    if "N" in waveform_kwargs:
+        waveform_kwargs.pop("N")
 
     prev_logl = xp.asarray(gb.get_ll(new_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs).reshape(prev_logp.shape))
 
@@ -513,7 +554,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
                     if not xp.allclose(best_logl, best_logl_check):
                         breakpoint()
 
-                    snr_lim = 12.0
+                    snr_lim = 9.0
                     keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > snr_lim
 
                     still_going_here = keep_binaries.copy()
@@ -578,7 +619,7 @@ def run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_run
             else:
                 break
 
-    return fit_gmm(samples_store)
+    return fit_gmm(samples_store, comm, comm_info)
 
     # import pickle
     # with open(f"new_4_gmm_info.pickle", "wb") as fp:
@@ -662,21 +703,22 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     nwalkers = 100
     ndim = 8
 
-    gf_information = comm.recv(source=head_rank, tag=25)
-    base_information = gf_information["general_global_info"]
+    comm.send({"send": True}, dest=head_rank, tag=20)
+    gf_information = comm.recv(source=head_rank, tag=27)
+    base_information = gf_information["gb"]
     band_edges = base_information["band_edges"]
 
     band_inds_running = np.ones_like(band_edges[:-1], dtype=bool)
     
-    priors_here = deepcopy(base_information["priors"]["gb"])
+    priors_here = deepcopy(base_information["priors"].priors_in)
 
     priors_here[1] = uniform_dist(0.0, 1.0, use_cupy=True)
     priors_here[2] = uniform_dist(0.0, 1.0, use_cupy=True) 
 
     priors_good = ProbDistContainer(priors_here, use_cupy=True)
     
-    fdot_mins = xp.asarray(get_fdot(band_edges, Mc=np.full_like(band_edges, m_chirp_lims[0])))
-    fdot_maxs = xp.asarray(get_fdot(band_edges, Mc=np.full_like(band_edges, m_chirp_lims[1])))
+    fdot_mins = xp.asarray(get_fdot(band_edges[:-1], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[0])))
+    fdot_maxs = xp.asarray(get_fdot(band_edges[1:], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[1])))
     f0_mins = xp.asarray(band_edges[:-1] * 1e3)
     f0_maxs = xp.asarray(band_edges[1:] * 1e3)
 
@@ -692,9 +734,17 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
         print("received data")
         print(incoming_data.keys())
 
-        generate_class = incoming_data["general_global_info"]["generate_current_state"]
+        generate_class = incoming_data["general"]["generate_current_state"]
 
-        generated_info = generate_class(incoming_data, only_max_ll=True)
+        generated_info = generate_class(incoming_data, only_max_ll=True) 
+        # generated_info_0 = generate_class(incoming_data, only_max_ll=True, include_mbhs=False, include_gbs=False, include_ll=True, include_source_only_ll=True)
+        # generated_info_1 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_ll=True, include_source_only_ll=True)
+        # generated_info_2 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_gbs=True, include_ll=True, include_source_only_ll=True)
+        # plt.loglog(2 * np.sqrt(df) * np.abs(generated_info_0["data"][0]))
+        # plt.loglog(2 * np.sqrt(df) * np.abs(generated_info_1["data"][0]))
+        # plt.savefig("check1.png")
+        # breakpoint()
+
         data = generated_info["data"]
         psd = generated_info["psd"]
 
@@ -709,16 +759,11 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
         else:
             gmm_samples_refit = None
 
-        gmm_mcmc_serch_info = run_iterative_subtraction_mcmc(iter_i, ndim, nwalkers, ntemps, band_inds_running, evens_odds, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, binaries_found, comm)
+        gmm_mcmc_search_info = run_iterative_subtraction_mcmc(ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
         
-        comm.isend({"search": gmm_mcmc_serch_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=20)
-        
-
-
-
-
-
-
+        comm.send({"receive": True}, dest=head_rank, tag=20)
+        comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
+    
         
             # refit GMM
 

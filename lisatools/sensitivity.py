@@ -517,7 +517,7 @@ def noisepsd_XY(f, model="SciRDv1", includewd=None, foreground_params=None):
     return Sxy
 
 
-def noisepsd_AE(f, model="SciRDv1", includewd=None, foreground_params=None, xp=None):
+def noisepsd_AE(f, model="SciRDv1", includewd=None, foreground_params=None, use_gpu=False):
     """
     Compute and return analytic PSD of noise for TDI A and E
      @param frequencydata  numpy array.
@@ -530,7 +530,9 @@ def noisepsd_AE(f, model="SciRDv1", includewd=None, foreground_params=None, xp=N
          if includewd == None: includewd = model.lisaWD
     """
 
-    if xp is None:
+    if use_gpu:
+        xp = cp
+    else:
         xp = np
 
     x = 2.0 * math.pi * lisaLT * f
@@ -547,7 +549,7 @@ def noisepsd_AE(f, model="SciRDv1", includewd=None, foreground_params=None, xp=N
     )
 
     if includewd is not None or foreground_params is not None:
-        Sa += WDconfusionAE(f, duration=includewd, foreground_params=foreground_params, model=model, xp=xp)
+        Sa += WDconfusionAE(f, duration=includewd, foreground_params=foreground_params, model=model, use_gpu=use_gpu)
         # Sa += makewdnoise(f,includewd,'AE')
 
     return Sa
@@ -612,11 +614,13 @@ def noisepsd_T(f, model="SciRDv1", includewd=None, foreground_params=None):
     return St
 
 
-def SGal(fr, pars, xp=None):
+def SGal(fr, pars, use_gpu=False):
     """
     TODO To be described
     """
-    if xp is None:
+    if use_gpu:
+        xp = cp
+    else:
         xp = np
     # {{{
     Amp = pars[0]
@@ -636,7 +640,7 @@ def SGal(fr, pars, xp=None):
     # }}}
 
 
-def GalConf(fr, Tobs=None, foreground_params=None, xp=None):
+def GalConf(fr, Tobs=None, foreground_params=None, use_gpu=False):
     """
     TODO To be described
     """
@@ -718,17 +722,19 @@ def GalConf(fr, Tobs=None, foreground_params=None, xp=None):
 
     else:
         raise ValueError("Must provide either Tobs or foreground_params.")
-    Sgal_int = SGal(fr, [Amp, alpha, sl1, kn, sl2], xp=xp)
+    Sgal_int = SGal(fr, [Amp, alpha, sl1, kn, sl2], use_gpu=use_gpu)
 
     return Sgal_int
 
 
 # TODO check it against the old LISA noise
-def WDconfusionX(f, foreground_params=None, duration=None, model="SciRDv1", xp=None):
+def WDconfusionX(f, foreground_params=None, duration=None, model="SciRDv1", use_gpu=False):
     """
     TODO To be described
     """
-    if xp is None:
+    if use_gpu:
+        xp = cp
+    else:
         xp = np
 
     if foreground_params is None and duration is None:
@@ -750,7 +756,7 @@ def WDconfusionX(f, foreground_params=None, duration=None, model="SciRDv1", xp=N
         else:
             duration_in = None
 
-        Sg_sens = GalConf(f, Tobs=duration_in, foreground_params=foreground_params, xp=xp)
+        Sg_sens = GalConf(f, Tobs=duration_in, foreground_params=foreground_params, use_gpu=use_gpu)
         
         # t = 4 * x**2 * xp.sin(x)**2 * (1.0 if obs == 'X' else 1.5)
         return t * Sg_sens
@@ -769,11 +775,11 @@ def WDconfusionX(f, foreground_params=None, duration=None, model="SciRDv1", xp=N
             raise NotImplementedError
 
 
-def WDconfusionAE(f, foreground_params=None, duration=None, model="SciRDv1", xp=None):
+def WDconfusionAE(f, foreground_params=None, duration=None, model="SciRDv1", use_gpu=False):
     """
     TODO To be described
     """
-    SgX = WDconfusionX(f, foreground_params=foreground_params, duration=duration, model=model, xp=xp)
+    SgX = WDconfusionX(f, foreground_params=foreground_params, duration=duration, model=model, use_gpu=use_gpu)
     return 1.5 * SgX
 
 
@@ -1266,8 +1272,10 @@ def noisepsd_T(f):
 # int_0^\infty S_h(f) = (1/T) \int_0^T |h(t)|^2 dt = (2/T) \int_0^\infty |h(f)|^2 df
 # so S_h(f_i) = (2/T) |h(f_i)|^2 = (2/T) |ret(f_i)|^2 / df^2 = (2/df) |ret(f_i)^2|
 
-def flat_psd_function(f, val, *args, xp=None, **kwargs):  
-    if xp is None:
+def flat_psd_function(f, val, *args, use_gpu=False, **kwargs):  
+    if use_gpu:
+        xp = cp
+    else:
         xp = np
     val = xp.atleast_1d(xp.asarray(val))
     out = xp.repeat(val[:, None], len(f), axis=1)

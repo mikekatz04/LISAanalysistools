@@ -62,14 +62,14 @@ class GBSpecialStretchMove(GroupStretchMove):
         snr_lim=1e-10,
         rj_proposal_distribution=None,
         num_repeat_proposals=1,
+        name=None,
         **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
         GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
 
         self.gpu_priors = gpu_priors
-
-        self.name = "gbgroupstretch"
+        self.name = name
         self.num_repeat_proposals = num_repeat_proposals
 
         for key in priors:
@@ -666,8 +666,10 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.setup(state.branches)
 
         new_state = State(state, copy=True)
-        band_temps = xp.asarray(new_state.band_info["band_temps"])
+        band_temps = xp.asarray(state.band_info["band_temps"].copy())
 
+        if self.is_rj_prop:
+            orig_store = new_state.log_like[0].copy()
         gb_fixed_coords = xp.asarray(new_state.branches["gb_fixed"].coords)
 
         self.mempool.free_all_blocks()
@@ -827,7 +829,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 if N_now == 0:  #  or N_now != 1024:
                     continue
 
-                old_data_1 = self.mgh.data_shaped[0][0][11].copy()
+                # old_data_1 = self.mgh.data_shaped[0][0][11].copy()
                 # checkit = np.where(new_state.supplimental[:]["overall_inds"] == 0)
 
                 # TODO; check the maximum allowable band
@@ -1375,6 +1377,9 @@ class GBSpecialStretchMove(GroupStretchMove):
         band_swaps_proposed = np.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         current_band_counts = np.zeros((len(self.band_edges) - 1, self.ntemps), dtype=int)
         
+        if self.is_rj_prop:
+            print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+        
         # if self.time > 0:
         #     self.check_ll_inject(new_state)
         if (
@@ -1764,7 +1769,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.mempool.free_all_blocks()
 
         if self.is_rj_prop:
-            print("count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1))
+            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
         return new_state, accepted
 
     def check_ll_inject(self, new_state):

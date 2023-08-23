@@ -385,7 +385,39 @@ class MultiGPUDataHolder:
         # et = time.perf_counter()
         # print("get psd term", et - st)
         return psd_term
+
+    def sub_in_data_and_psd(self, data, psd):
+        """Must be the same size at current data
         
+        
+        """
+        assert len(self.gpus) == 1
+        gpu_i = 0
+
+        # adjust psd
+        self.channel1_psd[gpu_i][:] = xp.asarray(psd[0].flatten())
+        self.channel2_psd[gpu_i][:] = xp.asarray(psd[1].flatten())
+
+        # remove injected data + previous templates
+        self.channel1_data[gpu_i][:self.nwalkers * self.data_length] -= self.channel1_base_data[gpu_i][:]
+        self.channel1_data[gpu_i][self.nwalkers * self.data_length:] -= self.channel1_base_data[gpu_i][:]
+
+        self.channel2_data[gpu_i][:self.nwalkers * self.data_length] -= self.channel2_base_data[gpu_i][:]
+        self.channel2_data[gpu_i][self.nwalkers * self.data_length:] -= self.channel2_base_data[gpu_i][:]
+
+        # change injected data + other templates in base
+        self.channel1_base_data[gpu_i][:] = xp.asarray(data[0].flatten())
+        self.channel2_base_data[gpu_i][:] = xp.asarray(data[1].flatten())
+
+        # re-add to channel data
+        self.channel1_data[gpu_i][:self.nwalkers * self.data_length] += self.channel1_base_data[gpu_i][:]
+        self.channel1_data[gpu_i][self.nwalkers * self.data_length:] += self.channel1_base_data[gpu_i][:]
+
+        self.channel2_data[gpu_i][:self.nwalkers * self.data_length] += self.channel2_base_data[gpu_i][:]
+        self.channel2_data[gpu_i][self.nwalkers * self.data_length:] += self.channel2_base_data[gpu_i][:]
+
+        return        
+
 
     def get_inner_product(self, *args, overall_inds=None, **kwargs):
 
