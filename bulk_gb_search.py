@@ -251,8 +251,8 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
         comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank, tag=send_tag)
     return
 
-def run_iterative_subtraction_mcmc(ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, comm, comm_info):
-    xp.cuda.runtime.setDevice(xp.cuda.runtime.getDevice())
+def run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, comm, comm_info):
+    xp.cuda.runtime.setDevice(gpu)
     temperature_control = TemperatureControl(ndim, nwalkers, ntemps=ntemps)
 
     num_max_proposals = 100000
@@ -689,9 +689,9 @@ def run_iterative_subtraction_mcmc(ndim, nwalkers, ntemps, band_inds_running, pr
     # return starting_points
 
 
-def refit_gmm(comm, comm_info, gb_reader, data, psd, number_samples_keep):
+def refit_gmm(gpu, comm, comm_info, gb_reader, data, psd, number_samples_keep):
     print("GATHER")
-    samples_gathered = gather_gb_samples(gb_reader, psd, xp.cuda.runtime.getDevice(), samples_keep=number_samples_keep, thin_by=20)
+    samples_gathered = gather_gb_samples(gb_reader, psd, gpu, samples_keep=number_samples_keep, thin_by=20)
     
     return fit_gmm(samples_gathered, comm, comm_info)
 
@@ -754,12 +754,12 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
         # max ll combination of psd and mbhs and gbs
         
         if incoming_data["gb"]["reader"].iteration > 100:
-            gmm_samples_refit = refit_gmm(comm, comm_info, incoming_data["gb"]["reader"], data, psd, 100)
+            gmm_samples_refit = refit_gmm(gpu, comm, comm_info, incoming_data["gb"]["reader"], data, psd, 100)
 
         else:
             gmm_samples_refit = None
 
-        gmm_mcmc_search_info = run_iterative_subtraction_mcmc(ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
+        gmm_mcmc_search_info = run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
         
         comm.send({"receive": True}, dest=head_rank, tag=20)
         comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)

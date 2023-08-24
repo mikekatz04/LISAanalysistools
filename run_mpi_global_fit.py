@@ -2,6 +2,8 @@ from mpi4py import MPI
 from copy import deepcopy
 from simultaneous_gb_pe import run_gb_pe
 from bulk_gb_search import run_gb_bulk_search, fit_each_leaf
+from simultaneous_psd_pe import run_psd_pe
+from simultaneous_mbh_pe import run_mbh_pe
 import time
 # from full_band_global_fit_settings import *
 from lisatools.globalfit.hdfbackend import HDFBackend as GBHDFBackend
@@ -27,23 +29,25 @@ if __name__ == "__main__":
 
     np.random.seed(settings["general"]["random_seed"])
     
-    head_rank = 1
-    gb_pe_rank = 0
+    head_rank = 3
+    gb_pe_rank = 1
     gb_search_rank = 2
+    psd_rank = 4
+    mbh_rank = 0
 
     current_info = deepcopy(settings)
 
     # assert comm.size > 3
-    gmm_ranks = [i for i in range(3, comm.size)]
+    gmm_ranks = [i for i in range(5, comm.size)]
     print(gmm_ranks)
     if rank == head_rank:
         gb_reader = GBHDFBackend(settings["general"]["file_information"]["fp_gb_pe"])
         gb_last_sample = gb_reader.get_last_sample()
 
-        # with open("save_state_new_gmm.pickle", "rb") as fp:
-        #     gb_last_sample = pickle.load(fp)
-        #     gb_last_sample.log_prior = np.zeros_like(gb_last_sample.log_like)
-        #     gb_last_sample.branches["gb_fixed"].coords[~gb_last_sample.branches["gb_fixed"].inds] = np.nan
+        with open("save_state_new_gmm.pickle", "rb") as fp:
+            gb_last_sample = pickle.load(fp)
+            gb_last_sample.log_prior = np.zeros_like(gb_last_sample.log_like)
+            gb_last_sample.branches["gb_fixed"].coords[~gb_last_sample.branches["gb_fixed"].inds] = np.nan
         # breakpoint()
 
         mbh_reader = HDFBackend(settings["general"]["file_information"]["fp_mbh_pe"])
@@ -57,11 +61,13 @@ if __name__ == "__main__":
         current_info["psd"]["cc_E"] = psd_last_sample.branches["psd"].coords[0, :, 0, 2:]
         current_info["psd"]["cc_foreground_params"] = psd_last_sample.branches["galfor"].coords[0, :, 0, :]
         current_info["psd"]["cc_ll"] = psd_last_sample.log_like[0]
+        current_info["psd"]["cc_lp"] = psd_last_sample.log_prior[0]
         current_info["psd"]["last_state"] = psd_last_sample
         
         current_info["mbh"]["reader"] = mbh_reader
         current_info["mbh"]["cc_params"] = mbh_last_sample.branches["mbh"].coords[0, :, :]
         current_info["mbh"]["cc_ll"] = mbh_last_sample.log_like[0]
+        current_info["mbh"]["cc_lp"] = mbh_last_sample.log_prior[0]
         current_info["mbh"]["last_state"] = mbh_last_sample
 
         # TODO: add all to GMM
@@ -71,6 +77,9 @@ if __name__ == "__main__":
         current_info["gb"]["cc_ll"] = gb_last_sample.log_like[0]
         current_info["gb"]["cc_lp"] = gb_last_sample.log_prior[0]
         current_info["gb"]["last_state"] = gb_last_sample
+
+        # check = current_info["general"]["generate_current_state"](current_info, include_ll=True, include_source_only_ll=True, n_gen_in=18)
+        # print(check["ll"])
 
         # gmm info
         if os.path.exists(settings["general"]["file_information"]["fp_gb_gmm_info"]):
@@ -86,6 +95,8 @@ if __name__ == "__main__":
         print("sending data")
 
         comm.send(current_info, dest=gb_pe_rank, tag=255)
+        comm.send(current_info, dest=psd_rank, tag=46)
+        comm.send(current_info, dest=mbh_rank, tag=76)
         if gb_search_proposal_gmm_info is not None or gb_sample_refit_gmm_info is not None:
             comm.send({"search_gmm": gb_search_proposal_gmm_info, "refit_gmm": gb_sample_refit_gmm_info}, dest=gb_pe_rank, tag=55)
 
@@ -136,9 +147,9 @@ if __name__ == "__main__":
                     if "gb_update" in gb_dict:
                         for key in ["cc_params", "cc_inds", "cc_ll", "cc_lp", "last_state"]:
                             if key == "last_state":
-                                current_info["gb"][key] = gb_dict["update"][key]
+                                current_info["gb"][key] = gb_dict["gb_update"][key]
                             else:
-                                current_info["gb"][key][:] = gb_dict["update"][key][:]
+                                current_info["gb"][key][:] = gb_dict["gb_update"][key][:]
                     update_refit = True
 
                 if "send" in gb_req and gb_req["send"]:
@@ -154,6 +165,47 @@ if __name__ == "__main__":
             else:
                 gb_check.cancel()
 
+            # check for update from PSD
+            psd_check = comm.irecv(source=psd_rank, tag=60)
+            if psd_check.get_status():
+                psd_req = psd_check.wait()
+                print(psd_req)
+                if "receive" in psd_req and psd_req["receive"]:
+                    psd_dict = comm.recv(source=psd_rank, tag=68)
+                
+                    if "psd_update" in psd_dict:
+                        for key in ["cc_A", "cc_E", "cc_foreground_params", "cc_ll", "cc_lp", "last_state"]:
+                            if key == "last_state":
+                                current_info["psd"][key] = psd_dict["psd_update"][key]
+                            else:
+                                current_info["psd"][key][:] = psd_dict["psd_update"][key][:]
+
+                if "send" in psd_req and psd_req["send"]:
+                    comm.send(current_info, dest=psd_rank, tag=61)
+
+            else:
+                psd_check.cancel()
+
+            # check for update from MBH
+            mbh_check = comm.irecv(source=mbh_rank, tag=70)
+            if mbh_check.get_status():
+                mbh_req = mbh_check.wait()
+                print(mbh_req)
+                if "receive" in mbh_req and mbh_req["receive"]:
+                    mbh_dict = comm.recv(source=mbh_rank, tag=78)
+                
+                    if "mbh_update" in mbh_dict:
+                        for key in ["cc_params", "cc_ll", "cc_lp", "last_state"]:
+                            if key == "last_state":
+                                current_info["mbh"][key] = mbh_dict["mbh_update"][key]
+                            else:
+                                current_info["mbh"][key][:] = mbh_dict["mbh_update"][key][:]
+
+                if "send" in mbh_req and mbh_req["send"]:
+                    comm.send(current_info, dest=mbh_rank, tag=71)
+
+            else:
+                mbh_check.cancel()
        
     elif rank == gb_pe_rank:
         gpu = 5
@@ -164,7 +216,18 @@ if __name__ == "__main__":
         comm_info = {"process_ranks_for_fit": gmm_ranks}
         refit_check = comm.recv(source=head_rank, tag=1010)
         # block until it is told to go
-        # fin = run_gb_bulk_search(gpu, comm, comm_info, head_rank)
+        print("STARTING REFIT")
+        fin = run_gb_bulk_search(gpu, comm, comm_info, head_rank)
+    
+    elif rank == psd_rank:
+        gpu = 6
+
+        fin = run_psd_pe(gpu, comm, head_rank)
+
+    elif rank == mbh_rank:
+        gpu = 7
+
+        fin = run_mbh_pe(gpu, comm, head_rank)
 
     elif rank in gmm_ranks:
         rec_tag = int(str(rank) + "300")

@@ -90,7 +90,7 @@ class UpdateNewResiduals(Update):
         }
         self.comm.send({"send": True, "receive": True}, dest=self.head_rank, tag=50)
 
-        self.comm.send({"update": update_dict}, dest=self.head_rank, tag=58)
+        self.comm.send({"gb_update": update_dict}, dest=self.head_rank, tag=58)
 
         if self.verbose:
             print("Requesting updated data from head process.")
@@ -130,8 +130,6 @@ class UpdateNewResiduals(Update):
 
         data = generated_info["data"]
         psd = generated_info["psd"]
-
-        breakpoint()
         
         self.mgh.sub_in_data_and_psd(data, psd)
 
@@ -139,6 +137,8 @@ class UpdateNewResiduals(Update):
             print("Finished subbing in new data.")
 
         xp.get_default_memory_pool().free_all_blocks()
+        new_ll = self.mgh.get_ll(include_psd_info=True)
+        last_sample.log_like[0, :] = new_ll[:]
         return
 
 def make_gmm(gb, gmm_info_in):
@@ -179,8 +179,7 @@ def run_gb_pe(gpu, comm, head_rank):
     if hasattr(last_sample, "band_info"):
         band_info_check = deepcopy(last_sample.band_info)
         adjust_temps = True
-    
-    del last_sample.band_info
+        del last_sample.band_info
     
     if not hasattr(last_sample, "band_info"):
         band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
@@ -188,11 +187,10 @@ def run_gb_pe(gpu, comm, head_rank):
         if adjust_temps:
             last_sample.band_info["band_temps"][:] = band_info_check["band_temps"][:]
 
-    # breakpoint()
     import time
     st = time.perf_counter()
     generate_class = gf_information["general"]["generate_current_state"]
-    generated_info = generate_class(gf_information, include_gbs=False, n_gen_in=nwalkers_pe)
+    generated_info = generate_class(gf_information, include_gbs=False, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
     et = time.perf_counter()
 
     print("Read in", et - st)
@@ -202,21 +200,25 @@ def run_gb_pe(gpu, comm, head_rank):
 
     df = gf_information["general"]["df"]
 
-    A_going_in = np.tile(data[0], (2, 1, 1))
-    E_going_in = np.tile(data[1], (2, 1, 1))
+    A_going_in = np.repeat(data[0], 2, axis=0).reshape(nwalkers_pe, 2, gf_information["general"]["data_length"]).transpose(1, 0, 2)
+    E_going_in = np.repeat(data[1], 2, axis=0).reshape(nwalkers_pe, 2, gf_information["general"]["data_length"]).transpose(1, 0, 2)
 
+    A_psd_in = np.repeat(psd[0], 1, axis=0).reshape(nwalkers_pe, 1, gf_information["general"]["data_length"]).transpose(1, 0, 2)
+    E_psd_in = np.repeat(psd[1], 1, axis=0).reshape(nwalkers_pe, 1, gf_information["general"]["data_length"]).transpose(1, 0, 2)
+    
     mgh = MultiGPUDataHolder(
         gpus,
         A_going_in,
         E_going_in,
         A_going_in, # store as base
         E_going_in, # store as base
-        psd[0],
-        psd[1],
+        A_psd_in,
+        E_psd_in,
         df,
         base_injections=[generate_class.A_inj, generate_class.E_inj],
         base_psd=None,  # [psd.copy(), psd.copy()]
     )
+    ll_c = mgh.get_ll()
 
     mempool.free_all_blocks()
 
@@ -284,7 +286,6 @@ def run_gb_pe(gpu, comm, head_rank):
         **waveform_kwargs,
     )
 
-    # breakpoint()
     del data_index
     del factors
     mempool.free_all_blocks()
@@ -329,7 +330,7 @@ def run_gb_pe(gpu, comm, head_rank):
         # rj_proposal_distribution=gpu_priors,
         a=1.75,
         use_gpu=True,
-        num_repeat_proposals=5
+        num_repeat_proposals=30
     )
 
     fd = gf_information["general"]["fd"].copy()
@@ -505,8 +506,9 @@ def run_gb_pe(gpu, comm, head_rank):
     mempool.free_all_blocks()
     comm.send({"start_refit": True}, dest=head_rank, tag=50)
 
+    # exit()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=True, thin_by=1, store=True
+        state_mix, nsteps_mix, progress=True, thin_by=10, store=True
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
     

@@ -1168,7 +1168,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 )
                 # print(np.abs(new_state.log_like - ll_after).max())
                 store_max_diff = np.abs(log_like_tmp[0].get() - ll_after).max()
-                print("CHECKING in:", tmp, store_max_diff)
+                # print("CHECKING in:", tmp, store_max_diff)
                 if store_max_diff > 3e-4:
                     self.check_ll_inject(new_state)
                     # self.mgh.get_ll(include_psd_info=True, stop=True)
@@ -1206,7 +1206,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             # when adjusting temperatures, be careful here
             if len(inds_band_change_cold_chain[0]) > 0:
                 check2 = self.mgh.get_ll(include_psd_info=True)
-                print("SWITCH", len(inds_band_change_cold_chain[0]))
+                # print("SWITCH", len(inds_band_change_cold_chain[0]))
                 walker_inds_change_cold_chain = np.tile(inds_band_change_cold_chain[0], (self.ntemps - 1, 1)).flatten()
                 old_leaf_inds_change_cold_chain = np.tile(inds_band_change_cold_chain[1], (self.ntemps - 1, 1)).flatten()
                 new_temp_inds_change_cold_chain = np.repeat(np.arange(1, self.ntemps), len(inds_band_change_cold_chain[0]))
@@ -1275,7 +1275,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 )
                 check3 = self.mgh.get_ll(include_psd_info=True)
 
-                print(check3 - check2)
+                # print(check3 - check2)
 
                 if np.any(
                     self.band_N_vals[adjust_band_old] !=
@@ -1285,7 +1285,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                         self.band_N_vals.get()[adjust_band_old] !=
                         self.band_N_vals.get()[adjust_band_new]
                     ])
-                    print(f"specific change in N across boundary: {walkers_focus}")
+                    # print(f"specific change in N across boundary: {walkers_focus}")
                     new_state.log_like[0, walkers_focus] = self.mgh.get_ll(include_psd_info=True)[walkers_focus]
 
         # self.check_ll_inject(new_state)
@@ -1377,8 +1377,8 @@ class GBSpecialStretchMove(GroupStretchMove):
         band_swaps_proposed = np.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         current_band_counts = np.zeros((len(self.band_edges) - 1, self.ntemps), dtype=int)
         
-        if self.is_rj_prop:
-            print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+        # if self.is_rj_prop:
+        #     print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
         
         # if self.time > 0:
         #     self.check_ll_inject(new_state)
@@ -1768,8 +1768,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        if self.is_rj_prop:
-            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+        # if self.is_rj_prop:
+        #     print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
         return new_state, accepted
 
     def check_ll_inject(self, new_state):
@@ -1813,7 +1813,7 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         check_ll_new = self.mgh.get_ll(include_psd_info=True)
         check_ll_diff1 = check_ll_new - check_ll
-        print(check_ll_diff1)
+        # print(check_ll_diff1)
 
         # breakpoint()
         return check_ll_new

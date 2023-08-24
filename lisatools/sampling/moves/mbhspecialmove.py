@@ -232,6 +232,6 @@ class MBHSpecialMove(RedBlueMove):
         xp.get_default_memory_pool().free_all_blocks()
         if not hasattr(self, "best_last_ll"):
             self.best_last_ll = current_ll.max()
-        print("mbh", self.best_last_ll, current_ll.max(), current_ll.max() - self.best_last_ll)
+        # print("mbh", self.best_last_ll, current_ll.max(), current_ll.max() - self.best_last_ll)
         self.best_last_ll = current_ll.max()
         return new_state, accepted
