@@ -17,6 +17,8 @@ from eryn.backends import HDFBackend
 
 
 if __name__ == "__main__":
+
+    # TODO: add command line args
     comm = MPI.COMM_WORLD
     gpus = [4, 5, 6, 7]
     settings = get_global_fit_settings()
