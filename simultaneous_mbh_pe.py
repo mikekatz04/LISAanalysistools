@@ -69,12 +69,11 @@ class UpdateNewResidualsMBH(Update):
             print("Received new data from head process.")
 
         nwalkers_pe = last_sample.log_like.shape[1]
-        generate_class = new_info["general"]["generate_current_state"]
-
-        assert np.all(new_info["mbh"]["cc_params"] == last_sample.branches["mbh"].coords[0])
         
-        generated_info = generate_class(new_info, n_gen_in=nwalkers_pe, include_ll=True)
-
+        assert np.all(new_info.mbh_info["cc_params"] == last_sample.branches["mbh"].coords[0])
+        
+        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe)
+    
         data, psd = generated_info["data"], generated_info["psd"]
 
         data_fin = xp.asarray([data[0], data[1], np.zeros_like(data[0])])
@@ -83,7 +82,7 @@ class UpdateNewResidualsMBH(Update):
         start_ll_check = np.zeros((data_fin.shape[1]))
  
         for i in range(data_fin.shape[1]):
-            start_ll_check[i] = (-1/2 * 4 * new_info["general"]["df"] * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i]) - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))).get().real
+            start_ll_check[i] = (-1/2 * 4 * new_info.general_info["df"] * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i]) - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))).get().real
 
         xp.get_default_memory_pool().free_all_blocks()
 
@@ -118,7 +117,8 @@ def run_mbh_pe(gpu, comm, head_rank):
     gpus = [gpu]
     
     gf_information = comm.recv(source=head_rank, tag=76)
-    mbh_info = gf_information["mbh"]
+    exit()
+    mbh_info = gf_information.mbh_info
     xp.cuda.runtime.setDevice(gpus[0])
 
     last_sample = mbh_info["last_state"]
@@ -128,15 +128,13 @@ def run_mbh_pe(gpu, comm, head_rank):
 
     assert np.all(mbh_info["cc_params"] == last_sample.branches["mbh"].coords[0])
 
-    generate_class = gf_information["general"]["generate_current_state"]
-    generated_info = generate_class(gf_information, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
-    
-    fd = xp.asarray(gf_information["general"]["fd"])
+    generated_info = gf_information.get_data_psd(include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
+    fd = xp.asarray(gf_information.general_info["fd"])
     
     data_fin = xp.asarray([generated_info["data"][0], generated_info["data"][1], np.zeros_like(generated_info["data"][1])])
     psds_fin = xp.asarray([generated_info["psd"][0], generated_info["psd"][1], np.full_like(generated_info["psd"][1], 1e10)])
 
-    df = gf_information["general"]["df"]
+    df = gf_information.general_info["df"]
 
     xp.get_default_memory_pool().free_all_blocks()
 
@@ -184,10 +182,11 @@ def run_mbh_pe(gpu, comm, head_rank):
 
     # TODO: start ll needs to be done carefully
     inner_moves = mbh_info["pe_info"]["inner_moves"]
-
+    print("MBH CHECK")
     move = MBHSpecialMove(wave_gen, fd, data_fin, psds_fin, mbh_info["pe_info"]["num_prop_repeats"], transform_fn, priors, waveform_kwargs, inner_moves, df)
 
     update = UpdateNewResidualsMBH(comm, head_rank, verbose=True)
+    print("MBH CHECK 2")
 
     ndims = {"mbh": mbh_info["pe_info"]["ndim"]}
 
@@ -218,6 +217,7 @@ def run_mbh_pe(gpu, comm, head_rank):
     nsteps_mix = 10000
     mempool.free_all_blocks()
 
+    print("MBH CHECK 3")
     out = sampler_mix.run_mcmc(start_state, nsteps_mix, progress=mbh_info["pe_info"]["progress"], thin_by=mbh_info["pe_info"]["thin_by"], store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 

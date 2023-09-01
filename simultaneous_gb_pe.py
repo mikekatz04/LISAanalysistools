@@ -68,13 +68,14 @@ from eryn.utils.updates import Update
 
 class UpdateNewResiduals(Update):
     def __init__(
-        self, mgh, gb, comm, head_rank, verbose=False
+        self, mgh, gb, comm, head_rank, gpu_priors, verbose=False
     ):
         self.mgh = mgh
         self.comm = comm
         self.head_rank = head_rank
         self.verbose = verbose
         self.gb = gb
+        self.gpu_priors = gpu_priors
 
     def __call__(self, iter, last_sample, sampler):
         
@@ -101,16 +102,20 @@ class UpdateNewResiduals(Update):
             print("Received new data from head process.")
 
         # get new gmm information
-        tmp = self.comm.recv(source=self.head_rank, tag=52)
 
-        new_search_gmm = tmp["search_gmm"]
-        gen_dist_search = make_gmm(self.gb, new_search_gmm)
+        new_search_gmm = new_info.gb_info["search_gmm_info"]
+        if new_search_gmm is not None:
+            gen_dist_search = make_gmm(self.gb, new_search_gmm)
+        else:
+            gen_dist_search = self.gpu_priors["gb_fixed"]
 
-        new_refit_gmm = tmp["refit_gmm"]
+        new_refit_gmm = new_info.gb_info["refit_gmm_info"]
         if new_refit_gmm is not None:
             gen_dist_refit = make_gmm(self.gb, new_refit_gmm)
-        else:
+        elif new_search_gmm is not None:
             gen_dist_refit = make_gmm(self.gb, new_search_gmm)
+        else:
+            gen_dist_refit = self.gpu_priors["gb_fixed"]
 
         # sub out the proposal distributions
         for move in sampler.rj_moves:
@@ -125,9 +130,7 @@ class UpdateNewResiduals(Update):
             print("Generating new base data.")
 
         nwalkers_pe = last_sample.log_like.shape[1]
-        generate_class = new_info["general"]["generate_current_state"]
-        generated_info = generate_class(new_info, include_gbs=False, n_gen_in=nwalkers_pe)
-
+        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe)
         data = generated_info["data"]
         psd = generated_info["psd"]
         
@@ -162,7 +165,7 @@ def run_gb_pe(gpu, comm, head_rank):
 
     gf_information = comm.recv(source=head_rank, tag=255)
 
-    gb_info = gf_information["gb"]
+    gb_info = gf_information.gb_info
     band_edges = gb_info["band_edges"]
     
     num_sub_bands = len(band_edges)
@@ -189,8 +192,7 @@ def run_gb_pe(gpu, comm, head_rank):
 
     import time
     st = time.perf_counter()
-    generate_class = gf_information["general"]["generate_current_state"]
-    generated_info = generate_class(gf_information, include_gbs=False, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
+    generated_info = gf_information.get_data_psd(include_gbs=False, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
     et = time.perf_counter()
 
     print("Read in", et - st)
@@ -198,13 +200,13 @@ def run_gb_pe(gpu, comm, head_rank):
     data = generated_info["data"]
     psd = generated_info["psd"]
 
-    df = gf_information["general"]["df"]
+    df = gf_information.general_info["df"]
 
-    A_going_in = np.repeat(data[0], 2, axis=0).reshape(nwalkers_pe, 2, gf_information["general"]["data_length"]).transpose(1, 0, 2)
-    E_going_in = np.repeat(data[1], 2, axis=0).reshape(nwalkers_pe, 2, gf_information["general"]["data_length"]).transpose(1, 0, 2)
+    A_going_in = np.repeat(data[0], 2, axis=0).reshape(nwalkers_pe, 2, gf_information.general_info["data_length"]).transpose(1, 0, 2)
+    E_going_in = np.repeat(data[1], 2, axis=0).reshape(nwalkers_pe, 2, gf_information.general_info["data_length"]).transpose(1, 0, 2)
 
-    A_psd_in = np.repeat(psd[0], 1, axis=0).reshape(nwalkers_pe, 1, gf_information["general"]["data_length"]).transpose(1, 0, 2)
-    E_psd_in = np.repeat(psd[1], 1, axis=0).reshape(nwalkers_pe, 1, gf_information["general"]["data_length"]).transpose(1, 0, 2)
+    A_psd_in = np.repeat(psd[0], 1, axis=0).reshape(nwalkers_pe, 1, gf_information.general_info["data_length"]).transpose(1, 0, 2)
+    E_psd_in = np.repeat(psd[1], 1, axis=0).reshape(nwalkers_pe, 1, gf_information.general_info["data_length"]).transpose(1, 0, 2)
     
     mgh = MultiGPUDataHolder(
         gpus,
@@ -215,7 +217,7 @@ def run_gb_pe(gpu, comm, head_rank):
         A_psd_in,
         E_psd_in,
         df,
-        base_injections=[generate_class.A_inj, generate_class.E_inj],
+        base_injections=[gf_information.general_info["A_inj"], gf_information.general_info["E_inj"]],
         base_psd=None,  # [psd.copy(), psd.copy()]
     )
     ll_c = mgh.get_ll()
@@ -227,40 +229,9 @@ def run_gb_pe(gpu, comm, head_rank):
 
     gb.gpus = mgh.gpus
 
-    coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[0,
-        last_sample.branches["gb_fixed"].inds[0]
-    ]
-
-    nleaves_max = last_sample.branches["gb_fixed"].shape[2]
-
     priors = {"gb_fixed": gb_info["priors"]}
-    check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
-
+    nleaves_max = last_sample.branches["gb_fixed"].shape[2]
     transform_fn = gb_info["transform"]
-
-    if np.any(np.isinf(check)):
-        raise ValueError("Starting priors are inf.")
-
-    coords_out_gb_fixed[:, 3] = coords_out_gb_fixed[:, 3] % (2 * np.pi)
-    coords_out_gb_fixed[:, 5] = coords_out_gb_fixed[:, 5] % (1 * np.pi)
-    coords_out_gb_fixed[:, 6] = coords_out_gb_fixed[:, 6] % (2 * np.pi)
-    
-    coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed)
-
-    band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
-
-    walker_vals = np.tile(
-        np.arange(nwalkers_pe), (nleaves_max, 1)
-    ).transpose((1, 0))[last_sample.branches["gb_fixed"].inds[0]]
-
-    data_index_1 = ((band_inds % 2) + 0) * nwalkers_pe + walker_vals
-
-    data_index = xp.asarray(data_index_1).astype(
-        xp.int32
-    )
-
-    # goes in as -h
-    factors = -xp.ones_like(data_index, dtype=xp.float64)
 
     band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
     
@@ -271,24 +242,58 @@ def run_gb_pe(gpu, comm, head_rank):
     from gbgpu.utils.utility import get_N
     band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
 
-    N_vals = band_N_vals[band_inds]
 
-    # TODO: add test to make sure that the genertor send in the general information matches this one
-    gb.generate_global_template(
-        coords_in_in,
-        data_index,
-        mgh.data_list,
-        batch_size=1000,
-        data_length=mgh.data_length,
-        factors=factors,
-        data_splits=mgh.gpu_splits,
-        N=N_vals,
-        **waveform_kwargs,
-    )
+    if last_sample.branches["gb_fixed"].inds[0].sum() > 0:
+        coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[0,
+            last_sample.branches["gb_fixed"].inds[0]
+        ]
+        
+        check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
 
-    del data_index
-    del factors
-    mempool.free_all_blocks()
+        if np.any(np.isinf(check)):
+            raise ValueError("Starting priors are inf.")
+
+        coords_out_gb_fixed[:, 3] = coords_out_gb_fixed[:, 3] % (2 * np.pi)
+        coords_out_gb_fixed[:, 5] = coords_out_gb_fixed[:, 5] % (1 * np.pi)
+        coords_out_gb_fixed[:, 6] = coords_out_gb_fixed[:, 6] % (2 * np.pi)
+        
+        coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed)
+
+        band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+
+        walker_vals = np.tile(
+            np.arange(nwalkers_pe), (nleaves_max, 1)
+        ).transpose((1, 0))[last_sample.branches["gb_fixed"].inds[0]]
+
+        data_index_1 = ((band_inds % 2) + 0) * nwalkers_pe + walker_vals
+
+        data_index = xp.asarray(data_index_1).astype(
+            xp.int32
+        )
+
+        # goes in as -h
+        factors = -xp.ones_like(data_index, dtype=xp.float64)
+
+        
+        N_vals = band_N_vals[band_inds]
+
+        print("before global template")
+        # TODO: add test to make sure that the genertor send in the general information matches this one
+        gb.generate_global_template(
+            coords_in_in,
+            data_index,
+            mgh.data_list,
+            batch_size=1000,
+            data_length=mgh.data_length,
+            factors=factors,
+            data_splits=mgh.gpu_splits,
+            N=N_vals,
+            **waveform_kwargs,
+        )
+        print("after global template")
+        del data_index
+        del factors
+        mempool.free_all_blocks()
 
     ll = np.tile(mgh.get_ll(include_psd_info=True), (ntemps_pe, 1))
 
@@ -304,9 +309,10 @@ def run_gb_pe(gpu, comm, head_rank):
     band_inds_in = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=int)
     N_vals_in = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=int)
 
-    f_in = state_mix.branches["gb_fixed"].coords[state_mix.branches["gb_fixed"].inds][:, 1] / 1e3
-    band_inds_in[state_mix.branches["gb_fixed"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
-    N_vals_in[state_mix.branches["gb_fixed"].inds] = band_N_vals.get()[band_inds_in[state_mix.branches["gb_fixed"].inds]]
+    if state_mix.branches["gb_fixed"].inds.sum() > 0:
+        f_in = state_mix.branches["gb_fixed"].coords[state_mix.branches["gb_fixed"].inds][:, 1] / 1e3
+        band_inds_in[state_mix.branches["gb_fixed"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
+        N_vals_in[state_mix.branches["gb_fixed"].inds] = band_N_vals.get()[band_inds_in[state_mix.branches["gb_fixed"].inds]]
 
     branch_supp_base_shape = (ntemps_pe, nwalkers_pe, nleaves_max)
     state_mix.branches["gb_fixed"].branch_supplimental = BranchSupplimental(
@@ -324,21 +330,22 @@ def run_gb_pe(gpu, comm, head_rank):
         parameter_transforms=transform_fn,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
-        random_seed=gf_information["general"]["random_seed"],
+        random_seed=gf_information.general_info["random_seed"],
         nfriends=nwalkers_pe,
-        n_iter_update=5,
+        n_iter_update=1,
+        live_dangerously=True,
         # rj_proposal_distribution=gpu_priors,
         a=1.75,
         use_gpu=True,
         num_repeat_proposals=30
     )
 
-    fd = gf_information["general"]["fd"].copy()
+    fd = gf_information.general_info["fd"].copy()
     
     gb_args = (
         gb,
         priors,
-        gf_information["general"]["start_freq_ind"],
+        gf_information.general_info["start_freq_ind"],
         mgh.data_length,
         mgh,
         np.asarray(fd),
@@ -365,7 +372,7 @@ def run_gb_pe(gpu, comm, head_rank):
         search=False,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
-        random_seed=gf_information["general"]["random_seed"],
+        random_seed=gf_information.general_info["random_seed"],
         nfriends=nwalkers_pe,
         rj_proposal_distribution=gpu_priors,
         a=1.7,
@@ -376,7 +383,7 @@ def run_gb_pe(gpu, comm, head_rank):
     gb_args_rj = (
         gb,
         priors,
-        gf_information["general"]["start_freq_ind"],
+        gf_information.general_info["start_freq_ind"],
         mgh.data_length,
         mgh,
         np.asarray(fd),
@@ -390,13 +397,26 @@ def run_gb_pe(gpu, comm, head_rank):
     )
 
     rj_moves_in.append(rj_move_prior)
-    rj_moves_in_frac.append(0.8)
+    rj_moves_in_frac.append(0.2)
 
-    
-    tmp = comm.recv(source=head_rank, tag=55)
+    if state_mix.branches["gb_fixed"].inds.sum() == 0:
+        # wait until we have a search distribution
+        waiting = True
+        while waiting:
+            time.sleep(20.0)
+            comm.send({"send": True}, dest=head_rank, tag=50)
+            new_info = comm.recv(source=head_rank, tag=51)
+            # print("CHECKING:", new_info.gb_info["search_gmm_info"])
+            if new_info.gb_info["search_gmm_info"] is not None:
+                waiting = False
+                gb_info = new_info.gb_info
 
-    current_gmm_search_info = tmp["search_gmm"]
-    gen_dist_search = make_gmm(gb, current_gmm_search_info)
+    current_gmm_search_info = gb_info["search_gmm_info"]
+    if current_gmm_search_info is not None:
+        gen_dist_search = make_gmm(gb, current_gmm_search_info)
+    else:
+        gen_dist_search = gpu_priors["gb_fixed"]
+
     gb_kwargs_rj_2 = gb_kwargs_rj.copy()
     gb_kwargs_rj_2["rj_proposal_distribution"] = {"gb_fixed": gen_dist_search}
     gb_kwargs_rj_2["name"] = "rj_search_gmm"
@@ -407,14 +427,16 @@ def run_gb_pe(gpu, comm, head_rank):
     )
 
     rj_moves_in.append(rj_move_search)
-    rj_moves_in_frac.append(0.2)
+    rj_moves_in_frac.append(0.8)
 
-    current_gmm_refit_info = tmp["refit_gmm"]
+    current_gmm_refit_info = gb_info["search_gmm_info"]
 
     if current_gmm_refit_info is not None:
         gen_dist_refit = make_gmm(gb, current_gmm_refit_info)
-    else:
+    elif current_gmm_search_info is not None:
         gen_dist_refit = make_gmm(gb, current_gmm_search_info)
+    else:
+        gen_dist_refit = gpu_priors["gb_fixed"]
     
     gb_kwargs_rj_3 = gb_kwargs_rj.copy()
 
@@ -427,6 +449,7 @@ def run_gb_pe(gpu, comm, head_rank):
     )
 
     rj_moves_in.append(rj_move_refit)
+    # TODO: check for this in updates
     if current_gmm_refit_info is not None:
         rj_moves_in_frac.append(0.2)
     else:
@@ -443,7 +466,7 @@ def run_gb_pe(gpu, comm, head_rank):
     branch_names = ["gb_fixed"]
 
     update = UpdateNewResiduals(
-        mgh, gb, comm, head_rank, verbose=True
+        mgh, gb, comm, head_rank, gpu_priors, verbose=True
     )
 
     ndims = {"gb_fixed": gb_info["pe_info"]["ndim"]}
@@ -451,7 +474,7 @@ def run_gb_pe(gpu, comm, head_rank):
         
     moves = moves_in_model + rj_moves
     backend = HDFBackend(
-        gf_information["general"]["file_information"]["fp_gb_pe"],
+        gf_information.general_info["file_information"]["fp_gb_pe"],
         compression="gzip",
         compression_opts=9,
     )
@@ -504,11 +527,10 @@ def run_gb_pe(gpu, comm, head_rank):
 
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
-    comm.send({"start_refit": True}, dest=head_rank, tag=50)
-
+    
     # exit()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=True, thin_by=10, store=True
+        state_mix, nsteps_mix, progress=False, thin_by=20, store=True
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
     

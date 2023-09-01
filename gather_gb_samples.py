@@ -76,8 +76,7 @@ def gather_gb_samples(gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
         binaries_in.append(transform_fn.both_transforms(np.tile(bin, (len(keep_i[0]), 1))))
 
         num_so_far += len(keep_i[0])
-        if i % 500 == 0:
-            print(i)
+        
 
     bins_fin_test_in = np.concatenate(binaries_for_test)
     bins_fin_base_in = np.concatenate(binaries_in)
@@ -135,7 +134,6 @@ def gather_gb_samples(gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
 
             keep_group_samples.append(binary_samples)
             keep_groups.append((num_grouping, sample_map, binary_map))
-            print(i, num_grouping)
 
             num_so_far_gather += 1
 
@@ -144,8 +142,9 @@ def gather_gb_samples(gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
     output_information = []
     for i in range(len(keep_group_sample_id)):
         output_information.append(np.concatenate([keep_group_sample_id[i].T, keep_group_samples[i]], axis=1))
-        
-    output_information = np.concatenate(output_information, axis=0)
+    
+    if len(output_information) > 0:
+        output_information = np.concatenate(output_information, axis=0)
     return output_information
 
 # np.savetxt("output_samples_from_gbs_grouped.txt", output_information, header="id, confidence, amp, f0, fdot, phi0, inc, psi, lam, beta", delimiter=",")

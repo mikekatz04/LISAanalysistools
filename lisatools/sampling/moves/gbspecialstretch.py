@@ -778,6 +778,8 @@ class GBSpecialStretchMove(GroupStretchMove):
                 )
             factors = (proposal_logpdf * -1) * (~gb_inds_orig).flatten() + (proposal_logpdf * +1) * (gb_inds_orig).flatten()
 
+            if self.name == "rj_prior":
+                factors[~gb_inds_orig.flatten()] = -1e300
         else:
             factors = xp.zeros(gb_inds_orig.sum().item())
 
@@ -1377,8 +1379,8 @@ class GBSpecialStretchMove(GroupStretchMove):
         band_swaps_proposed = np.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         current_band_counts = np.zeros((len(self.band_edges) - 1, self.ntemps), dtype=int)
         
-        # if self.is_rj_prop:
-        #     print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+        if self.is_rj_prop:
+            print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
         
         # if self.time > 0:
         #     self.check_ll_inject(new_state)
@@ -1768,8 +1770,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        # if self.is_rj_prop:
-        #     print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+        if self.is_rj_prop:
+            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
         return new_state, accepted
 
     def check_ll_inject(self, new_state):

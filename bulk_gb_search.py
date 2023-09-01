@@ -9,6 +9,7 @@ import time
 from gbgpu.utils.utility import get_N
 import pickle
 from tqdm import tqdm
+import os
 
 mempool = xp.get_default_memory_pool()
 
@@ -51,6 +52,9 @@ def shuffle_along_axis(a, axis, xp=None):
 
 def fit_gmm(samples, comm, comm_info):
 
+    if len(samples) == 0:
+        return None
+
     keep = np.array([0, 1, 2, 4, 6, 7])
 
     if samples.ndim == 4:
@@ -64,7 +68,7 @@ def fit_gmm(samples, comm, comm_info):
         max_groups = samples[:, 0].astype(int).max()
 
         args = []
-        for group in range(max_groups): 
+        for group in np.unique(samples[:, 0].astype(int)): 
             keep_samp = samples[:, 0].astype(int) == group
             if keep_samp.sum() > 0:
                 if np.any(np.isnan(samples[keep_samp, 2:])) or np.any(np.isinf(samples[keep_samp, 2:])):
@@ -80,6 +84,8 @@ def fit_gmm(samples, comm, comm_info):
     batch = 10000
     breaks = np.arange(0, len(args) + batch, batch)
     print("BREAKS", breaks)
+    if len(breaks) == 1:
+        breakpoint()
     process_ranks_for_fit = comm_info["process_ranks_for_fit"]
     gmm_info_all = []
     for i in range(len(breaks) - 1):
@@ -149,8 +155,7 @@ def fit_gmm(samples, comm, comm_info):
                         send_tag = int(str(proc_rank) + "67676")
                         comm.send(send_info, dest=proc_rank, tag=send_tag)
                         current_status[proc_i] = True
-                        if gmm_complete.sum() + 25 > len(args):
-                            print(proc_i, current_status)
+                        
                         current_send_arg_index += 1
 
         gmm_info_all.append(gmm_info)
@@ -703,14 +708,14 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     nwalkers = 100
     ndim = 8
 
-    comm.send({"send": True}, dest=head_rank, tag=20)
-    gf_information = comm.recv(source=head_rank, tag=27)
-    base_information = gf_information["gb"]
-    band_edges = base_information["band_edges"]
+    gf_information = comm.recv(source=head_rank, tag=2929)
+    gb_info = gf_information.gb_info
+    band_edges = gb_info["band_edges"]
+    # exit()
 
     band_inds_running = np.ones_like(band_edges[:-1], dtype=bool)
     
-    priors_here = deepcopy(base_information["priors"].priors_in)
+    priors_here = deepcopy(gb_info["priors"].priors_in)
 
     priors_here[1] = uniform_dist(0.0, 1.0, use_cupy=True)
     priors_here[2] = uniform_dist(0.0, 1.0, use_cupy=True) 
@@ -728,43 +733,43 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     print("start run")
     run = True
     while run:
-        comm.send({"send": True}, dest=head_rank, tag=20)
-        print("waiting for data")
-        incoming_data = comm.recv(source=head_rank, tag=27)
-        print("received data")
-        print(incoming_data.keys())
+        try:
+            comm.send({"send": True}, dest=head_rank, tag=20)
+            print("waiting for data")
+            incoming_data = comm.recv(source=head_rank, tag=27)
+            print("received data")
 
-        generate_class = incoming_data["general"]["generate_current_state"]
+            generated_info = incoming_data.get_data_psd(only_max_ll=True) 
+            # generated_info_0 = generate_class(incoming_data, only_max_ll=True, include_mbhs=False, include_gbs=False, include_ll=True, include_source_only_ll=True)
+            # generated_info_1 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_ll=True, include_source_only_ll=True)
+            # generated_info_2 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_gbs=True, include_ll=True, include_source_only_ll=True)
+            # plt.loglog(2 * np.sqrt(df) * np.abs(generated_info_0["data"][0]))
+            # plt.loglog(2 * np.sqrt(df) * np.abs(generated_info_1["data"][0]))
+            # plt.savefig("check1.png")
+            # breakpoint()
 
-        generated_info = generate_class(incoming_data, only_max_ll=True) 
-        # generated_info_0 = generate_class(incoming_data, only_max_ll=True, include_mbhs=False, include_gbs=False, include_ll=True, include_source_only_ll=True)
-        # generated_info_1 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_ll=True, include_source_only_ll=True)
-        # generated_info_2 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_gbs=True, include_ll=True, include_source_only_ll=True)
-        # plt.loglog(2 * np.sqrt(df) * np.abs(generated_info_0["data"][0]))
-        # plt.loglog(2 * np.sqrt(df) * np.abs(generated_info_1["data"][0]))
-        # plt.savefig("check1.png")
-        # breakpoint()
+            data = generated_info["data"]
+            psd = generated_info["psd"]
 
-        data = generated_info["data"]
-        psd = generated_info["psd"]
+            data = [xp.asarray(tmp) for tmp in data]
+            psd = [xp.asarray(tmp) for tmp in psd]
 
-        data = [xp.asarray(tmp) for tmp in data]
-        psd = [xp.asarray(tmp) for tmp in psd]
+            # max ll combination of psd and mbhs and gbs
+            
+            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
+                gmm_samples_refit = refit_gmm(gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
 
-        # max ll combination of psd and mbhs and gbs
+            else:
+                gmm_samples_refit = None
+
+            gmm_mcmc_search_info = run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
+            
+            comm.send({"receive": True}, dest=head_rank, tag=20)
+            comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
         
-        if incoming_data["gb"]["reader"].iteration > 100:
-            gmm_samples_refit = refit_gmm(gpu, comm, comm_info, incoming_data["gb"]["reader"], data, psd, 100)
-
-        else:
-            gmm_samples_refit = None
-
-        gmm_mcmc_search_info = run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
-        
-        comm.send({"receive": True}, dest=head_rank, tag=20)
-        comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
-    
-        
+        except BlockingIOError as e:
+            print("bulk", e)
+            time.sleep(20.0)  
             # refit GMM
 
 

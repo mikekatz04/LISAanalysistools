@@ -142,9 +142,8 @@ class UpdateNewResidualsPSD(Update):
             print("Received new data from head process.")
 
         nwalkers_pe = last_sample.log_like.shape[1]
-        generate_class = new_info["general"]["generate_current_state"]
-        generated_info = generate_class(new_info, n_gen_in=nwalkers_pe, include_ll=False)
-
+        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe)
+    
         data = generated_info["data"]
         psd = generated_info["psd"]
         
@@ -167,7 +166,8 @@ def run_psd_pe(gpu, comm, head_rank):
     gpus = [gpu]
     
     gf_information = comm.recv(source=head_rank, tag=46)
-    psd_info = gf_information["psd"]
+    exit()
+    psd_info = gf_information.psd_info
     xp.cuda.runtime.setDevice(gpus[0])
 
     last_sample = psd_info["last_state"]
@@ -175,10 +175,9 @@ def run_psd_pe(gpu, comm, head_rank):
     nwalkers_pe = psd_info["pe_info"]["nwalkers"]
     ntemps_pe = psd_info["pe_info"]["ntemps"]
 
-    generate_class = gf_information["general"]["generate_current_state"]
-    generated_info = generate_class(gf_information, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
+    generated_info = gf_information.get_data_psd(include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
     
-    fd = xp.asarray(gf_information["general"]["fd"])
+    fd = xp.asarray(gf_information.general_info["fd"])
     data = [xp.asarray(generated_info["data"][0]), xp.asarray(generated_info["data"][1])]
     walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps_pe, 1))
 
@@ -211,8 +210,8 @@ def run_psd_pe(gpu, comm, head_rank):
     # TODO: fix this 
     from gbgpu.gbgpu import GBGPU
     gb = GBGPU(use_gpu=True)
-    df = gf_information["general"]["df"]
-    data_length = gf_information["general"]["data_length"]
+    df = gf_information.general_info["df"]
+    data_length = gf_information.general_info["data_length"]
 
     # exit()
     sampler_mix = EnsembleSampler(

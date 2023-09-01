@@ -53,7 +53,6 @@ from lisatools.sampling.utility import DetermineGBGroups, GetLastGBState
 from eryn.prior import ProbDistContainer
 
 from eryn.state import State
-from eryn.moves import StretchMoveRJ
 from eryn.state import BranchSupplimental
 
 from lisatools.sampling.moves.gbmultipletryrj import GBMutlipleTryRJ
