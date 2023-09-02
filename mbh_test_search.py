@@ -11,8 +11,8 @@ if __name__ == "__main__":
     # print("start", fp)
     para_mbh_search = ParallelMBHSearchControl(settings, comm, gpus, head_rank=0, max_num_per_gpu=2, verbose=False)
 
-    para_mbh_search.run_parallel_mbh_search()  # testing_time_split=5)
-
+    # para_mbh_search.run_parallel_mbh_search()  # testing_time_split=5)
+    para_mbh_search.prune_via_matching()
     
     # print("end", fp)
     # frequencies to interpolate to

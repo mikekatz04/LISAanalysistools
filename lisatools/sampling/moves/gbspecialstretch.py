@@ -708,6 +708,8 @@ class GBSpecialStretchMove(GroupStretchMove):
             waveform_kwargs_now.pop("N")
         waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
 
+        if self.is_rj_prop:
+            print("START:", new_state.log_like[0])
         log_like_tmp = self.xp.asarray(new_state.log_like)
         log_prior_tmp = self.xp.asarray(new_state.log_prior)
 
@@ -1380,7 +1382,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         current_band_counts = np.zeros((len(self.band_edges) - 1, self.ntemps), dtype=int)
         
         if self.is_rj_prop:
-            print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+            print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         
         # if self.time > 0:
         #     self.check_ll_inject(new_state)
@@ -1771,7 +1773,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.mempool.free_all_blocks()
 
         if self.is_rj_prop:
-            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store)
+            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         return new_state, accepted
 
     def check_ll_inject(self, new_state):

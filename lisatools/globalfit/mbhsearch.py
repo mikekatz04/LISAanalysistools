@@ -407,12 +407,12 @@ class ParallelMBHSearchControl:
 
         if os.path.exists(self.output_points_file):
             with open(self.output_points_file, "rb") as fp:
-                self.output_point_info = pickle.load(fp)
+                self.output_points_info = pickle.load(fp)
 
-            # assert self.output_point_info["time_splits"] == self.time_splits
+            # assert self.output_points_info["time_splits"] == self.time_splits
 
         else:
-            self.output_point_info = {
+            self.output_points_info = {
                 "time_splits": self.time_splits,
                 "best_points": [],
                 "output_points": [],
@@ -444,14 +444,14 @@ class ParallelMBHSearchControl:
 
                 # above snr 40
                 if not finished_this_split:
-                    self.output_point_info["output_points"].append(output_points)
-                    self.output_point_info["best_points"].append(mbh_best)
+                    self.output_points_info["output_points"].append(output_points)
+                    self.output_points_info["best_points"].append(mbh_best)
                     
-                self.output_point_info["num_run_per_split"][time_split] += 1
-                self.output_point_info["still_running"][time_split] = (not finished_this_split)
+                self.output_points_info["num_run_per_split"][time_split] += 1
+                self.output_points_info["still_running"][time_split] = (not finished_this_split)
 
                 with open(self.output_points_file, "wb") as fp:
-                    pickle.dump(self.output_point_info, fp, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(self.output_points_info, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
                 current_status[i] = False
                 current_time_segment_status[time_split] = False
@@ -462,7 +462,7 @@ class ParallelMBHSearchControl:
     def launch_search_process(self, i, current_status, current_time_segment_status):
         time_split_ind = 0
         try:
-            while current_time_segment_status[time_split_ind] or not self.output_point_info["still_running"][time_split_ind]:
+            while current_time_segment_status[time_split_ind] or not self.output_points_info["still_running"][time_split_ind]:
                 time_split_ind += 1
                 if time_split_ind >= self.time_splits:
                     return
@@ -472,7 +472,7 @@ class ParallelMBHSearchControl:
         if self.verbose:
             print("going in", self.proc_inds[i], time_split_ind, current_time_segment_status)
         
-        self.comm.send({"best_points": np.asarray(self.output_point_info["best_points"]), "time_split": time_split_ind, "num_run": self.output_point_info["num_run_per_split"][time_split_ind], "total_splits": self.time_splits}, dest=self.proc_inds[i])
+        self.comm.send({"best_points": np.asarray(self.output_points_info["best_points"]), "time_split": time_split_ind, "num_run": self.output_points_info["num_run_per_split"][time_split_ind], "total_splits": self.time_splits}, dest=self.proc_inds[i])
         current_status[i] = True
         current_time_segment_status[time_split_ind] = True
 
@@ -522,7 +522,7 @@ class ParallelMBHSearchControl:
         if testing_time_split is not None:
             assert isinstance(testing_time_split, int) and testing_time_split < self.time_splits
             cp.cuda.runtime.setDevice(self.gpus[0])
-            output_points, mbh_best = run_mbh_search(self.settings, self.head_rank, testing_time_split, self.time_splits, np.asarray(self.output_point_info["best_points"]), self.output_point_info["num_run_per_split"][testing_time_split])
+            output_points, mbh_best = run_mbh_search(self.settings, self.head_rank, testing_time_split, self.time_splits, np.asarray(self.output_points_info["best_points"]), self.output_points_info["num_run_per_split"][testing_time_split])
             breakpoint()
 
         if self.rank == self.head_rank:
@@ -542,7 +542,7 @@ class ParallelMBHSearchControl:
                     if not current_status[i]:
                         self.launch_search_process(i, current_status, current_time_segment_status)
 
-                if not np.any(self.output_point_info["still_running"]):
+                if not np.any(self.output_points_info["still_running"]):
                     run = False
 
             self.end_run()
@@ -555,11 +555,11 @@ class ParallelMBHSearchControl:
     def prune_via_matching(self):
         if os.path.exists(self.output_points_file):
             with open(self.output_points_file, "rb") as fp:
-                self.output_point_info = pickle.load(fp)
+                self.output_points_info = pickle.load(fp)
         else:
             raise ValueError("Trying to prune with no input file.")
 
-        best_points = np.asarray(self.output_point_info["best_points"])
+        best_points = np.asarray(self.output_points_info["best_points"])
 
         best_points_in = self.settings["mbh"]["transform"].both_transforms(best_points, return_transpose=True)
 
@@ -605,16 +605,16 @@ class ParallelMBHSearchControl:
 
         prune_keep = np.delete(np.arange(data_channels_AET.shape[0]), np.unique(prune_remove))
 
-        output_points_pruned = np.asarray([self.output_point_info["output_points"][i] for i in prune_keep])
-        best_points_pruned = np.asarray([self.output_point_info["best_points"][i] for i in prune_keep])
+        output_points_pruned = np.asarray([self.output_points_info["output_points"][i] for i in prune_keep])
+        best_points_pruned = np.asarray([self.output_points_info["best_points"][i] for i in prune_keep])
 
-        self.output_point_info["output_points_pruned"] = output_points_pruned
-        self.output_point_info["best_points_pruned"] = best_points_pruned
+        self.output_points_info["output_points_pruned"] = output_points_pruned
+        self.output_points_info["best_points_pruned"] = best_points_pruned
 
         # backup file
         shutil.copy(self.output_points_file, self.output_points_file[:-7] + "_backup.pickle")
         with open(self.output_points_file, "wb") as fp:
-            pickle.dump(self.output_point_info, fp, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.output_points_info, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 

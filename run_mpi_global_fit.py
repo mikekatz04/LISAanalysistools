@@ -27,5 +27,5 @@ if __name__ == "__main__":
     
     current_info = CurrentInfoGlobalFit(settings)
     mpi_controller = MPIControlGlobalFit(current_info, comm, gpus)
-    mpi_controller.run_global()
+    mpi_controller.run()
 

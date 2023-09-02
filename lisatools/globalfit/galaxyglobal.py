@@ -11,6 +11,7 @@ from gbgpu.gbgpu import GBGPU
 
 
 from lisatools.sampling.moves.gbspecialstretch import GBSpecialStretchMove
+from gbgpu.utils.utility import get_fdot
 
 mempool = xp.get_default_memory_pool()
 
@@ -31,8 +32,48 @@ warnings.filterwarnings("ignore")
 stop_here = True
 
 from eryn.moves import Move
-from lisatools.globalfit.state import State
-from lisatools.globalfit.hdfbackend import HDFBackend
+from .state import State as GBState
+from .hdfbackend import HDFBackend as GBHDFBackend
+
+
+from copy import deepcopy
+import numpy as np
+from scipy import stats
+import warnings
+import time
+from gbgpu.utils.utility import get_N
+import pickle
+from tqdm import tqdm
+import os
+
+mempool = xp.get_default_memory_pool()
+
+from ..utils.multigpudataholder import MultiGPUDataHolder
+from .gathergalaxy import gather_gb_samples
+
+from sklearn.mixture import GaussianMixture
+
+try:
+    import cupy as xp
+
+    gpu_available = True
+except ModuleNotFoundError:
+    import numpy as xp
+
+    gpu_available = False
+
+from lisatools.utils.utility import searchsorted2d_vec, get_groups_from_band_structure
+from eryn.moves import StretchMove
+from eryn.moves import TemperatureControl
+from eryn.prior import ProbDistContainer
+from eryn.utils.utility import groups_from_inds
+from eryn.utils import PeriodicContainer
+
+from eryn.moves import GroupStretchMove
+
+from lisatools.diagnostic import inner_product
+from eryn.state import State
+
 
 
 class PlaceHolder(Move):
@@ -130,10 +171,11 @@ class UpdateNewResiduals(Update):
             print("Generating new base data.")
 
         nwalkers_pe = last_sample.log_like.shape[1]
-        generated_info = new_info.get_data_psd(n_gen_in=nwalkers_pe)
+        generated_info = new_info.get_data_psd(include_gbs=False, n_gen_in=nwalkers_pe)  # , include_ll=True, include_source_only_ll=True)
         data = generated_info["data"]
         psd = generated_info["psd"]
         
+        # needs to leave out gbs
         self.mgh.sub_in_data_and_psd(data, psd)
 
         if self.verbose:
@@ -196,7 +238,6 @@ def run_gb_pe(gpu, comm, head_rank):
     et = time.perf_counter()
 
     print("Read in", et - st)
-
     data = generated_info["data"]
     psd = generated_info["psd"]
 
@@ -283,7 +324,6 @@ def run_gb_pe(gpu, comm, head_rank):
             coords_in_in,
             data_index,
             mgh.data_list,
-            batch_size=1000,
             data_length=mgh.data_length,
             factors=factors,
             data_splits=mgh.gpu_splits,
@@ -297,7 +337,7 @@ def run_gb_pe(gpu, comm, head_rank):
 
     ll = np.tile(mgh.get_ll(include_psd_info=True), (ntemps_pe, 1))
 
-    state_mix = State(
+    state_mix = GBState(
         last_sample.branches_coords,
         inds=last_sample.branches_inds,
         log_like=ll,
@@ -332,12 +372,8 @@ def run_gb_pe(gpu, comm, head_rank):
         skip_supp_names_update=["group_move_points"],
         random_seed=gf_information.general_info["random_seed"],
         nfriends=nwalkers_pe,
-        n_iter_update=1,
-        live_dangerously=True,
-        # rj_proposal_distribution=gpu_priors,
-        a=1.75,
         use_gpu=True,
-        num_repeat_proposals=30
+        **gb_info["pe_info"]["group_proposal_kwargs"]
     )
 
     fd = gf_information.general_info["fd"].copy()
@@ -373,10 +409,8 @@ def run_gb_pe(gpu, comm, head_rank):
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=gf_information.general_info["random_seed"],
-        nfriends=nwalkers_pe,
-        rj_proposal_distribution=gpu_priors,
-        a=1.7,
         use_gpu=True,
+        rj_proposal_distribution=gpu_priors,
         name="rj_prior"
     )
 
@@ -397,7 +431,7 @@ def run_gb_pe(gpu, comm, head_rank):
     )
 
     rj_moves_in.append(rj_move_prior)
-    rj_moves_in_frac.append(0.2)
+    rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
     if state_mix.branches["gb_fixed"].inds.sum() == 0:
         # wait until we have a search distribution
@@ -427,7 +461,7 @@ def run_gb_pe(gpu, comm, head_rank):
     )
 
     rj_moves_in.append(rj_move_search)
-    rj_moves_in_frac.append(0.8)
+    rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
 
     current_gmm_refit_info = gb_info["search_gmm_info"]
 
@@ -450,10 +484,7 @@ def run_gb_pe(gpu, comm, head_rank):
 
     rj_moves_in.append(rj_move_refit)
     # TODO: check for this in updates
-    if current_gmm_refit_info is not None:
-        rj_moves_in_frac.append(0.2)
-    else:
-        rj_moves_in_frac.append(0.0)
+    rj_moves_in_frac.append(gb_info["pe_info"]["rj_refit_fraction"])
 
     total_frac = sum(rj_moves_in_frac)
 
@@ -473,7 +504,7 @@ def run_gb_pe(gpu, comm, head_rank):
     nleaves_max = {"gb_fixed": gb_info["pe_info"]["nleaves_max"]}
         
     moves = moves_in_model + rj_moves
-    backend = HDFBackend(
+    backend = GBHDFBackend(
         gf_information.general_info["file_information"]["fp_gb_pe"],
         compression="gzip",
         compression_opts=9,
@@ -502,7 +533,7 @@ def run_gb_pe(gpu, comm, head_rank):
         ndims,  # assumes ndim_max
         like_mix,
         priors,
-        tempering_kwargs={"betas": betas, "adaptation_time": 2, "permute": True},
+        tempering_kwargs={"betas": betas, **gb_info["pe_info"]["other_tempering_kwargs"]},
         nbranches=len(branch_names),
         nleaves_max=nleaves_max,
         moves=moves_in_model,
@@ -513,14 +544,13 @@ def run_gb_pe(gpu, comm, head_rank):
         periodic={"gb_fixed": gb_info["periodic"]},  # TODO: add periodic to proposals
         branch_names=gb_info["pe_info"]["branch_names"],
         update_fn=update,  # stop_converge_mix,
-        update_iterations=1,
+        update_iterations=gb_info["pe_info"]["update_iterations"],
         provide_groups=True,
         provide_supplimental=True,
-        num_repeats_in_model=1,
         track_moves=False
     )
 
-    nsteps_mix = 1000
+    nsteps_mix = gb_info["pe_info"]["nsteps"]
 
     # with open(current_save_state_file, "wb") as fp:
     #     pickle.dump(state_mix, fp, pickle.HIGHEST_PROTOCOL)
@@ -530,56 +560,10 @@ def run_gb_pe(gpu, comm, head_rank):
     
     # exit()
     out = sampler_mix.run_mcmc(
-        state_mix, nsteps_mix, progress=False, thin_by=20, store=True
+        state_mix, nsteps_mix, store=True, progress=gb_info["pe_info"]["progress"], thin_by=gb_info["pe_info"]["thin_by"]
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
     
-
-from full_band_global_fit_settings import *
-
-from copy import deepcopy
-from inspect import Attribute
-import numpy as np
-from scipy import stats
-import warnings
-import time
-from gbgpu.utils.utility import get_N
-import pickle
-from tqdm import tqdm
-import os
-
-mempool = xp.get_default_memory_pool()
-
-from full_band_global_fit_settings import *
-from single_mcmc_run import run_single_band_search
-from lisatools.utils.multigpudataholder import MultiGPUDataHolder
-from eryn.moves import CombineMove
-from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
-from initial_psd_search import run_psd_search
-from gathergalaxy import gather_gb_samples
-
-from sklearn.mixture import GaussianMixture
-
-try:
-    import cupy as xp
-
-    gpu_available = True
-except ModuleNotFoundError:
-    import numpy as xp
-
-    gpu_available = False
-
-from lisatools.utils.utility import searchsorted2d_vec, get_groups_from_band_structure
-from eryn.moves import StretchMove
-from eryn.moves import TemperatureControl
-from eryn.prior import ProbDistContainer
-from eryn.utils.utility import groups_from_inds
-from eryn.utils import PeriodicContainer
-
-from eryn.moves import GroupStretchMove
-
-from lisatools.diagnostic import inner_product
-from eryn.state import State
 
 def shuffle_along_axis(a, axis, xp=None):
     if xp is None:
@@ -793,13 +777,20 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
         comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank, tag=send_tag)
     return
 
-def run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, comm, comm_info):
+def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, comm, comm_info):
+    
+    gb = GBGPU(use_gpu=True)
     xp.cuda.runtime.setDevice(gpu)
     temperature_control = TemperatureControl(ndim, nwalkers, ntemps=ntemps)
+
+    # TODO: clean this up
+    gb_info = current_info.gb_info
+    df = current_info.general_info["df"]
 
     num_max_proposals = 100000
     convergence_iter_count = 500
 
+    periodic = {"gb_fixed": gb_info["periodic"]}
     move_proposal = StretchMove(periodic=PeriodicContainer(periodic), temperature_control=temperature_control, return_gpu=True, use_gpu=True)
     
     band_inds_here = xp.where(xp.asarray(band_inds_running))[0]
@@ -819,6 +810,8 @@ def run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_runnin
     new_points_with_fs[:, :, :, 1] = (f0_maxs[band_inds_here] - f0_mins[band_inds_here]) * new_points_with_fs[:, :, :, 1] + f0_mins[band_inds_here]
     new_points_with_fs[:, :, :, 2] = (fdot_maxs[band_inds_here] - fdot_mins[band_inds_here]) * new_points_with_fs[:, :, :, 2] + fdot_mins[band_inds_here]
 
+    transform_fn = gb_info["transform"]
+
     new_points_in = transform_fn.both_transforms(new_points_with_fs.reshape(-1, ndim), xp=xp).reshape(new_points_with_fs.shape[:-1] + (ndim + 1,)).reshape(-1, ndim + 1)
     inner_product = 4 * df * (xp.sum(data_in[0].conj() * data_in[0] / psd_in[0]) + xp.sum(data_in[1].conj() * data_in[1] / psd_in[1])).real
     ll = (-1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd_in)))).item()
@@ -826,6 +819,7 @@ def run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_runnin
 
     print(ll)
 
+    waveform_kwargs = gb_info["waveform_kwargs"].copy()
     if "N" in waveform_kwargs:
         waveform_kwargs.pop("N")
 
@@ -1259,6 +1253,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
     priors_good = ProbDistContainer(priors_here, use_cupy=True)
     
+    m_chirp_lims = gb_info["search_info"]["m_chirp_lims"]
     fdot_mins = xp.asarray(get_fdot(band_edges[:-1], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[0])))
     fdot_maxs = xp.asarray(get_fdot(band_edges[1:], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[1])))
     f0_mins = xp.asarray(band_edges[:-1] * 1e3)
@@ -1299,7 +1294,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             else:
                 gmm_samples_refit = None
 
-            gmm_mcmc_search_info = run_iterative_subtraction_mcmc(gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
+            gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, comm, comm_info)
             
             comm.send({"receive": True}, dest=head_rank, tag=20)
             comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)

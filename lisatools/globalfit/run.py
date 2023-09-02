@@ -65,6 +65,7 @@ class CurrentInfoGlobalFit:
             with open(mbh_search_file, "rb") as fp:
                 mbh_output_point_info = pickle.load(fp)
 
+            
             if "output_points_pruned" in mbh_output_point_info:
                 self.initialize_mbh_state_from_search(mbh_output_point_info)
                 
@@ -151,13 +152,12 @@ class CurrentInfoGlobalFit:
         return self.current_info["general"]
 
 class MPIControlGlobalFit:
-    def __init__(self, current_info, comm, gpus, run_mbh_search=True):
+    def __init__(self, current_info, comm, gpus):
 
         ranks = np.arange(comm.Get_size())
 
         self.rank = comm.Get_rank()
-        self.run_mbh_search = run_mbh_search
-
+        
         assert len(gpus) == 4
         assert len(ranks) >= 5
         
@@ -320,13 +320,13 @@ class MPIControlGlobalFit:
         self.current_info["mbh"]["last_state"] = State({"mbh": coords})
 
     def run_mbh_search(self):
-        para_mbh_search = ParallelMBHSearchControl(self.settings, self.comm, self.gpus, head_rank=self.head_rank, max_num_per_gpu=self.settings["mbh"]["search_info"]["max_num_per_gpu"], verbose=self.settings["mbh"]["search_info"]["verbose"])
-        
-        if "output_points_pruned" not in para_mbh_search.output_points_file:
+        para_mbh_search = ParallelMBHSearchControl(self.current_info.settings_dict, self.comm, self.gpus, head_rank=self.head_rank, max_num_per_gpu=self.current_info.settings_dict["mbh"]["search_info"]["max_num_per_gpu"], verbose=self.current_info.settings_dict["mbh"]["search_info"]["verbose"])
+
+        if "output_points_pruned" not in para_mbh_search.output_points_info:
             para_mbh_search.run_parallel_mbh_search()  # testing_time_split=5)
-            self.initialize_mbh_state_from_search(para_mbh_search.output_points_file)
+            self.initialize_mbh_state_from_search(para_mbh_search.output_points_info)
         else:
-            assert "cc_params" in self.current_info["mbh"]
+            assert "cc_params" in self.current_info.mbh_info
 
     def run_global_fit(self):
         if self.rank == self.head_rank:
