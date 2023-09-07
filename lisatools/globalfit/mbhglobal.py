@@ -117,7 +117,7 @@ def run_mbh_pe(gpu, comm, head_rank):
     gpus = [gpu]
     
     gf_information = comm.recv(source=head_rank, tag=76)
-    exit()
+
     mbh_info = gf_information.mbh_info
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -146,6 +146,11 @@ def run_mbh_pe(gpu, comm, head_rank):
     xp.get_default_memory_pool().free_all_blocks()
 
     priors = mbh_info["priors"]
+
+    if not hasattr(last_sample, "log_like"):
+        last_sample.log_like = np.zeros((ntemps_pe, nwalkers_pe))
+    if not hasattr(last_sample, "log_prior"):
+        last_sample.log_prior = np.zeros((ntemps_pe, nwalkers_pe))
 
     start_state = State(last_sample, copy=True)
     
@@ -185,14 +190,14 @@ def run_mbh_pe(gpu, comm, head_rank):
     print("MBH CHECK")
     move = MBHSpecialMove(wave_gen, fd, data_fin, psds_fin, mbh_info["pe_info"]["num_prop_repeats"], transform_fn, priors, waveform_kwargs, inner_moves, df)
 
-    update = UpdateNewResidualsMBH(comm, head_rank, verbose=True)
+    update = UpdateNewResidualsMBH(comm, head_rank, verbose=False)
     print("MBH CHECK 2")
 
     ndims = {"mbh": mbh_info["pe_info"]["ndim"]}
 
     like_mix = BasicResidualMGHLikelihood(None)
     # key permute is False
-    # exit()
+
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
         ndims,  # assumes ndim_max

@@ -233,5 +233,6 @@ class MBHSpecialMove(RedBlueMove):
         if not hasattr(self, "best_last_ll"):
             self.best_last_ll = current_ll.max()
         # print("mbh", self.best_last_ll, current_ll.max(), current_ll.max() - self.best_last_ll)
+        # print(new_state.log_like[0])
         self.best_last_ll = current_ll.max()
         return new_state, accepted

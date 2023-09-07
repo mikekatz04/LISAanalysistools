@@ -1,14 +1,15 @@
-from full_band_global_fit_settings import *
 import time
 import cupy as xp
+from gbgpu.gbgpu import GBGPU
+import numpy as np
+from gbgpu.utils.constants import *
 
-
-def gather_gb_samples(gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
+def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
 
     gb = GBGPU(use_gpu=True)
     xp.cuda.runtime.setDevice(gpu)
    
-    fake_data = [xp.zeros_like(fd, dtype=complex), xp.zeros_like(fd, dtype=complex)]
+    fake_data = [xp.zeros_like(current_info.general_info["fd"], dtype=complex), xp.zeros_like(current_info.general_info["fd"], dtype=complex)]
     
     step_index = slice(gb_reader.iteration - samples_keep, gb_reader.iteration, 1)
     temp_index = [0]
@@ -36,8 +37,13 @@ def gather_gb_samples(gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
 
     test_bins_for_snr = gb_samples[gb_inds]
 
+    transform_fn = current_info.gb_info["transform"]
     test_bins_for_snr_in = transform_fn.both_transforms(test_bins_for_snr)
     gb.d_d = 0.0
+
+    waveform_kwargs = current_info.gb_info["waveform_kwargs"].copy()
+    if "N" in waveform_kwargs:
+        waveform_kwargs.pop("N")
 
     _ = gb.get_ll(test_bins_for_snr_in, fake_data, psd_in, **waveform_kwargs)
 

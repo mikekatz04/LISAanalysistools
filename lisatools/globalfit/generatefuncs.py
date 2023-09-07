@@ -224,7 +224,7 @@ class GenerateCurrentState:
             n_mbh = A_mbh.shape[0]
             info_dict["mbh"] = {"n": n_mbh, "A": A_mbh, "E": E_mbh}
             n_gen_check_it.append(n_mbh)
-
+            
         if include_gbs:
             A_gb, E_gb = general_info.gb_info["get_templates"](general_info.gb_info, general_info.general_info, only_max_ll=only_max_ll)
             n_gb = A_gb.shape[0]

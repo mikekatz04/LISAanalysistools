@@ -24,7 +24,7 @@ from eryn.prior import ProbDistContainer
 from eryn.utils.utility import groups_from_inds
 from eryn.utils import PeriodicContainer
 
-from eryn.moves import GroupStretchMove
+from eryn.moves import GroupStretchMove, Move
 from eryn.moves.multipletry import logsumexp, get_mt_computations
 
 from ...diagnostic import inner_product
@@ -35,7 +35,7 @@ __all__ = ["GBSpecialStretchMove"]
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBSpecialStretchMove(GroupStretchMove):
+class GBSpecialStretchMove(GroupStretchMove, Move):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -63,6 +63,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         rj_proposal_distribution=None,
         num_repeat_proposals=1,
         name=None,
+        use_prior_removal=False,
         **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
@@ -71,6 +72,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         self.gpu_priors = gpu_priors
         self.name = name
         self.num_repeat_proposals = num_repeat_proposals
+        self.use_prior_removal = use_prior_removal
 
         for key in priors:
             if not isinstance(priors[key], ProbDistContainer):
@@ -114,12 +116,6 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.rj_proposal_distribution = rj_proposal_distribution
         self.is_rj_prop = self.rj_proposal_distribution is not None
-
-        if self.is_rj_prop:
-            self.get_special_proposal_setup = self.rj_proposal
-
-        else:
-            self.get_special_proposal_setup = self.new_in_model_proposal  # self.in_model_proposal
 
         # setup N vals for bands
         band_mean_f = (self.band_edges[1:] + self.band_edges[:-1]).get() / 2
@@ -708,8 +704,8 @@ class GBSpecialStretchMove(GroupStretchMove):
             waveform_kwargs_now.pop("N")
         waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
 
-        if self.is_rj_prop:
-            print("START:", new_state.log_like[0])
+        # if self.is_rj_prop:
+        #     print("START:", new_state.log_like[0])
         log_like_tmp = self.xp.asarray(new_state.log_like)
         log_prior_tmp = self.xp.asarray(new_state.log_prior)
 
@@ -780,7 +776,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 )
             factors = (proposal_logpdf * -1) * (~gb_inds_orig).flatten() + (proposal_logpdf * +1) * (gb_inds_orig).flatten()
 
-            if self.name == "rj_prior":
+            if self.name == "rj_prior" and self.use_prior_removal:
                 factors[~gb_inds_orig.flatten()] = -1e300
         else:
             factors = xp.zeros(gb_inds_orig.sum().item())
@@ -810,7 +806,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         )
         # print(np.abs(new_state.log_like - ll_after).max())
         store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
-        print("CHECKING 0:", store_max_diff, self.is_rj_prop)
+        # print("CHECKING 0:", store_max_diff, self.is_rj_prop)
         self.check_ll_inject(new_state)
 
         per_walker_band_proposals = xp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
@@ -1092,7 +1088,7 @@ class GBSpecialStretchMove(GroupStretchMove):
                 # print(f"After2 {params_curr_separated[1].min().item()} ")
                 
                 et = time.perf_counter()
-                print(et - st, N_now)
+                # print(et - st, N_now)
                 # breakpoint()
                 
             self.xp.cuda.runtime.deviceSynchronize()
@@ -1174,9 +1170,10 @@ class GBSpecialStretchMove(GroupStretchMove):
                 store_max_diff = np.abs(log_like_tmp[0].get() - ll_after).max()
                 # print("CHECKING in:", tmp, store_max_diff)
                 if store_max_diff > 3e-4:
+                    print("LARGER ERROR:", store_max_diff)
                     self.check_ll_inject(new_state)
                     # self.mgh.get_ll(include_psd_info=True, stop=True)
-                    breakpoint()
+
         new_state.branches["gb_fixed"].coords[:] = gb_fixed_coords.get()
         if self.is_rj_prop:
             new_state.branches["gb_fixed"].inds[:] = gb_inds_orig.get()
@@ -1194,7 +1191,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         )
         # print(np.abs(new_state.log_like - ll_after).max())
         store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
-        print("CHECKING 1:", store_max_diff, self.is_rj_prop)
+        # print("CHECKING 1:", store_max_diff, self.is_rj_prop)
         # if self.time > 0:
         #     breakpoint()
         #     self.check_ll_inject(new_state)
@@ -1299,7 +1296,7 @@ class GBSpecialStretchMove(GroupStretchMove):
         )
         # print(np.abs(new_state.log_like - ll_after).max())
         store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
-        print("CHECKING 2:", store_max_diff, self.is_rj_prop)
+        # print("CHECKING 2:", store_max_diff, self.is_rj_prop)
 
         self.mempool.free_all_blocks()
         # get accepted fraction
@@ -1381,8 +1378,8 @@ class GBSpecialStretchMove(GroupStretchMove):
         band_swaps_proposed = np.zeros((len(self.band_edges) - 1, self.ntemps - 1), dtype=int)
         current_band_counts = np.zeros((len(self.band_edges) - 1, self.ntemps), dtype=int)
         
-        if self.is_rj_prop:
-            print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+        # if self.is_rj_prop:
+        #     print("1st count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         
         # if self.time > 0:
         #     self.check_ll_inject(new_state)
@@ -1746,7 +1743,7 @@ class GBSpecialStretchMove(GroupStretchMove):
             )
             # print(np.abs(new_state.log_like - ll_after).max())
             store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
-            print("CHECKING:", store_max_diff, self.is_rj_prop)
+            # print("CHECKING:", store_max_diff, self.is_rj_prop)
             if store_max_diff > 1e-5:
                 ll_after = (
                     self.mgh.get_ll(include_psd_info=True, stop=True)
@@ -1772,8 +1769,8 @@ class GBSpecialStretchMove(GroupStretchMove):
 
         self.mempool.free_all_blocks()
 
-        if self.is_rj_prop:
-            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+        # if self.is_rj_prop:
+        #     print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         return new_state, accepted
 
     def check_ll_inject(self, new_state):

@@ -166,7 +166,7 @@ def run_psd_pe(gpu, comm, head_rank):
     gpus = [gpu]
     
     gf_information = comm.recv(source=head_rank, tag=46)
-    exit()
+
     psd_info = gf_information.psd_info
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -200,7 +200,7 @@ def run_psd_pe(gpu, comm, head_rank):
         betas=betas
     )
 
-    update = UpdateNewResidualsPSD(comm, head_rank, verbose=True)
+    update = UpdateNewResidualsPSD(comm, head_rank, verbose=False)
 
     ndims_in = psd_info["pe_info"]["ndims"]
     nleaves_max_in = psd_info["pe_info"]["nleaves_max"]
@@ -213,7 +213,6 @@ def run_psd_pe(gpu, comm, head_rank):
     df = gf_information.general_info["df"]
     data_length = gf_information.general_info["data_length"]
 
-    # exit()
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
         ndims_in,  # assumes ndim_max
@@ -229,7 +228,7 @@ def run_psd_pe(gpu, comm, head_rank):
         periodic=psd_info["periodic"],  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # sttop_converge_mix,
-        update_iterations=1,
+        update_iterations=10,
         provide_groups=False,
         provide_supplimental=True,
     )

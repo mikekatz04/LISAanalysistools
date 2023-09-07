@@ -371,8 +371,8 @@ def run_gb_pe(gpu, comm, head_rank):
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=gf_information.general_info["random_seed"],
-        nfriends=nwalkers_pe,
         use_gpu=True,
+        nfriends=nwalkers_pe,
         **gb_info["pe_info"]["group_proposal_kwargs"]
     )
 
@@ -411,7 +411,10 @@ def run_gb_pe(gpu, comm, head_rank):
         random_seed=gf_information.general_info["random_seed"],
         use_gpu=True,
         rj_proposal_distribution=gpu_priors,
-        name="rj_prior"
+        name="rj_prior",
+        use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+        nfriends=nwalkers_pe,
+        **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
     )
 
     gb_args_rj = (
@@ -497,7 +500,7 @@ def run_gb_pe(gpu, comm, head_rank):
     branch_names = ["gb_fixed"]
 
     update = UpdateNewResiduals(
-        mgh, gb, comm, head_rank, gpu_priors, verbose=True
+        mgh, gb, comm, head_rank, gpu_priors, verbose=False
     )
 
     ndims = {"gb_fixed": gb_info["pe_info"]["ndim"]}
@@ -558,7 +561,6 @@ def run_gb_pe(gpu, comm, head_rank):
     print("Starting mix ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     
-    # exit()
     out = sampler_mix.run_mcmc(
         state_mix, nsteps_mix, store=True, progress=gb_info["pe_info"]["progress"], thin_by=gb_info["pe_info"]["thin_by"]
     )
@@ -1020,6 +1022,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
             if run_number < 2:
                 betas = xp.repeat(xp.asarray(temperature_control.betas[:, None].copy()), len(band_inds_here), axis=-1)
                 
+                old_points_old = old_points.copy()
                 old_points[:] = best_logl_coords[None, None, :]
 
                 gen_points = old_points.transpose(2, 0, 1, 3).reshape(best_logl_coords.shape[0], -1, ndim).copy()
@@ -1035,7 +1038,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
                 iter_check = 0
                 max_iter = 10000
-                while np.any(still_going_start_like):
+                while np.any(still_going_start_like) and iter_check < max_iter:
                     num_still_going_start_like = still_going_start_like.sum().item()
                     
                     start_like = np.zeros((num_still_going_start_like, nwalkers * ntemps))
@@ -1053,7 +1056,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
                         fix = xp.isinf(logp)
                         if xp.all(fix):
-                            breakpoint()
+                            factor /= 10.0
 
                     new_points_with_fs = tmp.copy()
 
@@ -1075,7 +1078,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
                     iter_check += 1
                     factor *= 1.5
-                    print(iter_check, still_going_start_like.sum())
+                    # print(iter_check, still_going_start_like.sum())
 
                 if run_number == 1:
                     best_binaries_coords_with_fs = best_logl_coords.copy()
@@ -1090,7 +1093,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
                     if not xp.allclose(best_logl, best_logl_check):
                         breakpoint()
 
-                    snr_lim = 9.0
+                    snr_lim = gb_info["search_info"]["snr_lim"]
                     keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > snr_lim
 
                     still_going_here = keep_binaries.copy()
@@ -1225,9 +1228,9 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
     # return starting_points
 
 
-def refit_gmm(gpu, comm, comm_info, gb_reader, data, psd, number_samples_keep):
+def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_samples_keep):
     print("GATHER")
-    samples_gathered = gather_gb_samples(gb_reader, psd, gpu, samples_keep=number_samples_keep, thin_by=20)
+    samples_gathered = gather_gb_samples(current_info, gb_reader, psd, gpu, samples_keep=number_samples_keep, thin_by=20)
     
     return fit_gmm(samples_gathered, comm, comm_info)
 
@@ -1242,7 +1245,6 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     gf_information = comm.recv(source=head_rank, tag=2929)
     gb_info = gf_information.gb_info
     band_edges = gb_info["band_edges"]
-    # exit()
 
     band_inds_running = np.ones_like(band_edges[:-1], dtype=bool)
     
@@ -1271,6 +1273,11 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             incoming_data = comm.recv(source=head_rank, tag=27)
             print("received data")
 
+            if "cc_ll" not in incoming_data.psd_info or "cc_ll" not in incoming_data.mbh_info or "cc_ll" not in incoming_data.gb_info:
+                time.sleep(20.0)
+                print("Do not have maximum likelihood for all pieces for search. Waiting and then will try again.")
+                continue
+
             generated_info = incoming_data.get_data_psd(only_max_ll=True) 
             # generated_info_0 = generate_class(incoming_data, only_max_ll=True, include_mbhs=False, include_gbs=False, include_ll=True, include_source_only_ll=True)
             # generated_info_1 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_ll=True, include_source_only_ll=True)
@@ -1289,7 +1296,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             # max ll combination of psd and mbhs and gbs
             
             if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
-                gmm_samples_refit = refit_gmm(gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
+                gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
 
             else:
                 gmm_samples_refit = None
