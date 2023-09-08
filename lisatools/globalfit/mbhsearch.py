@@ -19,6 +19,7 @@ from bbhx.likelihood import HeterodynedLikelihood
 from bbhx.utils.constants import *
 from bbhx.utils.transform import *
 from eryn.backends import HDFBackend
+from lisatools.utils.utility import generate_noise_fd
 import pickle 
 
 from eryn.moves import StretchMove
@@ -141,13 +142,20 @@ def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, n
             np.fft.rfft(E) * dt,
             np.fft.rfft(T) * dt,
         )
+
         check = []
         freqs_check = np.fft.rfftfreq(len(A), dt)
         
         fd_tmp = np.fft.rfftfreq(len(X), dt)
-        # last_ll = -1/2 * 4 * settings["general"]["df"] * np.sum((Af.conj() * Af + Ef.conj() * Ef)[1:] / get_sensitivity(fd_tmp[1:], sens_fn="noisepsd_AE", model="sangria", includewd=1))
+        fd_tmp[0] = fd_tmp[1]
+
+        psd_tmp = get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1)
+
+        # last_ll = -1/2 * 4 * settings["general"]["df"] * np.sum((Af.conj() * Af + Ef.conj() * Ef) / psd_tmp)
 
         for i in range(len(best_points)):
+
+            psd_tmp = get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1)
 
             remove_point = best_points[i:i+1]
 
@@ -166,9 +174,11 @@ def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, n
                 length=1024,
             )[0]
 
-            # h_h = 4 * settings["general"]["df"] * np.sum((data_channels_AET[0].get().conj() * data_channels_AET[0].get() + data_channels_AET[1].get().conj() * data_channels_AET[1].get())[1:] / get_sensitivity(fd_tmp[1:], sens_fn="noisepsd_AE", model="sangria", includewd=1))
+            # psd_tmp[np.abs(data_channels_AET[0]).argmax().get() - 100000 : np.abs(data_channels_AET[0]).argmax().get() + 100000] = 1e300
 
-            # d_h = 4 * settings["general"]["df"] * np.sum((Af.conj() * data_channels_AET[0].get() + Ef.conj() * data_channels_AET[1].get())[1:] / get_sensitivity(fd_tmp[1:], sens_fn="noisepsd_AE", model="sangria", includewd=1))
+            # h_h = 4 * settings["general"]["df"] * np.sum((data_channels_AET[0].get().conj() * data_channels_AET[0].get() + data_channels_AET[1].get().conj() * data_channels_AET[1].get()) / psd_tmp)
+
+            # d_h = 4 * settings["general"]["df"] * np.sum((Af.conj() * data_channels_AET[0].get() + Ef.conj() * data_channels_AET[1].get()) / psd_tmp)
 
             # Af += data_channels_AET[0].get()
             # Ef += data_channels_AET[1].get()
@@ -178,25 +188,37 @@ def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, n
             Ef -= data_channels_AET[1].get()
             Tf -= data_channels_AET[2].get()
 
-            # ll = -1/2 * 4 * settings["general"]["df"] * np.sum((Af.conj() * Af + Ef.conj() * Ef)[1:] / get_sensitivity(fd_tmp[1:], sens_fn="noisepsd_AE", model="sangria", includewd=1))
+            # ll = -1/2 * 4 * settings["general"]["df"] * np.sum((Af.conj() * Af + Ef.conj() * Ef) / psd_tmp)
 
             # for (j, cA, cE, d_d, tref) in check:
-            #     d_h_tmp = 4 * settings["general"]["df"] * np.sum((cA.conj() * data_channels_AET[0].get() + cE.conj() * data_channels_AET[1].get())[1:] / get_sensitivity(fd_tmp[1:], sens_fn="noisepsd_AE", model="sangria", includewd=1))
+            #     d_h_tmp = 4 * settings["general"]["df"] * np.sum((cA.conj() * data_channels_AET[0].get() + cE.conj() * data_channels_AET[1].get()) / psd_tmp)
             #     if np.abs(d_h_tmp) / np.sqrt(d_d.real * h_h.real) > 0.2:
             #         print(i, remove_point[0, -1], j, tref, np.abs(d_h_tmp) / np.sqrt(d_d.real * h_h.real), d_h / h_h ** (1/2))
 
             # check_A = data_channels_AET[0].get()
             # check_E = data_channels_AET[1].get()
-            # d_d = 4 * settings["general"]["df"] * np.sum((check_A.conj() * check_A + check_E.conj() * check_E)[1:] / get_sensitivity(fd_tmp[1:], sens_fn="noisepsd_AE", model="sangria", includewd=1))
+            # d_d = 4 * settings["general"]["df"] * np.sum((check_A.conj() * check_A + check_E.conj() * check_E) / psd_tmp)
             # check.append([i, check_A, check_E, d_d, remove_point[0, -1]])
             
-            # # # check.append([ll.real, ll.real - last_ll.real, remove_point[:, -1], h_h ** (1/2), np.abs(d_h / h_h ** (1/2))])
-            # #print(i, ll.real, ll.real - last_ll.real, remove_point[:, -1], h_h ** (1/2), np.abs(d_h / h_h ** (1/2)))
+            # # check.append([ll.real, ll.real - last_ll.real, remove_point[:, -1], h_h ** (1/2), np.abs(d_h / h_h ** (1/2))])
+            # print(i, ll.real, ll.real - last_ll.real, remove_point[:, -1], h_h ** (1/2), np.abs(d_h / h_h ** (1/2)))
             # last_ll = ll
-            
+
         A = np.fft.irfft(Af) / dt
         E = np.fft.irfft(Ef) / dt
         T = np.fft.irfft(Tf) / dt
+
+        # import matplotlib.pyplot as plt
+        # plt.close()
+        # plt.plot(np.fft.irfft(np.fft.rfft(A) / get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1) ** (1/2))[4419700: 4420300])
+        # plt.plot(np.fft.irfft(data_channels_AET.get()[0] / get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1) ** (1/2))[4419700: 4420300])
+        # plt.savefig("check1.png")
+        # plt.close()
+        # plt.plot(np.fft.irfft(np.fft.rfft(E) / get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1) ** (1/2))[4419700: 4420300])
+        # plt.plot(np.fft.irfft(data_channels_AET.get()[1] / get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1) ** (1/2))[4419700: 4420300])
+        # plt.savefig("check2.png")
+        # breakpoint()
+
         print("adjusted")
 
     data = []
@@ -240,10 +262,21 @@ def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, n
     initial_t_vals = np.asarray(initial_t_vals)
     end_t_vals = np.asarray(end_t_vals)
         
-    A_psd = get_sensitivity(fd.get(), sens_fn="noisepsd_AE", model="sangria", includewd=1.0)
+    # A_psd = get_sensitivity(fd.get(), sens_fn="noisepsd_AE", model="sangria", includewd=1.0)
+    
+    # E_psd = get_sensitivity(
+    #     fd.get(), sens_fn="noisepsd_AE", model="sangria", includewd=1.0
+    # )
+
+    psd_reader = HDFBackend(settings['general']['file_information']['fp_psd_pe'])
+
+    psd_best = psd_reader.get_chain()["psd"][psd_reader.get_log_like() == psd_reader.get_log_like().max()].squeeze()
+    galfor_best = psd_reader.get_chain()["galfor"][psd_reader.get_log_like() == psd_reader.get_log_like().max()].squeeze()
+    
+    A_psd = get_sensitivity(fd.get(), sens_fn="noisepsd_AE", model=psd_best[:2], foreground_params=galfor_best)
     
     E_psd = get_sensitivity(
-        fd.get(), sens_fn="noisepsd_AE", model="sangria", includewd=1.0
+        fd.get(), sens_fn="noisepsd_AE", model=psd_best[2:], foreground_params=galfor_best
     )
 
     A_psd[0] = A_psd[1]
@@ -380,7 +413,7 @@ def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, n
     det_snr = (wave_gen.d_h / (wave_gen.h_h ** (1/2))).max()
     print("Found:", mbh_best, opt_snr, det_snr) 
 
-    if opt_snr < 40.0 or det_snr < 40.0:
+    if opt_snr < mbh_info["search_info"]["snr_lim"] or det_snr < mbh_info["search_info"]["snr_lim"]:
         finished_this_split = True
     else:
         finished_this_split = False
@@ -581,25 +614,38 @@ class ParallelMBHSearchControl:
         psd_tmp = get_sensitivity(self.settings["general"]["fd"], sens_fn="noisepsd_AE", model="sangria", includewd=1.0)
         psd_tmp[0] = psd_tmp[1]
         psd = np.array([psd_tmp, psd_tmp, np.full_like(psd_tmp, 1e10)])
+
+        A_noise = generate_noise_fd(self.settings["general"]["fd"], self.settings["general"]["df"], func=get_sensitivity, sens_fn="noisepsd_AE", model="sangria", includewd=1.0)
+        E_noise = generate_noise_fd(self.settings["general"]["fd"], self.settings["general"]["df"], func=get_sensitivity, sens_fn="noisepsd_AE", model="sangria", includewd=1.0)
+        A_noise[0] = A_noise[1]
+        E_noise[0] = A_noise[1]
+        noise = np.array([A_noise, E_noise, E_noise])
         
         df = self.settings["general"]["df"]
         prune_remove = []
+        out_norm_with_noise = []
         # keep in order. The earlier one will be the louder one found
         for i in range(data_channels_AET.shape[0]):
-            if i in prune_remove:
-                continue
-            for j in range(i + 1, data_channels_AET.shape[0]):
-                if j in prune_remove:
+            for j in range(i, data_channels_AET.shape[0]):
+                if (j in prune_remove or i in prune_remove) and i != j:
                     continue
 
-                a_a = 4 * df * np.sum(data_channels_AET[i].conj() * data_channels_AET[i] / psd[None, :], axis=(1, 2))
+                a_a = 4 * df * np.sum((noise + data_channels_AET[i]).conj() * (noise + data_channels_AET[i]) / psd[None, :], axis=(1, 2))
                 b_b = 4 * df * np.sum(data_channels_AET[j].conj() * data_channels_AET[j] / psd[None, :], axis=(1, 2))
-                a_b = 4 * df * np.sum(data_channels_AET[i].conj() * data_channels_AET[j] / psd[None, :], axis=(1, 2))
+                a_b = 4 * df * np.sum((noise + data_channels_AET[i]).conj() * data_channels_AET[j] / psd[None, :], axis=(1, 2))
 
-                normalized_noise_weighted_corr = np.abs(a_b).real / np.sqrt(a_a * b_b).real
-                    
-                if normalized_noise_weighted_corr > 0.25:
-                    print(i, j, normalized_noise_weighted_corr, best_points[i, -1], best_points[j, -1])
+                normalized_noise_weighted_corr_with_noise = -1/2 * (a_a + b_b - 2 * a_b) #  np.abs(a_b).real / np.sqrt(a_a * b_b).real
+                if i == j:
+                    out_norm_with_noise.append([normalized_noise_weighted_corr_with_noise.copy(), np.sqrt(b_b), a_b / np.sqrt(b_b)])
+                
+                c_c = 4 * df * np.sum(data_channels_AET[i].conj() * data_channels_AET[i] / psd[None, :], axis=(1, 2))
+                d_d = 4 * df * np.sum(data_channels_AET[j].conj() * data_channels_AET[j] / psd[None, :], axis=(1, 2))
+                c_d = 4 * df * np.sum(data_channels_AET[i].conj() * data_channels_AET[j] / psd[None, :], axis=(1, 2))
+
+                normalized_noise_weighted_corr = np.abs(c_d).real / np.sqrt(c_c * d_d).real
+            
+                if normalized_noise_weighted_corr > 0.25 and i != j:
+                    # print(i, j, normalized_noise_weighted_corr, best_points[i, -1], best_points[j, -1])
                 
                     prune_remove.append(j)
 

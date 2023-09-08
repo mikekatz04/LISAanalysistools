@@ -22,7 +22,7 @@ import subprocess
 import warnings
 warnings.filterwarnings("ignore")
 
-stop_here = True
+from lisatools.sampling.stopping import SearchConvergeStopping
 
 
 from eryn.moves import Move
@@ -170,12 +170,21 @@ def run_psd_pe(gpu, comm, head_rank):
     psd_info = gf_information.psd_info
     xp.cuda.runtime.setDevice(gpus[0])
 
-    last_sample = psd_info["last_state"]
+    priors = psd_info["priors"]
 
     nwalkers_pe = psd_info["pe_info"]["nwalkers"]
     ntemps_pe = psd_info["pe_info"]["ntemps"]
 
-    generated_info = gf_information.get_data_psd(include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
+    if "last_state" in psd_info:
+        last_sample = psd_info["last_state"]
+    else:
+        coords_psd = priors["psd"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
+        inds_psd = np.ones(coords_psd.shape[:-1], dtype=bool)
+        coords_galfor = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
+        inds_galfor = np.ones(coords_galfor.shape[:-1], dtype=bool)
+        last_sample = State({"psd": coords_psd, "galfor": coords_galfor}, inds={"psd": inds_psd, "galfor": inds_galfor})
+
+    generated_info = gf_information.get_data_psd(include_ll=False, include_source_only_ll=False, n_gen_in=nwalkers_pe)
     
     fd = xp.asarray(gf_information.general_info["fd"])
     data = [xp.asarray(generated_info["data"][0]), xp.asarray(generated_info["data"][1])]
@@ -186,10 +195,12 @@ def run_psd_pe(gpu, comm, head_rank):
 
     sens_kwargs = psd_info["psd_kwargs"].copy()
  
-    if hasattr(last_sample, "betas"):
+    if hasattr(last_sample, "betas") and last_sample.betas is not None:
         betas = last_sample.betas
     else:
-        betas = make_ladder(sum(list(psd_info["pe_info"]["ndim"].values())), ntemps=ntemps_pe)
+        betas = make_ladder(sum(list(psd_info["pe_info"]["ndims"].values())), ntemps=ntemps_pe)
+
+    assert len(betas) == ntemps_pe
 
     branch_names = psd_info["pe_info"]["branch_names"]
     
@@ -205,13 +216,21 @@ def run_psd_pe(gpu, comm, head_rank):
     ndims_in = psd_info["pe_info"]["ndims"]
     nleaves_max_in = psd_info["pe_info"]["nleaves_max"]
 
-    priors = psd_info["priors"]
-
     # TODO: fix this 
     from gbgpu.gbgpu import GBGPU
     gb = GBGPU(use_gpu=True)
     df = gf_information.general_info["df"]
     data_length = gf_information.general_info["data_length"]
+
+    if "run_search" in psd_info["search_info"] and psd_info["search_info"]["run_search"]:
+        stopping_fn = psd_info["search_info"]["stopping_function"]
+        stopping_iterations = psd_info["search_info"]["stopping_iterations"]
+        thin_by = psd_info["search_info"]["thin_by"]
+
+    else:
+        stopping_fn = None
+        stopping_iterations = -1
+        thin_by = psd_info["pe_info"]["thin_by"]
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
@@ -228,7 +247,9 @@ def run_psd_pe(gpu, comm, head_rank):
         periodic=psd_info["periodic"],  # TODO: add periodic to proposals
         branch_names=branch_names,
         update_fn=update,  # sttop_converge_mix,
-        update_iterations=10,
+        update_iterations=psd_info["pe_info"]["update_iterations"],
+        stopping_fn=stopping_fn,
+        stopping_iterations=stopping_iterations,
         provide_groups=False,
         provide_supplimental=True,
     )
@@ -246,7 +267,7 @@ def run_psd_pe(gpu, comm, head_rank):
     print("Starting psd ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
     
-    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=psd_info["pe_info"]["progress"], thin_by=psd_info["pe_info"]["thin_by"], store=True)
+    out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=psd_info["pe_info"]["progress"], thin_by=thin_by, store=True)
     print("ending psd ll best:", out.log_like.max(axis=-1))
 
 if __name__ == "__main__":

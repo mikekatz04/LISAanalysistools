@@ -219,23 +219,30 @@ class GenerateCurrentState:
         
         info_dict = {}
         n_gen_check_it = []
-        if include_mbhs:
+        if include_mbhs and "cc_params" in general_info.mbh_info:
             A_mbh, E_mbh = general_info.mbh_info["get_templates"](general_info.mbh_info, general_info.general_info, only_max_ll=only_max_ll, n_gen_in=n_gen_in)
             n_mbh = A_mbh.shape[0]
             info_dict["mbh"] = {"n": n_mbh, "A": A_mbh, "E": E_mbh}
             n_gen_check_it.append(n_mbh)
+        elif include_mbhs and "cc_params" not in general_info.mbh_info:
+            include_mbhs = False
             
-        if include_gbs:
+        if include_gbs and "cc_params" in general_info.gb_info:
             A_gb, E_gb = general_info.gb_info["get_templates"](general_info.gb_info, general_info.general_info, only_max_ll=only_max_ll)
             n_gb = A_gb.shape[0]
             info_dict["gb"] = {"n": n_gb, "A": A_gb, "E": E_gb}
             n_gen_check_it.append(n_gb)
 
-        if include_psd:
+        elif include_gbs and "cc_params" not in general_info.gb_info:
+            include_gbs = False
+
+        if include_psd and "cc_A" in general_info.psd_info:
             A_psd, E_psd = general_info.psd_info["get_psd"](general_info.psd_info, general_info.general_info, only_max_ll=only_max_ll)
             n_psd = A_psd.shape[0]
             info_dict["psd"] = {"n": n_psd, "A": A_psd, "E": E_psd}
             n_gen_check_it.append(n_psd)
+        elif include_psd and "cc_A" not in general_info.psd_info:
+            include_psd = False
 
         if n_gen_in is None and len(n_gen_check_it) > 0:
             n_gen = np.max(n_gen_check_it)

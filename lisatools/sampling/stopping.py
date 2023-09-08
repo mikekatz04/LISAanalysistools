@@ -183,5 +183,46 @@ class EvidenceStopping(Stopping):
             return False
 
 
+class MPICommunicateStopping(Stopping):
+
+    def __init__(self, comm, stopper_rank, other_ranks, stop_fn=None):
+
+        self.comm = comm
+        self.rank = comm.Get_rank()
+        self.stopper_rank = stopper_rank
+        self.other_ranks = other_ranks
+        self.stop_fn = stop_fn
+
+        if not self.rank == self.stopper_rank and not self.rank in self.other_ranks:
+            raise ValueError("Rank is not available in other ranks list. Must be either stopper rank or in other ranks list.")
+
+        if self.stopper_rank == self.rank and self.stop_fn is None:
+            raise ValueError("Rank is equivalent to stopper rank but stop_fn is not provided. It must be provided.")
+
+    def __call__(self, *args, **kwargs):
+
+        if self.rank == self.stopper_rank:
+            stop = self.stop_fn(*args, **kwargs)
+
+            if stop:
+                for rank in self.other_ranks:
+                    tag = int(str(rank) + "1000")
+                    self.comm.isend(True, dest=rank, tag=tag)
+
+        else:
+            tag = int(str(self.rank) + "1000")
+            check_stop = self.comm.irecv(source=self.stopper_rank, tag=tag)
+
+            if check_stop.get_status():
+                stop = check_stop.wait()
+
+            else:
+                check_stop.cancel()
+                stop = False
+        
+        return stop
+
+
+
 
         

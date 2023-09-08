@@ -11,6 +11,8 @@ from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
 from .psdglobal import run_psd_pe
 from .mbhglobal import run_mbh_pe
 
+from lisatools.sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
+
 from gbgpu.gbgpu import GBGPU
 
 from eryn.backends import HDFBackend
@@ -42,30 +44,38 @@ class CurrentInfoGlobalFit:
         #     gb_last_sample.branches["gb_fixed"].coords[~gb_last_sample.branches["gb_fixed"].inds] = np.nan
         # # breakpoint()
 
-        mbh_reader = HDFBackend(settings["general"]["file_information"]["fp_mbh_pe"])
-        mbh_last_sample = mbh_reader.get_last_sample()
-
         psd_reader = HDFBackend(settings["general"]["file_information"]["fp_psd_pe"])
-        psd_last_sample = psd_reader.get_last_sample()
-
         self.current_info["psd"]["reader"] = psd_reader
-        self.current_info["psd"]["cc_A"] = psd_last_sample.branches["psd"].coords[0, :, 0, :2]
-        self.current_info["psd"]["cc_E"] = psd_last_sample.branches["psd"].coords[0, :, 0, 2:]
-        self.current_info["psd"]["cc_foreground_params"] = psd_last_sample.branches["galfor"].coords[0, :, 0, :]
         
-        if self.current_info["general"]["begin_new_likelihood"]:
-            del psd_last_sample.log_like
-            del psd_last_sample.log_prior
-        else:
-            self.current_info["psd"]["cc_ll"] = psd_last_sample.log_like[0]
-            self.current_info["psd"]["cc_lp"] = psd_last_sample.log_prior[0]
+        if os.path.exists(psd_reader.filename):
+            psd_last_sample = psd_reader.get_last_sample()
+            self.current_info["psd"]["cc_A"] = psd_last_sample.branches["psd"].coords[0, :, 0, :2]
+            self.current_info["psd"]["cc_E"] = psd_last_sample.branches["psd"].coords[0, :, 0, 2:]
+            self.current_info["psd"]["cc_foreground_params"] = psd_last_sample.branches["galfor"].coords[0, :, 0, :]
             
-        self.current_info["psd"]["last_state"] = psd_last_sample
-        
-        self.current_info["mbh"]["reader"] = mbh_reader
+            if self.current_info["general"]["begin_new_likelihood"]:
+                del psd_last_sample.log_like
+                del psd_last_sample.log_prior
+            else:
+                self.current_info["psd"]["cc_ll"] = psd_last_sample.log_like[0]
+                self.current_info["psd"]["cc_lp"] = psd_last_sample.log_prior[0]
+                
+            self.current_info["psd"]["last_state"] = psd_last_sample
 
+        mbh_reader = HDFBackend(settings["general"]["file_information"]["fp_mbh_pe"])
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
-        if os.path.exists(self.current_info["mbh"]["reader"].filename):
+        
+        self.current_info["mbh"]["reader"] = mbh_reader    
+
+        if os.path.exists(mbh_search_file) and not os.path.exists(mbh_reader.filename):
+            with open(mbh_search_file, "rb") as fp:
+                mbh_output_point_info = pickle.load(fp)
+
+            if "output_points_pruned" in mbh_output_point_info:
+                self.initialize_mbh_state_from_search(mbh_output_point_info)
+          
+        elif os.path.exists(self.current_info["mbh"]["reader"].filename):
+            mbh_last_sample = mbh_reader.get_last_sample()
             self.current_info["mbh"]["cc_params"] = mbh_last_sample.branches["mbh"].coords[0, :, :]
             if self.current_info["general"]["begin_new_likelihood"]:
                 del mbh_last_sample.log_like
@@ -74,14 +84,8 @@ class CurrentInfoGlobalFit:
                 self.current_info["mbh"]["cc_ll"] = mbh_last_sample.log_like[0]
                 self.current_info["mbh"]["cc_lp"] = mbh_last_sample.log_prior[0]
             self.current_info["mbh"]["last_state"] = mbh_last_sample
-        elif os.path.exists(mbh_search_file):
-            with open(mbh_search_file, "rb") as fp:
-                mbh_output_point_info = pickle.load(fp)
 
-            
-            if "output_points_pruned" in mbh_output_point_info:
-                self.initialize_mbh_state_from_search(mbh_output_point_info)
-                
+              
         # TODO: add all to GMM
         self.current_info["gb"]["reader"] = gb_reader
         if os.path.exists(self.current_info["gb"]["reader"].filename):
@@ -190,21 +194,6 @@ class GlobalFitSegment(ABC):
         raise NotImplementedError
         
 
-class MBHSearchSegment(GlobalFitSegment):
-    def __init__(self, *args, head_rank=0, **kwargs):
-
-        super().__init__(*args, **kwargs)
-
-        self.head_rank = head_rank
-        self.para_mbh_search = ParallelMBHSearchControl(self.current_info.settings_dict, self.comm, self.gpus, head_rank=self.head_rank, max_num_per_gpu=self.current_info.settings_dict["mbh"]["search_info"]["max_num_per_gpu"], verbose=self.current_info.settings_dict["mbh"]["search_info"]["verbose"])
-
-    def adjust_settings(self, settings):
-        pass
-
-    def run(self):
-        self.para_mbh_search.run_parallel_mbh_search() 
-
-
 class MPIControlGlobalFit:
     def __init__(self, current_info, comm, gpus):
 
@@ -227,10 +216,10 @@ class MPIControlGlobalFit:
         self.gb_search_rank = ranks[3]
         self.gb_search_gpu = gpus[1]
 
-        self.psd_rank = ranks[4]
+        self.psd_rank = ranks[0]
         self.psd_gpu = gpus[2]
 
-        self.mbh_rank = ranks[0]
+        self.mbh_rank = ranks[4]
         self.mbh_gpu = gpus[3]
 
         self.gmm_ranks = ranks[5:]
@@ -424,53 +413,5 @@ class MPIControlGlobalFit:
             send_tag = int(str(self.rank) + "400")
             fit_each_leaf(self.rank, self.gb_search_rank, rec_tag, send_tag, self.comm)
 
+        self.comm.Barrier()
 
-
-
-class InitialMBHMixSegment(GlobalFitSegment):
-    def __init__(self, *args, **kwargs):
-
-        super().__init__(*args, **kwargs)
-
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
-
-    def adjust_settings(self, settings):
-        pass
-
-    def run(self):
-
-        self.mpi_controller.run_global_fit(run_psd=False, run_mbhs=True, run_gbs_pe=False, run_gbs_search=False)
-
-class InitialGBSearchSegment(GlobalFitSegment):
-    def __init__(self, *args, **kwargs):
-
-        super().__init__(*args, **kwargs)
-
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
-
-    def adjust_settings(self, settings):
-        
-        settings["gb"]["search_info"]["snr_lim"] = 9.0
-        settings["gb"]["pe_info"]["use_prior_removal"] = True
-        settings["gb"]["pe_info"]["rj_refit_fraction"] = 0.1
-        settings["gb"]["pe_info"]["rj_search_fraction"] = 0.7
-        settings["gb"]["pe_info"]["rj_prior_fraction"] = 0.2
-        settings["gb"]["pe_info"]["update_iterations"] = 1
-        
-    def run(self):
-        self.mpi_controller.run_global_fit(run_psd=False, run_mbhs=True, run_gbs_pe=True, run_gbs_search=False)
-
-
-class FullPESegment(GlobalFitSegment):
-    def __init__(self, *args, **kwargs):
-
-        super().__init__(*args, **kwargs)
-
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
-
-    def adjust_settings(self, settings):
-        pass
-
-    def run(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
-
-        self.mpi_controller.run_global_fit(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)

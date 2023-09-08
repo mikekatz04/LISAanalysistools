@@ -198,6 +198,16 @@ def run_mbh_pe(gpu, comm, head_rank):
     like_mix = BasicResidualMGHLikelihood(None)
     # key permute is False
 
+    if "run_search" in mbh_info["search_info"] and mbh_info["search_info"]["run_search"]:
+        stopping_fn = mbh_info["search_info"]["stopping_function"]
+        stopping_iterations = mbh_info["search_info"]["stopping_iterations"]
+        thin_by = mbh_info["search_info"]["thin_by"]
+
+    else:
+        stopping_fn = None
+        stopping_iterations = -1
+        thin_by = mbh_info["pe_info"]["thin_by"]
+
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
         ndims,  # assumes ndim_max
@@ -214,6 +224,8 @@ def run_mbh_pe(gpu, comm, head_rank):
         branch_names=branch_names,
         update_fn=update,  # stop_converge_mix,
         update_iterations=1,
+        stopping_fn=stopping_fn,
+        stopping_iterations=stopping_iterations,
         provide_groups=False,
         provide_supplimental=False,
     )
@@ -223,7 +235,7 @@ def run_mbh_pe(gpu, comm, head_rank):
     mempool.free_all_blocks()
 
     print("MBH CHECK 3")
-    out = sampler_mix.run_mcmc(start_state, nsteps_mix, progress=mbh_info["pe_info"]["progress"], thin_by=mbh_info["pe_info"]["thin_by"], store=True)
+    out = sampler_mix.run_mcmc(start_state, nsteps_mix, progress=mbh_info["pe_info"]["progress"], thin_by=thin_by, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
 if __name__ == "__main__":

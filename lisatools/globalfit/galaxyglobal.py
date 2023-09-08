@@ -530,6 +530,15 @@ def run_gb_pe(gpu, comm, head_rank):
     # state_mix.random_state = np.random.get_state()
     # state_mix.log_prior = np.zeros_like(state_mix.log_like)
     # backend.save_step(state_mix, np.zeros((ntemps_pe, nwalkers_pe), dtype=int), rj_accepted=np.zeros((ntemps_pe, nwalkers_pe), dtype=int))
+    if "run_search" in gb_info["pe_info"] and gb_info["pe_info"]["run_search"]:
+        stopping_fn = gb_info["pe_info"]["stopping_function"]
+        stopping_iterations = gb_info["pe_info"]["stopping_iterations"]
+        thin_by = gb_info["pe_info"]["thin_by"]
+
+    else:
+        stopping_fn = None
+        stopping_iterations = -1
+        thin_by = gb_info["pe_info"]["thin_by"]
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
@@ -550,7 +559,9 @@ def run_gb_pe(gpu, comm, head_rank):
         update_iterations=gb_info["pe_info"]["update_iterations"],
         provide_groups=True,
         provide_supplimental=True,
-        track_moves=False
+        track_moves=False,
+        stopping_fn=stopping_fn,
+        stopping_iterations=stopping_iterations,
     )
 
     nsteps_mix = gb_info["pe_info"]["nsteps"]
@@ -1268,6 +1279,13 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     run = True
     while run:
         try:
+
+            if "run_search" in gb_info["search_info"] and gb_info["search_info"]["run_search"]:
+                stop = gb_info["search_info"]["stopping_fn"](None, None, None)
+                
+                if stop:
+                    break
+                    
             comm.send({"send": True}, dest=head_rank, tag=20)
             print("waiting for data")
             incoming_data = comm.recv(source=head_rank, tag=27)
