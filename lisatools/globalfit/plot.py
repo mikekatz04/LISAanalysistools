@@ -9,6 +9,8 @@ def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=Fals
 
     plt.loglog(current_info.general_info["fd"], 2 * current_info.general_info["df"] * np.abs(generated_info_0["data"][0]) ** 2)
     
+    print("nleaves:", current_info.gb_info["reader"].get_nleaves()["gb_fixed"][-1].mean(axis=-1))
+        
     if add_gbs:
         generated_info_gb = current_info.get_data_psd(only_max_ll=True, include_gbs=False, include_mbhs=True, **kwargs)
         plt.loglog(current_info.general_info["fd"], 2 * current_info.general_info["df"] * np.abs(generated_info_1["data"][0] - generated_info_gb["data"][0]) ** 2)

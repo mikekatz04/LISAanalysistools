@@ -163,10 +163,12 @@ def run_mbh_pe(gpu, comm, head_rank):
     start_state.log_like[0] = start_ll_check
     branch_names = mbh_info["pe_info"]["branch_names"]
 
-    if hasattr(last_sample, "betas"):
-        betas = last_sample.betas
+    if hasattr(start_state, "betas") and start_state.betas is not None:
+        betas = start_state.betas
     else:
         betas = make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps_pe)
+
+    start_state.betas = betas
 
     wave_gen = BBHWaveformFD(
         **mbh_info["initialize_kwargs"]
@@ -200,6 +202,8 @@ def run_mbh_pe(gpu, comm, head_rank):
 
     if "run_search" in mbh_info["search_info"] and mbh_info["search_info"]["run_search"]:
         stopping_fn = mbh_info["search_info"]["stopping_function"]
+        if hasattr(stopping_fn, "add_comm"):
+            stopping_fn.add_comm(comm)
         stopping_iterations = mbh_info["search_info"]["stopping_iterations"]
         thin_by = mbh_info["search_info"]["thin_by"]
 

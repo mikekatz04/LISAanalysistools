@@ -585,6 +585,8 @@ class ParallelMBHSearchControl:
         else:
             self.search_process_control()
 
+        self.comm.Barrier()
+
     def prune_via_matching(self):
         if os.path.exists(self.output_points_file):
             with open(self.output_points_file, "rb") as fp:

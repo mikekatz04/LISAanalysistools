@@ -7,6 +7,7 @@ from .hdfbackend import HDFBackend as GBHDFBackend
 from .state import State
 from bbhx.waveformbuild import BBHWaveformFD
 
+from .run import *
 from .mbhsearch import ParallelMBHSearchControl
 from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
 from .psdglobal import run_psd_pe
@@ -82,13 +83,11 @@ class InitialMBHMixSegment(GlobalFitSegment):
         other_ranks = [self.mpi_controller.psd_rank]
 
         # had to go after initialization of mpi because it needs the ranks
-        if self.mpi_controller.rank == self.mpi_controller.mbh_rank:
-            stop_fn = SearchConvergeStopping(**self.current_info.mbh_info["search_info"]["stop_kwargs"])
-            self.current_info.mbh_info["search_info"]["stopping_function"] = MPICommunicateStopping(self.comm, stopper_rank, other_ranks, stop_fn=stop_fn)
+        stop_fn = SearchConvergeStopping(**self.current_info.mbh_info["search_info"]["stop_kwargs"])
+        self.current_info.mbh_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
 
-        elif self.mpi_controller.rank == self.mpi_controller.psd_rank:
-            self.current_info.psd_info["search_info"]["stopping_function"] = MPICommunicateStopping(self.comm, stopper_rank, other_ranks, stop_fn=None)
-
+        self.current_info.psd_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        
         self.mpi_controller.run_global_fit(run_psd=True, run_mbhs=True, run_gbs_pe=False, run_gbs_search=False)
 
 
@@ -101,7 +100,8 @@ class InitialGBSearchSegment(GlobalFitSegment):
 
     def adjust_settings(self, settings):
         
-        settings["gb"]["search_info"]["snr_lim"] = 9.0
+        #  settings["gb"]["search_info"]["snr_lim"] = 9.0
+        settings["gb"]["search_info"]["snr_lim"] = 7.0
         settings["gb"]["pe_info"]["use_prior_removal"] = True
         settings["gb"]["pe_info"]["rj_refit_fraction"] = 0.1
         settings["gb"]["pe_info"]["rj_search_fraction"] = 0.7
@@ -136,18 +136,13 @@ class InitialGBSearchSegment(GlobalFitSegment):
         ]
 
         # had to go after initialization of mpi because it needs the ranks
-        if self.mpi_controller.rank == self.mpi_controller.gb_rank:
-            stop_fn = SearchConvergeStopping(**self.current_info.gb_info["pe_info"]["stop_kwargs"])
-            self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(self.comm, stopper_rank, other_ranks, stop_fn=stop_fn)
+        stop_fn = SearchConvergeStopping(**self.current_info.gb_info["pe_info"]["stop_kwargs"])
+        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        self.current_info.psd_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.mbh_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
 
-        elif self.mpi_controller.rank == self.mpi_controller.psd_rank:
-            self.current_info.psd_info["search_info"]["stopping_function"] = MPICommunicateStopping(self.comm, stopper_rank, other_ranks, stop_fn=None)
-        elif self.mpi_controller.rank == self.mpi_controller.gb_search_rank:
-            self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(self.comm, stopper_rank, other_ranks, stop_fn=None)
-        elif self.mpi_controller.rank == self.mpi_controller.mbh_rank:
-            self.current_info.mbh_info["search_info"]["stopping_function"] = MPICommunicateStopping(self.comm, stopper_rank, other_ranks, stop_fn=None)
-
-        self.mpi_controller.run_global_fit(run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=False)
+        self.mpi_controller.run_global_fit(run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True)
 
 
 class FullPESegment(GlobalFitSegment):

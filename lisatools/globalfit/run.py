@@ -147,6 +147,18 @@ class CurrentInfoGlobalFit:
 
         print("DONE with SETUP")
 
+    
+    def initialize_mbh_state_from_search(self, mbh_output_point_info):
+        output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
+        coords = np.zeros((self.current_info["mbh"]["pe_info"]["ntemps"], self.current_info["mbh"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.current_info["mbh"]["pe_info"]["ndim"]))
+        assert output_points_pruned.shape[0] >= self.current_info["mbh"]["pe_info"]["nwalkers"]
+        
+        coords[:] = output_points_pruned[None, :self.current_info["mbh"]["pe_info"]["nwalkers"]]
+
+        self.current_info["mbh"]["cc_params"] = coords[0]
+        self.current_info["mbh"]["last_state"] = State({"mbh": coords}, log_like=np.zeros((self.current_info["mbh"]["pe_info"]["ntemps"], self.current_info["mbh"]["pe_info"]["nwalkers"])))
+
+
     def get_data_psd(self, **kwargs):
         return self.general_info["generate_current_state"](self, **kwargs) 
 
@@ -216,10 +228,10 @@ class MPIControlGlobalFit:
         self.gb_search_rank = ranks[3]
         self.gb_search_gpu = gpus[1]
 
-        self.psd_rank = ranks[0]
+        self.psd_rank = ranks[4]
         self.psd_gpu = gpus[2]
 
-        self.mbh_rank = ranks[4]
+        self.mbh_rank = ranks[0]
         self.mbh_gpu = gpus[3]
 
         self.gmm_ranks = ranks[5:]
@@ -357,14 +369,6 @@ class MPIControlGlobalFit:
 
         else:
             mbh_check.cancel()
-
-    def initialize_mbh_state_from_search(self, mbh_output_point_info):
-        output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).reshape(1, 0, 2)
-        coords = np.zeros((self.current_info["mbh"]["pe_info"]["ntemps"], self.current_info["mbh"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.current_info["mbh"]["pe_info"]["ndim"]))
-        coords[:] = output_points_pruned[None, :]
-
-        self.current_info["mbh"]["cc_params"] = coords[0]
-        self.current_info["mbh"]["last_state"] = State({"mbh": coords})
 
     def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
         if self.rank == self.head_rank:

@@ -200,6 +200,9 @@ def run_psd_pe(gpu, comm, head_rank):
     else:
         betas = make_ladder(sum(list(psd_info["pe_info"]["ndims"].values())), ntemps=ntemps_pe)
 
+        last_sample.betas = betas
+
+    assert not np.all(betas == 0.0)
     assert len(betas) == ntemps_pe
 
     branch_names = psd_info["pe_info"]["branch_names"]
@@ -224,6 +227,8 @@ def run_psd_pe(gpu, comm, head_rank):
 
     if "run_search" in psd_info["search_info"] and psd_info["search_info"]["run_search"]:
         stopping_fn = psd_info["search_info"]["stopping_function"]
+        if hasattr(stopping_fn, "add_comm"):
+            stopping_fn.add_comm(comm)
         stopping_iterations = psd_info["search_info"]["stopping_iterations"]
         thin_by = psd_info["search_info"]["thin_by"]
 

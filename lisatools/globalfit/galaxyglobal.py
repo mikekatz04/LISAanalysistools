@@ -532,6 +532,10 @@ def run_gb_pe(gpu, comm, head_rank):
     # backend.save_step(state_mix, np.zeros((ntemps_pe, nwalkers_pe), dtype=int), rj_accepted=np.zeros((ntemps_pe, nwalkers_pe), dtype=int))
     if "run_search" in gb_info["pe_info"] and gb_info["pe_info"]["run_search"]:
         stopping_fn = gb_info["pe_info"]["stopping_function"]
+
+        if hasattr(stopping_fn, "add_comm"):
+            stopping_fn.add_comm(comm)
+
         stopping_iterations = gb_info["pe_info"]["stopping_iterations"]
         thin_by = gb_info["pe_info"]["thin_by"]
 
@@ -1281,11 +1285,14 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
         try:
 
             if "run_search" in gb_info["search_info"] and gb_info["search_info"]["run_search"]:
-                stop = gb_info["search_info"]["stopping_fn"](None, None, None)
+                if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
+                    gb_info["search_info"]["stopping_function"].add_comm(comm)
+                
+                stop = gb_info["search_info"]["stopping_function"](None, None, None)
                 
                 if stop:
                     break
-                    
+
             comm.send({"send": True}, dest=head_rank, tag=20)
             print("waiting for data")
             incoming_data = comm.recv(source=head_rank, tag=27)

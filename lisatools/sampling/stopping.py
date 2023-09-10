@@ -185,21 +185,27 @@ class EvidenceStopping(Stopping):
 
 class MPICommunicateStopping(Stopping):
 
-    def __init__(self, comm, stopper_rank, other_ranks, stop_fn=None):
+    def __init__(self, stopper_rank, other_ranks, stop_fn=None):
 
-        self.comm = comm
-        self.rank = comm.Get_rank()
         self.stopper_rank = stopper_rank
         self.other_ranks = other_ranks
         self.stop_fn = stop_fn
 
-        if not self.rank == self.stopper_rank and not self.rank in self.other_ranks:
-            raise ValueError("Rank is not available in other ranks list. Must be either stopper rank or in other ranks list.")
-
-        if self.stopper_rank == self.rank and self.stop_fn is None:
-            raise ValueError("Rank is equivalent to stopper rank but stop_fn is not provided. It must be provided.")
+    def add_comm(self, comm):
+        self.comm = comm
 
     def __call__(self, *args, **kwargs):
+
+        if not hasattr(self, "comm"):
+            raise ValueError("Must add comm via add_comm method before __call__ is used.")
+
+        if not hasattr(self, "rank"):
+            self.rank = self.comm.Get_rank()
+            if not self.rank == self.stopper_rank and not self.rank in self.other_ranks:
+                raise ValueError("Rank is not available in other ranks list. Must be either stopper rank or in other ranks list.")
+
+            if self.stopper_rank == self.rank and self.stop_fn is None:
+                raise ValueError("Rank is equivalent to stopper rank but stop_fn is not provided. It must be provided.")
 
         if self.rank == self.stopper_rank:
             stop = self.stop_fn(*args, **kwargs)
