@@ -241,6 +241,9 @@ def run_mbh_pe(gpu, comm, head_rank):
     print("MBH CHECK 3")
     out = sampler_mix.run_mcmc(start_state, nsteps_mix, progress=mbh_info["pe_info"]["progress"], thin_by=thin_by, store=True)
     print("ending mix ll best:", out.log_like.max(axis=-1))
+    # communicate end of run to head process
+    comm.send({"finish_run": True}, dest=head_rank, tag=70)
+    return
 
 if __name__ == "__main__":
     import argparse

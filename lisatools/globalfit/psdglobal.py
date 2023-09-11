@@ -275,6 +275,10 @@ def run_psd_pe(gpu, comm, head_rank):
     out = sampler_mix.run_mcmc(state_mix, nsteps_mix, progress=psd_info["pe_info"]["progress"], thin_by=thin_by, store=True)
     print("ending psd ll best:", out.log_like.max(axis=-1))
 
+    # communicate end of run to head process
+    comm.send({"finish_run": True}, dest=head_rank, tag=60)
+    return
+
 if __name__ == "__main__":
     import argparse
     """parser = argparse.ArgumentParser()

@@ -295,11 +295,14 @@ class MPIControlGlobalFit:
         if run_gbs_search:
             self.comm.send(self.current_info, dest=self.gb_search_rank, tag=2929)
 
-    def refit_check(self, update_refit):
+    def refit_check(self, runs_going, update_refit):
+        if "gbs_search" not in runs_going:
+            return
+
         # check if refit is ready
-        refit_check = self.comm.irecv(source=self.gb_search_rank, tag=20)
-        if refit_check.get_status():
-            refit_dict = refit_check.wait()
+        refit_ch = self.comm.irecv(source=self.gb_search_rank, tag=20)
+        if refit_ch.get_status():
+            refit_dict = refit_ch.wait()
             print("CHECK", refit_dict)
             if "receive" in refit_dict and refit_dict["receive"]:
                 update_refit = False
@@ -309,15 +312,23 @@ class MPIControlGlobalFit:
             if "send" in refit_dict and refit_dict["send"]:
                 self.comm.send(self.current_info, dest=self.gb_search_rank, tag=27)
 
+            if "finished_run" in refit_dict and refit_dict["finished_run"]:
+                runs_going.remove("gbs_search")
+                for rank in self.gmm_ranks:
+                    rec_tag = int(str(rank) + "67676")
+                    self.comm.send("end", dest=rank, tag=rec_tag)
+
         else:
-            refit_check.cancel()
+            refit_ch.cancel()
 
         return update_refit
 
-    def gb_check(self, update_refit):
-        gb_check = self.comm.irecv(source=self.gb_pe_rank, tag=50)
-        if gb_check.get_status():
-            gb_req = gb_check.wait()
+    def gb_check(self, runs_going, update_refit):
+        if "gbs_pe" not in runs_going:
+            return
+        gb_ch = self.comm.irecv(source=self.gb_pe_rank, tag=50)
+        if gb_ch.get_status():
+            gb_req = gb_ch.wait()
 
             if "receive" in gb_req and gb_req["receive"]:
                 gb_dict = self.comm.recv(source=self.gb_pe_rank, tag=58)
@@ -333,12 +344,19 @@ class MPIControlGlobalFit:
                     # self.comm.send(True, dest=self.gb_search_rank, tag=1010)
                     # self.comm.send(self.current_info, dest=self.gb_search_rank, tag=2929)
                 self.have_started_refit = True
+
+            if "finished_run" in gb_req and gb_req["finished_run"]:
+                runs_going.remove("gbs_pe")
+
         else:
-            gb_check.cancel()
+            gb_ch.cancel()
     
         return update_refit
 
-    def psd_check(self):
+    def psd_check(self, runs_going):
+        if "psd" not in runs_going:
+            return
+
         psd_check = self.comm.irecv(source=self.psd_rank, tag=60)
         if psd_check.get_status():
             psd_req = psd_check.wait()
@@ -351,10 +369,16 @@ class MPIControlGlobalFit:
             if "send" in psd_req and psd_req["send"]:
                 self.comm.send(self.current_info, dest=self.psd_rank, tag=61)
 
+            if "finished_run" in psd_req and psd_req["finished_run"]:
+                runs_going.remove("psd")
+
         else:
             psd_check.cancel()
 
-    def mbh_check(self):
+    def mbh_check(self, runs_going):
+        if "mbhs" not in runs_going:
+            return
+            
         mbh_check = self.comm.irecv(source=self.mbh_rank, tag=70)
         if mbh_check.get_status():
             mbh_req = mbh_check.wait()
@@ -366,6 +390,9 @@ class MPIControlGlobalFit:
 
             if "send" in mbh_req and mbh_req["send"]:
                 self.comm.send(self.current_info, dest=self.mbh_rank, tag=71)
+
+            if "finished_run" in mbh_req and mbh_req["finished_run"]:
+                runs_going.remove("mbhs")
 
         else:
             mbh_check.cancel()
@@ -379,22 +406,37 @@ class MPIControlGlobalFit:
             self.share_start_info(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)
 
             update_refit = True
-            while True:
+
+            # populate which runs are going
+            runs_going = []
+            if run_psd:
+                runs_going.append("psd")
+            if run_gbs_pe:
+                runs_going.append("gbs_pe")
+            if run_gbs_search:
+                runs_going.append("gbs_search")
+            if run_mbhs:
+                runs_going.append("mbhs")
+
+            if len(runs_going) == 0:
+                raise ValueError("No runs are going to be launched because all options for runs are False.")
+
+            while len(runs_going) > 0:
                 time.sleep(1)
 
                 # print("checking again", update_refit)
                 
                 if update_refit:
-                    update_refit = self.refit_check(update_refit)
+                    update_refit = self.refit_check(runs_going, update_refit)
 
                 # check for update from GBs
-                update_refit = self.gb_check(update_refit)
+                update_refit = self.gb_check(runs_going, update_refit)
 
                 # check for update from PSD
-                self.psd_check()
+                self.psd_check(runs_going)
 
                 # check for update from MBH
-                self.mbh_check()
+                self.mbh_check(runs_going)
         
         elif self.rank == self.gb_pe_rank and run_gbs_pe:
             fin = run_gb_pe(self.gb_pe_gpu, self.comm, self.head_rank)

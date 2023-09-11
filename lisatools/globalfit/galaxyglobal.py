@@ -580,6 +580,10 @@ def run_gb_pe(gpu, comm, head_rank):
         state_mix, nsteps_mix, store=True, progress=gb_info["pe_info"]["progress"], thin_by=gb_info["pe_info"]["thin_by"]
     )
     print("ending mix ll best:", out.log_like.max(axis=-1))
+
+    # communicate end of run to head process
+    comm.send({"finish_run": True}, dest=head_rank, tag=50)
+    return
     
 
 def shuffle_along_axis(a, axis, xp=None):
@@ -729,7 +733,7 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
         if isinstance(check, str):
             if check == "end":
                 run_process = False
-                continue
+            continue
 
         assert isinstance(check, dict)
 
@@ -1352,6 +1356,10 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             # print(iter_i, f"Number of bands running: {band_inds_running.sum().item()}, found {num_binaries_found_this_iteration} binaries. Total binaries: {num_binaries_total}")
 
             # data_in, psd_in = run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration, starting_points)
+
+    # communicate end of run to head process
+    comm.send({"finish_run": True}, dest=head_rank, tag=20)
+    return
 
 
 if __name__ == "__main__":
