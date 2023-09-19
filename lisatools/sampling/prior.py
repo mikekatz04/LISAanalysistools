@@ -11,11 +11,84 @@ try:
 except (ModuleNotFoundError, ImportError) as e:
     pass
 
+class AmplitudeFrequencySNRPrior:
+    def __init__(self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs):
+        self.rho_star = rho_star
+        self.frequency_prior = frequency_prior
+
+        self.transform = AmplitudeFromSNR(L, Tobs, use_cupy=use_cupy, **noise_kwargs)
+        self.snr_prior = SNRPrior(rho_star, use_cupy=use_cupy)
+        
+        # must be after transform and snr_prior due to setter
+        self.use_cupy = use_cupy
+        
+    @property
+    def use_cupy(self):
+        return self._use_cupy
+
+    @use_cupy.setter
+    def use_cupy(self, use_cupy):
+        self._use_cupy = use_cupy
+        self.transform.use_cupy = use_cupy
+        self.snr_prior.use_cupy = use_cupy
+        self.frequency_prior.use_cupy = use_cupy
+
+    def pdf(self, *args, **noise_kwargs):
+        return np.exp(self.logpdf(*args, **noise_kwargs))
+
+    def logpdf(self, amp, f0_ms, **noise_kwargs):
+
+        xp = np if not self.use_cupy else cp
+
+        f0 = f0_ms / 1e3
+        rho, f0 = self.transform.forward(amp, f0, **noise_kwargs)
+
+        rho_pdf = self.snr_prior.pdf(rho)
+
+        Jac = xp.abs(rho / amp)
+
+        logpdf_amp = np.log(np.abs(Jac * rho_pdf))
+        logpdf_f = self.frequency_prior.logpdf(f0_ms)
+
+        return logpdf_amp + logpdf_f
+
+    def rvs(self, size=1, f0_input=None, **noise_kwargs):
+        if isinstance(size, int):
+            size = (size,)
+
+        xp = np if not self.use_cupy else cp
+
+        if f0_input is None:
+            f0_ms = self.frequency_prior.rvs(size=size)
+        else:
+            f0_ms = f0_input
+            assert f0_input.shape[:-1] == size
+        
+        f0 = f0_ms / 1e3
+
+        rho = self.snr_prior.rvs(size=size)
+
+        amp, _ = self.transform(rho, f0, **noise_kwargs)
+
+        return (amp, f0_ms)
+
+
+
+
+
 
 class SNRPrior:
     def __init__(self, rho_star, use_cupy=False):
         self.rho_star = rho_star
         self.use_cupy = use_cupy
+
+    @property
+    def use_cupy(self):
+        return self._use_cupy
+
+    @use_cupy.setter
+    def use_cupy(self, use_cupy):
+        self._use_cupy = use_cupy
 
     def pdf(self, rho):
         
@@ -83,20 +156,133 @@ class SNRPrior:
 
 
 class AmplitudeFromSNR:
-    def __init__(self, L, Tobs, **noise_kwargs):
+    def __init__(self, L, Tobs, fd=None, use_cupy=False, **noise_kwargs):
         self.f_star = 1 / (2. * np.pi * L) * C_SI
         self.Tobs = Tobs
         self.noise_kwargs = noise_kwargs
+        
+        xp = np if not use_cupy else cp
+        if fd is not None:
+            self.fd = xp.asarray(fd)
+        else:
+            self.fd = fd
 
-    def __call__(self, rho, f0):
-        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / get_sensitivity(f0, sens_fn="noisepsd_AE", **self.noise_kwargs))
+        # got to be after fd
+        self.use_cupy = use_cupy
+
+    @property
+    def use_cupy(self):
+        return self._use_cupy
+
+    @use_cupy.setter
+    def use_cupy(self, use_cupy):
+        self._use_cupy = use_cupy
+        if use_cupy and not isinstance(self.fd, cp.ndarray):
+            self.fd = cp.asarray(self.fd)
+        elif not use_cupy and isinstance(self.fd, cp.ndarray):
+            self.fd = self.fd.get()
+
+    def interp_psd(self, f0, psds, walker_inds=None):
+        assert self.fd is not None
+        xp = np if not self.use_cupy else cp
+        psds = xp.atleast_2d(psds)
+        
+        if xp == cp and not isinstance(self.fd, cp.ndarray):
+            self.fd = xp.asarray(self.fd)
+        try:
+            inds_fd = xp.searchsorted(self.fd, f0, side="right") - 1
+        except:
+            breakpoint()
+        if walker_inds is None:
+            walker_inds = xp.zeros_like(f0, dtype=int)
+
+        new_psds = (psds[(walker_inds, inds_fd + 1)] - psds[(walker_inds, inds_fd)]) / (self.fd[inds_fd + 1] - self.fd[inds_fd]) * (f0 - self.fd[inds_fd]) + psds[(walker_inds, inds_fd)]
+        return new_psds
+
+    def __call__(self, rho, f0, **noise_kwargs):
+
+        xp = np if not self.use_cupy else cp
+
+        if noise_kwargs == {}:
+            noise_kwargs = self.noise_kwargs
+
+        Sn_f = self.get_Sn_f(f0, **noise_kwargs)
+
+        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / Sn_f)
         amp = rho / factor
         return (amp, f0)
 
-    def forward(self, amp, f0):
-        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / get_sensitivity(f0, sens_fn="noisepsd_AE", **self.noise_kwargs))
+    def get_Sn_f(self, f0, psds=None, walker_inds=None, Sn_f=None, **noise_kwargs):
+        if Sn_f is not None:
+            assert len(f0) == len(Sn_f)
+            assert isinstance(f0, type(Sn_f))
+
+        elif psds is not None:
+            Sn_f = self.interp_psd(f0, psds, walker_inds=walker_inds)
+        else:
+            Sn_f = get_sensitivity(f0, **noise_kwargs)
+
+        return Sn_f
+
+    def forward(self, amp, f0, **noise_kwargs):
+
+        if noise_kwargs == {}:
+            noise_kwargs = self.noise_kwargs
+
+        Sn_f = self.get_Sn_f(f0, **noise_kwargs)
+
+        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / Sn_f)
         rho = amp * factor
         return (rho, f0)
+
+
+class GBPriorWrap:
+    def __init__(self, ndim, full_prior_container, gen_frequency_alone=False):
+        self.base_prior = full_prior_container
+        self.use_cupy = full_prior_container.use_cupy
+        self.ndim = ndim
+        self.gen_frequency_alone = gen_frequency_alone
+
+        if gen_frequency_alone:
+            self.keys_sep = [1, 2, 3, 4, 5, 6, 7]
+        else:
+            self.keys_sep = [2, 3, 4, 5, 6, 7]
+
+    @property
+    def priors_in(self):
+        return self.base_prior.priors_in
+
+    def logpdf(self, x, **noise_kwargs):
+        xp = np if not self.use_cupy else cp
+        assert x.shape[1] == self.ndim and x.ndim == 2
+
+        logpdf_everything_else = self.base_prior.logpdf(x, keys=self.keys_sep)
+
+        f0 = xp.asarray(x[:, 1])
+        amp = xp.asarray(x[:, 0])
+        logpdf_A_f = self.base_prior.priors_in[(0, 1)].logpdf(amp, f0, **noise_kwargs)
+
+        return logpdf_A_f + logpdf_everything_else
+
+    def rvs(self, size=1, ignore_amp=False, **kwargs):
+        xp = np if not self.use_cupy else cp
+        if isinstance(size, int):
+            size = (size,)
+        
+        arr = xp.zeros(size + (self.ndim,)).reshape(-1, self.ndim)
+
+        diff = self.ndim - len(self.keys_sep)
+        assert diff >= 0
+
+        arr[:, :] = self.base_prior.rvs(size, keys=self.keys_sep).reshape(-1, self.ndim)
+
+        if not ignore_amp:
+            f0_input = arr[:, 1] if self.gen_frequency_alone else None
+            arr[:, :diff] = xp.asarray(self.base_prior.priors_in[(0, 1)].rvs(size, f0_input=f0_input, **kwargs)).reshape(diff, -1).T
+
+        arr = arr.reshape(size + (self.ndim,))
+        return arr
+
 
 class FullGaussianMixtureModel:
     def __init__(self, gb, weights, means, covs, invcovs, dets, mins, maxs, limit=10.0, use_cupy=False):

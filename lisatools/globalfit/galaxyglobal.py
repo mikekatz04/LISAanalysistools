@@ -17,11 +17,12 @@ mempool = xp.get_default_memory_pool()
 
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
-from lisatools.sampling.prior import FullGaussianMixtureModel
+from lisatools.sampling.prior import FullGaussianMixtureModel, GBPriorWrap
 from eryn.moves.tempering import make_ladder
 from eryn.state import BranchSupplimental
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.ensemble import EnsembleSampler
+from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
 
 import subprocess
 
@@ -184,6 +185,14 @@ class UpdateNewResiduals(Update):
         xp.get_default_memory_pool().free_all_blocks()
         new_ll = self.mgh.get_ll(include_psd_info=True)
         last_sample.log_like[0, :] = new_ll[:]
+
+        ntemps, nwalkers, nleaves_max = last_sample.branches["gb_fixed"].inds.shape
+        walker_inds = np.repeat(np.arange(nwalkers)[:, None], ntemps * nleaves_max, axis=-1).reshape(nwalkers, ntemps, nleaves_max).transpose(1, 0, 2)
+        
+        per_source_lp = np.zeros_like(last_sample.branches["gb_fixed"].inds, dtype=np.float64)
+        per_source_lp[last_sample.branches["gb_fixed"].inds] = self.gpu_priors["gb_fixed"].logpdf(last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds]).get()
+        new_lp = per_source_lp.sum(axis=-1)
+        last_sample.log_prior[:] = new_lp[:]
         return
 
 def make_gmm(gb, gmm_info_in):
@@ -283,13 +292,26 @@ def run_gb_pe(gpu, comm, head_rank):
     from gbgpu.utils.utility import get_N
     band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
 
-
     if last_sample.branches["gb_fixed"].inds[0].sum() > 0:
+        
+        # from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
+        # L = 2.5e9
+        # amp_transform = AmplitudeFromSNR(L, gf_information.general_info['Tobs'], fd=gf_information.general_info["fd"])
+
+        # walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1).reshape(nwalkers_pe, ntemps_pe, nleaves_max).transpose(1, 0, 2)[last_sample.branches["gb_fixed"].inds]
+        
+        # coords_fix = last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds]
+        # coords_fix[:, 0], _ = amp_transform(coords_fix[:, 0], coords_fix[:, 1] / 1e3, psds=psd[0], walker_inds=walker_inds)
+        
+        # last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds, 0] = coords_fix[:, 0]
+
         coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[0,
             last_sample.branches["gb_fixed"].inds[0]
         ]
+
+        walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)[last_sample.branches["gb_fixed"].inds[0]]
         
-        check = priors["gb_fixed"].logpdf(coords_out_gb_fixed)
+        check = priors["gb_fixed"].logpdf(coords_out_gb_fixed, psds=psd[0], walker_inds=walker_inds)
 
         if np.any(np.isinf(check)):
             raise ValueError("Starting priors are inf.")
@@ -363,7 +385,7 @@ def run_gb_pe(gpu, comm, head_rank):
     for key, item in gpu_priors_in.items():
         item.use_cupy = True
 
-    gpu_priors = {"gb_fixed": ProbDistContainer(gpu_priors_in, use_cupy=True)}
+    gpu_priors = {"gb_fixed": GBPriorWrap(gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
 
     gb_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
@@ -500,7 +522,7 @@ def run_gb_pe(gpu, comm, head_rank):
     branch_names = ["gb_fixed"]
 
     update = UpdateNewResiduals(
-        mgh, gb, comm, head_rank, gpu_priors, verbose=False
+        mgh, gb, comm, head_rank, gpu_priors, verbose=True
     )
 
     ndims = {"gb_fixed": gb_info["pe_info"]["ndim"]}
@@ -816,7 +838,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
     
     band_inds_here = xp.where(xp.asarray(band_inds_running))[0]
 
-    new_points = priors_good.rvs(size=(ntemps, nwalkers, len(band_inds_here)))
+    new_points = priors_good.rvs(size=(ntemps, nwalkers, len(band_inds_here)))  # , psds=psd_in[0][None, :])
 
     fix = xp.any(xp.isinf(new_points), axis=-1) | xp.any(xp.isnan(new_points), axis=-1)
     while xp.any(fix):
@@ -828,9 +850,17 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
     prev_logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
     assert not xp.any(xp.isinf(prev_logp))
     new_points_with_fs = new_points.copy()
+
+    L = 2.5e9
+    amp_transform = AmplitudeFromSNR(L, current_info.general_info['Tobs'], fd=current_info.general_info["fd"], use_cupy=True)
+
+    original_snr_params = new_points_with_fs[:, :, :, 0].copy()
     new_points_with_fs[:, :, :, 1] = (f0_maxs[band_inds_here] - f0_mins[band_inds_here]) * new_points_with_fs[:, :, :, 1] + f0_mins[band_inds_here]
     new_points_with_fs[:, :, :, 2] = (fdot_maxs[band_inds_here] - fdot_mins[band_inds_here]) * new_points_with_fs[:, :, :, 2] + fdot_mins[band_inds_here]
+    new_points_with_fs[:, :, :, 0] = amp_transform(new_points_with_fs[:, :, :, 0].flatten(), new_points_with_fs[:, :, :, 1].flatten() / 1e3, psds=psd_in[0][None, :])[0].reshape(new_points_with_fs.shape[:-1])
 
+    lp_factors = np.log(original_snr_params / new_points_with_fs[:, :, :, 0])
+    prev_logp += lp_factors
     transform_fn = gb_info["transform"]
 
     new_points_in = transform_fn.both_transforms(new_points_with_fs.reshape(-1, ndim), xp=xp).reshape(new_points_with_fs.shape[:-1] + (ndim + 1,)).reshape(-1, ndim + 1)
@@ -892,13 +922,19 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
             new_points_dict, factors = move_proposal.get_proposal({"gb_fixed": s_in}, {"gb_fixed": c_in}, xp.random)
             new_points = new_points_dict["gb_fixed"].reshape(ntemps, int(nwalkers/2), num_still_going_here, -1)
             logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
+            
             factors = factors.reshape(logp.shape)
             keep_logp = ~xp.isinf(logp)
 
             new_points_with_fs = new_points.copy()
 
+            original_snr_params = new_points_with_fs[:, :, :, 0].copy()
             new_points_with_fs[:, :, :, 1] = (f0_maxs[None, None, band_inds_here[still_going_here]] - f0_mins[None, None, band_inds_here[still_going_here]]) * new_points_with_fs[:, :, :, 1] + f0_mins[None, None, band_inds_here[still_going_here]]
             new_points_with_fs[:, :, :, 2] = (fdot_maxs[None, None, band_inds_here[still_going_here]] - fdot_mins[None, None, band_inds_here[still_going_here]]) * new_points_with_fs[:, :, :, 2] + fdot_mins[None, None, band_inds_here[still_going_here]]
+            new_points_with_fs[:, :, :, 0] = amp_transform(new_points_with_fs[:, :, :, 0].flatten(), new_points_with_fs[:, :, :, 1].flatten() / 1e3, psds=psd_in[0][None, :])[0].reshape(new_points_with_fs.shape[:-1])
+
+            lp_factors = np.log(original_snr_params / new_points_with_fs[:, :, :, 0])
+            logp += lp_factors
 
             new_points_with_fs_keep = new_points_with_fs[keep_logp]
             new_points_in = transform_fn.both_transforms(new_points_with_fs_keep, xp=xp)
@@ -1030,7 +1066,8 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
                 coords_with_fs = old_points.transpose(2, 0, 1, 3)[still_going_here, 0, :].copy()
                 coords_with_fs[:, :, 1] = (f0_maxs[band_inds_here[still_going_here]] - f0_mins[band_inds_here][still_going_here])[:, None] * coords_with_fs[:, :, 1] + f0_mins[band_inds_here[still_going_here]][:, None]
                 coords_with_fs[:, :, 2] = (fdot_maxs[band_inds_here[still_going_here]] - fdot_mins[band_inds_here][still_going_here])[:, None] * coords_with_fs[:, :, 2] + fdot_mins[band_inds_here[still_going_here]][:, None]
-
+                coords_with_fs[:, :, 0] = amp_transform(coords_with_fs[:, :, 0].flatten(), coords_with_fs[:, :, 1].flatten() / 1e3, psds=psd_in[0][None, :])[0].reshape(coords_with_fs.shape[:-1])
+    
                 samples_store[:, collect_sample_iter] = coords_with_fs.get()
                 collect_sample_iter += 1
                 print(collect_sample_iter, num_samples_store)
@@ -1079,9 +1116,13 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
                     new_points_with_fs = tmp.copy()
 
+                    original_snr_params = new_points_with_fs[:, :, 0].copy()
                     new_points_with_fs[:, :, 1] = (f0_maxs[None, band_inds_here[still_going_start_like]] - f0_mins[None, band_inds_here[still_going_start_like]]).T * new_points_with_fs[:, :, 1] + f0_mins[None, band_inds_here[still_going_start_like]].T
                     new_points_with_fs[:, :, 2] = (fdot_maxs[None, band_inds_here[still_going_start_like]] - fdot_mins[None, band_inds_here[still_going_start_like]]).T * new_points_with_fs[:, :, 2] + fdot_mins[None, band_inds_here[still_going_start_like]].T
-
+                    new_points_with_fs[:, :, 0] = amp_transform(new_points_with_fs[:, :, 0].flatten(), new_points_with_fs[:, :, 1].flatten() / 1e3, psds=psd_in[0][None, :])[0].reshape(new_points_with_fs.shape[:-1])
+ 
+                    lp_factors = np.log(original_snr_params / new_points_with_fs[:, :, 0])
+                    logp += lp_factors
                     new_points_in = transform_fn.both_transforms(new_points_with_fs.reshape(-1, ndim), xp=xp)
 
                     start_like = xp.asarray(gb.get_ll(new_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs)).reshape(new_points_with_fs.shape[:-1])
@@ -1104,7 +1145,8 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
                     best_binaries_coords_with_fs[:, 1] = (f0_maxs[band_inds_here] - f0_mins[band_inds_here]) * best_binaries_coords_with_fs[:, 1] + f0_mins[band_inds_here]
                     best_binaries_coords_with_fs[:, 2] = (fdot_maxs[band_inds_here] - fdot_mins[band_inds_here]) * best_binaries_coords_with_fs[:, 2] + fdot_mins[band_inds_here]
-
+                    best_binaries_coords_with_fs[:, 0] = amp_transform(best_binaries_coords_with_fs[:, 0].flatten(), best_binaries_coords_with_fs[:, 1].flatten() / 1e3, psds=psd_in[0][None, :])[0].reshape(best_binaries_coords_with_fs.shape[:-1])
+            
                     best_logl_points_in = transform_fn.both_transforms(best_binaries_coords_with_fs, xp=xp)
 
                     best_logl_check = xp.asarray(gb.get_ll(best_logl_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs))
@@ -1268,15 +1310,19 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     band_inds_running = np.ones_like(band_edges[:-1], dtype=bool)
     
     priors_here = deepcopy(gb_info["priors"].priors_in)
-
-    priors_here[1] = uniform_dist(0.0, 1.0, use_cupy=True)
+    priors_here.pop((0, 1))
+    priors_here[0] = SNRPrior(gb_info["pe_info"]["rho_star"], use_cupy=True) 
+    priors_here[1] = uniform_dist(0.0, 1.0, use_cupy=True) 
     priors_here[2] = uniform_dist(0.0, 1.0, use_cupy=True) 
 
     priors_good = ProbDistContainer(priors_here, use_cupy=True)
     
     m_chirp_lims = gb_info["search_info"]["m_chirp_lims"]
-    fdot_mins = xp.asarray(get_fdot(band_edges[:-1], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[0])))
-    fdot_maxs = xp.asarray(get_fdot(band_edges[1:], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[1])))
+    
+    # now update for negative fdots
+    fdot_max_vals = xp.asarray(get_fdot(band_edges[1:], Mc=np.full(band_edges.shape[0] - 1, m_chirp_lims[1])))
+    fdot_mins = -fdot_max_vals
+    fdot_maxs = fdot_max_vals
     f0_mins = xp.asarray(band_edges[:-1] * 1e3)
     f0_maxs = xp.asarray(band_edges[1:] * 1e3)
 

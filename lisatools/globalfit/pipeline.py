@@ -112,7 +112,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
             diff=0.01,
             verbose=True
         )
-        settings["gb"]["pe_info"]["stopping_iterations"] = 1
+        settings["gb"]["pe_info"]["stopping_iterations"] = -1
         settings["gb"]["pe_info"]["run_search"] = True
 
         settings["gb"]["search_info"]["stopping_iterations"] = 1

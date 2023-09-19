@@ -12,6 +12,7 @@ from .psdglobal import run_psd_pe
 from .mbhglobal import run_mbh_pe
 
 from lisatools.sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
+from lisatools.globalfit.plot import RunResultsProduction
 
 from gbgpu.gbgpu import GBGPU
 
@@ -207,11 +208,13 @@ class GlobalFitSegment(ABC):
         
 
 class MPIControlGlobalFit:
-    def __init__(self, current_info, comm, gpus):
+    def __init__(self, current_info, comm, gpus, run_results_update=True, **run_results_update_kwargs):
 
         ranks = np.arange(comm.Get_size())
 
         self.rank = comm.Get_rank()
+        self.run_results_update = run_results_update
+        self.run_results_update_kwargs = run_results_update_kwargs
         
         assert len(gpus) == 4
         assert len(ranks) >= 5
@@ -222,19 +225,25 @@ class MPIControlGlobalFit:
 
         self.head_rank = ranks[1]
 
-        self.gb_pe_rank = ranks[2]
+        self.gb_pe_rank = ranks[0]
         self.gb_pe_gpu = gpus[0]
 
-        self.gb_search_rank = ranks[3]
+        self.gb_search_rank = ranks[3] 
         self.gb_search_gpu = gpus[1]
 
         self.psd_rank = ranks[4]
         self.psd_gpu = gpus[2]
 
-        self.mbh_rank = ranks[0]
+        self.mbh_rank = ranks[2]
         self.mbh_gpu = gpus[3]
 
-        self.gmm_ranks = ranks[5:]
+        if run_results_update:
+            self.run_results_rank = ranks[5]
+            self.gmm_ranks = ranks[6:]
+        else:
+            self.run_results_rank = -1
+            self.gmm_ranks = ranks[5:]
+
         self.have_started_refit = False
     
 
@@ -312,7 +321,7 @@ class MPIControlGlobalFit:
             if "send" in refit_dict and refit_dict["send"]:
                 self.comm.send(self.current_info, dest=self.gb_search_rank, tag=27)
 
-            if "finished_run" in refit_dict and refit_dict["finished_run"]:
+            if "finish_run" in refit_dict and refit_dict["finish_run"]:
                 runs_going.remove("gbs_search")
                 for rank in self.gmm_ranks:
                     rec_tag = int(str(rank) + "67676")
@@ -345,7 +354,7 @@ class MPIControlGlobalFit:
                     # self.comm.send(self.current_info, dest=self.gb_search_rank, tag=2929)
                 self.have_started_refit = True
 
-            if "finished_run" in gb_req and gb_req["finished_run"]:
+            if "finish_run" in gb_req and gb_req["finish_run"]:
                 runs_going.remove("gbs_pe")
 
         else:
@@ -356,11 +365,9 @@ class MPIControlGlobalFit:
     def psd_check(self, runs_going):
         if "psd" not in runs_going:
             return
-
         psd_check = self.comm.irecv(source=self.psd_rank, tag=60)
         if psd_check.get_status():
             psd_req = psd_check.wait()
-
             if "receive" in psd_req and psd_req["receive"]:
                 psd_dict = self.comm.recv(source=self.psd_rank, tag=68)
             
@@ -369,7 +376,7 @@ class MPIControlGlobalFit:
             if "send" in psd_req and psd_req["send"]:
                 self.comm.send(self.current_info, dest=self.psd_rank, tag=61)
 
-            if "finished_run" in psd_req and psd_req["finished_run"]:
+            if "finish_run" in psd_req and psd_req["finish_run"]:
                 runs_going.remove("psd")
 
         else:
@@ -391,11 +398,30 @@ class MPIControlGlobalFit:
             if "send" in mbh_req and mbh_req["send"]:
                 self.comm.send(self.current_info, dest=self.mbh_rank, tag=71)
 
-            if "finished_run" in mbh_req and mbh_req["finished_run"]:
+            if "finish_run" in mbh_req and mbh_req["finish_run"]:
                 runs_going.remove("mbhs")
 
         else:
             mbh_check.cancel()
+
+    def plot_check(self, run_plot):
+            
+        if run_plot:
+            self.comm.send(self.current_info, dest=self.run_results_rank, tag=7878)
+            run_plot = False
+
+        else:
+            plot_ch = self.comm.irecv(source=self.run_results_rank, tag=7979)
+            if plot_ch.get_status():
+                plot_req = plot_ch.wait()
+
+                if "ready" in plot_req and plot_req["ready"]:
+                    run_plot = True
+
+            else:
+                plot_ch.cancel()
+
+        return run_plot
 
     def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
         if self.rank == self.head_rank:
@@ -406,6 +432,7 @@ class MPIControlGlobalFit:
             self.share_start_info(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)
 
             update_refit = True
+            run_plot = False
 
             # populate which runs are going
             runs_going = []
@@ -437,6 +464,8 @@ class MPIControlGlobalFit:
 
                 # check for update from MBH
                 self.mbh_check(runs_going)
+
+                run_plot = self.plot_check(run_plot)
         
         elif self.rank == self.gb_pe_rank and run_gbs_pe:
             fin = run_gb_pe(self.gb_pe_gpu, self.comm, self.head_rank)
@@ -458,6 +487,10 @@ class MPIControlGlobalFit:
             rec_tag = int(str(self.rank) + "300")
             send_tag = int(str(self.rank) + "400")
             fit_each_leaf(self.rank, self.gb_search_rank, rec_tag, send_tag, self.comm)
+
+        elif self.run_results_update and self.rank == self.run_results_rank:
+            run_results_production = RunResultsProduction(self.comm, self.head_rank, add_gbs=False, add_mbhs=False)
+            #fin = run_results_production()
 
         self.comm.Barrier()
 

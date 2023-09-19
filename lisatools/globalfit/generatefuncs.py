@@ -270,11 +270,13 @@ class GenerateCurrentState:
             n_gen_check, A, E = info_dict[which]["n"], info_dict[which]["A"], info_dict[which]["E"]
 
             if n_gen_check == n_gen:
+                info_dict[which]["walker_inds"] = np.arange(n_gen)
                 continue
             elif n_gen_check > n_gen:
                 # more available than needed
                 # randomly pick
                 inds_keep = np.random.choice(np.arange(n_gen_check), n_gen, replace=False)
+                info_dict[which]["walker_inds"] = inds_keep.copy()
 
             elif n_gen_check < n_gen:
                 # not enough
@@ -291,6 +293,8 @@ class GenerateCurrentState:
                         inds_keep = np.concatenate([inds_keep, np.random.choice(np.arange(n_gen_check), n_gen - n_gen_curr, replace=False)])
                     
                     n_gen_curr = len(inds_keep)
+
+                info_dict[which]["walker_inds"] = inds_keep.copy()
 
             A = A[inds_keep]
             E = E[inds_keep]
@@ -322,6 +326,11 @@ class GenerateCurrentState:
 
         if include_psd:
             output["psd"] = [info_dict["psd"]["A"], info_dict["psd"]["E"]]
+            output["psd_inds"] = info_dict["psd"]["walker_inds"].copy()
+
+        for name in ["psd", "mbh", "gb"]:
+            if name in info_dict and "walker_inds" in info_dict[name]:
+                output[f"{name}_inds"] = info_dict[name]["walker_inds"].copy()
 
         if include_ll or include_source_only_ll:
             if not include_psd:

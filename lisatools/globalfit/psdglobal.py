@@ -4,6 +4,7 @@ import time
 import pickle
 import shutil
 import numpy as np
+from copy import deepcopy
 
 # from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
 
@@ -16,6 +17,9 @@ from eryn.moves import CombineMove
 from eryn.moves.tempering import make_ladder
 from eryn.state import State, BranchSupplimental
 from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
+from lisatools.sampling.prior import GBPriorWrap
+from eryn.prior import ProbDistContainer
+from gbgpu.gbgpu import GBGPU
 
 import subprocess
 
@@ -78,6 +82,84 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     # assert np.allclose(ll.get(), ll2.get())
     return ll.get()
 
+
+class PSDwithGBPriorWrap:
+    def __init__(self, gb, psd_prior, gb_prior=None, gb_params=None, walker_inds=None, walker_inds_map=None, gb_inds=None):
+        self.gb = gb
+        self.psd_prior = psd_prior
+        self.gb_prior = gb_prior
+        self.gb_params = gb_params
+        self.walker_inds = walker_inds
+        self.walker_inds_map = walker_inds_map
+        self.gb_inds = gb_inds
+
+        if (
+            self.walker_inds is not None 
+            or self.walker_inds_map is not None
+            or self.gb_prior is not None
+            or self.gb_params is not None
+            or self.gb_inds is not None
+        ):
+            if (
+                self.walker_inds is None 
+                or self.walker_inds_map is None
+                or self.gb_prior is None
+                or self.gb_params is None
+                or self.gb_inds is None
+            ):
+                raise ValueError("If providing walker inds, map, gb_params, or priors, must provide all.")
+
+    def logpdf(self, coords, inds, supps=None, branch_supps=None):
+
+        psd_pars = coords["psd"].reshape(-1, coords["psd"].shape[-1])
+        galfor_pars = coords["galfor"].reshape(-1, coords["galfor"].shape[-1])
+
+        if self.walker_inds is not None:
+            assert supps is not None
+            walker_inds_in = self.walker_inds[supps[:]["walker_inds"].flatten()]
+            gb_inds_in = self.gb_inds[supps[:]["walker_inds"].flatten()]
+            gb_params_in = self.gb_params[supps[:]["walker_inds"].flatten()][gb_inds_in]
+            current_group_inds = np.repeat(np.arange(psd_pars.shape[0])[:, None], walker_inds_in.shape[1], axis=-1)
+            noise_index_all = xp.asarray(current_group_inds[gb_inds_in]).astype(np.int32)
+
+            A_Soms_d_in_all = xp.asarray(psd_pars[:, 0])
+            A_Sa_a_in_all = xp.asarray(psd_pars[:, 1])
+            E_Soms_d_in_all = xp.asarray(psd_pars[:, 2])
+            E_Sa_a_in_all = xp.asarray(psd_pars[:, 3])
+            Amp_all = xp.asarray(galfor_pars[:, 0])
+            alpha_all = xp.asarray(galfor_pars[:, 1])
+            sl1_all = xp.asarray(galfor_pars[:, 2])
+            kn_all = xp.asarray(galfor_pars[:, 3])
+            sl2_all = xp.asarray(galfor_pars[:, 4])
+            num_f = len(gb_params_in)
+
+            Sn_A = xp.zeros(num_f, dtype=xp.float64)
+            Sn_E = xp.zeros(num_f, dtype=xp.float64)
+            f0 = xp.asarray(gb_params_in[:, 1]) / 1e3
+            
+            if len(f0) > 0:
+                self.gb.get_psd_val(Sn_A, Sn_E, f0, noise_index_all, A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, num_f)
+            
+            gb_logpdf_contrib = self.gb_prior["gb_fixed"].logpdf(gb_params_in, Sn_f=Sn_A)
+            logpdf_contribution = np.zeros_like(gb_inds_in, dtype=np.float64)
+
+            logpdf_contribution[gb_inds_in] = gb_logpdf_contrib.get()
+            gb_logpdf = logpdf_contribution.sum(axis=-1)
+            
+        else:
+            gb_logpdf = 0.0
+
+        psd_logpdf = self.psd_prior["psd"].logpdf(psd_pars)
+        galfor_logpdf = self.psd_prior["galfor"].logpdf(galfor_pars)
+
+        all_logpdf = (gb_logpdf + psd_logpdf + galfor_logpdf).reshape(coords["psd"].shape[:2])
+        if np.all(np.isnan(all_logpdf)):
+            raise ValueError("All log prior are inf")
+        elif np.any(np.isnan(all_logpdf)):
+            all_logpdf[np.isnan(all_logpdf)] = -np.inf
+        return all_logpdf
+
+    #     self.base_prior.logpdf(x, psds=self.mgh.)
 
 # def log_like(x, freqs, data, supps=None, **sens_kwargs):
 #     if supps is None:
@@ -153,6 +235,18 @@ class UpdateNewResidualsPSD(Update):
         if self.verbose:
             print("Finished subbing in new data.")
 
+        # need new prior
+        gb_inds_generate = generated_info["gb_inds"]
+        gb_nleaves_max = new_info.gb_info["cc_params"].shape[1]
+        sampler._priors["all_models_together"].gb_params = new_info.gb_info["cc_params"][gb_inds_generate] # [new_info.gb_info["cc_inds"][gb_inds_generate]]
+        sampler._priors["all_models_together"].walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], gb_nleaves_max, axis=-1)# [new_info.gb_info["cc_inds"][gb_inds_generate]]
+        sampler._priors["all_models_together"].walker_inds_map = gb_inds_generate
+        sampler._priors["all_models_together"].gb_inds = new_info.gb_info["cc_inds"][gb_inds_generate] 
+        
+        new_lp = sampler.compute_log_prior(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental)
+
+        last_sample.log_prior[:] = new_lp[:]
+
         new_ll = sampler.compute_log_like(last_sample.branches_coords, inds=last_sample.branches_inds, supps=last_sample.supplimental, logp=last_sample.log_prior)[0]
 
         xp.get_default_memory_pool().free_all_blocks()
@@ -170,28 +264,63 @@ def run_psd_pe(gpu, comm, head_rank):
     psd_info = gf_information.psd_info
     xp.cuda.runtime.setDevice(gpus[0])
 
-    priors = psd_info["priors"]
-
     nwalkers_pe = psd_info["pe_info"]["nwalkers"]
     ntemps_pe = psd_info["pe_info"]["ntemps"]
+
+    priors = {"all_models_together": psd_info["priors"]}
+
+    generated_info = gf_information.get_data_psd(include_ll=False, include_source_only_ll=False, n_gen_in=nwalkers_pe)
+    
+    if "gb_inds" in generated_info:
+
+        gb_inds_generate = generated_info["gb_inds"]
+        gb_nleaves_max = gf_information.gb_info["cc_params"].shape[1]
+        gpu_priors_in = deepcopy(gf_information.gb_info["priors"].priors_in)
+        for key, item in gpu_priors_in.items():
+            item.use_cupy = True
+
+        gpu_priors = {"gb_fixed": GBPriorWrap(gf_information.gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
+
+        gb_params = gf_information.gb_info["cc_params"][gb_inds_generate] # [gf_information.gb_info["cc_inds"][gb_inds_generate]]
+        walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], gb_nleaves_max, axis=-1)# [gf_information.gb_info["cc_inds"][gb_inds_generate]]
+        walker_inds_map = gb_inds_generate
+        gb_inds = gf_information.gb_info["cc_inds"][gb_inds_generate] 
+
+    else:
+        gb_params = None
+        walker_inds = None
+        walker_inds_map = None
+        gpu_priors = None
+        gb_inds = None
+
+    gb = GBGPU(use_gpu=True)
+    prior_wrap = {"all_models_together": PSDwithGBPriorWrap(
+        gb, 
+        priors["all_models_together"], 
+        gb_prior=gpu_priors, 
+        gb_params=gb_params, 
+        walker_inds=walker_inds, 
+        walker_inds_map=walker_inds_map,
+        gb_inds=gb_inds,
+    )}
 
     if "last_state" in psd_info:
         last_sample = psd_info["last_state"]
     else:
-        coords_psd = priors["psd"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
+        coords_psd = prior_wrap["all_models_together"].psd_prior["psd"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
         inds_psd = np.ones(coords_psd.shape[:-1], dtype=bool)
-        coords_galfor = priors["galfor"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
+        coords_galfor = prior_wrap["all_models_together"].psd_prior["galfor"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
         inds_galfor = np.ones(coords_galfor.shape[:-1], dtype=bool)
         last_sample = State({"psd": coords_psd, "galfor": coords_galfor}, inds={"psd": inds_psd, "galfor": inds_galfor})
 
-    generated_info = gf_information.get_data_psd(include_ll=False, include_source_only_ll=False, n_gen_in=nwalkers_pe)
-    
     fd = xp.asarray(gf_information.general_info["fd"])
     data = [xp.asarray(generated_info["data"][0]), xp.asarray(generated_info["data"][1])]
     walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps_pe, 1))
 
     supps_base_shape = (ntemps_pe, nwalkers_pe)
     supps = BranchSupplimental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
+
+    check = prior_wrap["all_models_together"].logpdf(last_sample.branches_coords, last_sample.branches_inds, supps=supps)
 
     sens_kwargs = psd_info["psd_kwargs"].copy()
  
@@ -220,8 +349,6 @@ def run_psd_pe(gpu, comm, head_rank):
     nleaves_max_in = psd_info["pe_info"]["nleaves_max"]
 
     # TODO: fix this 
-    from gbgpu.gbgpu import GBGPU
-    gb = GBGPU(use_gpu=True)
     df = gf_information.general_info["df"]
     data_length = gf_information.general_info["data_length"]
 
@@ -241,7 +368,7 @@ def run_psd_pe(gpu, comm, head_rank):
         nwalkers_pe,
         ndims_in,  # assumes ndim_max
         log_like,
-        priors,
+        prior_wrap,
         tempering_kwargs={"betas": betas, "permute": False, "skip_swap_supp_names": ["walker_inds"]},
         nbranches=len(branch_names),
         nleaves_max=nleaves_max_in,
@@ -259,7 +386,7 @@ def run_psd_pe(gpu, comm, head_rank):
         provide_supplimental=True,
     )
 
-    lp = sampler_mix.compute_log_prior(state_mix.branches_coords, inds=state_mix.branches_inds)
+    lp = sampler_mix.compute_log_prior(state_mix.branches_coords, inds=state_mix.branches_inds, supps=state_mix.supplimental)
     ll = sampler_mix.compute_log_like(state_mix.branches_coords, inds=state_mix.branches_inds, supps=state_mix.supplimental, logp=lp)[0]
 
     state_mix.log_like = ll
@@ -267,7 +394,6 @@ def run_psd_pe(gpu, comm, head_rank):
 
     # equlibrating likelihood check: -4293090.6483655665,
     nsteps_mix = 50000
-    
 
     print("Starting psd ll best:", state_mix.log_like.max(axis=-1))
     mempool.free_all_blocks()
