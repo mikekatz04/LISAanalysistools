@@ -145,9 +145,6 @@ class CurrentInfoGlobalFit:
 
         self.current_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
         self.current_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
-
-        print("DONE with SETUP")
-
     
     def initialize_mbh_state_from_search(self, mbh_output_point_info):
         output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
@@ -491,6 +488,4 @@ class MPIControlGlobalFit:
         elif self.run_results_update and self.rank == self.run_results_rank:
             run_results_production = RunResultsProduction(self.comm, self.head_rank, add_gbs=False, add_mbhs=False)
             #fin = run_results_production()
-
-        self.comm.Barrier()
 

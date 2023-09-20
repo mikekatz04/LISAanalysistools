@@ -25,11 +25,10 @@ if __name__ == "__main__":
     head_rank = 0
 
     global_fit_progression = [
-        # {"segment": InitialPSDSearch, "args": (comm,), "kwargs": dict()},
-        # {"segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank)},
-        # {"segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict()},
-        # {"segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict()},
-        {"segment": FullPESegment, "args": (comm,), "kwargs": dict()},
+        # {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict()},
+        # {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank)},
+        # {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict()},
+        {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict()},
     ]
     
     # debug_psd_search = InitialPSDSearch(comm)
@@ -50,8 +49,19 @@ if __name__ == "__main__":
     # if rank == head_rank:
     #     debug_search.para_mbh_search.run_parallel_mbh_search(testing_time_split=7)
 
-    for global_fit_segment in global_fit_progression:
+    for g_i, global_fit_segment in enumerate(global_fit_progression):
         segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
+        if rank == head_rank:
+            class_name = global_fit_segment["name"]
+            print(f"\n\nStarting {class_name}\n\n")
+            st = time.perf_counter()
+        print("start", g_i, rank)
         segment.run()
-    
+        comm.Barrier()
+        print("end", g_i, rank)
+        if rank == head_rank:
+            class_name = global_fit_segment["name"]
+            et = time.perf_counter()
+            print(f"\n\nEnding {class_name}({et - st} sec)\n\n")
+     
 

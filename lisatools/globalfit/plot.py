@@ -4,7 +4,9 @@ import corner
 
 def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=None):
 
+    plt.close()
     fig2, ax2 = plt.subplots(1, 1)
+    samples_list = []
     for i in range(num_leaves):
         mbh_samp = mbh_reader.get_chain(discard=discard)["mbh"][:, 0, :, i].reshape(-1, 11)
         if i == 0: 
@@ -25,27 +27,64 @@ def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=Non
         # truths_in = truth[inds_keep]
         labels = [r"$M$", r"$q$", r"$a_1$", r"$a_2$", r"$d_L$", r"$\phi_0$", r"$\cos{\iota}$", r"$\lambda$", r"$\sin{\beta}$", r"$\psi$", r"$t_c$"]
         labels2 = [labels[w] for w in inds_keep]
-        fig = corner.corner(mbh_samp_in, label_kwargs=dict(fontsize=16), plot_datapoints=False, smooth=0.6, levels=1 - np.exp(-0.5 * np.array([1, 2, 3])**2), labels=labels2, fig=fig)  # , truths=truths_in
+        fig = corner.corner(mbh_samp_in, label_kwargs=dict(fontsize=16), plot_datapoints=False, smooth=0.6, levels=1 - np.exp(-0.5 * np.array([1, 2, 3])**2), labels=labels2)  # , truths=truths_in
         
         # tc mT plot
-        ax2.scatter(mbh_samp[:, 10], mbh_samp[:, 0], color=f"C{i % 10}")
+        samples_list.append([mbh_samp[:, 10], mbh_samp[:, 0]])
         if save_file is not None:
-            save_file_tmp = save_file[:-4] + f"_{i+1}.png"
+            save_file_tmp = save_file[:-4] + f"_mbh_posterior_{i+1}.png"
             fig.savefig(save_file_tmp)
+            
+        del fig
+        plt.close()
 
+    plt.close()
+    for i, tmp in enumerate(samples_list):
+        ax2.scatter(tmp[0], tmp[1], color=f"C{i % 10}", s=8)
+        
     save_file_tmp = save_file[:-4] + "_mT_vs_tc.png"
     fig2.savefig(save_file_tmp)
+    plt.close()
+
+def produce_sky_plot(current_info, save_file=None, fig=None):
+    
+    ll_gb_ind_max = current_info.gb_info["cc_ll"].argmax()
+    gb_lam, gb_sinbeta = current_info.gb_info["cc_params"][ll_gb_ind_max, :, np.array([6, 7])][:, current_info.gb_info["cc_inds"][ll_gb_ind_max, :]]
+
+    gb_lam_degrees = gb_lam  - np.pi #  * 180. / np.pi - 180.0
+    gb_beta_degrees = np.arcsin(gb_sinbeta) #  * 180 / np.pi
+
+    plt.close()
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='mollweide')
+    ax.scatter(gb_lam_degrees, gb_beta_degrees, s=2, alpha=0.3)
+
+    ll_mbh_ind_max = current_info.mbh_info["cc_ll"].argmax()
+    
+    mbh_lam, mbh_sinbeta = current_info.mbh_info["cc_params"][ll_mbh_ind_max, :, np.array([7, 8])].reshape(-1, 2).T
+
+    mbh_lam_degrees = mbh_lam - np.pi   # * 180. / np.pi - 180.0
+    mbh_beta_degrees = np.arcsin(mbh_sinbeta)  #  * 180 / np.pi - 90.0
+
+    ax.scatter(mbh_lam_degrees, mbh_beta_degrees, marker="x", color="C1", s=20)
+    
+    if save_file is not None:
+        save_file_tmp = save_file[:-4] + "_sky_map.png"
+        fig.savefig(save_file_tmp)
+
     plt.close()
 
 
 def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
     plt.close()
     nl = gb_reader.get_nleaves()
-    plt.plot(nl["gb_fixed"][:, 0].mean(axis=-1), color="C1")
-    plt.plot(nl["gb_fixed"][:, 0].max(axis=-1), color="C0", ls="--")
-    plt.plot(nl["gb_fixed"][:, 0].min(axis=-1), color="C0", ls="--")
+    ll = gb_reader.get_log_like()
+
+    for i in range(nl["gb_fixed"].shape[1]):
+        plt.plot(nl["gb_fixed"][:, i].mean(axis=-1), color=f"C{i % 10}", label="t = " + str(i + 1))
     plt.ylabel("Number of Binaries (max, mean, min)")
     plt.xlabel("Sampler Iteration (thinned)")
+    plt.legend()
     save_file_tmp = save_file[:-4] + "_gb_nleaves_over_time.png"
     plt.savefig(save_file_tmp)
     plt.close()
@@ -54,6 +93,20 @@ def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
     save_file_tmp = save_file[:-4] + "_gb_nleaves_hist.png"
     plt.savefig(save_file_tmp)
     plt.close()
+    plt.hist(nl["gb_fixed"][-500:, 0].flatten(), bins=30)
+    plt.xlabel("Number of Binaries (last 500 iterations)")
+    save_file_tmp = save_file[:-4] + "_gb_nleaves_hist.png"
+    plt.savefig(save_file_tmp)
+    plt.close()
+    plt.plot(ll[:, 0].mean(axis=-1), color="C1")
+    plt.plot(ll[:, 0].max(axis=-1), color="C0", ls="--")
+    plt.plot(ll[:, 0].min(axis=-1), color="C0", ls="--")
+    plt.ylabel("logL (max, mean, min)")
+    plt.xlabel("Sampler Iteration (thinned)")
+    save_file_tmp = save_file[:-4] + "_gb_ll_over_time.png"
+    plt.savefig(save_file_tmp)
+    plt.close()
+    
 
 
 def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
@@ -126,10 +179,13 @@ class RunResultsProduction:
         make_current_plot(current_info, save_file=current_save_file, add_mbhs=self.add_mbhs, add_gbs=self.add_gbs, **self.kwargs)
         
         mbh_save_file = base_save_file + f"_mbh_posterior_leaf.png"
-        produce_mbh_plots(current_info.mbh_info["reader"], current_info.mbh_info["cc_params"].shape[1], discard=0, save_file=mbh_save_file, fig=None)
+        produce_mbh_plots(current_info.mbh_info["reader"], current_info.mbh_info["cc_params"].shape[1], discard=500, save_file=mbh_save_file, fig=None)
         
         gb_save_file = base_save_file + f"_gb_posterior.png"
         produce_gbs_plots(current_info.gb_info["reader"], discard=0, save_file=gb_save_file, fig=None)
 
         psd_save_file = base_save_file + f"_psd_posterior.png"
-        produce_psd_plots(current_info.psd_info["reader"], discard=0, save_file=psd_save_file, fig=None)
+        produce_psd_plots(current_info.psd_info["reader"], save_file=psd_save_file, discard=500, fig=None)
+
+        skymap_file = base_save_file + "_sky_map.png"
+        produce_sky_plot(current_info, save_file=skymap_file)

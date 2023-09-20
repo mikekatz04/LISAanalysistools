@@ -738,7 +738,6 @@ def fit_gmm(samples, comm, comm_info):
 
 
 def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
-    print("process", rank, gather_rank)
 
     run_process = True
 
@@ -1154,10 +1153,25 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
                     if not xp.allclose(best_logl, best_logl_check):
                         breakpoint()
 
-                    snr_lim = gb_info["search_info"]["snr_lim"]
+                    if "current_snr_lim_ind" not in gb_info["search_info"]:
+                        gb_info["search_info"]["current_snr_lim_ind"] = 0
+
+                    if gb_info["search_info"]["current_snr_lim_ind"] >= len(gb_info["search_info"]["snr_lims"]) - 1:
+                        gb_info["search_info"]["current_snr_lim_ind"] = len(gb_info["search_info"]["snr_lims"]) - 1
+                    
+                    current_snr_lim_ind = gb_info["search_info"]["current_snr_lim_ind"]
+                    snr_lim = gb_info["search_info"]["snr_lims"][current_snr_lim_ind]
                     keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > snr_lim
 
+                    print(f"SNR lim: {snr_lim}, {current_snr_lim_ind}")
+                    
                     still_going_here = keep_binaries.copy()
+
+                    num_new_binaries = keep_binaries.sum().item()
+                    print(f"num new search: {num_new_binaries}")
+                    
+                    if current_snr_lim_ind + 1 < len(gb_info["search_info"]["snr_lims"]) and num_new_binaries > gb_info["search_info"]["snr_lim_transitions"][current_snr_lim_ind]:
+                        gb_info["search_info"]["current_snr_lim_ind"] += 1
 
                     thin_by = 25
                     num_samples_store = 30

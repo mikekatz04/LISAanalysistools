@@ -66,16 +66,16 @@ class InitialMBHMixSegment(GlobalFitSegment):
 
     def adjust_settings(self, settings):
         settings["mbh"]["search_info"]["stop_kwargs"] = dict(
-            n_iters=3,
+            n_iters=1,
             diff=0.01,
             verbose=True
         )
-        settings["mbh"]["search_info"]["thin_by"] = 5
+        settings["mbh"]["search_info"]["thin_by"] = 1
         settings["mbh"]["search_info"]["stopping_iterations"] = 1
         settings["mbh"]["search_info"]["run_search"] = True
         
         settings["psd"]["search_info"]["run_search"] = True
-        settings["psd"]["search_info"]["stopping_iterations"] = 4
+        settings["psd"]["search_info"]["stopping_iterations"] = 1
 
     def run(self):
 
