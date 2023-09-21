@@ -2,6 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import corner
 
+from bbhx.utils.transform import LISA_to_SSB
+
 def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=None):
 
     plt.close()
@@ -51,22 +53,24 @@ def produce_sky_plot(current_info, save_file=None, fig=None):
     ll_gb_ind_max = current_info.gb_info["cc_ll"].argmax()
     gb_lam, gb_sinbeta = current_info.gb_info["cc_params"][ll_gb_ind_max, :, np.array([6, 7])][:, current_info.gb_info["cc_inds"][ll_gb_ind_max, :]]
 
-    gb_lam_degrees = gb_lam  - np.pi #  * 180. / np.pi - 180.0
-    gb_beta_degrees = np.arcsin(gb_sinbeta) #  * 180 / np.pi
+    gb_lam_rad = gb_lam  - np.pi #  * 180. / np.pi - 180.0
+    gb_beta_rad = np.arcsin(gb_sinbeta) #  * 180 / np.pi
 
     plt.close()
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='mollweide')
-    ax.scatter(gb_lam_degrees, gb_beta_degrees, s=2, alpha=0.3)
+    ax.scatter(gb_lam_rad, gb_beta_rad, s=2, alpha=0.3)
 
     ll_mbh_ind_max = current_info.mbh_info["cc_ll"].argmax()
     
-    mbh_lam, mbh_sinbeta = current_info.mbh_info["cc_params"][ll_mbh_ind_max, :, np.array([7, 8])].reshape(-1, 2).T
+    mbh_lam_L, mbh_sinbeta_L, mbh_psi_L, mbh_tc_L = current_info.mbh_info["cc_params"][ll_mbh_ind_max, :, np.array([7, 8, 9, 10])]
 
-    mbh_lam_degrees = mbh_lam - np.pi   # * 180. / np.pi - 180.0
-    mbh_beta_degrees = np.arcsin(mbh_sinbeta)  #  * 180 / np.pi - 90.0
+    mbh_tc_SSB, mbh_lam_SSB, mbh_beta_SSB, mbh_psi_SSB = LISA_to_SSB(mbh_tc_L, mbh_lam_L, np.arcsin(mbh_sinbeta_L), mbh_psi_L)
+    mbh_lam_rad = (mbh_lam_SSB % (2 * np.pi)) - np.pi   # * 180. / np.pi - 180.0
 
-    ax.scatter(mbh_lam_degrees, mbh_beta_degrees, marker="x", color="C1", s=20)
+    mbh_beta_rad = mbh_beta_SSB  #  * 180 / np.pi - 90.0
+
+    ax.scatter(mbh_lam_rad, mbh_beta_rad, marker="x", color="C1", s=20)
     
     if save_file is not None:
         save_file_tmp = save_file[:-4] + "_sky_map.png"
@@ -81,7 +85,7 @@ def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
     ll = gb_reader.get_log_like()
 
     for i in range(nl["gb_fixed"].shape[1]):
-        plt.plot(nl["gb_fixed"][:, i].mean(axis=-1), color=f"C{i % 10}", label="t = " + str(i + 1))
+        plt.plot(nl["gb_fixed"][:, i, 0], color=f"C{i % 10}", label="t = " + str(i + 1))
     plt.ylabel("Number of Binaries (max, mean, min)")
     plt.xlabel("Sampler Iteration (thinned)")
     plt.legend()

@@ -392,7 +392,7 @@ def simplesnr(f, h, i=None, years=1.0, noisemodel="SciRDv1", includewd=None, for
     return snr
 
 
-def lisasens(f, noiseModel="SciRDv1", includewd=None, foreground_params=None):
+def lisasens(f, model="SciRDv1", includewd=None, foreground_params=None, use_gpu=False):
     """
     Compute LISA sensitivity
     @param f is the frequency array
@@ -404,35 +404,29 @@ def lisasens(f, noiseModel="SciRDv1", includewd=None, foreground_params=None):
     """
     # noide model variable is ignored now, and can be used if we add more noise models
     # includewd - should be duration of observation in years (if not None)
-    # Sa_a = Sa_a_all[noiseModel]*(1.0 +(0.4e-3/f)**2)*(1.0+(f/8e-3)**4)
+    # Sa_a = Sa_a_all[model]*(1.0 +(0.4e-3/f)**2)*(1.0+(f/8e-3)**4)
     # Sa_d = Sa_a*(2.*np.pi*f)**(-4.)
 
-    Sop = Soms_d_all[noiseModel] * (1.0 + (2.0e-3 / f) ** 4)
+    if use_gpu:
+        xp = cp
+    else:
+        xp = np
 
-    Sa_d, Sop = lisanoises(f, noiseModel, "displacement")
+    Sa_d, Sop = lisanoises(f, model, "displacement")
 
-    ALL_m = np.sqrt(4.0 * Sa_d + Sop)
+    ALL_m = xp.sqrt(4.0 * Sa_d + Sop)
     ## Average the antenna response
-    AvResp = np.sqrt(5)
+    AvResp = xp.sqrt(5)
     ## Projection effect
-    Proj = 2.0 / np.sqrt(3)
+    Proj = 2.0 / xp.sqrt(3)
     ## Approximative transfert function
     f0 = 1.0 / (2.0 * lisaLT)
     a = 0.41
-    T = np.sqrt(1 + (f / (a * f0)) ** 2)
+    T = xp.sqrt(1 + (f / (a * f0)) ** 2)
     Sens = (AvResp * Proj * T * ALL_m / lisaL) ** 2
 
     if includewd is not None or foreground_params is not None:
-        day = 86400.0
-        year = 365.25 * 24.0 * 3600.0
-        if (includewd < day / year) or (includewd > 10.0):
-            raise NotImplementedError
-        
-        if includewd is not None:
-            includewd_in = includewd * year
-        else:
-            includewd_in = None
-        Sgal = GalConf(f, Tobs=includewd_in, foreground_params=foreground_params)
+        Sgal = GalConf(f, Tobs=includewd, foreground_params=foreground_params, use_gpu=use_gpu)
         Sens = Sens + Sgal
 
     return Sens

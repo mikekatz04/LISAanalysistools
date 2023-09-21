@@ -24,7 +24,7 @@ class GetPSDModel:
     def __init__(self, psd_kwargs):
         self.psd_kwargs = psd_kwargs
 
-    def __call__(self, psd_info, general_info, only_max_ll=False, n_gen_in=None):
+    def __call__(self, psd_info, general_info, only_max_ll=False, n_gen_in=None, return_lisasens=False):
 
         if "use_gpu" in self.psd_kwargs and self.psd_kwargs["use_gpu"]:
             xp = cp
@@ -58,9 +58,13 @@ class GetPSDModel:
         A_psd = np.zeros((num_psds, num_freqs))
         E_psd = np.zeros((num_psds, num_freqs))
         freqs = xp.asarray(general_info["fd"])
+        psd_kwargs_in = self.psd_kwargs.copy()
+        if return_lisasens:
+            psd_kwargs_in["sens_fn"] = "lisasens"
+
         for i, (A_params, E_params, foreground_params) in enumerate(zip(psd_params_A, psd_params_E, psd_foreground_params)):
-            A_tmp1 = get_sensitivity(freqs, model=A_params, foreground_params=foreground_params, **self.psd_kwargs)
-            E_tmp1 = get_sensitivity(freqs, model=E_params, foreground_params=foreground_params, **self.psd_kwargs)
+            A_tmp1 = get_sensitivity(freqs, model=A_params, foreground_params=foreground_params, **psd_kwargs_in)
+            E_tmp1 = get_sensitivity(freqs, model=E_params, foreground_params=foreground_params, **psd_kwargs_in)
 
             if use_gpu:
                 A_tmp2 = A_tmp1.get()
@@ -215,7 +219,7 @@ class GenerateCurrentState:
     def __init__(self, A_inj, E_inj):
         self.A_inj, self.E_inj = A_inj, E_inj
 
-    def __call__(self, general_info, include_mbhs=True, include_gbs=True, include_psd=True, only_max_ll=False, n_gen_in=None, include_ll=False, include_source_only_ll=False):
+    def __call__(self, general_info, include_mbhs=True, include_gbs=True, include_psd=True, include_lisasens=True, only_max_ll=False, n_gen_in=None, include_ll=False, include_source_only_ll=False):
         
         info_dict = {}
         n_gen_check_it = []
@@ -237,12 +241,20 @@ class GenerateCurrentState:
             include_gbs = False
 
         if include_psd and "cc_A" in general_info.psd_info:
-            A_psd, E_psd = general_info.psd_info["get_psd"](general_info.psd_info, general_info.general_info, only_max_ll=only_max_ll)
+            A_psd, E_psd = general_info.psd_info["get_psd"](general_info.psd_info, general_info.general_info, only_max_ll=only_max_ll, return_lisasens=False)
             n_psd = A_psd.shape[0]
             info_dict["psd"] = {"n": n_psd, "A": A_psd, "E": E_psd}
             n_gen_check_it.append(n_psd)
         elif include_psd and "cc_A" not in general_info.psd_info:
             include_psd = False
+
+        if include_lisasens and "cc_A" in general_info.psd_info:
+            A_lisasens, E_lisasens = general_info.psd_info["get_psd"](general_info.psd_info, general_info.general_info, only_max_ll=only_max_ll, return_lisasens=True)
+            n_lisasens = A_lisasens.shape[0]
+            info_dict["lisasens"] = {"n": n_lisasens, "A": A_lisasens, "E": E_lisasens}
+            n_gen_check_it.append(n_lisasens)
+        elif include_lisasens and "cc_A" not in general_info.psd_info:
+            include_lisasens = False
 
         if n_gen_in is None and len(n_gen_check_it) > 0:
             n_gen = np.max(n_gen_check_it)
@@ -267,34 +279,43 @@ class GenerateCurrentState:
             raise ValueError("n_gen_in must be None, string, or integer.")
         
         for which in info_dict.keys():
-            n_gen_check, A, E = info_dict[which]["n"], info_dict[which]["A"], info_dict[which]["E"]
+            if which != "lisasens":
+                n_gen_check, A, E = info_dict[which]["n"], info_dict[which]["A"], info_dict[which]["E"]
 
-            if n_gen_check == n_gen:
-                info_dict[which]["walker_inds"] = np.arange(n_gen)
-                continue
-            elif n_gen_check > n_gen:
-                # more available than needed
-                # randomly pick
-                inds_keep = np.random.choice(np.arange(n_gen_check), n_gen, replace=False)
-                info_dict[which]["walker_inds"] = inds_keep.copy()
+                if n_gen_check == n_gen:
+                    info_dict[which]["walker_inds"] = np.arange(n_gen)
+                    continue
+                elif n_gen_check > n_gen:
+                    # more available than needed
+                    # randomly pick
+                    inds_keep = np.random.choice(np.arange(n_gen_check), n_gen, replace=False)
+                    info_dict[which]["walker_inds"] = inds_keep.copy()
 
-            elif n_gen_check < n_gen:
-                # not enough
-                # check how many copies needed
-                copies = n_gen // n_gen_check
-                inds_keep = np.arange(n_gen_check)
-                n_gen_curr = len(inds_keep)
-                while n_gen_curr < n_gen:
-                    if n_gen_curr + n_gen_check < n_gen:
-                        inds_keep = np.concatenate([inds_keep, np.arange(n_gen_check)])
-                        
-                    else:
-                        # randomly choose remaining additions
-                        inds_keep = np.concatenate([inds_keep, np.random.choice(np.arange(n_gen_check), n_gen - n_gen_curr, replace=False)])
-                    
+                elif n_gen_check < n_gen:
+                    # not enough
+                    # check how many copies needed
+                    copies = n_gen // n_gen_check
+                    inds_keep = np.arange(n_gen_check)
                     n_gen_curr = len(inds_keep)
+                    while n_gen_curr < n_gen:
+                        if n_gen_curr + n_gen_check < n_gen:
+                            inds_keep = np.concatenate([inds_keep, np.arange(n_gen_check)])
+                            
+                        else:
+                            # randomly choose remaining additions
+                            inds_keep = np.concatenate([inds_keep, np.random.choice(np.arange(n_gen_check), n_gen - n_gen_curr, replace=False)])
+                        
+                        n_gen_curr = len(inds_keep)
 
+                    info_dict[which]["walker_inds"] = inds_keep.copy()
+            
+            else:
+                # ensure lisasens matches psd
+                inds_keep = info_dict["psd"]["walker_inds"].copy()
                 info_dict[which]["walker_inds"] = inds_keep.copy()
+                n_gen_check, A, E = info_dict[which]["n"], info_dict[which]["A"], info_dict[which]["E"]
+                if n_gen_check == n_gen:
+                    continue
 
             A = A[inds_keep]
             E = E[inds_keep]
@@ -320,15 +341,18 @@ class GenerateCurrentState:
         output = {
             "data": [data_A, data_E],
             "psd": None,
+            "lisasens": None,
             "ll": None,
             "ll_source": None
         }
 
         if include_psd:
             output["psd"] = [info_dict["psd"]["A"], info_dict["psd"]["E"]]
-            output["psd_inds"] = info_dict["psd"]["walker_inds"].copy()
+        
+        if include_lisasens:
+            output["lisasens"] = [info_dict["lisasens"]["A"], info_dict["lisasens"]["E"]]
 
-        for name in ["psd", "mbh", "gb"]:
+        for name in ["psd", "mbh", "gb", "lisasens"]:
             if name in info_dict and "walker_inds" in info_dict[name]:
                 output[f"{name}_inds"] = info_dict[name]["walker_inds"].copy()
 
@@ -346,7 +370,10 @@ class GenerateCurrentState:
 
         if only_max_ll:
             output["data"] = [output["data"][0].squeeze(), output["data"][1].squeeze()]
-            output["psd"] = [output["psd"][0].squeeze(), output["psd"][1].squeeze()]
+            if include_psd:
+                output["psd"] = [output["psd"][0].squeeze(), output["psd"][1].squeeze()]
+            if include_lisasens:
+                output["lisasens"] = [output["lisasens"][0].squeeze(), output["lisasens"][1].squeeze()]
             
         return output
 

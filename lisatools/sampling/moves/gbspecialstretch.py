@@ -385,6 +385,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         data = self.mgh.data_list
         base_data = self.mgh.base_data_list
         psd = self.mgh.psd_list
+        lisasens = self.mgh.lisasens_list
 
         # do unique for band size as separator between asynchronous kernel launches
         # band_indices = self.xp.asarray(new_state.branches["gb_fixed"].branch_supplimental.holder["band_inds"])
@@ -673,6 +674,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                     base_data[1][0],
                     psd[0][0],
                     psd[1][0],
+                    lisasens[0][0],
+                    lisasens[1][0],
                     self.df,
                     self.data_length,
                     self.nwalkers * self.ntemps,
@@ -1180,6 +1183,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                         base_data[1][0],
                         psd[0][0],
                         psd[1][0],
+                        lisasens[0][0],
+                        lisasens[1][0],
                         self.df,
                         self.data_length,
                         self.nwalkers * self.ntemps,

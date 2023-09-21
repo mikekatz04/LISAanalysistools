@@ -5,7 +5,7 @@ import time
 
 
 class MultiGPUDataHolder:
-    def __init__(self, gpus, channel1_data, channel2_data, channel1_base_data, channel2_base_data, channel1_psd, channel2_psd, df, base_injections=None, base_psd=None):
+    def __init__(self, gpus, channel1_data, channel2_data, channel1_base_data, channel2_base_data, channel1_psd, channel2_psd, channel1_lisasens, channel2_lisasens, df, base_injections=None, base_psd=None):
 
         if isinstance(gpus, int):
             gpus = [gpus]
@@ -49,6 +49,8 @@ class MultiGPUDataHolder:
         self.channel2_base_data = [None for _ in range(self.num_gpus)]
         self.channel1_psd = [None for _ in range(self.num_gpus)]
         self.channel2_psd = [None for _ in range(self.num_gpus)]
+        self.channel1_lisasens = [None for _ in range(self.num_gpus)]
+        self.channel2_lisasens = [None for _ in range(self.num_gpus)]
         return_to_main = xp.cuda.runtime.getDevice()
         for gpu_i, (gpu, gpu_split_tmp) in enumerate(zip(self.gpus, self.gpu_splits)):
             gpu_split = gpu_split_tmp[gpu_split_tmp < self.nwalkers]
@@ -62,6 +64,8 @@ class MultiGPUDataHolder:
                 self.channel2_base_data[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_data.dtype)
                 self.channel1_psd[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_psd.dtype)
                 self.channel2_psd[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel2_psd.dtype)
+                self.channel1_lisasens[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel1_lisasens.dtype)
+                self.channel2_lisasens[gpu_i] = xp.zeros(walker_inds_gpu_here.shape[0] * channel1_data.shape[-1], dtype=channel2_lisasens.dtype)
                 
                 for data_i, walker_ind in enumerate(walker_inds_gpu_here):
                     inds_slice = slice(data_i * channel1_data.shape[-1], (data_i + 1) * channel1_data.shape[-1])
@@ -108,6 +112,16 @@ class MultiGPUDataHolder:
                     self.channel2_psd[gpu_i][inds_slice] = tmp_psd2
                     del tmp_psd2
                     self.mempool.free_all_blocks()
+
+                    tmp_lisasens1 = xp.asarray(channel1_lisasens[0, walker_ind])
+                    self.channel1_lisasens[gpu_i][inds_slice] = tmp_lisasens1
+                    del tmp_lisasens1
+                    self.mempool.free_all_blocks()
+
+                    tmp_lisasens2 = xp.asarray(channel2_lisasens[0, walker_ind])
+                    self.channel2_lisasens[gpu_i][inds_slice] = tmp_lisasens2
+                    del tmp_lisasens2
+                    self.mempool.free_all_blocks()
         
         xp.cuda.runtime.setDevice(return_to_main)
         xp.cuda.runtime.deviceSynchronize()
@@ -131,6 +145,10 @@ class MultiGPUDataHolder:
     @property
     def psd_list(self):
         return [self.channel1_psd, self.channel2_psd]
+
+    @property
+    def lisasens_list(self):
+        return [self.channel1_lisasens, self.channel2_lisasens]
 
     @property
     def data_shaped(self):
@@ -161,6 +179,13 @@ class MultiGPUDataHolder:
         return [
             self.reshape_list(self.channel1_psd),
             self.reshape_list(self.channel2_psd),
+        ]
+
+    @property
+    def lisasens_shaped(self):
+        return [
+            self.reshape_list(self.channel1_lisasens),
+            self.reshape_list(self.channel2_lisasens),
         ]
 
     @property
@@ -222,6 +247,54 @@ class MultiGPUDataHolder:
                     E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
                     self.channel2_psd[gpu_i][inds_slice] = E_tmp[gpu_i]
+                    if xp.any(E_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+
+                del fd_gpu[gpu_i], A_tmp[gpu_i], E_tmp[gpu_i]
+                xp.get_default_memory_pool().free_all_blocks()
+
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
+
+    def set_lisasens_from_arrays(self, A_vals_in, E_vals_in, overall_inds=None):
+
+        if overall_inds is None:
+            overall_inds = np.arange(self.ntemps * self.nwalkers)
+
+        assert len(A_vals_in) == len(E_vals_in) == len(overall_inds)
+        return_to_main = xp.cuda.runtime.getDevice()
+
+        fd_gpu = [None for _ in self.gpus]
+        A_tmp = [None for _ in self.gpus]
+        E_tmp = [None for _ in self.gpus]
+        # st = time.perf_counter()
+        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+
+                fd_gpu[gpu_i] = xp.asarray(self.fd)
+                for i, (overall_index) in enumerate(overall_inds):
+                    
+                    if overall_index not in gpu_split:
+                        continue
+
+                    overall_index_here = overall_index - gpu_split.min().item()
+                    
+                    A_tmp[gpu_i] = xp.asarray(A_vals_in[i])
+                    A_tmp[gpu_i][0] = A_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel1_lisasens[gpu_i][inds_slice] = A_tmp[gpu_i]
+                    if xp.any(A_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+                    E_tmp[gpu_i] = xp.asarray(E_vals_in[i])
+                    E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel2_lisasens[gpu_i][inds_slice] = E_tmp[gpu_i]
                     if xp.any(E_tmp[gpu_i] < 0.0):
                         breakpoint()
 
@@ -324,7 +397,65 @@ class MultiGPUDataHolder:
                     E_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="noisepsd_AE", model=psd_params_E_in, foreground_params=foreground_pars_in, xp=xp)
                     E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
-                    self.channel1_psd[gpu_i][inds_slice] = E_tmp[gpu_i]
+                    self.channel2_psd[gpu_i][inds_slice] = E_tmp[gpu_i]
+                    if xp.any(E_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+
+                del fd_gpu[gpu_i], A_tmp[gpu_i], E_tmp[gpu_i]
+                xp.get_default_memory_pool().free_all_blocks()
+
+        xp.cuda.runtime.setDevice(return_to_main)
+        xp.cuda.runtime.deviceSynchronize()
+
+        # et = time.perf_counter()
+        # print("fill", et - st)  
+
+    def set_lisasens_vals(self, lisasens_params, overall_inds=None, foreground_params=None):
+
+        if overall_inds is None:
+            overall_inds = np.arange(self.ntemps * self.nwalkers)
+        return_to_main = xp.cuda.runtime.getDevice()
+
+        fd_gpu = [None for _ in self.gpus]
+        A_tmp = [None for _ in self.gpus]
+        E_tmp = [None for _ in self.gpus]
+        # st = time.perf_counter()
+        for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
+            with xp.cuda.device.Device(gpu):
+                xp.cuda.runtime.deviceSynchronize()
+
+                fd_gpu[gpu_i] = xp.asarray(self.fd)
+                for i, (overall_index) in enumerate(overall_inds):
+                    
+                    if overall_index not in gpu_split:
+                        continue
+
+                    overall_index_here = overall_index - gpu_split.min().item()
+                    
+                    if foreground_params is not None:
+                        foreground_pars_in = foreground_params[i]
+                    else:
+                        foreground_pars_in = None
+
+                    lisasens_params_A_in = lisasens_params[i][:2]
+                    
+                    A_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="lisasens", model=lisasens_params_A_in, foreground_params=foreground_pars_in, xp=xp)
+                    A_tmp[gpu_i][0] = A_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel1_lisasens[gpu_i][inds_slice] = A_tmp[gpu_i]
+                    if xp.any(A_tmp[gpu_i] < 0.0):
+                        breakpoint()
+
+                    lisasens_params_E_in = lisasens_params[i][2:]
+
+                    E_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="lisasens", model=lisasens_params_E_in, foreground_params=foreground_pars_in, xp=xp)
+                    E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
+                    inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+                    self.channel2_lisasens[gpu_i][inds_slice] = E_tmp[gpu_i]
                     if xp.any(E_tmp[gpu_i] < 0.0):
                         breakpoint()
 
@@ -386,7 +517,7 @@ class MultiGPUDataHolder:
         # print("get psd term", et - st)
         return psd_term
 
-    def sub_in_data_and_psd(self, data, psd):
+    def sub_in_data_and_psd(self, data, psd, lisasens):
         """Must be the same size at current data
         
         
@@ -397,6 +528,10 @@ class MultiGPUDataHolder:
         # adjust psd
         self.channel1_psd[gpu_i][:] = xp.asarray(psd[0].flatten())
         self.channel2_psd[gpu_i][:] = xp.asarray(psd[1].flatten())
+
+        # adjust lisasens
+        self.channel1_lisasens[gpu_i][:] = xp.asarray(lisasens[0].flatten())
+        self.channel2_lisasens[gpu_i][:] = xp.asarray(lisasens[1].flatten())
 
         # remove injected data + previous templates
         self.channel1_data[gpu_i][:self.nwalkers * self.data_length] -= self.channel1_base_data[gpu_i][:]

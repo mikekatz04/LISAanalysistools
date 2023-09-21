@@ -138,7 +138,7 @@ class PSDwithGBPriorWrap:
             f0 = xp.asarray(gb_params_in[:, 1]) / 1e3
             
             if len(f0) > 0:
-                self.gb.get_psd_val(Sn_A, Sn_E, f0, noise_index_all, A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, num_f)
+                self.gb.get_lisasens_val(Sn_A, Sn_E, f0, noise_index_all, A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, num_f)
             
             gb_logpdf_contrib = self.gb_prior["gb_fixed"].logpdf(gb_params_in, Sn_f=Sn_A)
             logpdf_contribution = np.zeros_like(gb_inds_in, dtype=np.float64)
