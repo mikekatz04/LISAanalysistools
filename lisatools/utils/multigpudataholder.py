@@ -554,8 +554,9 @@ class MultiGPUDataHolder:
         return        
 
 
-    def get_inner_product(self, *args, overall_inds=None, **kwargs):
+    def get_inner_product(self, *args, overall_inds=None, band_edge_inds=None, **kwargs):
 
+        breakpoint()
         reshape = False
         if overall_inds is None:
             reshape = True
@@ -563,7 +564,10 @@ class MultiGPUDataHolder:
                 
         return_to_main = xp.cuda.runtime.getDevice()
 
-        inner_term = np.zeros_like(overall_inds, dtype=float)
+        if band_edge_inds is None:
+            inner_term = np.zeros_like(overall_inds, dtype=float)
+        else:
+            inner_term = np.zeros((overall_inds.shape[0], band_edge_inds.shape[0] - 1), dtype=float)
 
         data_tmp1 = [None for _ in self.gpus]
         data_tmp2 = [None for _ in self.gpus]
@@ -587,10 +591,20 @@ class MultiGPUDataHolder:
                     psd_tmp1[gpu_i] = self.channel1_psd[gpu_i][inds_slice]
                     data_tmp2[gpu_i] = self.channel2_data[gpu_i][inds_slice_even] + self.channel2_data[gpu_i][inds_slice_odd] - self.channel2_base_data[gpu_i][inds_slice]
                     psd_tmp2[gpu_i] = self.channel2_psd[gpu_i][inds_slice]
-                    inner_here = self.df * 4 * xp.sum(
-                            data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
-                            + data_tmp2[gpu_i].conj() * data_tmp2[gpu_i] / psd_tmp2[gpu_i],
-                    ).real.item()
+
+                    if band_edge_inds is None:
+                        inner_here = self.df * 4 * xp.sum(
+                                data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
+                                + data_tmp2[gpu_i].conj() * data_tmp2[gpu_i] / psd_tmp2[gpu_i],
+                        ).real.item()
+
+                    else:
+                        inner_here_tmp = self.df * 4 * xp.cumsum(
+                                data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
+                                + data_tmp2[gpu_i].conj() * data_tmp2[gpu_i] / psd_tmp2[gpu_i],
+                        ).real[band_edge_inds]
+                        inner_here_tmp[1:] -= inner_here_tmp[:-1]
+                        inner_here = inner_here_tmp[1:]
 
                     # if overall_index_here == 11:
                     #     # for w in range(3951, 3951 + 420, 25):

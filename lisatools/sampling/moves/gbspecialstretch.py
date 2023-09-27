@@ -124,6 +124,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"]))
 
     def setup_gbs(self, branch):
+        st = time.perf_counter()
         coords = branch.coords
         inds = branch.inds
         supps = branch.branch_supplimental
@@ -142,7 +143,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         ]
 
         self.stretch_friends_args_in = tuple([tmp.copy() for tmp in self.all_coords_sorted.T])
-
+        et = time.perf_counter()
+        print("SETUP:", et - st)
         # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
         # freqs_sorted_here = self.freqs_sorted.get()
         # freqs_remaining_here = all_remaining_freqs

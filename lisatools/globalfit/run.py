@@ -13,6 +13,7 @@ from .mbhglobal import run_mbh_pe
 
 from lisatools.sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
 from lisatools.globalfit.plot import RunResultsProduction
+from lisatools.globalfit.hdfbackend import save_to_backend_asynchronously_and_plot
 
 from gbgpu.gbgpu import GBGPU
 
@@ -220,12 +221,12 @@ class MPIControlGlobalFit:
         self.comm = comm
         self.gpus = gpus
 
-        self.head_rank = ranks[1]
+        self.head_rank = ranks[5]
 
-        self.gb_pe_rank = ranks[3]
+        self.gb_pe_rank = ranks[0]
         self.gb_pe_gpu = gpus[0]
 
-        self.gb_search_rank = ranks[0] 
+        self.gb_search_rank = ranks[1] 
         self.gb_search_gpu = gpus[1]
 
         self.psd_rank = ranks[4]
@@ -235,7 +236,7 @@ class MPIControlGlobalFit:
         self.mbh_gpu = gpus[3]
 
         if run_results_update:
-            self.run_results_rank = ranks[5]
+            self.run_results_rank = ranks[3]
             self.gmm_ranks = ranks[6:]
         else:
             self.run_results_rank = -1
@@ -401,24 +402,17 @@ class MPIControlGlobalFit:
         else:
             mbh_check.cancel()
 
-    def plot_check(self, run_plot):
-            
-        if run_plot:
-            self.comm.send(self.current_info, dest=self.run_results_rank, tag=7878)
-            run_plot = False
+    def plot_check(self):
+
+        plot_ch = self.comm.irecv(source=self.run_results_rank, tag=91)
+        if plot_ch.get_status():
+            plot_req = plot_ch.wait()
+
+            if "send" in plot_req and plot_req["send"]:
+                self.comm.send(self.current_info, dest=self.run_results_rank, tag=92)
 
         else:
-            plot_ch = self.comm.irecv(source=self.run_results_rank, tag=7979)
-            if plot_ch.get_status():
-                plot_req = plot_ch.wait()
-
-                if "ready" in plot_req and plot_req["ready"]:
-                    run_plot = True
-
-            else:
-                plot_ch.cancel()
-
-        return run_plot
+            plot_ch.cancel()
 
     def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
         if self.rank == self.head_rank:
@@ -429,7 +423,6 @@ class MPIControlGlobalFit:
             self.share_start_info(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)
 
             update_refit = True
-            run_plot = False
 
             # populate which runs are going
             runs_going = []
@@ -462,10 +455,10 @@ class MPIControlGlobalFit:
                 # check for update from MBH
                 self.mbh_check(runs_going)
 
-                run_plot = self.plot_check(run_plot)
+                self.plot_check()
         
         elif self.rank == self.gb_pe_rank and run_gbs_pe:
-            fin = run_gb_pe(self.gb_pe_gpu, self.comm, self.head_rank)
+            fin = run_gb_pe(self.gb_pe_gpu, self.comm, self.head_rank, self.run_results_rank)
 
         elif self.rank == self.gb_search_rank and run_gbs_search:
             comm_info = {"process_ranks_for_fit": self.gmm_ranks}
@@ -486,6 +479,35 @@ class MPIControlGlobalFit:
             fit_each_leaf(self.rank, self.gb_search_rank, rec_tag, send_tag, self.comm)
 
         elif self.run_results_update and self.rank == self.run_results_rank:
-            run_results_production = RunResultsProduction(self.comm, self.head_rank, add_gbs=False, add_mbhs=False)
+            save_to_backend_asynchronously_and_plot(self.current_info.gb_info["reader"], self.comm, self.gb_pe_rank, self.head_rank, self.current_info.general_info["plot_iter"])
             #fin = run_results_production()
 
+
+def run_gf_progression(global_fit_progression, comm, head_rank):
+    rank = comm.Get_rank()
+    
+    for g_i, global_fit_segment in enumerate(global_fit_progression):
+        segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
+
+        # check if this segment has completed
+        if segment.current_info.general_info["file_information"]["status_file"] in os.listdir(segment.current_info.general_info["file_information"]["file_store_dir"]):
+            with open(segment.current_info.general_info["file_information"]["status_file"], "r") as fp:
+                lines = fp.read_lines()
+                if global_fit_segment["name"] + "\n" in lines:
+                    continue
+        if rank == head_rank:
+            class_name = global_fit_segment["name"]
+            print(f"\n\nStarting {class_name}\n\n")
+            st = time.perf_counter()
+        print("start", g_i, rank)
+        segment.run()
+        comm.Barrier()
+        print("end", g_i, rank)
+        if rank == head_rank:
+            class_name = global_fit_segment["name"]
+            et = time.perf_counter()
+            print(f"\n\nEnding {class_name}({et - st} sec)\n\n")
+            with open(segment.current_info.general_info["file_information"]["status_file"], "a") as fp:
+                fp.write(global_fit_segment["name"] + "\n")
+                if global_fit_segment["name"] in lines:
+                    continue

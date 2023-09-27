@@ -37,6 +37,30 @@ class SNRStopping(Stopping):
             return False
 
 
+class NLeavesSearchStopping:
+    def __init__(self, newly_added_limit=30, verbose=False):
+        self.newly_added_limit = newly_added_limit
+        self.verbose = verbose
+
+    def __call__(self, newly_added_sources):
+
+        if newly_added_sources < self.newly_added_limit:
+            stop = True
+
+        else:
+            stop = False
+
+        if self.verbose:
+            print(
+                "\nNUM NEW SOURCES:\n",
+                newly_added_sources,
+                "\nLIMIT:\n",
+                self.newly_added_limit
+            )
+
+        return stop
+
+
 class SearchConvergeStopping(Stopping):
     def __init__(self, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
         self.n_iters = n_iters
@@ -72,6 +96,50 @@ class SearchConvergeStopping(Stopping):
         else:
             return False
 
+
+
+class GBBandLogLConvergeStopping(Stopping):
+
+    def __init__(self, fd, band_edges, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
+        self.band_edge_inds = np.searchsorted(fd, band_edges, side="right") - 1
+        self.num_bands = self.band_edge_inds.shape[0] - 1
+        self.converged = np.zeros(self.num_bands, dtype=bool)
+        self.iters_consecutive = np.zeros(self.num_bands, dtype=int)
+        self.past_like_best = np.full(self.num_bands, -np.inf)
+        self.n_iters = n_iters
+        self.diff = diff
+        self.verbose = verbose
+        self.start_iteration = start_iteration
+
+    def add_mgh(self, mgh):
+        self.mgh = mgh
+
+    def __call__(self, i, sample, sampler):
+        
+        breakpoint()
+        ll_per_band = self.mgh.get_ll(band_edge_inds=self.band_edge_inds).max(axis=0)
+        
+        ll_movement = (ll_per_band - self.past_like_best) > self.diff
+
+        self.iters_consecutive[~ll_movement] += 1
+        self.iters_consecutive[ll_movement] = 0
+
+        self.converged = self.iters_consecutive >= self.n_iters
+
+        for move in sampler.all_moves:
+            move.converged_sub_bands = self.converged.copy()
+
+        if self.verbose:
+            print("Num still going:", (~self.converged).sum(), "\nChanged here:", (ll_movement).sum())
+
+        if np.all(self.converged):
+            return True
+        else:
+            return False
+
+        
+
+            
 
 
 class SearchConvergeStopping2(Stopping):

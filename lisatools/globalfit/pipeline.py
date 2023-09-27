@@ -13,7 +13,7 @@ from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
 from .psdglobal import run_psd_pe
 from .mbhglobal import run_mbh_pe
 
-from lisatools.sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
+from lisatools.sampling.stopping import SearchConvergeStopping, MPICommunicateStopping, NLeavesSearchStopping
 
 from gbgpu.gbgpu import GBGPU
 
@@ -92,32 +92,25 @@ class InitialMBHMixSegment(GlobalFitSegment):
 
 
 class InitialGBSearchSegment(GlobalFitSegment):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, snr_lim=10.0, **kwargs):
 
         super().__init__(*args, **kwargs)
-
+        self.snr_lim = snr_lim
         self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
 
     def adjust_settings(self, settings):
         
-        #  settings["gb"]["search_info"]["snr_lim"] = 9.0
-        settings["gb"]["search_info"]["snr_lim"] = 7.0
         settings["gb"]["pe_info"]["use_prior_removal"] = True
         settings["gb"]["pe_info"]["rj_refit_fraction"] = 0.1
         settings["gb"]["pe_info"]["rj_search_fraction"] = 0.7
         settings["gb"]["pe_info"]["rj_prior_fraction"] = 0.2
         settings["gb"]["pe_info"]["update_iterations"] = 1
-        settings["gb"]["pe_info"]["stop_kwargs"] = dict(
-            n_iters=5,
-            diff=0.01,
-            verbose=True
-        )
-        settings["gb"]["pe_info"]["stopping_iterations"] = -1
+        settings["gb"]["pe_info"]["stopping_iterations"] = 1
         settings["gb"]["pe_info"]["run_search"] = True
 
         settings["gb"]["search_info"]["stopping_iterations"] = 1
         settings["gb"]["search_info"]["run_search"] = True
-        settings["gb"]["search_info"]["snr_lim"] = 9.0
+        settings["gb"]["search_info"]["snr_lim"] = self.snr_lim
 
         settings["mbh"]["search_info"]["thin_by"] = 5
         settings["mbh"]["search_info"]["stopping_iterations"] = 1
@@ -128,18 +121,18 @@ class InitialGBSearchSegment(GlobalFitSegment):
         
     def run(self):
 
-        stopper_rank = self.mpi_controller.gb_pe_rank
+        stopper_rank = self.mpi_controller.gb_search_rank
         other_ranks = [
             self.mpi_controller.psd_rank,
             self.mpi_controller.mbh_rank,
-            self.mpi_controller.gb_search_rank
+            self.mpi_controller.gb_pe_rank
         ]
 
         # had to go after initialization of mpi because it needs the ranks
-        stop_fn = SearchConvergeStopping(**self.current_info.gb_info["pe_info"]["stop_kwargs"])
-        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        stop_fn = NLeavesSearchStopping(**self.current_info.gb_info["search_info"]["stop_kwargs"])
+        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
         self.current_info.psd_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
-        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
         self.current_info.mbh_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
 
         self.mpi_controller.run_global_fit(run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True)

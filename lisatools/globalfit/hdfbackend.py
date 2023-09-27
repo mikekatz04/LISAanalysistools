@@ -1,8 +1,55 @@
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
 from .state import State
+from .plot import RunResultsProduction
+import time
+
+
+def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_rank, plot_iter):
+
+    print("starting run")
+    run_results_production = RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
+    run = True
+    i = 0
+    while run:
+        print("WAITING FOR DATA")
+        save_dict = comm.recv(source=gb_pe_rank, tag=90)
+        print("RECEIVED FOR DATA")
+        if "finish" in save_dict and save_dict["finish"]:
+            break
+
+        time.sleep(15.)  # to allow for ending the code
+        save_args = save_dict["save_args"]
+        save_kwargs = save_dict["save_kwargs"]
+        print("attempting to save step")
+        st = time.perf_counter()
+        gb_reader.save_step_main(*save_args, **save_kwargs)
+        et = time.perf_counter()
+        print("SAVE STEP, time:", et - st)
+        if ((i + 1) % plot_iter) == 0:
+            print("ASK FOR DATA FOR PLOT")
+            comm.send({"send": True}, dest=head_rank, tag=91)
+            current_info = comm.recv(source=head_rank, tag=92)
+            print("STARTING PLOT")
+            run_results_production.build_plots(current_info)
+            print("FINISHED PLOT")
+
+        i += 1
+    return 
+
 
 class HDFBackend(eryn_HDFBackend):
+
+    def __init__(self, *args, comm=None, save_plot_rank=None, **kwargs):
+
+        super().__init__(*args, **kwargs)
+
+        if comm is not None or save_plot_rank is not None:
+            if comm is None or save_plot_rank is None:
+                raise ValueError("If providing comm/save_plot_rank, must provide both.")
+
+        self.comm = comm
+        self.save_plot_rank = save_plot_rank
     
     def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
         if num_bands is None or band_edges is None:
@@ -211,30 +258,12 @@ class HDFBackend(eryn_HDFBackend):
         """
         return self.get_value("band_info", **kwargs)
 
-    def save_step(
+    def save_step_main(
         self,
         state,
         *args, 
         **kwargs
     ):
-        """Save a step to the backend
-
-        Args:
-            state (State): The :class:`State` of the ensemble.
-            accepted (ndarray): An array of boolean flags indicating whether
-                or not the proposal for each walker was accepted.
-            rj_accepted (ndarray, optional): An array of the number of accepted steps
-                for the reversible jump proposal for each walker.
-                If :code:`self.rj` is True, then rj_accepted must be an array with
-                :code:`rj_accepted.shape == accepted.shape`. If :code:`self.rj`
-                is False, then rj_accepted must be None, which is the default.
-            swaps_accepted (ndarray, optional): 1D array with number of swaps accepted
-                for the in-model step. (default: ``None``)
-            moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the 
-                moves in the sampler. This dict must have the same keys as ``self.move_keys``.
-                (default: ``None``)
-
-        """
 
         super().save_step(state, *args, **kwargs)
         
@@ -260,6 +289,37 @@ class HDFBackend(eryn_HDFBackend):
 
         # reset the counter for band info
         state.reset_band_counters()
+        
+    def save_step(
+        self,
+        *args, 
+        **kwargs
+    ):
+        """Save a step to the backend
+
+        Args:
+            state (State): The :class:`State` of the ensemble.
+            accepted (ndarray): An array of boolean flags indicating whether
+                or not the proposal for each walker was accepted.
+            rj_accepted (ndarray, optional): An array of the number of accepted steps
+                for the reversible jump proposal for each walker.
+                If :code:`self.rj` is True, then rj_accepted must be an array with
+                :code:`rj_accepted.shape == accepted.shape`. If :code:`self.rj`
+                is False, then rj_accepted must be None, which is the default.
+            swaps_accepted (ndarray, optional): 1D array with number of swaps accepted
+                for the in-model step. (default: ``None``)
+            moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the 
+                moves in the sampler. This dict must have the same keys as ``self.move_keys``.
+                (default: ``None``)
+
+        """
+
+        if self.comm is None:
+            self.save_step_main(*args, **kwargs)
+        
+        else:
+            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank, tag=90)
+
 
     def get_a_sample(self, it):
         """Access a sample in the chain

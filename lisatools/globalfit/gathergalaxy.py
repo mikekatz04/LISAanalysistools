@@ -1,8 +1,13 @@
 import time
 import cupy as xp
+from gbgpu.utils.utility import get_N
 from gbgpu.gbgpu import GBGPU
 import numpy as np
 from gbgpu.utils.constants import *
+from datetime import datetime
+import pandas as pd
+import os
+
 
 def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
 
@@ -65,6 +70,8 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     binaries_for_test = []
     num_so_far = 0
     keep_going_in = []
+    base_snrs_going_in = []
+    test_snrs_going_in = []
     for i, bin in enumerate(first_sample):
         #if i > 100:
         #    continue
@@ -75,6 +82,9 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
 
         keep_going_in.append(i)
         keep_i = np.where((freq_dist < 1e-4) & (snr_dist < 20.0))
+
+        base_snrs_going_in.append(np.repeat(first_sample_snrs[i], len(keep_i[0])))
+        test_snrs_going_in.append(gb_snrs[1:][keep_i])
         keep_map.append([num_so_far + np.arange(len(keep_i[0])), keep_i])
         binaries_for_test_not_transformed.append(gb_samples[1:][keep_i])
         binaries_in_not_transformed.append(np.tile(bin, (len(keep_i[0]), 1)))
@@ -88,8 +98,8 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     bins_fin_base_in = np.concatenate(binaries_in)
     bins_fin_test_in_not_transformed = np.concatenate(binaries_for_test_not_transformed)
     bins_fin_base_in_not_transformed = np.concatenate(binaries_in_not_transformed)
-
-    from gbgpu.utils.utility import get_N
+    snrs_fin_test_in = np.concatenate(test_snrs_going_in)
+    snrs_fin_base_in = np.concatenate(base_snrs_going_in)
 
     N_vals = get_N(bins_fin_test_in[:, 0], bins_fin_test_in[:, 1], YEAR, oversample=4)
     waveform_kwargs["N"] = xp.asarray(N_vals)
@@ -103,6 +113,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     keep_groups = []
     keep_group_number = []
     keep_group_samples = []
+    keep_group_snrs = []
     keep_group_sample_id = []
     max_number = 0
     num_so_far_gather = 0
@@ -123,6 +134,9 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
             binary_samples = np.concatenate([np.array([bins_fin_base_in_not_transformed[keep_inds[0]]]), bins_fin_test_in_not_transformed[keep_inds][group_test]])
         except IndexError:
             breakpoint()
+
+        binary_snrs = np.concatenate([np.array([snrs_fin_base_in[keep_inds[0]]]), snrs_fin_test_in[keep_inds][group_test]])
+        
         if not np.all(gb_inds_left[sample_map, binary_map]):
             # TODO: fix this
             ind_fix = np.where(~gb_inds_left[sample_map, binary_map])
@@ -139,6 +153,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
 
 
             keep_group_samples.append(binary_samples)
+            keep_group_snrs.append(binary_snrs)
             keep_groups.append((num_grouping, sample_map, binary_map))
 
             num_so_far_gather += 1
@@ -147,11 +162,80 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
 
     output_information = []
     for i in range(len(keep_group_sample_id)):
-        output_information.append(np.concatenate([keep_group_sample_id[i].T, keep_group_samples[i]], axis=1))
+        output_information.append(np.concatenate([keep_group_sample_id[i].T, keep_group_snrs[i][:, None], keep_group_samples[i]], axis=1))
     
     if len(output_information) > 0:
         output_information = np.concatenate(output_information, axis=0)
     return output_information
+
+
+def build_catalog(current_info, gpu, **kwargs):
+    xp.cuda.runtime.setDevice(gpu)
+    gb_reader = current_info.gb_info["reader"]
+
+    generated_info = current_info.get_data_psd(include_gbs=False, include_mbhs=False, include_lisasens=False, only_max_ll=True)  # , include_ll=True, include_source_only_ll=True)
+    psd = xp.asarray(generated_info["psd"])
+    output_information = gather_gb_samples(current_info, gb_reader, psd, gpu, **kwargs)
+
+    unique_vals, first_entry_of_each_group, uni_inverse = np.unique(output_information[:,0].astype(int), return_index=True, return_inverse=True)
+
+    keys = [
+        "Group ID",
+        "Evidence",
+        "SNR",
+        "Amplitude",
+        "Frequency",
+        "Frequency Derivative",
+        "Initial Phase",
+        "cosinc",
+        "Polarization",
+        "Ecliptic Longitude",
+        "sinlat",
+    ]
+
+    df = pd.DataFrame({key: item for key, item in zip(keys, output_information.T)})
+
+    df["Ecliptic Latitude"] = np.arcsin(df["sinlat"])
+    df["Frequency"] = df["Frequency"] / 1e3
+    df["coslat"] = np.cos(np.pi / 2. - df["Ecliptic Latitude"])
+    df["Inclination"] = np.arccos(df["coslat"])
+    df["Parent"] = [None for _ in range(df.shape[0])]
+    year_val = datetime.now().year
+    month_val = datetime.now().month
+    day_val = datetime.now().day
+    
+    df_main = df.iloc[first_entry_of_each_group]
+    name_index = [f"EREBOR_{year_val}_{month_val}_{day_val}_{i:08d}" for i in range(df_main.shape[0])]
+    
+    chain_file_index = 0
+    store = 500
+    chain_file_list = []
+    for i in range(len(name_index)):
+        chain_file_list.append(current_info.general_info["file_information"]["all_chain_file"].split("/")[-1][:-3] + f"_{chain_file_index:04d}.h5")
+        
+        if (i + 1) %store == 0:
+            chain_file_index += 1
+
+    df_main["chain file"] = chain_file_list
+
+    df_main.index = name_index
+    df_main.to_hdf(current_info.general_info["file_information"]["main_chain_file"], "detections", mode="w", complevel=9)
+    
+    dirname = os.path.dirname(current_info.general_info["file_information"]["main_chain_file"])
+    if dirname[-1] != "/":
+        dirname += "/"
+    
+    # metadata
+    df_meta = pd.DataFrame({"Observation Time": [current_info.general_info["Tobs"]], "parent": [None], "Build Time": [datetime.now()]})
+    df_meta.to_hdf(current_info.general_info["file_information"]["main_chain_file"], "metadata", mode="a", complevel=9)
+
+    assert len(name_index) == len(first_entry_of_each_group)
+    # exit(0)
+    for i, (sub_df_name, index, store_file) in enumerate(zip(name_index, first_entry_of_each_group, chain_file_list)):
+        sub_df = df[df["Group ID"].astype(int) == int(df.iloc[index]["Group ID"])]
+        sub_df.to_hdf(dirname + store_file, sub_df_name + "_chain", mode="a", complevel=9)
+        if (i + 1) % 100 == 0:
+            print(f"Sub hdf: {i + 1} of {len(first_entry_of_each_group)}")
 
 # np.savetxt("output_samples_from_gbs_grouped.txt", output_information, header="id, confidence, amp, f0, fdot, phi0, inc, psi, lam, beta", delimiter=",")
 # exit()

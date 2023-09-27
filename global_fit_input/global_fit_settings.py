@@ -55,6 +55,11 @@ def get_global_fit_settings(copy_settings_file=False):
 
     file_information["fp_gb_gmm_info"] = file_store_dir + base_file_name + "_gmm_info.pickle"
 
+    file_information["main_chain_file"] = file_store_dir + base_file_name + "_main_chain_file.h5"
+    file_information["all_chain_file"] = file_store_dir + base_file_name + "_all_chain_file.h5"
+
+    file_information["status_file"] = file_store_dir + base_file_name + "_status_file.txt"
+
     if copy_settings_file:
         shutil.copy(__file__, file_store_dir + base_file_name + "_" + __file__.split("/")[-1])
     
@@ -135,6 +140,7 @@ def get_global_fit_settings(copy_settings_file=False):
         generate_current_state=generate_current_state,
         random_seed=1024,
         begin_new_likelihood=False,
+        plot_iter=2,
         gpus=[4, 5, 6, 7]
     )
 
@@ -143,7 +149,6 @@ def get_global_fit_settings(copy_settings_file=False):
     ###  Galactic Binary Settings  ###
     ##################################
     ##################################
-
 
     # limits on parameters
     delta_safe = 1e-5
@@ -269,8 +274,8 @@ def get_global_fit_settings(copy_settings_file=False):
         nwalkers=100,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
-        snr_lims=[4.0],  # [9.0, 7.0, 4.0],
-        snr_lim_transitions=[0],  # [50, 50, 50]
+        snr_lim=4.0,
+        stop_kwargs=dict(newly_added_limit=30, verbose=False)
     )
 
     # template generator
@@ -428,10 +433,10 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     inner_moves = [
-        (SkyMove(which="both"), 0.00),
-        (SkyMove(which="long"), 0.00),
-        (SkyMove(which="lat"), 0.08),
-        (StretchMove(), 0.92)
+        (SkyMove(which="both"), 0.02),
+        (SkyMove(which="long"), 0.05),
+        (SkyMove(which="lat"), 0.05),
+        (StretchMove(), 0.88)
     ]
 
     # mcmc info for main run

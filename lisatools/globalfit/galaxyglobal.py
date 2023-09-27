@@ -213,7 +213,7 @@ def make_gmm(gb, gmm_info_in):
     return gen_dist
 
 
-def run_gb_pe(gpu, comm, head_rank):
+def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     gb = GBGPU(use_gpu=True)
     gpus_pe = [gpu]
@@ -545,6 +545,8 @@ def run_gb_pe(gpu, comm, head_rank):
         gf_information.general_info["file_information"]["fp_gb_pe"],
         compression="gzip",
         compression_opts=9,
+        comm=comm,
+        save_plot_rank=save_plot_rank
     )
     
     if not backend.initialized:
@@ -564,19 +566,16 @@ def run_gb_pe(gpu, comm, head_rank):
     # state_mix.random_state = np.random.get_state()
     # state_mix.log_prior = np.zeros_like(state_mix.log_like)
     # backend.save_step(state_mix, np.zeros((ntemps_pe, nwalkers_pe), dtype=int), rj_accepted=np.zeros((ntemps_pe, nwalkers_pe), dtype=int))
-    if "run_search" in gb_info["pe_info"] and gb_info["pe_info"]["run_search"]:
-        stopping_fn = gb_info["pe_info"]["stopping_function"]
+    stopping_fn = gb_info["pe_info"]["stopping_function"]
 
-        if hasattr(stopping_fn, "add_comm"):
-            stopping_fn.add_comm(comm)
+    if hasattr(stopping_fn, "add_comm"):
+        stopping_fn.add_comm(comm)
 
-        stopping_iterations = gb_info["pe_info"]["stopping_iterations"]
-        thin_by = gb_info["pe_info"]["thin_by"]
+    if hasattr(stopping_fn, "add_mgh"):
+        stopping_fn.add_mgh(mgh)
 
-    else:
-        stopping_fn = None
-        stopping_iterations = -1
-        thin_by = gb_info["pe_info"]["thin_by"]
+    stopping_iterations = gb_info["pe_info"]["stopping_iterations"]
+    thin_by = gb_info["pe_info"]["thin_by"]
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
@@ -647,9 +646,9 @@ def fit_gmm(samples, comm, comm_info):
         for group in np.unique(samples[:, 0].astype(int)): 
             keep_samp = samples[:, 0].astype(int) == group
             if keep_samp.sum() > 0:
-                if np.any(np.isnan(samples[keep_samp, 2:])) or np.any(np.isinf(samples[keep_samp, 2:])):
+                if np.any(np.isnan(samples[keep_samp, 3:])) or np.any(np.isinf(samples[keep_samp, 3:])):
                     breakpoint()
-                args.append(samples[keep_samp, 2:][:, keep])
+                args.append(samples[keep_samp, 3:][:, keep])
 
     else:
         raise ValueError
@@ -1165,25 +1164,15 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
                     if not xp.allclose(best_logl, best_logl_check):
                         breakpoint()
 
-                    if "current_snr_lim_ind" not in gb_info["search_info"]:
-                        gb_info["search_info"]["current_snr_lim_ind"] = 0
-
-                    if gb_info["search_info"]["current_snr_lim_ind"] >= len(gb_info["search_info"]["snr_lims"]) - 1:
-                        gb_info["search_info"]["current_snr_lim_ind"] = len(gb_info["search_info"]["snr_lims"]) - 1
-                    
-                    current_snr_lim_ind = gb_info["search_info"]["current_snr_lim_ind"]
-                    snr_lim = gb_info["search_info"]["snr_lims"][current_snr_lim_ind]
+                    snr_lim = gb_info["search_info"]["snr_lim"]
                     keep_binaries = gb.d_h / xp.sqrt(gb.h_h.real) > snr_lim
 
-                    print(f"SNR lim: {snr_lim}, {current_snr_lim_ind}")
+                    print(f"SNR lim: {snr_lim}")
                     
                     still_going_here = keep_binaries.copy()
 
                     num_new_binaries = keep_binaries.sum().item()
                     print(f"num new search: {num_new_binaries}")
-                    
-                    if current_snr_lim_ind + 1 < len(gb_info["search_info"]["snr_lims"]) and num_new_binaries > gb_info["search_info"]["snr_lim_transitions"][current_snr_lim_ind]:
-                        gb_info["search_info"]["current_snr_lim_ind"] += 1
 
                     thin_by = 25
                     num_samples_store = 30
@@ -1359,16 +1348,6 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     run = True
     while run:
         try:
-
-            if "run_search" in gb_info["search_info"] and gb_info["search_info"]["run_search"]:
-                if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
-                    gb_info["search_info"]["stopping_function"].add_comm(comm)
-                
-                stop = gb_info["search_info"]["stopping_function"](None, None, None)
-                
-                if stop:
-                    break
-
             comm.send({"send": True}, dest=head_rank, tag=20)
             print("waiting for data")
             incoming_data = comm.recv(source=head_rank, tag=27)
@@ -1408,6 +1387,15 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             
             comm.send({"receive": True}, dest=head_rank, tag=20)
             comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
+
+            if "run_search" in gb_info["search_info"] and gb_info["search_info"]["run_search"]:
+                if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
+                    gb_info["search_info"]["stopping_function"].add_comm(comm)
+                
+                stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
+                
+                if stop:
+                    break
         
         except BlockingIOError as e:
             print("bulk", e)
