@@ -200,17 +200,11 @@ def run_mbh_pe(gpu, comm, head_rank):
     like_mix = BasicResidualMGHLikelihood(None)
     # key permute is False
 
-    if "run_search" in mbh_info["search_info"] and mbh_info["search_info"]["run_search"]:
-        stopping_fn = mbh_info["search_info"]["stopping_function"]
-        if hasattr(stopping_fn, "add_comm"):
-            stopping_fn.add_comm(comm)
-        stopping_iterations = mbh_info["search_info"]["stopping_iterations"]
-        thin_by = mbh_info["search_info"]["thin_by"]
-
-    else:
-        stopping_fn = None
-        stopping_iterations = -1
-        thin_by = mbh_info["pe_info"]["thin_by"]
+    stopping_fn = mbh_info["pe_info"]["stopping_function"]
+    if hasattr(stopping_fn, "add_comm"):
+        stopping_fn.add_comm(comm)
+    stopping_iterations = mbh_info["pe_info"]["stopping_iterations"]
+    thin_by = mbh_info["pe_info"]["thin_by"]
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,

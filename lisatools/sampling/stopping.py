@@ -116,7 +116,6 @@ class GBBandLogLConvergeStopping(Stopping):
 
     def __call__(self, i, sample, sampler):
         
-        breakpoint()
         ll_per_band = self.mgh.get_ll(band_edge_inds=self.band_edge_inds).max(axis=0)
         
         ll_movement = (ll_per_band - self.past_like_best) > self.diff
@@ -126,8 +125,10 @@ class GBBandLogLConvergeStopping(Stopping):
 
         self.converged = self.iters_consecutive >= self.n_iters
 
-        for move in sampler.all_moves:
-            move.converged_sub_bands = self.converged.copy()
+        self.past_like_best[ll_movement] = ll_per_band[ll_movement]
+
+        # for move in sampler.all_moves:
+        #     move.converged_sub_bands = self.converged.copy()
 
         if self.verbose:
             print("Num still going:", (~self.converged).sum(), "\nChanged here:", (ll_movement).sum())

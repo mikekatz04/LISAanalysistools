@@ -555,8 +555,6 @@ class MultiGPUDataHolder:
 
 
     def get_inner_product(self, *args, overall_inds=None, band_edge_inds=None, **kwargs):
-
-        breakpoint()
         reshape = False
         if overall_inds is None:
             reshape = True
@@ -618,9 +616,13 @@ class MultiGPUDataHolder:
                     #     if "stop" in kwargs and kwargs["stop"]:
                     #         breakpoint()
                     xp.cuda.runtime.deviceSynchronize()
-                    if np.isnan(inner_here):
+                    if np.all(np.isnan(inner_here)):
                         breakpoint()
-                    inner_term[i] = inner_here
+                    
+                    try:
+                        inner_term[i] = inner_here.get()
+                    except AttributeError:
+                        inner_term[i] = inner_here
 
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):

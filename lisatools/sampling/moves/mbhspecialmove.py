@@ -6,7 +6,7 @@ from eryn.moves import RedBlueMove, StretchMove
 from eryn.state import State
 
 from lisatools.sampling.moves.skymodehop import SkyMove
-
+from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 
 
@@ -58,24 +58,56 @@ class MBHSpecialMove(RedBlueMove):
             # d - h -> need to add removal waveforms
             # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
 
+            ll_tmp2 = ((-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2))) - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
+
             self.data_residuals[:2] += removal_waveforms[:2]
+            
+            # ll_tmp3 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2))) #  - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
+
+            psd_term = -xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2)).get()
+
+            keep_het = ll_tmp2.argmax().item()
             del removal_waveforms
             xp.get_default_memory_pool().free_all_blocks()
-            ll_tmp2 = (-1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(self.psd[:2])), axis=(0, 2))).get()
+            data_index = xp.arange(removal_coords_in.shape[0], dtype=np.int32)
+            noise_index = xp.arange(removal_coords_in.shape[0], dtype=np.int32)
+            het_coords = np.tile(removal_coords_in[keep_het], (removal_coords_in.shape[0], 1))
+
+            like_het = NewHeterodynedLikelihood(
+                self.waveform_gen,
+                self.fd,
+                self.data_residuals.transpose(1, 0, 2).copy(),
+                self.psd.transpose(1, 0, 2).copy(),
+                het_coords,
+                256,
+                data_index=data_index,
+                noise_index=noise_index,
+                use_gpu=True,  # self.use_gpu,
+            )
+            
+            ll_tmp = like_het.get_ll(
+                removal_coords_in, 
+                constants_index=data_index,
+            ) + psd_term
 
             old_coords = new_state.branches["mbh"].coords[:, :, leaf].reshape(-1, ndim)
             old_coords_in = self.transform_fn.both_transforms(old_coords)
             data_index = walker_inds_base.astype(np.int32)
             noise_index = walker_inds_base.astype(np.int32)
 
-            self.waveform_gen.d_d = xp.asarray(-2 * np.tile(ll_tmp2, (ntemps, 1)).flatten())
+            self.waveform_gen.d_d = ll_tmp  # xp.asarray(-2 * np.tile(ll_tmp2, (ntemps, 1)).flatten())
 
             del ll_tmp2
             xp.get_default_memory_pool().free_all_blocks()
-            d_d_store = self.waveform_gen.d_d.reshape(ntemps, nwalkers).get()
+            # d_d_store = self.waveform_gen.d_d.reshape(ntemps, nwalkers).get()
 
+            data_index_in = xp.tile(xp.arange(nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
             # TODO: fix this
-            prev_logl = self.waveform_gen.get_direct_ll(self.fd, self.data_residuals.flatten(), self.psd.flatten(), self.df, *old_coords_in.T, noise_index=noise_index, data_index=data_index, **self.mbh_kwargs).reshape((ntemps, nwalkers)).real.get()
+            # prev_logl = self.waveform_gen.get_direct_ll(self.fd, self.data_residuals.flatten(), self.psd.flatten(), self.df, *old_coords_in.T, noise_index=noise_index, data_index=data_index, **self.mbh_kwargs).reshape((ntemps, nwalkers)).real.get()
+            prev_logl = like_het.get_ll(
+                old_coords_in, 
+                constants_index=data_index_in,
+            ).reshape((ntemps, nwalkers)).real + psd_term
 
             prev_logp = self.mbh_priors["mbh"].logpdf(old_coords).reshape((ntemps, nwalkers))
 
@@ -137,15 +169,18 @@ class MBHSpecialMove(RedBlueMove):
                     new_points_in = self.transform_fn.both_transforms(new_points.reshape(-1, ndim)[~np.isinf(logp)])
                     
                     # Compute the lnprobs of the proposed position.
-                    data_index = walker_inds_here[~np.isinf(logp)].astype(np.int32)
-                    noise_index = walker_inds_here[~np.isinf(logp)].astype(np.int32)
+                    data_index = xp.asarray(walker_inds_here[~np.isinf(logp)].astype(np.int32))
+                    # noise_index = walker_inds_here[~np.isinf(logp)].astype(np.int32)
 
-                    self.waveform_gen.d_d = xp.asarray(d_d_store[(temp_inds_here[~np.isinf(logp)], walker_inds_here[~np.isinf(logp)])])
+                    # self.waveform_gen.d_d = xp.asarray(d_d_store[(temp_inds_here[~np.isinf(logp)], walker_inds_here[~np.isinf(logp)])])
                     
                     logl = np.full_like(logp, -1e300)
 
-                    logl[~np.isinf(logp)] = self.waveform_gen.get_direct_ll(self.fd, self.data_residuals.flatten(), self.psd.flatten(), self.df, *new_points_in.T, noise_index=noise_index, data_index=data_index, **self.mbh_kwargs).real.get()
-
+                    # logl[~np.isinf(logp)] = self.waveform_gen.get_direct_ll(self.fd, self.data_residuals.flatten(), self.psd.flatten(), self.df, *new_points_in.T, noise_index=noise_index, data_index=data_index, **self.mbh_kwargs).real.get()
+                    logl[~np.isinf(logp)] = like_het.get_ll(
+                        new_points_in, 
+                        constants_index=data_index,
+                    ) + psd_term[data_index.get()]
                     logl = logl.reshape(ntemps, nwalkers_here)
                     
                     logp = logp.reshape(ntemps, nwalkers_here)
@@ -209,10 +244,12 @@ class MBHSpecialMove(RedBlueMove):
             # d - h -> need to subtract added waveforms
             self.data_residuals[:2] -= add_waveforms[:2]
 
+            del like_het
             del add_waveforms
             xp.get_default_memory_pool().free_all_blocks()
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
 
+            
             # print(leaf)
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
@@ -232,7 +269,9 @@ class MBHSpecialMove(RedBlueMove):
         xp.get_default_memory_pool().free_all_blocks()
         if not hasattr(self, "best_last_ll"):
             self.best_last_ll = current_ll.max()
+            self.low_last_ll = current_ll.min()
         # print("mbh", self.best_last_ll, current_ll.max(), current_ll.max() - self.best_last_ll)
-        # print(new_state.log_like[0])
+        print(current_ll.max(), self.best_last_ll, current_ll.min(), self.low_last_ll)
         self.best_last_ll = current_ll.max()
+        self.low_last_ll = current_ll.min()
         return new_state, accepted

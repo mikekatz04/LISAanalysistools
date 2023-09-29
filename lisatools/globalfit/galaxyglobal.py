@@ -571,8 +571,8 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     if hasattr(stopping_fn, "add_comm"):
         stopping_fn.add_comm(comm)
 
-    if hasattr(stopping_fn, "add_mgh"):
-        stopping_fn.add_mgh(mgh)
+    if stopping_fn.stop_fn is not None and hasattr(stopping_fn.stop_fn, "add_mgh"):
+        stopping_fn.stop_fn.add_mgh(mgh)
 
     stopping_iterations = gb_info["pe_info"]["stopping_iterations"]
     thin_by = gb_info["pe_info"]["thin_by"]
@@ -1377,7 +1377,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
             # max ll combination of psd and mbhs and gbs
             
-            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
+            if False: # os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
                 gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
 
             else:
@@ -1388,14 +1388,14 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             comm.send({"receive": True}, dest=head_rank, tag=20)
             comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
 
-            if "run_search" in gb_info["search_info"] and gb_info["search_info"]["run_search"]:
-                if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
-                    gb_info["search_info"]["stopping_function"].add_comm(comm)
-                
-                stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
-                
-                if stop:
-                    break
+            if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
+                gb_info["search_info"]["stopping_function"].add_comm(comm)
+            
+            breakpoint()
+            stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
+            
+            if stop:
+                break
         
         except BlockingIOError as e:
             print("bulk", e)

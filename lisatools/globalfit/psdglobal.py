@@ -352,17 +352,11 @@ def run_psd_pe(gpu, comm, head_rank):
     df = gf_information.general_info["df"]
     data_length = gf_information.general_info["data_length"]
 
-    if "run_search" in psd_info["search_info"] and psd_info["search_info"]["run_search"]:
-        stopping_fn = psd_info["search_info"]["stopping_function"]
-        if hasattr(stopping_fn, "add_comm"):
-            stopping_fn.add_comm(comm)
-        stopping_iterations = psd_info["search_info"]["stopping_iterations"]
-        thin_by = psd_info["search_info"]["thin_by"]
-
-    else:
-        stopping_fn = None
-        stopping_iterations = -1
-        thin_by = psd_info["pe_info"]["thin_by"]
+    stopping_fn = psd_info["pe_info"]["stopping_function"]
+    if hasattr(stopping_fn, "add_comm"):
+        stopping_fn.add_comm(comm)
+    stopping_iterations = psd_info["pe_info"]["stopping_iterations"]
+    thin_by = psd_info["pe_info"]["thin_by"]
 
     sampler_mix = EnsembleSampler(
         nwalkers_pe,

@@ -237,6 +237,12 @@ def get_global_fit_settings(copy_settings_file=False):
     betas = 1 / 1.2 ** np.arange(ntemps_pe)
     betas[-1] = 0.0001
 
+    stopping_kwargs = dict(
+        n_iters=1000,
+        diff=1.0,
+        verbose=True
+    )
+
     # mcmc info for main run
     gb_main_run_mcmc_info = dict(
         branch_names=["gb_fixed"],
@@ -262,9 +268,11 @@ def get_global_fit_settings(copy_settings_file=False):
         rj_prior_fraction=0.6,
         nsteps=10000,
         update_iterations=1,
-        thin_by=5,
+        thin_by=1,
         progress=True,
-        rho_star=rho_star
+        rho_star=rho_star,
+        stop_kwargs=stopping_kwargs,
+        stopping_iterations=1,
     )
 
     # mcmc info for search runs
@@ -275,7 +283,8 @@ def get_global_fit_settings(copy_settings_file=False):
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
         snr_lim=4.0,
-        stop_kwargs=dict(newly_added_limit=30, verbose=False)
+        stop_kwargs=dict(newly_added_limit=1000, verbose=False),
+        stopping_iterations=1,
     )
 
     # template generator
@@ -293,7 +302,7 @@ def get_global_fit_settings(copy_settings_file=False):
         initialize_kwargs=gb_initialize_kwargs,
         pe_info=gb_main_run_mcmc_info,
         search_info=gb_search_run_mcmc_info,
-        get_templates=get_gb_templates
+        get_templates=get_gb_templates,
     )
 
 
@@ -329,6 +338,12 @@ def get_global_fit_settings(copy_settings_file=False):
         4: uniform_dist(5e1, 8e3),  # Slope2
     }
 
+    search_stopping_kwargs = dict(
+        n_iters=1,
+        diff=0.01,
+        verbose=True
+    )
+
     # mcmc info for main run
     psd_main_run_mcmc_info = dict(
         branch_names=["psd", "galfor"],
@@ -339,19 +354,8 @@ def get_global_fit_settings(copy_settings_file=False):
         progress=False,
         thin_by=100,
         update_iterations=20,
-    )
-
-    search_stopping_kwargs = dict(
-        n_iters=1,
-        diff=0.01,
-        verbose=True
-    )
-
-    psd_search_kwargs = dict(
         stop_kwargs=search_stopping_kwargs,
-        stopping_iterations=1,
-        thin_by=20,
-        run_search=False,
+        stopping_iterations=5
     )
 
     all_psd_info = dict(
@@ -361,7 +365,7 @@ def get_global_fit_settings(copy_settings_file=False):
         initalize_kwargs=psd_initialize_kwargs,
         get_psd=get_psd,
         pe_info=psd_main_run_mcmc_info,
-        search_info=psd_search_kwargs
+        stopping_iterations=1,
     )
 
 
@@ -439,23 +443,25 @@ def get_global_fit_settings(copy_settings_file=False):
         (StretchMove(), 0.88)
     ]
 
+    search_stopping_kwargs = dict(
+        n_iters=50,
+        diff=0.01,
+        verbose=True
+    )
+
     # mcmc info for main run
     mbh_main_run_mcmc_info = dict(
         branch_names=["mbh"],
         nleaves_max=15,
         ndim=11,
         ntemps=10,
-        nwalkers=30,
-        num_prop_repeats=25,
+        nwalkers=100,
+        num_prop_repeats=200,
         inner_moves=inner_moves,
-        progress=False,
-        thin_by=1
-    )
-
-    search_stopping_kwargs = dict(
-        n_iters=50,
-        diff=0.01,
-        verbose=True
+        progress=True,
+        thin_by=1,
+        stop_kwargs=search_stopping_kwargs,
+        stopping_iterations=4
     )
 
     mbh_search_kwargs = {
@@ -466,14 +472,15 @@ def get_global_fit_settings(copy_settings_file=False):
     }
 
     mbh_search_run_info = dict(
-        stop_kwargs=search_stopping_kwargs,
         ntemps=10,
         nwalkers=100,
         mbh_kwargs=mbh_search_kwargs,
         time_splits=8,
         max_num_per_gpu=2, 
         verbose=False,
-        snr_lim=20.0
+        snr_lim=20.0, 
+        stop_kwargs=search_stopping_kwargs,
+        stopping_iterations=4
     )
 
     all_mbh_info = dict(
@@ -485,6 +492,8 @@ def get_global_fit_settings(copy_settings_file=False):
         pe_info=mbh_main_run_mcmc_info,
         search_info=mbh_search_run_info,
         get_templates=get_mbh,
+        stop_kwargs=search_stopping_kwargs,
+        stopping_iterations=1,
     )
 
     ##############

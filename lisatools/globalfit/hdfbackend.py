@@ -23,7 +23,7 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_ra
         save_kwargs = save_dict["save_kwargs"]
         print("attempting to save step")
         st = time.perf_counter()
-        gb_reader.save_step_main(*save_args, **save_kwargs)
+        # gb_reader.save_step_main(*save_args, **save_kwargs)
         et = time.perf_counter()
         print("SAVE STEP, time:", et - st)
         if ((i + 1) % plot_iter) == 0:

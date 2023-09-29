@@ -223,17 +223,17 @@ class MPIControlGlobalFit:
 
         self.head_rank = ranks[5]
 
-        self.gb_pe_rank = ranks[0]
+        self.gb_pe_rank = ranks[1]
         self.gb_pe_gpu = gpus[0]
 
-        self.gb_search_rank = ranks[1] 
+        self.gb_search_rank = ranks[0] 
         self.gb_search_gpu = gpus[1]
 
         self.psd_rank = ranks[4]
-        self.psd_gpu = gpus[2]
+        self.psd_gpu = gpus[3]
 
         self.mbh_rank = ranks[2]
-        self.mbh_gpu = gpus[3]
+        self.mbh_gpu = gpus[2]
 
         if run_results_update:
             self.run_results_rank = ranks[3]
