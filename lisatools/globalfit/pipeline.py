@@ -44,13 +44,12 @@ class InitialPSDSearch(GlobalFitSegment):
 
         super().__init__(*args, **kwargs)
 
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
+        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus, run_results_update=False)
 
     def adjust_settings(self, settings):
         settings["psd"]["pe_info"]["update_iterations"] = -1
-        settings["psd"]["search_info"]["run_search"] = True
-        settings["psd"]["search_info"]["stopping_iterations"] = 4
-        settings["psd"]["search_info"]["stopping_function"] = SearchConvergeStopping(**settings["psd"]["search_info"]["stop_kwargs"])
+        settings["psd"]["pe_info"]["stopping_iterations"] = 4
+        settings["psd"]["pe_info"]["stopping_function"] = SearchConvergeStopping(**settings["psd"]["pe_info"]["stop_kwargs"])
 
     def run(self):
 
@@ -62,31 +61,21 @@ class InitialMBHMixSegment(GlobalFitSegment):
 
         super().__init__(*args, **kwargs)
 
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
+        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus, run_results_update=False)
 
     def adjust_settings(self, settings):
-        settings["mbh"]["search_info"]["stop_kwargs"] = dict(
-            n_iters=1,
-            diff=0.01,
-            verbose=True
-        )
-        settings["mbh"]["search_info"]["thin_by"] = 1
-        settings["mbh"]["search_info"]["stopping_iterations"] = 1
-        settings["mbh"]["search_info"]["run_search"] = True
+        pass
         
-        settings["psd"]["search_info"]["run_search"] = True
-        settings["psd"]["search_info"]["stopping_iterations"] = 1
-
     def run(self):
 
         stopper_rank = self.mpi_controller.mbh_rank
         other_ranks = [self.mpi_controller.psd_rank]
 
         # had to go after initialization of mpi because it needs the ranks
-        stop_fn = SearchConvergeStopping(**self.current_info.mbh_info["search_info"]["stop_kwargs"])
-        self.current_info.mbh_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        stop_fn = SearchConvergeStopping(**self.current_info.mbh_info["pe_info"]["stop_kwargs"])
+        self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
 
-        self.current_info.psd_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.psd_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
         
         self.mpi_controller.run_global_fit(run_psd=True, run_mbhs=True, run_gbs_pe=False, run_gbs_search=False)
 
@@ -95,7 +84,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
     def __init__(self, *args, snr_lim=10.0, **kwargs):
         self.snr_lim = snr_lim
         super().__init__(*args, **kwargs)
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
+        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus, run_results_update=True)
 
     def adjust_settings(self, settings):
         
@@ -137,7 +126,7 @@ class FullPESegment(GlobalFitSegment):
 
         super().__init__(*args, **kwargs)
 
-        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus)
+        self.mpi_controller = MPIControlGlobalFit(self.current_info, self.comm, self.gpus, run_results_update=True)
 
     def adjust_settings(self, settings):
         pass

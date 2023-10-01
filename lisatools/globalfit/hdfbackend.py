@@ -7,7 +7,7 @@ import time
 
 def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_rank, plot_iter):
 
-    print("starting run")
+    print("starting run SAVE")
     run_results_production = RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
     run = True
     i = 0
@@ -15,15 +15,16 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_ra
         print("WAITING FOR DATA")
         save_dict = comm.recv(source=gb_pe_rank, tag=90)
         print("RECEIVED FOR DATA")
-        if "finish" in save_dict and save_dict["finish"]:
-            break
+        if "finish_run" in save_dict and save_dict["finish_run"]:
+            run = False
+            continue
 
         time.sleep(15.)  # to allow for ending the code
         save_args = save_dict["save_args"]
         save_kwargs = save_dict["save_kwargs"]
         print("attempting to save step")
         st = time.perf_counter()
-        # gb_reader.save_step_main(*save_args, **save_kwargs)
+        gb_reader.save_step_main(*save_args, **save_kwargs)
         et = time.perf_counter()
         print("SAVE STEP, time:", et - st)
         if ((i + 1) % plot_iter) == 0:

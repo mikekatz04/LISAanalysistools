@@ -23,16 +23,15 @@ if __name__ == "__main__":
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
-    head_rank = 0
+    head_rank = 2
 
     global_fit_progression = [
-        # {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict()},
-        # {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank)},
-        # {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict()},
-        {"name": "gb search 1", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0)},
-        
-        # {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=7.0)},
-        # {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict()},
+        {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict()},
+        {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank)},
+        {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict()},
+        # {"name": "gb search 1", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0)},
+        {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=7.0)},
+        {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict()},
     ]
     
     # debug_psd_search = InitialPSDSearch(comm)

@@ -40,7 +40,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "second_run_through"
+    base_file_name = "third_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -75,7 +75,7 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ = f["obs"]["tdi"][:]
 
         # remove mbhb and igb
-        for source in ["igb"]:  # "vgb" "mbhb",
+        for source in []:  # "igb"]:  # "vgb" "mbhb",
             change_arr = f["sky"][source]["tdi"][:]
             for change in ["X", "Y", "Z"]:
                 tXYZ[change] -= change_arr[change]
@@ -141,7 +141,7 @@ def get_global_fit_settings(copy_settings_file=False):
         random_seed=1024,
         begin_new_likelihood=False,
         plot_iter=2,
-        gpus=[4, 5, 6, 7]
+        gpus=[3, 4, 5, 6]
     )
 
     ##################################
@@ -231,7 +231,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
 
-    snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 75.0, 100.0, 5e2])
+    snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
     ntemps_pe = 24  # len(snrs_ladder)
     # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
     betas = 1 / 1.2 ** np.arange(ntemps_pe)
@@ -283,7 +283,7 @@ def get_global_fit_settings(copy_settings_file=False):
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
         snr_lim=4.0,
-        stop_kwargs=dict(newly_added_limit=1000, verbose=False),
+        stop_kwargs=dict(newly_added_limit=30, verbose=False),
         stopping_iterations=1,
     )
 
@@ -339,9 +339,9 @@ def get_global_fit_settings(copy_settings_file=False):
     }
 
     search_stopping_kwargs = dict(
-        n_iters=1,
+        n_iters=5,
         diff=0.01,
-        verbose=True
+        verbose=False
     )
 
     # mcmc info for main run
@@ -355,7 +355,7 @@ def get_global_fit_settings(copy_settings_file=False):
         thin_by=100,
         update_iterations=20,
         stop_kwargs=search_stopping_kwargs,
-        stopping_iterations=5
+        stopping_iterations=1
     )
 
     all_psd_info = dict(
@@ -385,7 +385,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # priors
     priors_mbh = {
-        0: uniform_dist(np.log(1e5), np.log(1e7)),
+        0: uniform_dist(np.log(1e4), np.log(1e8)),
         1: uniform_dist(0.01, 0.999999999),
         2: uniform_dist(-0.99999999, +0.99999999),
         3: uniform_dist(-0.99999999, +0.99999999),
@@ -443,10 +443,10 @@ def get_global_fit_settings(copy_settings_file=False):
         (StretchMove(), 0.88)
     ]
 
-    search_stopping_kwargs = dict(
-        n_iters=50,
+    mix_stopping_kwargs = dict(
+        n_iters=5,
         diff=0.01,
-        verbose=True
+        verbose=False
     )
 
     # mcmc info for main run
@@ -458,10 +458,10 @@ def get_global_fit_settings(copy_settings_file=False):
         nwalkers=100,
         num_prop_repeats=200,
         inner_moves=inner_moves,
-        progress=True,
+        progress=False,
         thin_by=1,
-        stop_kwargs=search_stopping_kwargs,
-        stopping_iterations=4
+        stop_kwargs=mix_stopping_kwargs,
+        stopping_iterations=1
     )
 
     mbh_search_kwargs = {
@@ -470,6 +470,12 @@ def get_global_fit_settings(copy_settings_file=False):
         "shift_t_limits": True,
         "phase_marginalize": True
     }
+
+    search_stopping_kwargs = dict(
+        n_iters=50,
+        diff=0.01,
+        verbose=False
+    )
 
     mbh_search_run_info = dict(
         ntemps=10,
@@ -493,7 +499,6 @@ def get_global_fit_settings(copy_settings_file=False):
         search_info=mbh_search_run_info,
         get_templates=get_mbh,
         stop_kwargs=search_stopping_kwargs,
-        stopping_iterations=1,
     )
 
     ##############

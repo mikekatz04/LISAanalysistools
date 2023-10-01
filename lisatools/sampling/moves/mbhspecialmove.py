@@ -271,7 +271,7 @@ class MBHSpecialMove(RedBlueMove):
             self.best_last_ll = current_ll.max()
             self.low_last_ll = current_ll.min()
         # print("mbh", self.best_last_ll, current_ll.max(), current_ll.max() - self.best_last_ll)
-        print(current_ll.max(), self.best_last_ll, current_ll.min(), self.low_last_ll)
+        # print(current_ll.max(), self.best_last_ll, current_ll.min(), self.low_last_ll)
         self.best_last_ll = current_ll.max()
         self.low_last_ll = current_ll.min()
         return new_state, accepted

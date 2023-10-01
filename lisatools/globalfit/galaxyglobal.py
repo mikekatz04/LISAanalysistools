@@ -534,7 +534,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     branch_names = ["gb_fixed"]
 
     update = UpdateNewResiduals(
-        mgh, gb, comm, head_rank, gpu_priors, verbose=True
+        mgh, gb, comm, head_rank, gpu_priors, verbose=False
     )
 
     ndims = {"gb_fixed": gb_info["pe_info"]["ndim"]}
@@ -615,6 +615,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     # communicate end of run to head process
+    comm.send({"finish_run": True}, dest=backend.save_plot_rank, tag=90)
     comm.send({"finish_run": True}, dest=head_rank, tag=50)
     return
     
@@ -972,6 +973,8 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
             prev_logl[temps_here[keep], walkers_here[keep], bands_here[keep]] = logl[keep]
             old_points[temps_here[keep], walkers_here[keep], bands_here[keep]] = new_points[keep]
             
+        original_snr_params = new_points_with_fs[:, :, :, 0].copy()
+
         # prepare information on how many swaps are accepted this time
         swaps_accepted = xp.zeros((ntemps - 1, num_still_going_here), dtype=int)
         swaps_proposed = xp.full_like(swaps_accepted, nwalkers)
@@ -1059,6 +1062,16 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
         best_logl_ind = prev_logl.reshape(ntemps * nwalkers, len(band_inds_here)).argmax(axis=0)[improvement]
         best_logl_coords[improvement] = old_points.reshape(ntemps * nwalkers, len(band_inds_here), ndim)[(best_logl_ind, xp.arange(len(band_inds_here))[improvement])]
+
+        best_binaries_coords_with_fs = best_logl_coords.copy()
+
+        best_binaries_coords_with_fs[:, 1] = (f0_maxs[band_inds_here] - f0_mins[band_inds_here]) * best_binaries_coords_with_fs[:, 1] + f0_mins[band_inds_here]
+        best_binaries_coords_with_fs[:, 2] = (fdot_maxs[band_inds_here] - fdot_mins[band_inds_here]) * best_binaries_coords_with_fs[:, 2] + fdot_mins[band_inds_here]
+        best_binaries_coords_with_fs[:, 0] = amp_transform(best_binaries_coords_with_fs[:, 0].flatten(), best_binaries_coords_with_fs[:, 1].flatten() / 1e3, psds=lisasens_in[0][None, :])[0].reshape(best_binaries_coords_with_fs.shape[:-1])
+
+        best_logl_points_in = transform_fn.both_transforms(best_binaries_coords_with_fs, xp=xp)
+
+        best_logl_check = xp.asarray(gb.get_ll(best_logl_points_in, data_in, psd_in, phase_marginalize=True, **waveform_kwargs))
 
         if prop_i > convergence_iter_count:
             iter_count[improvement] = 0
@@ -1155,7 +1168,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
 
                     best_binaries_coords_with_fs[:, 1] = (f0_maxs[band_inds_here] - f0_mins[band_inds_here]) * best_binaries_coords_with_fs[:, 1] + f0_mins[band_inds_here]
                     best_binaries_coords_with_fs[:, 2] = (fdot_maxs[band_inds_here] - fdot_mins[band_inds_here]) * best_binaries_coords_with_fs[:, 2] + fdot_mins[band_inds_here]
-                    best_binaries_coords_with_fs[:, 0] = amp_transform(best_binaries_coords_with_fs[:, 0].flatten(), best_binaries_coords_with_fs[:, 1].flatten() / 1e3, psds=psd_in[0][None, :])[0].reshape(best_binaries_coords_with_fs.shape[:-1])
+                    best_binaries_coords_with_fs[:, 0] = amp_transform(best_binaries_coords_with_fs[:, 0].flatten(), best_binaries_coords_with_fs[:, 1].flatten() / 1e3, psds=lisasens_in[0][None, :])[0].reshape(best_binaries_coords_with_fs.shape[:-1])
             
                     best_logl_points_in = transform_fn.both_transforms(best_binaries_coords_with_fs, xp=xp)
 
@@ -1377,7 +1390,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
             # max ll combination of psd and mbhs and gbs
             
-            if False: # os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
+            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
                 gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
 
             else:
@@ -1391,7 +1404,6 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
                 gb_info["search_info"]["stopping_function"].add_comm(comm)
             
-            breakpoint()
             stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
             
             if stop:
@@ -1420,6 +1432,10 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             # data_in, psd_in = run_gb_mixing(iter_i, gpus, fp_gb_mixing, num_binaries_found_this_iteration, starting_points)
 
     # communicate end of run to head process
+    for rank in comm_info["process_ranks_for_fit"]:
+        rec_tag = int(str(rank) + "67676")
+        comm.send("end", dest=rank, tag=rec_tag)
+
     comm.send({"finish_run": True}, dest=head_rank, tag=20)
     return
 

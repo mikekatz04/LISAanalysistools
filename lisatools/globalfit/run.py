@@ -221,7 +221,7 @@ class MPIControlGlobalFit:
         self.comm = comm
         self.gpus = gpus
 
-        self.head_rank = ranks[5]
+        self.head_rank = ranks[2]
 
         self.gb_pe_rank = ranks[1]
         self.gb_pe_gpu = gpus[0]
@@ -229,14 +229,14 @@ class MPIControlGlobalFit:
         self.gb_search_rank = ranks[0] 
         self.gb_search_gpu = gpus[1]
 
-        self.psd_rank = ranks[4]
+        self.psd_rank = ranks[3]
         self.psd_gpu = gpus[3]
 
-        self.mbh_rank = ranks[2]
+        self.mbh_rank = ranks[4]
         self.mbh_gpu = gpus[2]
 
         if run_results_update:
-            self.run_results_rank = ranks[3]
+            self.run_results_rank = ranks[5]
             self.gmm_ranks = ranks[6:]
         else:
             self.run_results_rank = -1
@@ -321,9 +321,9 @@ class MPIControlGlobalFit:
 
             if "finish_run" in refit_dict and refit_dict["finish_run"]:
                 runs_going.remove("gbs_search")
-                for rank in self.gmm_ranks:
-                    rec_tag = int(str(rank) + "67676")
-                    self.comm.send("end", dest=rank, tag=rec_tag)
+                # for rank in self.gmm_ranks:
+                #     rec_tag = int(str(rank) + "67676")
+                #     self.comm.send("end", dest=rank, tag=rec_tag)
 
         else:
             refit_ch.cancel()
@@ -490,9 +490,9 @@ def run_gf_progression(global_fit_progression, comm, head_rank):
         segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
 
         # check if this segment has completed
-        if segment.current_info.general_info["file_information"]["status_file"] in os.listdir(segment.current_info.general_info["file_information"]["file_store_dir"]):
+        if segment.current_info.general_info["file_information"]["status_file"].split("/")[-1] in os.listdir(segment.current_info.general_info["file_information"]["file_store_dir"]):
             with open(segment.current_info.general_info["file_information"]["status_file"], "r") as fp:
-                lines = fp.read_lines()
+                lines = fp.readlines()
                 if global_fit_segment["name"] + "\n" in lines:
                     continue
         if rank == head_rank:
@@ -501,6 +501,7 @@ def run_gf_progression(global_fit_progression, comm, head_rank):
             st = time.perf_counter()
         print("start", g_i, rank)
         segment.run()
+        print("finished:", rank)
         comm.Barrier()
         print("end", g_i, rank)
         if rank == head_rank:
@@ -509,5 +510,3 @@ def run_gf_progression(global_fit_progression, comm, head_rank):
             print(f"\n\nEnding {class_name}({et - st} sec)\n\n")
             with open(segment.current_info.general_info["file_information"]["status_file"], "a") as fp:
                 fp.write(global_fit_segment["name"] + "\n")
-                if global_fit_segment["name"] in lines:
-                    continue
