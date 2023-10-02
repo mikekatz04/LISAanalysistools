@@ -34,7 +34,7 @@ from global_fit_input.global_fit_settings import get_global_fit_settings
 
 
 class CurrentInfoGlobalFit:
-    def __init__(self, settings):
+    def __init__(self, settings, get_last_state_info=True):
 
         self.settings_dict = settings
         self.current_info = deepcopy(settings)
@@ -49,7 +49,7 @@ class CurrentInfoGlobalFit:
         psd_reader = HDFBackend(settings["general"]["file_information"]["fp_psd_pe"])
         self.current_info["psd"]["reader"] = psd_reader
         
-        if os.path.exists(psd_reader.filename):
+        if os.path.exists(psd_reader.filename) and get_last_state_info:
             psd_last_sample = psd_reader.get_last_sample()
             self.current_info["psd"]["cc_A"] = psd_last_sample.branches["psd"].coords[0, :, 0, :2]
             self.current_info["psd"]["cc_E"] = psd_last_sample.branches["psd"].coords[0, :, 0, 2:]
@@ -76,7 +76,7 @@ class CurrentInfoGlobalFit:
             if "output_points_pruned" in mbh_output_point_info:
                 self.initialize_mbh_state_from_search(mbh_output_point_info)
           
-        elif os.path.exists(self.current_info["mbh"]["reader"].filename):
+        elif os.path.exists(self.current_info["mbh"]["reader"].filename) and get_last_state_info:
             mbh_last_sample = mbh_reader.get_last_sample()
             self.current_info["mbh"]["cc_params"] = mbh_last_sample.branches["mbh"].coords[0, :, :]
             if self.current_info["general"]["begin_new_likelihood"]:
@@ -90,7 +90,7 @@ class CurrentInfoGlobalFit:
               
         # TODO: add all to GMM
         self.current_info["gb"]["reader"] = gb_reader
-        if os.path.exists(self.current_info["gb"]["reader"].filename):
+        if os.path.exists(self.current_info["gb"]["reader"].filename) and get_last_state_info:
             gb_last_sample = gb_reader.get_last_sample()
 
             self.current_info["gb"]["cc_params"] = gb_last_sample.branches["gb_fixed"].coords[0, :, :]

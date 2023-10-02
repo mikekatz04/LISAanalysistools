@@ -94,7 +94,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
         settings["gb"]["pe_info"]["rj_prior_fraction"] = 0.2
         settings["gb"]["pe_info"]["update_iterations"] = 1
         settings["gb"]["pe_info"]["stopping_iterations"] = 1
-        settings["gb"]["pe_info"]["thin_by"] = 1
+        # settings["gb"]["pe_info"]["thin_by"] = 1
 
         settings["gb"]["search_info"]["stopping_iterations"] = 1
         settings["gb"]["search_info"]["snr_lim"] = self.snr_lim

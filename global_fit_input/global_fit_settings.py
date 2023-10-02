@@ -55,8 +55,10 @@ def get_global_fit_settings(copy_settings_file=False):
 
     file_information["fp_gb_gmm_info"] = file_store_dir + base_file_name + "_gmm_info.pickle"
 
-    file_information["main_chain_file"] = file_store_dir + base_file_name + "_main_chain_file.h5"
-    file_information["all_chain_file"] = file_store_dir + base_file_name + "_all_chain_file.h5"
+    file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
+    file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
+
+    file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
 
     file_information["status_file"] = file_store_dir + base_file_name + "_status_file.txt"
 
@@ -268,7 +270,7 @@ def get_global_fit_settings(copy_settings_file=False):
         rj_prior_fraction=0.6,
         nsteps=10000,
         update_iterations=1,
-        thin_by=1,
+        thin_by=5,
         progress=True,
         rho_star=rho_star,
         stop_kwargs=stopping_kwargs,
