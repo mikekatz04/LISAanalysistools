@@ -102,7 +102,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
         settings["mbh"]["pe_info"]["stopping_iterations"] = 1
         settings["psd"]["pe_info"]["stopping_iterations"] = 4
         
-    def run(self):
+    def run(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
 
         stopper_rank = self.mpi_controller.gb_search_rank
         other_ranks = [
@@ -118,7 +118,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
         self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
         self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
 
-        self.mpi_controller.run_global_fit(run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True)
+        self.mpi_controller.run_global_fit(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)
 
 
 class FullPESegment(GlobalFitSegment):

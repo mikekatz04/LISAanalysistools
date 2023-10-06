@@ -264,6 +264,15 @@ class MPIControlGlobalFit:
             gmm_info_dict = {"search": self.current_info.gb_info["search_gmm_info"], "refit": self.current_info.gb_info["refit_gmm_info"]}
             pickle.dump(gmm_info_dict, fp_gmm, protocol=pickle.HIGHEST_PROTOCOL)
 
+        if not hasattr(self, "gmm_output_iter"):
+            self.gmm_output_iter = 0
+        else:
+            self.gmm_output_iter += 1
+
+        with open(self.current_info.general_info["file_information"]["fp_gb_gmm_info"][:-7] + f"_{self.gmm_output_iter}.pickle", "wb") as fp_gmm:
+            pickle.dump(gmm_info_dict, fp_gmm, protocol=pickle.HIGHEST_PROTOCOL)
+            
+
     def update_gbs(self, gb_dict):
         assert "gb_update" in gb_dict
         for key in ["cc_params", "cc_inds", "cc_ll", "cc_lp", "last_state"]:

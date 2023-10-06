@@ -877,8 +877,9 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
     new_points_in = transform_fn.both_transforms(new_points_with_fs.reshape(-1, ndim), xp=xp).reshape(new_points_with_fs.shape[:-1] + (ndim + 1,)).reshape(-1, ndim + 1)
     inner_product = 4 * df * (xp.sum(data_in[0].conj() * data_in[0] / psd_in[0]) + xp.sum(data_in[1].conj() * data_in[1] / psd_in[1])).real
     ll = (-1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd_in)))).item()
-    gb.d_d = ll
+    gb.d_d = inner_product
 
+    start_ll = -1/2 * inner_product
     print(ll)
 
     waveform_kwargs = gb_info["waveform_kwargs"].copy()
@@ -923,17 +924,17 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
             inds_here = xp.asarray(inds_here)
             inds_not_here = xp.asarray(inds_not_here)
 
-            s_in = old_points[:, inds_here][:, :, still_going_here].reshape((ntemps, int(nwalkers/2) * num_still_going_here, 1, -1))
-            c_in = [old_points[:, inds_not_here][:, :, still_going_here].reshape((ntemps, int(nwalkers/2) * num_still_going_here, 1, -1))]
+            s_in = old_points[:, inds_here][:, :, still_going_here].transpose(0, 2, 1, 3).reshape((ntemps * num_still_going_here, int(nwalkers/2), 1, -1))
+            c_in = [old_points[:, inds_not_here][:, :, still_going_here].transpose(0, 2, 1, 3).reshape((ntemps * num_still_going_here, int(nwalkers/2), 1, -1))]
 
             temps_here = temp_guide[:, inds_here][:, :, still_going_here]
             walkers_here = walker_guide[:, inds_here][:, :, still_going_here]
             bands_here = band_guide[:, inds_here][:, :, still_going_here]
 
             new_points_dict, factors = move_proposal.get_proposal({"gb_fixed": s_in}, {"gb_fixed": c_in}, xp.random)
-            new_points = new_points_dict["gb_fixed"].reshape(ntemps, int(nwalkers/2), num_still_going_here, -1)
+            new_points = new_points_dict["gb_fixed"].reshape(ntemps, num_still_going_here, int(nwalkers/2), -1).transpose(0, 2, 1, 3)
             logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
-            
+
             factors = factors.reshape(logp.shape)
             keep_logp = ~xp.isinf(logp)
 
@@ -1081,7 +1082,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
         still_going_here[iter_count >= convergence_iter_count] = False
         
         if prop_i % convergence_iter_count == 0:
-            print(f"Proposal {prop_i}, Still going:", still_going_here.sum().item())
+            print(f"Proposal {prop_i}, Still going:", still_going_here.sum().item())  # , still_going_here[825], np.sort(prev_logl[0, :, 825] - start_ll))
         if run_number == 2:
             iter_count[:] = 0
             collect_sample_check_iter += 1

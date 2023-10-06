@@ -284,7 +284,7 @@ def get_global_fit_settings(copy_settings_file=False):
         nwalkers=100,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
-        snr_lim=4.0,
+        snr_lim=9.0,
         stop_kwargs=dict(newly_added_limit=30, verbose=False),
         stopping_iterations=1,
     )

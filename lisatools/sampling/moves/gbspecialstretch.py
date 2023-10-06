@@ -1459,8 +1459,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
 
         self.mempool.free_all_blocks()
 
-        # if self.is_rj_prop:
-        #     print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+        if self.is_rj_prop:
+            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         return new_state, accepted
 
     def check_ll_inject(self, new_state):
