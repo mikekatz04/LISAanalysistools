@@ -143,7 +143,7 @@ def get_global_fit_settings(copy_settings_file=False):
         random_seed=1024,
         begin_new_likelihood=False,
         plot_iter=2,
-        gpus=[3, 4, 5, 6]
+        gpus=[2, 3, 4, 6]
     )
 
     ##################################

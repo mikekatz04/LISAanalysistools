@@ -187,9 +187,9 @@ class CurrentInfoGlobalFit:
 
 
 class GlobalFitSegment(ABC):
-    def __init__(self, comm):
+    def __init__(self, comm, copy_settings_file=False):
         self.comm = comm
-        self.base_settings = get_global_fit_settings()
+        self.base_settings = get_global_fit_settings(copy_settings_file=copy_settings_file)
         settings = deepcopy(self.base_settings)
         self.gpus = settings["general"]["gpus"]
         self.adjust_settings(settings)
@@ -221,12 +221,12 @@ class MPIControlGlobalFit:
         self.comm = comm
         self.gpus = gpus
 
-        self.head_rank = ranks[2]
+        self.head_rank = ranks[0]
 
         self.gb_pe_rank = ranks[1]
         self.gb_pe_gpu = gpus[0]
 
-        self.gb_search_rank = ranks[0] 
+        self.gb_search_rank = ranks[2] 
         self.gb_search_gpu = gpus[1]
 
         self.psd_rank = ranks[3]

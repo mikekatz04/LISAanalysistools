@@ -23,15 +23,15 @@ if __name__ == "__main__":
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
-    head_rank = 2
+    head_rank = 0
 
     global_fit_progression = [
-        {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict()},
-        {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank)},
-        {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict()},
+        {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
+        {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank, copy_settings_file=True)},
+        {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
         # {"name": "gb search 1", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0)},
-        {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0)},
-        {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict()},
+        {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0, copy_settings_file=True)},
+        {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
     ]
     
     # debug_psd_search = InitialPSDSearch(comm)
@@ -46,12 +46,12 @@ if __name__ == "__main__":
     # debug_mix = InitialMBHMixSegment(comm)
     # debug_mix.run()
 
-    debug_gb_search = InitialGBSearchSegment(comm)
-    debug_gb_search.run(run_psd=False, run_gbs_pe=True, run_gbs_search=True, run_mbhs=False)
+    # debug_gb_search = InitialGBSearchSegment(comm)
+    # debug_gb_search.run(run_psd=False, run_gbs_pe=True, run_gbs_search=True, run_mbhs=False)
 
     # if rank == head_rank:
     #     debug_search.para_mbh_search.run_parallel_mbh_search(testing_time_split=7)
 
-    # run_gf_progression(global_fit_progression, comm, head_rank)
+    run_gf_progression(global_fit_progression, comm, head_rank)
      
 

@@ -245,7 +245,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
         last_sample.initialize_band_information(nwalkers_pe, ntemps_pe, band_edges, band_temps)
         if adjust_temps:
-            last_sample.band_info["band_temps"][:] = band_info_check["band_temps"][:]
+            last_sample.band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
 
     import time
     st = time.perf_counter()

@@ -338,8 +338,9 @@ class HDFBackend(eryn_HDFBackend):
         sample = State(super().get_a_sample(it))
 
         thin = self.iteration - it if it != self.iteration else 1
+        discard = it + 1 - thin
 
-        sample.band_info = self.get_band_info(discard=it - 1, thin=thin)
+        sample.band_info = self.get_band_info(discard=discard, thin=thin)
         sample.band_info["initialized"] = True
 
         return sample
