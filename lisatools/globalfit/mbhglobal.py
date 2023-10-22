@@ -13,10 +13,12 @@ from eryn.ensemble import EnsembleSampler
 from single_mcmc_run import run_single_band_search
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
-from eryn.moves.tempering import make_ladder
-from eryn.state import State, BranchSupplimental
+from eryn.moves.tempering import make_ladder, TemperatureControl
+from eryn.state import BranchSupplimental
 from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
 from lisatools.sampling.moves.mbhspecialmove import MBHSpecialMove
+from .state import MBHState
+from .hdfbackend import MBHHDFBackend
 
 from bbhx.waveformbuild import BBHWaveformFD
 from bbhx.waveforms.phenomhm import PhenomHMAmpPhase
@@ -152,7 +154,7 @@ def run_mbh_pe(gpu, comm, head_rank):
     if not hasattr(last_sample, "log_prior"):
         last_sample.log_prior = np.zeros((ntemps_pe, nwalkers_pe))
 
-    start_state = State(last_sample, copy=True)
+    start_state = MBHState(last_sample, copy=True)
     
     # start_state.branches["mbh"].shape = (ntemps_pe, nwalkers_pe) + start_state.branches["mbh"].shape[2:]
     # start_state.branches["mbh"].coords = start_state.branches["mbh"].coords[:, :nwalkers_pe]
@@ -163,12 +165,14 @@ def run_mbh_pe(gpu, comm, head_rank):
     start_state.log_like[0] = start_ll_check
     branch_names = mbh_info["pe_info"]["branch_names"]
 
-    if hasattr(start_state, "betas") and start_state.betas is not None:
-        betas = start_state.betas
+    if hasattr(start_state, "betas_all") and start_state.betas_all is not None:
+        betas_all = start_state.betas_all
     else:
-        betas = make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps_pe)
+        betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps_pe), (mbh_info["pe_info"]["nleaves_max"], 1))
 
-    start_state.betas = betas
+    # to make the states work 
+    betas = betas_all[0]
+    start_state.betas_all = betas_all
 
     wave_gen = BBHWaveformFD(
         **mbh_info["initialize_kwargs"]
@@ -190,7 +194,17 @@ def run_mbh_pe(gpu, comm, head_rank):
     # TODO: start ll needs to be done carefully
     inner_moves = mbh_info["pe_info"]["inner_moves"]
     print("MBH CHECK")
-    move = MBHSpecialMove(wave_gen, fd, data_fin, psds_fin, mbh_info["pe_info"]["num_prop_repeats"], transform_fn, priors, waveform_kwargs, inner_moves, df)
+
+    temperature_controls = [None for _ in range(mbh_info["pe_info"]["nleaves_max"])]
+    for leaf in range(mbh_info["pe_info"]["nleaves_max"]):
+        temperature_controls[leaf] = TemperatureControl(
+            mbh_info["pe_info"]["ndim"],
+            nwalkers_pe,
+            betas=betas_all[leaf],
+            permute=False,
+        )
+
+    move = MBHSpecialMove(wave_gen, fd, data_fin, psds_fin, mbh_info["pe_info"]["num_prop_repeats"], transform_fn, priors, waveform_kwargs, inner_moves, df, temperature_controls)
 
     update = UpdateNewResidualsMBH(comm, head_rank, verbose=False)
     print("MBH CHECK 2")
@@ -206,6 +220,25 @@ def run_mbh_pe(gpu, comm, head_rank):
     stopping_iterations = mbh_info["pe_info"]["stopping_iterations"]
     thin_by = mbh_info["pe_info"]["thin_by"]
 
+    backend = MBHHDFBackend(
+        gf_information.general_info["file_information"]["fp_mbh_pe"],
+        compression="gzip",
+        compression_opts=9,
+    )
+    
+    if not backend.initialized:
+        backend.reset(
+            nwalkers_pe,
+            ndims,
+            nleaves_max=mbh_info["pe_info"]["nleaves_max"],
+            ntemps=ntemps_pe,
+            branch_names=branch_names,
+            nbranches=len(branch_names),
+            rj=False,
+            moves=None,
+            num_mbhs=mbh_info["pe_info"]["nleaves_max"],
+        )
+
     sampler_mix = EnsembleSampler(
         nwalkers_pe,
         ndims,  # assumes ndim_max
@@ -216,7 +249,7 @@ def run_mbh_pe(gpu, comm, head_rank):
         nbranches=len(branch_names),
         nleaves_max={"mbh": mbh_info["pe_info"]["nleaves_max"]},
         nleaves_min={"mbh": mbh_info["pe_info"]["nleaves_max"]},
-        backend=mbh_info["reader"],  # mbh_info["reader"],
+        backend=backend,  # mbh_info["reader"],
         vectorize=True,
         periodic=periodic,  # TODO: add periodic to proposals
         branch_names=branch_names,
@@ -226,6 +259,7 @@ def run_mbh_pe(gpu, comm, head_rank):
         stopping_iterations=stopping_iterations,
         provide_groups=False,
         provide_supplimental=False,
+        track_moves=False
     )
 
     # equlibrating likelihood check: -4293090.6483655665,

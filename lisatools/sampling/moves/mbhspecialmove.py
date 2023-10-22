@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 
 class MBHSpecialMove(RedBlueMove):
-    def __init__(self, waveform_gen, fd, data_residuals, psd, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, **kwargs):
+    def __init__(self, waveform_gen, fd, data_residuals, psd, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, temperature_controls, **kwargs):
 
         RedBlueMove.__init__(self, **kwargs)
         self.fd = fd
@@ -27,6 +27,7 @@ class MBHSpecialMove(RedBlueMove):
         self.moves = moves_tmp
         self.move_weights = move_weights
         self.df = df
+        self.temperature_controls = temperature_controls
 
     def get_logl(self):
         return -1/2 * (4 * self.df * self.xp.sum((self.data_residuals[:2].conj() * self.data_residuals[:2]) / self.psd[:2], axis=-1)).get()
@@ -40,12 +41,18 @@ class MBHSpecialMove(RedBlueMove):
 
         ntemps, nwalkers, nleaves, ndim = new_state.branches["mbh"].shape
 
+        assert len(self.temperature_controls) == nleaves
+
         temp_inds_base = np.repeat(np.arange(ntemps)[:, None], nwalkers, axis=-1)
         walker_inds_base = np.tile(np.arange(nwalkers), (ntemps, 1))
 
         start_leaf = np.random.randint(0, nleaves)
         for base_leaf in range(nleaves):
             leaf = (base_leaf + start_leaf) % nleaves
+
+            temperature_control_here = self.temperature_controls[leaf]
+            temperature_control_here.betas[:] = new_state.betas_all[leaf]
+
             # remove cold chain sources
             xp.get_default_memory_pool().free_all_blocks()
             removal_coords = new_state.branches["mbh"].coords[0, :, leaf]
@@ -111,7 +118,7 @@ class MBHSpecialMove(RedBlueMove):
 
             prev_logp = self.mbh_priors["mbh"].logpdf(old_coords).reshape((ntemps, nwalkers))
 
-            prev_logP = self.compute_log_posterior(prev_logl, prev_logp)
+            prev_logP = temperature_control_here.compute_log_posterior_tempered(prev_logl, prev_logp)
             
             # fix this need to compute prev_logl for all walkers
             xp.get_default_memory_pool().free_all_blocks()
@@ -188,8 +195,8 @@ class MBHSpecialMove(RedBlueMove):
 
                     prev_logl_here = prev_logl[inds == split].reshape(ntemps, nwalkers_here)
 
-                    prev_logP_here = self.compute_log_posterior(prev_logl_here, prev_logp_here)
-                    logP = self.compute_log_posterior(logl, logp)
+                    prev_logP_here = temperature_control_here.compute_log_posterior_tempered(prev_logl_here, prev_logp_here)
+                    logP = temperature_control_here.compute_log_posterior_tempered(logl, logp)
 
                     lnpdiff = factors + logP - prev_logP_here
 
@@ -218,7 +225,7 @@ class MBHSpecialMove(RedBlueMove):
                 coords_for_swap = {"mbh": new_state.branches_coords["mbh"][:, :, leaf].copy()[:, :, None]}
                 
                 # TODO: check permute make sure it is okay
-                coords_for_swap, prev_logP, prev_logl, prev_logp, inds, blobs, supps, branch_supps = self.temperature_control.temperature_swaps(
+                coords_for_swap, prev_logP, prev_logl, prev_logp, inds, blobs, supps, branch_supps = temperature_control_here.temperature_swaps(
                     coords_for_swap,
                     prev_logP.copy(),
                     prev_logl.copy(),
@@ -226,7 +233,7 @@ class MBHSpecialMove(RedBlueMove):
                     branch_supps={"mbh":None}
                 )
 
-                self.temperature_control.adapt_temps()
+                temperature_control_here.adapt_temps()
 
                 new_state.branches_coords["mbh"][:, :, leaf] = coords_for_swap["mbh"][:, :, 0]
 
@@ -249,7 +256,8 @@ class MBHSpecialMove(RedBlueMove):
             xp.get_default_memory_pool().free_all_blocks()
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
 
-            
+            # read out all betas from temperature controls
+            new_state.betas_all[leaf] = temperature_control_here.betas[:]
             # print(leaf)
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(self.data_residuals[:2].conj() * self.data_residuals[:2] / self.psd[:2], axis=(0, 2)).get()
@@ -274,4 +282,5 @@ class MBHSpecialMove(RedBlueMove):
         # print(current_ll.max(), self.best_last_ll, current_ll.min(), self.low_last_ll)
         self.best_last_ll = current_ll.max()
         self.low_last_ll = current_ll.min()
+        self.temperature_control.swaps_accepted = self.temperature_controls[0].swaps_accepted
         return new_state, accepted

@@ -215,9 +215,12 @@ def make_gmm(gb, gmm_info_in):
 
 def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
-    gb = GBGPU(use_gpu=True)
     gpus_pe = [gpu]
     gpus = gpus_pe
+
+    xp.cuda.runtime.setDevice(gpus[0])
+
+    gb = GBGPU(use_gpu=True)
     # from lisatools.sampling.stopping import SearchConvergeStopping2
 
     gf_information = comm.recv(source=head_rank, tag=255)
@@ -226,8 +229,6 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     band_edges = gb_info["band_edges"]
     
     num_sub_bands = len(band_edges)
-
-    xp.cuda.runtime.setDevice(gpus[0])
 
     nwalkers_pe = gb_info["pe_info"]["nwalkers"]
     ntemps_pe = gb_info["pe_info"]["ntemps"]
@@ -407,6 +408,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         random_seed=gf_information.general_info["random_seed"],
         use_gpu=True,
         nfriends=nwalkers_pe,
+        phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
         **gb_info["pe_info"]["group_proposal_kwargs"]
     )
 
@@ -448,6 +450,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         name="rj_prior",
         use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
         nfriends=nwalkers_pe,
+        phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
         **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
     )
 
@@ -833,8 +836,8 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
 
 def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, lisasens_in, comm, comm_info):
     
-    gb = GBGPU(use_gpu=True)
     xp.cuda.runtime.setDevice(gpu)
+    gb = GBGPU(use_gpu=True)
     temperature_control = TemperatureControl(ndim, nwalkers, ntemps=ntemps)
 
     # TODO: clean this up
@@ -1391,7 +1394,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
             # max ll combination of psd and mbhs and gbs
             
-            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > 100:
+            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"]:
                 gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
 
             else:

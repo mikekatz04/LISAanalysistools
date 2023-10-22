@@ -159,6 +159,7 @@ class CurrentInfoGlobalFit:
 
 
     def get_data_psd(self, **kwargs):
+        # self passed here to access all current info
         return self.general_info["generate_current_state"](self, **kwargs) 
 
     @property
@@ -488,7 +489,7 @@ class MPIControlGlobalFit:
             fit_each_leaf(self.rank, self.gb_search_rank, rec_tag, send_tag, self.comm)
 
         elif self.run_results_update and self.rank == self.run_results_rank:
-            save_to_backend_asynchronously_and_plot(self.current_info.gb_info["reader"], self.comm, self.gb_pe_rank, self.head_rank, self.current_info.general_info["plot_iter"])
+            save_to_backend_asynchronously_and_plot(self.current_info.gb_info["reader"], self.comm, self.gb_pe_rank, self.head_rank, self.current_info.general_info["plot_iter"], self.current_info.general_info["backup_iter"])
             #fin = run_results_production()
 
 

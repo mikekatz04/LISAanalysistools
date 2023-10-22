@@ -190,6 +190,9 @@ class GetGBTemplates:
         if use_gpu:
             templates_in = templates_in_tmp.get()
 
+        else:
+            templates_in = templates_in_tmp
+
         del gb_gen, templates_in_tmp, group_index
 
         if use_gpu:

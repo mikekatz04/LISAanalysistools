@@ -3,9 +3,10 @@ from eryn.backends import HDFBackend as eryn_HDFBackend
 from .state import State
 from .plot import RunResultsProduction
 import time
+import shutil
 
 
-def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_rank, plot_iter):
+def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_rank, plot_iter, backup_iter):
 
     print("starting run SAVE")
     run_results_production = RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
@@ -31,9 +32,20 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_ra
             print("ASK FOR DATA FOR PLOT")
             comm.send({"send": True}, dest=head_rank, tag=91)
             current_info = comm.recv(source=head_rank, tag=92)
+
+            # remove GPU component for GB waveform build
+            current_info.current_info["gb"]["get_templates"].initialization_kwargs["use_gpu"] = False
+            current_info.current_info["mbh"]["get_templates"].initialization_kwargs["use_gpu"] = False
+            current_info.current_info["gb"]["get_templates"].runtime_kwargs["use_c_implementation"] = False
+
             print("STARTING PLOT")
             run_results_production.build_plots(current_info)
             print("FINISHED PLOT")
+
+        if ((i + 1) % backup_iter) == 0:
+            print("copy to backup file")
+            # copy to backup file
+            shutil.copy(gb_reader.filename, gb_reader.filename[:-3] + "_running_backup_copy.h5")
 
         i += 1
     return 
@@ -342,6 +354,176 @@ class HDFBackend(eryn_HDFBackend):
 
         sample.band_info = self.get_band_info(discard=discard, thin=thin)
         sample.band_info["initialized"] = True
+
+        return sample
+
+    
+
+
+class MBHHDFBackend(eryn_HDFBackend):
+
+    def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int=None, **kwargs):
+        if num_mbhs is None:
+            raise ValueError("Must provide num_mbhs kwarg.")
+
+        # regular reset
+        super().reset(nwalkers, *args, ntemps=ntemps, **kwargs)
+
+        # open file in append mode
+        with self.open("a") as f:
+            g = f[self.name]
+
+            g.attrs["num_mbhs"] = num_mbhs
+
+            g.create_dataset(
+                "betas_all",
+                (0, num_mbhs, ntemps),
+                maxshape=(None, num_mbhs, ntemps),
+                dtype=self.dtype,
+                compression=self.compression,
+                compression_opts=self.compression_opts,
+            )
+
+    @property
+    def num_mbhs(self):
+        """Get num_bands from h5 file."""
+        with self.open() as f:
+            return f[self.name].attrs["num_mbhs"]
+
+    @property
+    def reset_kwargs(self):
+        """Get reset_kwargs from h5 file."""
+        return dict(
+            nleaves_max=self.nleaves_max,
+            ntemps=self.ntemps,
+            branch_names=self.branch_names,
+            rj=self.rj,
+            moves=self.moves,
+            num_bands=self.num_mbhs
+        )
+
+    def grow(self, ngrow, *args):
+
+        super().grow(ngrow, *args)
+        
+        # open the file in append mode
+        with self.open("a") as f:
+            g = f[self.name]
+
+            # resize all the arrays accordingly
+            ntot = g.attrs["iteration"] + ngrow
+            g["betas_all"].resize(ntot, axis=0)
+
+    def get_value(self, name, thin=1, discard=0, slice_vals=None):
+        """Returns a requested value to user.
+
+        This function helps to streamline the backend for both
+        basic and hdf backend.
+
+        Args:
+            name (str): Name of value requested.
+            thin (int, optional): Take only every ``thin`` steps from the
+                chain. (default: ``1``)
+            discard (int, optional): Discard the first ``discard`` steps in
+                the chain as burn-in. (default: ``0``)
+            slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
+                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be 
+                ignored if slice_vals is not ``None``. This is particularly useful if files are 
+                very large and the user only wants a small subset of the overall array.
+                (default: ``None``)
+
+        Returns:
+            dict or np.ndarray: Values requested.
+
+        """
+        # check if initialized
+        if not self.initialized:
+            raise AttributeError(
+                "You must run the sampler with "
+                "'store == True' before accessing the "
+                "results"
+            )
+
+        if name != "betas_all":
+            return super().get_value(name, thin=thin, discard=discard, slice_vals=slice_vals) 
+
+        if slice_vals is None:
+            slice_vals = slice(discard + thin - 1, self.iteration, thin)
+
+        # open the file wrapped in a "with" statement
+        with self.open() as f:
+            # get the group that everything is stored in
+            g = f[self.name]
+            iteration = g.attrs["iteration"]
+            if iteration <= 0:
+                raise AttributeError(
+                    "You must run the sampler with "
+                    "'store == True' before accessing the "
+                    "results"
+                )
+
+            v_all = g["betas_all"][slice_vals]
+        return v_all
+
+    def get_betas_all(self, **kwargs):
+        """Get the stored chain of MCMC samples
+
+        Args:
+            thin (int, optional): Take only every ``thin`` steps from the
+                chain. (default: ``1``)
+            discard (int, optional): Discard the first ``discard`` steps in
+                the chain as burn-in. (default: ``0``)
+            slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
+                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``. 
+                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``. 
+                This is particularly useful if files are very large and the user only wants a 
+                small subset of the overall array. (default: ``None``)
+
+        Returns:
+            dict: MCMC samples
+                The dictionary contains np.ndarrays of samples
+                across the branches.
+
+        """
+        return self.get_value("betas_all", **kwargs)
+
+    def save_step(
+        self,
+        state,
+        *args, 
+        **kwargs
+    ):
+
+        super().save_step(state, *args, **kwargs)
+        
+        # open for appending in with statement
+        with self.open("a") as f:
+            g = f[self.name]
+            # get the iteration left off on
+            # minus one because it was updated in the super function
+            iteration = g.attrs["iteration"] - 1
+
+            g["betas_all"][iteration] = state.betas_all
+
+    def get_a_sample(self, it):
+        """Access a sample in the chain
+
+        Args:
+            it (int): iteration of State to return.
+
+        Returns:
+            State: :class:`eryn.state.State` object containing the sample from the chain.
+
+        Raises:
+            AttributeError: Backend is not initialized.
+
+        """
+        sample = State(super().get_a_sample(it))
+
+        thin = self.iteration - it if it != self.iteration else 1
+        discard = it + 1 - thin
+
+        sample.betas_all = self.get_betas_all(discard=discard, thin=thin)
 
         return sample
 

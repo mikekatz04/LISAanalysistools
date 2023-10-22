@@ -40,7 +40,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "third_run_through"
+    base_file_name = "fourth_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -142,8 +142,9 @@ def get_global_fit_settings(copy_settings_file=False):
         generate_current_state=generate_current_state,
         random_seed=1024,
         begin_new_likelihood=False,
-        plot_iter=2,
-        gpus=[2, 3, 4, 6]
+        plot_iter=4,
+        backup_iter=10,
+        gpus=[5, 6, 7, 1]
     )
 
     ##################################
@@ -252,7 +253,8 @@ def get_global_fit_settings(copy_settings_file=False):
         ndim=8,
         ntemps=len(betas),
         betas=betas,
-        nwalkers=18,
+        nwalkers=36,
+        start_resample_iter=200,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         group_proposal_kwargs=dict(
             n_iter_update=1,
@@ -266,7 +268,7 @@ def get_global_fit_settings(copy_settings_file=False):
         ),
         use_prior_removal=False,
         rj_refit_fraction=0.2,
-        rj_search_fraction= 0.2,
+        rj_search_fraction=0.2,
         rj_prior_fraction=0.6,
         nsteps=10000,
         update_iterations=1,
@@ -275,6 +277,8 @@ def get_global_fit_settings(copy_settings_file=False):
         rho_star=rho_star,
         stop_kwargs=stopping_kwargs,
         stopping_iterations=1,
+        in_model_phase_maximize=False,
+        rj_phase_maximize=False,
     )
 
     # mcmc info for search runs
@@ -284,7 +288,7 @@ def get_global_fit_settings(copy_settings_file=False):
         nwalkers=100,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
-        snr_lim=9.0,
+        snr_lim=8.0,
         stop_kwargs=dict(newly_added_limit=30, verbose=False),
         stopping_iterations=1,
     )

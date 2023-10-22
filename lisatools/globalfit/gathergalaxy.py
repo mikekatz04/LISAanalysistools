@@ -105,7 +105,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     waveform_kwargs["N"] = xp.asarray(N_vals)
     fake_data_swap = [[fake_data[0]], [fake_data[1]]]
     psd_in_swap = [[psd_in[0]], [psd_in[1]]]
-    gb.gpus = [6]
+    gb.gpus = [gpu]
     _ = gb.swap_likelihood_difference(bins_fin_base_in,bins_fin_test_in,fake_data_swap,psd_in_swap,start_freq_ind=0,data_length=len(fake_data[0]),data_splits=[np.array([0])],**waveform_kwargs,)
 
     ll_diff = -1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real

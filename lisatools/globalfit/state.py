@@ -75,3 +75,22 @@ class State(eryn_State):
         self.band_info["band_num_accepted_rj"][:] = 0
         self.band_info["band_swaps_proposed"][:] = 0
         self.band_info["band_swaps_accepted"][:] = 0
+
+
+
+class MBHState(eryn_State):
+
+    def __init__(self, possible_state, *args, betas_all=None, **kwargs):
+
+        super().__init__(possible_state, *args, **kwargs)
+
+        if isinstance(possible_state, self.__class__):
+            copy = "copy" in kwargs and kwargs["copy"] is True
+
+            dc = deepcopy if copy else lambda x: x
+            self.betas_all = dc(possible_state.betas_all)
+
+        elif betas_all is not None:
+            self.betas_all = betas_all
+
+    

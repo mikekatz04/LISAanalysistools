@@ -65,6 +65,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         num_repeat_proposals=1,
         name=None,
         use_prior_removal=False,
+        phase_maximize=False, 
         **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
@@ -111,6 +112,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.fd = fd
         self.df = (fd[1] - fd[0]).item()
         self.mgh = mgh
+        self.phase_maximize = phase_maximize
 
         self.snr_lim = snr_lim
 
@@ -717,6 +719,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                     accepted_out_here,
                     band_inv_temp_vals_here,  # band_inv_temp_vals
                     self.is_rj_prop,
+                    self.phase_maximize,
                     self.snr_lim,
                 )
 
@@ -1276,6 +1279,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                         accepted_out_here,
                         band_inv_temp_vals_here,  # band_inv_temp_vals
                         self.is_rj_prop,
+                        False,  # phased maximize
                         self.snr_lim,
                     )
 
@@ -1460,7 +1464,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.mempool.free_all_blocks()
 
         if self.is_rj_prop:
-            print("2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+            print(self.name, "2nd count check:", new_state.branches["gb_fixed"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         return new_state, accepted
 
     def check_ll_inject(self, new_state):

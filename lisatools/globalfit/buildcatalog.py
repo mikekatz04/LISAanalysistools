@@ -23,7 +23,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
     generated_info = current_info.get_data_psd(include_gbs=False, include_mbhs=False, include_lisasens=False, only_max_ll=True)  # , include_ll=True, include_source_only_ll=True)
     psd = xp.asarray(generated_info["psd"])
     output_information = gather_gb_samples(current_info, gb_reader, psd, gpu, **kwargs)
-
+    breakpoint()
     unique_vals, first_entry_of_each_group, uni_inverse = np.unique(output_information[:,0].astype(int), return_index=True, return_inverse=True)
 
     keys = [

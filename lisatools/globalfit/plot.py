@@ -125,7 +125,6 @@ def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
 
 
 def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=False, **kwargs):
-
     generated_info_0 = current_info.get_data_psd(only_max_ll=True, include_gbs=False, include_mbhs=False, **kwargs)
     generated_info_1 = current_info.get_data_psd(only_max_ll=True, **kwargs)
 
@@ -183,7 +182,7 @@ class RunResultsProduction:
         make_current_plot(current_info, save_file=current_save_file, add_mbhs=self.add_mbhs, add_gbs=self.add_gbs, **self.kwargs)
         
         mbh_save_file = base_save_file + f"_mbh_posterior_leaf.png"
-        produce_mbh_plots(current_info.mbh_info["reader"], current_info.mbh_info["cc_params"].shape[1], discard=200, save_file=mbh_save_file, fig=None)
+        produce_mbh_plots(current_info.mbh_info["reader"], current_info.mbh_info["cc_params"].shape[1], discard=0, save_file=mbh_save_file, fig=None)
         
         gb_save_file = base_save_file + f"_gb_posterior.png"
         produce_gbs_plots(current_info.gb_info["reader"], discard=0, save_file=gb_save_file, fig=None)
