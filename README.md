@@ -1,13 +1,13 @@
 # lisacattools
 
-[![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://tlittenberg.github.io/lisacattools)
+[![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://mikekatz04.github.io/LISAanalysistools)
 
 Python module for interacting with example LISA catalogs
 
 ## 1 - Getting Started
 
 These instructions will get you a copy of the project up and running on your local machine,
-either for development and testing purposes or as an installed package.  For more information, see the documentation at https://tlittenberg.github.io/lisacattools.
+either for development and testing purposes or as an installed package.  For more information, see the documentation at https://mikekatz04.github.io/LISAanalysistools.
 
 ### 1.1 - Prerequisites
 
@@ -17,7 +17,7 @@ You will need python3 to run this program.
 
 First, we need to clone the repository
 ```
-git clone https://github.com/tlittenberg/lisacattools.git
+git clone https://github.com/mikekatz04/LISAanalysistools.git
 ```
 
 #### 1.2.1 - For users
@@ -50,7 +50,7 @@ make install-dev
 ### 1.3 - Installing by pip
 
 ```
-pip install lisacattools
+pip install lisatools
 ```
 
 ## 2 - Development (only if the repository has be cloned)
