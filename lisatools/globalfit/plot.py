@@ -88,7 +88,7 @@ def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
         plt.plot(nl["gb_fixed"][:, i, 0], color=f"C{i % 10}", label="t = " + str(i + 1))
     plt.ylabel("Number of Binaries (max, mean, min)")
     plt.xlabel("Sampler Iteration (thinned)")
-    plt.legend()
+    plt.legend(loc="upper left")
     save_file_tmp = save_file[:-4] + "_gb_nleaves_over_time.png"
     plt.savefig(save_file_tmp)
     plt.close()

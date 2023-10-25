@@ -131,9 +131,9 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         inds = branch.inds
         supps = branch.branch_supplimental
         ntemps, nwalkers, nleaves_max, ndim = branch.shape
-        all_remaining_freqs = coords[inds][:, 1]
+        all_remaining_freqs = coords[0][inds[0]][:, 1]
 
-        all_remaining_cords = coords[inds]
+        all_remaining_cords = coords[0][inds[0]]
 
         num_remaining = len(all_remaining_freqs)
 
