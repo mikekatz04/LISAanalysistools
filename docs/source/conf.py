@@ -1,44 +1,34 @@
+# -*- coding: utf-8 -*-
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
-
 # -- Path setup --------------------------------------------------------------
-
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
-# import os
-# import sys
-# sys.path.insert(0, os.path.abspath('.'))
-
-
-# -- Project information -----------------------------------------------------
-
-project = 'lisatools'
-copyright = '2021, Michael L. Katz'
-author = 'Michael L. Katz'
-
-import pypandoc
-
-output = pypandoc.convert_file("../../README.md", "rst")
-with open("README.rst", "w") as fp:
-    fp.write(output)
-
-import sys, os
+import os
+import sys
 
 sys.path.insert(0, os.path.abspath("../../"))
 
-import shutil
+here = os.path.abspath(os.path.dirname(__file__))
 
+about = {}
+with open(os.path.join(here, "../../lisatools", "_version.py"), encoding="utf-8") as f:
+    exec(f.read(), about)
+# from sphinx_gallery.sorting import FileNameSortKey
 
+# -- Project information -----------------------------------------------------
 
-shutil.copy(
-    "../../examples/lisatools_tutorial.ipynb",
-    "lisatools_tutorial.ipynb",
-)
+project = about["__name__"]
+copyright = about["__copyright__"]
+author = about["__author__"]
+
+# The full version, including alpha/beta/rc tags
+release = about["__version__"]
 
 
 # -- General configuration ---------------------------------------------------
@@ -46,17 +36,17 @@ shutil.copy(
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-html_theme = "sphinx_rtd_theme"
 extensions = [
     "sphinx.ext.autodoc",
+    "sphinx_gallery.gen_gallery",
+    "sphinx.ext.viewcode",
     "sphinx.ext.napoleon",
-    "sphinx.ext.autosummary",
-    "sphinx_rtd_theme",
-    "nbsphinx",
-    "sphinx.ext.mathjax",
+    "sphinx.ext.intersphinx",
+    "sphinx.ext.githubpages",
+    "m2r2",
 ]
 
-source_suffix = [".rst"]
+source_suffix = [".rst", ".md"]
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -65,20 +55,6 @@ templates_path = ["_templates"]
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
-
-import sphinx_rtd_theme
-
-autodoc_member_order = "bysource"
-
-
-def skip(app, what, name, obj, would_skip, options):
-    if name == "__call__":
-        return False
-    return would_skip
-
-
-def setup(app):
-    app.connect("autodoc-skip-member", skip)
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -93,12 +69,22 @@ html_theme = "sphinx_rtd_theme"
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
 
-html_theme_options = {
-    "display_version": True,
-    "prev_next_buttons_location": "both",
-    "style_nav_header_background": "coral",
-    # Toc options
-    "collapse_navigation": True,
-    "sticky_navigation": True,
-    "navigation_depth": 4,
+# sphinx-gallery configuration
+sphinx_gallery_conf = {
+    # path to your example scripts
+    "examples_dirs": ["../examples_ucb"],  # , "../examples_smbh"],
+    # path to where to save gallery generated output
+    "gallery_dirs": ["examples_ucb"],  # , "examples_smbh"],
 }
+
+# configuration for intersphinx: refer to the Python standard library.
+intersphinx_mapping = {
+    "python": (
+        "https://docs.python.org/{.major}".format(sys.version_info),
+        None,
+    ),
+    "matplotlib": ("https://matplotlib.org/", None),
+    "pandas": ("https://pandas.pydata.org/", None),
+}
+
+latex_engine = "xelatex"

@@ -1,0 +1,60 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: local
+    hooks:
+      - id: cyclomatic_complexity
+        name: cyclomatic_complexity
+        entry: bash -c 'nb=$(radon cc -n C -e "lisacattools/catalog.py" lisacattools | wc -l) && ((nb<1)) && exit 0'
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: maintenability
+        name: maintenability
+        entry: bash -c 'nb=$(radon mi -n C lisacattools | wc -l) && ((nb<1)) && exit 0'
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: tests
+        name: tests
+        entry: bash -c 'make test'
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: generate_coverage
+        name: generate_coverage
+        entry: bash -c 'coverage run -m robot --variable TMP_DIR:tests/results --outputdir tests/results/ tests/testsuites/ && coverage html --include=lisacattools/* --directory=tests/results/coverage && exit 0'
+        language: system
+        types: [python]
+        pass_filenames: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-xml
+      - id: check-json
+      - id: check-added-large-files
+      - id: fix-byte-order-marker
+      - id: end-of-file-fixer
+      - id: detect-private-key
+      - id: requirements-txt-fixer
+      - id: pretty-format-json
+      - id: fix-encoding-pragma
+  - repo: https://github.com/asottile/reorder_python_imports
+    rev: v3.9.0
+    hooks:
+      - id: reorder-python-imports
+  - repo: https://github.com/ambv/black
+    rev: 22.12.0
+    hooks:
+      - id: black
+        language_version: python3.10
+        exclude: docs, tests
+        args: [--line-length=79]
+  - repo: https://github.com/pycqa/flake8
+    rev: 6.0.0
+    hooks:
+      - id: flake8
+        exclude: docs
