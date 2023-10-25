@@ -7,6 +7,7 @@ from gbgpu.utils.constants import *
 from datetime import datetime
 import pandas as pd
 import os
+import h5py
 
 
 def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
@@ -21,13 +22,16 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     slice_vals = (step_index, temp_index)
     discard_val = gb_reader.iteration - samples_keep if gb_reader.iteration - samples_keep >= 0 else 0
     
+    gb_file = gb_reader.filename
     read_in_success = False
     max_tries = 100
     current_try = 0
     while not read_in_success:
         try:
-            gb_samples = gb_reader.get_chain(discard=discard_val, thin=thin_by)["gb_fixed"][:, 0]  # slice_vals=slice_vals)["gb_fixed"][:, 0]  # 
-            gb_inds = gb_reader.get_inds(discard=discard_val, thin=thin_by)["gb_fixed"][:, 0]  # slice_vals=slice_vals)["gb_fixed"][:, 0]  # 
+            with h5py.File(gb_file, "r") as fp:
+                iteration = fp["mcmc"].attrs["iteration"]
+                gb_samples = fp["mcmc"]["chain"]["gb_fixed"][iteration - samples_keep:iteration, 0, :, :, :]
+                gb_inds = fp["mcmc"]["inds"]["gb_fixed"][iteration - samples_keep:iteration, 0, :, :]
             read_in_success = True
         except BlockingIOError:
             print("Failed open")
