@@ -167,9 +167,9 @@ class HDFBackend(eryn_HDFBackend):
 
     @property
     def band_edges(self):
-        """Get num_bands from h5 file."""
+        """Get band_edges from h5 file."""
         with self.open() as f:
-            return f[self.name].attrs["num_bands"]
+            return f[self.name]["band_info"]["band_edges"][:]
 
     @property
     def reset_kwargs(self):
@@ -246,7 +246,8 @@ class HDFBackend(eryn_HDFBackend):
                     "results"
                 )
 
-            v_all = {key: g["band_info"][key][slice_vals] for key in g["band_info"]}
+            v_all = {key: g["band_info"][key][slice_vals] for key in g["band_info"] if key != "band_edges"}
+            v_all["band_edges"] = g["band_info"]["band_edges"][:]
         return v_all
 
     def get_band_info(self, **kwargs):

@@ -1160,13 +1160,18 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
                     # fix any nans that may come up
                     start_like[xp.isnan(start_like)] = -1e300
                     
-                    update = xp.arange(still_going_start_like.shape[0])[still_going_start_like][xp.std(start_like, axis=-1) > 5.0]
+                    update = xp.arange(still_going_start_like.shape[0])[still_going_start_like][xp.std(start_like, axis=-1) > 15.0]
                     still_going_start_like[update] = False 
 
                     iter_check += 1
                     factor *= 1.5
-                    # print(iter_check, still_going_start_like.sum())
+                    
+                    # if still_going_start_like[400]:
+   
+                    #     ind_check = np.where(np.arange(still_going_start_like.shape[0])[still_going_start_like] == 400)[0]
+                    #     print(iter_check, still_going_start_like.sum(), start_like[ind_check].max(axis=-1), start_like[ind_check].min(axis=-1), start_like[ind_check].max(axis=-1) - start_like[ind_check].min(axis=-1), xp.std(start_like, axis=-1)[ind_check])
 
+                # breakpoint()
                 if run_number == 1:
                     best_binaries_coords_with_fs = best_logl_coords.copy()
 
@@ -1334,6 +1339,8 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     ntemps = 10
     nwalkers = 100
     ndim = 8
+
+    stop = True
 
     gf_information = comm.recv(source=head_rank, tag=2929)
     gb_info = gf_information.gb_info

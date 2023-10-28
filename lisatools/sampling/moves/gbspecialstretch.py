@@ -137,6 +137,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
 
         num_remaining = len(all_remaining_freqs)
 
+        all_temp_fs = self.xp.asarray(coords[inds][:, 1])
+
         # TODO: improve this?
         self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
         self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
@@ -144,8 +146,82 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
             self.inds_freqs_sorted
         ]
 
+        total_binaries = inds.sum()
+        still_going = xp.ones(total_binaries, dtype=bool) 
+        inds_zero = xp.searchsorted(self.freqs_sorted, all_temp_fs, side="right") - 1
+        left_inds = inds_zero - int(self.nfriends / 2)
+        right_inds = inds_zero + int(self.nfriends / 2) - 1
+
+        # do right first here
+        right_inds[left_inds < 0] = self.nfriends - 1
+        left_inds[left_inds < 0] = 0
+        
+        # do left first here
+        left_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - self.nfriends
+        right_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - 1
+
+        assert np.all(right_inds - left_inds == self.nfriends - 1)
+        assert not np.any(right_inds < 0) and not np.any(right_inds > len(self.freqs_sorted) - 1) and not np.any(left_inds < 0) and not np.any(left_inds > len(self.freqs_sorted) - 1)
+        
+        jjj = 0
+        while np.any(still_going):
+            distance_left = np.abs(all_temp_fs[still_going] - self.freqs_sorted[left_inds[still_going]])
+            distance_right = np.abs(all_temp_fs[still_going] - self.freqs_sorted[right_inds[still_going]])
+
+            check_move_right = (distance_right <= distance_left)
+            check_left_inds = left_inds[still_going][check_move_right] + 1
+            check_right_inds = right_inds[still_going][check_move_right] + 1
+
+            new_distance_right = np.abs(all_temp_fs[still_going][check_move_right] - self.freqs_sorted[check_right_inds])
+
+            change_inds = xp.arange(len(all_temp_fs))[still_going][check_move_right][(new_distance_right < distance_left[check_move_right]) & (check_right_inds < len(self.freqs_sorted))]
+
+            left_inds[change_inds] += 1
+            right_inds[change_inds] += 1
+
+            stop_inds_right_1 = xp.arange(len(all_temp_fs))[still_going][check_move_right][(check_right_inds >= len(self.freqs_sorted))]
+
+            # last part is just for up here, below it will remove if it is still equal
+            stop_inds_right_2 = xp.arange(len(all_temp_fs))[still_going][check_move_right][(new_distance_right >= distance_left[check_move_right]) & (check_right_inds < len(self.freqs_sorted)) & (distance_right[check_move_right] != distance_left[check_move_right])]
+            stop_inds_right = xp.concatenate([stop_inds_right_1, stop_inds_right_2])
+            assert np.all(still_going[stop_inds_right])
+
+            # equal to should only be left over if it was equal above and moving right did not help
+            check_move_left = (distance_left <= distance_right)
+            check_left_inds = left_inds[still_going][check_move_left] - 1
+            check_right_inds = right_inds[still_going][check_move_left] - 1
+
+            new_distance_left = np.abs(all_temp_fs[still_going][check_move_left] - self.freqs_sorted[check_left_inds])
+            
+            change_inds = xp.arange(len(all_temp_fs))[still_going][check_move_left][(new_distance_left < distance_right[check_move_left]) & (check_left_inds >= 0)]
+
+            left_inds[change_inds] -= 1
+            right_inds[change_inds] -= 1
+
+            stop_inds_left_1 = xp.arange(len(all_temp_fs))[still_going][check_move_left][(check_left_inds < 0)]
+            stop_inds_left_2 = xp.arange(len(all_temp_fs))[still_going][check_move_left][(new_distance_left >= distance_right[check_move_left]) & (check_left_inds >= 0)]
+            stop_inds_left = xp.concatenate([stop_inds_left_1, stop_inds_left_2])
+            
+            stop_inds = xp.concatenate([stop_inds_right, stop_inds_left])
+            still_going[stop_inds] = False
+            print(jjj, still_going.sum())
+            if jjj >= self.nfriends:
+                breakpoint()
+            jjj += 1
+
+        start_inds = left_inds.copy().get()
+
+        start_inds_all = np.zeros_like(inds, dtype=np.int32)
+        start_inds_all[inds] = start_inds.astype(np.int32)
+
+        if "friend_start_inds" not in supps:
+            supps.add_objects({"friend_start_inds": start_inds_all})
+        else:
+            supps[:] = {"friend_start_inds": start_inds_all}
+
         self.stretch_friends_args_in = tuple([tmp.copy() for tmp in self.all_coords_sorted.T])
         et = time.perf_counter()
+        self.mempool.free_all_blocks()
         print("SETUP:", et - st)
         # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
         # freqs_sorted_here = self.freqs_sorted.get()
@@ -465,6 +541,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         else:
             factors = xp.zeros(gb_inds_orig.sum().item())
 
+        start_inds_all = xp.asarray(new_state.branches["gb_fixed"].branch_supplimental.holder["friend_start_inds"], dtype=xp.int32)[gb_inds]
         points_curr = points_curr[gb_inds]
         # N_vals_in = N_vals_in[gb_inds]
         band_indices = band_indices[gb_inds]
@@ -549,6 +626,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 # permutate for rj just in case
                 permute_inds = xp.random.permutation(xp.arange(keep.sum()))
                 params_curr = points_curr[keep][permute_inds]
+                start_inds_here = start_inds_all[keep][permute_inds]
                 inds_here = gb_inds_in[keep][permute_inds]
                 factors_here = factors[keep][permute_inds]
 
@@ -568,6 +646,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 params_curr = params_curr[sort_special]
                 inds_here = inds_here[sort_special]
                 factors_here = factors_here[sort_special]
+                start_inds_here = start_inds_here[sort_special]
                 prior_all_curr_here = prior_all_curr_here[sort_special]
                 temp_inds_here = temp_inds_here[sort_special]
                 walker_inds_here = walker_inds_here[sort_special]
@@ -731,8 +810,10 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
 
                 num_proposals_per_band = band_num_bins_here * num_proposals_here
 
+                assert start_inds_here.dtype == np.int32
+
                 proposal_info = self.gb.pyStretchProposalPackage(
-                    *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here))
+                    *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here, start_inds_here))
                 )
 
                 output_info.append([L_contribution_here, p_contribution_here, accepted_out_here, num_proposals_per_band])
@@ -1285,9 +1366,13 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
 
                     inds_here = xp.ones_like(temps_in_tmp, dtype=bool)
                     factors_here = xp.zeros_like(temps_in_tmp, dtype=float)
+                    start_inds_here = xp.zeros_like(temps_in_tmp, dtype=np.int32)
+                    
                     num_proposals_here = 1
+                    
+                    assert start_inds_here.dtype == np.int32
                     proposal_info = self.gb.pyStretchProposalPackage(
-                        *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here))
+                        *(self.stretch_friends_args_in + (self.nfriends, len(self.stretch_friends_args_in[0]), num_proposals_here, self.a, ndim, inds_here, factors_here, start_inds_here))
                     )
 
                     inputs_now = (
