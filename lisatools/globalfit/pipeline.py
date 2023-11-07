@@ -95,7 +95,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
         settings["gb"]["pe_info"]["update_iterations"] = 1
         settings["gb"]["pe_info"]["stopping_iterations"] = 1
         settings["gb"]["pe_info"]["rj_phase_maximize"] = True
-        settings["gb"]["pe_info"]["start_resample_iter"] = 100
+        settings["gb"]["pe_info"]["start_resample_iter"] = 200
         settings["gb"]["pe_info"]["group_proposal_kwargs"]["num_repeat_proposals"] = 50
         # settings["gb"]["pe_info"]["thin_by"] = 1
 

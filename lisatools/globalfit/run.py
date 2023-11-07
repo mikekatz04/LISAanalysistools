@@ -43,7 +43,7 @@ class CurrentInfoGlobalFit:
         # with open("save_state_new_gmm.pickle", "rb") as fp:
         #     gb_last_sample = pickle.load(fp)
         #     gb_last_sample.log_prior = np.zeros_like(gb_last_sample.log_like)
-        #     gb_last_sample.branches["gb_fixed"].coords[~gb_last_sample.branches["gb_fixed"].inds] = np.nan
+        #     gb_last_sample.branches["gb"].coords[~gb_last_sample.branches["gb"].inds] = np.nan
         # # breakpoint()
 
         psd_reader = HDFBackend(settings["general"]["file_information"]["fp_psd_pe"])
@@ -93,8 +93,8 @@ class CurrentInfoGlobalFit:
         if os.path.exists(self.current_info["gb"]["reader"].filename) and get_last_state_info:
             gb_last_sample = gb_reader.get_last_sample()
 
-            self.current_info["gb"]["cc_params"] = gb_last_sample.branches["gb_fixed"].coords[0, :, :]
-            self.current_info["gb"]["cc_inds"] = gb_last_sample.branches["gb_fixed"].inds[0, :, :]
+            self.current_info["gb"]["cc_params"] = gb_last_sample.branches["gb"].coords[0, :, :]
+            self.current_info["gb"]["cc_inds"] = gb_last_sample.branches["gb"].inds[0, :, :]
             if self.current_info["general"]["begin_new_likelihood"]:
                 del gb_last_sample.log_like
                 del gb_last_sample.log_prior
@@ -128,7 +128,7 @@ class CurrentInfoGlobalFit:
             self.current_info["gb"]["cc_ll"] = ll[0]
             self.current_info["gb"]["cc_lp"] = lp[0]
             self.current_info["gb"]["last_state"] = State(
-                {"gb_fixed": coords}, inds={"gb_fixed": inds}, log_like=ll, log_prior=ll
+                {"gb": coords}, inds={"gb": inds}, log_like=ll, log_prior=ll
             )
 
         # check = self.current_info["general"]["generate_current_state"](self.current_info, include_ll=True, include_source_only_ll=True, n_gen_in=18)
@@ -222,9 +222,9 @@ class MPIControlGlobalFit:
         self.comm = comm
         self.gpus = gpus
 
-        self.head_rank = ranks[1]
+        self.head_rank = ranks[0]
 
-        self.gb_pe_rank = ranks[0]
+        self.gb_pe_rank = ranks[1]
         self.gb_pe_gpu = gpus[0]
 
         self.gb_search_rank = ranks[2] 

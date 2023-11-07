@@ -37,8 +37,8 @@ if __name__ == "__main__":
     # debug_psd_search = InitialPSDSearch(comm)
     # debug_psd_search.run()
 
-    debug_seg = FullPESegment(comm)
-    debug_seg.run(run_psd=False, run_gbs_pe=True, run_gbs_search=True, run_mbhs=False)
+    # debug_seg = FullPESegment(comm)
+    # debug_seg.run(run_psd=False, run_gbs_pe=True, run_gbs_search=True, run_mbhs=False)
 
     # debug_search = MBHSearchSegment(comm, head_rank=head_rank)
     # debug_search.run()
@@ -52,6 +52,6 @@ if __name__ == "__main__":
     # if rank == head_rank:
     #     debug_search.para_mbh_search.run_parallel_mbh_search(testing_time_split=7)
 
-    # run_gf_progression(global_fit_progression, comm, head_rank)
+    run_gf_progression(global_fit_progression, comm, head_rank)
      
 

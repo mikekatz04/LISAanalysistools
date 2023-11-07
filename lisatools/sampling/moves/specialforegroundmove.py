@@ -142,7 +142,7 @@ class GBForegroundSpecialMove(StretchMove):
         # Split the ensemble in half and iterate over these two halves.
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
-        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb_fixed"].shape
+        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb"].shape
 
         split_inds = np.zeros(nwalkers, dtype=int)
         split_inds[1::2] = 1
@@ -238,7 +238,7 @@ class GBForegroundSpecialMove(StretchMove):
                 self.mgh.restore_base_injections()
 
                 for name in new_state.branches.keys():
-                    if name not in ["gb", "gb_fixed"]:
+                    if name not in ["gb", "gb"]:
                         continue
                     new_state_branch = new_state.branches[name]
                     coords_here = new_state_branch.coords[new_state_branch.inds]
@@ -305,7 +305,7 @@ class GBForegroundSpecialMove(StretchMove):
                 data_minus_template[:] = self.xp.asarray(self.data)[None, None]
                 templates = self.xp.zeros_like(data_minus_template).reshape(-1, 2, data_minus_template.shape[-1])
                 for name in new_state.branches.keys():
-                    if name not in ["gb", "gb_fixed"]:
+                    if name not in ["gb", "gb"]:
                         continue
                     new_state_branch = new_state.branches[name]
                     coords_here = new_state_branch.coords[new_state_branch.inds]
@@ -355,12 +355,12 @@ class GBForegroundSpecialMove(StretchMove):
 
                 # need to calculate switch likelihoods
 
-                coords_iperm = new_state.branches["gb_fixed"].coords[i, iperm]
-                coords_i1perm = new_state.branches["gb_fixed"].coords[i - 1, i1perm]
+                coords_iperm = new_state.branches["gb"].coords[i, iperm]
+                coords_i1perm = new_state.branches["gb"].coords[i - 1, i1perm]
 
-                N_vals_iperm = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i, iperm]
+                N_vals_iperm = new_state.branches["gb"].branch_supplimental.holder["N_vals"][i, iperm]
 
-                N_vals_i1perm = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][i - 1, i1perm]
+                N_vals_i1perm = new_state.branches["gb"].branch_supplimental.holder["N_vals"][i - 1, i1perm]
 
                 f_test_i = coords_iperm[None, :, :, 1] / 1e3
                 f_test_2_i = coords_i1perm[None, :, :, 1] / 1e3
@@ -415,8 +415,8 @@ class GBForegroundSpecialMove(StretchMove):
                     group_here_i1 = (temp_inds_i1, walkers_inds_i1, leaf_inds)
 
                     # factors_here = factors[group_here]
-                    old_points = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i]
-                    new_points = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
+                    old_points = self.xp.asarray(new_state.branches["gb"].coords)[group_here_i]
+                    new_points = self.xp.asarray(new_state.branches["gb"].coords)[group_here_i1]
 
                     N_vals_here_i = N_vals[group_here_i]
                     
@@ -426,8 +426,8 @@ class GBForegroundSpecialMove(StretchMove):
                     delta_logl_i = self.run_swap_ll(None, old_points, new_points, group_here_i, N_vals_here_i, waveform_kwargs_now, None, log_like_tmp, log_prior_tmp, return_at_logl=True)
 
                     # factors_here = factors[group_here]
-                    old_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i1]
-                    new_points[:] = self.xp.asarray(new_state.branches["gb_fixed"].coords)[group_here_i]
+                    old_points[:] = self.xp.asarray(new_state.branches["gb"].coords)[group_here_i1]
+                    new_points[:] = self.xp.asarray(new_state.branches["gb"].coords)[group_here_i]
 
                     N_vals_here_i1 = N_vals[group_here_i1]
                     
@@ -458,8 +458,8 @@ class GBForegroundSpecialMove(StretchMove):
                     ).astype(self.xp.int32)
 
                     N_vals_i = N_vals[inds_i_swap]
-                    params_i = self.xp.asarray(new_state.branches["gb_fixed"].coords)[inds_i_swap]
-                    params_i1 = self.xp.asarray(new_state.branches["gb_fixed"].coords)[inds_i1_swap]
+                    params_i = self.xp.asarray(new_state.branches["gb"].coords)[inds_i_swap]
+                    params_i1 = self.xp.asarray(new_state.branches["gb"].coords)[inds_i1_swap]
 
                     params_generate = self.xp.concatenate([
                         params_i,
@@ -524,16 +524,16 @@ class GBForegroundSpecialMove(StretchMove):
 
                     log_like_tmp[:] += self.xp.asarray(logl_change_contribution)
 
-                    tmp_swap = new_state.branches["gb_fixed"].coords[inds_i_swap]
-                    new_state.branches["gb_fixed"].coords[inds_i_swap] = new_state.branches["gb_fixed"].coords[inds_i1_swap]
+                    tmp_swap = new_state.branches["gb"].coords[inds_i_swap]
+                    new_state.branches["gb"].coords[inds_i_swap] = new_state.branches["gb"].coords[inds_i1_swap]
 
-                    new_state.branches["gb_fixed"].coords[inds_i1_swap] = tmp_swap
+                    new_state.branches["gb"].coords[inds_i1_swap] = tmp_swap
 
-                    tmp_swap = new_state.branches["gb_fixed"].branch_supplimental[inds_i_swap]
+                    tmp_swap = new_state.branches["gb"].branch_supplimental[inds_i_swap]
 
-                    new_state.branches["gb_fixed"].branch_supplimental[inds_i_swap] = new_state.branches["gb_fixed"].branch_supplimental[inds_i1_swap]
+                    new_state.branches["gb"].branch_supplimental[inds_i_swap] = new_state.branches["gb"].branch_supplimental[inds_i1_swap]
 
-                    new_state.branches["gb_fixed"].branch_supplimental[inds_i1_swap] = tmp_swap
+                    new_state.branches["gb"].branch_supplimental[inds_i1_swap] = tmp_swap
 
                     # inds are all non-zero
                     self.swaps_accepted[i - 1] += np.sum(sel)

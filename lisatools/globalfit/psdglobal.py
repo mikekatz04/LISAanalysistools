@@ -140,7 +140,7 @@ class PSDwithGBPriorWrap:
             if len(f0) > 0:
                 self.gb.get_lisasens_val(Sn_A, Sn_E, f0, noise_index_all, A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, num_f)
             
-            gb_logpdf_contrib = self.gb_prior["gb_fixed"].logpdf(gb_params_in, Sn_f=Sn_A)
+            gb_logpdf_contrib = self.gb_prior["gb"].logpdf(gb_params_in, Sn_f=Sn_A)
             logpdf_contribution = np.zeros_like(gb_inds_in, dtype=np.float64)
 
             logpdf_contribution[gb_inds_in] = gb_logpdf_contrib.get()
@@ -279,7 +279,7 @@ def run_psd_pe(gpu, comm, head_rank):
         for key, item in gpu_priors_in.items():
             item.use_cupy = True
 
-        gpu_priors = {"gb_fixed": GBPriorWrap(gf_information.gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
+        gpu_priors = {"gb": GBPriorWrap(gf_information.gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
 
         gb_params = gf_information.gb_info["cc_params"][gb_inds_generate] # [gf_information.gb_info["cc_inds"][gb_inds_generate]]
         walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], gb_nleaves_max, axis=-1)# [gf_information.gb_info["cc_inds"][gb_inds_generate]]
@@ -397,6 +397,11 @@ def run_psd_pe(gpu, comm, head_rank):
 
     # communicate end of run to head process
     comm.send({"finish_run": True}, dest=head_rank, tag=60)
+
+    del data, fd
+    
+    # free memory
+    mempool.free_all_blocks()
     return
 
 if __name__ == "__main__":

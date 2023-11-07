@@ -72,7 +72,9 @@ def search_likelihood_wrap(x, wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_
 
 
 # function call
-def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, num_run):
+def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_points, num_run):
+
+    cp.cuda.runtime.setDevice(gpu)
 
     mbh_info = settings["mbh"]
 
@@ -417,6 +419,16 @@ def run_mbh_search(settings, rank, time_split, total_time_splits, best_points, n
         finished_this_split = True
     else:
         finished_this_split = False
+
+    try:
+        del sampler
+        del all_data
+        del psd
+        del wave_gen
+        cp.get_default_memory_pool().free_all_blocks()
+        
+    except NameError:
+        pass
                 
     cp.get_default_memory_pool().free_all_blocks()
 
@@ -513,11 +525,11 @@ class ParallelMBHSearchControl:
         for proc_i in self.proc_inds:
             self.comm.send({"complete": True}, dest=proc_i)
 
-    def run_single_search(self, best_points, time_split, total_time_splits, num_run):
+    def run_single_search(self, gpu, best_points, time_split, total_time_splits, num_run):
 
 
         print(f"Starting: split {time_split} for run number {num_run}")
-        new_output_points, new_best_point, finished_this_split = run_mbh_search(self.settings, self.rank, time_split, self.time_splits, best_points, num_run)
+        new_output_points, new_best_point, finished_this_split = run_mbh_search(gpu, self.settings, self.rank, time_split, self.time_splits, best_points, num_run)
         print(f"End: split {time_split} for run number {num_run}")
         cp.get_default_memory_pool().free_all_blocks()
         return (new_output_points, new_best_point, finished_this_split)
@@ -539,7 +551,7 @@ class ParallelMBHSearchControl:
             total_time_splits = incoming_dict['total_splits']
             num_run = incoming_dict['num_run']
 
-            new_output_points, new_best_point, finished_this_split = self.run_single_search(best_points, time_split, total_time_splits, num_run)
+            new_output_points, new_best_point, finished_this_split = self.run_single_search(gpu_check['gpu'], best_points, time_split, total_time_splits, num_run)
 
             print(f"send before receive: split {time_split} for run number {num_run}")
             
@@ -548,14 +560,14 @@ class ParallelMBHSearchControl:
             
             self.comm.send({"output_points": new_output_points, "mbh_best": new_best_point, "time_split": time_split, "finished_this_split": finished_this_split}, dest=self.head_rank)
             print(f"after update: split {time_split} for run number {num_run}")
-            
+        
     def run_parallel_mbh_search(self, testing_time_split=None):
 
         # testing
         if testing_time_split is not None:
             assert isinstance(testing_time_split, int) and testing_time_split < self.time_splits
             cp.cuda.runtime.setDevice(self.gpus[0])
-            output_points, mbh_best = run_mbh_search(self.settings, self.head_rank, testing_time_split, self.time_splits, np.asarray(self.output_points_info["best_points"]), self.output_points_info["num_run_per_split"][testing_time_split])
+            output_points, mbh_best = run_mbh_search(self.gpus[0], self.settings, self.head_rank, testing_time_split, self.time_splits, np.asarray(self.output_points_info["best_points"]), self.output_points_info["num_run_per_split"][testing_time_split])
             breakpoint()
 
         if self.rank == self.head_rank:

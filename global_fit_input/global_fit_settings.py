@@ -40,7 +40,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "fourth_run_through"
+    base_file_name = "fifth_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -144,7 +144,7 @@ def get_global_fit_settings(copy_settings_file=False):
         begin_new_likelihood=False,
         plot_iter=4,
         backup_iter=10,
-        gpus=[5, 6, 7, 1]
+        gpus=[4, 5, 6, 7]
     )
 
     ##################################
@@ -248,7 +248,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # mcmc info for main run
     gb_main_run_mcmc_info = dict(
-        branch_names=["gb_fixed"],
+        branch_names=["gb"],
         nleaves_max=15000,
         ndim=8,
         ntemps=len(betas),
@@ -272,7 +272,7 @@ def get_global_fit_settings(copy_settings_file=False):
         rj_prior_fraction=0.6,
         nsteps=10000,
         update_iterations=1,
-        thin_by=5,
+        thin_by=3,
         progress=True,
         rho_star=rho_star,
         stop_kwargs=stopping_kwargs,

@@ -30,8 +30,8 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
         try:
             with h5py.File(gb_file, "r") as fp:
                 iteration = fp["mcmc"].attrs["iteration"]
-                gb_samples = fp["mcmc"]["chain"]["gb_fixed"][iteration - samples_keep:iteration, 0, :, :, :]
-                gb_inds = fp["mcmc"]["inds"]["gb_fixed"][iteration - samples_keep:iteration, 0, :, :]
+                gb_samples = fp["mcmc"]["chain"]["gb"][iteration - samples_keep:iteration, 0, :, :, :]
+                gb_inds = fp["mcmc"]["inds"]["gb"][iteration - samples_keep:iteration, 0, :, :]
             read_in_success = True
         except BlockingIOError:
             print("Failed open")
