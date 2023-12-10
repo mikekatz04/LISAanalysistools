@@ -106,13 +106,22 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     snrs_fin_base_in = np.concatenate(base_snrs_going_in)
 
     N_vals = get_N(bins_fin_test_in[:, 0], bins_fin_test_in[:, 1], YEAR, oversample=4)
-    waveform_kwargs["N"] = xp.asarray(N_vals)
     fake_data_swap = [[fake_data[0]], [fake_data[1]]]
     psd_in_swap = [[psd_in[0]], [psd_in[1]]]
     gb.gpus = [gpu]
-    _ = gb.swap_likelihood_difference(bins_fin_base_in,bins_fin_test_in,fake_data_swap,psd_in_swap,start_freq_ind=0,data_length=len(fake_data[0]),data_splits=[np.array([0])],**waveform_kwargs,)
+    
+    ll_diff = np.zeros(bins_fin_base_in.shape[0])
+    batch_size = int(1e3)
 
-    ll_diff = -1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real
+    inds_split = np.arange(0, bins_fin_base_in.shape[0] + batch_size, batch_size)
+
+    for jjj, (start_ind, end_ind) in enumerate(zip(inds_split[:-1], inds_split[1:])):
+        waveform_kwargs["N"] = xp.asarray(N_vals[start_ind:end_ind])
+    
+        _ = gb.swap_likelihood_difference(bins_fin_base_in[start_ind:end_ind],bins_fin_test_in[start_ind:end_ind],fake_data_swap,psd_in_swap,start_freq_ind=0,data_length=len(fake_data[0]),data_splits=[np.array([0])],**waveform_kwargs,)
+
+        ll_diff[start_ind:end_ind] = (-1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real).get()
+        print(start_ind, len(inds_split) - 1)
 
     keep_groups = []
     keep_group_number = []
@@ -128,7 +137,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
         if len(keep_inds) == 0:
             continue
         ll_diff_i = ll_diff[keep_inds]
-        group_test = (ll_diff_i > -30.0).get()
+        group_test = (ll_diff_i > -30.0)  # .get()
         num_grouping = group_test.sum()
         
         in_here = keep_going_in[i]

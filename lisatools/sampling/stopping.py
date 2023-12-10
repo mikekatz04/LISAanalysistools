@@ -1,3 +1,5 @@
+import time 
+
 import numpy as np
 
 from eryn.utils.stopping import Stopping
@@ -44,6 +46,9 @@ class NLeavesSearchStopping:
 
     def __call__(self, newly_added_sources):
 
+        if not hasattr(self, "st"):
+            self.st = time.perf_counter()
+
         if newly_added_sources < self.newly_added_limit:
             stop = True
 
@@ -51,11 +56,13 @@ class NLeavesSearchStopping:
             stop = False
 
         if self.verbose:
+            dur = (time.perf_counter() - self.st) / 3600.0  # hours
             print(
                 "\nNUM NEW SOURCES:\n",
                 newly_added_sources,
                 "\nLIMIT:\n",
-                self.newly_added_limit
+                self.newly_added_limit,
+                f"\nTIME TO NOW: {dur} hours"
             )
 
         return stop

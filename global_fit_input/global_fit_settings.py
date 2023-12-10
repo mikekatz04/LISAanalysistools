@@ -40,7 +40,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "fifth_run_through"
+    base_file_name = "sixth_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -255,6 +255,7 @@ def get_global_fit_settings(copy_settings_file=False):
         betas=betas,
         nwalkers=36,
         start_resample_iter=-1,  # -1 so that it starts right at the start of PE
+        iter_count_per_resample=10,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         group_proposal_kwargs=dict(
             n_iter_update=1,
@@ -288,8 +289,8 @@ def get_global_fit_settings(copy_settings_file=False):
         nwalkers=100,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
-        snr_lim=8.0,
-        stop_kwargs=dict(newly_added_limit=30, verbose=False),
+        snr_lim=5.0,
+        stop_kwargs=dict(newly_added_limit=1, verbose=True),
         stopping_iterations=1,
     )
 

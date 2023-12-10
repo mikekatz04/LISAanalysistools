@@ -95,13 +95,9 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.gpu_cuda_wrap = self.gb.pyPeriodicPackage(2 * np.pi, np.pi, 2 * np.pi)
 
         # use gpu from template generator
-        self.use_gpu = gb.use_gpu
+        # self.use_gpu = gb.use_gpu
         if self.use_gpu:
-            self.xp = xp
             self.mempool = self.xp.get_default_memory_pool()
-
-        else:
-            self.xp = np
 
         self.band_edges = band_edges
         self.num_bands = len(band_edges) - 1
@@ -146,7 +142,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
             self.inds_freqs_sorted
         ]
 
-        total_binaries = inds.sum()
+        total_binaries = inds.sum().item()
         still_going = xp.ones(total_binaries, dtype=bool) 
         inds_zero = xp.searchsorted(self.freqs_sorted, all_temp_fs, side="right") - 1
         left_inds = inds_zero - int(self.nfriends / 2)
@@ -204,7 +200,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
             
             stop_inds = xp.concatenate([stop_inds_right, stop_inds_left])
             still_going[stop_inds] = False
-            print(jjj, still_going.sum())
+            # print(jjj, still_going.sum())
             if jjj >= self.nfriends:
                 breakpoint()
             jjj += 1
@@ -222,7 +218,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.stretch_friends_args_in = tuple([tmp.copy() for tmp in self.all_coords_sorted.T])
         et = time.perf_counter()
         self.mempool.free_all_blocks()
-        print("SETUP:", et - st)
+        # print("SETUP:", et - st)
         # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
         # freqs_sorted_here = self.freqs_sorted.get()
         # freqs_remaining_here = all_remaining_freqs
@@ -1549,7 +1545,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.mempool.free_all_blocks()
 
         if self.is_rj_prop:
-            print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+            pass  # print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
         return new_state, accepted
 
     def check_ll_inject(self, new_state):

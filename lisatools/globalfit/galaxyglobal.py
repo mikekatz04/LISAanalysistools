@@ -942,6 +942,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
             new_points = new_points_dict["gb"].reshape(ntemps, num_still_going_here, int(nwalkers/2), -1).transpose(0, 2, 1, 3)
             logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
 
+            # TODO: make sure factors are reshaped properly
             factors = factors.reshape(logp.shape)
             keep_logp = ~xp.isinf(logp)
 
@@ -1372,6 +1373,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     # do not run the last band
     band_inds_running[-1] = False
 
+    run_counter = 0
     print("start run")
     run = True
     while run:
@@ -1405,7 +1407,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
             # max ll combination of psd and mbhs and gbs
             
-            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"]:
+            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"] and (run_counter % incoming_data.gb_info["pe_info"]["iter_count_per_resample"]) == 0:
                 gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
 
             else:
@@ -1420,7 +1422,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
                 gb_info["search_info"]["stopping_function"].add_comm(comm)
             
             stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
-            
+            run_counter += 1
             if stop:
                 break
         
@@ -1455,9 +1457,9 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
     try:
         for i in range(len(data)):
-            del data[i]
-            del psd[i]
-            del lisasens[i]
+            data[i] = None
+            psd[i] = None
+            lisasens[i] = None
 
     # have not stored this info yet
     except NameError:

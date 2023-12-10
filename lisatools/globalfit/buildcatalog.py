@@ -45,7 +45,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
     df["Ecliptic Latitude"] = np.arcsin(df["sinlat"])
     df["Frequency"] = df["Frequency"] / 1e3
     df["coslat"] = np.cos(np.pi / 2. - df["Ecliptic Latitude"])
-    df["Inclination"] = np.arccos(df["coslat"])
+    df["Inclination"] = np.arccos(df["cosinc"])
     df["Parent"] = [None for _ in range(df.shape[0])]
     year_val = datetime.now().year
     month_val = datetime.now().month
