@@ -5,6 +5,13 @@ from ..utils.constants import *
 from ..sensitivity import get_sensitivity
 from eryn.moves.multipletry import logsumexp
 
+from typing import Union, Optional, Tuple, List
+
+import sys
+sys.path.append("/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/")
+# from galaxy_ffdot import GalaxyFFdot
+# from galaxy import Galaxy
+
 try:
     import cupy as cp
 
@@ -434,5 +441,63 @@ class FullGaussianMixtureModel:
         return new_points_mapped
         
 
+# class FlowDist:
+#     def __init__(self, config: dict, model: Union[Galaxy, GalaxyFFdot], fit: str, ndim: int):
+
+#         self.dist = model(config)
+#         self.dist.load_fit(fit)
+#         self.config = config
+#         self.fit = fit
+#         self.ndim = ndim
+
+#     def rvs(self, size: Optional[Union[int, tuple]]=(1,)) -> cp.ndarray:
+#         if isinstance(size, int):
+#             size = (size,)
+
+#         total_samp = int(np.prod(size))
+#         samples = self.dist.sample(total_samp).reshape(size + (self.ndim,))
+#         return samples 
+
+#     def logpdf(self, x: cp.ndarray) -> cp.ndarray:
+#         assert x.shape[-1] == self.ndim
+#         log_prob = self.dist.log_prob(x.reshape(-1, self.ndim)).reshape(x.shape[:-1])
+#         return log_prob
+
+# class GalaxyFlowDist(FlowDist):
+#     def __init__(self):
+#         config = '/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/configs/gbs/density_galaxy.yaml'
+#         model = Galaxy
+#         fit = '/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/minmax_galaxy_sangria.txt'
+#         ndim = 3
+#         super().__init__(config, model, fit, ndim)
+
+#     def logpdf(self, x: cp.ndarray) -> cp.ndarray:
+#         # adjust amplitudes to exp
+#         x[:, 0] = np.log(x[:, 0])
+#         return super().logpdf(x)
+
+#     def rvs(self, size: Optional[Union[int, tuple]]=(1,)) -> cp.ndarray:
+#         if isinstance(size, int):
+#             size = (size,)
+
+#         samples = super().rvs(size=size)
+#         samples = samples.reshape(-1, samples.shape[-1])
+#         samples[:, 0] = np.exp(samples[:, 0])
+#         samples = samples.reshape(size + (samples.shape[-1],))
+#         return samples
+
+# class FFdotFlowDist(FlowDist):
+#     def __init__(self):
+#         config = '/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/configs/gbs/density_f.yaml'
+#         model = GalaxyFFdot
+#         fit = '/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/minmax_ffdot_sangria.txt'
+#         ndim = 2
+#         super().__init__(config, model, fit, ndim)
+        
+    
+
+    
         
         
+            
+            

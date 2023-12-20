@@ -65,7 +65,6 @@ def get_global_fit_settings(copy_settings_file=False):
     if copy_settings_file:
         shutil.copy(__file__, file_store_dir + base_file_name + "_" + __file__.split("/")[-1])
     
-    
     ###############################
     ###############################
     ###  Global Fit data Setup  ###
@@ -123,6 +122,8 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
+    gpus = [4, 5, 6, 7]
+
     all_general_info = dict(
         file_information=file_information,
         fd=fd,
@@ -144,7 +145,47 @@ def get_global_fit_settings(copy_settings_file=False):
         begin_new_likelihood=False,
         plot_iter=4,
         backup_iter=10,
-        gpus=[4, 5, 6, 7]
+        gpus=gpus
+    )
+
+
+    ###############################
+    ###############################
+    ######    Rank/GPU setup  #####
+    ###############################
+    ###############################
+
+    head_rank = 0
+
+    gb_pe_rank = 1
+    gb_pe_gpu = gpus[0]
+
+    # should be one more rank than GPUs for refit
+    gb_search_rank = [2, 3]
+    gb_search_gpu = gpus[1]
+
+    psd_rank = 4
+    psd_gpu = gpus[3]
+
+    mbh_rank = 5
+    mbh_gpu = gpus[2]
+
+    # run results rank will be next available rank if used
+    # gmm_ranks will be all other ranks
+
+    rank_info = dict(
+        head_rank=head_rank,
+        gb_pe_rank=gb_pe_rank,
+        gb_search_rank=gb_search_rank,
+        psd_rank=psd_rank,
+        mbh_rank=mbh_rank,
+    )
+
+    gpu_assignments = dict(
+        gb_pe_gpu=gb_pe_gpu,
+        gb_search_gpu=gb_search_gpu,
+        psd_gpu=psd_gpu,
+        mbh_gpu=mbh_gpu,
     )
 
     ##################################
@@ -246,6 +287,11 @@ def get_global_fit_settings(copy_settings_file=False):
         verbose=True
     )
 
+    stop_search_kwargs = dict(
+        convergence_iter=5,  # really * thin_by
+        verbose=True
+    )
+
     # mcmc info for main run
     gb_main_run_mcmc_info = dict(
         branch_names=["gb"],
@@ -277,6 +323,7 @@ def get_global_fit_settings(copy_settings_file=False):
         progress=True,
         rho_star=rho_star,
         stop_kwargs=stopping_kwargs,
+        stop_search_kwargs=dict(convergence_iter=5, verbose=True),  # really 5 * thin_by
         stopping_iterations=1,
         in_model_phase_maximize=False,
         rj_phase_maximize=False,
@@ -290,7 +337,7 @@ def get_global_fit_settings(copy_settings_file=False):
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
         m_chirp_lims=[0.001, 1.2],
         snr_lim=5.0,
-        stop_kwargs=dict(newly_added_limit=1, verbose=True),
+        # stop_kwargs=dict(newly_added_limit=1, verbose=True),
         stopping_iterations=1,
     )
 
@@ -357,7 +404,7 @@ def get_global_fit_settings(copy_settings_file=False):
         ndims={"psd": 4, "galfor": 5},
         nleaves_max={"psd": 1, "galfor": 1},
         ntemps=10,
-        nwalkers=100,
+        nwalkers=50,
         progress=False,
         thin_by=100,
         update_iterations=20,
@@ -462,7 +509,7 @@ def get_global_fit_settings(copy_settings_file=False):
         nleaves_max=15,
         ndim=11,
         ntemps=10,
-        nwalkers=100,
+        nwalkers=50,
         num_prop_repeats=200,
         inner_moves=inner_moves,
         progress=False,
@@ -516,5 +563,12 @@ def get_global_fit_settings(copy_settings_file=False):
         "gb": all_gb_info,
         "mbh": all_mbh_info,
         "psd": all_psd_info,
-        "general": all_general_info
+        "general": all_general_info,
+        "rank_info": rank_info,
+        "gpu_assignments": gpu_assignments,
     }
+
+
+if __name__ == "__main__":
+    settings = get_global_fit_settings()
+    breakpoint()

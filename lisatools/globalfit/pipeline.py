@@ -105,20 +105,30 @@ class InitialGBSearchSegment(GlobalFitSegment):
         settings["mbh"]["pe_info"]["stopping_iterations"] = 1
         settings["psd"]["pe_info"]["stopping_iterations"] = 4
         
+        settings["gpu_assignments"]["gb_search_gpu"] = settings["general"]["gpus"][1:3]
+        settings["gpu_assignments"]["gb_pe_gpu"] = settings["general"]["gpus"][0]
+        settings["gpu_assignments"]["psd_gpu"] = settings["general"]["gpus"][3]
+        settings["gpu_assignments"]["mbh_gpu"] = settings["general"]["gpus"][3]
+
+        settings["rank_info"]["gb_search_rank"] = [2, 3, 4]
+        settings["rank_info"]["gb_pe_rank"] = 1
+        settings["rank_info"]["psd_rank"] = 5
+        settings["rank_info"]["mbh_rank"] = 6
+        
     def run(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
 
-        stopper_rank = self.mpi_controller.gb_search_rank
+        stopper_rank = self.mpi_controller.gb_pe_rank
         other_ranks = [
             self.mpi_controller.psd_rank,
             self.mpi_controller.mbh_rank,
-            self.mpi_controller.gb_pe_rank
-        ]
+        ] + self.mpi_controller.gb_search_rank  # gb_search_rank is a list
 
+        print(f"Stopper {stopper_rank}, other: {other_ranks}")
         # had to go after initialization of mpi because it needs the ranks
-        stop_fn = NLeavesSearchStopping(**self.current_info.gb_info["search_info"]["stop_kwargs"])
-        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        stop_fn = NLeavesSearchStopping(**self.current_info.gb_info["pe_info"]["stop_search_kwargs"])
+        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
         self.current_info.psd_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
-        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
         self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
 
         self.mpi_controller.run_global_fit(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)

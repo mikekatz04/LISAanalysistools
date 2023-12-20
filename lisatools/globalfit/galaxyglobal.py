@@ -222,7 +222,6 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     gb = GBGPU(use_gpu=True)
     # from lisatools.sampling.stopping import SearchConvergeStopping2
-
     gf_information = comm.recv(source=head_rank, tag=255)
 
     gb_info = gf_information.gb_info
@@ -1337,7 +1336,7 @@ def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_s
     
     return fit_gmm(samples_gathered, comm, comm_info)
 
-def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
+def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remainder):
     gpus = [gpu]
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -1347,11 +1346,27 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
     stop = True
 
-    gf_information = comm.recv(source=head_rank, tag=2929)
+    rank = comm.Get_rank()
+    tag = int(str(2929) + str(rank))
+    print("CHECK yep", rank, tag, head_rank)
+    gf_information = comm.recv(source=head_rank, tag=tag)
+    print("CHECK n", rank, tag, head_rank)
     gb_info = gf_information.gb_info
     band_edges = gb_info["band_edges"]
 
-    band_inds_running = np.ones_like(band_edges[:-1], dtype=bool)
+    band_inds_running = np.zeros_like(band_edges[:-1], dtype=bool)
+
+    # split_remainder of 0 is refit
+    # split_remainder >= 1 is search
+    if split_remainder > 0:
+        search_split_remainder = split_remainder - 1
+        num_search_for_search = num_search - 1
+        assert search_split_remainder >= 0
+        assert num_search_for_search > 0 and search_split_remainder < num_search_for_search
+
+        band_inds_running[np.arange(len(band_inds_running)) % num_search_for_search == search_split_remainder] = True
+
+    print(rank, f"FIGURE ", num_search, split_remainder, band_inds_running.sum(), band_inds_running.shape[0])
     
     priors_here = deepcopy(gb_info["priors"].priors_in)
     priors_here.pop((0, 1))
@@ -1372,6 +1387,9 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
     # do not run the last band
     band_inds_running[-1] = False
+
+    # stopping function
+    stopping_function_here = deepcopy(gb_info["search_info"]["stopping_function"])
 
     run_counter = 0
     print("start run")
@@ -1407,21 +1425,27 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
 
             # max ll combination of psd and mbhs and gbs
             
-            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"] and (run_counter % incoming_data.gb_info["pe_info"]["iter_count_per_resample"]) == 0:
-                gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
+            # run refit
+            if split_remainder == 0:
+                if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"] and (run_counter % incoming_data.gb_info["pe_info"]["iter_count_per_resample"]) == 0:
+                    gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
+
+                else:
+                    gmm_samples_refit = None
+
+                send_out_dict = {"sample_refit": gmm_samples_refit}
 
             else:
-                gmm_samples_refit = None
+                gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
+                send_out_dict = {"search": gmm_mcmc_search_info}
 
-            gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
-            
             comm.send({"receive": True}, dest=head_rank, tag=20)
-            comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
+            comm.send(send_out_dict, dest=head_rank, tag=29)
 
-            if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
-                gb_info["search_info"]["stopping_function"].add_comm(comm)
+            if not hasattr(stopping_function_here, "comm") and hasattr(stopping_function_here, "add_comm"):
+                stopping_function_here.add_comm(comm)
             
-            stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
+            stop = stopping_function_here(incoming_data)
             run_counter += 1
             if stop:
                 break
