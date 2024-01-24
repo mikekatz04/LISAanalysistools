@@ -445,7 +445,12 @@ class FullGaussianMixtureModel:
 #     def __init__(self, config: dict, model: Union[Galaxy, GalaxyFFdot], fit: str, ndim: int):
 
 #         self.dist = model(config)
-#         self.dist.load_fit(fit)
+#         self.dist.load_fit()
+
+#         param_min, param_max = np.loadtxt(fit)
+#         self.dist.set_min(param_min)
+#         self.dist.set_max(param_max)
+        
 #         self.config = config
 #         self.fit = fit
 #         self.ndim = ndim

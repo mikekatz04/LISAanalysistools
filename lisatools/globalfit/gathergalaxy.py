@@ -61,7 +61,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
     gb_snrs = np.full(gb_inds.shape, -1e10)
     gb_snrs[gb_inds] = optimal_snr.get()
 
-    gb_keep = gb_snrs > 7.0
+    gb_keep = gb_snrs > 8.0
     gb_inds_left = gb_inds.copy()
 
     first_sample = gb_samples[0].reshape(-1, 8)
@@ -137,7 +137,7 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
         if len(keep_inds) == 0:
             continue
         ll_diff_i = ll_diff[keep_inds]
-        group_test = (ll_diff_i > -30.0)  # .get()
+        group_test = (ll_diff_i > -25.0)  # .get()
         num_grouping = group_test.sum()
         
         in_here = keep_going_in[i]
