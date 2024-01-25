@@ -92,14 +92,14 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     machine=$(uname -m)
     if [[ "$machine" == "arm64" ]]; then
         echo "This is an M1 Mac."
-        conda create -n "$env_name" -c conda-forge -y wget gsl hdf5 numpy Cython scipy tqdm jupyter ipython h5py requests matplotlib python=3.12 openblas lapack liblapacke
+        conda create -n "$env_name" -c conda-forge -y wget gsl hdf5 numpy pandas Cython scipy tqdm jupyter ipython h5py requests matplotlib python=3.12 openblas lapack liblapacke
     else
         echo "This is not an M1 Mac."
-        conda create -n "$env_name" -c conda-forge -y clangxx_osx-64 clang_osx-64 wget gsl lapack=3.6.1 hdf5 numpy Cython scipy tqdm jupyter ipython h5py requests matplotlib python=3.12
+        conda create -n "$env_name" -c conda-forge -y clangxx_osx-64 clang_osx-64 wget gsl lapack=3.6.1 hdf5 numpy pandas Cython scipy tqdm jupyter ipython h5py requests matplotlib python=3.12
     fi
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     echo "This system is Unix/Linux."
-    conda create -n "$env_name" -c conda-forge -y gcc_linux-64 gxx_linux-64 wget gsl lapack=3.6.1 hdf5 numpy Cython scipy tqdm jupyter ipython h5py requests matplotlib python=3.12
+    conda create -n "$env_name" -c conda-forge -y gcc_linux-64 gxx_linux-64 wget gsl lapack=3.6.1 hdf5 numpy pandas Cython scipy tqdm jupyter ipython h5py requests matplotlib python=3.12
 else
     echo "Unsupported operating system."
 fi
@@ -145,6 +145,10 @@ if [[ "$use_gpu" == true ]];
 fi
 
 machine=$(uname -m)
+
+wget https://github.com/mikekatz04/lisa-on-gpu/raw/master/orbit_files/esa-trailing-orbits.h5
+wget https://github.com/mikekatz04/lisa-on-gpu/raw/master/orbit_files/equalarmlength-trailing-fit.h5
+mv esa-trailing-orbits.h5 equalarmlength-trailing-fit.h5 examples/
 
 if [[ "$machine" == "arm64" ]]; then
     "$pip_here" install . --ccbin /usr/bin/
