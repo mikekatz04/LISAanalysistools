@@ -202,9 +202,9 @@ class GetLastGBState:
             raise ValueError("In get_last_gb_state, waveform_kwargs must include 'start_freq_ind'.")
 
         #check = reader.get_last_sample()
-        ntemps, nwalkers, nleaves_max_old, ndim = state.branches["gb_fixed"].shape
+        ntemps, nwalkers, nleaves_max_old, ndim = state.branches["gb"].shape
         
-        #out = get_groups_for_remixing(check, check_temp=0, input_groups=None, input_groups_inds=None, fix_group_count=False, name_here="gb_fixed")
+        #out = get_groups_for_remixing(check, check_temp=0, input_groups=None, input_groups_inds=None, fix_group_count=False, name_here="gb")
 
         #lengths = []
         #for group in out[0]:
@@ -219,8 +219,8 @@ class GetLastGBState:
                     state.log_like[i] = state.log_like[fix_temp_initial_ind]
                     state.log_prior[i] = state.log_prior[fix_temp_initial_ind]
                     state.branches_coords["gb"][i] = state.branches_coords["gb"][fix_temp_initial_ind]
-                    state.branches_coords["gb_fixed"][i] = state.branches_coords["gb_fixed"][fix_temp_initial_ind]
-                    state.branches_inds["gb_fixed"][i] = state.branches_inds["gb_fixed"][fix_temp_initial_ind]
+                    state.branches_coords["gb"][i] = state.branches_coords["gb"][fix_temp_initial_ind]
+                    state.branches_inds["gb"][i] = state.branches_inds["gb"][fix_temp_initial_ind]
                     state.branches_inds["gb"][i] = state.branches_inds["gb"][fix_temp_initial_ind]
 
             ntemps, nwalkers, nleaves_max_old, ndim = state.branches["gb"].shape
@@ -260,10 +260,10 @@ class GetLastGBState:
             # no "gb"
             pass
 
-        data_index_in = groups_from_inds({"gb_fixed": state.branches_inds["gb_fixed"]})["gb_fixed"]
+        data_index_in = groups_from_inds({"gb": state.branches_inds["gb"]})["gb"]
         data_index = xp.asarray(mgh.get_mapped_indices(data_index_in)).astype(xp.int32)
 
-        params_add_in = self.transform_fn["gb_fixed"].both_transforms(state.branches_coords["gb_fixed"][state.branches_inds["gb_fixed"]])
+        params_add_in = self.transform_fn["gb"].both_transforms(state.branches_coords["gb"][state.branches_inds["gb"]])
         
         #  -1 is to do -(-d + h) = d - h  
         mgh.multiply_data(-1.)

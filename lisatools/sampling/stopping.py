@@ -1,3 +1,5 @@
+import time 
+
 import numpy as np
 
 from eryn.utils.stopping import Stopping
@@ -38,25 +40,40 @@ class SNRStopping(Stopping):
 
 
 class NLeavesSearchStopping:
-    def __init__(self, newly_added_limit=30, verbose=False):
-        self.newly_added_limit = newly_added_limit
+    def __init__(self, convergence_iter=5, verbose=False):
+        self.convergence_iter = convergence_iter
         self.verbose = verbose
 
-    def __call__(self, newly_added_sources):
+    def __call__(self, current_info):
 
-        if newly_added_sources < self.newly_added_limit:
-            stop = True
+        if not hasattr(self, "st"):
+            self.st = time.perf_counter()
 
-        else:
-            stop = False
+        current_iter = current_info.gb_info["reader"].iteration
 
-        if self.verbose:
-            print(
-                "\nNUM NEW SOURCES:\n",
-                newly_added_sources,
-                "\nLIMIT:\n",
-                self.newly_added_limit
-            )
+        if current_iter > self.convergence_iter:
+
+            nleaves_cc = curr.gb_info["reader"].get_nleaves()["gb"][:, 0]
+
+            # do not include most recent
+            nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
+            nleaves_cc_max_new = nleaves_cc[-self.convergence_iter:].max()
+
+            if nleaves_cc_max_old > nleaves_cc_max_new:
+                stop = True
+
+            else:
+                stop = False
+
+            if self.verbose:
+                dur = (time.perf_counter() - self.st) / 3600.0  # hours
+                print(
+                    "\nnleaves max old:\n",
+                    nleaves_cc_max_old,
+                    "\nnleaves max new:\n",
+                    nleaves_cc_max_newf,
+                    f"\nTIME TO NOW: {dur} hours"
+                )
 
         return stop
 

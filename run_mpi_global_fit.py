@@ -30,7 +30,7 @@ if __name__ == "__main__":
         {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank, copy_settings_file=True)},
         {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
         # {"name": "gb search 1", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0)},
-        {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0, copy_settings_file=True)},
+        {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=7.0, copy_settings_file=True)},
         {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
     ]
     
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     # debug_psd_search.run()
 
     # debug_seg = FullPESegment(comm)
-    # debug_seg.run(run_psd=False, run_gbs_pe=False, run_gbs_search=False, run_mbhs=True)
+    # debug_seg.run(run_psd=False, run_gbs_pe=True, run_gbs_search=False, run_mbhs=False)
 
     # debug_search = MBHSearchSegment(comm, head_rank=head_rank)
     # debug_search.run()
@@ -47,7 +47,7 @@ if __name__ == "__main__":
     # debug_mix.run()
 
     # debug_gb_search = InitialGBSearchSegment(comm)
-    # debug_gb_search.run(run_psd=False, run_gbs_pe=True, run_gbs_search=True, run_mbhs=True)
+    # debug_gb_search.run(run_psd=False, run_gbs_pe=False, run_gbs_search=True, run_mbhs=False)
 
     # if rank == head_rank:
     #     debug_search.para_mbh_search.run_parallel_mbh_search(testing_time_split=7)

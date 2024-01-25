@@ -271,6 +271,9 @@ def run_mbh_pe(gpu, comm, head_rank):
     print("ending mix ll best:", out.log_like.max(axis=-1))
     # communicate end of run to head process
     comm.send({"finish_run": True}, dest=head_rank, tag=70)
+
+    del data_fin, psds_fin, fd
+    mempool.free_all_blocks()
     return
 
 if __name__ == "__main__":

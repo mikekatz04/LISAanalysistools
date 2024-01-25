@@ -125,8 +125,8 @@ class UpdateNewResiduals(Update):
             print("Sending gb update to head process.")
 
         update_dict = {
-            "cc_params": last_sample.branches["gb_fixed"].coords[0, :, :].copy(),
-            "cc_inds": last_sample.branches["gb_fixed"].inds[0, :, :].copy(),
+            "cc_params": last_sample.branches["gb"].coords[0, :, :].copy(),
+            "cc_inds": last_sample.branches["gb"].inds[0, :, :].copy(),
             "cc_ll": last_sample.log_like[0].copy(),
             "cc_lp": last_sample.log_prior[0].copy(),
             "last_state": last_sample
@@ -149,7 +149,7 @@ class UpdateNewResiduals(Update):
         if new_search_gmm is not None:
             gen_dist_search = make_gmm(self.gb, new_search_gmm)
         else:
-            gen_dist_search = self.gpu_priors["gb_fixed"]
+            gen_dist_search = self.gpu_priors["gb"]
 
         new_refit_gmm = new_info.gb_info["refit_gmm_info"]
         if new_refit_gmm is not None:
@@ -157,15 +157,15 @@ class UpdateNewResiduals(Update):
         elif new_search_gmm is not None:
             gen_dist_refit = make_gmm(self.gb, new_search_gmm)
         else:
-            gen_dist_refit = self.gpu_priors["gb_fixed"]
+            gen_dist_refit = self.gpu_priors["gb"]
 
         # sub out the proposal distributions
         for move in sampler.rj_moves:
             if move.name == "rj_refit_gmm":
-                move.rj_proposal_distribution = {"gb_fixed": gen_dist_refit}
+                move.rj_proposal_distribution = {"gb": gen_dist_refit}
             
             elif move.name == "rj_search_gmm":
-                move.rj_proposal_distribution = {"gb_fixed": gen_dist_search}
+                move.rj_proposal_distribution = {"gb": gen_dist_search}
 
         if self.verbose:
             print("Finished GMM reset.")
@@ -173,7 +173,7 @@ class UpdateNewResiduals(Update):
 
         ntemps_pe = last_sample.log_like.shape[0]
         nwalkers_pe = last_sample.log_like.shape[1]
-        nleaves_max = last_sample.branches["gb_fixed"].shape[2]
+        nleaves_max = last_sample.branches["gb"].shape[2]
         generated_info = new_info.get_data_psd(include_gbs=False, n_gen_in=nwalkers_pe, include_lisasens=True)  # , include_ll=True, include_source_only_ll=True)
         data = generated_info["data"]
         psd = generated_info["psd"]
@@ -189,13 +189,13 @@ class UpdateNewResiduals(Update):
         new_ll = self.mgh.get_ll(include_psd_info=True)
         last_sample.log_like[0, :] = new_ll[:]
 
-        ntemps, nwalkers, nleaves_max = last_sample.branches["gb_fixed"].inds.shape
+        ntemps, nwalkers, nleaves_max = last_sample.branches["gb"].inds.shape
         walker_inds = np.repeat(np.arange(nwalkers)[:, None], ntemps * nleaves_max, axis=-1).reshape(nwalkers, ntemps, nleaves_max).transpose(1, 0, 2)
         
-        per_source_lp = np.zeros_like(last_sample.branches["gb_fixed"].inds, dtype=np.float64)
-        walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1).reshape(nwalkers_pe, ntemps_pe, nleaves_max).transpose(1, 0, 2)[last_sample.branches["gb_fixed"].inds]
+        per_source_lp = np.zeros_like(last_sample.branches["gb"].inds, dtype=np.float64)
+        walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1).reshape(nwalkers_pe, ntemps_pe, nleaves_max).transpose(1, 0, 2)[last_sample.branches["gb"].inds]
         
-        per_source_lp[last_sample.branches["gb_fixed"].inds] = self.gpu_priors["gb_fixed"].logpdf(last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds], psds=lisasens[0], walker_inds=walker_inds).get()
+        per_source_lp[last_sample.branches["gb"].inds] = self.gpu_priors["gb"].logpdf(last_sample.branches["gb"].coords[last_sample.branches["gb"].inds], psds=lisasens[0], walker_inds=walker_inds).get()
         
         new_lp = per_source_lp.sum(axis=-1)
         last_sample.log_prior[:] = new_lp[:]
@@ -222,7 +222,6 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     gb = GBGPU(use_gpu=True)
     # from lisatools.sampling.stopping import SearchConvergeStopping2
-
     gf_information = comm.recv(source=head_rank, tag=255)
 
     gb_info = gf_information.gb_info
@@ -292,8 +291,8 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     gb.gpus = mgh.gpus
 
-    priors = {"gb_fixed": gb_info["priors"]}
-    nleaves_max = last_sample.branches["gb_fixed"].shape[2]
+    priors = {"gb": gb_info["priors"]}
+    nleaves_max = last_sample.branches["gb"].shape[2]
     transform_fn = gb_info["transform"]
 
     band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
@@ -305,41 +304,41 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     from gbgpu.utils.utility import get_N
     band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
 
-    if last_sample.branches["gb_fixed"].inds[0].sum() > 0:
+    if last_sample.branches["gb"].inds[0].sum() > 0:
         
         # from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
         # L = 2.5e9
         # amp_transform = AmplitudeFromSNR(L, gf_information.general_info['Tobs'], fd=gf_information.general_info["fd"])
 
-        # walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1).reshape(nwalkers_pe, ntemps_pe, nleaves_max).transpose(1, 0, 2)[last_sample.branches["gb_fixed"].inds]
+        # walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1).reshape(nwalkers_pe, ntemps_pe, nleaves_max).transpose(1, 0, 2)[last_sample.branches["gb"].inds]
         
-        # coords_fix = last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds]
+        # coords_fix = last_sample.branches["gb"].coords[last_sample.branches["gb"].inds]
         # coords_fix[:, 0], _ = amp_transform(coords_fix[:, 0], coords_fix[:, 1] / 1e3, psds=psd[0], walker_inds=walker_inds)
         
-        # last_sample.branches["gb_fixed"].coords[last_sample.branches["gb_fixed"].inds, 0] = coords_fix[:, 0]
+        # last_sample.branches["gb"].coords[last_sample.branches["gb"].inds, 0] = coords_fix[:, 0]
 
-        coords_out_gb_fixed = last_sample.branches["gb_fixed"].coords[0,
-            last_sample.branches["gb_fixed"].inds[0]
+        coords_out_gb = last_sample.branches["gb"].coords[0,
+            last_sample.branches["gb"].inds[0]
         ]
 
-        walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)[last_sample.branches["gb_fixed"].inds[0]]
+        walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)[last_sample.branches["gb"].inds[0]]
         
-        check = priors["gb_fixed"].logpdf(coords_out_gb_fixed, psds=lisasens[0], walker_inds=walker_inds)
+        check = priors["gb"].logpdf(coords_out_gb, psds=lisasens[0], walker_inds=walker_inds)
 
         if np.any(np.isinf(check)):
             raise ValueError("Starting priors are inf.")
 
-        coords_out_gb_fixed[:, 3] = coords_out_gb_fixed[:, 3] % (2 * np.pi)
-        coords_out_gb_fixed[:, 5] = coords_out_gb_fixed[:, 5] % (1 * np.pi)
-        coords_out_gb_fixed[:, 6] = coords_out_gb_fixed[:, 6] % (2 * np.pi)
+        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
+        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
+        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
         
-        coords_in_in = transform_fn.both_transforms(coords_out_gb_fixed)
+        coords_in_in = transform_fn.both_transforms(coords_out_gb)
 
         band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
 
         walker_vals = np.tile(
             np.arange(nwalkers_pe), (nleaves_max, 1)
-        ).transpose((1, 0))[last_sample.branches["gb_fixed"].inds[0]]
+        ).transpose((1, 0))[last_sample.branches["gb"].inds[0]]
 
         data_index_1 = ((band_inds % 2) + 0) * nwalkers_pe + walker_vals
 
@@ -384,21 +383,21 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     band_inds_in = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=int)
     N_vals_in = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=int)
 
-    if state_mix.branches["gb_fixed"].inds.sum() > 0:
-        f_in = state_mix.branches["gb_fixed"].coords[state_mix.branches["gb_fixed"].inds][:, 1] / 1e3
-        band_inds_in[state_mix.branches["gb_fixed"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
-        N_vals_in[state_mix.branches["gb_fixed"].inds] = band_N_vals.get()[band_inds_in[state_mix.branches["gb_fixed"].inds]]
+    if state_mix.branches["gb"].inds.sum() > 0:
+        f_in = state_mix.branches["gb"].coords[state_mix.branches["gb"].inds][:, 1] / 1e3
+        band_inds_in[state_mix.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
+        N_vals_in[state_mix.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state_mix.branches["gb"].inds]]
 
     branch_supp_base_shape = (ntemps_pe, nwalkers_pe, nleaves_max)
-    state_mix.branches["gb_fixed"].branch_supplimental = BranchSupplimental(
+    state_mix.branches["gb"].branch_supplimental = BranchSupplimental(
         {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
     )
 
-    gpu_priors_in = deepcopy(priors["gb_fixed"].priors_in)
+    gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for key, item in gpu_priors_in.items():
         item.use_cupy = True
 
-    gpu_priors = {"gb_fixed": GBPriorWrap(gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
+    gpu_priors = {"gb": GBPriorWrap(gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
 
     gb_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
@@ -425,14 +424,14 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         gpu_priors,
     )
 
-    gb_fixed_move = GBSpecialStretchMove(
+    gb_move = GBSpecialStretchMove(
         *gb_args,
         **gb_kwargs,
     )
 
     # add the other
-    gb_fixed_move.gb.gpus = gpus
-    moves_in_model = [gb_fixed_move]
+    gb_move.gb.gpus = gpus
+    moves_in_model = [gb_move]
 
     rj_moves_in = []
 
@@ -473,7 +472,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     rj_moves_in.append(rj_move_prior)
     rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
-    if state_mix.branches["gb_fixed"].inds.sum() == 0:
+    if state_mix.branches["gb"].inds.sum() == 0:
         # wait until we have a search distribution
         waiting = True
         while waiting:
@@ -489,10 +488,10 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     if current_gmm_search_info is not None:
         gen_dist_search = make_gmm(gb, current_gmm_search_info)
     else:
-        gen_dist_search = gpu_priors["gb_fixed"]
+        gen_dist_search = gpu_priors["gb"]
 
     gb_kwargs_rj_2 = gb_kwargs_rj.copy()
-    gb_kwargs_rj_2["rj_proposal_distribution"] = {"gb_fixed": gen_dist_search}
+    gb_kwargs_rj_2["rj_proposal_distribution"] = {"gb": gen_dist_search}
     gb_kwargs_rj_2["name"] = "rj_search_gmm"
 
     rj_move_search = GBSpecialStretchMove(
@@ -510,11 +509,11 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     elif current_gmm_search_info is not None:
         gen_dist_refit = make_gmm(gb, current_gmm_search_info)
     else:
-        gen_dist_refit = gpu_priors["gb_fixed"]
+        gen_dist_refit = gpu_priors["gb"]
     
     gb_kwargs_rj_3 = gb_kwargs_rj.copy()
 
-    gb_kwargs_rj_3["rj_proposal_distribution"] = {"gb_fixed": gen_dist_refit}
+    gb_kwargs_rj_3["rj_proposal_distribution"] = {"gb": gen_dist_refit}
     gb_kwargs_rj_3["name"] = "rj_refit_gmm"
 
     rj_move_refit = GBSpecialStretchMove(
@@ -534,14 +533,14 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         rj_move[0].gb.gpus = gpus
 
     like_mix = BasicResidualMGHLikelihood(mgh)
-    branch_names = ["gb_fixed"]
+    branch_names = ["gb"]
 
     update = UpdateNewResiduals(
         mgh, gb, comm, head_rank, gpu_priors, verbose=False
     )
 
-    ndims = {"gb_fixed": gb_info["pe_info"]["ndim"]}
-    nleaves_max = {"gb_fixed": gb_info["pe_info"]["nleaves_max"]}
+    ndims = {"gb": gb_info["pe_info"]["ndim"]}
+    nleaves_max = {"gb": gb_info["pe_info"]["nleaves_max"]}
         
     moves = moves_in_model + rj_moves
     backend = GBHDFBackend(
@@ -593,7 +592,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
         backend=backend,
         vectorize=True,
-        periodic={"gb_fixed": gb_info["periodic"]},  # TODO: add periodic to proposals
+        periodic={"gb": gb_info["periodic"]},  # TODO: add periodic to proposals
         branch_names=gb_info["pe_info"]["branch_names"],
         update_fn=update,  # stop_converge_mix,
         update_iterations=gb_info["pe_info"]["update_iterations"],
@@ -620,6 +619,10 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     # communicate end of run to head process
     comm.send({"finish_run": True}, dest=backend.save_plot_rank, tag=90)
     comm.send({"finish_run": True}, dest=head_rank, tag=50)
+
+    del mgh
+    
+    mempool.free_all_blocks()
     return
     
 
@@ -847,7 +850,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
     num_max_proposals = 100000
     convergence_iter_count = 500
 
-    periodic = {"gb_fixed": gb_info["periodic"]}
+    periodic = {"gb": gb_info["periodic"]}
     move_proposal = StretchMove(periodic=PeriodicContainer(periodic), temperature_control=temperature_control, return_gpu=True, use_gpu=True)
     
     band_inds_here = xp.where(xp.asarray(band_inds_running))[0]
@@ -934,10 +937,11 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
             walkers_here = walker_guide[:, inds_here][:, :, still_going_here]
             bands_here = band_guide[:, inds_here][:, :, still_going_here]
 
-            new_points_dict, factors = move_proposal.get_proposal({"gb_fixed": s_in}, {"gb_fixed": c_in}, xp.random)
-            new_points = new_points_dict["gb_fixed"].reshape(ntemps, num_still_going_here, int(nwalkers/2), -1).transpose(0, 2, 1, 3)
+            new_points_dict, factors = move_proposal.get_proposal({"gb": s_in}, {"gb": c_in}, xp.random)
+            new_points = new_points_dict["gb"].reshape(ntemps, num_still_going_here, int(nwalkers/2), -1).transpose(0, 2, 1, 3)
             logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
 
+            # TODO: make sure factors are reshaped properly
             factors = factors.reshape(logp.shape)
             keep_logp = ~xp.isinf(logp)
 
@@ -1160,13 +1164,18 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
                     # fix any nans that may come up
                     start_like[xp.isnan(start_like)] = -1e300
                     
-                    update = xp.arange(still_going_start_like.shape[0])[still_going_start_like][xp.std(start_like, axis=-1) > 5.0]
+                    update = xp.arange(still_going_start_like.shape[0])[still_going_start_like][xp.std(start_like, axis=-1) > 15.0]
                     still_going_start_like[update] = False 
 
                     iter_check += 1
                     factor *= 1.5
-                    # print(iter_check, still_going_start_like.sum())
+                    
+                    # if still_going_start_like[400]:
+   
+                    #     ind_check = np.where(np.arange(still_going_start_like.shape[0])[still_going_start_like] == 400)[0]
+                    #     print(iter_check, still_going_start_like.sum(), start_like[ind_check].max(axis=-1), start_like[ind_check].min(axis=-1), start_like[ind_check].max(axis=-1) - start_like[ind_check].min(axis=-1), xp.std(start_like, axis=-1)[ind_check])
 
+                # breakpoint()
                 if run_number == 1:
                     best_binaries_coords_with_fs = best_logl_coords.copy()
 
@@ -1284,7 +1293,7 @@ def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, ba
     #         tmp[:, :, 3] = tmp[:, :, 3] % (2 * np.pi)
     #         tmp[:, :, 5] = tmp[:, :, 5] % (np.pi)
     #         tmp[:, :, 6] = tmp[:, :, 6] % (2 * np.pi)
-    #         logp = priors["gb_fixed"].logpdf(tmp.reshape(-1, ndim)).reshape(tmp.shape[:-1])
+    #         logp = priors["gb"].logpdf(tmp.reshape(-1, ndim)).reshape(tmp.shape[:-1])
 
     #         fix = np.isinf(logp)
     #         if np.all(fix):
@@ -1327,7 +1336,7 @@ def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_s
     
     return fit_gmm(samples_gathered, comm, comm_info)
 
-def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
+def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remainder):
     gpus = [gpu]
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -1335,11 +1344,29 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     nwalkers = 100
     ndim = 8
 
-    gf_information = comm.recv(source=head_rank, tag=2929)
+    stop = True
+
+    rank = comm.Get_rank()
+    tag = int(str(2929) + str(rank))
+    print("CHECK yep", rank, tag, head_rank)
+    gf_information = comm.recv(source=head_rank, tag=tag)
+    print("CHECK n", rank, tag, head_rank)
     gb_info = gf_information.gb_info
     band_edges = gb_info["band_edges"]
 
-    band_inds_running = np.ones_like(band_edges[:-1], dtype=bool)
+    band_inds_running = np.zeros_like(band_edges[:-1], dtype=bool)
+
+    # split_remainder of 0 is refit
+    # split_remainder >= 1 is search
+    if split_remainder > 0:
+        search_split_remainder = split_remainder - 1
+        num_search_for_search = num_search - 1
+        assert search_split_remainder >= 0
+        assert num_search_for_search > 0 and search_split_remainder < num_search_for_search
+
+        band_inds_running[np.arange(len(band_inds_running)) % num_search_for_search == search_split_remainder] = True
+
+    print(rank, f"FIGURE ", num_search, split_remainder, band_inds_running.sum(), band_inds_running.shape[0])
     
     priors_here = deepcopy(gb_info["priors"].priors_in)
     priors_here.pop((0, 1))
@@ -1361,6 +1388,10 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
     # do not run the last band
     band_inds_running[-1] = False
 
+    # stopping function
+    stopping_function_here = deepcopy(gb_info["search_info"]["stopping_function"])
+
+    run_counter = 0
     print("start run")
     run = True
     while run:
@@ -1384,32 +1415,38 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
             # plt.savefig("check1.png")
             # breakpoint()
 
-            data = generated_info["data"]
-            psd = generated_info["psd"]
-            lisasens = generated_info["lisasens"]
+            data_cpu = generated_info["data"]
+            psd_cpu = generated_info["psd"]
+            lisasens_cpu = generated_info["lisasens"]
 
-            data = [xp.asarray(tmp) for tmp in data]
-            psd = [xp.asarray(tmp) for tmp in psd]
-            lisasens = [xp.asarray(tmp) for tmp in lisasens]
+            data = [xp.asarray(tmp) for tmp in data_cpu]
+            psd = [xp.asarray(tmp) for tmp in psd_cpu]
+            lisasens = [xp.asarray(tmp) for tmp in lisasens_cpu]
 
             # max ll combination of psd and mbhs and gbs
             
-            if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"]:
-                gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
+            # run refit
+            if split_remainder == 0:
+                if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"] and (run_counter % incoming_data.gb_info["pe_info"]["iter_count_per_resample"]) == 0:
+                    gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
+
+                else:
+                    gmm_samples_refit = None
+
+                send_out_dict = {"sample_refit": gmm_samples_refit}
 
             else:
-                gmm_samples_refit = None
+                gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
+                send_out_dict = {"search": gmm_mcmc_search_info}
 
-            gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
-            
             comm.send({"receive": True}, dest=head_rank, tag=20)
-            comm.send({"search": gmm_mcmc_search_info, "sample_refit": gmm_samples_refit}, dest=head_rank, tag=29)
+            comm.send(send_out_dict, dest=head_rank, tag=29)
 
-            if not hasattr(gb_info["search_info"]["stopping_function"], "comm") and hasattr(gb_info["search_info"]["stopping_function"], "add_comm"):
-                gb_info["search_info"]["stopping_function"].add_comm(comm)
+            if not hasattr(stopping_function_here, "comm") and hasattr(stopping_function_here, "add_comm"):
+                stopping_function_here.add_comm(comm)
             
-            stop = gb_info["search_info"]["stopping_function"](len(gmm_mcmc_search_info[0]))
-            
+            stop = stopping_function_here(incoming_data)
+            run_counter += 1
             if stop:
                 break
         
@@ -1441,6 +1478,18 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank):
         comm.send("end", dest=rank, tag=rec_tag)
 
     comm.send({"finish_run": True}, dest=head_rank, tag=20)
+
+    try:
+        for i in range(len(data)):
+            data[i] = None
+            psd[i] = None
+            lisasens[i] = None
+
+    # have not stored this info yet
+    except NameError:
+        pass
+
+    xp.get_default_memory_pool().free_all_blocks()
     return
 
 

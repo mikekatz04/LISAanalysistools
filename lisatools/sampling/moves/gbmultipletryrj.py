@@ -376,7 +376,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
         nwalkers, nleaves_max, ndim = base_shape
         # st2 = time.perf_counter()
         lp_new = (
-            self.gpu_priors["gb_fixed"]
+            self.gpu_priors["gb"]
             .logpdf(generated_points.reshape(-1, 8))
             .reshape(nwalkers, self.num_try)
         )
@@ -459,7 +459,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
 
         """
 
-        name = "gb_fixed"
+        name = "gb"
 
         ntemps, nwalkers, nleaves_max, ndim = gb_coords.shape
 
@@ -631,8 +631,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
         all_branch_names = list(new_state.branches_coords.keys())
 
         if np.any(
-            new_state.branches_supplimental["gb_fixed"].holder["N_vals"][
-                new_state.branches_inds["gb_fixed"]
+            new_state.branches_supplimental["gb"].holder["N_vals"][
+                new_state.branches_inds["gb"]
             ]
             == 0
         ):
@@ -651,9 +651,9 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
             # st = time.perf_counter()
             accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
-            coords_propose_in = self.xp.asarray(new_state.branches_coords["gb_fixed"])
-            inds_propose_in = self.xp.asarray(new_state.branches_inds["gb_fixed"])
-            branches_supp_propose_in = new_state.branches_supplimental["gb_fixed"]
+            coords_propose_in = self.xp.asarray(new_state.branches_coords["gb"])
+            inds_propose_in = self.xp.asarray(new_state.branches_inds["gb"])
+            branches_supp_propose_in = new_state.branches_supplimental["gb"]
             remaining_coords = coords_propose_in[inds_propose_in]
             f0 = remaining_coords[:, 1] / 1e3
             inds_into_full_f0 = self.xp.arange(f0.shape[0])
@@ -774,7 +774,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                 changes[nleaves_here == 0] = +1
 
                 if self.xp.any(
-                    nleaves_here >= self.max_k[all_branch_names.index("gb_fixed")]
+                    nleaves_here >= self.max_k[all_branch_names.index("gb")]
                 ):
                     raise ValueError("nleaves_here higher than max_k.")
 
@@ -861,8 +861,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                 # TODO: check this
                 edge_factors = self.xp.zeros_like(factors)
                 # get factors for edges
-                min_k = self.min_k[all_branch_names.index("gb_fixed")]
-                max_k = self.max_k[all_branch_names.index("gb_fixed")]
+                min_k = self.min_k[all_branch_names.index("gb")]
+                max_k = self.max_k[all_branch_names.index("gb")]
 
                 # fix proposal asymmetry at bottom of k range
                 inds_min = self.xp.where(nleaves_here.flatten() == min_k)
@@ -967,7 +967,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                     [tmp.get() for tmp in list(tuple_accepted_reverse)]
                 )
                 # accepted removals
-                new_state.branches["gb_fixed"].inds[tuple_accepted_reverse_cpu] = False
+                new_state.branches["gb"].inds[tuple_accepted_reverse_cpu] = False
                 delta_logl_trans1 = self.xp.zeros_like(
                     leaf_inds_for_change, dtype=float
                 )
@@ -1011,8 +1011,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                 tuple_accepted_forward_cpu = tuple(
                     [tmp.get() for tmp in list(tuple_accepted_forward)]
                 )
-                new_state.branches["gb_fixed"].inds[tuple_accepted_forward_cpu] = True
-                new_state.branches["gb_fixed"].coords[
+                new_state.branches["gb"].inds[tuple_accepted_forward_cpu] = True
+                new_state.branches["gb"].coords[
                     tuple_accepted_forward_cpu
                 ] = new_coords[accepted_forward].get()
 
@@ -1041,16 +1041,16 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                         # use old state to get supp information
                         f0_old = (
                             self.xp.asarray(
-                                state.branches["gb_fixed"].coords[
-                                    t, state.branches["gb_fixed"].inds[t]
+                                state.branches["gb"].coords[
+                                    t, state.branches["gb"].inds[t]
                                 ][:, 1]
                             )
                             / 1e3
                         )
                         friend_start_inds = self.xp.asarray(
-                            state.branches["gb_fixed"].branch_supplimental.holder[
+                            state.branches["gb"].branch_supplimental.holder[
                                 "friend_start_inds"
-                            ][t, state.branches["gb_fixed"].inds[t]]
+                            ][t, state.branches["gb"].inds[t]]
                         )
 
                         f0_old_sorted = self.xp.sort(f0_old, axis=-1)
@@ -1081,7 +1081,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                         new_friends_start_inds = friend_start_inds[old_inds_f0_old]
 
                         # TODO: maybe check this
-                        new_state.branches["gb_fixed"].branch_supplimental.holder[
+                        new_state.branches["gb"].branch_supplimental.holder[
                             "friend_start_inds"
                         ][
                             (
@@ -1093,11 +1093,11 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
 
                     """inds_into_old_array = self.xp.take_along_axis(inds_f0_old_sorted, inds_f0_accepted_addition, axis=-1).reshape(ntemps, nwalkers, -1)
 
-                    new_start_inds = self.xp.take_along_axis(state.branches["gb_fixed"].branch_supplimental.holder["friend_start_inds"], inds_into_old_array, axis=-1)
+                    new_start_inds = self.xp.take_along_axis(state.branches["gb"].branch_supplimental.holder["friend_start_inds"], inds_into_old_array, axis=-1)
 
                     keep_new_start_inds = new_start_inds[f0_accepted_addition.reshape(ntemps, nwalkers, -1) > -10.0]
                     breakpoint()
-                    state.branches["gb_fixed"].branch_supplimental.holder["friend_start_inds"][(
+                    state.branches["gb"].branch_supplimental.holder["friend_start_inds"][(
 
                     )] = keep_new_start_inds
                     
@@ -1200,7 +1200,7 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
 
                     # inds_here_for_add = tuple_accepted_forward
 
-                    new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"][
+                    new_state.branches["gb"].branch_supplimental.holder["N_vals"][
                         inds_here_for_add_cpu
                     ] = N_temp.get()
 
@@ -1243,8 +1243,8 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
                     )
 
                     if np.any(
-                        new_state.branches_supplimental["gb_fixed"].holder["N_vals"][
-                            new_state.branches_inds["gb_fixed"]
+                        new_state.branches_supplimental["gb"].holder["N_vals"][
+                            new_state.branches_inds["gb"]
                         ]
                         == 0
                     ):
@@ -1283,5 +1283,5 @@ class GBMutlipleTryRJ(MultipleTryMove, ReversibleJumpMove, GBSpecialStretchMove)
 
         et = time.perf_counter()
         print("RJ end", et - st)
-        print(new_state.branches["gb_fixed"].nleaves.mean(axis=-1))
+        print(new_state.branches["gb"].nleaves.mean(axis=-1))
         return new_state, accepted

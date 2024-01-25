@@ -84,20 +84,20 @@ def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
     nl = gb_reader.get_nleaves()
     ll = gb_reader.get_log_like()
 
-    for i in range(nl["gb_fixed"].shape[1]):
-        plt.plot(nl["gb_fixed"][:, i, 0], color=f"C{i % 10}", label="t = " + str(i + 1))
+    for i in range(nl["gb"].shape[1]):
+        plt.plot(nl["gb"][:, i, 0], color=f"C{i % 10}", label="t = " + str(i + 1))
     plt.ylabel("Number of Binaries (max, mean, min)")
     plt.xlabel("Sampler Iteration (thinned)")
     plt.legend(loc="upper left")
     save_file_tmp = save_file[:-4] + "_gb_nleaves_over_time.png"
     plt.savefig(save_file_tmp)
     plt.close()
-    plt.hist(nl["gb_fixed"][-500:, 0].flatten(), bins=30)
+    plt.hist(nl["gb"][-500:, 0].flatten(), bins=30)
     plt.xlabel("Number of Binaries (last 500 iterations)")
     save_file_tmp = save_file[:-4] + "_gb_nleaves_hist.png"
     plt.savefig(save_file_tmp)
     plt.close()
-    plt.hist(nl["gb_fixed"][-500:, 0].flatten(), bins=30)
+    plt.hist(nl["gb"][-500:, 0].flatten(), bins=30)
     plt.xlabel("Number of Binaries (last 500 iterations)")
     save_file_tmp = save_file[:-4] + "_gb_nleaves_hist.png"
     plt.savefig(save_file_tmp)
@@ -130,7 +130,7 @@ def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=Fals
 
     plt.loglog(current_info.general_info["fd"], 2 * current_info.general_info["df"] * np.abs(generated_info_0["data"][0]) ** 2)
     
-    print("nleaves:", current_info.gb_info["reader"].get_nleaves()["gb_fixed"][-1].mean(axis=-1))
+    print("nleaves:", current_info.gb_info["reader"].get_nleaves()["gb"][-1].mean(axis=-1))
         
     if add_gbs:
         generated_info_gb = current_info.get_data_psd(only_max_ll=True, include_gbs=False, include_mbhs=True, **kwargs)
@@ -188,7 +188,7 @@ class RunResultsProduction:
         produce_gbs_plots(current_info.gb_info["reader"], discard=0, save_file=gb_save_file, fig=None)
 
         psd_save_file = base_save_file + f"_psd_posterior.png"
-        produce_psd_plots(current_info.psd_info["reader"], save_file=psd_save_file, discard=200, fig=None)
+        produce_psd_plots(current_info.psd_info["reader"], save_file=psd_save_file, discard=0, fig=None)
 
         skymap_file = base_save_file + "_sky_map.png"
         produce_sky_plot(current_info, save_file=skymap_file)

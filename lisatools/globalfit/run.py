@@ -43,7 +43,7 @@ class CurrentInfoGlobalFit:
         # with open("save_state_new_gmm.pickle", "rb") as fp:
         #     gb_last_sample = pickle.load(fp)
         #     gb_last_sample.log_prior = np.zeros_like(gb_last_sample.log_like)
-        #     gb_last_sample.branches["gb_fixed"].coords[~gb_last_sample.branches["gb_fixed"].inds] = np.nan
+        #     gb_last_sample.branches["gb"].coords[~gb_last_sample.branches["gb"].inds] = np.nan
         # # breakpoint()
 
         psd_reader = HDFBackend(settings["general"]["file_information"]["fp_psd_pe"])
@@ -93,8 +93,8 @@ class CurrentInfoGlobalFit:
         if os.path.exists(self.current_info["gb"]["reader"].filename) and get_last_state_info:
             gb_last_sample = gb_reader.get_last_sample()
 
-            self.current_info["gb"]["cc_params"] = gb_last_sample.branches["gb_fixed"].coords[0, :, :]
-            self.current_info["gb"]["cc_inds"] = gb_last_sample.branches["gb_fixed"].inds[0, :, :]
+            self.current_info["gb"]["cc_params"] = gb_last_sample.branches["gb"].coords[0, :, :]
+            self.current_info["gb"]["cc_inds"] = gb_last_sample.branches["gb"].inds[0, :, :]
             if self.current_info["general"]["begin_new_likelihood"]:
                 del gb_last_sample.log_like
                 del gb_last_sample.log_prior
@@ -128,7 +128,7 @@ class CurrentInfoGlobalFit:
             self.current_info["gb"]["cc_ll"] = ll[0]
             self.current_info["gb"]["cc_lp"] = lp[0]
             self.current_info["gb"]["last_state"] = State(
-                {"gb_fixed": coords}, inds={"gb_fixed": inds}, log_like=ll, log_prior=ll
+                {"gb": coords}, inds={"gb": inds}, log_like=ll, log_prior=ll
             )
 
         # check = self.current_info["general"]["generate_current_state"](self.current_info, include_ll=True, include_source_only_ll=True, n_gen_in=18)
@@ -186,6 +186,14 @@ class CurrentInfoGlobalFit:
     def general_info(self):
         return self.current_info["general"]
 
+    @property
+    def rank_info(self):
+        return self.current_info["rank_info"]
+
+    @property
+    def gpu_assignments(self):
+        return self.current_info["gpu_assignments"]
+
 
 class GlobalFitSegment(ABC):
     def __init__(self, comm, copy_settings_file=False):
@@ -216,63 +224,125 @@ class MPIControlGlobalFit:
         self.run_results_update_kwargs = run_results_update_kwargs
         
         assert len(gpus) == 4
-        assert len(ranks) >= 5
         
         self.current_info = current_info
         self.comm = comm
         self.gpus = gpus
 
-        self.head_rank = ranks[0]
+        self.head_rank = self.current_info.rank_info["head_rank"]
 
-        self.gb_pe_rank = ranks[1]
-        self.gb_pe_gpu = gpus[0]
+        self.gb_pe_rank = self.current_info.rank_info["gb_pe_rank"]
+        self.gb_pe_gpu = self.current_info.gpu_assignments["gb_pe_gpu"]
 
-        self.gb_search_rank = ranks[2] 
-        self.gb_search_gpu = gpus[1]
+        self.gb_search_rank = self.current_info.rank_info["gb_search_rank"]
 
-        self.psd_rank = ranks[3]
-        self.psd_gpu = gpus[3]
+        if isinstance(self.gb_search_rank, int):
+            self.gb_search_rank = [self.gb_search_rank]
 
-        self.mbh_rank = ranks[4]
-        self.mbh_gpu = gpus[2]
+        self.gb_search_gpu = self.current_info.gpu_assignments["gb_search_gpu"]
+        if isinstance(self.gb_search_gpu, int):
+            self.gb_search_gpu = [self.gb_search_gpu]
+
+        assert len(self.gb_search_gpu) == len(self.gb_search_rank) - 1
+
+        self.psd_rank = self.current_info.rank_info["psd_rank"]
+        self.psd_gpu = self.current_info.gpu_assignments["psd_gpu"]
+
+        self.mbh_rank = self.current_info.rank_info["mbh_rank"]
+        self.mbh_gpu = self.current_info.gpu_assignments["mbh_gpu"]
+
+        self.all_gpu_assignments = []
+        for tmp in [
+            self.gb_pe_gpu,
+            self.gb_search_gpu,
+            self.mbh_gpu,
+            self.psd_gpu
+        ]:
+            if isinstance(tmp, int):
+                self.all_gpu_assignments.append(tmp)
+            elif isinstance(tmp, list):
+                for tmp1 in tmp:
+                    assert isinstance(tmp1, int)
+                self.all_gpu_assignments += tmp
+
+        self.all_non_gmm_ranks = []
+        for tmp in [
+            self.gb_pe_rank,
+            self.gb_search_rank,
+            self.mbh_rank,
+            self.psd_rank
+        ]:
+            if isinstance(tmp, int):
+                self.all_non_gmm_ranks.append(tmp)
+            elif isinstance(tmp, list):
+                for tmp1 in tmp:
+                    assert isinstance(tmp1, int)
+                self.all_non_gmm_ranks += tmp
+
+        for gpu_assign in self.all_gpu_assignments:
+            assert gpu_assign in self.gpus
+
+        other_ranks = [i for i in ranks if i not in self.all_non_gmm_ranks]
 
         if run_results_update:
-            self.run_results_rank = ranks[5]
-            self.gmm_ranks = ranks[6:]
+            assert len(other_ranks) >= 2
+            self.run_results_rank = other_ranks[0]
+            self.gmm_ranks = other_ranks[1:]
         else:
+            assert len(other_ranks) >= 1
             self.run_results_rank = -1
-            self.gmm_ranks = ranks[5:]
+            self.gmm_ranks = other_ranks[:]
+
+        # setup for split search
+        # must be rank because we want to include the refit
+        split_ind = int(len(other_ranks) / len(self.gb_search_rank))
+        gmm_rank_inds = np.arange(len(self.gmm_ranks))
+
+        self.gmm_ranks = [[other_ranks[j] for j in gmm_rank_inds if (j % len(self.gb_search_rank)) == i] for i in range(len(self.gb_search_rank))]
 
         self.have_started_refit = False
-    
 
-    def update_refit(self, gmm_info):
+        self.updated_search_gmm_info = [None for _ in range(len(self.gb_search_gpu))]
+
+    def update_refit(self, search_index: int, gmm_info: dict):
+        if "sample_refit" in gmm_info and gmm_info["sample_refit"] is not None:
+            # refit always just replaces it
+            self.current_info.gb_info["refit_gmm_info"] = gmm_info["sample_refit"]
+            
         if "search" in gmm_info and gmm_info["search"] is not None:
             # TODO: check if we want this
-            self.current_info.gb_info["search_gmm_info"] = gmm_info["search"]
+            assert search_index > 0
+            self.updated_search_gmm_info[search_index - 1] = gmm_info["search"]
             
             # if self.current_info.gb_info["search_gmm_info"] is None:
             #     self.current_info.gb_info["search_gmm_info"] = gmm_info["search"]
             # else:
             #     # search keeps adding to what it already has
             #     self.current_info.gb_info["search_gmm_info"] = [tmp1 + tmp2 for tmp1, tmp2 in zip(self.current_info.gb_info["search_gmm_info"], gmm_info["search"])]
-            
-        if "sample_refit" in gmm_info and gmm_info["sample_refit"] is not None:
-            # refit always just replaces it
-            self.current_info.gb_info["refit_gmm_info"] = gmm_info["sample_refit"]
-            
-        with open(self.current_info.general_info["file_information"]["fp_gb_gmm_info"], "wb") as fp_gmm:
-            gmm_info_dict = {"search": self.current_info.gb_info["search_gmm_info"], "refit": self.current_info.gb_info["refit_gmm_info"]}
-            pickle.dump(gmm_info_dict, fp_gmm, protocol=pickle.HIGHEST_PROTOCOL)
+        
+        if np.all(np.asarray(self.updated_search_gmm_info) != None):
+            # combine info
+            out_lists = [[] for i in range(len(self.updated_search_gmm_info[0]))]
+            for i in range(len(self.updated_search_gmm_info[0])):
+                for j in range(len(self.updated_search_gmm_info)):
+                    out_lists[i] = out_lists[i] + self.updated_search_gmm_info[j][i]
 
-        if not hasattr(self, "gmm_output_iter"):
-            self.gmm_output_iter = 0
-        else:
-            self.gmm_output_iter += 1
+            # save update
+            self.current_info.gb_info["search_gmm_info"] = out_lists
 
-        with open(self.current_info.general_info["file_information"]["fp_gb_gmm_info"][:-7] + f"_{self.gmm_output_iter}.pickle", "wb") as fp_gmm:
-            pickle.dump(gmm_info_dict, fp_gmm, protocol=pickle.HIGHEST_PROTOCOL)
-            
+            with open(self.current_info.general_info["file_information"]["fp_gb_gmm_info"], "wb") as fp_gmm:
+                gmm_info_dict = {"search": self.current_info.gb_info["search_gmm_info"], "refit": self.current_info.gb_info["refit_gmm_info"]}
+                pickle.dump(gmm_info_dict, fp_gmm, protocol=pickle.HIGHEST_PROTOCOL)
+
+            if not hasattr(self, "gmm_output_iter"):
+                self.gmm_output_iter = 0
+            else:
+                self.gmm_output_iter += 1
+
+            with open(self.current_info.general_info["file_information"]["fp_gb_gmm_info"][:-7] + f"_{self.gmm_output_iter}.pickle", "wb") as fp_gmm:
+                pickle.dump(gmm_info_dict, fp_gmm, protocol=pickle.HIGHEST_PROTOCOL)
+                
+            self.updated_search_gmm_info = [None for _ in range(len(self.gb_search_gpu))]
 
     def update_gbs(self, gb_dict):
         assert "gb_update" in gb_dict
@@ -299,7 +369,6 @@ class MPIControlGlobalFit:
                 self.current_info.mbh_info[key][:] = mbh_dict["mbh_update"][key][:]
 
     def share_start_info(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
-        
         if run_gbs_pe:
             self.comm.send(self.current_info, dest=self.gb_pe_rank, tag=255)
     
@@ -310,33 +379,45 @@ class MPIControlGlobalFit:
             self.comm.send(self.current_info, dest=self.mbh_rank, tag=76)
         
         if run_gbs_search:
-            self.comm.send(self.current_info, dest=self.gb_search_rank, tag=2929)
+            for i, gb_search_rank in enumerate(self.gb_search_rank):
+                tag = int(str(2929) + str(gb_search_rank))
+                print(f"YAYA {i}", gb_search_rank, tag)
+                self.comm.send(self.current_info, dest=gb_search_rank, tag=tag)
 
     def refit_check(self, runs_going, update_refit):
         if "gbs_search" not in runs_going:
             return
 
-        # check if refit is ready
-        refit_ch = self.comm.irecv(source=self.gb_search_rank, tag=20)
-        if refit_ch.get_status():
-            refit_dict = refit_ch.wait()
-            print("CHECK", refit_dict)
-            if "receive" in refit_dict and refit_dict["receive"]:
-                update_refit = False
-                gmm_info = self.comm.recv(source=self.gb_search_rank, tag=29)
-                self.update_refit(gmm_info)
+        for i, gb_search_rank in enumerate(self.gb_search_rank):
+            # only need to stop this on the search operations
+            if i > 0 and self.updated_search_gmm_info[i - 1] is not None:
+                # cannot allow this to run through the loop
+                # will confuse "send"
+                continue
 
-            if "send" in refit_dict and refit_dict["send"]:
-                self.comm.send(self.current_info, dest=self.gb_search_rank, tag=27)
+            # check if refit is ready
+            refit_ch = self.comm.irecv(source=gb_search_rank, tag=20)
+            if refit_ch.get_status():
+                refit_dict = refit_ch.wait()
+                if "receive" in refit_dict and refit_dict["receive"]:
+                    gmm_info = self.comm.recv(source=gb_search_rank, tag=29)
+                    self.update_refit(i, gmm_info)
+                
+                    # received and both cleared out (but avoid for just sample refit)
+                    if np.any(np.asarray(self.updated_search_gmm_info) == None) and "sample_refit" not in gmm_info or ("sample_refit" in gmm_info["sample_refit"] and gmm_info["sample_refit"] is None):
+                        update_refit = False
 
-            if "finish_run" in refit_dict and refit_dict["finish_run"]:
-                runs_going.remove("gbs_search")
-                # for rank in self.gmm_ranks:
-                #     rec_tag = int(str(rank) + "67676")
-                #     self.comm.send("end", dest=rank, tag=rec_tag)
+                if "send" in refit_dict and refit_dict["send"] and np.all(np.asarray(self.updated_search_gmm_info) == None):
+                    self.comm.send(self.current_info, dest=gb_search_rank, tag=27)
 
-        else:
-            refit_ch.cancel()
+                if "finish_run" in refit_dict and refit_dict["finish_run"]:
+                    runs_going.remove("gbs_search")
+                    # for rank in self.gmm_ranks:
+                    #     rec_tag = int(str(rank) + "67676")
+                    #     self.comm.send("end", dest=rank, tag=rec_tag)
+
+            else:
+                refit_ch.cancel()
 
         return update_refit
 
@@ -434,6 +515,8 @@ class MPIControlGlobalFit:
 
             update_refit = True
 
+            print("done sending data")
+
             # populate which runs are going
             runs_going = []
             if run_psd:
@@ -470,12 +553,18 @@ class MPIControlGlobalFit:
         elif self.rank == self.gb_pe_rank and run_gbs_pe:
             fin = run_gb_pe(self.gb_pe_gpu, self.comm, self.head_rank, self.run_results_rank)
 
-        elif self.rank == self.gb_search_rank and run_gbs_search:
-            comm_info = {"process_ranks_for_fit": self.gmm_ranks}
+        elif self.rank in self.gb_search_rank and run_gbs_search:
+            num_search = len(self.gb_search_rank)
+            split = list(range(num_search))
+            assert num_search == len(self.gb_search_gpu) + 1
+            index_search = self.gb_search_rank.index(self.rank)
+            # one GPU will do both search and refit
+            gpu_here = self.gb_search_gpu[index_search] if index_search == 0 else self.gb_search_gpu[index_search - 1]
+            comm_info = {"process_ranks_for_fit": self.gmm_ranks[index_search]}
             # refit_check = self.comm.recv(source=self.head_rank, tag=1010)
             # # block until it is told to go
-            print("STARTING REFIT")
-            fin = run_gb_bulk_search(self.gb_search_gpu, self.comm, comm_info, self.head_rank)
+            print("STARTING REFIT", split, self.rank, index_search, self.gmm_ranks[index_search])
+            fin = run_gb_bulk_search(gpu_here, self.comm, comm_info, self.head_rank, num_search, index_search)
         
         elif self.rank == self.psd_rank and run_psd:
             fin = run_psd_pe(self.psd_gpu, self.comm, self.head_rank)
@@ -483,14 +572,19 @@ class MPIControlGlobalFit:
         elif self.rank == self.mbh_rank and run_mbhs:
             fin = run_mbh_pe(self.mbh_gpu, self.comm, self.head_rank)
 
-        elif self.rank in self.gmm_ranks and run_gbs_search:
-            rec_tag = int(str(self.rank) + "300")
-            send_tag = int(str(self.rank) + "400")
-            fit_each_leaf(self.rank, self.gb_search_rank, rec_tag, send_tag, self.comm)
-
         elif self.run_results_update and self.rank == self.run_results_rank:
             save_to_backend_asynchronously_and_plot(self.current_info.gb_info["reader"], self.comm, self.gb_pe_rank, self.head_rank, self.current_info.general_info["plot_iter"], self.current_info.general_info["backup_iter"])
             #fin = run_results_production()
+
+        elif run_gbs_search:
+            assert len(self.gmm_ranks) == len(self.gb_search_rank)
+            for gmm_ranks_here, gb_search_rank_here in zip(self.gmm_ranks, self.gb_search_rank):
+                if self.rank in gmm_ranks_here:
+                    rec_tag = int(str(self.rank) + "300")
+                    send_tag = int(str(self.rank) + "400")
+                    print(f"GOING IN {self.rank, gb_search_rank_here}")
+                    fit_each_leaf(self.rank, gb_search_rank_here, rec_tag, send_tag, self.comm)
+
 
 
 def run_gf_progression(global_fit_progression, comm, head_rank):

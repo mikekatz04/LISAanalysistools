@@ -1,5 +1,6 @@
 import numpy as np
 from copy import deepcopy
+import warnings
 
 from lisatools.sensitivity import get_sensitivity
 from lisatools.globalfit.hdfbackend import HDFBackend as GBHDFBackend

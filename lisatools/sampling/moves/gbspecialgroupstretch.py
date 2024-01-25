@@ -155,7 +155,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
 
     def find_friends(self, branches):
         for i, (name, branch) in enumerate(branches.items()):
-            if name == "gb_fixed":
+            if name == "gb":
                 self.setup_gbs(branch)
 
     def propose(self, model, state):
@@ -173,9 +173,9 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
         # st = time.perf_counter()
         # Check that the dimensions are compatible.
         ndim_total = 0
-        ntemps, nwalkers, nleaves_, ndim_ = state.branches["gb_fixed"].shape 
+        ntemps, nwalkers, nleaves_, ndim_ = state.branches["gb"].shape 
         
-        if state.branches["gb_fixed"].nleaves.sum() < 2 * self.nfriends:
+        if state.branches["gb"].nleaves.sum() < 2 * self.nfriends:
             print("Not enough friends yet.")
             accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             self.temperature_control.swaps_accepted = np.zeros(ntemps - 1, dtype=int)
@@ -189,19 +189,19 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
         # Split the ensemble in half and iterate over these two halves.
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
-        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb_fixed"].shape
+        ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb"].shape
         
-        f_test = state.branches_coords["gb_fixed"][:, :, :, 1] / 1e3
+        f_test = state.branches_coords["gb"][:, :, :, 1] / 1e3
 
         # TODO: add actual amplitude
-        N_vals = new_state.branches["gb_fixed"].branch_supplimental.holder["N_vals"]
+        N_vals = new_state.branches["gb"].branch_supplimental.holder["N_vals"]
 
         N_vals = self.xp.asarray(N_vals)
 
         N_vals_2_times = self.xp.concatenate([N_vals, N_vals], axis=-1)
 
         gb_coords = np.zeros((ntemps, nwalkers, nleaves_max, ndim))
-        gb_coords[new_state.branches_inds["gb_fixed"]] = new_state.branches_coords["gb_fixed"][new_state.branches_inds["gb_fixed"]].copy()
+        gb_coords[new_state.branches_inds["gb"]] = new_state.branches_coords["gb"][new_state.branches_inds["gb"]].copy()
 
         log_like_tmp = self.xp.asarray(new_state.log_like)
         log_prior_tmp = self.xp.asarray(new_state.log_prior)
@@ -212,7 +212,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
         
         groups = get_groups_from_band_structure(f_test, self.band_edges, xp=np)
         breakpoint()
-        groups[new_state.branches_inds["gb_fixed"]] = -1
+        groups[new_state.branches_inds["gb"]] = -1
         unique_groups, group_len = np.unique(groups.flatten(), return_counts=True)
 
         # remove information about the bad "-1" group
@@ -231,13 +231,13 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
             waveform_kwargs_now.pop("N")
         waveform_kwargs_now["start_freq_ind"] = self.start_freq_ind
 
-        points_to_move = q["gb_fixed"][group]
-        group_branch_supp_info = new_state.branches_supplimental["gb_fixed"][group_cpu]
+        points_to_move = q["gb"][group]
+        group_branch_supp_info = new_state.branches_supplimental["gb"][group_cpu]
         points_for_move = self.xp.asarray(group_branch_supp_info["group_move_points"])
 
         q_temp, factors_temp = self.get_proposal(
-            {"gb_fixed": points_to_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)},  
-            {"gb_fixed": [points_for_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)]}, 
+            {"gb": points_to_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)},  
+            {"gb": [points_for_move.transpose(0, 2, 1, 3).reshape(ntemps * nleaves_max, int(nwalkers / 2), 1, ndim)]}, 
             model.random
         )
         breakpoint()
@@ -261,9 +261,9 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
             factors[:, split_here] = factors_temp.reshape(ntemps, nleaves_max, int(nwalkers / 2)).transpose(0, 2, 1)
 
             # use new_state here to get change after 1st round
-            q = {"gb_fixed": gb_fixed_coords.copy()}
+            q = {"gb": gb_coords.copy()}
 
-            q["gb_fixed"][:, split_here] = q_temp["gb_fixed"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
+            q["gb"][:, split_here] = q_temp["gb"].reshape(ntemps, nleaves_max, int(nwalkers / 2), ndim).transpose(0, 2, 1, 3)
 
             """et = time.perf_counter()
             print("prop", (et - st))"""
@@ -278,18 +278,18 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
 
                 # st = time.perf_counter()
                 temp_inds, walkers_inds, leaf_inds = [self.xp.asarray(grp) for grp in group] 
-            q = q = {"gb_fixed": gb_coords.copy()}
+            q = q = {"gb": gb_coords.copy()}
             # new_inds = deepcopy(new_state.branches_inds)
 
-            points_to_move = q["gb_fixed"][group]
-            group_branch_supp_info = new_state.branches_supplimental["gb_fixed"][group_cpu]
+            points_to_move = q["gb"][group]
+            group_branch_supp_info = new_state.branches_supplimental["gb"][group_cpu]
             points_for_move = self.xp.asarray(group_branch_supp_info["group_move_points"])
 
             """et = time.perf_counter()
             print("before prop", (et - st))
             st = time.perf_counter()"""
             q_temp, factors_temp = self.get_proposal(
-                {"gb_fixed": points_to_move},  {"gb_fixed": points_for_move}, model.random
+                {"gb": points_to_move},  {"gb": points_for_move}, model.random
             )
 
             """et = time.perf_counter()
@@ -298,7 +298,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
 
             #breakpoint()
 
-            q["gb_fixed"][group] = q_temp["gb_fixed"]
+            q["gb"][group] = q_temp["gb"]
 
             # data should not be whitened
             # TODO: take this out of the groups loop
@@ -326,14 +326,14 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                 noise_ll = self.noise_ll
 
             if self.use_gpu:
-                new_points_prior = q["gb_fixed"][group].get()
+                new_points_prior = q["gb"][group].get()
                 old_points_prior = gb_coords[group].get()
             else:
-                new_points_prior = q["gb_fixed"][group]
+                new_points_prior = q["gb"][group]
                 old_points_prior = gb_coords[group]
 
             # TODO: GPUize prior
-            logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(new_points_prior))
+            logp = self.xp.asarray(self.priors["gb"].logpdf(new_points_prior))
 
             if self.xp.all(self.xp.isinf(logp)):
                 pass
@@ -341,7 +341,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
             keep_here = self.xp.where(~self.xp.isinf(logp))
 
             points_remove = self.parameter_transforms.both_transforms(points_to_move[keep_here], xp=self.xp)
-            points_add = self.parameter_transforms.both_transforms(q_temp["gb_fixed"][keep_here], xp=self.xp)
+            points_add = self.parameter_transforms.both_transforms(q_temp["gb"][keep_here], xp=self.xp)
 
             data_index = self.xp.asarray((temp_inds[keep_here] * nwalkers + walkers_inds[keep_here]).astype(xp.int32))
             noise_index = self.xp.asarray((temp_inds[keep_here] * nwalkers + walkers_inds[keep_here]).astype(xp.int32))
@@ -399,7 +399,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
             #if np.any(logl - np.load("noise_ll.npy").flatten() > 0.0):
             #    breakpoint()    
             #print("multi check: ", (logl - np.load("noise_ll.npy").flatten()))
-            prev_logp = self.xp.asarray(self.priors["gb_fixed"].logpdf(old_points_prior))
+            prev_logp = self.xp.asarray(self.priors["gb"].logpdf(old_points_prior))
 
             betas_in = self.xp.asarray(self.temperature_control.betas)[temp_inds]
             logP = self.compute_log_posterior(logl, logp, betas=betas_in)
@@ -420,9 +420,9 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                 accepted_here = keep.copy()
 
                 # check freq overlap
-                f0_new = q_temp["gb_fixed"][keep, 1]
+                f0_new = q_temp["gb"][keep, 1]
                 f0_old = gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])][:, 1]
-                nleaves_max = state.branches["gb_fixed"].nleaves_max
+                nleaves_max = state.branches["gb"].nleaves_max
                 check_f0 = self.xp.zeros((ntemps, nwalkers, nleaves_max))
                 #check_f0_old = self.xp.zeros((ntemps, nwalkers, nleaves_max))
                 check_f0[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = f0_new
@@ -481,7 +481,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                     except:
                         breakpoint()
 
-                gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = q_temp["gb_fixed"][keep]
+                gb_coords[(temp_inds[keep], walkers_inds[keep], leaf_inds[keep])] = q_temp["gb"][keep]
 
                 # parameters were run for all ~np.isinf(logp), need to adjust for those not accepted
                 keep_from_before = (keep * (~self.xp.isinf(logp)))[~self.xp.isinf(logp)]
@@ -583,11 +583,11 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                     breakpoint()
 
         try:
-            new_state.branches["gb_fixed"].coords[:] = gb_coords.get()
+            new_state.branches["gb"].coords[:] = gb_coords.get()
             new_state.log_like[:] = log_like_tmp.get()
             new_state.log_prior[:] = log_prior_tmp.get()
         except AttributeError:
-            new_state.branches["gb_fixed"].coords[:] = gb_coords
+            new_state.branches["gb"].coords[:] = gb_coords
             new_state.log_like[:] = log_like_tmp
             new_state.log_prior[:] = log_prior_tmp
 
@@ -609,7 +609,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
                 data_minus_template[:] = self.xp.asarray(self.data)[None, None]
                 templates = self.xp.zeros_like(data_minus_template).reshape(-1, 2, data_minus_template.shape[-1])
                 for name in new_state.branches.keys():
-                    if name not in ["gb_fixed", "gb_fixed"]:
+                    if name not in ["gb", "gb"]:
                         continue
                     new_state_branch = new_state.branches[name]
                     coords_here = new_state_branch.coords[new_state_branch.inds]
@@ -646,7 +646,7 @@ class GBSpecialGroupStretchMove(GBGroupStretchMove, GBSpecialStretchMove):
         print("group middle", (et - st))
         st = time.perf_counter()"""
         # get accepted fraction 
-        accepted_check = np.all(np.abs(new_state.branches_coords["gb_fixed"] - state.branches_coords["gb_fixed"]) > 0.0, axis=-1).sum(axis=(1, 2)) / new_state.branches_inds["gb_fixed"].sum(axis=(1,2))
+        accepted_check = np.all(np.abs(new_state.branches_coords["gb"] - state.branches_coords["gb"]) > 0.0, axis=-1).sum(axis=(1, 2)) / new_state.branches_inds["gb"].sum(axis=(1,2))
 
         # manually tell temperatures how real overall acceptance fraction is
         number_of_walkers_for_accepted = np.floor(nwalkers * accepted_check).astype(int)
