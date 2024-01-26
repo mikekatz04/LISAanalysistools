@@ -164,6 +164,7 @@ else
     "$pip_here" install git+https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms.git
 fi
 
+conda activate "$env_name"
 # if [[ "$run_tests" == "true" ]]; 
 #  then echo "Running tests...";
 #  "$python_here" -m unittest discover;

@@ -43,7 +43,8 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.githubpages",
-    "m2r2",
+    # "m2r2",
+    "sphinx_autodoc_typehints",
 ]
 
 source_suffix = [".rst", ".md"]
@@ -76,6 +77,8 @@ sphinx_gallery_conf = {
     # path to where to save gallery generated output
     "gallery_dirs": ["examples_ucb"],  # , "examples_smbh"],
 }
+
+typehints_defaults = "comma"
 
 # configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {

@@ -28,10 +28,6 @@ In addition, posterior samples for each candidate are stored as separate data fr
 
       :download:`Download all examples in Python source code: examples_ucb_python.zip </examples_ucb/examples_ucb_python.zip>`
 
-    .. container:: sphx-glr-download sphx-glr-download-jupyter
-
-      :download:`Download all examples in Jupyter notebooks: examples_ucb_jupyter.zip </examples_ucb/examples_ucb_jupyter.zip>`
-
 
 .. only:: html
 
