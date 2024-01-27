@@ -44,16 +44,17 @@ class NLeavesSearchStopping:
         self.convergence_iter = convergence_iter
         self.verbose = verbose
 
-    def __call__(self, current_info):
+    def __call__(self, i, sample, sampler):
 
         if not hasattr(self, "st"):
             self.st = time.perf_counter()
 
-        current_iter = current_info.gb_info["reader"].iteration
+        current_iter = sampler.backend.iteration
 
+        stop = False
         if current_iter > self.convergence_iter:
 
-            nleaves_cc = curr.gb_info["reader"].get_nleaves()["gb"][:, 0]
+            nleaves_cc = sampler.backend.get_nleaves()["gb"][:, 0]
 
             # do not include most recent
             nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
@@ -71,7 +72,7 @@ class NLeavesSearchStopping:
                     "\nnleaves max old:\n",
                     nleaves_cc_max_old,
                     "\nnleaves max new:\n",
-                    nleaves_cc_max_newf,
+                    nleaves_cc_max_new,
                     f"\nTIME TO NOW: {dur} hours"
                 )
 
