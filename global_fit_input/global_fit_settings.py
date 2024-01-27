@@ -132,7 +132,11 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
+<<<<<<< HEAD
     gpus = [4, 6, 7, 7]
+=======
+    gpus = [5, 6, 7, 7]
+>>>>>>> f8a359e (running fine again)
 
     all_general_info = dict(
         file_information=file_information,
