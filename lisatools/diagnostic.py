@@ -584,177 +584,76 @@ def plot_covariance_corner(
     return fig
 
 
-def mismatch_criterion(
-    waveform_model,
-    params,
-    deriv_inds=None,
-    inner_product_kwargs={},
-    waveform_kwargs={},
-    parameter_transforms=None,
-    fish=None,
-    eps=None,
-    eigens=None,
-    return_fish=False,
-    fisher_kwargs={},
-):
-    """
-    return the mismatch criterion of Vallisneri abs(log r)for a zero noise signal approximation
-    and the overlap(h_true, h(0 + delta))/(1- 0.5 *delta gamma delta)
-    this is a good check for the fisher matrix approximation
+def plot_covariance_contour(
+    params: np.ndarray,
+    cov: np.ndarray,
+    horizontal_index: int,
+    vertical_index: int,
+    nsamp: Optional[int] = 25000,
+    ax: Optional[plt.Axes] = None,
+    **kwargs: dict,
+) -> plt.Axes | Tuple[plt.Figure, plt.Axes]:
+    """Construct a contour plot for a given covariance matrix on a single axis object.
+
+    The `corner <https://corner.readthedocs.io/en/latest/>`_ module is required for this.
 
     Args:
-        waveform_model (function): Function used to compute GW waveform.
-        params (ndarray): Set of GW parameters for the waveform.
-        deriv_inds (ndarray): Subset of the GW parameters for which the fisher matrix will be used, specified by indices.
-            Defaults to all parameters.
-        inner_product_kwargs (dict): Keyword arguments for the inner_product function (optional).
-        waveform_kwargs (dict): Keyword arguments for the waveform_model function (optional).
-        parameter_transforms (TransformContainer): Parameter transformations to be applied, specified by index (optional).
-        fish (ndarray): Pre-computed fisher matrix, as output by fisher(*fisher_args). Must match supplied *fisher_args.
-        eps (ndarray or int): Numerical derivative step sizes to use in the fisher matrix calculation, if required.
-            If int, the same step size is used for all parameters (not recommended).
-        eigens (tuple): tuple of pre-computed eigenvalue and right-eigenvector arrays corresponding
-            to the provided fisher matrix.
-        return_fish (bool): If True, returns Fisher matrix (defaults to False).
-        fisher_kwargs (dict): Further keyword arguments to be passed to the fisher matrix generation function (optional).
+        params: The set of parameters used for the event (the mean vector of the covariance matrix).
+        cov: Covariance matrix from which to construct the corner plot.
+        horizontal_index: Parameter index to plot along the horizontal axis of the contour plot.
+        vertical_index: Parameter index to plot along the vertical axis of the contour plot.
+        nsamp: Number of samples to draw from the multivariate distribution.
+        fig: Matplotlib :class:`plt.Figure` object. Use this if passing an existing corner plot figure.
+        **kwargs: Keyword arguments for the corner plot - see the module documentation for more info.
 
     Returns:
-        tuple containing
+        If ``ax`` is provided, the return will be that ax object. If it is not provided, then a
+        Matplotlib Figure and Axes obejct is created and returned as a tuple: ``(plt.Figure, plt.Axes)``.
 
-            mismatch (double): Mismatch between perturbed and ML waveforms.
-            ratio (double): Computed value of |ln(r)| for this instance of parameter perturbation.
-            fish (ndarray): Fisher matrix, if return_fish is set to True.
     """
 
-    # TODO tidy up handling of all of these kwargs!
-
-    params_true = params.copy()
-
-    params_true = parameter_transforms.transform_base_parameters(params_true)
-
-    h_true = waveform_model(*params_true, **waveform_kwargs)
-
-    num_params = len(params)
-
-    if deriv_inds is None:
-        deriv_inds = np.arange(num_params)
-
-    num_fish_params = len(deriv_inds)
-
-    if fish is None:
-        if eps is None:
-            print(
-                "No numerical derivative step-sizes (eps) supplied for Fisher matrix generation."
-            )
-            raise Exception
-
-        elif isinstance(eps, float):
-            eps = np.full_like(params, eps)
-
-        fish = fisher(
-            waveform_model=waveform_model,
-            params=params,
-            eps=eps,
-            deriv_inds=deriv_inds,
-            parameter_transforms=parameter_transforms,
-            waveform_kwargs=waveform_kwargs,
-            inner_product_kwargs=inner_product_kwargs,
-            **fisher_kwargs,
-        )
-
+    # TODO: add capability for ChainConsumer?
     try:
-        fish = (
-            fish.get()
-        )  # This works both for use_gpu=True and for passing in a numpy Fisher matrix
-    except AttributeError:
-        pass
-
-    if eigens is None:
-        w, v = np.linalg.eig(fish)
-    else:
-        w, v = eigens
-
-    d = num_fish_params
-    vec_delta = np.zeros(d)
-    u = np.random.normal(0, 1, d)  # an array of d normally distributed random variables
-    norm = np.sum(u**2) ** (0.5)
-    # r = (np.random.uniform(0, 1)) ** (1.0 / d)  - i dont know why this is here if we are sampling from sphere surface
-    x = u / norm  # r * u / norm
-    # MISMATCH vector
-    for l in range(0, d):
-        vec_delta += x[l] * v[:, l] / np.sqrt(w[l])
-
-    # signal perturbed
-    var_p_eps = params.copy()
-    for i, ind in enumerate(deriv_inds):  # for only the considered variables
-        var_p_eps[ind] = var_p_eps[ind].copy() + vec_delta[i]
-
-    var_p_eps = parameter_transforms.transform_base_parameters(var_p_eps)
-
-    # properly treat boundary conditions for polar angles
-    for val in [7, 9]:
-        var_p_eps[val] = var_p_eps[val] % (2 * np.pi)  # wrap the angle to [0, 2pi]
-        if var_p_eps[val] > np.pi:
-            var_p_eps[val] = (
-                2 * np.pi - var_p_eps[val]
-            )  # reflect polar angle on boundary
-            # if val == 7:  # if qK, both phiS and phiK must be flipped which cancels out. Still need to flip for qS --- not sure about this, actually
-            var_p_eps[val + 1] += np.pi  # flip azimuthal angle
-
-    h_delta = waveform_model(*var_p_eps, **waveform_kwargs)
-
-    # get the derivative
-    prod = np.sum(
-        [
-            [
-                fish[j, k] * vec_delta[j] * vec_delta[k]
-                for j in range(0, num_fish_params)
-            ]
-            for k in range(0, num_fish_params)
-        ]
-    )
-
-    # X = window_zero(h_delta,var_p_eps[7])
-
-    # Y = h_true
-    over = inner_product(
-        [h_delta.real, h_delta.imag],
-        [h_true.real, h_true.imag],
-        **inner_product_kwargs,
-        normalize=True,
-    )
-    ratio = over / (
-        1
-        - 0.5
-        * prod
-        / inner_product(
-            [h_true.real, h_true.imag],
-            [h_true.real, h_true.imag],
-            **inner_product_kwargs,
-            normalize=False,
+        import corner
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+            "Attempting to plot using the corner module, but it is not installed."
         )
-    )
-    mism = (1.0 - over) / 2.0
 
-    if not return_fish:
-        return mism, ratio
-    elif return_fish:
-        return mism, ratio, fish
+    if ax is None:
+        fig, ax = plt.subplots(1, 1)
+    else:
+        fig = None
+
+    # generate fake samples from the covariance distribution
+    samp = np.random.multivariate_normal(params, cov, size=nsamp)
+
+    x = samp[:, horizontal_index]
+    y = samp[:, vertical_index]
+
+    # make corner plot
+    corner.hist2d(x, y, ax=ax, **kwargs)
+
+    if fig is None:
+        return ax
+    else:
+        return (fig, ax)
 
 
-def get_eigens(arr, high_precision=False):
+def get_eigeninfo(
+    arr: np.ndarray, high_precision: Optional[bool] = False
+) -> Tuple[np.ndarray, np.ndarray]:
     """Performs eigenvalue decomposition and returns the eigenvalues and right-eigenvectors for the supplied fisher/covariance matrix.
 
     Args:
-        arr (ndarray): Input matrix for which to perform eigenvalue decomposition.
-        high_precision (bool): If True, use 500-dps precision to ensure accurate eigenvalue decomposition
-            (requires mpmath to be installed). Defaults to False.
-    Returns:
-        tuple containing
+        arr: Input matrix for which to perform eigenvalue decomposition.
+        high_precision: If ``True``, use 500-dps precision to ensure accurate eigenvalue decomposition
+            (requires `mpmath <https://mpmath.org>`_ to be installed). Defaults to False.
 
-            evals (ndarray): Eigenvalues for the supplied array.
-            evects (ndarray): Right-eigenvectors for the supplied array, constructed such that evects[:,k] corresponds
-                to the evals[k].
+    Returns:
+        Tuple containing Eigenvalues and right-Eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to evals[k].
+
+
     """
 
     if high_precision:
@@ -768,8 +667,10 @@ def get_eigens(arr, high_precision=False):
 
     if high_precision:
         hp_arr = mp.matrix(arr.tolist())
+        # get eigenvectors
         E, EL, ER = mp.eig(hp_arr, left=True, right=True)
 
+        # convert back
         evals = np.array(E, dtype=np.float64)
         evects = np.array(ER.tolist(), dtype=np.float64)
 
@@ -777,157 +678,134 @@ def get_eigens(arr, high_precision=False):
 
     else:
         evals, evects = np.linalg.eig(arr)
-
         return evals, evects
 
 
-def vallisneri_criterion_cdf(
-    *mismatch_args,
-    num_samples=100,
-    return_cdf=True,
-    return_ratios=False,
-    fish=None,
-    precision=False,
-    fisher_kwargs={},
-    **mismatch_kwargs,
-):
-    """Generates CDF of 1-sigma isoprobability contour mismatches abs(log(r)) as in Vallisneri (2008) and reads off the 90th percentile value.
+def cutler_vallisneri_bias(
+    waveform_model_true: callable,
+    waveform_model_approx: callable,
+    params: np.ndarray,
+    eps: float | np.ndarray,
+    input_diagnostics: Optional[dict] = None,
+    info_mat: Optional[np.ndarray] = None,
+    deriv_inds: Optional[ArrayLike] = None,
+    return_derivs: Optional[bool] = False,
+    return_cov: Optional[bool] = False,
+    parameter_transforms: Optional[TransformContainer] = None,
+    waveform_true_args: Optional[tuple] = (),
+    waveform_true_kwargs: Optional[dict] = {},
+    waveform_approx_args: Optional[tuple] = (),
+    waveform_approx_kwargs: Optional[dict] = {},
+    inner_product_kwargs: Optional[dict] = {},
+) -> list:
+    """Calculate the Cutler-Vallisneri bias.
+
+    # TODO: add basic math
 
     Args:
-        *mismatch_args: Arguments to pass to the mismatch_criterion() function call.
-        num_samples (int, optional): number of parameter samples to generate (defaults to 100).
-        return_cdf (bool): If True, returns the CDF quantiles and values. Defaults to True.
-        return_ratios (bool): If True, returns the set of drawn |ln(r)| samples. Defaults to False.
-        fish (ndarray): Fisher matrix corresponding to the input event parameters (optional - will be generated if not provided).
-        precision (bool): If True, use 500-dps precision to compute eigenvalues/eigenvectors (requires mpmath). Defaults to False.
-        fisher_kwargs (dict): Keyword arguments to pass to the fisher matrix generation function (optional).
+        waveform_model_true: Callable function to the **true** waveform generator with signature ``(*params, **waveform_kwargs)``.
+        waveform_model_approx: Callable function to the **approximate** waveform generator with signature ``(*params, **waveform_kwargs)``.
+        params: Source parameters.
+        eps: Absolute **derivative** step size. See :func:`info_matrix`.
+        input_diagnostics: Dictionary including the diagnostic information if it is precomputed. Dictionary must include
+            keys ``"cov"`` (covariance matrix, output of :func:`covariance`), ``"h_true"`` (the **true** waveform),
+            and ``"dh"`` (derivatives of the waveforms, list of outputs from :func:`dh_dlambda`).
+        info_mat: Pre-computed information matrix. If supplied, this matrix will be inverted to find the covariance.
+        deriv_inds: Subset of parameters of interest. See :func:`info_matrix`.
+        return_derivs: If ``True``, also returns computed numerical derivatives.
+        return_cov: If ``True``, also returns computed covariance matrix.
+        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/html/user/utils.html#eryn.utils.TransformContainer>`_ object. See :func:`info_matrix`.
+        waveform_true_args: Arguments for the **true** waveform generator.
+        waveform_true_kwargs: Keyword arguments for the **true** waveform generator.
+        waveform_approx_args: Arguments for the **approximate** waveform generator.
+        waveform_approx_kwargs: Keyword arguments for the **approximate** waveform generator.
+        inner_product_kwargs: Keyword arguments for the inner product function.
 
     Returns:
-        tuple containing
+        List of return information. By default, it is ``[systematic error, bias]``.
+        If ``return_derivs`` or ``return_cov`` are ``True``, they will be added to the list with derivs added before covs.
 
-            r_at_90 (double): 90th percentile value of the maximum-mismatch CDF.
-            quantiles (ndarray): Cumulative distribution function quantiles.
-            cdf (ndarray): Cumulative distribution function values.
-            ratios (ndarray): Set of drawn |ln(r)| samples.
     """
 
-    ratios = np.zeros(num_samples)
-
-    if fish is None:
-        fish = fisher(*mismatch_args, **fisher_kwargs)
-
-    # handle CuPy use in Fisher matrix generation
-    try:
-        fish = fish.get()
-    except AttributeError:
-        pass
-
-    w, v = get_eigens(fish, high_precision=precision)
-
-    eigens = (w, v)
-
-    j = 0
-    while j < num_samples:
-        try:
-            mism, ratio = mismatch_criterion(
-                *mismatch_args, fish=fish, eigens=eigens, **mismatch_kwargs
-            )
-            ratios[j] = abs(np.log(ratio))
-            j += 1
-        except Exception as err:
-            print("Error generating CDF sample: ", err)
-            raise
-
-    quantiles, counts = np.unique(ratios, return_counts=True)
-    cdf = np.cumsum(counts).astype(np.double) / ratios.size
-
-    r_at_90 = np.interp(0.9, cdf, quantiles)
-
-    out = (r_at_90,)
-    if return_cdf:
-        out += (
-            quantiles,
-            cdf,
-        )
-    if return_ratios:
-        out += (ratios,)
-
-    return out
-
-
-def cutler_vallisneri_bias(
-    waveform_model_true,
-    waveform_model_approx,
-    params,
-    eps,
-    in_diagnostics=None,
-    fish=None,
-    deriv_inds=None,
-    return_fisher=False,
-    return_derivs=False,
-    return_cov=False,
-    parameter_transforms=None,
-    waveform_true_kwargs={},
-    waveform_approx_kwargs={},
-    inner_product_kwargs={},
-):
-    num_params = len(params)
-
     if deriv_inds is None:
-        deriv_inds = np.arange(num_params)
+        deriv_inds = np.arange(len(params))
 
-    num_fish_params = len(deriv_inds)
+    if info_mat is not None and input_diagnostics is not None:
+        warnings.warn(
+            "Provided info_mat and input_diagnostics kwargs. Ignoring info_mat."
+        )
 
-    if isinstance(eps, float):
-        eps = np.full_like(params, eps)
+    # adjust parameters to waveform basis
+    params_in = parameter_transforms.transform_base_parameters(params.copy())
 
-    params_true = params.copy()
-    params_true = parameter_transforms.transform_base_parameters(params_true)
+    if input_diagnostics is None:
+        # get true waveform
+        h_true = waveform_model_true(
+            *(tuple(params_in) + tuple(waveform_true_args)), **waveform_true_kwargs
+        )
 
-    if in_diagnostics is None:
-        h_true = waveform_model_true(*params_true, **waveform_true_kwargs)
-
-        cov, fish, dh = covariance(
+        # get covariance info and waveform derivatives
+        cov, dh = covariance(
+            eps,
             waveform_model_true,
             params,
-            eps,
-            return_fisher=True,
             return_derivs=True,
             deriv_inds=deriv_inds,
+            info_mat=info_mat,
             parameter_transforms=parameter_transforms,
+            waveform_args=waveform_true_args,
             waveform_kwargs=waveform_true_kwargs,
             inner_product_kwargs=inner_product_kwargs,
         )
 
     else:
-        cov = in_diagnostics["cov"]
-        h_true = in_diagnostics["h_true"]
-        dh = in_diagnostics["dh"]
+        # pre-computed info
+        cov = input_diagnostics["cov"]
+        h_true = input_diagnostics["h_true"]
+        dh = input_diagnostics["dh"]
 
-    h_approx = waveform_model_approx(*params_true, **waveform_approx_kwargs)
+    # get approximate waveform
+    h_approx = waveform_model_approx(
+        *(tuple(params_in) + tuple(waveform_true_args)), **waveform_approx_kwargs
+    )
 
-    diff = h_true - h_approx
+    # adjust/check waveform outputs
+    if isinstance(h_true, np.ndarray) and h_true.ndim == 1:
+        h_true = [h_true]
+    elif isinstance(h_true, np.ndarray) and h_true.ndim == 2:
+        h_true = list(h_true)
 
+    if isinstance(h_approx, np.ndarray) and h_approx.ndim == 1:
+        h_approx = [h_approx]
+    elif isinstance(h_approx, np.ndarray) and h_approx.ndim == 2:
+        h_approx = list(h_approx)
+
+    assert len(h_approx) == len(h_true)
+    assert np.all(
+        np.asarray([len(h_approx[i]) == len(h_true[i]) for i in range(len(h_true))])
+    )
+
+    # difference in the waveforms
+    diff = [h_true[i] - h_approx[i] for i in range(len(h_approx))]
+
+    # systematic err
     syst_vec = np.array(
         [
             inner_product(
-                [dh[k, :].real, dh[k, :].imag],
-                [diff.real, diff.imag],
+                dh[k],
+                diff,
                 **inner_product_kwargs,
             )
-            for k in range(num_fish_params)
+            for k in range(len(deriv_inds))
         ]
     )
 
     bias = np.dot(cov, syst_vec)
 
-    if True not in [return_fisher, return_cov, return_derivs]:
-        return syst_vec, bias
-
+    # return list
     returns = [syst_vec, bias]
-    if return_fisher:
-        returns.append(fish)
 
+    # add anything requested
     if return_cov:
         returns.append(cov)
 
@@ -937,15 +815,56 @@ def cutler_vallisneri_bias(
     return returns
 
 
-def scale_snr(target_snr, sig, *snr_args, return_orig_snr=False, **snr_kwargs):
-    snr_out = snr(sig, *snr_args, **snr_kwargs)
+def scale_to_snr(
+    target_snr: float,
+    sig: np.ndarray | list,
+    *snr_args: tuple,
+    return_orig_snr: Optional[bool] = False,
+    **snr_kwargs: dict,
+) -> np.ndarray | list | Tuple[np.ndarray | list, float]:
+    """Calculate the SNR and scale a signal.
 
+    Args:
+        target_snr: Desired SNR value for the injected signal.
+        sig: Signal to adjust. A copy will be made.
+            Can be time-domain or frequency-domain.
+            Must be 1D ``np.ndarray``, list of 1D ``np.ndarray``s, or 2D ``np.ndarray``
+            across channels with shape ``(nchannels, data length)``.
+        *snr_args: Arguments to pass to :func:`snr`.
+        return_orig_snr: If ``True``, return the original SNR in addition to the adjusted data.
+        **snr_kwargs: Keyword arguments to pass to :func:`snr`.
+
+    Returns:
+        Returns the copied input signal adjusted to the target SNR. If ``return_orig_snr is True``, the original
+        SNR is added as the second entry of a tuple with the adjusted signal (as the first entry in the tuple).
+
+    """
+    # get the snr and adjustment factor
+    snr_out = snr(sig, *snr_args, **snr_kwargs)
     factor = target_snr / snr_out
 
-    if isinstance(sig, list) is False:
-        sig = [sig]
+    # any changes back to the original signal type
+    back_single = False
+    back_2d_array = False
 
+    if isinstance(sig, list) is False and sig.ndim == 1:
+        sig = [sig]
+        back_single = True
+
+    elif isinstance(sig, list) is False and sig.ndim == 2:
+        sig = list(sig)
+        back_2d_array = True
+
+    # adjust
     out = [sig_i * factor for sig_i in sig]
+
+    # adjust type back to the input type
+    if back_2d_array:
+        out = np.asarray(out)
+
+    if back_single:
+        out = out[0]
+
     if return_orig_snr:
         return (out, snr_out)
 
