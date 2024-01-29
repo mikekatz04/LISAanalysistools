@@ -17,22 +17,8 @@ except (ModuleNotFoundError, ImportError):
 
     pass
 
-from lisatools.sensitivity import get_sensitivity
-
-
-def get_array_module(arr: np.ndarray | cp.ndarray) -> ModuleType:
-    """Return array library of an array (np/cp).
-
-    Args:
-        arr: Numpy or Cupy array.
-
-    """
-    if isinstance(arr, np.ndarray):
-        return np
-    elif isinstance(arr, cp.ndarray):
-        return cp
-    else:
-        raise ValueError("arr must be a numpy or cupy array.")
+from .sensitivity import get_sensitivity
+from .utils.utility import get_array_module
 
 
 def inner_product(
