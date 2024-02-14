@@ -1,5 +1,6 @@
 from multiprocessing.sharedctypes import Value
 from types import ModuleType, NoneType
+from typing import Tuple
 import numpy as np
 
 # from ..sensitivity import get_sensitivity
@@ -41,11 +42,36 @@ def generate_noise_fd(freqs, df, *sensitivity_args, func=None, **sensitivity_kwa
     return noise_to_add
 
 
-def AET(X, Y, Z):
+def AET(
+    X: float | np.ndarray, Y: float | np.ndarray, Z: float | np.ndarray
+) -> Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
+    """Transform to AET from XYZ
+
+    .. math::
+
+        A = (Z - X) / \\sqrt(2)
+
+    .. math::
+
+        E = (X - 2Y + Z) / \\sqrt(6)
+
+    .. math::
+
+        T = (X + Y + Z) / \\sqrt(3)
+
+    Args:
+        X: X-channel information.
+        Y: Y-channel information.
+        Z: Z-channel information.
+
+    Returns:
+        A, E, T Channels.
+
+    """
     return (
-        (Z - X) / np.sqrt(2.0),
-        (X - 2.0 * Y + Z) / np.sqrt(6.0),
-        (X + Y + Z) / np.sqrt(3.0),
+        (Z - X) / math.sqrt(2.0),
+        (X - 2.0 * Y + Z) / math.sqrt(6.0),
+        (X + Y + Z) / math.sqrt(3.0),
     )
 
 
