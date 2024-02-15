@@ -1,6 +1,6 @@
 import warnings
 from abc import ABC
-from typing import Any, Tuple, Optional, List
+from typing import Any, Tuple, Optional, List, Dict
 
 import math
 import numpy as np
@@ -22,6 +22,7 @@ class StochasticContribution(ABC):
     """Base Class for Stochastic Contributions to the PSD."""
 
     ndim = None
+    added_stochastic_list = []
 
     @classmethod
     def _check_ndim(cls, params: ArrayLike) -> None:
@@ -51,7 +52,8 @@ class StochasticContribution(ABC):
             **kwargs: Keyword arguments for the stochastic model.
 
         """
-        cls._check_ndim(params)
+        if len(cls.added_stochastic_list) > 0:
+            cls._check_ndim(params[0])
         return cls.specific_Sh_function(f, *params, **kwargs)
 
     @staticmethod
@@ -70,6 +72,30 @@ class StochasticContribution(ABC):
 
         """
         raise NotImplementedError
+
+
+class StochasticContributionContainer:
+    def __init__(
+        self, stochastic_contribution_dict: dict[StochasticContribution] = {}
+    ) -> None:
+        self.stochastic_contribution_dict = stochastic_contribution_dict
+
+    def get_Sh(
+        self, f: float | np.ndarray, params_dict: dict[tuple], kwargs_dict: dict[dict]
+    ) -> np.ndarray:
+        Sh_out = np.zeros_like(f)
+        for key in params_dict:
+            stochastic_contrib = self.stochastic_contribution_dict[key]
+            Sh_out += stochastic_contrib.get_Sh(
+                f, params_dict[key], **(kwargs_dict.get(key, {}))
+            )
+        return Sh_out
+
+    def __setitem__(self, key: str | int | tuple, val: StochasticContribution) -> None:
+        self.stochastic_contribution_dict[key] = val
+
+    def __getitem__(self, key: str | int | tuple) -> StochasticContribution:
+        return self.stochastic_contribution_dict[key]
 
 
 class HyperbolicTangentGalacticForeground(StochasticContribution):

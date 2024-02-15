@@ -528,10 +528,12 @@ class SensitivityMatrix:
         | List[np.ndarray | Sensitivity]
         | np.ndarray
         | Sensitivity,
+        *sens_args: tuple,
         **sens_kwargs: dict,
     ) -> None:
         self.frequency_arr = f
         self.data_length = len(self.frequency_arr)
+        self.sens_args = sens_args
         self.sens_kwargs = sens_kwargs
         self.sens_mat = sens_mat
 
@@ -564,7 +566,10 @@ class SensitivityMatrix:
             current_sens = self._sens_mat.flatten()[i]
             if hasattr(current_sens, "get_Sn") or isinstance(current_sens, str):
                 new_out[i] = get_sensitivity(
-                    self.frequency_arr, sens_fn=current_sens, **self.sens_kwargs
+                    self.frequency_arr,
+                    *self.sens_args,
+                    sens_fn=current_sens,
+                    **self.sens_kwargs,
                 )
 
             elif isinstance(current_sens, np.ndarray) or isinstance(
@@ -574,7 +579,9 @@ class SensitivityMatrix:
             else:
                 raise ValueError
 
-        self._sens_mat = new_out.reshape(self.return_shape)
+        self._sens_mat = np.asarray(list(new_out), dtype=float).reshape(
+            self.return_shape + (-1,)
+        )
 
     def __getitem__(self, index: tuple) -> np.ndarray:
         return self.sens_mat[index]

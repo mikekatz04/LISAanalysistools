@@ -17,17 +17,18 @@ except (ModuleNotFoundError, ImportError):
 
     pass
 
-from .sensitivity import get_sensitivity
+from .sensitivity import get_sensitivity, SensitivityMatrix
+from .datacontainer import DataResidualArray
 from .utils.utility import get_array_module
 
 
 def inner_product(
-    sig1: np.ndarray | list,
-    sig2: np.ndarray | list,
+    sig1: np.ndarray | list | DataResidualArray,
+    sig2: np.ndarray | list | DataResidualArray,
     dt: Optional[float] = None,
     df: Optional[float] = None,
     f_arr: Optional[float] = None,
-    PSD: Optional[str | NoneType | np.ndarray] = "lisasens",
+    PSD: Optional[str | NoneType | np.ndarray | SensitivityMatrix] = "LISASens",
     PSD_args: Optional[tuple] = (),
     PSD_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
@@ -73,98 +74,84 @@ def inner_product(
 
     """
     # initial input checks and setup
-    if df is None and dt is None and f_arr is None:
-        raise ValueError("Must provide either df, dt or f_arr keyword arguments.")
+    sig1 = DataResidualArray(sig1, dt=dt, f_arr=f_arr, df=df)
+    sig2 = DataResidualArray(sig2, dt=dt, f_arr=f_arr, df=df)
 
-    if not isinstance(sig1, list) and sig1.ndim == 1:
-        sig1 = [sig1]
-    elif not isinstance(sig1, list) and sig1.ndim == 2:
-        sig1 = list(sig1)
-
-    if not isinstance(sig2, list) and sig2.ndim == 1:
-        sig2 = [sig2]
-    elif not isinstance(sig2, list) and sig2.ndim == 2:
-        sig2 = list(sig2)
-
-    if len(sig1) != len(sig2):
+    if sig1.nchannels != sig2.nchannels:
         raise ValueError(
-            "Signal 1 has {} channels. Signal 2 has {} channels. Must be equal.".format(
-                len(sig1), len(sig2)
-            )
+            f"Signal 1 has {sig1.nchannels} channels. Signal 2 has {sig2.nchannels} channels. Must be the same."
         )
 
     xp = get_array_module(sig1[0])
 
     # checks
-    for i in range(len(sig1)):
+    for i in range(sig1.nchannels):
         if not type(sig1[0]) == type(sig1[i]) and type(sig1[0]) == type(sig2[i]):
             raise ValueError(
                 "Array in sig1, index 0 sets array module. Not all arrays match that module type (Numpy or Cupy)"
             )
 
-    if dt is not None:
-        # setup time-domain signals for inner product
-        if len(sig1[0]) != len(sig2[0]):
-            warnings.warn(
-                "The two signals are two different lengths in the time domain. Zero padding smaller array."
-            )
-
-            length = len(sig1[0]) if len(sig1[0]) > len(sig2[0]) else len(sig2[0])
-
-            sig1 = [xp.pad(sig, (0, length - len(sig1[0]))) for sig in sig1]
-            sig2 = [xp.pad(sig, (0, length - len(sig2[0]))) for sig in sig2]
-
-        length = len(sig1[0])
-
-        freqs = xp.fft.rfftfreq(length, dt)
-
-        ft_sig1 = [xp.fft.rfft(sig) * dt for sig in sig1]
-        ft_sig2 = [xp.fft.rfft(sig) * dt for sig in sig2]
-
-    else:
-        # setup frequency domain info
-        ft_sig1 = sig1
-        ft_sig2 = sig2
-
-        if df is not None:
-            freqs = xp.arange(len(sig1[0])) * df
-
-        else:
-            freqs = f_arr
-
-    # get PSD weighting
-    if isinstance(PSD, str):
-        PSD_arr = get_sensitivity(freqs, sens_fn=PSD, *PSD_args, **PSD_kwargs)
-
-    elif isinstance(PSD, xp.ndarray):
-        assert PSD.ndim == 1
-        PSD_arr = PSD
-
-    elif PSD is None:
-        PSD_arr = xp.full_like(freqs, 1.0)
-
-    else:
+    if sig1.data_length != sig2.data_length:
         raise ValueError(
-            "PSD must be a string giving the sens_fn or a predetermimed array or None if noise weighting is included in a signal."
+            "The two signals are two different lengths. Must be the same length."
         )
 
+    freqs = sig1.f_arr
+
+    # get PSD weighting
+    if not isinstance(PSD, SensitivityMatrix):
+        PSD = SensitivityMatrix(freqs, [PSD], *PSD_args, **PSD_kwargs)
+
+    operational_sets = []
+
+    if PSD.ndim == 3:
+        assert PSD.shape[0] == PSD.shape[1] == sig1.shape[0] == sig2.shape[0]
+
+        for i in range(PSD.shape[0]):
+            for j in range(i, PSD.shape[1]):
+                factor = 1.0 if i == j else 2.0
+                operational_sets.append(
+                    dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
+                )
+
+    elif PSD.ndim == 2 and PSD.shape[0] > 1:
+        assert PSD.shape[0] == sig1.shape[0] == sig2.shape[0]
+        for i in range(PSD.shape[0]):
+            operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=i))
+
+    elif PSD.ndim == 2 and PSD.shape[0] == 1:
+        for i in range(sig1.shape[0]):
+            operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=0))
+
+    else:
+        raise ValueError("# TODO")
+
+    if complex:
+        func = lambda x: x
+    else:
+        func = xp.real
+
+    # initialize
     out = 0.0
     x = freqs
 
-    # fix nan if initial freq is zero
-    if xp.isnan(PSD_arr[0]):
-        # set it to the neighboring value
-        PSD_arr[0] = PSD_arr[1]
-
     # account for hp and hx if included in time domain signal
-    for temp1, temp2 in zip(ft_sig1, ft_sig2):
-        if complex:
-            func = lambda x: x
-        else:
-            func = xp.real
-        y = func(temp1.conj() * temp2) / PSD_arr  # assumes right summation rule
+    for op_set in operational_sets:
+        factor = op_set["factor"]
 
-        out += 4 * xp.trapz(y, x=x)
+        temp1 = sig1[op_set["sig1_ind"]]
+        temp2 = sig2[op_set["sig2_ind"]]
+        psd_tmp = PSD[op_set["psd_ind"]]
+
+        ind_start = 1 if np.isnan(psd_tmp[0]) else 0
+
+        y = (
+            func(temp1[ind_start:].conj() * temp2[ind_start:]) / psd_tmp[ind_start:]
+        )  # assumes right summation rule
+        # df is sunk into trapz
+        tmp_out = factor * 4 * xp.trapz(y, x=x[ind_start:])
+        print(op_set, tmp_out)
+        out += tmp_out
 
     # normalize the inner produce
     normalization_value = 1.0
@@ -172,23 +159,13 @@ def inner_product(
         norm1 = inner_product(
             sig1,
             sig1,
-            dt=dt,
-            df=df,
-            f_arr=f_arr,
             PSD=PSD,
-            PSD_args=PSD_args,
-            PSD_kwargs=PSD_kwargs,
             normalize=False,
         )
         norm2 = inner_product(
             sig2,
             sig2,
-            dt=dt,
-            df=df,
-            f_arr=f_arr,
             PSD=PSD,
-            PSD_args=PSD_args,
-            PSD_kwargs=PSD_kwargs,
             normalize=False,
         )
 
@@ -209,12 +186,7 @@ def inner_product(
         normalization_value = inner_product(
             sig_to_normalize,
             sig_to_normalize,
-            dt=dt,
-            df=df,
-            f_arr=f_arr,
             PSD=PSD,
-            PSD_args=PSD_args,
-            PSD_kwargs=PSD_kwargs,
             normalize=False,
         )
 
@@ -225,10 +197,45 @@ def inner_product(
     return out
 
 
+def residual_source_likelihood_term(
+    data_res_arr: DataResidualArray, **kwargs: dict
+) -> float | complex:
+    kwargs["normalize"] = False
+    ip_val = inner_product(data_res_arr, data_res_arr, **kwargs)
+    return -1 / 2.0 * ip_val
+
+
+def noise_likelihood_term(PSD: SensitivityMatrix) -> float:
+    fix = np.isnan(PSD[:])
+    assert np.sum(fix) == np.prod(PSD.shape[:-1]) or np.sum(fix) == 0
+    nl_val = -np.sum(np.log(PSD[~fix]))
+    return nl_val
+
+
+def residual_full_source_and_noise_likelihood(
+    data_res_arr: DataResidualArray,
+    PSD: str | NoneType | np.ndarray | SensitivityMatrix,
+    **kwargs: dict,
+) -> float | complex:
+    if not isinstance(PSD, SensitivityMatrix):
+        # TODO: maybe adjust so it can take a list just like Sensitivity matrix
+        PSD = SensitivityMatrix(data_res_arr.f_arr, [PSD], **kwargs)
+
+    # remove key
+    for key in "PSD", "PSD_args", "PSD_kwargs":
+        if key in kwargs:
+            kwargs.pop(key)
+
+    rslt = residual_source_likelihood_term(data_res_arr, PSD=PSD, **kwargs)
+
+    nlt = noise_likelihood_term(PSD)
+    return nlt + rslt
+
+
 def snr(
     sig1: np.ndarray | list,
     *args: Any,
-    data: Optional[np.ndarray | list] = None,
+    data: Optional[np.ndarray | list | DataResidualArray] = None,
     **kwargs: Any,
 ) -> float:
     """Compute the snr between two signals weighted by a PSD.
@@ -508,7 +515,7 @@ def covariance(
 
     if diagonalize:
         # get eigeninformation
-        eig_vals, eig_vecs = get_eigens(cov, high_precision=precision)
+        eig_vals, eig_vecs = get_eigeninfo(cov, high_precision=precision)
 
         # diagonal cov now
         cov = np.dot(np.dot(eig_vecs.T, cov), eig_vecs)
@@ -752,7 +759,7 @@ def cutler_vallisneri_bias(
 
     # get approximate waveform
     h_approx = waveform_model_approx(
-        *(tuple(params_in) + tuple(waveform_true_args)), **waveform_approx_kwargs
+        *(tuple(params_in) + tuple(waveform_approx_args)), **waveform_approx_kwargs
     )
 
     # adjust/check waveform outputs
