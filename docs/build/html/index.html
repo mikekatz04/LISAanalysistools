@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LISA Analysis Tools (lisatools) &mdash; LISA Analysis Tools 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=80d5e7a1" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=19f00094" />
+      <link rel="stylesheet" type="text/css" href="_static/sg_gallery.css?v=61a4c737" />
+      <link rel="stylesheet" type="text/css" href="_static/sg_gallery-binder.css?v=f4aeca0c" />
+      <link rel="stylesheet" type="text/css" href="_static/sg_gallery-dataframe.css?v=2082cf3c" />
+      <link rel="stylesheet" type="text/css" href="_static/sg_gallery-rendered-html.css?v=1277b6f3" />
+
+  
+  <!--[if lt IE 9]>
+    <script src="_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+        <script src="_static/jquery.js?v=5d32c60e"></script>
+        <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+        <script src="_static/documentation_options.js?v=01f34227"></script>
+        <script src="_static/doctools.js?v=888ff710"></script>
+        <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="LISA Detector Setup" href="user/main.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="#" class="icon icon-home">
+            LISA Analysis Tools
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Documentation:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="user/main.html">LISA Detector Setup</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user/main.html#module-lisatools.diagnostic">Diagnostics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user/main.html#sampling">Sampling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user/sensitivity.html">Sensitivity Information</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="#">LISA Analysis Tools</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="#" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">LISA Analysis Tools (<code class="docutils literal notranslate"><span class="pre">lisatools</span></code>)</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="lisa-analysis-tools-lisatools">
+<h1>LISA Analysis Tools (<code class="docutils literal notranslate"><span class="pre">lisatools</span></code>)<a class="headerlink" href="#lisa-analysis-tools-lisatools" title="Link to this heading"></a></h1>
+<section id="run-large-scale-and-small-scale-lisa-data-analysis">
+<h2>Run large-scale and small-scale LISA data analysis<a class="headerlink" href="#run-large-scale-and-small-scale-lisa-data-analysis" title="Link to this heading"></a></h2>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Documentation:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="user/main.html">LISA Detector Setup</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.detector.LISAModel"><code class="docutils literal notranslate"><span class="pre">LISAModel</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.detector.LISAModelSettings"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.detector.get_available_default_lisa_models"><code class="docutils literal notranslate"><span class="pre">get_available_default_lisa_models()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="user/main.html#module-lisatools.diagnostic">Diagnostics</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.covariance"><code class="docutils literal notranslate"><span class="pre">covariance()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.cutler_vallisneri_bias"><code class="docutils literal notranslate"><span class="pre">cutler_vallisneri_bias()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.data_signal_full_source_and_noise_likelihood"><code class="docutils literal notranslate"><span class="pre">data_signal_full_source_and_noise_likelihood()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.data_signal_source_likelihood_term"><code class="docutils literal notranslate"><span class="pre">data_signal_source_likelihood_term()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.dh_dlambda"><code class="docutils literal notranslate"><span class="pre">dh_dlambda()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.get_eigeninfo"><code class="docutils literal notranslate"><span class="pre">get_eigeninfo()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.h_var_p_eps"><code class="docutils literal notranslate"><span class="pre">h_var_p_eps()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.info_matrix"><code class="docutils literal notranslate"><span class="pre">info_matrix()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.inner_product"><code class="docutils literal notranslate"><span class="pre">inner_product()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.noise_likelihood_term"><code class="docutils literal notranslate"><span class="pre">noise_likelihood_term()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.plot_covariance_contour"><code class="docutils literal notranslate"><span class="pre">plot_covariance_contour()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.plot_covariance_corner"><code class="docutils literal notranslate"><span class="pre">plot_covariance_corner()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.residual_full_source_and_noise_likelihood"><code class="docutils literal notranslate"><span class="pre">residual_full_source_and_noise_likelihood()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.residual_source_likelihood_term"><code class="docutils literal notranslate"><span class="pre">residual_source_likelihood_term()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.scale_to_snr"><code class="docutils literal notranslate"><span class="pre">scale_to_snr()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/main.html#lisatools.diagnostic.snr"><code class="docutils literal notranslate"><span class="pre">snr()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="user/main.html#sampling">Sampling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user/sensitivity.html">Sensitivity Information</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.get_sensitivity"><code class="docutils literal notranslate"><span class="pre">get_sensitivity()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.get_stock_sensitivity_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_options()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#sensitivity-matrix">Sensitivity Matrix</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#sensitivity-base-class">Sensitivity Base Class</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity"><code class="docutils literal notranslate"><span class="pre">Sensitivity</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity.get_Sn"><code class="docutils literal notranslate"><span class="pre">Sensitivity.get_Sn()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity.get_stochastic_contribution"><code class="docutils literal notranslate"><span class="pre">Sensitivity.get_stochastic_contribution()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity.lisanoises"><code class="docutils literal notranslate"><span class="pre">Sensitivity.lisanoises()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">Sensitivity.stochastic_transform()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity.transform"><code class="docutils literal notranslate"><span class="pre">Sensitivity.transform()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#sensitivity-models">Sensitivity Models</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.LISASens"><code class="docutils literal notranslate"><span class="pre">LISASens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.LISASens.get_Sn"><code class="docutils literal notranslate"><span class="pre">LISASens.get_Sn()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.CornishLISASens"><code class="docutils literal notranslate"><span class="pre">CornishLISASens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.CornishLISASens.get_Sn"><code class="docutils literal notranslate"><span class="pre">CornishLISASens.get_Sn()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.FlatPSDFunction"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.FlatPSDFunction.get_Sn"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction.get_Sn()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens"><code class="docutils literal notranslate"><span class="pre">X1TDISens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">X1TDISens.stochastic_transform()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">X1TDISens.transform()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Y1TDISens"><code class="docutils literal notranslate"><span class="pre">Y1TDISens</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Z1TDISens"><code class="docutils literal notranslate"><span class="pre">Z1TDISens</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens"><code class="docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">XY1TDISens.stochastic_transform()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">XY1TDISens.transform()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.YZ1TDISens"><code class="docutils literal notranslate"><span class="pre">YZ1TDISens</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.ZX1TDISens"><code class="docutils literal notranslate"><span class="pre">ZX1TDISens</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens"><code class="docutils literal notranslate"><span class="pre">A1TDISens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">A1TDISens.stochastic_transform()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">A1TDISens.transform()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.E1TDISens"><code class="docutils literal notranslate"><span class="pre">E1TDISens</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens"><code class="docutils literal notranslate"><span class="pre">T1TDISens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">T1TDISens.stochastic_transform()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">T1TDISens.transform()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens"><code class="docutils literal notranslate"><span class="pre">X2TDISens</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">X2TDISens.stochastic_transform()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens.transform"><code class="docutils literal notranslate"><span class="pre">X2TDISens.transform()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Y2TDISens"><code class="docutils literal notranslate"><span class="pre">Y2TDISens</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Z2TDISens"><code class="docutils literal notranslate"><span class="pre">Z2TDISens</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="user/main.html" class="btn btn-neutral float-right" title="LISA Detector Setup" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, Michael L. Katz.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

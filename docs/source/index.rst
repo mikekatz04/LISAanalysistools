@@ -5,6 +5,7 @@
    :caption: Documentation:
 
    user/main
+   user/sensitivity
    
 .. toctree::
    :maxdepth: 4
