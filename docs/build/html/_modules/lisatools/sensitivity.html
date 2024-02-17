@@ -48,8 +48,9 @@
               <p class="caption" role="heading"><span class="caption-text">Documentation:</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../user/main.html">LISA Detector Setup</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../user/main.html#diagnostics">Diagnostics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/main.html#module-lisatools.diagnostic">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/sensitivity.html">Sensitivity Information</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/stochastic.html">Stochastic Signals</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html#analysis-container">Analysis Container</a></li>
 </ul>
@@ -82,6 +83,7 @@
 <span></span><span class="kn">import</span> <span class="nn">warnings</span>
 <span class="kn">from</span> <span class="nn">abc</span> <span class="kn">import</span> <span class="n">ABC</span>
 <span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">List</span>
+<span class="kn">from</span> <span class="nn">copy</span> <span class="kn">import</span> <span class="n">deepcopy</span>
 
 <span class="kn">import</span> <span class="nn">math</span>
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
@@ -745,19 +747,61 @@
         <span class="k">assert</span> <span class="n">frequency_arr</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">1</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_frequency_arr</span> <span class="o">=</span> <span class="n">frequency_arr</span>
 
+<div class="viewcode-block" id="SensitivityMatrix.update_frequency_arr">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_frequency_arr">[docs]</a>
+    <span class="k">def</span> <span class="nf">update_frequency_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frequency_arr</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Update class with new frequency array.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            frequency_arr: Frequency array.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span> <span class="o">=</span> <span class="n">frequency_arr</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat_input</span></div>
+
+
+<div class="viewcode-block" id="SensitivityMatrix.update_model">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_model">[docs]</a>
+    <span class="k">def</span> <span class="nf">update_model</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">model</span><span class="p">:</span> <span class="n">lisa_models</span><span class="o">.</span><span class="n">LISAModel</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Update class with new sensitivity model.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_kwargs</span><span class="p">[</span><span class="s2">&quot;model&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">model</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat_input</span></div>
+
+
+<div class="viewcode-block" id="SensitivityMatrix.update_stochastic">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_stochastic">[docs]</a>
+    <span class="k">def</span> <span class="nf">update_stochastic</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stochastic_function</span><span class="p">:</span> <span class="n">StochasticContribution</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Update class with new stochastic function.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            stochastic_function: Keyword argument update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_kwargs</span><span class="p">[</span><span class="s2">&quot;stochastic_function&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">stochastic_function</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat_input</span></div>
+
+
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span>
 
     <span class="nd">@sens_mat</span><span class="o">.</span><span class="n">setter</span>
     <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span>
-        <span class="bp">self</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]]</span> <span class="o">|</span> <span class="n">List</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">sens_mat</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="n">Sensitivity</span><span class="p">]]</span>
+        <span class="o">|</span> <span class="n">List</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="n">Sensitivity</span><span class="p">]</span>
+        <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
+        <span class="o">|</span> <span class="n">Sensitivity</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat_input</span> <span class="o">=</span> <span class="n">sens_mat</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat_input</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="n">sens_mat</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">sens_mat</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span>
 
         <span class="c1"># not an</span>
-        <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span><span class="o">.</span><span class="n">flatten</span><span class="p">()),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span>
         <span class="n">new_out</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">full</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span><span class="o">.</span><span class="n">flatten</span><span class="p">()),</span> <span class="kc">None</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">return_shape</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span><span class="o">.</span><span class="n">shape</span>
         <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span><span class="o">.</span><span class="n">flatten</span><span class="p">())):</span>

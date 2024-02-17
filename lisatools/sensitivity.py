@@ -1,6 +1,7 @@
 import warnings
 from abc import ABC
 from typing import Any, Tuple, Optional, List
+from copy import deepcopy
 
 import math
 import numpy as np
@@ -560,19 +561,52 @@ class SensitivityMatrix:
         assert frequency_arr.ndim == 1
         self._frequency_arr = frequency_arr
 
+    def update_frequency_arr(self, frequency_arr: np.ndarray) -> None:
+        """Update class with new frequency array.
+
+        Args:
+            frequency_arr: Frequency array.
+
+        """
+        self.frequency_arr = frequency_arr
+        self.sens_mat = self.sens_mat_input
+
+    def update_model(self, model: lisa_models.LISAModel) -> None:
+        """Update class with new sensitivity model.
+
+        Args:
+            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
+
+        """
+        self.sens_kwargs["model"] = model
+        self.sens_mat = self.sens_mat_input
+
+    def update_stochastic(self, stochastic_function: StochasticContribution) -> None:
+        """Update class with new stochastic function.
+
+        Args:
+            stochastic_function: Keyword argument update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.
+
+        """
+        self.sens_kwargs["stochastic_function"] = stochastic_function
+        self.sens_mat = self.sens_mat_input
+
     @property
     def sens_mat(self) -> np.ndarray:
         return self._sens_mat
 
     @sens_mat.setter
     def sens_mat(
-        self, sens_mat: List[List[np.ndarray]] | List[np.ndarray] | np.ndarray
+        self,
+        sens_mat: List[List[np.ndarray | Sensitivity]]
+        | List[np.ndarray | Sensitivity]
+        | np.ndarray
+        | Sensitivity,
     ) -> None:
-        self._sens_mat_input = sens_mat
+        self.sens_mat_input = deepcopy(sens_mat)
         self._sens_mat = np.asarray(sens_mat, dtype=object)
 
         # not an
-        np.zeros(len(self._sens_mat.flatten()), dtype=object)
         new_out = np.full(len(self._sens_mat.flatten()), None, dtype=object)
         self.return_shape = self._sens_mat.shape
         for i in range(len(self._sens_mat.flatten())):
