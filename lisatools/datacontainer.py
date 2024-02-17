@@ -90,8 +90,9 @@ class DataResidualArray:
             self._f_arr = np.fft.rfftfreq(self.data_length, dt)
 
             # transform data
-            tmp = get_array_module(self.data_res_arr).fft.rfft(
-                self.data_res_arr, axis=-1
+            tmp = (
+                get_array_module(self.data_res_arr).fft.rfft(self.data_res_arr, axis=-1)
+                * self._dt
             )
             del self._data_res_arr
             self._data_res_arr = tmp
@@ -264,6 +265,10 @@ class DataResidualArray:
             raise NotImplementedError
 
         for i, ax_tmp in zip(inds_list, ax):
-            ax_tmp.loglog(self.frequency_arr, self.data_res_arr[i], **kwargs)
+            ax_tmp.loglog(self.frequency_arr, np.abs(self.data_res_arr[i]), **kwargs)
 
         return (fig, ax)
+
+    @property
+    def char_strain(self):
+        return np.sqrt(self.f_arr) * np.abs(self.data_res_arr)
