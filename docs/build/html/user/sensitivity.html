@@ -25,6 +25,7 @@
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Data / Residual / Signal Container" href="datacontainer.html" />
     <link rel="prev" title="LISA Detector Setup" href="main.html" /> 
 </head>
 
@@ -51,7 +52,6 @@
 <ul class="current">
 <li class="toctree-l1"><a class="reference internal" href="main.html">LISA Detector Setup</a></li>
 <li class="toctree-l1"><a class="reference internal" href="main.html#module-lisatools.diagnostic">Diagnostics</a></li>
-<li class="toctree-l1"><a class="reference internal" href="main.html#sampling">Sampling</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Sensitivity Information</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_sensitivity"><code class="docutils literal notranslate"><span class="pre">get_sensitivity()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_stock_sensitivity_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_options()</span></code></a></li>
@@ -119,6 +119,7 @@
 </li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="datacontainer.html">Data / Residual / Signal Container</a></li>
 </ul>
 
         </div>
@@ -166,10 +167,10 @@
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
 <li><p><strong>sens_fn</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">&lt;class</span> <span class="pre">'lisatools.sensitivity.LISASens'&gt;</span></code>) – String or class that represents the name of the desired PSD function.</p></li>
-<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a></span>) – Any additional arguments for the sensitivity function.</p></li>
+<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a></span>) – Any additional arguments for the sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
 <li><p><strong>return_type</strong> (default: <code class="docutils literal notranslate"><span class="pre">'PSD'</span></code>) – Described the desired output. Choices are ASD,
 PSD, or char_strain (characteristic strain). Default is ASD.</p></li>
-<li><p><strong>**kwargs</strong> – Keyword arguments to pass to sensitivity function.</p></li>
+<li><p><strong>**kwargs</strong> – Keyword arguments to pass to sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
@@ -738,6 +739,7 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
         <a href="main.html" class="btn btn-neutral float-left" title="LISA Detector Setup" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="datacontainer.html" class="btn btn-neutral float-right" title="Data / Residual / Signal Container" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>

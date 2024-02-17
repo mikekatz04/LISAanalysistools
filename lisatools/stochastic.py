@@ -141,6 +141,7 @@ class HyperbolicTangentGalacticForeground(StochasticContribution):
 
 
 class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForeground):
+    # TODO: need to verify this is still working
     ndim = 1
     amp = 3.26651613e-44
     alpha = 1.18300266e00

@@ -16,6 +16,3 @@ Diagnostics
     :show-inheritance:
 
 
-Sampling
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-

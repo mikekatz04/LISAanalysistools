@@ -6,6 +6,7 @@ import math
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy import interpolate
+import matplotlib.pyplot as plt
 
 try:
     import cupy as cp
@@ -213,3 +214,56 @@ class DataResidualArray:
     @property
     def shape(self) -> tuple:
         return self.data_res_arr.shape
+
+    def loglog(
+        self,
+        ax: Optional[List[plt.Axes] | plt.Axes] = None,
+        fig: Optional[plt.Figure] = None,
+        inds: Optional[List[int] | int] = None,
+        **kwargs: dict,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        """Produce a log-log plot of the data.
+
+        Args:
+            ax: Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.
+            fig: Matplotlib figure object.
+            inds: Integer index to select out which data to add to a single access.
+                A list can be provided if ax is a list. They must be the same length.
+            **kwargs: Keyword arguments to be passed to ``loglog`` function in matplotlib.
+
+        Returns:
+            Matplotlib figure and axes objects in a 2-tuple.
+
+
+        """
+        if ax is None and fig is None:
+            nrows = 1
+            ncols = self.shape[0]
+
+            fig, ax = plt.subplots(nrows, ncols, sharex=True, sharey=True)
+            ax = ax.ravel()
+            inds_list = range(len(ax))
+
+        elif ax is not None:
+            if isinstance(ax, list):
+                assert len(ax) == np.prod(self.shape[:-1])
+                if inds is None:
+                    inds_list = list(np.arange(np.prod(self.shape[:-1])))
+                else:
+                    assert isinstance(inds, list) and len(inds) == len(ax)
+                    inds_list = inds
+
+            elif isinstance(ax, plt.Axes):
+                assert inds is not None and (
+                    isinstance(inds, tuple) or isinstance(inds, int)
+                )
+                ax = [ax]
+                inds_list = [inds]
+
+        elif fig is not None:
+            raise NotImplementedError
+
+        for i, ax_tmp in zip(inds_list, ax):
+            ax_tmp.loglog(self.frequency_arr, self.data_res_arr[i], **kwargs)
+
+        return (fig, ax)

@@ -49,8 +49,8 @@
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../user/main.html">LISA Detector Setup</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/main.html#module-lisatools.diagnostic">Diagnostics</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../user/main.html#sampling">Sampling</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/sensitivity.html">Sensitivity Information</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html">Data / Residual / Signal Container</a></li>
 </ul>
 
         </div>
@@ -123,6 +123,7 @@
 <span class="n">sangria</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">10.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">2.4e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="s2">&quot;sangria&quot;</span><span class="p">)</span>
 
 <span class="n">__stock_list_models__</span> <span class="o">=</span> <span class="p">[</span><span class="n">scirdv1</span><span class="p">,</span> <span class="n">proposal</span><span class="p">,</span> <span class="n">mrdv1</span><span class="p">,</span> <span class="n">sangria</span><span class="p">]</span>
+<span class="n">__stock_list_models_name__</span> <span class="o">=</span> <span class="p">[</span><span class="n">tmp</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">tmp</span> <span class="ow">in</span> <span class="n">__stock_list_models__</span><span class="p">]</span>
 
 
 <div class="viewcode-block" id="get_available_default_lisa_models">
@@ -139,7 +140,7 @@
 
 
 <span class="k">def</span> <span class="nf">get_default_lisa_model_from_str</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LISAModel</span><span class="p">:</span>
-    <span class="k">if</span> <span class="n">model</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">__stock_list_models__</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">model</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">__stock_list_models_name__</span><span class="p">:</span>
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
             <span class="s2">&quot;Requested string model is not available. See lisatools.detector documentation.&quot;</span>
         <span class="p">)</span>

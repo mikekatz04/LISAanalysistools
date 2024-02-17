@@ -12,11 +12,13 @@ class LISAModelSettings:
     Args:
         Soms_d: OMS displacement noise.
         Sa_a: Acceleration noise.
+        name: Name of model.
 
     """
 
     Soms_d: float
     Sa_a: float
+    name: str
 
 
 class LISAModel(LISAModelSettings, ABC):
@@ -29,12 +31,13 @@ class LISAModel(LISAModelSettings, ABC):
         return out
 
 
-scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2)
-proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2)
-mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2)
-sangria = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2)
+scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, "scirdv1")
+proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, "proposal")
+mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, "mrdv1")
+sangria = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, "sangria")
 
-__stock_list_models__ = ["scirdv1", "proposal", "mrdv1", "sangria"]
+__stock_list_models__ = [scirdv1, proposal, mrdv1, sangria]
+__stock_list_models_name__ = [tmp.name for tmp in __stock_list_models__]
 
 
 def get_available_default_lisa_models() -> List[LISAModel]:
@@ -48,7 +51,7 @@ def get_available_default_lisa_models() -> List[LISAModel]:
 
 
 def get_default_lisa_model_from_str(model: str) -> LISAModel:
-    if model not in __stock_list_models__:
+    if model not in __stock_list_models_name__:
         raise ValueError(
             "Requested string model is not available. See lisatools.detector documentation."
         )

@@ -6,6 +6,7 @@ import math
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy import interpolate
+import matplotlib.pyplot as plt
 
 try:
     import cupy as cp
@@ -72,6 +73,9 @@ class Sensitivity(ABC):
             Tuple with acceleration term as first value and oms term as second value.
 
         """
+
+        if isinstance(model, str):
+            model = lisa_models.check_lisa_model(model)
 
         # TODO: fix this up
         Soms_d_in = model.Soms_d
@@ -166,17 +170,20 @@ class Sensitivity(ABC):
         sgal = np.zeros_like(f)
 
         if (
-            stochastic_params != ()
-            or stochastic_kwargs != {}
+            (stochastic_params != () and stochastic_params is not None)
+            or (stochastic_kwargs != {} and stochastic_kwargs is not None)
             or stochastic_function is not None
         ):
             if stochastic_function is None:
                 stochastic_function = FittedHyperbolicTangentGalacticForeground
 
-            chek = stochastic_function.get_Sh(
-                f, *stochastic_params, **stochastic_kwargs
-            )
-            sgal[:] = chek
+            try:
+                check = stochastic_function.get_Sh(
+                    f, *stochastic_params, **stochastic_kwargs
+                )
+            except:
+                breakpoint()
+            sgal[:] = check
 
         if squeeze:
             sgal = sgal.squeeze()
@@ -408,12 +415,18 @@ class LISASens(Sensitivity):
         average: bool = True,
         **kwargs: dict,
     ) -> float | np.ndarray:
-        """
+        """Compute the base LISA sensitivity function.
 
         Args:
+            f: Frequency array.
+            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
             average: Whether to apply averaging factors to sensitivity curve.
                 Antenna response: ``av_resp = np.sqrt(5) if average else 1.0``
-                Projectioneffect: ``Proj = 2.0 / np.sqrt(3) if average else 1.0``
+                Projection effect: ``Proj = 2.0 / np.sqrt(3) if average else 1.0``
+            **kwargs: Keyword arguments to pass to :func:`get_stochastic_contribution`. # TODO: fix
+
+        Returns:
+            Sensitivity array.
 
         """
 
@@ -591,11 +604,41 @@ class SensitivityMatrix:
         return self.sens_mat.ndim
 
     def flatten(self) -> np.ndarray:
-        return self.sens_mat.flatten()
+        return self.sens_mat.reshape(-1, self.sens_mat.shape[-1])
 
     @property
     def shape(self) -> tuple:
         return self.sens_mat.shape
+
+    def loglog(
+        self,
+        ax: Optional[plt.Axes] = None,
+        fig: Optional[plt.Figure] = None,
+        inds: Optional[int | tuple] = None,
+        **kwargs: dict,
+    ) -> Tuple[plt.Figure, plt.Axes]:
+        if ax is None and fig is None:
+            outer_shape = self.shape[:-1]
+            if len(outer_shape) == 2:
+                nrows = outer_shape[0]
+                ncols = outer_shape[1]
+            elif len(outer_shape) == 1:
+                nrows = 1
+                ncols = outer_shape[0]
+
+            fig, ax = plt.subplots(nrows, ncols, sharex=True, sharey=True)
+            ax = ax.ravel()
+
+        elif ax is not None:
+            assert len(ax) == np.prod(self.shape[:-1])
+
+        elif fig is not None:
+            raise NotImplementedError
+
+        for i in range(np.prod(self.shape[:-1])):
+            ax[i].loglog(self.frequency_arr, self.flatten()[i], **kwargs)
+
+        return (fig, ax)
 
 
 class XYZ1SensitivityMatrix(SensitivityMatrix):
@@ -634,10 +677,10 @@ def get_sensitivity(
     Args:
         f: Frequency array.
         sens_fn: String or class that represents the name of the desired PSD function.
-        *args: Any additional arguments for the sensitivity function.
+        *args: Any additional arguments for the sensitivity function ``get_Sn`` method.
         return_type: Described the desired output. Choices are ASD,
             PSD, or char_strain (characteristic strain). Default is ASD.
-        **kwargs: Keyword arguments to pass to sensitivity function.
+        **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
 
     Return:
         Sensitivity values.
@@ -679,9 +722,9 @@ __stock_sens_options__ = [
     "X1TDISens",
     "Y1TDISens",
     "Z1TDISens",
-    "XYTDISens",
-    "YZTDISens",
-    "ZXTDISens",
+    "XY1TDISens",
+    "YZ1TDISens",
+    "ZX1TDISens",
     "A1TDISens",
     "E1TDISens",
     "T1TDISens",

@@ -28,19 +28,19 @@ def inner_product(
     dt: Optional[float] = None,
     df: Optional[float] = None,
     f_arr: Optional[float] = None,
-    PSD: Optional[str | NoneType | np.ndarray | SensitivityMatrix] = "LISASens",
-    PSD_args: Optional[tuple] = (),
-    PSD_kwargs: Optional[dict] = {},
+    psd: Optional[str | NoneType | np.ndarray | SensitivityMatrix] = "LISASens",
+    psd_args: Optional[tuple] = (),
+    psd_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
     complex: Optional[bool] = False,
 ) -> float | complex:
-    """Compute the inner product between two signals weighted by a PSD.
+    """Compute the inner product between two signals weighted by a psd.
 
     The inner product between time series :math:`a(t)` and :math:`b(t)` is
 
     .. math::
 
-        \langle a | b \\rangle = 2\int_{f_\\text{min}}^{f_\\text{max}} \\frac{\\tilde{a}(f)^*\\tilde{b}(f)}{S_n(f)} df\ \ ,
+        \langle a | b \\rangle = 2\int_{f_\\text{min}}^{f_\\text{max}} \\frac{\\tilde{a}(f)^*\\tilde{b}(f) + \\tilde{a}(f)\\tilde{b}(f)^*}{S_n(f)} df\ \ ,
 
     where :math:`\\tilde{a}(f)` is the Fourier transform of :math:`a(t)` and :math:`S_n(f)` is the one-sided Power Spectral Density of the noise.
 
@@ -60,11 +60,11 @@ def inner_product(
         dt: Time step in seconds. If provided, assumes time-domain signals.
         df: Constant frequency spacing. This will assume a frequency domain signal with constant frequency spacing.
         f_arr: Array of specific frequencies at which the signal is given.
-        PSD: Indicator of what PSD to use. If a ``str``, this will be passed as the ``sens_fn`` kwarg to :func:`get_sensitivity`.
-            If ``None``, it will be an array of ones. Or, you can pass a 1D ``np.ndarray`` of PSD values that must be the same length
+        psd: Indicator of what psd to use. If a ``str``, this will be passed as the ``sens_fn`` kwarg to :func:`get_sensitivity`.
+            If ``None``, it will be an array of ones. Or, you can pass a 1D ``np.ndarray`` of psd values that must be the same length
             as the frequency domain signals.
-        PSD_args: Arguments to pass to the PSD function if ``type(PSD) == str``.
-        PSD_kwargs: Keyword arguments to pass to the PSD function if ``type(PSD) == str``.
+        psd_args: Arguments to pass to the psd function if ``type(psd) == str``.
+        psd_kwargs: Keyword arguments to pass to the psd function if ``type(psd) == str``.
         normalize: Normalize the inner product. If ``True``, it will normalize the square root of the product of individual signal inner products.
             You can also pass ``"sig1"`` or ``"sig2"`` to normalize with respect to one signal.
         complex: If ``True``, return the complex value of the inner product rather than just its real-valued part.
@@ -98,28 +98,28 @@ def inner_product(
 
     freqs = sig1.f_arr
 
-    # get PSD weighting
-    if not isinstance(PSD, SensitivityMatrix):
-        PSD = SensitivityMatrix(freqs, [PSD], *PSD_args, **PSD_kwargs)
+    # get psd weighting
+    if not isinstance(psd, SensitivityMatrix):
+        psd = SensitivityMatrix(freqs, [psd], *psd_args, **psd_kwargs)
 
     operational_sets = []
 
-    if PSD.ndim == 3:
-        assert PSD.shape[0] == PSD.shape[1] == sig1.shape[0] == sig2.shape[0]
+    if psd.ndim == 3:
+        assert psd.shape[0] == psd.shape[1] == sig1.shape[0] == sig2.shape[0]
 
-        for i in range(PSD.shape[0]):
-            for j in range(i, PSD.shape[1]):
+        for i in range(psd.shape[0]):
+            for j in range(i, psd.shape[1]):
                 factor = 1.0 if i == j else 2.0
                 operational_sets.append(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )
 
-    elif PSD.ndim == 2 and PSD.shape[0] > 1:
-        assert PSD.shape[0] == sig1.shape[0] == sig2.shape[0]
-        for i in range(PSD.shape[0]):
+    elif psd.ndim == 2 and psd.shape[0] > 1:
+        assert psd.shape[0] == sig1.shape[0] == sig2.shape[0]
+        for i in range(psd.shape[0]):
             operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=i))
 
-    elif PSD.ndim == 2 and PSD.shape[0] == 1:
+    elif psd.ndim == 2 and psd.shape[0] == 1:
         for i in range(sig1.shape[0]):
             operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=0))
 
@@ -141,7 +141,7 @@ def inner_product(
 
         temp1 = sig1[op_set["sig1_ind"]]
         temp2 = sig2[op_set["sig2_ind"]]
-        psd_tmp = PSD[op_set["psd_ind"]]
+        psd_tmp = psd[op_set["psd_ind"]]
 
         ind_start = 1 if np.isnan(psd_tmp[0]) else 0
 
@@ -159,13 +159,13 @@ def inner_product(
         norm1 = inner_product(
             sig1,
             sig1,
-            PSD=PSD,
+            psd=psd,
             normalize=False,
         )
         norm2 = inner_product(
             sig2,
             sig2,
-            PSD=PSD,
+            psd=psd,
             normalize=False,
         )
 
@@ -186,7 +186,7 @@ def inner_product(
         normalization_value = inner_product(
             sig_to_normalize,
             sig_to_normalize,
-            PSD=PSD,
+            psd=psd,
             normalize=False,
         )
 
@@ -200,45 +200,158 @@ def inner_product(
 def residual_source_likelihood_term(
     data_res_arr: DataResidualArray, **kwargs: dict
 ) -> float | complex:
+    """Calculate the source term in the Likelihood for a data residual (d - h).
+
+    The source term in the likelihood is given by,
+
+    .. math::
+
+        \\log{\\mathcal{L}}_\\text{src} = -\\frac{1}{2}\\langle \\vec{d} - \\vec{h} | \\vec{d} - \\vec{h}\\rangle.
+
+    Args:
+        data_res_arr: Data residual.
+        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+
+    Returns:
+        Source term Likelihood value.
+
+    """
     kwargs["normalize"] = False
     ip_val = inner_product(data_res_arr, data_res_arr, **kwargs)
     return -1 / 2.0 * ip_val
 
 
-def noise_likelihood_term(PSD: SensitivityMatrix) -> float:
-    fix = np.isnan(PSD[:])
-    assert np.sum(fix) == np.prod(PSD.shape[:-1]) or np.sum(fix) == 0
-    nl_val = -np.sum(np.log(PSD[~fix]))
+def noise_likelihood_term(psd: SensitivityMatrix) -> float:
+    """Calculate the noise term in the Likelihood.
+
+    The noise term in the likelihood is given by,
+
+    .. math::
+
+        \\log{\\mathcal{L}}_n = -\\sum \\log{\\vec{S}_n}.
+
+    Args:
+        psd: Sensitivity information.
+
+    Returns:
+        Noise term Likelihood value.
+
+    """
+    fix = np.isnan(psd[:])
+    assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
+    nl_val = -np.sum(np.log(psd[~fix]))
     return nl_val
 
 
 def residual_full_source_and_noise_likelihood(
     data_res_arr: DataResidualArray,
-    PSD: str | NoneType | np.ndarray | SensitivityMatrix,
+    psd: str | NoneType | np.ndarray | SensitivityMatrix,
     **kwargs: dict,
 ) -> float | complex:
-    if not isinstance(PSD, SensitivityMatrix):
+    """Calculate the full Likelihood including noise and source terms.
+
+    The noise term is calculated with :func:`noise_likelihood_term`.
+
+    The source term is calcualted with :func:`residual_source_likelihood_term`.
+
+    Args:
+        data_res_arr: Data residual.
+        psd: Sensitivity information.
+        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+
+    Returns:
+       Full Likelihood value.
+
+    """
+    if not isinstance(psd, SensitivityMatrix):
         # TODO: maybe adjust so it can take a list just like Sensitivity matrix
-        PSD = SensitivityMatrix(data_res_arr.f_arr, [PSD], **kwargs)
+        psd = SensitivityMatrix(data_res_arr.f_arr, [psd], **kwargs)
 
     # remove key
-    for key in "PSD", "PSD_args", "PSD_kwargs":
+    for key in "psd", "psd_args", "psd_kwargs":
         if key in kwargs:
             kwargs.pop(key)
 
-    rslt = residual_source_likelihood_term(data_res_arr, PSD=PSD, **kwargs)
+    rslt = residual_source_likelihood_term(data_res_arr, psd=psd, **kwargs)
 
-    nlt = noise_likelihood_term(PSD)
+    nlt = noise_likelihood_term(psd)
+    return nlt + rslt
+
+
+def data_signal_source_likelihood_term(
+    data_arr: DataResidualArray, sig_arr: DataResidualArray, **kwargs: dict
+) -> float | complex:
+    """Calculate the source term in the Likelihood for separate signal and data.
+
+    The source term in the likelihood is given by,
+
+    .. math::
+
+        \\log{\\mathcal{L}}_\\text{src} = -\\frac{1}{2}\\left(\\langle \\vec{d} | \\vec{d}\\rangle + \\langle \\vec{h} | \\vec{h}\\rangle - 2\\langle \\vec{d} | \\vec{h}\\rangle \\right)\ \ .
+
+    Args:
+        data_arr: Data.
+        sig_arr: Signal.
+        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+
+    Returns:
+        Source term Likelihood value.
+
+    """
+    kwargs["normalize"] = False
+    d_h = inner_product(data_arr, sig_arr, **kwargs)
+    h_h = inner_product(sig_arr, sig_arr, **kwargs)
+    d_d = inner_product(data_arr, data_arr, **kwargs)
+    return -1 / 2.0 * (d_d + h_h - 2 * d_h)
+
+
+def data_signal_full_source_and_noise_likelihood(
+    data_arr: DataResidualArray,
+    sig_arr: DataResidualArray,
+    psd: str | NoneType | np.ndarray | SensitivityMatrix,
+    **kwargs: dict,
+) -> float | complex:
+    """Calculate the full Likelihood including noise and source terms.
+
+    Here, the signal is treated separate from the data.
+
+    The noise term is calculated with :func:`noise_likelihood_term`.
+
+    The source term is calcualted with :func:`data_signal_source_likelihood_term`.
+
+    Args:
+        data_arr: Data.
+        sig_arr: Signal.
+        psd: Sensitivity information.
+        **kwargs: Keyword arguments to pass to :func:`inner_product`.
+
+    Returns:
+       Full Likelihood value.
+
+    """
+    if not isinstance(psd, SensitivityMatrix):
+        # TODO: maybe adjust so it can take a list just like Sensitivity matrix
+        psd = SensitivityMatrix(data_arr.f_arr, [psd], **kwargs)
+
+    # remove key
+    for key in "psd", "psd_args", "psd_kwargs":
+        if key in kwargs:
+            kwargs.pop(key)
+
+    rslt = data_signal_source_likelihood_term(data_arr, sig_arr, psd=psd, **kwargs)
+
+    nlt = noise_likelihood_term(psd)
+
     return nlt + rslt
 
 
 def snr(
-    sig1: np.ndarray | list,
+    sig1: np.ndarray | list | DataResidualArray,
     *args: Any,
     data: Optional[np.ndarray | list | DataResidualArray] = None,
     **kwargs: Any,
 ) -> float:
-    """Compute the snr between two signals weighted by a PSD.
+    """Compute the snr between two signals weighted by a psd.
 
     The signal-to-noise ratio of a signal is :math:`\\sqrt{\\langle a|a\\rangle}`.
 
