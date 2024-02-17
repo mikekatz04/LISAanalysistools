@@ -222,6 +222,7 @@ class DataResidualArray:
         ax: Optional[List[plt.Axes] | plt.Axes] = None,
         fig: Optional[plt.Figure] = None,
         inds: Optional[List[int] | int] = None,
+        char_strain: Optional[bool] = False,
         **kwargs: dict,
     ) -> Tuple[plt.Figure, plt.Axes]:
         """Produce a log-log plot of the data.
@@ -231,6 +232,7 @@ class DataResidualArray:
             fig: Matplotlib figure object.
             inds: Integer index to select out which data to add to a single access.
                 A list can be provided if ax is a list. They must be the same length.
+            char_strain: If ``True`` return plot in characteristic strain representation.
             **kwargs: Keyword arguments to be passed to ``loglog`` function in matplotlib.
 
         Returns:

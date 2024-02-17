@@ -67,6 +67,9 @@
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.likelihood"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.likelihood()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.loglog"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.loglog()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.sens_mat"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.sens_mat</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.template_inner_product"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_inner_product()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.template_likelihood"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_likelihood()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.template_snr"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_snr()</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -117,7 +120,7 @@ or a string corresponding to the <code class="xref py py-class docutils literal 
 </dl>
 <dl class="py method">
 <dt class="sig sig-object py" id="lisatools.datacontainer.DataResidualArray.loglog">
-<span class="sig-name descname"><span class="pre">loglog</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fig</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inds</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/datacontainer.html#DataResidualArray.loglog"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.datacontainer.DataResidualArray.loglog" title="Link to this definition"></a></dt>
+<span class="sig-name descname"><span class="pre">loglog</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fig</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inds</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">char_strain</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/datacontainer.html#DataResidualArray.loglog"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.datacontainer.DataResidualArray.loglog" title="Link to this definition"></a></dt>
 <dd><p>Produce a log-log plot of the data.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -126,6 +129,7 @@ or a string corresponding to the <code class="xref py py-class docutils literal 
 <li><p><strong>fig</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib figure object.</p></li>
 <li><p><strong>inds</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a>], <a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Integer index to select out which data to add to a single access.
 A list can be provided if ax is a list. They must be the same length.</p></li>
+<li><p><strong>char_strain</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code> return plot in characteristic strain representation.</p></li>
 <li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to be passed to <code class="docutils literal notranslate"><span class="pre">loglog</span></code> function in matplotlib.</p></li>
 </ul>
 </dd>
@@ -218,6 +222,69 @@ A list can be provided if ax is a list. They must be the same length.</p></li>
 <dt class="sig sig-object py" id="lisatools.analysiscontainer.AnalysisContainer.sens_mat">
 <em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">sens_mat</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="sensitivity.html#lisatools.sensitivity.SensitivityMatrix" title="lisatools.sensitivity.SensitivityMatrix"><span class="pre">SensitivityMatrix</span></a></em><a class="headerlink" href="#lisatools.analysiscontainer.AnalysisContainer.sens_mat" title="Link to this definition"></a></dt>
 <dd><p>Sensitivity information.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.analysiscontainer.AnalysisContainer.template_inner_product">
+<span class="sig-name descname"><span class="pre">template_inner_product</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">template</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/analysiscontainer.html#AnalysisContainer.template_inner_product"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.analysiscontainer.AnalysisContainer.template_inner_product" title="Link to this definition"></a></dt>
+<dd><p>Calculate the inner product of a template with the data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>template</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.datacontainer.DataResidualArray" title="lisatools.datacontainer.DataResidualArray"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataResidualArray</span></code></a></span>) – Template signal.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.inner_product" title="lisatools.analysiscontainer.AnalysisContainer.inner_product"><code class="xref py py-func docutils literal notranslate"><span class="pre">inner_product()</span></code></a>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <a class="reference external" href="https://docs.python.org/3/library/functions.html#complex" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">complex</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Inner product value.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.analysiscontainer.AnalysisContainer.template_likelihood">
+<span class="sig-name descname"><span class="pre">template_likelihood</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">template</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">include_psd_info</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">phase_maximize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/analysiscontainer.html#AnalysisContainer.template_likelihood"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.analysiscontainer.AnalysisContainer.template_likelihood" title="Link to this definition"></a></dt>
+<dd><p>Calculate the Likelihood of a template against the data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>template</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.datacontainer.DataResidualArray" title="lisatools.datacontainer.DataResidualArray"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataResidualArray</span></code></a></span>) – Template signal.</p></li>
+<li><p><strong>include_psd_info</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, add the PSD term to the Likelihood value.</p></li>
+<li><p><strong>phase_maximize</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, maximize over an overall phase.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.inner_product" title="lisatools.analysiscontainer.AnalysisContainer.inner_product"><code class="xref py py-func docutils literal notranslate"><span class="pre">inner_product()</span></code></a>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Likelihood value.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.analysiscontainer.AnalysisContainer.template_snr">
+<span class="sig-name descname"><span class="pre">template_snr</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">template</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">phase_maximize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/analysiscontainer.html#AnalysisContainer.template_snr"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.analysiscontainer.AnalysisContainer.template_snr" title="Link to this definition"></a></dt>
+<dd><p>Calculate the SNR of a template, both optimal and detected.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>template</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.datacontainer.DataResidualArray" title="lisatools.datacontainer.DataResidualArray"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataResidualArray</span></code></a></span>) – Template signal.</p></li>
+<li><p><strong>phase_maximize</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, maximize over an overall phase.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.inner_product" title="lisatools.analysiscontainer.AnalysisContainer.inner_product"><code class="xref py py-func docutils literal notranslate"><span class="pre">inner_product()</span></code></a>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Tuple</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a>]</span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><code class="docutils literal notranslate"><span class="pre">(optimal</span> <span class="pre">snr,</span> <span class="pre">detected</span> <span class="pre">snr)</span></code>.</p>
+</dd>
+</dl>
 </dd></dl>
 
 </dd></dl>
