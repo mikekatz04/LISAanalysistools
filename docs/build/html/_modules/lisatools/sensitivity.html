@@ -775,14 +775,17 @@
 
 <div class="viewcode-block" id="SensitivityMatrix.update_stochastic">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_stochastic">[docs]</a>
-    <span class="k">def</span> <span class="nf">update_stochastic</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">stochastic_function</span><span class="p">:</span> <span class="n">StochasticContribution</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span> <span class="nf">update_stochastic</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Update class with new stochastic function.</span>
 
 <span class="sd">        Args:</span>
-<span class="sd">            stochastic_function: Keyword argument update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.</span>
+<span class="sd">            **kwargs: Keyword arguments update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.</span>
+<span class="sd">                This operation will combine the new and old kwarg dictionaries, updating any</span>
+<span class="sd">                old information with any added corresponding new information. **Note**: any old information</span>
+<span class="sd">                that is not updated will remain in place.</span>
 
 <span class="sd">        &quot;&quot;&quot;</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">sens_kwargs</span><span class="p">[</span><span class="s2">&quot;stochastic_function&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">stochastic_function</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">sens_kwargs</span> <span class="o">=</span> <span class="p">{</span><span class="o">**</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_kwargs</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">}</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat_input</span></div>
 
 

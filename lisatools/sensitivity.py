@@ -581,14 +581,17 @@ class SensitivityMatrix:
         self.sens_kwargs["model"] = model
         self.sens_mat = self.sens_mat_input
 
-    def update_stochastic(self, stochastic_function: StochasticContribution) -> None:
+    def update_stochastic(self, **kwargs: dict) -> None:
         """Update class with new stochastic function.
 
         Args:
-            stochastic_function: Keyword argument update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.
+            **kwargs: Keyword arguments update for :func:`lisatools.sensitivity.Sensitivity.get_stochastic_contribution`.
+                This operation will combine the new and old kwarg dictionaries, updating any
+                old information with any added corresponding new information. **Note**: any old information
+                that is not updated will remain in place.
 
         """
-        self.sens_kwargs["stochastic_function"] = stochastic_function
+        self.sens_kwargs = {**self.sens_kwargs, **kwargs}
         self.sens_mat = self.sens_mat_input
 
     @property
