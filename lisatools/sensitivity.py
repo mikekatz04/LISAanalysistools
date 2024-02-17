@@ -615,8 +615,25 @@ class SensitivityMatrix:
         ax: Optional[plt.Axes] = None,
         fig: Optional[plt.Figure] = None,
         inds: Optional[int | tuple] = None,
+        char_strain: Optional[bool] = False,
         **kwargs: dict,
     ) -> Tuple[plt.Figure, plt.Axes]:
+        """Produce a log-log plot of the sensitivity.
+
+        Args:
+            ax: Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.
+            fig: Matplotlib figure object.
+            inds: Integer index to select out which data to add to a single access.
+                A list can be provided if ax is a list. They must be the same length.
+            char_strain: If ``True``, plot in characteristic strain representation. **Note**: assumes the sensitivity
+                is input as power spectral density.
+            **kwargs: Keyword arguments to be passed to ``loglog`` function in matplotlib.
+
+        Returns:
+            Matplotlib figure and axes objects in a 2-tuple.
+
+
+        """
         if ax is None and fig is None:
             outer_shape = self.shape[:-1]
             if len(outer_shape) == 2:
@@ -636,7 +653,10 @@ class SensitivityMatrix:
             raise NotImplementedError
 
         for i in range(np.prod(self.shape[:-1])):
-            ax[i].loglog(self.frequency_arr, self.flatten()[i], **kwargs)
+            plot_in = self.flatten()[i]
+            if char_strain:
+                plot_in = np.sqrt(self.frequency_arr * plot_in)
+            ax[i].loglog(self.frequency_arr, plot_in, **kwargs)
 
         return (fig, ax)
 

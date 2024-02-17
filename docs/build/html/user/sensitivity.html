@@ -56,7 +56,10 @@
 <li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_sensitivity"><code class="docutils literal notranslate"><span class="pre">get_sensitivity()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_stock_sensitivity_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_options()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#sensitivity-matrix">Sensitivity Matrix</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.loglog"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.loglog()</span></code></a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#sensitivity-base-class">Sensitivity Base Class</a><ul>
@@ -120,6 +123,7 @@
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="datacontainer.html">Data / Residual / Signal Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="datacontainer.html#analysis-container">Analysis Container</a></li>
 </ul>
 
         </div>
@@ -215,6 +219,31 @@ or a string corresponding to the <a class="reference internal" href="#lisatools.
 </ul>
 </dd>
 </dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix.loglog">
+<span class="sig-name descname"><span class="pre">loglog</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fig</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inds</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">char_strain</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#SensitivityMatrix.loglog"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix.loglog" title="Link to this definition"></a></dt>
+<dd><p>Produce a log-log plot of the sensitivity.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>ax</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.</p></li>
+<li><p><strong>fig</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib figure object.</p></li>
+<li><p><strong>inds</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Integer index to select out which data to add to a single access.
+A list can be provided if ax is a list. They must be the same length.</p></li>
+<li><p><strong>char_strain</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, plot in characteristic strain representation. <strong>Note</strong>: assumes the sensitivity
+is input as power spectral density.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to be passed to <code class="docutils literal notranslate"><span class="pre">loglog</span></code> function in matplotlib.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Tuple</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>, <a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Matplotlib figure and axes objects in a 2-tuple.</p>
+</dd>
+</dl>
+</dd></dl>
+
 </dd></dl>
 
 </section>

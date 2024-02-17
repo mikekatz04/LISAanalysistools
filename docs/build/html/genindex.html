@@ -51,6 +51,7 @@
 <li class="toctree-l1"><a class="reference internal" href="user/main.html#module-lisatools.diagnostic">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="user/sensitivity.html">Sensitivity Information</a></li>
 <li class="toctree-l1"><a class="reference internal" href="user/datacontainer.html">Data / Residual / Signal Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="user/datacontainer.html#analysis-container">Analysis Container</a></li>
 </ul>
 
         </div>
@@ -106,6 +107,10 @@
       <li><a href="user/sensitivity.html#lisatools.sensitivity.A1TDISens">A1TDISens (class in lisatools.sensitivity)</a>
 </li>
   </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer">AnalysisContainer (class in lisatools.analysiscontainer)</a>
+</li>
+  </ul></td>
 </tr></table>
 
 <h2 id="C">C</h2>
@@ -125,12 +130,14 @@
 <h2 id="D">D</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="user/main.html#lisatools.diagnostic.data_signal_full_source_and_noise_likelihood">data_signal_full_source_and_noise_likelihood() (in module lisatools.diagnostic)</a>
+      <li><a href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.data_res_arr">data_res_arr (lisatools.analysiscontainer.AnalysisContainer property)</a>
 </li>
-      <li><a href="user/main.html#lisatools.diagnostic.data_signal_source_likelihood_term">data_signal_source_likelihood_term() (in module lisatools.diagnostic)</a>
+      <li><a href="user/main.html#lisatools.diagnostic.data_signal_full_source_and_noise_likelihood">data_signal_full_source_and_noise_likelihood() (in module lisatools.diagnostic)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="user/main.html#lisatools.diagnostic.data_signal_source_likelihood_term">data_signal_source_likelihood_term() (in module lisatools.diagnostic)</a>
+</li>
       <li><a href="user/datacontainer.html#lisatools.datacontainer.DataResidualArray">DataResidualArray (class in lisatools.datacontainer)</a>
 </li>
       <li><a href="user/main.html#lisatools.diagnostic.dh_dlambda">dh_dlambda() (in module lisatools.diagnostic)</a>
@@ -198,13 +205,19 @@
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="user/main.html#lisatools.diagnostic.inner_product">inner_product() (in module lisatools.diagnostic)</a>
+
+      <ul>
+        <li><a href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.inner_product">(lisatools.analysiscontainer.AnalysisContainer method)</a>
 </li>
+      </ul></li>
   </ul></td>
 </tr></table>
 
 <h2 id="L">L</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.likelihood">likelihood() (lisatools.analysiscontainer.AnalysisContainer method)</a>
+</li>
       <li><a href="user/main.html#lisatools.detector.LISAModel">LISAModel (class in lisatools.detector)</a>
 </li>
       <li><a href="user/main.html#lisatools.detector.LISAModelSettings">LISAModelSettings (class in lisatools.detector)</a>
@@ -213,8 +226,6 @@
 </li>
       <li><a href="user/sensitivity.html#lisatools.sensitivity.LISASens">LISASens (class in lisatools.sensitivity)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li>
     lisatools.detector
 
@@ -222,6 +233,8 @@
         <li><a href="user/main.html#module-lisatools.detector">module</a>
 </li>
       </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li>
     lisatools.diagnostic
 
@@ -229,8 +242,14 @@
         <li><a href="user/main.html#module-lisatools.diagnostic">module</a>
 </li>
       </ul></li>
-      <li><a href="user/datacontainer.html#lisatools.datacontainer.DataResidualArray.loglog">loglog() (lisatools.datacontainer.DataResidualArray method)</a>
+      <li><a href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.loglog">loglog() (lisatools.analysiscontainer.AnalysisContainer method)</a>
+
+      <ul>
+        <li><a href="user/datacontainer.html#lisatools.datacontainer.DataResidualArray.loglog">(lisatools.datacontainer.DataResidualArray method)</a>
 </li>
+        <li><a href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.loglog">(lisatools.sensitivity.SensitivityMatrix method)</a>
+</li>
+      </ul></li>
   </ul></td>
 </tr></table>
 
@@ -286,12 +305,16 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="user/main.html#lisatools.diagnostic.scale_to_snr">scale_to_snr() (in module lisatools.diagnostic)</a>
 </li>
+      <li><a href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.sens_mat">sens_mat (lisatools.analysiscontainer.AnalysisContainer property)</a>
+</li>
       <li><a href="user/sensitivity.html#lisatools.sensitivity.Sensitivity">Sensitivity (class in lisatools.sensitivity)</a>
 </li>
       <li><a href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix">SensitivityMatrix (class in lisatools.sensitivity)</a>
 </li>
       <li><a href="user/main.html#lisatools.diagnostic.snr">snr() (in module lisatools.diagnostic)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="user/sensitivity.html#lisatools.sensitivity.A1TDISens.stochastic_transform">stochastic_transform() (lisatools.sensitivity.A1TDISens static method)</a>
 
       <ul>
