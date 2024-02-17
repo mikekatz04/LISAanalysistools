@@ -6,6 +6,7 @@
 
    user/main
    user/sensitivity
+   user/stochastic
    user/datacontainer
    
 .. toctree::

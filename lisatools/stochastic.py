@@ -75,8 +75,16 @@ class StochasticContribution(ABC):
 
 
 class StochasticContributionContainer:
+    """Container for multiple Stochastic Contributions
+
+    Args:
+        stochastic_contribution_dict: Dictionary with multiple Stochastic entries.
+            Keys are the names and values are of type :class:`StochasticContribution`.
+
+    """
+
     def __init__(
-        self, stochastic_contribution_dict: dict[StochasticContribution] = {}
+        self, stochastic_contribution_dict: dict[StochasticContribution]
     ) -> None:
         self.stochastic_contribution_dict = stochastic_contribution_dict
 
@@ -99,6 +107,8 @@ class StochasticContributionContainer:
 
 
 class HyperbolicTangentGalacticForeground(StochasticContribution):
+    """Hyperbolic Tangent-based foreground fitting function."""
+
     ndim = 5
 
     @staticmethod

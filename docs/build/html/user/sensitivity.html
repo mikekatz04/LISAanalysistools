@@ -25,7 +25,7 @@
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Data / Residual / Signal Container" href="datacontainer.html" />
+    <link rel="next" title="Stochastic Signals" href="stochastic.html" />
     <link rel="prev" title="LISA Detector Setup" href="main.html" /> 
 </head>
 
@@ -122,6 +122,7 @@
 </li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="stochastic.html">Stochastic Signals</a></li>
 <li class="toctree-l1"><a class="reference internal" href="datacontainer.html">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="datacontainer.html#analysis-container">Analysis Container</a></li>
 </ul>
@@ -289,7 +290,7 @@ output to the correct TDI contribution.</p>
 <li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
 <li><p><strong>stochastic_params</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">()</span></code>) – Parameters (arguments) to feed to <code class="docutils literal notranslate"><span class="pre">stochastic_function</span></code>.</p></li>
 <li><p><strong>stochastic_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">{}</span></code>) – Keyword arguments to feeed to <code class="docutils literal notranslate"><span class="pre">stochastic_function</span></code>.</p></li>
-<li><p><strong>stochastic_function</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Stochastic class or string name of stochastic class. Takes <code class="docutils literal notranslate"><span class="pre">stochastic_args</span></code> and <code class="docutils literal notranslate"><span class="pre">stochastic_kwargs</span></code>.
+<li><p><strong>stochastic_function</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="stochastic.html#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Stochastic class or string name of stochastic class. Takes <code class="docutils literal notranslate"><span class="pre">stochastic_args</span></code> and <code class="docutils literal notranslate"><span class="pre">stochastic_kwargs</span></code>.
 If <code class="docutils literal notranslate"><span class="pre">None</span></code>, it uses <code class="xref py py-class docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground</span></code>.</p></li>
 </ul>
 </dd>
@@ -405,7 +406,7 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.CornishLISASens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">CornishLISASens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#CornishLISASens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.CornishLISASens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.LISASens" title="lisatools.sensitivity.LISASens"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISASens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">LISASens</span></code></p>
 <p>PSD from <a class="reference external" href="https://arxiv.org/pdf/1803.01944.pdf">https://arxiv.org/pdf/1803.01944.pdf</a></p>
 <p>Power Spectral Density for the LISA detector assuming it has been active for a year.
 I found an analytic version in one of Niel Cornish’s paper which he submitted to the arXiv in
@@ -440,7 +441,7 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.FlatPSDFunction">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">FlatPSDFunction</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#FlatPSDFunction"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.FlatPSDFunction" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.LISASens" title="lisatools.sensitivity.LISASens"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISASens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">LISASens</span></code></p>
 <p>White Noise PSD function.</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="lisatools.sensitivity.FlatPSDFunction.get_Sn">
@@ -521,13 +522,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.Y1TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">Y1TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#Y1TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.Y1TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.X1TDISens" title="lisatools.sensitivity.X1TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">X1TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">X1TDISens</span></code></p>
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.Z1TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">Z1TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#Z1TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.Z1TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.X1TDISens" title="lisatools.sensitivity.X1TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">X1TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">X1TDISens</span></code></p>
 </dd></dl>
 
 <dl class="py class">
@@ -583,13 +584,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.YZ1TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">YZ1TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#YZ1TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.YZ1TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.XY1TDISens" title="lisatools.sensitivity.XY1TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">XY1TDISens</span></code></p>
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.ZX1TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">ZX1TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#ZX1TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.ZX1TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.XY1TDISens" title="lisatools.sensitivity.XY1TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">XY1TDISens</span></code></p>
 </dd></dl>
 
 <dl class="py class">
@@ -645,7 +646,7 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.E1TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">E1TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#E1TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.E1TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.A1TDISens" title="lisatools.sensitivity.A1TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">A1TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">A1TDISens</span></code></p>
 </dd></dl>
 
 <dl class="py class">
@@ -751,13 +752,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.Y2TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">Y2TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#Y2TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.Y2TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.X2TDISens" title="lisatools.sensitivity.X2TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">X2TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">X2TDISens</span></code></p>
 </dd></dl>
 
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.Z2TDISens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">Z2TDISens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#Z2TDISens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.Z2TDISens" title="Link to this definition"></a></dt>
-<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.X2TDISens" title="lisatools.sensitivity.X2TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">X2TDISens</span></code></a></p>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">X2TDISens</span></code></p>
 </dd></dl>
 
 </section>
@@ -768,7 +769,7 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
         <a href="main.html" class="btn btn-neutral float-left" title="LISA Detector Setup" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="datacontainer.html" class="btn btn-neutral float-right" title="Data / Residual / Signal Container" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="stochastic.html" class="btn btn-neutral float-right" title="Stochastic Signals" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>
