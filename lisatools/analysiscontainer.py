@@ -119,7 +119,7 @@ class AnalysisContainer:
 
         Args:
             template: Template signal.
-            **kwargs: Keyword arguments to pass to :func:`inner_product`.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
             Inner product value.
@@ -139,7 +139,7 @@ class AnalysisContainer:
         Args:
             template: Template signal.
             phase_maximize: If ``True``, maximize over an overall phase.
-            **kwargs: Keyword arguments to pass to :func:`inner_product`.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
             ``(optimal snr, detected snr)``.
@@ -177,7 +177,7 @@ class AnalysisContainer:
             template: Template signal.
             include_psd_info: If ``True``, add the PSD term to the Likelihood value.
             phase_maximize: If ``True``, maximize over an overall phase.
-            **kwargs: Keyword arguments to pass to :func:`inner_product`.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
             Likelihood value.
@@ -216,7 +216,7 @@ class AnalysisContainer:
         Args:
             source_only: If ``True`` return the source-only Likelihood.
             noise_only: If ``True``, return the noise part of the Likelihood alone.
-            **kwargs: Keyword arguments to pass to :func:`inner_product`.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
             Likelihood value.
