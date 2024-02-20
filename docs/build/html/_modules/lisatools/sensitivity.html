@@ -108,10 +108,6 @@
 <span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.</span>
 
-<span class="sd">References for noise models:</span>
-<span class="sd">  * &#39;Proposal&#39;: LISA Consortium Proposal for L3 mission: LISA_L3_20170120 (https://atrium.in2p3.fr/13414ec1-c9ac-44b4-bace-7004468f684c)</span>
-<span class="sd">  * &#39;SciRDv1&#39;: Science Requirement Document: ESA-L3-EST-SCI-RS-001 14/05/2018 (https://atrium.in2p3.fr/f5a78d3e-9e19-47a5-aa11-51c81d370f5f)</span>
-<span class="sd">  * &#39;MRDv1&#39;: Mission Requirement Document: ESA-L3-EST-MIS-RS-001 08/12/2017</span>
 <span class="sd">&quot;&quot;&quot;</span>
 
 
@@ -791,6 +787,7 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Get sensitivity matrix.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span>
 
     <span class="nd">@sens_mat</span><span class="o">.</span><span class="n">setter</span>
@@ -801,6 +798,7 @@
         <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span>
         <span class="o">|</span> <span class="n">Sensitivity</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set sensitivity matrix.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat_input</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="n">sens_mat</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">sens_mat</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">object</span><span class="p">)</span>
 
@@ -824,22 +822,30 @@
             <span class="k">else</span><span class="p">:</span>
                 <span class="k">raise</span> <span class="ne">ValueError</span>
 
+        <span class="c1"># setup in array form</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">new_out</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">return_shape</span> <span class="o">+</span> <span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,)</span>
         <span class="p">)</span>
 
-    <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+    <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Indexing the class indexes the array.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">[</span><span class="n">index</span><span class="p">]</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">ndim</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Dimensionality of sens mat array.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">ndim</span>
 
+<div class="viewcode-block" id="SensitivityMatrix.flatten">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.flatten">[docs]</a>
     <span class="k">def</span> <span class="nf">flatten</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Flatten sens mat array.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span></div>
+
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">shape</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Shape of sens mat array.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span>
 
 <div class="viewcode-block" id="SensitivityMatrix.loglog">
@@ -868,55 +874,125 @@
 
 
 <span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">if</span> <span class="n">ax</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">fig</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">outer_shape</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">outer_shape</span><span class="p">)</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-                <span class="n">nrows</span> <span class="o">=</span> <span class="n">outer_shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
-                <span class="n">ncols</span> <span class="o">=</span> <span class="n">outer_shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
-            <span class="k">elif</span> <span class="nb">len</span><span class="p">(</span><span class="n">outer_shape</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
-                <span class="n">nrows</span> <span class="o">=</span> <span class="mi">1</span>
-                <span class="n">ncols</span> <span class="o">=</span> <span class="n">outer_shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">ax</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">fig</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">)</span> <span class="ow">or</span> <span class="p">(</span><span class="n">ax</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ax</span><span class="p">,</span> <span class="nb">list</span><span class="p">)):</span>
+            <span class="k">if</span> <span class="n">ax</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">fig</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">outer_shape</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">outer_shape</span><span class="p">)</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+                    <span class="n">nrows</span> <span class="o">=</span> <span class="n">outer_shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+                    <span class="n">ncols</span> <span class="o">=</span> <span class="n">outer_shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+                <span class="k">elif</span> <span class="nb">len</span><span class="p">(</span><span class="n">outer_shape</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+                    <span class="n">nrows</span> <span class="o">=</span> <span class="mi">1</span>
+                    <span class="n">ncols</span> <span class="o">=</span> <span class="n">outer_shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
 
-            <span class="n">fig</span><span class="p">,</span> <span class="n">ax</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">subplots</span><span class="p">(</span><span class="n">nrows</span><span class="p">,</span> <span class="n">ncols</span><span class="p">,</span> <span class="n">sharex</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">sharey</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-            <span class="n">ax</span> <span class="o">=</span> <span class="n">ax</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
+                <span class="n">fig</span><span class="p">,</span> <span class="n">ax</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">subplots</span><span class="p">(</span><span class="n">nrows</span><span class="p">,</span> <span class="n">ncols</span><span class="p">,</span> <span class="n">sharex</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">sharey</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+                <span class="n">ax</span> <span class="o">=</span> <span class="n">ax</span><span class="o">.</span><span class="n">ravel</span><span class="p">()</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">ax</span><span class="p">)</span> <span class="o">==</span> <span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
 
-        <span class="k">elif</span> <span class="n">ax</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">ax</span><span class="p">)</span> <span class="o">==</span> <span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">])):</span>
+                <span class="n">plot_in</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">flatten</span><span class="p">()[</span><span class="n">i</span><span class="p">]</span>
+                <span class="k">if</span> <span class="n">char_strain</span><span class="p">:</span>
+                    <span class="n">plot_in</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span> <span class="o">*</span> <span class="n">plot_in</span><span class="p">)</span>
+                <span class="n">ax</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span><span class="p">,</span> <span class="n">plot_in</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
         <span class="k">elif</span> <span class="n">fig</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">NotImplementedError</span>
 
-        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">])):</span>
-            <span class="n">plot_in</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">flatten</span><span class="p">()[</span><span class="n">i</span><span class="p">]</span>
+        <span class="k">elif</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ax</span><span class="p">,</span> <span class="n">plt</span><span class="o">.</span><span class="n">axes</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">inds</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="s2">&quot;When passing a single axes object for `ax`, but also pass `inds` kwarg.&quot;</span>
+                <span class="p">)</span>
+            <span class="n">plot_in</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">[</span><span class="n">inds</span><span class="p">]</span>
             <span class="k">if</span> <span class="n">char_strain</span><span class="p">:</span>
                 <span class="n">plot_in</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span> <span class="o">*</span> <span class="n">plot_in</span><span class="p">)</span>
-            <span class="n">ax</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span><span class="p">,</span> <span class="n">plot_in</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="n">ax</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span><span class="p">,</span> <span class="n">plot_in</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;ax must be a list of axes objects or a single axes object.&quot;</span>
+            <span class="p">)</span>
 
         <span class="k">return</span> <span class="p">(</span><span class="n">fig</span><span class="p">,</span> <span class="n">ax</span><span class="p">)</span></div>
 </div>
 
 
 
+<div class="viewcode-block" id="XYZ1SensitivityMatrix">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.XYZ1SensitivityMatrix">[docs]</a>
 <span class="k">class</span> <span class="nc">XYZ1SensitivityMatrix</span><span class="p">(</span><span class="n">SensitivityMatrix</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Default sensitivity matrix for XYZ (TDI 1)</span>
+
+<span class="sd">    This is 3x3 symmetric matrix.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        f: Frequency array.</span>
+<span class="sd">        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
     <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">sens_mat</span> <span class="o">=</span> <span class="p">[</span>
             <span class="p">[</span><span class="n">X1TDISens</span><span class="p">,</span> <span class="n">XY1TDISens</span><span class="p">,</span> <span class="n">ZX1TDISens</span><span class="p">],</span>
             <span class="p">[</span><span class="n">XY1TDISens</span><span class="p">,</span> <span class="n">Y1TDISens</span><span class="p">,</span> <span class="n">YZ1TDISens</span><span class="p">],</span>
             <span class="p">[</span><span class="n">ZX1TDISens</span><span class="p">,</span> <span class="n">YZ1TDISens</span><span class="p">,</span> <span class="n">Z1TDISens</span><span class="p">],</span>
         <span class="p">]</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span></div>
 
 
+
+<div class="viewcode-block" id="AET1SensitivityMatrix">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.AET1SensitivityMatrix">[docs]</a>
 <span class="k">class</span> <span class="nc">AET1SensitivityMatrix</span><span class="p">(</span><span class="n">SensitivityMatrix</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Default sensitivity matrix for AET (TDI 1)</span>
+
+<span class="sd">    This is just an array because no cross-terms.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        f: Frequency array.</span>
+<span class="sd">        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
     <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">sens_mat</span> <span class="o">=</span> <span class="p">[</span><span class="n">A1TDISens</span><span class="p">,</span> <span class="n">E1TDISens</span><span class="p">,</span> <span class="n">T1TDISens</span><span class="p">]</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span></div>
 
 
+
+<div class="viewcode-block" id="AE1SensitivityMatrix">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.AE1SensitivityMatrix">[docs]</a>
 <span class="k">class</span> <span class="nc">AE1SensitivityMatrix</span><span class="p">(</span><span class="n">SensitivityMatrix</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Default sensitivity matrix for AE (no T) (TDI 1)</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        f: Frequency array.</span>
+<span class="sd">        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
     <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">sens_mat</span> <span class="o">=</span> <span class="p">[</span><span class="n">A1TDISens</span><span class="p">,</span> <span class="n">E1TDISens</span><span class="p">]</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="LISASensSensitivityMatrix">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.LISASensSensitivityMatrix">[docs]</a>
+<span class="k">class</span> <span class="nc">LISASensSensitivityMatrix</span><span class="p">(</span><span class="n">SensitivityMatrix</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Default sensitivity matrix adding :class:`LISASens` for the specified number of channels.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        f: Frequency array.</span>
+<span class="sd">        nchannels: Number of channels.</span>
+<span class="sd">        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">nchannels</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">sens_mat</span> <span class="o">=</span> <span class="p">[</span><span class="n">LISASens</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">nchannels</span><span class="p">)]</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">sens_kwargs</span><span class="p">)</span></div>
+
 
 
 <div class="viewcode-block" id="get_sensitivity">
@@ -934,8 +1010,8 @@
 
 <span class="sd">    Args:</span>
 <span class="sd">        f: Frequency array.</span>
-<span class="sd">        sens_fn: String or class that represents the name of the desired PSD function.</span>
 <span class="sd">        *args: Any additional arguments for the sensitivity function ``get_Sn`` method.</span>
+<span class="sd">        sens_fn: String or class that represents the name of the desired PSD function.</span>
 <span class="sd">        return_type: Described the desired output. Choices are ASD,</span>
 <span class="sd">            PSD, or char_strain (characteristic strain). Default is ASD.</span>
 <span class="sd">        **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.</span>
@@ -1006,6 +1082,26 @@
 
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="n">__stock_sens_options__</span></div>
+
+
+
+<span class="n">__stock_sensitivity_mat_options__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">&quot;XYZ1SensitivityMatrix&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;AET1SensitivityMatrix&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;AE1SensitivityMatrix&quot;</span><span class="p">,</span>
+<span class="p">]</span>
+
+
+<div class="viewcode-block" id="get_stock_sensitivity_matrix_options">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.get_stock_sensitivity_matrix_options">[docs]</a>
+<span class="k">def</span> <span class="nf">get_stock_sensitivity_matrix_options</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">SensitivityMatrix</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Get stock options for sensitivity matrix.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        List of stock sensitivity matrix options.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">return</span> <span class="n">__stock_sensitivity_mat_options__</span></div>
 
 </pre></div>
 

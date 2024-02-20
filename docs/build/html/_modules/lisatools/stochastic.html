@@ -181,21 +181,57 @@
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span> <span class="o">=</span> <span class="n">stochastic_contribution_dict</span>
 
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">stochastic_contribution_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Stochastic contribution storage.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_stochastic_contribution_dict</span>
+
+    <span class="nd">@stochastic_contribution_dict</span><span class="o">.</span><span class="n">setter</span>
+    <span class="k">def</span> <span class="nf">stochastic_contribution_dict</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">stochastic_contribution_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set stochastic_contribution_dict.&quot;&quot;&quot;</span>
+        <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">stochastic_contribution_dict</span><span class="p">,</span> <span class="nb">dict</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">stochastic_contribution_dict</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">StochasticContribution</span><span class="p">):</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                    <span class="sa">f</span><span class="s2">&quot;Stochastic model </span><span class="si">{</span><span class="n">key</span><span class="si">}</span><span class="s2"> is not of type StochasticContribution.&quot;</span>
+                <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_stochastic_contribution_dict</span> <span class="o">=</span> <span class="n">stochastic_contribution_dict</span>
+
+<div class="viewcode-block" id="StochasticContributionContainer.get_Sh">
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.StochasticContributionContainer.get_Sh">[docs]</a>
     <span class="k">def</span> <span class="nf">get_Sh</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">params_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">kwargs_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate Sh for stochastic contribution.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            f: Frequency array.</span>
+<span class="sd">            params_dict: Dictionary with keys equivalent to ``self.stochastic_contribution_dict.keys()``.</span>
+<span class="sd">                Values are the parameters for each associated model.</span>
+<span class="sd">            kwargs_dict: Dictionary with keys equivalent to ``self.stochastic_contribution_dict.keys()``.</span>
+<span class="sd">                Values are the keyword argument dicts for each associated model.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Stochastic contribution.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
         <span class="n">Sh_out</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
         <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">params_dict</span><span class="p">:</span>
             <span class="n">stochastic_contrib</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span>
             <span class="n">Sh_out</span> <span class="o">+=</span> <span class="n">stochastic_contrib</span><span class="o">.</span><span class="n">get_Sh</span><span class="p">(</span>
                 <span class="n">f</span><span class="p">,</span> <span class="n">params_dict</span><span class="p">[</span><span class="n">key</span><span class="p">],</span> <span class="o">**</span><span class="p">(</span><span class="n">kwargs_dict</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="p">{}))</span>
             <span class="p">)</span>
-        <span class="k">return</span> <span class="n">Sh_out</span>
+        <span class="k">return</span> <span class="n">Sh_out</span></div>
+
 
     <span class="k">def</span> <span class="fm">__setitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">,</span> <span class="n">val</span><span class="p">:</span> <span class="n">StochasticContribution</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set an item by directly indexing the class object.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">val</span>
 
     <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Get item directly from dictionary.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span></div>
 
 

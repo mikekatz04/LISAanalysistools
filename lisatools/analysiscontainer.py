@@ -28,6 +28,8 @@ from .diagnostic import (
     residual_full_source_and_noise_likelihood,
     residual_source_likelihood_term,
     inner_product,
+    data_signal_source_likelihood_term,
+    data_signal_full_source_and_noise_likelihood,
 )
 
 
@@ -37,11 +39,16 @@ class AnalysisContainer:
     Args:
         data_res_arr: Data / Residual / Signal array.
         sens_mat: Sensitivity information.
+        signal_gen: Callable object that takes information through ``*args`` and ``**kwargs`` and
+            generates a signal in the proper channel setup employed in ``data_res_arr`` and ``sens_mat``.
 
     """
 
     def __init__(
-        self, data_res_arr: DataResidualArray, sens_mat: SensitivityMatrix
+        self,
+        data_res_arr: DataResidualArray,
+        sens_mat: SensitivityMatrix,
+        signal_gen: Optional[callable] = None,
     ) -> None:
         self.data_res_arr = data_res_arr
         self.sens_mat = sens_mat
@@ -67,6 +74,21 @@ class AnalysisContainer:
         "Set sensitivity information."
         assert isinstance(sens_mat, SensitivityMatrix)
         self._sens_mat = sens_mat
+
+    @property
+    def signal_gen(self) -> callable:
+        """Signal generator."""
+        if not hasattr(self, "_signal_gen"):
+            raise ValueError(
+                "User must input signal_gen kwarg to use the signal generator."
+            )
+        return self._signal_gen
+
+    @signal_gen.setter
+    def signal_gen(self, signal_gen: callable):
+        """Set signal generator."""
+        assert hasattr(signal_gen, "__call__")
+        self._signal_gen = signal_gen
 
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
@@ -234,3 +256,140 @@ class AnalysisContainer:
             return residual_full_source_and_noise_likelihood(
                 self.data_res_arr, self.sens_mat, **kwargs
             )
+
+    def _calculate_signal_operation(
+        self,
+        calc: str,
+        params: ArrayLike,
+        source_only: bool = False,
+        waveform_kwargs: Optional[dict] = {},
+        data_res_arr_kwargs: Optional[dict] = {},
+        **kwargs: dict
+    ) -> float | complex:
+        """Return the likelihood of a generated signal with the data.
+
+        Args:
+            calc: Type of calculation to do. Options are ``"likelihood"``, ``"inner_product"``, or ``"snr"``.
+            params: Parameters for signal.
+            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
+            waveform_kwargs: Keyword arguments to pass to waveform generator.
+            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
+                This can be used if any transforms are desired prior to the Likelihood computation.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+
+        Returns:
+            Likelihood value.
+
+        """
+        template = DataResidualArray(
+            self.signal_gen(*params, **waveform_kwargs), **data_res_arr_kwargs
+        )
+
+        args = (self.data_res_arr, template)
+
+        kwargs = dict(include_psd_info=(~source_only), psd=self.sens_mat, **kwargs)
+
+        if calc == "likelihood":
+            return self.template_likelihood(*args, **kwargs)
+        elif calc == "inner_product":
+            return self.template_inner_product(*args, **kwargs)
+        elif calc == "snr":
+            return self.template_snr(*args, **kwargs)
+        else:
+            raise ValueError("`calc` must be 'likelihood', 'inner_product', or 'snr'.")
+
+    def calculate_signal_likelihood(
+        self,
+        params: ArrayLike,
+        source_only: bool = False,
+        waveform_kwargs: Optional[dict] = {},
+        data_res_arr_kwargs: Optional[dict] = {},
+        **kwargs: dict
+    ) -> float | complex:
+        """Return the likelihood of a generated signal with the data.
+
+        Args:
+            params: Parameters for signal.
+            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
+            waveform_kwargs: Keyword arguments to pass to waveform generator.
+            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
+                This can be used if any transforms are desired prior to the Likelihood computation.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+
+        Returns:
+            Likelihood value.
+
+        """
+
+        self._calculate_signal_operation(
+            "likelihood",
+            params,
+            source_only=source_only,
+            waveform_kwargs=waveform_kwargs,
+            data_res_arr_kwargs=data_res_arr_kwargs,
+            **kwargs
+        )
+
+    def calculate_signal_inner_product(
+        self,
+        params: ArrayLike,
+        source_only: bool = False,
+        waveform_kwargs: Optional[dict] = {},
+        data_res_arr_kwargs: Optional[dict] = {},
+        **kwargs: dict
+    ) -> float | complex:
+        """Return the inner product of a generated signal with the data.
+
+        Args:
+            params: Parameters for signal.
+            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
+            waveform_kwargs: Keyword arguments to pass to waveform generator.
+            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
+                This can be used if any transforms are desired prior to the Likelihood computation.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+
+        Returns:
+            Inner product value.
+
+        """
+
+        self._calculate_signal_operation(
+            "inner_product",
+            params,
+            source_only=source_only,
+            waveform_kwargs=waveform_kwargs,
+            data_res_arr_kwargs=data_res_arr_kwargs,
+            **kwargs
+        )
+
+    def calculate_signal_snr(
+        self,
+        params: ArrayLike,
+        source_only: bool = False,
+        waveform_kwargs: Optional[dict] = {},
+        data_res_arr_kwargs: Optional[dict] = {},
+        **kwargs: dict
+    ) -> Tuple[float, float]:
+        """Return the SNR of a generated signal with the data.
+
+        Args:
+            params: Parameters for signal.
+            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
+            waveform_kwargs: Keyword arguments to pass to waveform generator.
+            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
+                This can be used if any transforms are desired prior to the Likelihood computation.
+            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+
+        Returns:
+            Snr values (optimal, detected).
+
+        """
+
+        self._calculate_signal_operation(
+            "snr",
+            params,
+            source_only=source_only,
+            waveform_kwargs=waveform_kwargs,
+            data_res_arr_kwargs=data_res_arr_kwargs,
+            **kwargs
+        )

@@ -64,7 +64,11 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#combinatorial-stochastic-container">Combinatorial Stochastic Container</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer.get_Sh"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.get_Sh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.stochastic_contribution_dict</span></code></a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#stock-stochastic-models">Stock Stochastic Models</a><ul>
@@ -172,6 +176,35 @@
 Keys are the names and values are of type <a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a>.</p>
 </dd>
 </dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.stochastic.StochasticContributionContainer.get_Sh">
+<span class="sig-name descname"><span class="pre">get_Sh</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">params_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_dict</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#StochasticContributionContainer.get_Sh"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.StochasticContributionContainer.get_Sh" title="Link to this definition"></a></dt>
+<dd><p>Calculate Sh for stochastic contribution.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>params_dict</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>]</span>) – Dictionary with keys equivalent to <code class="docutils literal notranslate"><span class="pre">self.stochastic_contribution_dict.keys()</span></code>.
+Values are the parameters for each associated model.</p></li>
+<li><p><strong>kwargs_dict</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>]</span>) – Dictionary with keys equivalent to <code class="docutils literal notranslate"><span class="pre">self.stochastic_contribution_dict.keys()</span></code>.
+Values are the keyword argument dicts for each associated model.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Stochastic contribution.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">stochastic_contribution_dict</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><span class="pre">StochasticContribution</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict" title="Link to this definition"></a></dt>
+<dd><p>Stochastic contribution storage.</p>
+</dd></dl>
+
 </dd></dl>
 
 </section>

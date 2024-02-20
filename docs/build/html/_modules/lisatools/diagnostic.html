@@ -48,9 +48,11 @@
               <p class="caption" role="heading"><span class="caption-text">Documentation:</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="../../user/main.html">LISA Detector Setup</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../user/main.html#sensitivity-information">Sensitivity Information</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/main.html#module-lisatools.diagnostic">Diagnostics</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../user/main.html#sampling">Sampling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/sensitivity.html">Sensitivity Information</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/stochastic.html">Stochastic Signals</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html">Data / Residual / Signal Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html#analysis-container">Analysis Container</a></li>
 </ul>
 
         </div>
@@ -232,7 +234,6 @@
         <span class="p">)</span>  <span class="c1"># assumes right summation rule</span>
         <span class="c1"># df is sunk into trapz</span>
         <span class="n">tmp_out</span> <span class="o">=</span> <span class="n">factor</span> <span class="o">*</span> <span class="mi">4</span> <span class="o">*</span> <span class="n">xp</span><span class="o">.</span><span class="n">trapz</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="n">x</span><span class="o">=</span><span class="n">x</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:])</span>
-        <span class="nb">print</span><span class="p">(</span><span class="n">op_set</span><span class="p">,</span> <span class="n">tmp_out</span><span class="p">)</span>
         <span class="n">out</span> <span class="o">+=</span> <span class="n">tmp_out</span>
 
     <span class="c1"># normalize the inner produce</span>

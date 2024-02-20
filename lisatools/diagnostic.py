@@ -150,7 +150,6 @@ def inner_product(
         )  # assumes right summation rule
         # df is sunk into trapz
         tmp_out = factor * 4 * xp.trapz(y, x=x[ind_start:])
-        print(op_set, tmp_out)
         out += tmp_out
 
     # normalize the inner produce

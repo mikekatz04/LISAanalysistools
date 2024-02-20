@@ -354,117 +354,19 @@
             <span class="k">raise</span> <span class="ne">NotImplementedError</span>
 
         <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">ax_tmp</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">inds_list</span><span class="p">,</span> <span class="n">ax</span><span class="p">):</span>
-            <span class="n">ax_tmp</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">[</span><span class="n">i</span><span class="p">]),</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="n">plot_in</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">char_strain</span><span class="p">:</span>
+                <span class="n">plot_in</span> <span class="o">*=</span> <span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span>
+            <span class="n">ax_tmp</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">frequency_arr</span><span class="p">,</span> <span class="n">plot_in</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
         <span class="k">return</span> <span class="p">(</span><span class="n">fig</span><span class="p">,</span> <span class="n">ax</span><span class="p">)</span></div>
 
 
     <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">char_strain</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">def</span> <span class="nf">char_strain</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Characteristic strain representation of the data.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">f_arr</span><span class="p">)</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">)</span></div>
 
-
-
-<span class="k">class</span> <span class="nc">AnalysisContainer</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Combinatorial container that combines sensitivity and data information.</span>
-
-<span class="sd">    Args:</span>
-<span class="sd">        data_res_arr: Data / Residual / Signal array.</span>
-<span class="sd">        sens_mat: Sensitivity information.</span>
-
-<span class="sd">    &quot;&quot;&quot;</span>
-
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span>
-        <span class="bp">self</span><span class="p">,</span> <span class="n">data_res_arr</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">:</span> <span class="n">SensitivityMatrix</span>
-    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span> <span class="o">=</span> <span class="n">data_res_arr</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span> <span class="o">=</span> <span class="n">sens_mat</span>
-
-    <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DataResidualArray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Data information.&quot;&quot;&quot;</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr</span>
-
-    <span class="nd">@data_res_arr</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data_res_arr</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set data.&quot;&quot;&quot;</span>
-        <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="n">DataResidualArray</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr</span> <span class="o">=</span> <span class="n">data_res_arr</span>
-
-    <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SensitivityMatrix</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Sensitivity information.&quot;&quot;&quot;</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span>
-
-    <span class="nd">@sens_mat</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">:</span> <span class="n">SensitivityMatrix</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="s2">&quot;Set sensitivity information.&quot;</span>
-        <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">sens_mat</span><span class="p">,</span> <span class="n">SensitivityMatrix</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span> <span class="o">=</span> <span class="n">sens_mat</span>
-
-    <span class="k">def</span> <span class="nf">loglog</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">plt</span><span class="o">.</span><span class="n">Figure</span><span class="p">,</span> <span class="n">plt</span><span class="o">.</span><span class="n">Axes</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Produce loglog plot of both source and sensitivity information.</span>
-
-<span class="sd">        Returns:</span>
-<span class="sd">            Matplotlib figure and axes object in a 2-tuple.</span>
-
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="n">fig</span><span class="p">,</span> <span class="n">ax</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">loglog</span><span class="p">()</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">3</span><span class="p">:</span>
-            <span class="c1"># 3x3 most likely</span>
-            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
-                <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
-                    <span class="n">ax</span><span class="p">[</span><span class="n">i</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="n">j</span><span class="p">]</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span>
-                        <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">f_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span>
-                    <span class="p">)</span>
-                    <span class="n">ax</span><span class="p">[</span><span class="n">i</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="n">j</span><span class="p">]</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span>
-                        <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">f_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">[</span><span class="n">j</span><span class="p">]</span>
-                    <span class="p">)</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
-                <span class="n">ax</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">loglog</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">f_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
-
-    <span class="k">def</span> <span class="nf">inner_product</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the inner product of the current set of information</span>
-
-<span class="sd">        Args:</span>
-<span class="sd">            **kwargs: Inner product keyword arguments.</span>
-
-<span class="sd">        Returns:</span>
-<span class="sd">            Inner product value.</span>
-
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">if</span> <span class="s2">&quot;psd&quot;</span> <span class="ow">in</span> <span class="n">kwargs</span><span class="p">:</span>
-            <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;psd&quot;</span><span class="p">)</span>
-
-        <span class="k">return</span> <span class="n">inner_product</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="n">psd</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">)</span>
-
-    <span class="k">def</span> <span class="nf">likelihood</span><span class="p">(</span>
-        <span class="bp">self</span><span class="p">,</span> <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="n">noise_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span>
-    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the likelihood of the current arangement.</span>
-
-<span class="sd">        Args:</span>
-<span class="sd">            source_only: If ``True`` return the source-only Likelihood.</span>
-<span class="sd">            noise_only: If ``True``, return the noise part of the Likelihood alone.</span>
-<span class="sd">            **kwargs: Keyword arguments to pass to :func:`inner_product`.</span>
-
-<span class="sd">        Returns:</span>
-<span class="sd">            Likelihood value.</span>
-
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">if</span> <span class="n">noise_only</span> <span class="ow">and</span> <span class="n">source_only</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;noise_only and source only cannot both be True.&quot;</span><span class="p">)</span>
-        <span class="k">elif</span> <span class="n">noise_only</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">noise_likelihood_term</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">)</span>
-        <span class="k">elif</span> <span class="n">source_only</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">residual_source_likelihood_term</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
-            <span class="p">)</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">residual_full_source_and_noise_likelihood</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span>
-            <span class="p">)</span>
 </pre></div>
 
            </div>

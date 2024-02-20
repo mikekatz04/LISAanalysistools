@@ -116,12 +116,24 @@
 <li class="toctree-l1"><a class="reference internal" href="user/sensitivity.html">Sensitivity Information</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.get_sensitivity"><code class="docutils literal notranslate"><span class="pre">get_sensitivity()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.get_stock_sensitivity_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_options()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.get_stock_sensitivity_matrix_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_matrix_options()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#sensitivity-matrix">Sensitivity Matrix</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.flatten"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.flatten()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.loglog"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.loglog()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.ndim"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.ndim</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.sens_mat"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.sens_mat</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.shape"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.shape</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_frequency_arr"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.update_frequency_arr()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_model"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.update_model()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.SensitivityMatrix.update_stochastic"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.update_stochastic()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#stock-sensitivity-matrices">Stock Sensitivity Matrices</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XYZ1SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">XYZ1SensitivityMatrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.AET1SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">AET1SensitivityMatrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.AE1SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">AE1SensitivityMatrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.LISASensSensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">LISASensSensitivityMatrix</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -135,53 +147,24 @@
 <li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Sensitivity.transform"><code class="docutils literal notranslate"><span class="pre">Sensitivity.transform()</span></code></a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#stock-sensitivity-models">Stock Sensitivity Models</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.LISASens"><code class="docutils literal notranslate"><span class="pre">LISASens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.CornishLISASens"><code class="docutils literal notranslate"><span class="pre">CornishLISASens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.FlatPSDFunction"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens"><code class="docutils literal notranslate"><span class="pre">X1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Y1TDISens"><code class="docutils literal notranslate"><span class="pre">Y1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Z1TDISens"><code class="docutils literal notranslate"><span class="pre">Z1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens"><code class="docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.YZ1TDISens"><code class="docutils literal notranslate"><span class="pre">YZ1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.ZX1TDISens"><code class="docutils literal notranslate"><span class="pre">ZX1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens"><code class="docutils literal notranslate"><span class="pre">A1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.E1TDISens"><code class="docutils literal notranslate"><span class="pre">E1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens"><code class="docutils literal notranslate"><span class="pre">T1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens"><code class="docutils literal notranslate"><span class="pre">X2TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Y2TDISens"><code class="docutils literal notranslate"><span class="pre">Y2TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Z2TDISens"><code class="docutils literal notranslate"><span class="pre">Z2TDISens</span></code></a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="user/sensitivity.html#sensitivity-models">Sensitivity Models</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.LISASens"><code class="docutils literal notranslate"><span class="pre">LISASens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.LISASens.get_Sn"><code class="docutils literal notranslate"><span class="pre">LISASens.get_Sn()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.CornishLISASens"><code class="docutils literal notranslate"><span class="pre">CornishLISASens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.CornishLISASens.get_Sn"><code class="docutils literal notranslate"><span class="pre">CornishLISASens.get_Sn()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.FlatPSDFunction"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.FlatPSDFunction.get_Sn"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction.get_Sn()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens"><code class="docutils literal notranslate"><span class="pre">X1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">X1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">X1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Y1TDISens"><code class="docutils literal notranslate"><span class="pre">Y1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Z1TDISens"><code class="docutils literal notranslate"><span class="pre">Z1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens"><code class="docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">XY1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.XY1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">XY1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.YZ1TDISens"><code class="docutils literal notranslate"><span class="pre">YZ1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.ZX1TDISens"><code class="docutils literal notranslate"><span class="pre">ZX1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens"><code class="docutils literal notranslate"><span class="pre">A1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">A1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.A1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">A1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.E1TDISens"><code class="docutils literal notranslate"><span class="pre">E1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens"><code class="docutils literal notranslate"><span class="pre">T1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">T1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.T1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">T1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens"><code class="docutils literal notranslate"><span class="pre">X2TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">X2TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.X2TDISens.transform"><code class="docutils literal notranslate"><span class="pre">X2TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Y2TDISens"><code class="docutils literal notranslate"><span class="pre">Y2TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="user/sensitivity.html#lisatools.sensitivity.Z2TDISens"><code class="docutils literal notranslate"><span class="pre">Z2TDISens</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -196,7 +179,11 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#combinatorial-stochastic-container">Combinatorial Stochastic Container</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.StochasticContributionContainer"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.StochasticContributionContainer"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.StochasticContributionContainer.get_Sh"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.get_Sh()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.stochastic_contribution_dict</span></code></a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#stock-stochastic-models">Stock Stochastic Models</a><ul>
@@ -214,6 +201,7 @@
 </li>
 <li class="toctree-l1"><a class="reference internal" href="user/datacontainer.html">Data / Residual / Signal Container</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="user/datacontainer.html#lisatools.datacontainer.DataResidualArray"><code class="docutils literal notranslate"><span class="pre">DataResidualArray</span></code></a><ul>
+<li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.datacontainer.DataResidualArray.char_strain"><code class="docutils literal notranslate"><span class="pre">DataResidualArray.char_strain</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.datacontainer.DataResidualArray.loglog"><code class="docutils literal notranslate"><span class="pre">DataResidualArray.loglog()</span></code></a></li>
 </ul>
 </li>
@@ -221,11 +209,15 @@
 </li>
 <li class="toctree-l1"><a class="reference internal" href="user/datacontainer.html#analysis-container">Analysis Container</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code></a><ul>
+<li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_inner_product"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.calculate_signal_inner_product()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_likelihood"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.calculate_signal_likelihood()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_snr"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.calculate_signal_snr()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.data_res_arr"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.data_res_arr</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.inner_product"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.inner_product()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.likelihood"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.likelihood()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.loglog"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.loglog()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.sens_mat"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.sens_mat</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.signal_gen"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.signal_gen</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.template_inner_product"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_inner_product()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.template_likelihood"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_likelihood()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.template_snr"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_snr()</span></code></a></li>

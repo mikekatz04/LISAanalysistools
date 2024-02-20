@@ -55,12 +55,24 @@
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Sensitivity Information</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_sensitivity"><code class="docutils literal notranslate"><span class="pre">get_sensitivity()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_stock_sensitivity_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_options()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.get_stock_sensitivity_matrix_options"><code class="docutils literal notranslate"><span class="pre">get_stock_sensitivity_matrix_options()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#sensitivity-matrix">Sensitivity Matrix</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.flatten"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.flatten()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.loglog"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.loglog()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.ndim"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.ndim</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.sens_mat"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.sens_mat</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.shape"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.shape</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.update_frequency_arr"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.update_frequency_arr()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.update_model"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.update_model()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix.update_stochastic"><code class="docutils literal notranslate"><span class="pre">SensitivityMatrix.update_stochastic()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#stock-sensitivity-matrices">Stock Sensitivity Matrices</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.XYZ1SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">XYZ1SensitivityMatrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.AET1SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">AET1SensitivityMatrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.AE1SensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">AE1SensitivityMatrix</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.LISASensSensitivityMatrix"><code class="docutils literal notranslate"><span class="pre">LISASensSensitivityMatrix</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -74,53 +86,24 @@
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.Sensitivity.transform"><code class="docutils literal notranslate"><span class="pre">Sensitivity.transform()</span></code></a></li>
 </ul>
 </li>
+<li class="toctree-l3"><a class="reference internal" href="#stock-sensitivity-models">Stock Sensitivity Models</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.LISASens"><code class="docutils literal notranslate"><span class="pre">LISASens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.CornishLISASens"><code class="docutils literal notranslate"><span class="pre">CornishLISASens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.FlatPSDFunction"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.X1TDISens"><code class="docutils literal notranslate"><span class="pre">X1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.Y1TDISens"><code class="docutils literal notranslate"><span class="pre">Y1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.Z1TDISens"><code class="docutils literal notranslate"><span class="pre">Z1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.XY1TDISens"><code class="docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.YZ1TDISens"><code class="docutils literal notranslate"><span class="pre">YZ1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.ZX1TDISens"><code class="docutils literal notranslate"><span class="pre">ZX1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.A1TDISens"><code class="docutils literal notranslate"><span class="pre">A1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.E1TDISens"><code class="docutils literal notranslate"><span class="pre">E1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.T1TDISens"><code class="docutils literal notranslate"><span class="pre">T1TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.X2TDISens"><code class="docutils literal notranslate"><span class="pre">X2TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.Y2TDISens"><code class="docutils literal notranslate"><span class="pre">Y2TDISens</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.Z2TDISens"><code class="docutils literal notranslate"><span class="pre">Z2TDISens</span></code></a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#sensitivity-models">Sensitivity Models</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.LISASens"><code class="docutils literal notranslate"><span class="pre">LISASens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.LISASens.get_Sn"><code class="docutils literal notranslate"><span class="pre">LISASens.get_Sn()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.CornishLISASens"><code class="docutils literal notranslate"><span class="pre">CornishLISASens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.CornishLISASens.get_Sn"><code class="docutils literal notranslate"><span class="pre">CornishLISASens.get_Sn()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.FlatPSDFunction"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.FlatPSDFunction.get_Sn"><code class="docutils literal notranslate"><span class="pre">FlatPSDFunction.get_Sn()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.X1TDISens"><code class="docutils literal notranslate"><span class="pre">X1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.X1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">X1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.X1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">X1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.Y1TDISens"><code class="docutils literal notranslate"><span class="pre">Y1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.Z1TDISens"><code class="docutils literal notranslate"><span class="pre">Z1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.XY1TDISens"><code class="docutils literal notranslate"><span class="pre">XY1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.XY1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">XY1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.XY1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">XY1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.YZ1TDISens"><code class="docutils literal notranslate"><span class="pre">YZ1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.ZX1TDISens"><code class="docutils literal notranslate"><span class="pre">ZX1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.A1TDISens"><code class="docutils literal notranslate"><span class="pre">A1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.A1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">A1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.A1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">A1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.E1TDISens"><code class="docutils literal notranslate"><span class="pre">E1TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.T1TDISens"><code class="docutils literal notranslate"><span class="pre">T1TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.T1TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">T1TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.T1TDISens.transform"><code class="docutils literal notranslate"><span class="pre">T1TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.X2TDISens"><code class="docutils literal notranslate"><span class="pre">X2TDISens</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.X2TDISens.stochastic_transform"><code class="docutils literal notranslate"><span class="pre">X2TDISens.stochastic_transform()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.sensitivity.X2TDISens.transform"><code class="docutils literal notranslate"><span class="pre">X2TDISens.transform()</span></code></a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.Y2TDISens"><code class="docutils literal notranslate"><span class="pre">Y2TDISens</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.sensitivity.Z2TDISens"><code class="docutils literal notranslate"><span class="pre">Z2TDISens</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -162,6 +145,7 @@
 <li><p>‘Proposal’: LISA Consortium Proposal for L3 mission: LISA_L3_20170120 (<a class="reference external" href="https://atrium.in2p3.fr/13414ec1-c9ac-44b4-bace-7004468f684c">https://atrium.in2p3.fr/13414ec1-c9ac-44b4-bace-7004468f684c</a>)</p></li>
 <li><p>‘SciRDv1’: Science Requirement Document: ESA-L3-EST-SCI-RS-001 14/05/2018 (<a class="reference external" href="https://atrium.in2p3.fr/f5a78d3e-9e19-47a5-aa11-51c81d370f5f">https://atrium.in2p3.fr/f5a78d3e-9e19-47a5-aa11-51c81d370f5f</a>)</p></li>
 <li><p>‘MRDv1’: Mission Requirement Document: ESA-L3-EST-MIS-RS-001 08/12/2017</p></li>
+<li><p>‘sangria’: Model used for LDC2A data generation.</p></li>
 </ul>
 </dd>
 </dl>
@@ -174,8 +158,8 @@
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>sens_fn</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">&lt;class</span> <span class="pre">'lisatools.sensitivity.LISASens'&gt;</span></code>) – String or class that represents the name of the desired PSD function.</p></li>
 <li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a></span>) – Any additional arguments for the sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
+<li><p><strong>sens_fn</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">&lt;class</span> <span class="pre">'lisatools.sensitivity.LISASens'&gt;</span></code>) – String or class that represents the name of the desired PSD function.</p></li>
 <li><p><strong>return_type</strong> (default: <code class="docutils literal notranslate"><span class="pre">'PSD'</span></code>) – Described the desired output. Choices are ASD,
 PSD, or char_strain (characteristic strain). Default is ASD.</p></li>
 <li><p><strong>**kwargs</strong> – Keyword arguments to pass to sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
@@ -204,9 +188,27 @@ PSD, or char_strain (characteristic strain). Default is ASD.</p></li>
 </dl>
 </dd></dl>
 
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.sensitivity.get_stock_sensitivity_matrix_options">
+<span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">get_stock_sensitivity_matrix_options</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#get_stock_sensitivity_matrix_options"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.get_stock_sensitivity_matrix_options" title="Link to this definition"></a></dt>
+<dd><p>Get stock options for sensitivity matrix.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix" title="lisatools.sensitivity.SensitivityMatrix"><code class="xref py py-class docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a>]</span></p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of stock sensitivity matrix options.</p>
+</dd>
+</dl>
+</dd></dl>
+
 <section id="sensitivity-matrix">
 <h2>Sensitivity Matrix<a class="headerlink" href="#sensitivity-matrix" title="Link to this heading"></a></h2>
-<p>The sensitivity matrix ….</p>
+<p>The sensitivity matrix is designed to house sensitivity information that will enter into the Likelihood function.
+It is a matrix because the 3 channels in LISA will be correlated. Therefore, in XYZ channels, this is a 3x3 matrix that includes correlated cross-terms between the channels.
+When working with AET channels (uncorrelated in idealized noise situations), then the sensitivity matrix will be an array of length 2 for AE or 3 for AET.
+The <a class="reference internal" href="main.html#lisatools.diagnostic.inner_product" title="lisatools.diagnostic.inner_product"><code class="xref py py-func docutils literal notranslate"><span class="pre">lisatools.diagnostic.inner_product()</span></code></a> will adjust its computation based on the shape of the sensitivity matrix input.
+The user does not have to do anything special for this change to work. It happens under the hood.</p>
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">SensitivityMatrix</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sens_mat</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">sens_args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">sens_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#SensitivityMatrix"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix" title="Link to this definition"></a></dt>
@@ -224,14 +226,25 @@ or a string corresponding to the <a class="reference internal" href="#lisatools.
 </dd>
 </dl>
 <dl class="py method">
+<dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix.flatten">
+<span class="sig-name descname"><span class="pre">flatten</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#SensitivityMatrix.flatten"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix.flatten" title="Link to this definition"></a></dt>
+<dd><p>Flatten sens mat array.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
 <dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix.loglog">
 <span class="sig-name descname"><span class="pre">loglog</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fig</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inds</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">char_strain</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#SensitivityMatrix.loglog"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix.loglog" title="Link to this definition"></a></dt>
 <dd><p>Produce a log-log plot of the sensitivity.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>ax</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.</p></li>
-<li><p><strong>fig</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib figure object.</p></li>
+<li><p><strong>ax</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.8.3)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.</p></li>
+<li><p><strong>fig</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.3)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib figure object.</p></li>
 <li><p><strong>inds</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Integer index to select out which data to add to a single access.
 A list can be provided if ax is a list. They must be the same length.</p></li>
 <li><p><strong>char_strain</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, plot in characteristic strain representation. <strong>Note</strong>: assumes the sensitivity
@@ -240,12 +253,30 @@ is input as power spectral density.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Tuple</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>, <a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.8.2)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Tuple</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/figure_api.html#matplotlib.figure.Figure" title="(in Matplotlib v3.8.3)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>, <a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.8.3)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Matplotlib figure and axes objects in a 2-tuple.</p>
 </dd>
 </dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix.ndim">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ndim</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a></em><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix.ndim" title="Link to this definition"></a></dt>
+<dd><p>Dimensionality of sens mat array.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix.sens_mat">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">sens_mat</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix.sens_mat" title="Link to this definition"></a></dt>
+<dd><p>Get sensitivity matrix.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.sensitivity.SensitivityMatrix.shape">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">shape</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><span class="pre">tuple</span></a></em><a class="headerlink" href="#lisatools.sensitivity.SensitivityMatrix.shape" title="Link to this definition"></a></dt>
+<dd><p>Shape of sens mat array.</p>
 </dd></dl>
 
 <dl class="py method">
@@ -295,6 +326,72 @@ that is not updated will remain in place.</p>
 
 </dd></dl>
 
+<section id="stock-sensitivity-matrices">
+<h3>Stock Sensitivity Matrices<a class="headerlink" href="#stock-sensitivity-matrices" title="Link to this heading"></a></h3>
+<dl class="py class">
+<dt class="sig sig-object py" id="lisatools.sensitivity.XYZ1SensitivityMatrix">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">XYZ1SensitivityMatrix</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">sens_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#XYZ1SensitivityMatrix"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.XYZ1SensitivityMatrix" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix" title="lisatools.sensitivity.SensitivityMatrix"><code class="xref py py-class docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a></p>
+<p>Default sensitivity matrix for XYZ (TDI 1)</p>
+<p>This is 3x3 symmetric matrix.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>**sens_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a href="#id3"><span class="problematic" id="id4">:method:`Sensitivity.get_Sn`</span></a>.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="lisatools.sensitivity.AET1SensitivityMatrix">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">AET1SensitivityMatrix</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">sens_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#AET1SensitivityMatrix"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.AET1SensitivityMatrix" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix" title="lisatools.sensitivity.SensitivityMatrix"><code class="xref py py-class docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a></p>
+<p>Default sensitivity matrix for AET (TDI 1)</p>
+<p>This is just an array because no cross-terms.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>**sens_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a href="#id5"><span class="problematic" id="id6">:method:`Sensitivity.get_Sn`</span></a>.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="lisatools.sensitivity.AE1SensitivityMatrix">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">AE1SensitivityMatrix</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">sens_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#AE1SensitivityMatrix"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.AE1SensitivityMatrix" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix" title="lisatools.sensitivity.SensitivityMatrix"><code class="xref py py-class docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a></p>
+<p>Default sensitivity matrix for AE (no T) (TDI 1)</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>**sens_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a href="#id7"><span class="problematic" id="id8">:method:`Sensitivity.get_Sn`</span></a>.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="lisatools.sensitivity.LISASensSensitivityMatrix">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">LISASensSensitivityMatrix</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nchannels</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">sens_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#LISASensSensitivityMatrix"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.LISASensSensitivityMatrix" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.SensitivityMatrix" title="lisatools.sensitivity.SensitivityMatrix"><code class="xref py py-class docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code></a></p>
+<p>Default sensitivity matrix adding <a class="reference internal" href="#lisatools.sensitivity.LISASens" title="lisatools.sensitivity.LISASens"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISASens</span></code></a> for the specified number of channels.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>nchannels</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></span>) – Number of channels.</p></li>
+<li><p><strong>**sens_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a href="#id9"><span class="problematic" id="id10">:method:`Sensitivity.get_Sn`</span></a>.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
 </section>
 <section id="sensitivity-base-class">
 <h2>Sensitivity Base Class<a class="headerlink" href="#sensitivity-base-class" title="Link to this heading"></a></h2>
@@ -418,9 +515,8 @@ If <code class="docutils literal notranslate"><span class="pre">None</span></cod
 
 </dd></dl>
 
-</section>
-<section id="sensitivity-models">
-<h2>Sensitivity Models<a class="headerlink" href="#sensitivity-models" title="Link to this heading"></a></h2>
+<section id="stock-sensitivity-models">
+<h3>Stock Sensitivity Models<a class="headerlink" href="#stock-sensitivity-models" title="Link to this heading"></a></h3>
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.sensitivity.LISASens">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">LISASens</span></span><a class="reference internal" href="../_modules/lisatools/sensitivity.html#LISASens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.LISASens" title="Link to this definition"></a></dt>
@@ -809,6 +905,7 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dd><p>Bases: <a class="reference internal" href="#lisatools.sensitivity.X2TDISens" title="lisatools.sensitivity.X2TDISens"><code class="xref py py-class docutils literal notranslate"><span class="pre">X2TDISens</span></code></a></p>
 </dd></dl>
 
+</section>
 </section>
 </section>
 

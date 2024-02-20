@@ -26,10 +26,6 @@ from .stochastic import (
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
 
-References for noise models:
-  * 'Proposal': LISA Consortium Proposal for L3 mission: LISA_L3_20170120 (https://atrium.in2p3.fr/13414ec1-c9ac-44b4-bace-7004468f684c)
-  * 'SciRDv1': Science Requirement Document: ESA-L3-EST-SCI-RS-001 14/05/2018 (https://atrium.in2p3.fr/f5a78d3e-9e19-47a5-aa11-51c81d370f5f)
-  * 'MRDv1': Mission Requirement Document: ESA-L3-EST-MIS-RS-001 08/12/2017
 """
 
 
@@ -596,6 +592,7 @@ class SensitivityMatrix:
 
     @property
     def sens_mat(self) -> np.ndarray:
+        """Get sensitivity matrix."""
         return self._sens_mat
 
     @sens_mat.setter
@@ -606,6 +603,7 @@ class SensitivityMatrix:
         | np.ndarray
         | Sensitivity,
     ) -> None:
+        """Set sensitivity matrix."""
         self.sens_mat_input = deepcopy(sens_mat)
         self._sens_mat = np.asarray(sens_mat, dtype=object)
 
@@ -629,22 +627,27 @@ class SensitivityMatrix:
             else:
                 raise ValueError
 
+        # setup in array form
         self._sens_mat = np.asarray(list(new_out), dtype=float).reshape(
             self.return_shape + (-1,)
         )
 
-    def __getitem__(self, index: tuple) -> np.ndarray:
+    def __getitem__(self, index: Any) -> np.ndarray:
+        """Indexing the class indexes the array."""
         return self.sens_mat[index]
 
     @property
     def ndim(self) -> int:
+        """Dimensionality of sens mat array."""
         return self.sens_mat.ndim
 
     def flatten(self) -> np.ndarray:
+        """Flatten sens mat array."""
         return self.sens_mat.reshape(-1, self.sens_mat.shape[-1])
 
     @property
     def shape(self) -> tuple:
+        """Shape of sens mat array."""
         return self.sens_mat.shape
 
     def loglog(
@@ -671,34 +674,59 @@ class SensitivityMatrix:
 
 
         """
-        if ax is None and fig is None:
-            outer_shape = self.shape[:-1]
-            if len(outer_shape) == 2:
-                nrows = outer_shape[0]
-                ncols = outer_shape[1]
-            elif len(outer_shape) == 1:
-                nrows = 1
-                ncols = outer_shape[0]
+        if (ax is None and fig is None) or (ax is not None and isinstance(ax, list)):
+            if ax is None and fig is None:
+                outer_shape = self.shape[:-1]
+                if len(outer_shape) == 2:
+                    nrows = outer_shape[0]
+                    ncols = outer_shape[1]
+                elif len(outer_shape) == 1:
+                    nrows = 1
+                    ncols = outer_shape[0]
 
-            fig, ax = plt.subplots(nrows, ncols, sharex=True, sharey=True)
-            ax = ax.ravel()
+                fig, ax = plt.subplots(nrows, ncols, sharex=True, sharey=True)
+                ax = ax.ravel()
+            else:
+                assert len(ax) == np.prod(self.shape[:-1])
 
-        elif ax is not None:
-            assert len(ax) == np.prod(self.shape[:-1])
+            for i in range(np.prod(self.shape[:-1])):
+                plot_in = self.flatten()[i]
+                if char_strain:
+                    plot_in = np.sqrt(self.frequency_arr * plot_in)
+                ax[i].loglog(self.frequency_arr, plot_in, **kwargs)
 
         elif fig is not None:
             raise NotImplementedError
 
-        for i in range(np.prod(self.shape[:-1])):
-            plot_in = self.flatten()[i]
+        elif isinstance(ax, plt.axes):
+            if inds is None:
+                raise ValueError(
+                    "When passing a single axes object for `ax`, but also pass `inds` kwarg."
+                )
+            plot_in = self.sens_mat[inds]
             if char_strain:
                 plot_in = np.sqrt(self.frequency_arr * plot_in)
-            ax[i].loglog(self.frequency_arr, plot_in, **kwargs)
+            ax.loglog(self.frequency_arr, plot_in, **kwargs)
+
+        else:
+            raise ValueError(
+                "ax must be a list of axes objects or a single axes object."
+            )
 
         return (fig, ax)
 
 
 class XYZ1SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for XYZ (TDI 1)
+
+    This is 3x3 symmetric matrix.
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+
+    """
+
     def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
         sens_mat = [
             [X1TDISens, XY1TDISens, ZX1TDISens],
@@ -709,14 +737,47 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
 
 
 class AET1SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for AET (TDI 1)
+
+    This is just an array because no cross-terms.
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+
+    """
+
     def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens, T1TDISens]
         super().__init__(f, sens_mat, **sens_kwargs)
 
 
 class AE1SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for AE (no T) (TDI 1)
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+
+    """
+
     def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
+
+class LISASensSensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix adding :class:`LISASens` for the specified number of channels.
+
+    Args:
+        f: Frequency array.
+        nchannels: Number of channels.
+        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+
+    """
+
+    def __init__(self, f: np.ndarray, nchannels: int, **sens_kwargs: dict) -> None:
+        sens_mat = [LISASens for _ in range(nchannels)]
         super().__init__(f, sens_mat, **sens_kwargs)
 
 
@@ -733,8 +794,8 @@ def get_sensitivity(
 
     Args:
         f: Frequency array.
-        sens_fn: String or class that represents the name of the desired PSD function.
         *args: Any additional arguments for the sensitivity function ``get_Sn`` method.
+        sens_fn: String or class that represents the name of the desired PSD function.
         return_type: Described the desired output. Choices are ASD,
             PSD, or char_strain (characteristic strain). Default is ASD.
         **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
@@ -802,3 +863,20 @@ def get_stock_sensitivity_options() -> List[Sensitivity]:
 
     """
     return __stock_sens_options__
+
+
+__stock_sensitivity_mat_options__ = [
+    "XYZ1SensitivityMatrix",
+    "AET1SensitivityMatrix",
+    "AE1SensitivityMatrix",
+]
+
+
+def get_stock_sensitivity_matrix_options() -> List[SensitivityMatrix]:
+    """Get stock options for sensitivity matrix.
+
+    Returns:
+        List of stock sensitivity matrix options.
+
+    """
+    return __stock_sensitivity_mat_options__

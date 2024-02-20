@@ -88,9 +88,40 @@ class StochasticContributionContainer:
     ) -> None:
         self.stochastic_contribution_dict = stochastic_contribution_dict
 
+    @property
+    def stochastic_contribution_dict(self) -> dict[StochasticContribution]:
+        """Stochastic contribution storage."""
+        return self._stochastic_contribution_dict
+
+    @stochastic_contribution_dict.setter
+    def stochastic_contribution_dict(
+        self, stochastic_contribution_dict: dict[StochasticContribution]
+    ) -> None:
+        """Set stochastic_contribution_dict."""
+        assert isinstance(stochastic_contribution_dict, dict)
+        for key, value in stochastic_contribution_dict.items():
+            if not isinstance(value, StochasticContribution):
+                raise ValueError(
+                    f"Stochastic model {key} is not of type StochasticContribution."
+                )
+        self._stochastic_contribution_dict = stochastic_contribution_dict
+
     def get_Sh(
         self, f: float | np.ndarray, params_dict: dict[tuple], kwargs_dict: dict[dict]
     ) -> np.ndarray:
+        """Calculate Sh for stochastic contribution.
+
+        Args:
+            f: Frequency array.
+            params_dict: Dictionary with keys equivalent to ``self.stochastic_contribution_dict.keys()``.
+                Values are the parameters for each associated model.
+            kwargs_dict: Dictionary with keys equivalent to ``self.stochastic_contribution_dict.keys()``.
+                Values are the keyword argument dicts for each associated model.
+
+        Returns:
+            Stochastic contribution.
+
+        """
         Sh_out = np.zeros_like(f)
         for key in params_dict:
             stochastic_contrib = self.stochastic_contribution_dict[key]
@@ -100,9 +131,11 @@ class StochasticContributionContainer:
         return Sh_out
 
     def __setitem__(self, key: str | int | tuple, val: StochasticContribution) -> None:
+        """Set an item by directly indexing the class object."""
         self.stochastic_contribution_dict[key] = val
 
     def __getitem__(self, key: str | int | tuple) -> StochasticContribution:
+        """Get item directly from dictionary."""
         return self.stochastic_contribution_dict[key]
 
 
