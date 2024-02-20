@@ -321,7 +321,7 @@
         <span class="n">d_h</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">non_marg_d_h</span><span class="p">)</span> <span class="k">if</span> <span class="n">phase_maximize</span> <span class="k">else</span> <span class="n">non_marg_d_h</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">non_marg_d_h</span> <span class="o">=</span> <span class="n">non_marg_d_h</span>
         <span class="n">like_out</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span> <span class="o">/</span> <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="n">d_d</span> <span class="o">+</span> <span class="n">h_h</span> <span class="o">-</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">d_h</span><span class="p">)</span><span class="o">.</span><span class="n">real</span>
-
+        <span class="nb">print</span><span class="p">(</span><span class="n">include_psd_info</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">include_psd_info</span><span class="p">:</span>
             <span class="c1"># add noise term if requested</span>
             <span class="n">like_out</span> <span class="o">+=</span> <span class="bp">self</span><span class="o">.</span><span class="n">likelihood</span><span class="p">(</span><span class="n">noise_only</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
@@ -362,7 +362,7 @@
     <span class="k">def</span> <span class="nf">_calculate_signal_operation</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="n">calc</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-        <span class="n">params</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
+        <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">waveform_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
         <span class="n">data_res_arr_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
@@ -372,31 +372,41 @@
 
 <span class="sd">        Args:</span>
 <span class="sd">            calc: Type of calculation to do. Options are ``&quot;likelihood&quot;``, ``&quot;inner_product&quot;``, or ``&quot;snr&quot;``.</span>
-<span class="sd">            params: Parameters for signal.</span>
+<span class="sd">            *args: Arguments to waveform generating function. Must include parameters.</span>
 <span class="sd">            source_only: If ``True`` return the source-only Likelihood (leave out noise part).</span>
 <span class="sd">            waveform_kwargs: Keyword arguments to pass to waveform generator.</span>
 <span class="sd">            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.</span>
-<span class="sd">                This can be used if any transforms are desired prior to the Likelihood computation.</span>
+<span class="sd">                This can be used if any transforms are desired prior to the Likelihood computation. If it is not input,</span>
+<span class="sd">                the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.</span>
 <span class="sd">            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`</span>
 
 <span class="sd">        Returns:</span>
 <span class="sd">            Likelihood value.</span>
 
 <span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="n">data_res_arr_kwargs</span> <span class="o">==</span> <span class="p">{}:</span>
+            <span class="n">data_res_arr_kwargs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">init_kwargs</span>
+
         <span class="n">template</span> <span class="o">=</span> <span class="n">DataResidualArray</span><span class="p">(</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">signal_gen</span><span class="p">(</span><span class="o">*</span><span class="n">params</span><span class="p">,</span> <span class="o">**</span><span class="n">waveform_kwargs</span><span class="p">),</span> <span class="o">**</span><span class="n">data_res_arr_kwargs</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">signal_gen</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">waveform_kwargs</span><span class="p">),</span> <span class="o">**</span><span class="n">data_res_arr_kwargs</span>
         <span class="p">)</span>
 
-        <span class="n">args</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="n">template</span><span class="p">)</span>
+        <span class="n">args_2</span> <span class="o">=</span> <span class="p">(</span><span class="n">template</span><span class="p">,)</span>
 
-        <span class="n">kwargs</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">include_psd_info</span><span class="o">=</span><span class="p">(</span><span class="o">~</span><span class="n">source_only</span><span class="p">),</span> <span class="n">psd</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">if</span> <span class="s2">&quot;include_psd_info&quot;</span> <span class="ow">in</span> <span class="n">kwargs</span><span class="p">:</span>
+            <span class="k">assert</span> <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;include_psd_info&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="p">(</span><span class="ow">not</span> <span class="n">source_only</span><span class="p">)</span>
+            <span class="n">kwargs</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="s2">&quot;include_psd_info&quot;</span><span class="p">)</span>
+
+        <span class="n">kwargs</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">include_psd_info</span><span class="o">=</span><span class="p">(</span><span class="ow">not</span> <span class="n">source_only</span><span class="p">),</span> <span class="n">psd</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">calc</span> <span class="o">==</span> <span class="s2">&quot;likelihood&quot;</span><span class="p">:</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">template_likelihood</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">template_likelihood</span><span class="p">(</span><span class="o">*</span><span class="n">args_2</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
         <span class="k">elif</span> <span class="n">calc</span> <span class="o">==</span> <span class="s2">&quot;inner_product&quot;</span><span class="p">:</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">template_inner_product</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">template_inner_product</span><span class="p">(</span><span class="o">*</span><span class="n">args_2</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
         <span class="k">elif</span> <span class="n">calc</span> <span class="o">==</span> <span class="s2">&quot;snr&quot;</span><span class="p">:</span>
-            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">template_snr</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">template_snr</span><span class="p">(</span><span class="o">*</span><span class="n">args_2</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;`calc` must be &#39;likelihood&#39;, &#39;inner_product&#39;, or &#39;snr&#39;.&quot;</span><span class="p">)</span>
 
@@ -404,7 +414,7 @@
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_likelihood">[docs]</a>
     <span class="k">def</span> <span class="nf">calculate_signal_likelihood</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
-        <span class="n">params</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
+        <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">waveform_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
         <span class="n">data_res_arr_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
@@ -413,7 +423,7 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the likelihood of a generated signal with the data.</span>
 
 <span class="sd">        Args:</span>
-<span class="sd">            params: Parameters for signal.</span>
+<span class="sd">            params: Arguments to waveform generating function. Must include parameters.</span>
 <span class="sd">            source_only: If ``True`` return the source-only Likelihood (leave out noise part).</span>
 <span class="sd">            waveform_kwargs: Keyword arguments to pass to waveform generator.</span>
 <span class="sd">            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.</span>
@@ -425,9 +435,9 @@
 
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">_calculate_signal_operation</span><span class="p">(</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_calculate_signal_operation</span><span class="p">(</span>
             <span class="s2">&quot;likelihood&quot;</span><span class="p">,</span>
-            <span class="n">params</span><span class="p">,</span>
+            <span class="o">*</span><span class="n">args</span><span class="p">,</span>
             <span class="n">source_only</span><span class="o">=</span><span class="n">source_only</span><span class="p">,</span>
             <span class="n">waveform_kwargs</span><span class="o">=</span><span class="n">waveform_kwargs</span><span class="p">,</span>
             <span class="n">data_res_arr_kwargs</span><span class="o">=</span><span class="n">data_res_arr_kwargs</span><span class="p">,</span>
@@ -439,7 +449,7 @@
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_inner_product">[docs]</a>
     <span class="k">def</span> <span class="nf">calculate_signal_inner_product</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
-        <span class="n">params</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
+        <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">waveform_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
         <span class="n">data_res_arr_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
@@ -448,7 +458,7 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the inner product of a generated signal with the data.</span>
 
 <span class="sd">        Args:</span>
-<span class="sd">            params: Parameters for signal.</span>
+<span class="sd">            *args: Arguments to waveform generating function. Must include parameters.</span>
 <span class="sd">            source_only: If ``True`` return the source-only Likelihood (leave out noise part).</span>
 <span class="sd">            waveform_kwargs: Keyword arguments to pass to waveform generator.</span>
 <span class="sd">            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.</span>
@@ -460,9 +470,9 @@
 
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">_calculate_signal_operation</span><span class="p">(</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_calculate_signal_operation</span><span class="p">(</span>
             <span class="s2">&quot;inner_product&quot;</span><span class="p">,</span>
-            <span class="n">params</span><span class="p">,</span>
+            <span class="o">*</span><span class="n">args</span><span class="p">,</span>
             <span class="n">source_only</span><span class="o">=</span><span class="n">source_only</span><span class="p">,</span>
             <span class="n">waveform_kwargs</span><span class="o">=</span><span class="n">waveform_kwargs</span><span class="p">,</span>
             <span class="n">data_res_arr_kwargs</span><span class="o">=</span><span class="n">data_res_arr_kwargs</span><span class="p">,</span>
@@ -474,7 +484,7 @@
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_snr">[docs]</a>
     <span class="k">def</span> <span class="nf">calculate_signal_snr</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
-        <span class="n">params</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
+        <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">ArrayLike</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">waveform_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
         <span class="n">data_res_arr_kwargs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span> <span class="o">=</span> <span class="p">{},</span>
@@ -483,7 +493,7 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the SNR of a generated signal with the data.</span>
 
 <span class="sd">        Args:</span>
-<span class="sd">            params: Parameters for signal.</span>
+<span class="sd">            *args: Arguments to waveform generating function. Must include parameters.</span>
 <span class="sd">            source_only: If ``True`` return the source-only Likelihood (leave out noise part).</span>
 <span class="sd">            waveform_kwargs: Keyword arguments to pass to waveform generator.</span>
 <span class="sd">            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.</span>
@@ -495,9 +505,9 @@
 
 <span class="sd">        &quot;&quot;&quot;</span>
 
-        <span class="bp">self</span><span class="o">.</span><span class="n">_calculate_signal_operation</span><span class="p">(</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_calculate_signal_operation</span><span class="p">(</span>
             <span class="s2">&quot;snr&quot;</span><span class="p">,</span>
-            <span class="n">params</span><span class="p">,</span>
+            <span class="o">*</span><span class="n">args</span><span class="p">,</span>
             <span class="n">source_only</span><span class="o">=</span><span class="n">source_only</span><span class="p">,</span>
             <span class="n">waveform_kwargs</span><span class="o">=</span><span class="n">waveform_kwargs</span><span class="p">,</span>
             <span class="n">data_res_arr_kwargs</span><span class="o">=</span><span class="n">data_res_arr_kwargs</span><span class="p">,</span>

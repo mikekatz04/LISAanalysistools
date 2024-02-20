@@ -674,7 +674,9 @@ class SensitivityMatrix:
 
 
         """
-        if (ax is None and fig is None) or (ax is not None and isinstance(ax, list)):
+        if (ax is None and fig is None) or (
+            ax is not None and (isinstance(ax, list) or isinstance(ax, np.ndarray))
+        ):
             if ax is None and fig is None:
                 outer_shape = self.shape[:-1]
                 if len(outer_shape) == 2:

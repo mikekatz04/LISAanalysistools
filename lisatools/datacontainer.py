@@ -57,6 +57,16 @@ class DataResidualArray:
             self.data_res_arr = data_res_in
             self._store_time_and_frequency_information(dt=dt, f_arr=f_arr, df=df)
 
+    @property
+    def init_kwargs(self) -> dict:
+        """Initial dt, df, f_arr"""
+        return self._init_kwargs
+
+    @init_kwargs.setter
+    def init_kwargs(self, init_kwargs: dict) -> None:
+        """Set initial kwargs."""
+        self._init_kwargs = init_kwargs
+
     def _check_inputs(
         self,
         dt: Optional[float] = None,
@@ -76,6 +86,7 @@ class DataResidualArray:
             raise ValueError(
                 "Can only provide one of dt, f_arr, or df. Not more than one."
             )
+        self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
 
     def _store_time_and_frequency_information(
         self,

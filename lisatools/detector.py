@@ -51,6 +51,15 @@ def get_available_default_lisa_models() -> List[LISAModel]:
 
 
 def get_default_lisa_model_from_str(model: str) -> LISAModel:
+    """Return a LISA model from a ``str`` input.
+
+    Args:
+        model: Model indicated with a ``str``.
+
+    Returns:
+        LISA model associated to that ``str``.
+
+    """
     if model not in __stock_list_models_name__:
         raise ValueError(
             "Requested string model is not available. See lisatools.detector documentation."
@@ -59,6 +68,15 @@ def get_default_lisa_model_from_str(model: str) -> LISAModel:
 
 
 def check_lisa_model(model: Any) -> LISAModel:
+    """Check input LISA model.
+
+    Args:
+        model: LISA model to check.
+
+    Returns:
+        LISA Model checked. Adjusted from ``str`` if ``str`` input.
+
+    """
     if isinstance(model, str):
         model = get_default_lisa_model_from_str(model)
 

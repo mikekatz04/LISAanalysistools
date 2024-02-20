@@ -69,9 +69,9 @@ def AET(
 
     """
     return (
-        (Z - X) / math.sqrt(2.0),
-        (X - 2.0 * Y + Z) / math.sqrt(6.0),
-        (X + Y + Z) / math.sqrt(3.0),
+        (Z - X) / np.sqrt(2.0),
+        (X - 2.0 * Y + Z) / np.sqrt(6.0),
+        (X + Y + Z) / np.sqrt(3.0),
     )
 
 
@@ -96,83 +96,6 @@ def searchsorted2d_vec(a, b, xp=None, gpu=None, **kwargs):
         pass
 
     return out
-
-
-"""
-def get_groups_from_band_structure(f0_1, band_edges, f0_2=None, xp=None):
-    if xp is None:
-        xp = np
-
-    else:
-        try:
-            xp.cuda.runtime.setDevice(xp.cuda.runtime.getDevice())
-
-        except AttributeError:
-            # it is numpy
-            pass
-
-    freqs = [f0_1] if f0_2 is None else [f0_1, f0_2]
-    band_indices_special_arr = [None for _ in freqs]
-    temp_inds_arr = [None for _ in freqs]
-    walkers_inds_arr = [None for _ in freqs]
-    for i, f0 in enumerate(freqs):
-        if not isinstance(f0, xp.ndarray) or not isinstance(band_edges, xp.ndarray):
-            raise TypeError("f0 and band_edges must be xp.ndarray with xp as numpy or cupy as given by the xp kwarg.")
-
-        shape = f0.shape
-
-        # remove any above or below bands
-        bad = (f0 < band_edges.min()) | (f0 > band_edges.max())
-        band_indices = xp.searchsorted(band_edges, f0.flatten()).reshape(shape) - 1
-
-        # temperature index associated with each band
-        temp_inds = xp.repeat(xp.arange(band_indices.shape[0]), np.prod(band_indices.shape[1:])).reshape(shape)
-
-        # walker index associated with each band
-        walker_inds = xp.tile(xp.arange(band_indices.shape[1]), (band_indices.shape[0], band_indices.shape[2], 1)).transpose((0, 2, 1))
-
-        # special indexing method
-        band_indices_special = (band_indices + int(1e12) * temp_inds + int(1e6) * walker_inds)
-
-        band_indices_special_arr[i] = band_indices_special
-        walkers_inds_arr[i] = walker_inds
-        temp_inds_arr[i] = temp_inds
-
-    if len(band_indices_special_arr) == 1:
-        band_indices_special_arr.append(band_indices_special_arr[0].copy())
-
-    band_indices_special_arr = xp.asarray(band_indices_special_arr).transpose((1, 2, 3, 0))
-    walkers_inds_arr = xp.asarray(walkers_inds_arr).transpose((1, 2, 3, 0))
-    temp_inds_arr = xp.asarray(temp_inds_arr).transpose((1, 2, 3, 0))
-
-    # sort the bands in, but keep places with inds_band_indices
-    inds_band_indices = xp.argsort(band_indices_special_arr[:, :, :, 0], axis=-1)
-
-    band_indices_sorted_special = xp.take_along_axis(band_indices_special_arr, inds_band_indices[:, :, :, None], axis=2)
-
-    band_indices_sorted_special_0 = band_indices_sorted_special[:, :, :, 0]
-
-    # get the unique special indicators
-    unique_special, unique_special_start_inds, unique_special_reverse, unique_special_counts = np.unique(band_indices_sorted_special_0, return_index=True, return_inverse=True, return_counts=True)
-
-    # this basically makes mini arange setups for each band
-    # the added_contribution for the first unique band index is removed
-    added_contribution = xp.arange(np.prod(band_indices_sorted_special_0.shape)).reshape(band_indices_sorted_special_0.shape)
-
-    # gets the groups
-    combined = band_indices_sorted_special_0 + added_contribution
-    groups = combined - ((combined.flatten()[unique_special_start_inds])[unique_special_reverse]).reshape(band_indices_sorted_special_0.shape)
-
-    groups_even_odd = (2 * groups) * (band_indices_sorted_special_0 % 2 == 0) + (2 * groups + 1) * (band_indices_sorted_special_0 % 2 == 1)
-
-    groups_even_odd[bad] = -1
-    
-    groups_out = groups_even_odd.copy()
-    groups_out[(temp_inds.flatten(), walker_inds.flatten(), inds_band_indices.flatten())] = groups_even_odd.flatten()
-    breakpoint()
-    return groups_out
-
-"""
 
 
 def get_groups_from_band_structure(

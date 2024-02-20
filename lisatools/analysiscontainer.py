@@ -223,7 +223,7 @@ class AnalysisContainer:
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
         like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
-
+        print(include_psd_info)
         if include_psd_info:
             # add noise term if requested
             like_out += self.likelihood(noise_only=True)
@@ -260,7 +260,7 @@ class AnalysisContainer:
     def _calculate_signal_operation(
         self,
         calc: str,
-        params: ArrayLike,
+        *args: ArrayLike,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
@@ -270,37 +270,47 @@ class AnalysisContainer:
 
         Args:
             calc: Type of calculation to do. Options are ``"likelihood"``, ``"inner_product"``, or ``"snr"``.
-            params: Parameters for signal.
+            *args: Arguments to waveform generating function. Must include parameters.
             source_only: If ``True`` return the source-only Likelihood (leave out noise part).
             waveform_kwargs: Keyword arguments to pass to waveform generator.
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
-                This can be used if any transforms are desired prior to the Likelihood computation.
+                This can be used if any transforms are desired prior to the Likelihood computation. If it is not input,
+                the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
 
         Returns:
             Likelihood value.
 
         """
+
+        if data_res_arr_kwargs == {}:
+            data_res_arr_kwargs = self.data_res_arr.init_kwargs
+
         template = DataResidualArray(
-            self.signal_gen(*params, **waveform_kwargs), **data_res_arr_kwargs
+            self.signal_gen(*args, **waveform_kwargs), **data_res_arr_kwargs
         )
 
-        args = (self.data_res_arr, template)
+        args_2 = (template,)
 
-        kwargs = dict(include_psd_info=(~source_only), psd=self.sens_mat, **kwargs)
+        if "include_psd_info" in kwargs:
+            assert kwargs["include_psd_info"] == (not source_only)
+            kwargs.pop("include_psd_info")
+
+        kwargs = dict(include_psd_info=(not source_only), psd=self.sens_mat, **kwargs)
 
         if calc == "likelihood":
-            return self.template_likelihood(*args, **kwargs)
+            print(kwargs)
+            return self.template_likelihood(*args_2, **kwargs)
         elif calc == "inner_product":
-            return self.template_inner_product(*args, **kwargs)
+            return self.template_inner_product(*args_2, **kwargs)
         elif calc == "snr":
-            return self.template_snr(*args, **kwargs)
+            return self.template_snr(*args_2, **kwargs)
         else:
             raise ValueError("`calc` must be 'likelihood', 'inner_product', or 'snr'.")
 
     def calculate_signal_likelihood(
         self,
-        params: ArrayLike,
+        *args: ArrayLike,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
@@ -309,7 +319,7 @@ class AnalysisContainer:
         """Return the likelihood of a generated signal with the data.
 
         Args:
-            params: Parameters for signal.
+            params: Arguments to waveform generating function. Must include parameters.
             source_only: If ``True`` return the source-only Likelihood (leave out noise part).
             waveform_kwargs: Keyword arguments to pass to waveform generator.
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
@@ -321,9 +331,9 @@ class AnalysisContainer:
 
         """
 
-        self._calculate_signal_operation(
+        return self._calculate_signal_operation(
             "likelihood",
-            params,
+            *args,
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
             data_res_arr_kwargs=data_res_arr_kwargs,
@@ -332,7 +342,7 @@ class AnalysisContainer:
 
     def calculate_signal_inner_product(
         self,
-        params: ArrayLike,
+        *args: ArrayLike,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
@@ -341,7 +351,7 @@ class AnalysisContainer:
         """Return the inner product of a generated signal with the data.
 
         Args:
-            params: Parameters for signal.
+            *args: Arguments to waveform generating function. Must include parameters.
             source_only: If ``True`` return the source-only Likelihood (leave out noise part).
             waveform_kwargs: Keyword arguments to pass to waveform generator.
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
@@ -353,9 +363,9 @@ class AnalysisContainer:
 
         """
 
-        self._calculate_signal_operation(
+        return self._calculate_signal_operation(
             "inner_product",
-            params,
+            *args,
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
             data_res_arr_kwargs=data_res_arr_kwargs,
@@ -364,7 +374,7 @@ class AnalysisContainer:
 
     def calculate_signal_snr(
         self,
-        params: ArrayLike,
+        *args: ArrayLike,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
@@ -373,7 +383,7 @@ class AnalysisContainer:
         """Return the SNR of a generated signal with the data.
 
         Args:
-            params: Parameters for signal.
+            *args: Arguments to waveform generating function. Must include parameters.
             source_only: If ``True`` return the source-only Likelihood (leave out noise part).
             waveform_kwargs: Keyword arguments to pass to waveform generator.
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
@@ -385,9 +395,9 @@ class AnalysisContainer:
 
         """
 
-        self._calculate_signal_operation(
+        return self._calculate_signal_operation(
             "snr",
-            params,
+            *args,
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
             data_res_arr_kwargs=data_res_arr_kwargs,
