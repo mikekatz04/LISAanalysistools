@@ -45,6 +45,8 @@ public:
     int get_sc_ind(int sc);
     double get_light_travel_time(double t, int link);
     Vec get_pos(double t, int sc);
+    void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
+    void get_pos_ptr(Vec *vec, double t, int sc);
 };
 
 #endif // __DETECTOR_HPP__

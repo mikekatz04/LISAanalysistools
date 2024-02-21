@@ -131,7 +131,7 @@ class Orbits(ABC):
     def n(self) -> np.ndarray:
         """Light travel time."""
         self._check_configured()
-        return self._ltt
+        return self._n
 
     @n.setter
     def n(self, n: np.ndarray) -> np.ndarray:
@@ -270,6 +270,22 @@ class Orbits(ABC):
             raise ValueError(
                 "Cannot request property. Need to use configure() method first."
             )
+
+    def get_light_travel_times(
+        self, t: float | np.ndarray, link: int
+    ) -> float | np.ndarray:
+        return self.pycppdetector.get_light_travel_times(t, link)
+
+    def get_normal_unit_vec(self, t: float | np.ndarray, link: int) -> np.ndarray:
+        return self.pycppdetector.get_normal_unit_vec(t, link)
+
+    def get_pos(self, t: float | np.ndarray, sc: int) -> np.ndarray:
+        return self.pycppdetector.get_pos(t, sc)
+
+    @property
+    def ptr(self) -> int:
+        """pointer to c-class"""
+        return self.pycppdetector.ptr
 
 
 class EqualArmlengthOrbits(Orbits):
