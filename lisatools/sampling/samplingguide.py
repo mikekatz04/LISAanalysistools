@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 
-#%matplotlib inline
+# %matplotlib inline
 
 from bbhx.waveformbuild import BBHWaveformFD
 from bbhx.utils.transform import tLfromSSBframe
@@ -27,7 +27,7 @@ from bbhx.utils.transform import (
 )
 from eryn.prior import uniform_dist
 from eryn.backends import HDFBackend
-from lisatools.utils.constants import *
+from lisaconstants import *
 from gbgpu.utils.constants import YEAR
 from eryn.prior import ProbDistContainer
 from eryn.utils import TransformContainer, PeriodicContainer
@@ -71,7 +71,6 @@ class SamplerGuide:
         start_factor=None,
         verbose=False,
     ):
-
         self.input_start_state = start_state
 
         self.use_gpu = use_gpu
@@ -161,12 +160,11 @@ class SamplerGuide:
                     raise ValueError(
                         "If generating points from fisher matrix, must store start_mean and cov attributes."
                     )
-                
+
                 run_flag = True
                 while run_flag:
                     coords_all = {}
                     for i, key in enumerate(self.branch_names):
-
                         coords_all[key] = np.zeros(
                             self.ntemps,
                             self.nwalkers,
@@ -180,7 +178,10 @@ class SamplerGuide:
                                         continue
 
                                     coords = np.zeros(
-                                        (self.nleaves_max[i], self.default_ndims[i],)
+                                        (
+                                            self.nleaves_max[i],
+                                            self.default_ndims[i],
+                                        )
                                     )
                                     inds_fix = np.arange(self.nleaves_max[i])
 
@@ -191,14 +192,18 @@ class SamplerGuide:
                                             raise RuntimeError(
                                                 "Covariance matrix walker generation is not generating walkers in the prior range."
                                             )
-                                        coords[inds_fix] = np.random.multivariate_normal(
+                                        coords[
+                                            inds_fix
+                                        ] = np.random.multivariate_normal(
                                             self.start_mean[l],
                                             self.start_factor * self.cov[l],
                                             size=len(inds_fix),
                                         )
 
                                         inds_fix = np.where(
-                                            np.isinf(self.priors.logpdf(self._start_state))
+                                            np.isinf(
+                                                self.priors.logpdf(self._start_state)
+                                            )
                                         )[0]
 
                                         iter_num += 1
@@ -274,7 +279,6 @@ class SamplerGuide:
     def _set_parameter_transforms(
         self, transform_container, parameter_transforms_in, fill_dict_in
     ):
-
         if transform_container is not None:
             if isinstance(transform_container, TransformContainer):
                 raise ValueError(
@@ -467,7 +471,9 @@ class MBHGuide(SamplerGuide):
             compress=True,
         )
         return dict(
-            template_gen_kwargs=template_kwargs, noise_kwargs_AE={}, noise_kwargs_T={},
+            template_gen_kwargs=template_kwargs,
+            noise_kwargs_AE={},
+            noise_kwargs_T={},
         )
 
     @property
@@ -494,7 +500,6 @@ class MBHGuide(SamplerGuide):
         multi_mode_start=True,
         **kwargs,
     ):
-
         self.global_fit = global_fit
         if global_fit:
             raise NotImplementedError
@@ -642,7 +647,6 @@ class MBHGuide(SamplerGuide):
 class GBGuide(SamplerGuide):
     @property
     def default_priors(self):
-
         if hasattr(self, "include_fddot") and self.include_fddot:
             ind_change = 1
         else:
@@ -684,7 +688,6 @@ class GBGuide(SamplerGuide):
 
     @property
     def default_fill_dict(self):
-
         if hasattr(self, "include_fddot") and self.include_fddot:
             return {
                 "gb": {
@@ -717,10 +720,14 @@ class GBGuide(SamplerGuide):
             noise_fn=get_sensitivity,
             noise_kwargs=[
                 dict(
-                    sens_fn="noisepsd_AE", model="SciRDv1", includewd=self.Tobs / YEAR,
+                    sens_fn="noisepsd_AE",
+                    model="SciRDv1",
+                    includewd=self.Tobs / YEAR,
                 ),
                 dict(
-                    sens_fn="noisepsd_AE", model="SciRDv1", includewd=self.Tobs / YEAR,
+                    sens_fn="noisepsd_AE",
+                    model="SciRDv1",
+                    includewd=self.Tobs / YEAR,
                 ),
             ],
             add_noise=False,
@@ -852,7 +859,6 @@ class GBGuide(SamplerGuide):
         adjust_betas=False,
         **kwargs,
     ):
-
         self.global_fit = global_fit
         if global_fit:
             raise NotImplementedError
@@ -945,7 +951,10 @@ class GBGuide(SamplerGuide):
                 make_params[0] *= factor
                 injection_params[0] = np.log(make_params[0])
 
-                A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs_in,)
+                A_inj, E_inj = gb.inject_signal(
+                    *make_params,
+                    **template_kwargs_in,
+                )
                 snr_check2 = snr([A_inj, E_inj], **temp_inner_product_kwargs)
 
                 # print(snr_check2)
@@ -1004,14 +1013,14 @@ class GBGuide(SamplerGuide):
 
         self.lnprob = gb
 
-        #self.start_state = self.input_start_state
+        # self.start_state = self.input_start_state
 
         self.injection_setup_kwargs["params"] = None
         self.lnprob.inject_signal(**self.injection_setup_kwargs)
         self.setup_sampler()
-        #self.adjust_start_state()
+        # self.adjust_start_state()
 
-        #if self.test_start_likelihood:
+        # if self.test_start_likelihood:
         #    self.perform_test_start_likelihood()
 
         # check = self.lnprob.get_ll(
@@ -1022,7 +1031,6 @@ class GBGuide(SamplerGuide):
 class EMRIGuide(SamplerGuide):
     @property
     def default_priors(self):
-
         default_priors = {
             0: uniform_dist(np.log(1e5), np.log(1e7)),
             1: uniform_dist(1.0, 100.0),
@@ -1134,10 +1142,14 @@ class EMRIGuide(SamplerGuide):
             noise_fn=get_sensitivity,
             noise_kwargs=[
                 dict(
-                    sens_fn="lisasens", model="SciRDv1", includewd=self.Tobs / YRSID_SI,
+                    sens_fn="lisasens",
+                    model="SciRDv1",
+                    includewd=self.Tobs / YRSID_SI,
                 ),
                 dict(
-                    sens_fn="lisasens", model="SciRDv1", includewd=self.Tobs / YRSID_SI,
+                    sens_fn="lisasens",
+                    model="SciRDv1",
+                    includewd=self.Tobs / YRSID_SI,
                 ),
             ],
             add_noise=False,
@@ -1159,7 +1171,6 @@ class EMRIGuide(SamplerGuide):
 
     @property
     def default_periodic(self):
-
         intrinsic = False
         schwarzschild = False
         if hasattr(self, "intrinsic") and self.intrinsic:
@@ -1234,7 +1245,6 @@ class EMRIGuide(SamplerGuide):
         inner_product_kwargs={},
         **kwargs,
     ):
-
         self.nchannels = 2
 
         if f_arr is None:
@@ -1301,7 +1311,10 @@ class EMRIGuide(SamplerGuide):
                 make_params[0] *= factor
                 injection_params[0] = np.log(make_params[0])
 
-                A_inj, E_inj = gb.inject_signal(*make_params, **template_kwargs,)
+                A_inj, E_inj = gb.inject_signal(
+                    *make_params,
+                    **template_kwargs,
+                )
                 snr_check2 = snr([A_inj, E_inj], **temp_inner_product_kwargs)
 
                 # print(snr_check2)
@@ -1340,7 +1353,6 @@ class EMRIGuide(SamplerGuide):
 
 
 if __name__ == "__main__":
-
     from lisatools.utils.utility import AET
     from gbgpu.utils.constants import *
 
@@ -1429,11 +1441,9 @@ if __name__ == "__main__":
     for i, (M, mu, p0, e0, dist) in tqdm.tqdm(
         enumerate(zip(M_arr, mu_arr, p0_arr, e0_arr, dist_arr))
     ):
-
         for j, (wave_gen, wave_kwargs, key) in enumerate(
             zip(wave_gens, wave_kwargs_list, keys)
         ):
-
             print(M, mu, e0, key)
 
             e0_temp = e0
