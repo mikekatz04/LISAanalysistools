@@ -39,6 +39,16 @@ class Orbits(ABC):
         """Spacecraft order."""
         return SC
 
+    @property
+    def link_space_craft_r(self) -> List[int]:
+        """Receiver (first) spacecraft"""
+        return [int(str(link_i)[0]) for link_i in self.LINKS]
+
+    @property
+    def link_space_craft_e(self) -> List[int]:
+        """Sender (second) spacecraft"""
+        return [int(str(link_i)[1]) for link_i in self.LINKS]
+
     def _setup(self) -> None:
         with self.open() as f:
             for key in f.attrs.keys():
@@ -222,13 +232,20 @@ class Orbits(ABC):
 
         self.configured = True
 
+        lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
+        lse = np.asarray(self.link_space_craft_e).copy().astype(np.int32)
+        ll = np.asarray(self.LINKS).copy().astype(np.int32)
+
         if make_cpp:
             self.pycppdetector = pycppDetector(
                 dt,
                 len(self.t),
-                self.n.flatten(),
-                self.ltt.flatten(),
-                self.x.flatten(),
+                self.n.flatten().copy(),
+                self.ltt.flatten().copy(),
+                self.x.flatten().copy(),
+                ll,
+                lsr,
+                lse,
             )
             self.dt = dt
         else:

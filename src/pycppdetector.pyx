@@ -13,13 +13,15 @@ cdef extern from "../include/Detector.hpp":
         VecWrap(double x_, double y_, double z_) except+
 
     cdef cppclass OrbitsWrap "Orbits":
-        OrbitsWrap(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_) except+
+        OrbitsWrap(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_s_) except+
         int get_window(double t) except+
         void get_normal_unit_vec_ptr(VecWrap *vec, double t, int link)
         int get_link_ind(int link) except+
         int get_sc_ind(int sc) except+
         double get_light_travel_time(double t, int link) except+
         VecWrap get_pos_ptr(VecWrap* out, double t, int sc) except+
+        void dealloc();
+        
 
 cdef class pycppDetector:
     cdef OrbitsWrap *g
@@ -34,11 +36,17 @@ cdef class pycppDetector:
             n_arr,
             L_arr, 
             x_arr,
+            links,
+            sc_r, 
+            sc_s
         ), tkwargs = wrapper(*args, **kwargs)
 
         cdef size_t n_arr_in = n_arr
         cdef size_t L_arr_in = L_arr
         cdef size_t x_arr_in = x_arr
+        cdef size_t links_in = links
+        cdef size_t sc_r_in = sc_r
+        cdef size_t sc_s_in = sc_s
         
         self.g = new OrbitsWrap(
             dt,
@@ -46,9 +54,13 @@ cdef class pycppDetector:
             <double*> n_arr_in,
             <double*> L_arr_in, 
             <double*> x_arr_in, 
+            <int*> links_in, 
+            <int*> sc_r_in, 
+            <int*> sc_s_in
         )
 
     def __dealloc__(self):
+        self.g.dealloc()
         if self.g:
             del self.g
 

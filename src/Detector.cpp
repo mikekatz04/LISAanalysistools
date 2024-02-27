@@ -2,6 +2,8 @@
 #include "Detector.hpp"
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <sstream>
 
 int Orbits::get_window(double t)
 {
@@ -44,20 +46,31 @@ int Orbits::get_sc_ind(int sc)
     else if (sc == 3)
         return 2;
     else
+    {
 #ifdef __CUDACC__
-        printf("BAD sc ind. Must be 1,2,3.");
+        printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
 #else
-        throw std::invalid_argument("Bad sc ind. Must be 1,2,3.");
+        std::ostringstream oss;
+        int xxxx = 1;
+        oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << xxxx;
+        std::string var = oss.str();
+        throw std::invalid_argument(var);
 #endif // __CUDACC__
-    return -1;
+    }
+    return 0;
 }
 
-double Orbits::interpolate(double t, double *in_arr, int down_ind, int up_ind, int ndim, int pos)
+double Orbits::interpolate(double t, double *in_arr, int window, int major_ndim, int major_ind, int ndim, int pos)
 {
-    double down = in_arr[down_ind * ndim + pos];
-    double up = in_arr[up_ind * ndim + pos];
+    double up = in_arr[((window + 1) * major_ndim + major_ind) * ndim + pos]; // down_ind * ndim + pos];
+    double down = in_arr[(window * major_ndim + major_ind) * ndim + pos];
+
     // m *(x - x0) + y0
-    return ((up - down) / dt) * (t - (dt * down_ind)) + down;
+    double fin = ((up - down) / dt) * (t - (dt * window)) + down;
+    // if ((ndim == 1))
+    //     printf("%e %e %e %e \n", fin, down, up, (t - (dt * window)));
+
+    return fin;
 }
 
 void Orbits::get_normal_unit_vec_ptr(Vec *vec, double t, int link)
@@ -83,11 +96,11 @@ Vec Orbits::get_normal_unit_vec(double t, int link)
     int down_ind = window * nlinks + link_ind;
 
     // x (pos = 0) ndim = 3
-    double x_out = interpolate(t, n_arr, down_ind, up_ind, 3, 0);
+    double x_out = interpolate(t, n_arr, window, nlinks, link_ind, 3, 0);
     // y (pos = 1)
-    double y_out = interpolate(t, n_arr, down_ind, up_ind, 3, 1);
+    double y_out = interpolate(t, n_arr, window, nlinks, link_ind, 3, 1);
     // z (pos = 2)
-    double z_out = interpolate(t, n_arr, down_ind, up_ind, 3, 2);
+    double z_out = interpolate(t, n_arr, window, nlinks, link_ind, 3, 2);
 
     return Vec(x_out, y_out, z_out);
 }
@@ -102,12 +115,13 @@ double Orbits::get_light_travel_time(double t, int link)
     }
 
     int link_ind = get_link_ind(link);
-
+    if ((link_ind < 0) || (link_ind >= 6))
+        printf("BAD %d\n", link_ind);
     int up_ind = (window + 1) * (nlinks + link_ind);
     int down_ind = window * (nlinks + link_ind);
 
     // x (pos = 0), ndim = 1
-    double ltt_out = interpolate(t, ltt_arr, down_ind, up_ind, 1, 0);
+    double ltt_out = interpolate(t, ltt_arr, window, nlinks, link_ind, 1, 0);
 
     return ltt_out;
 }
@@ -123,15 +137,12 @@ Vec Orbits::get_pos(double t, int sc)
 
     int sc_ind = get_sc_ind(sc);
 
-    int up_ind = (window + 1) * nspacecraft + sc_ind;
-    int down_ind = window * nspacecraft + sc_ind;
-
     // x (pos = 0), ndim = 3
-    double x_out = interpolate(t, x_arr, down_ind, up_ind, 3, 0);
+    double x_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 0);
     // y (pos = 1), ndim = 3
-    double y_out = interpolate(t, x_arr, down_ind, up_ind, 3, 1);
+    double y_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 1);
     // z (pos = 2), ndim = 3
-    double z_out = interpolate(t, x_arr, down_ind, up_ind, 3, 2);
+    double z_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 2);
     return Vec(x_out, y_out, z_out);
 }
 
