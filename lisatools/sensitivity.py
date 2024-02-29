@@ -621,7 +621,7 @@ class SensitivityMatrix:
                 )
 
             elif isinstance(current_sens, np.ndarray) or isinstance(
-                current_sens, cp.npdarray
+                current_sens, cp.ndarray
             ):
                 new_out[i] = current_sens
             else:
