@@ -310,7 +310,9 @@ class EqualArmlengthOrbits(Orbits):
 
     def __init__(self):
         # TODO: fix this up
-        super().__init__("equalarmlength-orbits.h5")
+        super().__init__(
+            "/Users/mlkatz1/Research/LISAanalysistools/examples/equalarmlength-orbits.h5"
+        )
 
 
 class DefaultOrbits(EqualArmlengthOrbits):
@@ -334,8 +336,8 @@ class LISAModelSettings:
 
     Soms_d: float
     Sa_a: float
-    name: str
     orbits: Orbits
+    name: str
 
 
 class LISAModel(LISAModelSettings, ABC):
