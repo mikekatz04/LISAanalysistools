@@ -13,7 +13,7 @@ cdef extern from "../include/Detector.hpp":
         VecWrap(double x_, double y_, double z_) except+
 
     cdef cppclass OrbitsWrap "Orbits":
-        OrbitsWrap(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_s_) except+
+        OrbitsWrap(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_) except+
         int get_window(double t) except+
         void get_normal_unit_vec_ptr(VecWrap *vec, double t, int link)
         int get_link_ind(int link) except+
@@ -25,6 +25,14 @@ cdef extern from "../include/Detector.hpp":
 
 cdef class pycppDetector:
     cdef OrbitsWrap *g
+    cdef double dt
+    cdef int N
+    cdef size_t n_arr
+    cdef size_t L_arr
+    cdef size_t x_arr
+    cdef size_t links
+    cdef size_t sc_r
+    cdef size_t sc_e
 
     def __cinit__(self, 
         *args, 
@@ -38,15 +46,24 @@ cdef class pycppDetector:
             x_arr,
             links,
             sc_r, 
-            sc_s
+            sc_e
         ), tkwargs = wrapper(*args, **kwargs)
+
+        self.dt = dt
+        self.N = N 
+        self.n_arr = n_arr
+        self.L_arr = L_arr 
+        self.x_arr = x_arr
+        self.links = links
+        self.sc_r = sc_r
+        self.sc_e = sc_e
 
         cdef size_t n_arr_in = n_arr
         cdef size_t L_arr_in = L_arr
         cdef size_t x_arr_in = x_arr
         cdef size_t links_in = links
         cdef size_t sc_r_in = sc_r
-        cdef size_t sc_s_in = sc_s
+        cdef size_t sc_e_in = sc_e
         
         self.g = new OrbitsWrap(
             dt,
@@ -56,13 +73,16 @@ cdef class pycppDetector:
             <double*> x_arr_in, 
             <int*> links_in, 
             <int*> sc_r_in, 
-            <int*> sc_s_in
+            <int*> sc_e_in
         )
 
     def __dealloc__(self):
         self.g.dealloc()
         if self.g:
             del self.g
+
+    def __reduce__(self):
+        return (rebuild, (self.dt, self.N, self.n_arr, self.L_arr, self.x_arr, self.links, self.sc_r, self.sc_e,))
 
     def get_window(self, t: float) -> int:
         return self.g.get_window(t)
@@ -139,3 +159,23 @@ cdef class pycppDetector:
         return <uintptr_t>self.g
     
         
+def rebuild(dt,
+    N, 
+    n_arr,
+    L_arr, 
+    x_arr,
+    links,
+    sc_r, 
+    sc_e
+):
+    c = pycppDetector(
+        dt,
+        N, 
+        n_arr,
+        L_arr, 
+        x_arr,
+        links,
+        sc_r, 
+        sc_e
+    )
+    return c

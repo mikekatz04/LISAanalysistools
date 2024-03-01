@@ -8,6 +8,7 @@
    user/sensitivity
    user/stochastic
    user/datacontainer
+   user/sources
    
 .. toctree::
    :maxdepth: 4

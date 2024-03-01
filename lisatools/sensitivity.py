@@ -687,7 +687,11 @@ class SensitivityMatrix:
                     ncols = outer_shape[0]
 
                 fig, ax = plt.subplots(nrows, ncols, sharex=True, sharey=True)
-                ax = ax.ravel()
+                try:
+                    ax = ax.ravel()
+                except AttributeError:
+                    ax = [ax]  # just one axis object, no list
+
             else:
                 assert len(ax) == np.prod(self.shape[:-1])
 
