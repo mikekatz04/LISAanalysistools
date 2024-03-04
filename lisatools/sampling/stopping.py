@@ -289,7 +289,7 @@ class MPICommunicateStopping(Stopping):
         if not hasattr(self, "rank"):
             self.rank = self.comm.Get_rank()
             if not self.rank == self.stopper_rank and not self.rank in self.other_ranks:
-                raise ValueError("Rank is not available in other ranks list. Must be either stopper rank or in other ranks list.")
+                raise ValueError(f"Rank ({self.rank}) is not available in other ranks list ({self.other_ranks}). Must be either stopper rank ({self.stopper_rank}) or in other ranks list.")
 
             if self.stopper_rank == self.rank and self.stop_fn is None:
                 raise ValueError("Rank is equivalent to stopper rank but stop_fn is not provided. It must be provided.")

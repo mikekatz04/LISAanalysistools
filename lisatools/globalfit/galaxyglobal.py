@@ -110,7 +110,7 @@ from eryn.utils.updates import Update
 
 class UpdateNewResiduals(Update):
     def __init__(
-        self, mgh, gb, comm, head_rank, gpu_priors, verbose=False
+        self, mgh, gb, comm, head_rank, gpu_priors, last_prior_vals, verbose=False
     ):
         self.mgh = mgh
         self.comm = comm
@@ -118,6 +118,7 @@ class UpdateNewResiduals(Update):
         self.verbose = verbose
         self.gb = gb
         self.gpu_priors = gpu_priors
+        self.last_prior_vals = last_prior_vals
 
     def __call__(self, iter, last_sample, sampler):
         
@@ -174,11 +175,27 @@ class UpdateNewResiduals(Update):
         ntemps_pe = last_sample.log_like.shape[0]
         nwalkers_pe = last_sample.log_like.shape[1]
         nleaves_max = last_sample.branches["gb"].shape[2]
-        generated_info = new_info.get_data_psd(include_gbs=False, n_gen_in=nwalkers_pe, include_lisasens=True)  # , include_ll=True, include_source_only_ll=True)
+
+        # get old data off gpu
+        old_data = self.mgh.get()
+
+        ntemps, nwalkers, nleaves_max = last_sample.branches["gb"].inds.shape
+        walker_inds_old = np.repeat(np.arange(nwalkers)[:, None], ntemps * nleaves_max, axis=-1).reshape(nwalkers, ntemps, nleaves_max).transpose(1, 0, 2)
+        
+        per_source_lp_old = np.zeros_like(last_sample.branches["gb"].inds, dtype=np.float64)
+        walker_inds_old = np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1).reshape(nwalkers_pe, ntemps_pe, nleaves_max).transpose(1, 0, 2)[last_sample.branches["gb"].inds]
+        
+        per_source_lp_old[last_sample.branches["gb"].inds] = self.gpu_priors["gb"].logpdf(last_sample.branches["gb"].coords[last_sample.branches["gb"].inds], psds=self.mgh.lisasens_shaped[0][0], walker_inds=walker_inds_old).get()
+        
+        lp_gbs_old = per_source_lp_old.sum(axis=-1)
+
+        generated_info = new_info.get_data_psd(include_gbs=False, n_gen_in=nwalkers_pe, include_lisasens=True, return_prior_val=True, fix_val_in_gen=["gb"])  # , include_ll=True, include_source_only_ll=True)
         data = generated_info["data"]
         psd = generated_info["psd"]
         lisasens = generated_info["lisasens"]
         
+        prev_logl_check = self.mgh.get_ll(include_psd_info=True)
+
         # needs to leave out gbs
         self.mgh.sub_in_data_and_psd(data, psd, lisasens)
 
@@ -186,8 +203,10 @@ class UpdateNewResiduals(Update):
             print("Finished subbing in new data.")
 
         xp.get_default_memory_pool().free_all_blocks()
-        new_ll = self.mgh.get_ll(include_psd_info=True)
-        last_sample.log_like[0, :] = new_ll[:]
+
+        # add priors from other parts of global fit
+        prev_logp = last_sample.log_prior[0] + self.last_prior_vals
+        prev_logl = last_sample.log_like[0].copy()
 
         ntemps, nwalkers, nleaves_max = last_sample.branches["gb"].inds.shape
         walker_inds = np.repeat(np.arange(nwalkers)[:, None], ntemps * nleaves_max, axis=-1).reshape(nwalkers, ntemps, nleaves_max).transpose(1, 0, 2)
@@ -197,8 +216,48 @@ class UpdateNewResiduals(Update):
         
         per_source_lp[last_sample.branches["gb"].inds] = self.gpu_priors["gb"].logpdf(last_sample.branches["gb"].coords[last_sample.branches["gb"].inds], psds=lisasens[0], walker_inds=walker_inds).get()
         
-        new_lp = per_source_lp.sum(axis=-1)
-        last_sample.log_prior[:] = new_lp[:]
+        new_lp_gbs = per_source_lp.sum(axis=-1)
+        # add priors from other parts of global fit
+        logp = new_lp_gbs[0] + generated_info["psd_prior_vals"] + generated_info["mbh_prior_vals"]
+        logl = self.mgh.get_ll(include_psd_info=True)
+
+        # all in the cold chain (beta = 1)
+        prev_logP = prev_logl + prev_logp
+        logP = logl + logp
+
+        # factors = 0.0 TODO: fix detailed balance here?
+        accept = (logP - prev_logP) > np.log(sampler.get_model().random.rand(*logP.shape))
+        # TODO: this was not right in the end. Need to think about more. 
+        # so adding this:
+        accept[:] = True
+        
+        last_sample.log_like[0, accept] = logl[accept]
+        last_sample.log_prior[:, accept] = new_lp_gbs[:, accept]
+        self.last_prior_vals[accept] = (generated_info["psd_prior_vals"] + generated_info["mbh_prior_vals"])[accept]
+
+        keys_pass = [f"channel{i + 1}_data" for i in range(2)]
+
+        # start with new
+        new_data = self.mgh.get()
+        keep_data = self.mgh.get()
+        for key in old_data:
+            if key in keys_pass:
+                continue
+
+            assert len(keep_data[key]) == 1
+            try:
+                keep_data[key][0][~accept, :] = old_data[key][0][~accept, :]
+            except IndexError:
+                breakpoint()
+
+        out_data = [keep_data[f"channel{i + 1}_base_data"][0].copy() for i in range(2)]
+        out_psd = [keep_data[f"channel{i + 1}_psd"][0].copy() for i in range(2)]
+        out_lisasens = [keep_data[f"channel{i + 1}_lisasens"][0].copy() for i in range(2)]
+        
+        # needs to leave out gbs
+        self.mgh.sub_in_data_and_psd(out_data, out_psd, out_lisasens)
+
+        print("ACCEPTED:", np.arange(len(accept))[accept], np.abs(last_sample.log_like[0] - self.mgh.get_ll(include_psd_info=True)))
         return
 
 def make_gmm(gb, gmm_info_in):
@@ -249,7 +308,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     import time
     st = time.perf_counter()
-    generated_info = gf_information.get_data_psd(include_gbs=False, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe)
+    generated_info = gf_information.get_data_psd(include_gbs=False, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers_pe, return_prior_val=True, fix_val_in_gen=["gb"])
     et = time.perf_counter()
 
     print("Read in", et - st)
@@ -536,7 +595,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     branch_names = ["gb"]
 
     update = UpdateNewResiduals(
-        mgh, gb, comm, head_rank, gpu_priors, verbose=False
+        mgh, gb, comm, head_rank, gpu_priors, generated_info["psd_prior_vals"] + generated_info["mbh_prior_vals"], verbose=False
     )
 
     ndims = {"gb": gb_info["pe_info"]["ndim"]}
@@ -1406,7 +1465,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
                 print("Do not have maximum likelihood for all pieces for search. Waiting and then will try again.")
                 continue
 
-            generated_info = incoming_data.get_data_psd(only_max_ll=True) 
+            generated_info = incoming_data.get_data_psd(only_max_ll=True, return_prior_val=True, fix_val_in_gen=["gb"]) 
             # generated_info_0 = generate_class(incoming_data, only_max_ll=True, include_mbhs=False, include_gbs=False, include_ll=True, include_source_only_ll=True)
             # generated_info_1 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_ll=True, include_source_only_ll=True)
             # generated_info_2 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_gbs=True, include_ll=True, include_source_only_ll=True)

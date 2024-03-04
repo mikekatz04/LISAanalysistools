@@ -223,7 +223,7 @@ class MPIControlGlobalFit:
         self.run_results_update = run_results_update
         self.run_results_update_kwargs = run_results_update_kwargs
         
-        assert len(gpus) == 4
+        assert len(gpus) in [3, 4]
         
         self.current_info = current_info
         self.comm = comm

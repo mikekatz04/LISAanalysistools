@@ -40,7 +40,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "sixth_run_through"
+    base_file_name = "first_run_through_hidden"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -71,7 +71,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    ldc_source_file = "LDC2_sangria_training_v2.h5"
+    ldc_source_file = "LDC2_sangria_blind_v2.h5"  # "LDC2_sangria_training_v2.h5"
     with h5py.File(ldc_source_file, "r") as f:
         tXYZ = f["obs"]["tdi"][:]
 
@@ -506,7 +506,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # mcmc info for main run
     mbh_main_run_mcmc_info = dict(
         branch_names=["mbh"],
-        nleaves_max=15,
+        nleaves_max=6,
         ndim=11,
         ntemps=10,
         nwalkers=50,
