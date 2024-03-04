@@ -76,7 +76,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    ldc_source_file = "LDC2_sangria_training_v2.h5"
+    ldc_source_file = "LDC2_sangria_blind_v2.h5"  # "LDC2_sangria_training_v2.h5"
     with h5py.File(ldc_source_file, "r") as f:
         tXYZ = f["obs"]["tdi"][:]
 
@@ -132,11 +132,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-<<<<<<< HEAD
     gpus = [4, 6, 7, 7]
-=======
-    gpus = [5, 6, 7, 7]
->>>>>>> f8a359e (running fine again)
 
     all_general_info = dict(
         file_information=file_information,
@@ -520,7 +516,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # mcmc info for main run
     mbh_main_run_mcmc_info = dict(
         branch_names=["mbh"],
-        nleaves_max=15,
+        nleaves_max=6,
         ndim=11,
         ntemps=10,
         nwalkers=50,
