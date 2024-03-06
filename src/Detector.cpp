@@ -67,8 +67,8 @@ double Orbits::interpolate(double t, double *in_arr, int window, int major_ndim,
 
     // m *(x - x0) + y0
     double fin = ((up - down) / dt) * (t - (dt * window)) + down;
-    // if ((ndim == 1))
-    //     printf("%e %e %e %e \n", fin, down, up, (t - (dt * window)));
+    if ((ndim == 1))
+        printf("%d %e %e %e %e \n", window, fin, down, up, (t - (dt * window)));
 
     return fin;
 }

@@ -53,6 +53,9 @@ class AnalysisContainer:
         self.data_res_arr = data_res_arr
         self.sens_mat = sens_mat
 
+        if signal_gen is not None:
+            self.signal_gen = signal_gen
+
     @property
     def data_res_arr(self) -> DataResidualArray:
         """Data information."""
@@ -134,6 +137,18 @@ class AnalysisContainer:
 
         return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat)
 
+    def snr(self, **kwargs: dict) -> float:
+        """Return the SNR of the current set of information
+
+        Args:
+            **kwargs: Inner product keyword arguments.
+
+        Returns:
+            SNR value.
+
+        """
+        return self.inner_product(**kwargs).real ** (1 / 2)
+
     def template_inner_product(
         self, template: DataResidualArray, **kwargs: dict
     ) -> float | complex:
@@ -149,6 +164,9 @@ class AnalysisContainer:
         """
         if "psd" in kwargs:
             kwargs.pop("psd")
+
+        if "include_psd_info" in kwargs:
+            kwargs.pop("include_psd_info")
 
         ip_val = inner_product(self.data_res_arr, template, psd=self.sens_mat, **kwargs)
         return ip_val

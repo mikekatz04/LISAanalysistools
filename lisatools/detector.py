@@ -237,7 +237,7 @@ class Orbits(ABC):
         ll = np.asarray(self.LINKS).copy().astype(np.int32)
 
         if make_cpp:
-            self.pycppdetector = pycppDetector(
+            self.pycppdetector_args = (
                 dt,
                 len(self.t),
                 self.n.flatten().copy(),
@@ -249,7 +249,7 @@ class Orbits(ABC):
             )
             self.dt = dt
         else:
-            self.pycppdetector = None
+            self.pycppdetector_args = None
             self.dt = dt
 
     @property
@@ -266,15 +266,20 @@ class Orbits(ABC):
     @property
     def pycppdetector(self) -> pycppDetector:
         """C++ class"""
-        if self._pycppdetector is None:
+        if self._pycppdetector_args is None:
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
+        self._pycppdetector = pycppDetector(*self._pycppdetector_args)
         return self._pycppdetector
 
-    @pycppdetector.setter
-    def pycppdetector(self, pycppdetector: Optional[pycppDetector]) -> None:
-        self._pycppdetector = pycppdetector
+    @property
+    def pycppdetector_args(self) -> tuple:
+        return self._pycppdetector_args
+
+    @pycppdetector_args.setter
+    def pycppdetector_args(self, pycppdetector_args: tuple) -> None:
+        self._pycppdetector_args = pycppdetector_args
 
     @property
     def size(self) -> int:
@@ -291,7 +296,7 @@ class Orbits(ABC):
     def get_light_travel_times(
         self, t: float | np.ndarray, link: int
     ) -> float | np.ndarray:
-        return self.pycppdetector.get_light_travel_times(t, link)
+        return self.pycppdetector.get_light_travel_time(t, link)
 
     def get_normal_unit_vec(self, t: float | np.ndarray, link: int) -> np.ndarray:
         return self.pycppdetector.get_normal_unit_vec(t, link)

@@ -5,23 +5,7 @@ from libcpp cimport bool
 from lisatools.utils.pointeradjust import wrapper
 from libc.stdint cimport uintptr_t
 
-cdef extern from "../include/Detector.hpp":
-    cdef cppclass VecWrap "Vec":
-        double x
-        double y
-        double z
-        VecWrap(double x_, double y_, double z_) except+
-
-    cdef cppclass OrbitsWrap "Orbits":
-        OrbitsWrap(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_) except+
-        int get_window(double t) except+
-        void get_normal_unit_vec_ptr(VecWrap *vec, double t, int link)
-        int get_link_ind(int link) except+
-        int get_sc_ind(int sc) except+
-        double get_light_travel_time(double t, int link) except+
-        VecWrap get_pos_ptr(VecWrap* out, double t, int sc) except+
-        void dealloc();
-        
+from src.pycppdetector cimport *
 
 cdef class pycppDetector:
     cdef OrbitsWrap *g
@@ -128,6 +112,7 @@ cdef class pycppDetector:
     def get_light_travel_time(self, t: np.ndarray | float, link: int) -> np.ndarray:
 
         if isinstance(t, float):
+            print("t", t)
             return self.get_light_travel_time_single(t, link)
         elif isinstance(t, np.ndarray):
             return self.get_light_travel_time_arr(t, link)
