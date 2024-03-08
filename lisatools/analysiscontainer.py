@@ -314,10 +314,10 @@ class AnalysisContainer:
             assert kwargs["include_psd_info"] == (not source_only)
             kwargs.pop("include_psd_info")
 
-        kwargs = dict(include_psd_info=(not source_only), psd=self.sens_mat, **kwargs)
+        kwargs = dict(psd=self.sens_mat, **kwargs)
 
         if calc == "likelihood":
-            print(kwargs)
+            kwargs["include_psd_info"] = not source_only
             return self.template_likelihood(*args_2, **kwargs)
         elif calc == "inner_product":
             return self.template_inner_product(*args_2, **kwargs)
@@ -421,3 +421,18 @@ class AnalysisContainer:
             data_res_arr_kwargs=data_res_arr_kwargs,
             **kwargs
         )
+
+    def eryn_likelihood_function(self, x, *args, **kwargs):
+        if x.ndim == 1:
+            input_vals = tuple(x) + tuple(args)
+            return self.calculate_signal_likelihood(*input_vals, **kwargs)
+        elif x.ndim == 2:
+            likelihood_out = np.zeros(x.shape[0])
+            for i in range(x.shape[0]):
+                input_vals = tuple(x[i]) + tuple(args)
+                likelihood_out[i] = self.calculate_signal_likelihood(
+                    *input_vals, **kwargs
+                )
+
+        else:
+            raise ValueError("x must be a 1D or 2D array.")
