@@ -241,7 +241,7 @@ class AnalysisContainer:
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
         like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
-        print(include_psd_info)
+
         if include_psd_info:
             # add noise term if requested
             like_out += self.likelihood(noise_only=True)

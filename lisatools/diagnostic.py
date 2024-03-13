@@ -238,7 +238,7 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
     """
     fix = np.isnan(psd[:]) | np.isinf(psd[:])
     assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
-    nl_val = -np.sum(np.log(psd[~fix]))
+    nl_val = -1.0 / 2.0 * np.sum(np.log(psd[~fix]))
     return nl_val
 
 
