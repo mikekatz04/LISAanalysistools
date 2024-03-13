@@ -1,8 +1,8 @@
-# lisacattools
+# LISA Analysis Tools
 
 [![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://mikekatz04.github.io/LISAanalysistools)
 
-Python module for interacting with example LISA catalogs
+LISA Analysis Tools is a package for performing LISA Data Analysis tasks, including building the LISA Global Fit. 
 
 ## 1 - Getting Started
 
@@ -139,7 +139,7 @@ make demo
 
 We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/your/project/tags).
 
-Current Version: 0.0.1
+Current Version: 1.0.0
 
 ## Authors
 

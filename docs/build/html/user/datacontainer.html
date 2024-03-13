@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Data / Residual / Signal Container &mdash; LISA Analysis Tools 0.1.0 documentation</title>
+  <title>Data / Residual / Signal Container &mdash; lisaanalysistools 1.0.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
@@ -19,7 +19,7 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=01f34227"></script>
+        <script src="../_static/documentation_options.js?v=8d563738"></script>
         <script src="../_static/doctools.js?v=888ff710"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../_static/js/theme.js"></script>
@@ -38,7 +38,7 @@
           
           
           <a href="../index.html" class="icon icon-home">
-            LISA Analysis Tools
+            lisaanalysistools
           </a>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
@@ -74,6 +74,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.loglog"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.loglog()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.sens_mat"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.sens_mat</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.signal_gen"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.signal_gen</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.snr"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.snr()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.template_inner_product"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_inner_product()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.template_likelihood"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_likelihood()</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.analysiscontainer.AnalysisContainer.template_snr"><code class="docutils literal notranslate"><span class="pre">AnalysisContainer.template_snr()</span></code></a></li>
@@ -90,7 +91,7 @@
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="../index.html">LISA Analysis Tools</a>
+          <a href="../index.html">lisaanalysistools</a>
       </nav>
 
       <div class="wy-nav-content">
@@ -325,6 +326,23 @@ This can be used if any transforms are desired prior to the Likelihood computati
 </dd></dl>
 
 <dl class="py method">
+<dt class="sig sig-object py" id="lisatools.analysiscontainer.AnalysisContainer.snr">
+<span class="sig-name descname"><span class="pre">snr</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/analysiscontainer.html#AnalysisContainer.snr"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.analysiscontainer.AnalysisContainer.snr" title="Link to this definition"></a></dt>
+<dd><p>Return the SNR of the current set of information</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Inner product keyword arguments.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>SNR value.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
 <dt class="sig sig-object py" id="lisatools.analysiscontainer.AnalysisContainer.template_inner_product">
 <span class="sig-name descname"><span class="pre">template_inner_product</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">template</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/analysiscontainer.html#AnalysisContainer.template_inner_product"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.analysiscontainer.AnalysisContainer.template_inner_product" title="Link to this definition"></a></dt>
 <dd><p>Calculate the inner product of a template with the data.</p>
@@ -402,7 +420,7 @@ This can be used if any transforms are desired prior to the Likelihood computati
   <hr/>
 
   <div role="contentinfo">
-    <p>&#169; Copyright 2023, Michael L. Katz.</p>
+    <p>&#169; Copyright Michael L. Katz 2024.</p>
   </div>
 
   Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a

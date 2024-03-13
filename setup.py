@@ -38,10 +38,13 @@ for line in lines:
         version_string = line.split("Current Version: ")[1].split("\n")[0]
 
 with open("lisatools/_version.py", "w") as f:
-    f.write("__version__ = '{}'".format(version_string))
+    f.write("__version__ = '{}'\n".format(version_string))
+    f.write('__copyright__ = "Michael L. Katz 2024"\n')
+    f.write('__name__ = "lisaanalysistools"\n')
+    f.write('__author__ = "Michael L. Katz"\n')
 
 setup(
-    name="lisatools",
+    name="lisaanalysistools",
     author="Michael Katz",
     author_email="mikekatz04@gmail.com",
     ext_modules=extensions,

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.detector &mdash; LISA Analysis Tools 0.1.0 documentation</title>
+  <title>lisatools.detector &mdash; lisatools 1.0.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,7 +18,7 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=01f34227"></script>
+        <script src="../../_static/documentation_options.js?v=8d563738"></script>
         <script src="../../_static/doctools.js?v=888ff710"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../_static/js/theme.js"></script>
@@ -35,7 +35,7 @@
           
           
           <a href="../../index.html" class="icon icon-home">
-            LISA Analysis Tools
+            lisatools
           </a>
 <div role="search">
   <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
@@ -62,7 +62,7 @@
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="../../index.html">LISA Analysis Tools</a>
+          <a href="../../index.html">lisatools</a>
       </nav>
 
       <div class="wy-nav-content">
@@ -327,7 +327,7 @@
         <span class="n">ll</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">LINKS</span><span class="p">)</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="n">make_cpp</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span> <span class="o">=</span> <span class="n">pycppDetector</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector_args</span> <span class="o">=</span> <span class="p">(</span>
                 <span class="n">dt</span><span class="p">,</span>
                 <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">),</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">n</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">(),</span>
@@ -339,7 +339,7 @@
             <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">dt</span> <span class="o">=</span> <span class="n">dt</span>
         <span class="k">else</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector_args</span> <span class="o">=</span> <span class="kc">None</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">dt</span> <span class="o">=</span> <span class="n">dt</span></div>
 
 
@@ -357,15 +357,20 @@
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">pycppdetector</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pycppDetector</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;C++ class&quot;&quot;&quot;</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
                 <span class="s2">&quot;Asking for c++ class. Need to set linear_interp_setup = True when configuring.&quot;</span>
             <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector</span> <span class="o">=</span> <span class="n">pycppDetector</span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span><span class="p">)</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector</span>
 
-    <span class="nd">@pycppdetector</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">pycppdetector</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">pycppdetector</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">pycppDetector</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector</span> <span class="o">=</span> <span class="n">pycppdetector</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">pycppdetector_args</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span>
+
+    <span class="nd">@pycppdetector_args</span><span class="o">.</span><span class="n">setter</span>
+    <span class="k">def</span> <span class="nf">pycppdetector_args</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">pycppdetector_args</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span> <span class="o">=</span> <span class="n">pycppdetector_args</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">size</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
@@ -382,7 +387,7 @@
     <span class="k">def</span> <span class="nf">get_light_travel_times</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">link</span><span class="p">:</span> <span class="nb">int</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_light_travel_times</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_light_travel_time</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span>
 
     <span class="k">def</span> <span class="nf">get_normal_unit_vec</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">link</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_normal_unit_vec</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span>
@@ -525,7 +530,7 @@
   <hr/>
 
   <div role="contentinfo">
-    <p>&#169; Copyright 2023, Michael L. Katz.</p>
+    <p>&#169; Copyright Michael L. Katz 2024.</p>
   </div>
 
   Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
