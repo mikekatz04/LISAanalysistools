@@ -4,7 +4,7 @@ requires = ["setuptools", "wheel", "Cython",  "numpy"]
 build-backend = 'setuptools.build_meta'
 
 [tool.poetry]
-name = "lisatools"
+name = "lisaanalysistools"
 version = "1.0.0"
 description = "A package for LISA Data Analysis"
 license = "Apache"
