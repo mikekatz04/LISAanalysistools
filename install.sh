@@ -150,19 +150,11 @@ wget https://github.com/mikekatz04/lisa-on-gpu/raw/master/orbit_files/esa-traili
 wget https://github.com/mikekatz04/lisa-on-gpu/raw/master/orbit_files/equalarmlength-trailing-fit.h5
 mv esa-trailing-orbits.h5 equalarmlength-trailing-fit.h5 examples/
 
-if [[ "$machine" == "arm64" ]]; then
-    "$pip_here" install . --ccbin /usr/bin/
-    "$pip_here" install git+https://github.com/mikekatz04/lisa-on-gpu.git --ccbin /usr/bin/
-    "$pip_here" install git+https://github.com/mikekatz04/BBHx.git --ccbin /usr/bin/
-    "$pip_here" install git+https://github.com/mikekatz04/GBGPU.git --ccbin /usr/bin/
-    "$pip_here" install git+https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms.git --ccbin /usr/bin/
-else
-    "$pip_here" install .
-    "$pip_here" install git+https://github.com/mikekatz04/lisa-on-gpu.git
-    "$pip_here" install git+https://github.com/mikekatz04/BBHx.git
-    "$pip_here" install git+https://github.com/mikekatz04/GBGPU.git
-    "$pip_here" install git+https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms.git
-fi
+"$python_here" -m pip install --index-url https://test.pypi.org/simple/ lisaanalysistools
+"$python_here" -m pip install --index-url https://test.pypi.org/simple/ fastlisaresponse
+"$python_here" -m pip install --index-url https://test.pypi.org/simple/ bbhx
+"$python_here" -m pip install --index-url https://test.pypi.org/simple/ fastemriwaveforms
+"$python_here" -m pip install --index-url https://test.pypi.org/simple/ gbgpu
 
 conda activate "$env_name"
 # if [[ "$run_tests" == "true" ]]; 

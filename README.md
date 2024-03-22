@@ -9,143 +9,55 @@ LISA Analysis Tools is a package for performing LISA Data Analysis tasks, includ
 These instructions will get you a copy of the project up and running on your local machine,
 either for development and testing purposes or as an installed package.  For more information, see the documentation at https://mikekatz04.github.io/LISAanalysistools.
 
-### 1.1 - Prerequisites
+# Installation
 
-You will need python3 to run this program.
+You can install with `pip`:
+```
+pip install lisaanalysistools
+```
 
-### 1.2 - Installing by cloning the repository
+If you want to install all of the tools associated with LISA Analysis Tools (Fast EMRI Waveforms, BBHx, GBGPU, fastlisaresponse, eryn), see the following instructions.
 
-First, we need to clone the repository
+LISA Analysis Tools leverages conda environments to install and use necessary packages. If you do not have [Anaconda](https://www.anaconda.com/download) or [miniconda](https://docs.anaconda.com/free/miniconda/index.html) installed, you must do this first and load your `base` conda environment. 
+
+First, clone the repo and `cd` to the `LATW` directory.:
 ```
 git clone https://github.com/mikekatz04/LISAanalysistools.git
+cd LISAanalysistools/
 ```
 
-#### 1.2.1 - For users
+Install all packages necessary for the tutorials by running:
+```
+bash install.sh
+```
+Running `bash install.sh -h` will also give you some basic install options. 
 
-To install the package for non-root users:
-```
-make user
-```
+If you want more flexibility, you can install each package given above separately. If you do this, you will also need # TODO: add. 
 
-To install the package on the root system:
-```
-make
-```
+## Contributing
 
-#### 1.2.2 - For developers
-
-Create a virtualenv
-
-```
-make prepare-dev
-source .lisacattools-env
-```
-
-Install the sotfware and the external libraries for development purpose
-
-```
-make install-dev
-```
-
-### 1.3 - Installing by pip
-
-```
-pip install lisatools
-```
-
-## 2 - Development (only if the repository has be cloned)
-
-### 2.1 - Writing the code
-
-Install the software by PIP (developers version)
-
-Then, develop your code and commit
-```
-git commit
-```
-The tests and code style formatter will be run automatically. To ignore the
-checks, do
-```
-git commit --no-verify
-```
-
-### 2.2 - Running the tests
-
-```
-make test
-```
-
-### 2.3 - Testing on python 3.8,3.9,3.10
-
-Install all required prerequisite dependencies:
-
-```
-sudo apt-get update; sudo apt-get install make build-essential libssl-dev zlib1g-dev \
-libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm \
-libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
-
-```
-
-Download and execute installation script:
-￼
-```
-curl https://pyenv.run | bash
-```
-
-Add the following entries into your ~/.bashrc file:
-
-```
-# pyenv
-export PATH="$HOME/.pyenv/bin:$PATH"
-eval "$(pyenv init --path)"
-eval "$(pyenv virtualenv-init -)"
-```
-
-Restart your shell:
-
-```
-exec $SHELL
-```
-
-Validate installation:
-
-```
-pyenv --version
-```
-
-Once the dependencies are installed, test on python 3.8, 3.8 and 3.10 :
-
-```
-make tox
-```
-
-## 3 - Running the tutorial
-
-Once the software is installed, data must be downloaded for the tutorial.
-The data are downloaded from a google drive and are large files -- ~10GB in total -- and will be installed
-in `tutorial/data`.
-Datasets include a catalog of simulated MBH detections with parameters updated on a weekly cadence,
-and two UCB catalogs, using 3 and 6 months of simulated LISA data.
-```
-make data
-```
-
-Then install jupyter and run the tutorial
-```
-make demo
-```
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct, and the process for submitting pull requests to us.
 
 ## Versioning
 
-We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/your/project/tags).
+We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/BlackHolePerturbationToolkit/FastEMRIWaveforms/tags).
 
 Current Version: 1.0.0
 
-## Authors
+## Authors/Developers
 
-* **James I. Thorpe**, **Tyson B. Littenberg** - Initial work
-* **Jean-Christophe Malapert**
+* **Michael Katz**
+
+### Contibutors
+
+* Lorenzo Speri
+* Christian Chapman-Bird
 
 ## License
 
-This project is licensed under the LGPLV3 License - see the [LICENSE](LICENSE) file for details
+This project is licensed under the Apache License - see the [LICENSE.md](LICENSE.md) file for details.
+
+## Citation
+
+TODO.
+
