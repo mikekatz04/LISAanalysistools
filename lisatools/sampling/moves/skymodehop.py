@@ -75,7 +75,7 @@ class SkyMove(MHMove):
         coords = self.long_transform(coords, random)
         return coords
 
-    def get_proposal(self, branches_coords, branches_inds, random):
+    def get_proposal(self, branches_coords, random, branches_inds=None, **kwargs):
         """Get proposal from Gaussian distribution
 
         Args:
@@ -90,9 +90,15 @@ class SkyMove(MHMove):
         """
 
         q = {}
-        for name, coords, inds in zip(
-            branches_coords.keys(), branches_coords.values(), branches_inds.values()
+        for name, coords in zip(
+            branches_coords.keys(), branches_coords.values()
         ):
+
+            if branches_inds is None:
+                inds = np.ones(coords.shape[:-1], dtype=bool)
+
+            else:
+                inds = branches_inds[name]
 
             ntemps, nwalkers, _, _ = coords.shape
             inds_here = np.where(inds == True)

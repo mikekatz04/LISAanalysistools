@@ -27,3 +27,14 @@ Omega0 = 1.9909865927683788e-07
 L_SI = 2.5e9
 eorbit = 0.004824185218078991
 ConstOmega = 1.99098659277e-7
+
+#### Armlength
+lisaL = 2.5e9  # LISA's arm meters
+lisaLT = lisaL / C_SI  # LISA's armn in sec
+
+#### Noise levels
+### Optical Metrology System noise
+## Decomposition
+Sloc = (1.7e-12) ** 2  # m^2/Hz
+Ssci = (8.9e-12) ** 2  # m^2/Hz
+Soth = (2.0e-12) ** 2  # m^2/Hz

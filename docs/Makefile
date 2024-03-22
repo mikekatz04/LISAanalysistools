@@ -6,7 +6,11 @@
 SPHINXOPTS    ?=
 SPHINXBUILD   ?= sphinx-build
 SOURCEDIR     = source
-BUILDDIR      = .
+BUILDDIR      = build
+
+github:
+	@make html
+	@cp -r build/html site/LISAanalysistools/
 
 # Put it first so that "make" without argument is like "make help".
 help:

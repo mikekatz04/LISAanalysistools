@@ -4,10 +4,10 @@ from eryn.state import Branch, BranchSupplimental
 import numpy as np
 
 try:
-    import cupy as xp
+    import cupy as cp
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as xp
+    pass
 
 
 class Likelihood(object):
@@ -26,9 +26,10 @@ class Likelihood(object):
         fill_data_noise=False,
         transpose_params=False,
         subset=None,
+        adjust_psd=False,
     ):
-
         self.subset = subset
+        self.adjust_psd = adjust_psd
         self.transpose_params = transpose_params
         self.template_model = template_model
 
@@ -54,17 +55,11 @@ class Likelihood(object):
             self.frequency_domain = False
 
         self.return_cupy = return_cupy
-        if use_gpu:
-            self.xp = xp
-
-        else:
-            self.xp = np
 
         self.noise_has_been_added = False
         self._specific_likelihood_setup()
 
     def _specific_likelihood_setup(self):
-
         if isinstance(self.template_model, list):
             raise ValueError("For single likelihood, template model cannot be a list.")
         if hasattr(self.template_model, "get_ll"):
@@ -83,16 +78,18 @@ class Likelihood(object):
         params=None,
         waveform_kwargs={},
         noise_fn=None,
+        noise_args=[],
         noise_kwargs={},
         add_noise=False,
     ):
+        xp = cp if self.use_gpu else np
 
         if params is not None:
             if self.parameter_transforms is not None:
                 key = list(self.parameter_transforms.keys())[0]
                 params = self.parameter_transforms[key].both_transforms(params)
 
-            injection_channels = self.xp.asarray(
+            injection_channels = xp.asarray(
                 self.template_model(*params, **waveform_kwargs)
             )
             try:
@@ -105,7 +102,7 @@ class Likelihood(object):
             if isinstance(data_stream, list) is False:
                 raise ValueError("If data_stream is provided, it must be as a list.")
             try:
-                injection_channels = self.xp.asarray(data_stream).get()
+                injection_channels = xp.asarray(data_stream).get()
             except AttributeError:
                 injection_channels = np.asarray(data_stream)
 
@@ -148,8 +145,19 @@ class Likelihood(object):
         else:
             noise_kwargs = [noise_kwargs for _ in range(self.num_channels)]
 
+        if isinstance(noise_args, list):
+            if len(noise_args) != 1 and len(noise_args) != self.num_channels:
+                raise ValueError(
+                    "Number of noise args does not match number of channels declared by user."
+                )
+            elif len(noise_args) == 1:
+                noise_args = [noise_args[0] for _ in range(self.num_channels)]
+
+        else:
+            noise_args = [noise_args for _ in range(self.num_channels)]
+
         if self.frequency_domain:
-            if self.df is not None:
+            if self.df is not None and self.f_arr is None:
                 df = self.df
                 can_add_noise = True
                 freqs = np.arange(self.injection_length) * df
@@ -158,120 +166,163 @@ class Likelihood(object):
             else:
                 freqs = self.f_arr
                 can_add_noise = False
+                self.df = (freqs[1] - freqs[0]).item()
 
         else:
             dt = self.dt
             freqs = np.fft.rfftfreq(self.injection_length, dt)
             can_add_noise = True
-            df = 1.0 / (self.injection_length * dt)
-
-        psd = [
-            noise_fn_temp(freqs, **noise_kwargs_temp)
-            for noise_fn_temp, noise_kwargs_temp in zip(noise_fn, noise_kwargs)
-        ]
+            self.df = df = 1.0 / (self.injection_length * dt)
 
         if self.frequency_domain is False:
-            injection_channels = [
-                np.fft.rfft(inj) * dt for inj in injection_channels
-            ]
+            injection_channels = [np.fft.rfft(inj) * dt for inj in injection_channels]
 
-        diff_freqs = np.zeros_like(freqs)
-        diff_freqs[1:] = np.diff(freqs)
-        diff_freqs[0] = diff_freqs[1]
-
-        self.base_injections = injection_channels
-        if add_noise and can_add_noise and self.noise_has_been_added is False:
-            raise NotImplementedError
-            norm = 0.5 * (1.0 / df) ** 0.5
-            noise_to_add = [
-                psd_temp ** (1 / 2)
-                * (
-                    np.random.normal(0, norm, len(freqs))
-                    + 1j * np.random.normal(0, norm, len(freqs))
+        if not self.adjust_psd:
+            psd = [
+                noise_fn_temp(freqs, *noise_args_temp, **noise_kwargs_temp)
+                for noise_fn_temp, noise_args_temp, noise_kwargs_temp in zip(
+                    noise_fn, noise_args, noise_kwargs
                 )
-                for psd_temp in psd
             ]
 
-            self.noise_to_add = noise_to_add
+            if np.isnan(psd[0][0]):
+                for i in range(len(psd)):
+                    psd[i][0] = 1e100
 
-            injection_channels = [
-                inj + noise for inj, noise in zip(injection_channels, noise_to_add)
-            ]
+            diff_freqs = np.zeros_like(freqs)
+            diff_freqs[1:] = np.diff(freqs)
+            diff_freqs[0] = diff_freqs[1]
 
-            # TODO: need to check this
-            self.noise_likelihood_factor = np.sum(
-                [
-                    1.0 / 2.0 * (2 * np.pi) * np.sum(diff_freqs * psd_temp)
+            self.base_injections = injection_channels
+            if add_noise and can_add_noise and self.noise_has_been_added is False:
+                raise NotImplementedError
+                norm = 0.5 * (1.0 / df) ** 0.5
+                noise_to_add = [
+                    psd_temp ** (1 / 2)
+                    * (
+                        np.random.normal(0, norm, len(freqs))
+                        + 1j * np.random.normal(0, norm, len(freqs))
+                    )
                     for psd_temp in psd
                 ]
+
+                self.noise_to_add = noise_to_add
+
+                injection_channels = [
+                    inj + noise for inj, noise in zip(injection_channels, noise_to_add)
+                ]
+
+                # TODO: need to check this
+                self.noise_likelihood_factor = np.sum(
+                    [
+                        1.0 / 2.0 * (2 * np.pi) * np.sum(diff_freqs * psd_temp)
+                        for psd_temp in psd
+                    ]
+                )
+                self.noise_has_been_added = True
+
+                self.noise_added_base_injections = injection_channels
+
+            # noise weighting
+            # injection_channels = [
+            #    inj * (diff_freqs / psd_temp) ** (1 / 2)
+            #    for inj, psd_temp in zip(injection_channels, psd)
+            # ]
+
+            # self.psd = xp.asarray(
+            #    [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
+            # )
+            self.psd = xp.asarray(psd)
+
+            # if self.like_here is False:
+            #    self.psd = [xp.asarray(nf.copy()) for nf in self.psd]
+
+        # if we need to evaluate the psd each time
+        else:
+            self.noise_fn, self.noise_args, self.noise_kwargs = (
+                noise_fn,
+                noise_args,
+                noise_kwargs,
             )
-            self.noise_has_been_added = True
 
-            self.noise_added_base_injections = injection_channels
-
-        # noise weighting
-        injection_channels = [
-            inj * (diff_freqs / psd_temp) ** (1 / 2)
-            for inj, psd_temp in zip(injection_channels, psd)
-        ]
-
-        self.noise_factor = self.xp.asarray(
-            [(diff_freqs / psd_temp) ** (1 / 2) for psd_temp in psd]
-        )
+        self.freqs = xp.asarray(freqs)
 
         if hasattr(self, "injection_channels") is False:
-            self.injection_channels = self.xp.asarray(injection_channels)
-            self.freqs = self.xp.asarray(freqs)
-
+            self.injection_channels = xp.asarray(injection_channels)
         else:
-            self.injection_channels += self.xp.asarray(injection_channels)
+            self.injection_channels += xp.asarray(injection_channels)
 
         if self.like_here is False:
             self.injection_channels = [inj.copy() for inj in self.injection_channels]
-            self.noise_factor = [nf.copy() for nf in self.noise_factor]
 
         self.data_length = len(self.injection_channels[0])
-        self.psd = psd
 
-    def get_ll(self, params, *args, **kwargs):
+        self.start_freq_ind = int(self.freqs[0] / self.df)
+
+    def get_ll(self, params, data, psd, *args, **kwargs):
+        xp = cp if self.use_gpu else np
+
+        if psd is None:
+            psd = self.psd
+
+        if data is None:
+            data = self.injection_channels
 
         # TODO: make sure parameter transformations appear in posterior if possible
         num_likes = params.shape[0]
         if self.vectorized:
-            template_channels = self.xp.asarray(
+            template_channels = xp.asarray(
                 self.template_model(*params, *args, **kwargs)
             )
 
         else:
-            template_channels = self.xp.asarray(
-                [self.template_model(*params_i, *args, **kwargs) for params_i in params]
-            )
+            if isinstance(params[0], np.float64):
+                params = [params]
+            template_channels = [None for _ in range(len(params))]
+            for i, params_i in enumerate(params):
+                # np.save("params_last", params_i)
+                template_channels[i] = self.template_model(*params_i, *args, **kwargs)
+
+            template_channels = xp.asarray(template_channels)
+
+            # template_channels = xp.asarray(
+            #    [self.template_model(*params_i, *args, **kwargs) for params_i in params]
+            # )
 
         if self.frequency_domain is False:
-            # TODO: vectorize this
-            # 2: is removal of DC component + right summation approximation
-            template_channels = (
-                self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
-            )
+            template_channels = xp.fft.rfft(template_channels, axis=-1) * self.dt
 
-        h = template_channels * self.noise_factor[self.xp.newaxis, :, :]
+        if psd.ndim == 2:
+            psd = psd[xp.newaxis, :, :]
+
+        h = template_channels
         if self.separate_d_h:
             raise NotImplementedError
 
         else:
+            if data.ndim == 2:
+                data = data[xp.newaxis, :, :]
+
+            psd[xp.isnan(psd) | xp.isinf(psd)] = 1e20
             # combines all channels into 1D array per likelihood
-            d_minus_h = (self.injection_channels[self.xp.newaxis, :, :] - h).reshape(
-                num_likes, len(self.injection_channels), -1
-            )
+
+            d_minus_h = data - h
 
             # TODO: add inds_slice to here from global
-            start_ind = 1 if np.isnan(self.noise_factor[0, 0]) else 0
+            # start_ind = 1 if np.isnan(psd[0, 0, 0]) else 0
 
             ll = -(
                 1.0
                 / 2.0
-                * (4.0 * self.xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real, axis=(1, 2)))
+                * (
+                    4.0
+                    * self.df
+                    * xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2))
+                )
             )
+
+            if self.adjust_psd:
+                ll += xp.sum(xp.log(psd), axis=(1, 2))
 
             if self.noise_has_been_added:
                 raise NotImplementedError
@@ -292,15 +343,89 @@ class Likelihood(object):
         else:
             return out
 
-    def __call__(self, params, *args, **kwargs):
+    def evaluate_psd(
+        self,
+        noise_params,
+        f_arr=None,
+        noise_fn: list = None,
+        noise_kwargs: list = None,
+        noise_groups=None,
+    ):
+        xp = cp if self.use_gpu else np
 
-        if not isinstance(params, np.ndarray):
-            raise ValueError("params must be np.ndarray.")
+        if noise_groups is None:
+            if len(np.unique(noise_groups)) != len(noise_groups):
+                raise ValueError(
+                    "If providing noise_groups with adjustable leaf count, need to write custom evaluate_psd function."
+                )
+        if f_arr is None:
+            f_arr = self.freqs
+
+        assert isinstance(f_arr, xp.ndarray)
+
+        if noise_fn is None:
+            # must be a list
+            noise_fn = self.noise_fn
+
+        if noise_kwargs is None:
+            # must be a list
+            noise_kwargs = self.noise_kwargs
+
+        psd = xp.asarray(
+            [
+                noise_fn_temp(f_arr, *noise_params, **noise_kwargs_temp)
+                for noise_fn_temp, noise_kwargs_temp in zip(noise_fn, noise_kwargs)
+            ]
+        ).transpose((1, 0, 2))
+        return psd
+
+    def __call__(self, params, data=None, psd=None, *args, **kwargs):
+        xp = cp if self.use_gpu else np
+        if isinstance(params, list):
+            if len(params) != 2:
+                ValueError(
+                    "If providing params for a single source Likelihood, must be an array if just parameters or a list of length 2 where the first entry in the parameter array and the second entry is the parameterization of the noise curve."
+                )
+
+            if not self.adjust_psd:
+                raise ValueError(
+                    "If providing a list with noise parameters, adjust_psd kwarg in __init__ method must be true."
+                )
+            # must be transpose for noise
+            noise_params = params[1].T
+
+            params = params[0]
+
+            if psd is not None:
+                raise ValueError(
+                    "If providing noise parameters to likelihood, cannot also provide psd kwarg."
+                )
+
+        else:
+            noise_params = None
+
+        assert isinstance(params, np.ndarray)
 
         if self.parameter_transforms is not None:
-            key = list(self.parameter_transforms.keys())[0]
-            params = self.parameter_transforms[key].both_transforms(params)
+            keys = list(self.parameter_transforms.keys())
+            if len(keys) > 1:
+                if len(keys) > 2:
+                    raise ValueError(
+                        "parameter_transforms should only contain transforms for the parameters and the noise parameters."
+                    )
+                if "noise_params" not in keys or "noise_params" != keys[0]:
+                    raise ValueError(
+                        "'noise_params' must be the model name given for noise information to maintain consistency. It must be provided in the second position in the parameter_transforms dictionary."
+                    )
 
+            params = self.parameter_transforms[keys[0]].both_transforms(params)
+
+            if "noise_params" in keys:
+                noise_params = self.parameter_transforms[
+                    "noise_params"
+                ].both_transforms(noise_params)
+
+        # only has to do with params, not noise params
         if self.transpose_params:
             params = params.T
             subset_axis = 1
@@ -327,8 +452,17 @@ class Likelihood(object):
 
             args_in += args
 
-            if self.fill_data_noise:
-                args_in += (self.injection_channels, self.noise_factor)
+            if self.fill_data_noise or self.like_here or noise_params is not None:
+                if data is None:
+                    data = self.injection_channels
+
+                if noise_params is not None:
+                    # assumes that there is one set of noise parameters per regular parameters
+                    psd = self.evaluate_psd(noise_params[:, inds])
+                else:
+                    psd = self.psd
+
+                args_in += (data, psd)
 
             out_ll.append(self.get_ll(*args_in, **kwargs))
         return np.concatenate(out_ll, axis=0)
@@ -398,14 +532,15 @@ class Likelihood(object):
 
 class GlobalLikelihood(Likelihood):
     def __init__(
-        self, *args, fill_templates=False, **kwargs,
+        self,
+        *args,
+        fill_templates=False,
+        **kwargs,
     ):
-
         super(GlobalLikelihood, self).__init__(*args, **kwargs)
         self.fill_templates = fill_templates
 
     def _specific_likelihood_setup(self):
-
         if not isinstance(self.template_model, list):
             self.template_model = [self.template_model]
 
@@ -427,6 +562,8 @@ class GlobalLikelihood(Likelihood):
         self,
         params,
         groups,
+        data,
+        psd,
         data_length=None,
         start_freq_ind=None,
         args_list=None,
@@ -448,9 +585,9 @@ class GlobalLikelihood(Likelihood):
 
         else:
             branch_supps = [None for _ in params]
-        
+
         assert len(groups) == len(branch_supps)
-        
+
         if args_list is None:
             args_list = [[] for _ in params]
 
@@ -458,7 +595,7 @@ class GlobalLikelihood(Likelihood):
             kwargs_list = [{} for _ in params]
 
         # TODO: make sure parameter transformations appear in posterior if possible
-        total_groups = np.max(groups) + 1
+        total_groups = np.max(np.concatenate(groups)) + 1
 
         if data_length is not None or start_freq_ind is not None:
             if data_length is None:
@@ -467,103 +604,143 @@ class GlobalLikelihood(Likelihood):
                 raise ValueError("data_length must be int.")
 
             if start_freq_ind is None:
-                start_freq_ind = 0
+                start_freq_ind = self.start_freq_ind
             elif not isinstance(start_freq_ind, int):
                 raise ValueError("start_freq_ind must be int.")
 
-            if start_freq_ind + data_length > self.data_length:
+            if (start_freq_ind - self.start_freq_ind) + data_length > self.data_length:
                 raise ValueError("start_freq_ind + data_length > full data length.")
 
             if kwargs_list is None:
                 kwargs_list = [{}]
 
             for kwargs in kwargs_list:
-                kwargs["start_freq_ind"] = start_freq_ind
+                if isinstance(kwargs, dict):
+                    kwargs["start_freq_ind"] = start_freq_ind
 
         else:
-            start_freq_ind = 0
+            start_freq_ind = self.start_freq_ind
             data_length = self.data_length
 
-        template_all = self.xp.zeros(
-            (total_groups, self.num_channels, data_length), dtype=self.xp.complex128,
-        )
+        if data is None:
+            data = self.injection_channels[xp.newaxis, :, inds_slice]
 
-        for i, (params_i, groups_i, args_i, kwargs_i, tm_i, vec_i, branch_supp_i) in enumerate(
-            zip(
-                params,
-                groups,
-                args_list,
-                kwargs_list,
-                self.template_model,
-                self.vectorized,
-                branch_supps,
+        if psd is None:
+            psd = self.psd[xp.newaxis, :, inds_slice]
+
+        if supps is None or "data_minus_template" not in supps:
+            template_all = xp.zeros(
+                (total_groups, self.num_channels, data_length),
+                dtype=xp.complex128,
             )
-        ):
-            # TODO: make fill templates adjustable per model
-            if not self.fill_templates:  # False
-                if vec_i:
-                    template_channels = self.xp.asarray(
-                        tm_i(params_i, *args_i, **kwargs_i)
-                    )
 
-                else:
-                    template_channels = self.xp.asarray(
-                        [
-                            tm_i(params_ij, *args_i, **kwargs_i)
-                            for params_ij in params_i.T
-                        ]
-                    )
-
-                if self.frequency_domain is False:
-                    # TODO: vectorize this
-                    # 2: is removal of DC component + right summation approximation
-                    template_channels = (
-                        self.xp.fft.rfft(template_channels, axis=-1)[:, :, 2:] * self.dt
-                    )
-
-                # TODO: could put this in c?
-                for group_ij in np.unique(groups_i):
-                    inds1 = np.where(groups_i == group_ij)
-                    template_all[group_ij] += template_channels[inds1].sum(axis=0)
-
-            else:  # model will fill templates
-                kwargs_i_in = kwargs_i.copy()
-                if branch_supp_i is not None:
-                    kwargs_i_in["branch_supps"] = branch_supp_i
-                if supps is not None:
-                    kwargs_i_in["supps"] = supps
-
-                if vec_i:
-                    tm_i.generate_global_template(
-                        params_i, groups_i, template_all, *args_i, **kwargs_i_in
-                    )
-
-                else:
-                    for params_ij, groups_ij in zip(params_i.T, groups_i):
-                        tm_i.generate_global_template(
-                            params_ij, groups_ij, template_all, *args_i, **kwargs_i_in
+            for i, (
+                params_i,
+                groups_i,
+                args_i,
+                kwargs_i,
+                tm_i,
+                vec_i,
+                branch_supp_i,
+            ) in enumerate(
+                zip(
+                    params,
+                    groups,
+                    args_list,
+                    kwargs_list,
+                    self.template_model,
+                    self.vectorized,
+                    branch_supps,
+                )
+            ):
+                # TODO: make fill templates adjustable per model
+                if not self.fill_templates:  # False
+                    if vec_i:
+                        template_channels = xp.asarray(
+                            tm_i(params_i, *args_i, **kwargs_i)
                         )
 
-        inds_slice = slice(start_freq_ind, start_freq_ind + data_length)
+                    else:
+                        template_channels = xp.asarray(
+                            [
+                                tm_i(params_ij, *args_i, **kwargs_i)
+                                for params_ij in params_i.T
+                            ]
+                        )
 
-        template_all *= self.noise_factor[self.xp.newaxis, :, inds_slice]
+                    if self.frequency_domain is False:
+                        # TODO: vectorize this
+                        # 2: is removal of DC component + right summation approximation
+                        template_channels = (
+                            xp.fft.rfft(template_channels, axis=-1) * self.dt
+                        )
 
-        # accelerate ?
-        d_minus_h = (
-            self.injection_channels[self.xp.newaxis, :, inds_slice] - template_all
-        ).reshape(total_groups, len(self.injection_channels), -1)
+                    # TODO: could put this in c?
+                    for group_ij in np.unique(groups_i):
+                        inds1 = np.where(groups_i == group_ij)
+                        template_all[group_ij] += template_channels[inds1].sum(axis=0)
 
-        start_ind = 1 if np.isnan(self.noise_factor[0, inds_slice][0]) else 0
+                else:  # model will fill templates
+                    kwargs_i_in = kwargs_i.copy()
+                    if branch_supp_i is not None:
+                        kwargs_i_in["branch_supps"] = branch_supp_i
+                    if supps is not None:
+                        kwargs_i_in["supps"] = supps
 
-        ll = -(
-            1.0 / 2.0 * (4.0 * self.xp.sum((d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real, axis=(1, 2)))
+                    if vec_i:
+                        tm_i.generate_global_template(
+                            params_i, groups_i, template_all, *args_i, **kwargs_i_in
+                        )
+
+                    else:
+                        for params_ij, groups_ij in zip(params_i.T, groups_i):
+                            tm_i.generate_global_template(
+                                params_ij,
+                                groups_ij,
+                                template_all,
+                                *args_i,
+                                **kwargs_i_in,
+                            )
+            breakpoint()
+            # accelerate ?
+            d_minus_h = (data - template_all).reshape(
+                total_groups, len(self.injection_channels), -1
+            )
+
+        else:
+            d_minus_h = supps["data_minus_template"]
+
+        start_here = start_freq_ind - self.start_freq_ind
+        end_here = start_here + data_length
+        inds_slice = slice(start_here, end_here)
+
+        # avoid f = 0
+        start_ind = 1 if np.isnan(psd[0, 0, inds_slice][0]) else 0
+
+        self.signal_ll = -(
+            1.0
+            / 2.0
+            * (
+                4.0
+                * self.df
+                * xp.sum(
+                    (
+                        d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]
+                    ).real
+                    / psd[:, :, start_ind:],
+                    axis=(1, 2),
+                )
+            )
         )
 
-        if self.noise_has_been_added:
-            ll -= self.noise_likelihood_factor
+        ll = self.signal_ll.copy()
+        if self.adjust_psd:
+            self.noise_ll = -xp.sum(xp.log(psd), axis=(1, 2))
+            ll += self.noise_ll
 
-        out = self.xp.atleast_1d(ll.squeeze())
-
+        out = xp.atleast_1d(ll.squeeze())
+        if xp.any(xp.isnan(out)):
+            breakpoint()
         if self.use_gpu:
             if self.return_cupy:
                 return out
@@ -576,7 +753,7 @@ class GlobalLikelihood(Likelihood):
         else:
             return out
 
-    def __call__(self, params, groups, *args, **kwargs):
+    def __call__(self, params, groups, *args, data=None, psd=None, **kwargs):
         if isinstance(params, np.ndarray):
             params = [params]
         elif not isinstance(params, list):
@@ -587,19 +764,58 @@ class GlobalLikelihood(Likelihood):
         elif not isinstance(groups, list):
             raise ValueError("groups must be np.ndarray or list of np.ndarray.")
 
+        # if np.any(np.abs(params[0][:, 4]) > 1.0) or np.any(np.abs(params[0][:, 7]) > 1.0):
+        #    breakpoint()
+
         if self.parameter_transforms is not None:
             for i, (params_i, transform_i) in enumerate(
                 zip(params, self.parameter_transforms)
             ):
-                params_temp = transform_i.fill_values(params_i.copy())
-                params[i] = transform_i.transform_base_parameters(params_temp)
+                params[i] = transform_i.both_transforms(params_i.copy())
 
         else:
             params = [params_i.T for params_i in params]
 
-        args_in = params + groups + list(args)
-        if self.fill_data_noise:
-            args_in += [self.injection_channels, self.noise_factor]
+        for par_i in params:
+            if np.any(np.isnan(par_i)):
+                breakpoint()
+
+        if self.adjust_psd:
+            assert len(params) > 1
+            assert len(groups) > 1
+
+            noise_params = params[-1]
+            noise_groups = groups[-1]
+
+            if "branch_supps" in kwargs:
+                assert len(kwargs["branch_supps"]) == len(groups)
+                noise_supps = kwargs["branch_supps"][-1]
+                kwargs["branch_supps"] = kwargs["branch_supps"][:-1]
+
+            params = params[:-1]
+            groups = groups[:-1]
+
+        else:
+            noise_params = None
+
+        args_in = [params] + [groups] + list(args)
+
+        if noise_params is not None:
+            psd = self.evaluate_psd(noise_params.T, noise_groups=noise_groups)
+        else:
+            if psd is None:
+                psd = self.psd
+            if self.like_here:
+                if isinstance(psd, list):
+                    psd = xp.asarray(psd)[None, :, :]  # .transpose(1, 0, 2)
+
+        args_in += args
+
+        if self.fill_data_noise or self.like_here or noise_params is not None:
+            if data is None:
+                data = self.injection_channels
+
+            args_in += [data, psd]
 
         return self.get_ll(*args_in, **kwargs)
 
