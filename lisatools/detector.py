@@ -2,6 +2,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, List, Tuple, Optional
 from dataclasses import dataclass
+import requests
 
 import numpy as np
 import h5py
@@ -63,8 +64,22 @@ class Orbits(ABC):
     def filename(self, filename: str) -> None:
         """Set file name."""
         assert isinstance(filename, str)
-        assert os.path.exists(filename)
-        self._filename = filename
+        path_to_this_file = __file__.split("detector.py")[0]
+        if not os.path.exists(path_to_this_file + "orbit_files/"):
+            os.mkdir(path_to_this_file + "orbit_files/")
+        path_to_this_file = path_to_this_file + "orbit_files/"
+        if not os.path.exists(path_to_this_file + filename):
+            github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/orbit_files/{filename}"
+            r = requests.get(github_file)
+            if r.status_code != 200:
+                raise ValueError(
+                    f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/orbit_files/."
+                )
+
+            with open(path_to_this_file + filename, "wb") as f:
+                f.write(r.content)
+
+        self._filename = path_to_this_file + filename
 
     def open(self) -> h5py.File:
         """Opens the h5 file in the proper mode.
@@ -315,9 +330,7 @@ class EqualArmlengthOrbits(Orbits):
 
     def __init__(self):
         # TODO: fix this up
-        super().__init__(
-            "/Users/mlkatz1/Research/LISAanalysistools/examples/equalarmlength-orbits.h5"
-        )
+        super().__init__("equalarmlength-orbits.h5")
 
 
 class DefaultOrbits(EqualArmlengthOrbits):
