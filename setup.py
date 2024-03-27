@@ -53,7 +53,6 @@ setup(
         "lisatools",
         "lisatools.sampling",
         "lisatools.sampling.moves",
-        "lisatools.pipeline",
         "lisatools.utils",
         "lisatools.sources",
         "lisatools.sources.emri",
