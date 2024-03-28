@@ -69,11 +69,11 @@ class Orbits(ABC):
             os.mkdir(path_to_this_file + "orbit_files/")
         path_to_this_file = path_to_this_file + "orbit_files/"
         if not os.path.exists(path_to_this_file + filename):
-            github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/orbit_files/{filename}"
+            github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
             r = requests.get(github_file)
             if r.status_code != 200:
                 raise ValueError(
-                    f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/orbit_files/."
+                    f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
                 )
 
             with open(path_to_this_file + filename, "wb") as f:
