@@ -48,11 +48,10 @@ Current Version: 1.0.3
 ## Authors/Developers
 
 * **Michael Katz**
-
-### Contibutors
-
 * Lorenzo Speri
 * Christian Chapman-Bird
+* Natalia Korsakova
+* Nikos Karnesis
 
 ## License
 
@@ -60,5 +59,20 @@ This project is licensed under the Apache License - see the [LICENSE.md](LICENSE
 
 ## Citation
 
-TODO.
+```
+@software{michael_katz_2024_10930980,
+  author       = {Michael Katz and
+                  CChapmanbird and
+                  Lorenzo Speri and
+                  Nikolaos Karnesis and
+                  Korsakova, Natalia},
+  title        = {mikekatz04/LISAanalysistools: First main release.},
+  month        = apr,
+  year         = 2024,
+  publisher    = {Zenodo},
+  version      = {v1.0.3},
+  doi          = {10.5281/zenodo.10930980},
+  url          = {https://doi.org/10.5281/zenodo.10930980}
+}
+```
 
