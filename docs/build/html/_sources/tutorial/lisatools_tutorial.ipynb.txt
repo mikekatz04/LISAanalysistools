@@ -15,7 +15,7 @@
     "\n",
     "The documentation for `lisatools` can be found [here](https://mikekatz04.github.io/LISAanalysistools).\n",
     "\n",
-    "If you use this code, please cite the [zenodo](). "
+    "If you use this code, please cite the [zenodo](https://zenodo.org/records/10930980). "
    ]
   },
   {
