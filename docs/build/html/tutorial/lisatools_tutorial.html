@@ -88,13 +88,11 @@
 <li class="toctree-l2"><a class="reference internal" href="#Bias-estimate">Bias estimate</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#Analysis-Container">Analysis Container</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#Direct-computations-on-the-residual-contained-in-the-DataResidualArrray.">Direct computations on the residual contained in the <code class="docutils literal notranslate"><span class="pre">DataResidualArrray</span></code>.</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#Build-a-template-and-then-compare-it-to-the-data.">Build a template and then compare it to the data.</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#Build-a-template-generation-model-and-add-to-the-AnalysisContainer">Build a template generation model and add to the <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code></a></li>
-</ul>
-</li>
+<li class="toctree-l1"><a class="reference internal" href="#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="#Analysis-Container">Analysis Container</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#Direct-computations-on-the-residual-contained-in-the-DataResidualArrray.">Direct computations on the residual contained in the <code class="docutils literal notranslate"><span class="pre">DataResidualArrray</span></code>.</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#Build-a-template-and-then-compare-it-to-the-data.">Build a template and then compare it to the data.</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#Build-a-template-generation-model-and-add-to-the-AnalysisContainer">Build a template generation model and add to the <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -1304,8 +1302,9 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 <img alt="../_images/tutorial_lisatools_tutorial_78_1.png" src="../_images/tutorial_lisatools_tutorial_78_1.png" />
 </div>
 </div>
+</section>
 <section id="Analysis-Container">
-<h2>Analysis Container<a class="headerlink" href="#Analysis-Container" title="Link to this heading"></a></h2>
+<h1>Analysis Container<a class="headerlink" href="#Analysis-Container" title="Link to this heading"></a></h1>
 <p>The <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code> brings together the <code class="docutils literal notranslate"><span class="pre">SensitivityMatrix</span></code> and the <code class="docutils literal notranslate"><span class="pre">DataResidualArray</span></code> to perform a variety of computations.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[36]:
@@ -1357,7 +1356,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 </div>
 <section id="Direct-computations-on-the-residual-contained-in-the-DataResidualArrray.">
-<h3>Direct computations on the residual contained in the <code class="docutils literal notranslate"><span class="pre">DataResidualArrray</span></code>.<a class="headerlink" href="#Direct-computations-on-the-residual-contained-in-the-DataResidualArrray." title="Link to this heading"></a></h3>
+<h2>Direct computations on the residual contained in the <code class="docutils literal notranslate"><span class="pre">DataResidualArrray</span></code>.<a class="headerlink" href="#Direct-computations-on-the-residual-contained-in-the-DataResidualArrray." title="Link to this heading"></a></h2>
 <div class="nbinput docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[38]:
 </pre></div>
@@ -1445,7 +1444,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 </section>
 <section id="Build-a-template-and-then-compare-it-to-the-data.">
-<h3>Build a template and then compare it to the data.<a class="headerlink" href="#Build-a-template-and-then-compare-it-to-the-data." title="Link to this heading"></a></h3>
+<h2>Build a template and then compare it to the data.<a class="headerlink" href="#Build-a-template-and-then-compare-it-to-the-data." title="Link to this heading"></a></h2>
 <div class="nbinput docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[43]:
 </pre></div>
@@ -1474,7 +1473,7 @@ Template Likelihood: -2.061157325776094
 </div>
 </section>
 <section id="Build-a-template-generation-model-and-add-to-the-AnalysisContainer">
-<h3>Build a template generation model and add to the <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code><a class="headerlink" href="#Build-a-template-generation-model-and-add-to-the-AnalysisContainer" title="Link to this heading"></a></h3>
+<h2>Build a template generation model and add to the <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code><a class="headerlink" href="#Build-a-template-generation-model-and-add-to-the-AnalysisContainer" title="Link to this heading"></a></h2>
 <p>This allows for inputing parameters and waveform settings directly to the <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code> for computations.</p>
 <div class="nbinput nblast docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[44]:
@@ -1511,7 +1510,6 @@ With parameters snr: (40.57290120524879, 40.5729012052488)
 With parameters inner product: 1646.1603122108788
 </pre></div></div>
 </div>
-</section>
 </section>
 </section>
 
