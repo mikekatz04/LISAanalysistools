@@ -12,6 +12,16 @@
 import os
 import sys
 
+
+dir_path = os.path.dirname(os.path.realpath(__file__)) + "/../../"
+
+import shutil
+
+shutil.copy(
+    dir_path + "examples/lisatools_tutorial.ipynb",
+    dir_path + "docs/source/tutorial/lisatools_tutorial.ipynb",
+)
+
 sys.path.insert(0, os.path.abspath("../../"))
 
 here = os.path.abspath(os.path.dirname(__file__))
@@ -43,7 +53,7 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.githubpages",
-    # "m2r2",
+    "nbsphinx",
     "sphinx_autodoc_typehints",
 ]
 

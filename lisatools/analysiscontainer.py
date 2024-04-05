@@ -268,7 +268,7 @@ class AnalysisContainer:
             return noise_likelihood_term(self.sens_mat)
         elif source_only:
             return residual_source_likelihood_term(
-                self.data_res_arr, self.sens_mat, **kwargs
+                self.data_res_arr, psd=self.sens_mat, **kwargs
             )
         else:
             return residual_full_source_and_noise_likelihood(

@@ -22,7 +22,6 @@ class Orbits(ABC):
     Args:
         filename: File name. File should be in the style of LISAOrbits
 
-
     """
 
     def __init__(self, filename: str) -> None:
@@ -51,6 +50,7 @@ class Orbits(ABC):
         return [int(str(link_i)[1]) for link_i in self.LINKS]
 
     def _setup(self) -> None:
+        """Read in orbital data from file and store."""
         with self.open() as f:
             for key in f.attrs.keys():
                 setattr(self, key + "_base", f.attrs[key])
@@ -63,22 +63,33 @@ class Orbits(ABC):
     @filename.setter
     def filename(self, filename: str) -> None:
         """Set file name."""
+
         assert isinstance(filename, str)
+
+        # get path
         path_to_this_file = __file__.split("detector.py")[0]
+
+        # make sure orbit_files directory exists in the right place
         if not os.path.exists(path_to_this_file + "orbit_files/"):
             os.mkdir(path_to_this_file + "orbit_files/")
         path_to_this_file = path_to_this_file + "orbit_files/"
+
         if not os.path.exists(path_to_this_file + filename):
+            # download files from github if they are not there
             github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
             r = requests.get(github_file)
+
+            # if not success
             if r.status_code != 200:
                 raise ValueError(
                     f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
                 )
 
+            # write the contents to a local file
             with open(path_to_this_file + filename, "wb") as f:
                 f.write(r.content)
 
+        # store
         self._filename = path_to_this_file + filename
 
     def open(self) -> h5py.File:
@@ -96,7 +107,7 @@ class Orbits(ABC):
 
     @property
     def t_base(self) -> np.ndarray:
-        """Light travel times along links from file."""
+        """Time array from file."""
         with self.open() as f:
             t_base = np.arange(self.size_base) * self.dt_base
         return t_base
@@ -117,14 +128,14 @@ class Orbits(ABC):
 
     @property
     def x_base(self) -> np.ndarray:
-        """Light travel times along links from file."""
+        """Spacecraft position from file."""
         with self.open() as f:
             x = f["tcb"]["x"][:]
         return x
 
     @property
     def v_base(self) -> np.ndarray:
-        """Light travel times along links from file."""
+        """Spacecraft velocities from file."""
         with self.open() as f:
             v = f["tcb"]["v"][:]
         return v
@@ -154,35 +165,35 @@ class Orbits(ABC):
 
     @property
     def n(self) -> np.ndarray:
-        """Light travel time."""
+        """Normal vectors along links."""
         self._check_configured()
         return self._n
 
     @n.setter
     def n(self, n: np.ndarray) -> np.ndarray:
-        """Set light travel time."""
+        """Set Normal vectors along links."""
         return self._n
 
     @property
     def x(self) -> np.ndarray:
-        """Light travel time."""
+        """Spacecraft positions."""
         self._check_configured()
         return self._x
 
     @x.setter
     def x(self, x: np.ndarray) -> np.ndarray:
-        """Set light travel time."""
+        """Set Spacecraft positions."""
         return self._x
 
     @property
     def v(self) -> np.ndarray:
-        """Light travel time."""
+        """Spacecraft velocities."""
         self._check_configured()
         return self._v
 
     @v.setter
     def v(self, v: np.ndarray) -> np.ndarray:
-        """Set light travel time."""
+        """Set Spacecraft velocities."""
         return self._v
 
     def configure(
@@ -290,6 +301,7 @@ class Orbits(ABC):
 
     @property
     def pycppdetector_args(self) -> tuple:
+        """args for the c++ class."""
         return self._pycppdetector_args
 
     @pycppdetector_args.setter
@@ -311,30 +323,81 @@ class Orbits(ABC):
     def get_light_travel_times(
         self, t: float | np.ndarray, link: int
     ) -> float | np.ndarray:
+        """Compute light travel time as a function of time.
+
+        Computes with the c++ backend.
+
+        Args:
+            t: Time array in seconds.
+            link: which link. Must be ``in self.LINKS``.
+
+        Returns:
+            Light travel times.
+
+        """
         return self.pycppdetector.get_light_travel_time(t, link)
 
     def get_normal_unit_vec(self, t: float | np.ndarray, link: int) -> np.ndarray:
+        """Compute link normal vector as a function of time.
+
+        Computes with the c++ backend.
+
+        Args:
+            t: Time array in seconds.
+            link: which link. Must be ``in self.LINKS``.
+
+        Returns:
+            Link normal vectors.
+
+        """
         return self.pycppdetector.get_normal_unit_vec(t, link)
 
     def get_pos(self, t: float | np.ndarray, sc: int) -> np.ndarray:
+        """Compute spacecraft position as a function of time.
+
+        Computes with the c++ backend.
+
+        Args:
+            t: Time array in seconds.
+            sc: which spacecraft. Must be ``in self.SC``.
+
+        Returns:
+            Spacecraft positions.
+
+        """
         return self.pycppdetector.get_pos(t, sc)
 
     @property
     def ptr(self) -> int:
-        """pointer to c-class"""
+        """pointer to c++ class"""
         return self.pycppdetector.ptr
 
 
 class EqualArmlengthOrbits(Orbits):
-    """Equal Armlength Orbits"""
+    """Equal Armlength Orbits
+
+    Orbit file: equalarmlength-orbits.h5
+
+    """
 
     def __init__(self):
-        # TODO: fix this up
         super().__init__("equalarmlength-orbits.h5")
 
 
+class ESAOrbits(Orbits):
+    """ESA Orbits
+
+    Orbit file: esa-trailing-orbits.h5
+
+    """
+
+    def __init__(self):
+        # TODO: fix this up
+        super().__init__("esa-trailing-orbits.h5")
+
+
 class DefaultOrbits(EqualArmlengthOrbits):
-    """Set default orbit class to Equal Arm Length orbits for now."""
+    """Set default orbit class to Equal Armlength orbits for now."""
 
     pass
 
@@ -343,11 +406,10 @@ class DefaultOrbits(EqualArmlengthOrbits):
 class LISAModelSettings:
     """Required LISA model settings:
 
-    TODO: rename these
-
     Args:
         Soms_d: OMS displacement noise.
         Sa_a: Acceleration noise.
+        orbits: Orbital information.
         name: Name of model.
 
     """
@@ -359,7 +421,16 @@ class LISAModelSettings:
 
 
 class LISAModel(LISAModelSettings, ABC):
-    """Model for the LISA Constellation"""
+    """Model for the LISA Constellation
+
+    This includes sensitivity information computed in
+    :module:`lisatools.sensitivity` and orbital information
+    contained in an :class:`Orbits` class object.
+
+    This class is used to house high-level methods useful
+    to various needed computations.
+
+    """
 
     def __str__(self) -> str:
         out = "LISA Constellation Configurations Settings:\n"
@@ -368,6 +439,7 @@ class LISAModel(LISAModelSettings, ABC):
         return out
 
 
+# defaults
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
 proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "proposal")
 mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "mrdv1")

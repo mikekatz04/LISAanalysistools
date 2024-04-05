@@ -4,14 +4,15 @@
    :maxdepth: 4
    :caption: Documentation:
 
-   user/main
+   user/diagnostic
    user/sensitivity
    user/stochastic
    user/datacontainer
    user/sources
+   user/detector
    
 .. toctree::
    :maxdepth: 4
    :caption: Tutorial:
 
-   lisatools_tutorial
+   tutorial/lisatools_tutorial

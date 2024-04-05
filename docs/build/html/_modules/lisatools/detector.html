@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.detector &mdash; lisaanalysistools 1.0.0 documentation</title>
+  <title>lisatools.detector &mdash; lisaanalysistools 1.0.2 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,7 +18,7 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=8d563738"></script>
+        <script src="../../_static/documentation_options.js?v=1ed6394b"></script>
         <script src="../../_static/doctools.js?v=888ff710"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="../../_static/js/theme.js"></script>
@@ -107,7 +107,6 @@
 <span class="sd">    Args:</span>
 <span class="sd">        filename: File name. File should be in the style of LISAOrbits</span>
 
-
 <span class="sd">    &quot;&quot;&quot;</span>
 
     <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
@@ -136,6 +135,7 @@
         <span class="k">return</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">link_i</span><span class="p">)[</span><span class="mi">1</span><span class="p">])</span> <span class="k">for</span> <span class="n">link_i</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">LINKS</span><span class="p">]</span>
 
     <span class="k">def</span> <span class="nf">_setup</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Read in orbital data from file and store.&quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">open</span><span class="p">()</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
             <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">f</span><span class="o">.</span><span class="n">attrs</span><span class="o">.</span><span class="n">keys</span><span class="p">():</span>
                 <span class="nb">setattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span> <span class="o">+</span> <span class="s2">&quot;_base&quot;</span><span class="p">,</span> <span class="n">f</span><span class="o">.</span><span class="n">attrs</span><span class="p">[</span><span class="n">key</span><span class="p">])</span>
@@ -148,22 +148,33 @@
     <span class="nd">@filename</span><span class="o">.</span><span class="n">setter</span>
     <span class="k">def</span> <span class="nf">filename</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Set file name.&quot;&quot;&quot;</span>
+
         <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span>
+
+        <span class="c1"># get path</span>
         <span class="n">path_to_this_file</span> <span class="o">=</span> <span class="vm">__file__</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;detector.py&quot;</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># make sure orbit_files directory exists in the right place</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path_to_this_file</span> <span class="o">+</span> <span class="s2">&quot;orbit_files/&quot;</span><span class="p">):</span>
             <span class="n">os</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">path_to_this_file</span> <span class="o">+</span> <span class="s2">&quot;orbit_files/&quot;</span><span class="p">)</span>
         <span class="n">path_to_this_file</span> <span class="o">=</span> <span class="n">path_to_this_file</span> <span class="o">+</span> <span class="s2">&quot;orbit_files/&quot;</span>
+
         <span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">path_to_this_file</span> <span class="o">+</span> <span class="n">filename</span><span class="p">):</span>
-            <span class="n">github_file</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;https://github.com/mikekatz04/LISAanalysistools/raw/main/orbit_files/</span><span class="si">{</span><span class="n">filename</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="c1"># download files from github if they are not there</span>
+            <span class="n">github_file</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/</span><span class="si">{</span><span class="n">filename</span><span class="si">}</span><span class="s2">&quot;</span>
             <span class="n">r</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">github_file</span><span class="p">)</span>
+
+            <span class="c1"># if not success</span>
             <span class="k">if</span> <span class="n">r</span><span class="o">.</span><span class="n">status_code</span> <span class="o">!=</span> <span class="mi">200</span><span class="p">:</span>
                 <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
-                    <span class="sa">f</span><span class="s2">&quot;Cannot find </span><span class="si">{</span><span class="n">filename</span><span class="si">}</span><span class="s2"> within default files located at github.com/mikekatz04/LISAanalysistools/orbit_files/.&quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;Cannot find </span><span class="si">{</span><span class="n">filename</span><span class="si">}</span><span class="s2"> within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/.&quot;</span>
                 <span class="p">)</span>
 
+            <span class="c1"># write the contents to a local file</span>
             <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">path_to_this_file</span> <span class="o">+</span> <span class="n">filename</span><span class="p">,</span> <span class="s2">&quot;wb&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
                 <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
 
+        <span class="c1"># store</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_filename</span> <span class="o">=</span> <span class="n">path_to_this_file</span> <span class="o">+</span> <span class="n">filename</span>
 
 <div class="viewcode-block" id="Orbits.open">
@@ -184,7 +195,7 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">t_base</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Light travel times along links from file.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Time array from file.&quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">open</span><span class="p">()</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
             <span class="n">t_base</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">size_base</span><span class="p">)</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">dt_base</span>
         <span class="k">return</span> <span class="n">t_base</span>
@@ -205,14 +216,14 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">x_base</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Light travel times along links from file.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Spacecraft position from file.&quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">open</span><span class="p">()</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
             <span class="n">x</span> <span class="o">=</span> <span class="n">f</span><span class="p">[</span><span class="s2">&quot;tcb&quot;</span><span class="p">][</span><span class="s2">&quot;x&quot;</span><span class="p">][:]</span>
         <span class="k">return</span> <span class="n">x</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">v_base</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Light travel times along links from file.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Spacecraft velocities from file.&quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">open</span><span class="p">()</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
             <span class="n">v</span> <span class="o">=</span> <span class="n">f</span><span class="p">[</span><span class="s2">&quot;tcb&quot;</span><span class="p">][</span><span class="s2">&quot;v&quot;</span><span class="p">][:]</span>
         <span class="k">return</span> <span class="n">v</span>
@@ -242,35 +253,35 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">n</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Light travel time.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Normal vectors along links.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_check_configured</span><span class="p">()</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_n</span>
 
     <span class="nd">@n</span><span class="o">.</span><span class="n">setter</span>
     <span class="k">def</span> <span class="nf">n</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set light travel time.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set Normal vectors along links.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_n</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">x</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Light travel time.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Spacecraft positions.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_check_configured</span><span class="p">()</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_x</span>
 
     <span class="nd">@x</span><span class="o">.</span><span class="n">setter</span>
     <span class="k">def</span> <span class="nf">x</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set light travel time.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set Spacecraft positions.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_x</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">v</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Light travel time.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Spacecraft velocities.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_check_configured</span><span class="p">()</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_v</span>
 
     <span class="nd">@v</span><span class="o">.</span><span class="n">setter</span>
     <span class="k">def</span> <span class="nf">v</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">v</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set light travel time.&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set Spacecraft velocities.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_v</span>
 
 <div class="viewcode-block" id="Orbits.configure">
@@ -381,6 +392,7 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">pycppdetector_args</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;args for the c++ class.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span>
 
     <span class="nd">@pycppdetector_args</span><span class="o">.</span><span class="n">setter</span>
@@ -399,20 +411,65 @@
                 <span class="s2">&quot;Cannot request property. Need to use configure() method first.&quot;</span>
             <span class="p">)</span>
 
+<div class="viewcode-block" id="Orbits.get_light_travel_times">
+<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.get_light_travel_times">[docs]</a>
     <span class="k">def</span> <span class="nf">get_light_travel_times</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">link</span><span class="p">:</span> <span class="nb">int</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_light_travel_time</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute light travel time as a function of time.</span>
 
+<span class="sd">        Computes with the c++ backend.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            t: Time array in seconds.</span>
+<span class="sd">            link: which link. Must be ``in self.LINKS``.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Light travel times.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_light_travel_time</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Orbits.get_normal_unit_vec">
+<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.get_normal_unit_vec">[docs]</a>
     <span class="k">def</span> <span class="nf">get_normal_unit_vec</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">link</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_normal_unit_vec</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute link normal vector as a function of time.</span>
 
+<span class="sd">        Computes with the c++ backend.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            t: Time array in seconds.</span>
+<span class="sd">            link: which link. Must be ``in self.LINKS``.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Link normal vectors.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_normal_unit_vec</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Orbits.get_pos">
+<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.get_pos">[docs]</a>
     <span class="k">def</span> <span class="nf">get_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">sc</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_pos</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">sc</span><span class="p">)</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute spacecraft position as a function of time.</span>
+
+<span class="sd">        Computes with the c++ backend.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            t: Time array in seconds.</span>
+<span class="sd">            sc: which spacecraft. Must be ``in self.SC``.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Spacecraft positions.</span>
+
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_pos</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">sc</span><span class="p">)</span></div>
+
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">ptr</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;pointer to c-class&quot;&quot;&quot;</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;pointer to c++ class&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">ptr</span></div>
 
 
@@ -420,18 +477,36 @@
 <div class="viewcode-block" id="EqualArmlengthOrbits">
 <a class="viewcode-back" href="../../user/main.html#lisatools.detector.EqualArmlengthOrbits">[docs]</a>
 <span class="k">class</span> <span class="nc">EqualArmlengthOrbits</span><span class="p">(</span><span class="n">Orbits</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Equal Armlength Orbits&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Equal Armlength Orbits</span>
+
+<span class="sd">    Orbit file: equalarmlength-orbits.h5</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;equalarmlength-orbits.h5&quot;</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="ESAOrbits">
+<a class="viewcode-back" href="../../user/main.html#lisatools.detector.ESAOrbits">[docs]</a>
+<span class="k">class</span> <span class="nc">ESAOrbits</span><span class="p">(</span><span class="n">Orbits</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;ESA Orbits</span>
+
+<span class="sd">    Orbit file: esa-trailing-orbits.h5</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
 
     <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
         <span class="c1"># TODO: fix this up</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;equalarmlength-orbits.h5&quot;</span><span class="p">)</span></div>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;esa-trailing-orbits.h5&quot;</span><span class="p">)</span></div>
 
 
 
 <div class="viewcode-block" id="DefaultOrbits">
 <a class="viewcode-back" href="../../user/main.html#lisatools.detector.DefaultOrbits">[docs]</a>
 <span class="k">class</span> <span class="nc">DefaultOrbits</span><span class="p">(</span><span class="n">EqualArmlengthOrbits</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Set default orbit class to Equal Arm Length orbits for now.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Set default orbit class to Equal Armlength orbits for now.&quot;&quot;&quot;</span>
 
     <span class="k">pass</span></div>
 
@@ -443,11 +518,10 @@
 <span class="k">class</span> <span class="nc">LISAModelSettings</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Required LISA model settings:</span>
 
-<span class="sd">    TODO: rename these</span>
-
 <span class="sd">    Args:</span>
 <span class="sd">        Soms_d: OMS displacement noise.</span>
 <span class="sd">        Sa_a: Acceleration noise.</span>
+<span class="sd">        orbits: Orbital information.</span>
 <span class="sd">        name: Name of model.</span>
 
 <span class="sd">    &quot;&quot;&quot;</span>
@@ -462,7 +536,16 @@
 <div class="viewcode-block" id="LISAModel">
 <a class="viewcode-back" href="../../user/main.html#lisatools.detector.LISAModel">[docs]</a>
 <span class="k">class</span> <span class="nc">LISAModel</span><span class="p">(</span><span class="n">LISAModelSettings</span><span class="p">,</span> <span class="n">ABC</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Model for the LISA Constellation&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Model for the LISA Constellation</span>
+
+<span class="sd">    This includes sensitivity information computed in</span>
+<span class="sd">    :module:`lisatools.sensitivity` and orbital information</span>
+<span class="sd">    contained in an :class:`Orbits` class object.</span>
+
+<span class="sd">    This class is used to house high-level methods useful</span>
+<span class="sd">    to various needed computations.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
 
     <span class="k">def</span> <span class="fm">__str__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
         <span class="n">out</span> <span class="o">=</span> <span class="s2">&quot;LISA Constellation Configurations Settings:</span><span class="se">\n</span><span class="s2">&quot;</span>
@@ -472,6 +555,7 @@
 
 
 
+<span class="c1"># defaults</span>
 <span class="n">scirdv1</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">15.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">3.0e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;scirdv1&quot;</span><span class="p">)</span>
 <span class="n">proposal</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">10.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">3.0e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;proposal&quot;</span><span class="p">)</span>
 <span class="n">mrdv1</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">10.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">2.4e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;mrdv1&quot;</span><span class="p">)</span>
