@@ -4,12 +4,12 @@
    :maxdepth: 4
    :caption: Documentation:
 
-   user/diagnostic
    user/sensitivity
+   user/detector
    user/stochastic
    user/datacontainer
+   user/diagnostic
    user/sources
-   user/detector
    
 .. toctree::
    :maxdepth: 4
