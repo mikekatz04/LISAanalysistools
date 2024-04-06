@@ -5,7 +5,6 @@ from copy import deepcopy
 
 import math
 import numpy as np
-from numpy.typing import ArrayLike
 from scipy import interpolate
 import matplotlib.pyplot as plt
 
@@ -527,17 +526,19 @@ class SensitivityMatrix:
         sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
             desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
             or a string corresponding to the :class:`Sensitivity` object.
-        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 
     def __init__(
         self,
         f: np.ndarray,
-        sens_mat: List[List[np.ndarray | Sensitivity]]
-        | List[np.ndarray | Sensitivity]
-        | np.ndarray
-        | Sensitivity,
+        sens_mat: (
+            List[List[np.ndarray | Sensitivity]]
+            | List[np.ndarray | Sensitivity]
+            | np.ndarray
+            | Sensitivity
+        ),
         *sens_args: tuple,
         **sens_kwargs: dict,
     ) -> None:
@@ -598,10 +599,12 @@ class SensitivityMatrix:
     @sens_mat.setter
     def sens_mat(
         self,
-        sens_mat: List[List[np.ndarray | Sensitivity]]
-        | List[np.ndarray | Sensitivity]
-        | np.ndarray
-        | Sensitivity,
+        sens_mat: (
+            List[List[np.ndarray | Sensitivity]]
+            | List[np.ndarray | Sensitivity]
+            | np.ndarray
+            | Sensitivity
+        ),
     ) -> None:
         """Set sensitivity matrix."""
         self.sens_mat_input = deepcopy(sens_mat)
@@ -729,7 +732,7 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
 
     Args:
         f: Frequency array.
-        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 
@@ -749,7 +752,7 @@ class AET1SensitivityMatrix(SensitivityMatrix):
 
     Args:
         f: Frequency array.
-        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 
@@ -763,7 +766,7 @@ class AE1SensitivityMatrix(SensitivityMatrix):
 
     Args:
         f: Frequency array.
-        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 
@@ -778,7 +781,7 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
     Args:
         f: Frequency array.
         nchannels: Number of channels.
-        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 

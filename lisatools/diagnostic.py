@@ -2,7 +2,6 @@ import warnings
 from types import ModuleType, NoneType
 from typing import Optional, Any, Tuple, List
 
-from numpy.typing import ArrayLike
 import matplotlib.pyplot as plt
 
 from eryn.utils import TransformContainer
@@ -387,7 +386,7 @@ def snr(
 def h_var_p_eps(
     step: float,
     waveform_model: callable,
-    params: ArrayLike,
+    params: np.ndarray | list,
     index: int,
     parameter_transforms: Optional[TransformContainer] = None,
     waveform_args: Optional[tuple] = (),
@@ -499,8 +498,8 @@ def dh_dlambda(
 def info_matrix(
     eps: float | np.ndarray,
     waveform_model: callable,
-    params: ArrayLike,
-    deriv_inds: Optional[ArrayLike] = None,
+    params: np.ndarray | list,
+    deriv_inds: Optional[np.ndarray | list] = None,
     inner_product_kwargs: Optional[dict] = {},
     return_derivs: Optional[bool] = False,
     **kwargs: dict,
@@ -793,7 +792,7 @@ def cutler_vallisneri_bias(
     eps: float | np.ndarray,
     input_diagnostics: Optional[dict] = None,
     info_mat: Optional[np.ndarray] = None,
-    deriv_inds: Optional[ArrayLike] = None,
+    deriv_inds: Optional[np.ndarray | list] = None,
     return_derivs: Optional[bool] = False,
     return_cov: Optional[bool] = False,
     parameter_transforms: Optional[TransformContainer] = None,

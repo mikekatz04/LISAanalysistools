@@ -226,9 +226,9 @@ def get_groups_from_band_structure(
     groups_even_odd = xp.sum(groups_even_odd_tmp, axis=0)
 
     groups_out = -2 * xp.ones_like(f0, dtype=int)
-    groups_out[
-        (temp_inds, walker_inds, inds_band_indices.flatten()[keep])
-    ] = groups_even_odd
+    groups_out[(temp_inds, walker_inds, inds_band_indices.flatten()[keep])] = (
+        groups_even_odd
+    )
 
     groups_out[bad] = -1
 
@@ -238,3 +238,9 @@ def get_groups_from_band_structure(
         fix_1 = band_indices[fix]"""
 
     return groups_out
+
+
+autodoc_type_aliases = {
+    "Iterable": "Iterable",
+    "ArrayLike": "ArrayLike",
+}

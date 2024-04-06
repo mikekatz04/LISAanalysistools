@@ -88,6 +88,11 @@ sphinx_gallery_conf = {
     "gallery_dirs": ["examples_ucb"],  # , "examples_smbh"],
 }
 
+autodoc_type_aliases = {
+    "Iterable": "Iterable",
+    "ArrayLike": "ArrayLike",
+}
+
 typehints_defaults = "comma"
 
 # configuration for intersphinx: refer to the Python standard library.

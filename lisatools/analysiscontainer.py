@@ -1,12 +1,16 @@
+from __future__ import annotations
+
+
 import warnings
 from abc import ABC
 from typing import Any, Tuple, Optional, List
 
 import math
 import numpy as np
-from numpy.typing import ArrayLike
+
 from scipy import interpolate
 import matplotlib.pyplot as plt
+
 
 try:
     import cupy as cp
@@ -209,7 +213,7 @@ class AnalysisContainer:
         template: DataResidualArray,
         include_psd_info: bool = False,
         phase_maximize: bool = False,
-        **kwargs: dict
+        **kwargs: dict,
     ) -> float:
         """Calculate the Likelihood of a template against the data.
 
@@ -278,11 +282,11 @@ class AnalysisContainer:
     def _calculate_signal_operation(
         self,
         calc: str,
-        *args: ArrayLike,
+        *args: Any,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
-        **kwargs: dict
+        **kwargs: dict,
     ) -> float | complex:
         """Return the likelihood of a generated signal with the data.
 
@@ -328,11 +332,11 @@ class AnalysisContainer:
 
     def calculate_signal_likelihood(
         self,
-        *args: ArrayLike,
+        *args: Any,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
-        **kwargs: dict
+        **kwargs: dict,
     ) -> float | complex:
         """Return the likelihood of a generated signal with the data.
 
@@ -355,16 +359,16 @@ class AnalysisContainer:
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
             data_res_arr_kwargs=data_res_arr_kwargs,
-            **kwargs
+            **kwargs,
         )
 
     def calculate_signal_inner_product(
         self,
-        *args: ArrayLike,
+        *args: Any,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
-        **kwargs: dict
+        **kwargs: dict,
     ) -> float | complex:
         """Return the inner product of a generated signal with the data.
 
@@ -387,16 +391,16 @@ class AnalysisContainer:
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
             data_res_arr_kwargs=data_res_arr_kwargs,
-            **kwargs
+            **kwargs,
         )
 
     def calculate_signal_snr(
         self,
-        *args: ArrayLike,
+        *args: Any,
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
-        **kwargs: dict
+        **kwargs: dict,
     ) -> Tuple[float, float]:
         """Return the SNR of a generated signal with the data.
 
@@ -419,7 +423,7 @@ class AnalysisContainer:
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
             data_res_arr_kwargs=data_res_arr_kwargs,
-            **kwargs
+            **kwargs,
         )
 
     def eryn_likelihood_function(self, x, *args, **kwargs):

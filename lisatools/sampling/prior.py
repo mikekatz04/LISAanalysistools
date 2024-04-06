@@ -8,7 +8,10 @@ from eryn.moves.multipletry import logsumexp
 from typing import Union, Optional, Tuple, List
 
 import sys
-sys.path.append("/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/")
+
+sys.path.append(
+    "/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/"
+)
 # from galaxy_ffdot import GalaxyFFdot
 # from galaxy import Galaxy
 
@@ -18,17 +21,20 @@ try:
 except (ModuleNotFoundError, ImportError) as e:
     pass
 
+
 class AmplitudeFrequencySNRPrior:
-    def __init__(self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs):
+    def __init__(
+        self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs
+    ):
         self.rho_star = rho_star
         self.frequency_prior = frequency_prior
 
         self.transform = AmplitudeFromSNR(L, Tobs, use_cupy=use_cupy, **noise_kwargs)
         self.snr_prior = SNRPrior(rho_star, use_cupy=use_cupy)
-        
+
         # must be after transform and snr_prior due to setter
         self.use_cupy = use_cupy
-        
+
     @property
     def use_cupy(self):
         return self._use_cupy
@@ -70,7 +76,7 @@ class AmplitudeFrequencySNRPrior:
         else:
             f0_ms = f0_input
             assert f0_input.shape[:-1] == size
-        
+
         f0 = f0_ms / 1e3
 
         rho = self.snr_prior.rvs(size=size)
@@ -78,10 +84,6 @@ class AmplitudeFrequencySNRPrior:
         amp, _ = self.transform(rho, f0, **noise_kwargs)
 
         return (amp, f0_ms)
-
-
-
-
 
 
 class SNRPrior:
@@ -98,12 +100,16 @@ class SNRPrior:
         self._use_cupy = use_cupy
 
     def pdf(self, rho):
-        
+
         xp = np if not self.use_cupy else cp
 
         p = xp.zeros_like(rho)
         good = rho > 0.0
-        p[good] = 3 * rho[good] / (4 * self.rho_star ** 2 * (1 + rho[good] / (4 * self.rho_star)) ** 5)
+        p[good] = (
+            3
+            * rho[good]
+            / (4 * self.rho_star**2 * (1 + rho[good] / (4 * self.rho_star)) ** 5)
+        )
         return p
 
     def logpdf(self, rho):
@@ -114,7 +120,15 @@ class SNRPrior:
         xp = np if not self.use_cupy else cp
         c = xp.zeros_like(rho)
         good = rho > 0.0
-        c[good] = 768 * self.rho_star ** 3 * (1 / (768. * self.rho_star ** 3) - (rho[good] + self.rho_star)/(3. * (rho[good] + 4 * self.rho_star) ** 4))
+        c[good] = (
+            768
+            * self.rho_star**3
+            * (
+                1 / (768.0 * self.rho_star**3)
+                - (rho[good] + self.rho_star)
+                / (3.0 * (rho[good] + 4 * self.rho_star) ** 4)
+            )
+        )
         return c
 
     def rvs(self, size=1):
@@ -125,49 +139,125 @@ class SNRPrior:
 
         u = xp.random.rand(*size)
 
-        rho = (-4*self.rho_star + xp.sqrt(-32*self.rho_star**2 - (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) + 
-      (3072*2**0.3333333333333333*xp.cbrt(-1 + 3*u - 3*u**2 + u**3)*
-         (self.rho_star**4 - u*self.rho_star**4))/
-       ((-1 + u)**2*xp.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-            xp.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-              3131031158784*u**3*self.rho_star**12))) + 
-      xp.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-          xp.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-            3131031158784*u**3*self.rho_star**12))/
-       (3.*2**0.3333333333333333*xp.cbrt(-1 + 3*u - 3*u**2 + u**3)))/2.
-     + xp.sqrt(32*self.rho_star**2 + (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) - 
-      (3072*2**0.3333333333333333*xp.cbrt(-1 + 3*u - 3*u**2 + u**3)*
-         (self.rho_star**4 - u*self.rho_star**4))/
-       ((-1 + u)**2*xp.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-            xp.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-              3131031158784*u**3*self.rho_star**12))) - 
-      xp.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-          xp.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-            3131031158784*u**3*self.rho_star**12))/
-       (3.*2**0.3333333333333333*xp.cbrt(-1 + 3*u - 3*u**2 + u**3)) + 
-      (2048*self.rho_star**3 - (2048*u*self.rho_star**3)/(-1 + u))/
-       (4.*xp.sqrt(-32*self.rho_star**2 - (32*(-self.rho_star**2 + u*self.rho_star**2))/(1 - u) + 
-           (3072*2**0.3333333333333333*
-              xp.cbrt(-1 + 3*u - 3*u**2 + u**3)*(self.rho_star**4 - u*self.rho_star**4)
-              )/
-            ((-1 + u)**2*xp.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-                 xp.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-                   3131031158784*u**3*self.rho_star**12))) + 
-           xp.cbrt(-1769472*self.rho_star**6 + 1769472*u*self.rho_star**6 - 
-               xp.sqrt(3131031158784*u*self.rho_star**12 - 6262062317568*u**2*self.rho_star**12 + 
-                 3131031158784*u**3*self.rho_star**12))/
-            (3.*2**0.3333333333333333*
-              xp.cbrt(-1 + 3*u - 3*u**2 + u**3)))))/2.)
+        rho = (
+            -4 * self.rho_star
+            + xp.sqrt(
+                -32 * self.rho_star**2
+                - (32 * (-self.rho_star**2 + u * self.rho_star**2)) / (1 - u)
+                + (
+                    3072
+                    * 2**0.3333333333333333
+                    * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3)
+                    * (self.rho_star**4 - u * self.rho_star**4)
+                )
+                / (
+                    (-1 + u) ** 2
+                    * xp.cbrt(
+                        -1769472 * self.rho_star**6
+                        + 1769472 * u * self.rho_star**6
+                        - xp.sqrt(
+                            3131031158784 * u * self.rho_star**12
+                            - 6262062317568 * u**2 * self.rho_star**12
+                            + 3131031158784 * u**3 * self.rho_star**12
+                        )
+                    )
+                )
+                + xp.cbrt(
+                    -1769472 * self.rho_star**6
+                    + 1769472 * u * self.rho_star**6
+                    - xp.sqrt(
+                        3131031158784 * u * self.rho_star**12
+                        - 6262062317568 * u**2 * self.rho_star**12
+                        + 3131031158784 * u**3 * self.rho_star**12
+                    )
+                )
+                / (3.0 * 2**0.3333333333333333 * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3))
+            )
+            / 2.0
+            + xp.sqrt(
+                32 * self.rho_star**2
+                + (32 * (-self.rho_star**2 + u * self.rho_star**2)) / (1 - u)
+                - (
+                    3072
+                    * 2**0.3333333333333333
+                    * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3)
+                    * (self.rho_star**4 - u * self.rho_star**4)
+                )
+                / (
+                    (-1 + u) ** 2
+                    * xp.cbrt(
+                        -1769472 * self.rho_star**6
+                        + 1769472 * u * self.rho_star**6
+                        - xp.sqrt(
+                            3131031158784 * u * self.rho_star**12
+                            - 6262062317568 * u**2 * self.rho_star**12
+                            + 3131031158784 * u**3 * self.rho_star**12
+                        )
+                    )
+                )
+                - xp.cbrt(
+                    -1769472 * self.rho_star**6
+                    + 1769472 * u * self.rho_star**6
+                    - xp.sqrt(
+                        3131031158784 * u * self.rho_star**12
+                        - 6262062317568 * u**2 * self.rho_star**12
+                        + 3131031158784 * u**3 * self.rho_star**12
+                    )
+                )
+                / (3.0 * 2**0.3333333333333333 * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3))
+                + (2048 * self.rho_star**3 - (2048 * u * self.rho_star**3) / (-1 + u))
+                / (
+                    4.0
+                    * xp.sqrt(
+                        -32 * self.rho_star**2
+                        - (32 * (-self.rho_star**2 + u * self.rho_star**2)) / (1 - u)
+                        + (
+                            3072
+                            * 2**0.3333333333333333
+                            * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3)
+                            * (self.rho_star**4 - u * self.rho_star**4)
+                        )
+                        / (
+                            (-1 + u) ** 2
+                            * xp.cbrt(
+                                -1769472 * self.rho_star**6
+                                + 1769472 * u * self.rho_star**6
+                                - xp.sqrt(
+                                    3131031158784 * u * self.rho_star**12
+                                    - 6262062317568 * u**2 * self.rho_star**12
+                                    + 3131031158784 * u**3 * self.rho_star**12
+                                )
+                            )
+                        )
+                        + xp.cbrt(
+                            -1769472 * self.rho_star**6
+                            + 1769472 * u * self.rho_star**6
+                            - xp.sqrt(
+                                3131031158784 * u * self.rho_star**12
+                                - 6262062317568 * u**2 * self.rho_star**12
+                                + 3131031158784 * u**3 * self.rho_star**12
+                            )
+                        )
+                        / (
+                            3.0
+                            * 2**0.3333333333333333
+                            * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3)
+                        )
+                    )
+                )
+            )
+            / 2.0
+        )
 
         return rho
 
 
 class AmplitudeFromSNR:
     def __init__(self, L, Tobs, fd=None, use_cupy=False, **noise_kwargs):
-        self.f_star = 1 / (2. * np.pi * L) * C_SI
+        self.f_star = 1 / (2.0 * np.pi * L) * C_SI
         self.Tobs = Tobs
         self.noise_kwargs = noise_kwargs
-        
+
         xp = np if not use_cupy else cp
         if fd is not None:
             self.fd = xp.asarray(fd)
@@ -193,7 +283,7 @@ class AmplitudeFromSNR:
         assert self.fd is not None
         xp = np if not self.use_cupy else cp
         psds = xp.atleast_2d(psds)
-        
+
         if xp == cp and not isinstance(self.fd, cp.ndarray):
             self.fd = xp.asarray(self.fd)
         try:
@@ -203,7 +293,9 @@ class AmplitudeFromSNR:
         if walker_inds is None:
             walker_inds = xp.zeros_like(f0, dtype=int)
 
-        new_psds = (psds[(walker_inds, inds_fd + 1)] - psds[(walker_inds, inds_fd)]) / (self.fd[inds_fd + 1] - self.fd[inds_fd]) * (f0 - self.fd[inds_fd]) + psds[(walker_inds, inds_fd)]
+        new_psds = (psds[(walker_inds, inds_fd + 1)] - psds[(walker_inds, inds_fd)]) / (
+            self.fd[inds_fd + 1] - self.fd[inds_fd]
+        ) * (f0 - self.fd[inds_fd]) + psds[(walker_inds, inds_fd)]
         return new_psds
 
     def __call__(self, rho, f0, **noise_kwargs):
@@ -215,7 +307,7 @@ class AmplitudeFromSNR:
 
         Sn_f = self.get_Sn_f(f0, **noise_kwargs)
 
-        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / Sn_f)
+        factor = 1.0 / 2.0 * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / Sn_f)
         amp = rho / factor
         return (amp, f0)
 
@@ -238,7 +330,7 @@ class AmplitudeFromSNR:
 
         Sn_f = self.get_Sn_f(f0, **noise_kwargs)
 
-        factor = 1./2. * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / Sn_f)
+        factor = 1.0 / 2.0 * np.sqrt((self.Tobs * np.sin(f0 / self.f_star) ** 2) / Sn_f)
         rho = amp * factor
         return (rho, f0)
 
@@ -275,7 +367,7 @@ class GBPriorWrap:
         xp = np if not self.use_cupy else cp
         if isinstance(size, int):
             size = (size,)
-        
+
         arr = xp.zeros(size + (self.ndim,)).reshape(-1, self.ndim)
 
         diff = self.ndim - len(self.keys_sep)
@@ -285,15 +377,35 @@ class GBPriorWrap:
 
         if not ignore_amp:
             f0_input = arr[:, 1] if self.gen_frequency_alone else None
-            arr[:, :diff] = xp.asarray(self.base_prior.priors_in[(0, 1)].rvs(size, f0_input=f0_input, **kwargs)).reshape(diff, -1).T
+            arr[:, :diff] = (
+                xp.asarray(
+                    self.base_prior.priors_in[(0, 1)].rvs(
+                        size, f0_input=f0_input, **kwargs
+                    )
+                )
+                .reshape(diff, -1)
+                .T
+            )
 
         arr = arr.reshape(size + (self.ndim,))
         return arr
 
 
 class FullGaussianMixtureModel:
-    def __init__(self, gb, weights, means, covs, invcovs, dets, mins, maxs, limit=10.0, use_cupy=False):
-        
+    def __init__(
+        self,
+        gb,
+        weights,
+        means,
+        covs,
+        invcovs,
+        dets,
+        mins,
+        maxs,
+        limit=10.0,
+        use_cupy=False,
+    ):
+
         self.use_cupy = use_cupy
         if use_cupy:
             xp = cp
@@ -306,7 +418,7 @@ class FullGaussianMixtureModel:
         for i, weight in enumerate(weights):
             index_base = np.full_like(weight, i, dtype=int)
             indexing.append(index_base)
-        
+
         self.indexing = xp.asarray(np.concatenate(indexing))
         # invidivual weights / total number of components to uniformly choose from them
         self.weights = xp.asarray(np.concatenate(weights, axis=0) * 1 / len(weights))
@@ -326,19 +438,28 @@ class FullGaussianMixtureModel:
         self.means_in_pdf = self.means.T.flatten().copy()
         self.invcovs_in_pdf = self.invcovs.transpose(1, 2, 0).flatten().copy()
 
-        self.cumulative_weights = xp.concatenate([xp.array([0.0]), xp.cumsum(self.weights)])
+        self.cumulative_weights = xp.concatenate(
+            [xp.array([0.0]), xp.cumsum(self.weights)]
+        )
 
-        self.min_limit_f = self.map_back_frequency(-1. * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]) 
-        self.max_limit_f = self.map_back_frequency(+1. * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]) 
+        self.min_limit_f = self.map_back_frequency(
+            -1.0 * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]
+        )
+        self.max_limit_f = self.map_back_frequency(
+            +1.0 * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]
+        )
 
         # compute the jacobian
-        self.log_det_J = (self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1))[self.indexing].copy()
+        self.log_det_J = (
+            self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1)
+        )[self.indexing].copy()
 
         """self.inds_sort_min_limit_f = xp.argsort(self.min_limit_f)
         self.inds_sort_max_limit_f = xp.argsort(self.max_limit_f)
         self.sorted_min_limit_f = self.min_limit_f[self.inds_sort_min_limit_f]
         self.sorted_max_limit_f = self.max_limit_f[self.inds_sort_max_limit_f]
         """
+
     def logpdf(self, x):
 
         if self.use_cupy:
@@ -358,13 +479,15 @@ class FullGaussianMixtureModel:
         ind_min_limit = xp.searchsorted(f_sort, self.min_limit_f, side="left")
         ind_max_limit = xp.searchsorted(f_sort, self.max_limit_f, side="right")
 
-        diff = (ind_max_limit - ind_min_limit)
+        diff = ind_max_limit - ind_min_limit
         cs = xp.concatenate([xp.array([0]), xp.cumsum(diff)])
         tmp = xp.arange(cs[-1])
         keep_component_map = xp.searchsorted(cs, tmp, side="right") - 1
-        keep_point_map = tmp - cs[keep_component_map] + ind_min_limit[keep_component_map]
+        keep_point_map = (
+            tmp - cs[keep_component_map] + ind_min_limit[keep_component_map]
+        )
         max_components = diff.max().item()
-        
+
         int_check = int(1e6)
         assert int_check > self.min_limit_f.shape[0]
         special_point_component_map = int_check * keep_point_map + keep_component_map
@@ -375,20 +498,37 @@ class FullGaussianMixtureModel:
         components_keep_in = sorted_special - points_keep_in * int_check
 
         unique_points, unique_starts = xp.unique(points_keep_in, return_index=True)
-        start_index_in_pdf = xp.concatenate([unique_starts, xp.array([len(points_keep_in)])]).astype(xp.int32)
+        start_index_in_pdf = xp.concatenate(
+            [unique_starts, xp.array([len(points_keep_in)])]
+        ).astype(xp.int32)
         assert xp.all(xp.diff(unique_starts) > 0)
-        
+
         points_sorted_in = points_sorted[unique_points]
 
         logpdf_out_tmp = xp.zeros(points_sorted_in.shape[0])
 
-        self.gb.compute_logpdf(logpdf_out_tmp, components_keep_in.astype(xp.int32), points_sorted_in,
-                    self.weights, self.mins_in_pdf, self.maxs_in_pdf, self.means_in_pdf, self.invcovs_in_pdf, self.dets, self.log_det_J, 
-                    points_sorted_in.shape[0], start_index_in_pdf, self.weights.shape[0], x.shape[1])
+        self.gb.compute_logpdf(
+            logpdf_out_tmp,
+            components_keep_in.astype(xp.int32),
+            points_sorted_in,
+            self.weights,
+            self.mins_in_pdf,
+            self.maxs_in_pdf,
+            self.means_in_pdf,
+            self.invcovs_in_pdf,
+            self.dets,
+            self.log_det_J,
+            points_sorted_in.shape[0],
+            start_index_in_pdf,
+            self.weights.shape[0],
+            x.shape[1],
+        )
 
         # need to reverse the sort
         logpdf_out = xp.full(x.shape[0], -xp.inf)
-        logpdf_out[xp.sort(inds_sort[unique_points])] = logpdf_out_tmp[xp.argsort(inds_sort[unique_points])]
+        logpdf_out[xp.sort(inds_sort[unique_points])] = logpdf_out_tmp[
+            xp.argsort(inds_sort[unique_points])
+        ]
         return logpdf_out
         """# breakpoint()
 
@@ -409,11 +549,11 @@ class FullGaussianMixtureModel:
         return logpdf_full_dist"""
 
     def map_input(self, x, mins, maxs):
-        return ((x - mins) / (maxs - mins)) * 2. - 1.
+        return ((x - mins) / (maxs - mins)) * 2.0 - 1.0
 
     def map_back_frequency(self, x, mins, maxs):
-        return (x + 1.) * 1. / 2. * (maxs - mins) + mins
-        
+        return (x + 1.0) * 1.0 / 2.0 * (maxs - mins) + mins
+
     def rvs(self, size=(1,)):
 
         if isinstance(size, int):
@@ -426,20 +566,26 @@ class FullGaussianMixtureModel:
 
         # choose which component
         draw = xp.random.rand(*size)
-        component = (xp.searchsorted(self.cumulative_weights, draw.flatten(), side="right") - 1).reshape(draw.shape)
+        component = (
+            xp.searchsorted(self.cumulative_weights, draw.flatten(), side="right") - 1
+        ).reshape(draw.shape)
 
         mean_here = self.means[component]
         cov_here = self.covs[component]
 
-        new_points = mean_here + xp.einsum("...kj,...j->...k", cov_here, np.random.randn(*(component.shape + (self.ndim,))))
+        new_points = mean_here + xp.einsum(
+            "...kj,...j->...k",
+            cov_here,
+            np.random.randn(*(component.shape + (self.ndim,))),
+        )
 
         index_here = self.indexing[component]
         mins_here = self.mins[index_here]
         maxs_here = self.maxs[index_here]
         new_points_mapped = self.map_back_frequency(new_points, mins_here, maxs_here)
-        
+
         return new_points_mapped
-        
+
 
 # class FlowDist:
 #     def __init__(self, config: dict, model: Union[Galaxy, GalaxyFFdot], fit: str, ndim: int):
@@ -450,7 +596,7 @@ class FullGaussianMixtureModel:
 #         param_min, param_max = np.loadtxt(fit)
 #         self.dist.set_min(param_min)
 #         self.dist.set_max(param_max)
-        
+
 #         self.config = config
 #         self.fit = fit
 #         self.ndim = ndim
@@ -461,7 +607,7 @@ class FullGaussianMixtureModel:
 
 #         total_samp = int(np.prod(size))
 #         samples = self.dist.sample(total_samp).reshape(size + (self.ndim,))
-#         return samples 
+#         return samples
 
 #     def logpdf(self, x: cp.ndarray) -> cp.ndarray:
 #         assert x.shape[-1] == self.ndim
@@ -498,11 +644,3 @@ class FullGaussianMixtureModel:
 #         fit = '/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/minmax_ffdot_sangria.txt'
 #         ndim = 2
 #         super().__init__(config, model, fit, ndim)
-        
-    
-
-    
-        
-        
-            
-            

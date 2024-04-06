@@ -4,7 +4,6 @@ from typing import Any, Tuple, Optional, List, Dict
 
 import math
 import numpy as np
-from numpy.typing import ArrayLike
 from scipy import interpolate
 
 try:
@@ -25,7 +24,7 @@ class StochasticContribution(ABC):
     added_stochastic_list = []
 
     @classmethod
-    def _check_ndim(cls, params: ArrayLike) -> None:
+    def _check_ndim(cls, params: np.ndarray | list) -> None:
         """Check the dimensionality of the parameters matches the model.
 
         Args:
@@ -42,7 +41,7 @@ class StochasticContribution(ABC):
 
     @classmethod
     def get_Sh(
-        cls, f: float | np.ndarray, *params: ArrayLike, **kwargs: Any
+        cls, f: float | np.ndarray, *params: np.ndarray | list, **kwargs: Any
     ) -> float | np.ndarray:
         """Calculate the power spectral density of the stochastic contribution.
 

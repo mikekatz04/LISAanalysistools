@@ -167,7 +167,7 @@ class CalculateSNR:
         self.aet_template_gen = aet_template_gen
         self.psd_kwargs = psd_kwargs
 
-    def __call__(self, *params: Union[list, tuple, np.ndarray], **kwargs: Any) -> float:
+    def __call__(self, *params: np.ndarray | list, **kwargs: Any) -> float:
         a_chan, e_chan, t_chan = self.aet_template_gen(*params, **kwargs)
 
         # ignore t channel for snr computation

@@ -4,7 +4,6 @@ from typing import Any, Tuple, Optional, List
 
 import math
 import numpy as np
-from numpy.typing import ArrayLike
 from scipy import interpolate
 import matplotlib.pyplot as plt
 
@@ -36,7 +35,7 @@ class DataResidualArray:
         sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
             desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
             or a string corresponding to the :class:`Sensitivity` object.
-        **sens_kwargs: Keyword arguments to pass to :method:`Sensitivity.get_Sn`.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 
