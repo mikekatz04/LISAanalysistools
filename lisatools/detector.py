@@ -443,7 +443,7 @@ class LISAModel(LISAModelSettings, ABC):
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
 proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "proposal")
 mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "mrdv1")
-sangria = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "sangria")
+sangria = LISAModel((7.9e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "sangria")
 
 __stock_list_models__ = [scirdv1, proposal, mrdv1, sangria]
 __stock_list_models_name__ = [tmp.name for tmp in __stock_list_models__]

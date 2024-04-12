@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Introduction &mdash; lisaanalysistools 1.0.4 documentation</title>
+  <title>Introduction &mdash; lisaanalysistools 1.0.5 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
@@ -20,7 +20,7 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=71272d9f"></script>
+        <script src="../_static/documentation_options.js?v=d55fa986"></script>
         <script src="../_static/doctools.js?v=888ff710"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -709,10 +709,10 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[LISAModel(Soms_d=2.25e-22, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x10cc20770&gt;, name=&#39;scirdv1&#39;),
- LISAModel(Soms_d=9.999999999999999e-23, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x10a6ac980&gt;, name=&#39;proposal&#39;),
- LISAModel(Soms_d=9.999999999999999e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x10b091220&gt;, name=&#39;mrdv1&#39;),
- LISAModel(Soms_d=9.999999999999999e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x10cc68c80&gt;, name=&#39;sangria&#39;)]
+[LISAModel(Soms_d=2.25e-22, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x148af2e70&gt;, name=&#39;scirdv1&#39;),
+ LISAModel(Soms_d=9.999999999999999e-23, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x109b94b90&gt;, name=&#39;proposal&#39;),
+ LISAModel(Soms_d=9.999999999999999e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x148aceba0&gt;, name=&#39;mrdv1&#39;),
+ LISAModel(Soms_d=9.999999999999999e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x10bbfd850&gt;, name=&#39;sangria&#39;)]
 </pre></div></div>
 </div>
 <p>Compare two models.</p>
@@ -735,7 +735,7 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-&lt;matplotlib.legend.Legend at 0x14a2d07d0&gt;
+&lt;matplotlib.legend.Legend at 0x149534b90&gt;
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -804,17 +804,17 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:84: RuntimeWarning: divide by zero encountered in divide
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:83: RuntimeWarning: divide by zero encountered in divide
   Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:86: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:85: RuntimeWarning: divide by zero encountered in power
   Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:88: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:87: RuntimeWarning: invalid value encountered in multiply
   Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:93: RuntimeWarning: divide by zero encountered in divide
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:92: RuntimeWarning: divide by zero encountered in divide
   Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:95: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:94: RuntimeWarning: invalid value encountered in multiply
   Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:178: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:177: RuntimeWarning: divide by zero encountered in power
   * (f ** (-7.0 / 3.0))
 /Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/numpy/fft/_pocketfft.py:70: ComplexWarning: Casting complex values to real discards the imaginary part
   r = pfi.execute(a, is_real, is_forward, fct)
@@ -929,7 +929,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[&lt;matplotlib.lines.Line2D at 0x14a9c2b70&gt;]
+[&lt;matplotlib.lines.Line2D at 0x149df2e10&gt;]
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -968,7 +968,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[&lt;matplotlib.lines.Line2D at 0x14ab12870&gt;]
+[&lt;matplotlib.lines.Line2D at 0x149f1a870&gt;]
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -1041,7 +1041,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-&lt;matplotlib.colorbar.Colorbar at 0x14ad1fb60&gt;
+&lt;matplotlib.colorbar.Colorbar at 0x14a12f140&gt;
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -1180,15 +1180,15 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 <div class="highlight"><pre>
 /Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/numpy/fft/_pocketfft.py:70: ComplexWarning: Casting complex values to real discards the imaginary part
   r = pfi.execute(a, is_real, is_forward, fct)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:84: RuntimeWarning: divide by zero encountered in divide
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:83: RuntimeWarning: divide by zero encountered in divide
   Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:86: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:85: RuntimeWarning: divide by zero encountered in power
   Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:88: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:87: RuntimeWarning: invalid value encountered in multiply
   Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:93: RuntimeWarning: divide by zero encountered in divide
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:92: RuntimeWarning: divide by zero encountered in divide
   Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:95: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:94: RuntimeWarning: invalid value encountered in multiply
   Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
 </pre></div></div>
 </div>
@@ -1205,9 +1205,9 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:178: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:177: RuntimeWarning: divide by zero encountered in power
   * (f ** (-7.0 / 3.0))
-/var/folders/j0/bh276m5s531565_7zdy_t5m40000gp/T/ipykernel_44643/752658551.py:12: RuntimeWarning: invalid value encountered in divide
+/var/folders/j0/bh276m5s531565_7zdy_t5m40000gp/T/ipykernel_66818/752658551.py:12: RuntimeWarning: invalid value encountered in divide
   print(h1 / h1_scaled)
 </pre></div></div>
 </div>
@@ -1331,7 +1331,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 38.94741534749
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:701: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:704: RuntimeWarning: invalid value encountered in multiply
   plot_in = np.sqrt(self.frequency_arr * plot_in)
 /Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/matplotlib/cbook.py:1699: ComplexWarning: Casting complex values to real discards the imaginary part
   return math.isfinite(val)

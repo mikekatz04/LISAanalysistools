@@ -5,7 +5,7 @@ build-backend = 'setuptools.build_meta'
 
 [tool.poetry]
 name = "lisaanalysistools"
-version = "1.0.4"
+version = "1.0.5"
 description = "A package for LISA Data Analysis"
 license = "Apache"
 classifiers = ["Programming Language :: Python :: 3", "Operating System :: OS Independent"]

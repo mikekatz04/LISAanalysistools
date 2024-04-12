@@ -117,7 +117,6 @@ class Sensitivity(ABC):
             PSD values.
 
         """
-        x = 2.0 * np.pi * lisaLT * f
 
         # get noise values
         Spm, Sop = cls.lisanoises(f, model)
@@ -126,7 +125,11 @@ class Sensitivity(ABC):
         Sout = cls.transform(f, Spm, Sop, **kwargs)
 
         # will add zero if ignored
-        Sout += cls.get_stochastic_contribution(f, **kwargs)
+        stochastic_contribution = cls.stochastic_transform(
+            f, cls.get_stochastic_contribution(f, **kwargs), **kwargs
+        )
+
+        Sout += stochastic_contribution
         return Sout
 
     @classmethod
@@ -173,12 +176,9 @@ class Sensitivity(ABC):
             if stochastic_function is None:
                 stochastic_function = FittedHyperbolicTangentGalacticForeground
 
-            try:
                 check = stochastic_function.get_Sh(
                     f, *stochastic_params, **stochastic_kwargs
                 )
-            except:
-                breakpoint()
             sgal[:] = check
 
         if squeeze:
@@ -343,7 +343,7 @@ class A1TDISens(Sensitivity):
         )
 
         x = 2.0 * np.pi * lisaLT * f
-        return (
+        Sa = (
             8.0
             * np.sin(x) ** 2
             * (
@@ -351,6 +351,8 @@ class A1TDISens(Sensitivity):
                 + Sop * (2.0 + np.cos(x))
             )
         )
+
+        return Sa
 
     @staticmethod
     def stochastic_transform(

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.detector &mdash; lisaanalysistools 1.0.2 documentation</title>
+  <title>lisatools.detector &mdash; lisaanalysistools 1.0.5 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,9 +18,10 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=1ed6394b"></script>
+        <script src="../../_static/documentation_options.js?v=d55fa986"></script>
         <script src="../../_static/doctools.js?v=888ff710"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" /> 
@@ -47,13 +48,23 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Documentation:</span></p>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../../user/main.html">LISA Detector Setup</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../user/main.html#module-lisatools.diagnostic">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/sensitivity.html">Sensitivity Information</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/detector.html">Detector Information</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/stochastic.html">Stochastic Signals</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/datacontainer.html#analysis-container">Analysis Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user/diagnostic.html">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../user/sources.html">GW Source Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Tutorial:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#LISA-Sensitivity">LISA Sensitivity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Orbits">Orbits</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Defining-a-LISAModel">Defining a <code class="docutils literal notranslate"><span class="pre">LISAModel</span></code></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Diagnostics">Diagnostics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Analysis-Container">Analysis Container</a></li>
 </ul>
 
         </div>
@@ -100,7 +111,7 @@
 
 
 <div class="viewcode-block" id="Orbits">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.Orbits">[docs]</a>
 <span class="k">class</span> <span class="nc">Orbits</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;LISA Orbit Base Class</span>
 
@@ -178,7 +189,7 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_filename</span> <span class="o">=</span> <span class="n">path_to_this_file</span> <span class="o">+</span> <span class="n">filename</span>
 
 <div class="viewcode-block" id="Orbits.open">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.open">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.Orbits.open">[docs]</a>
     <span class="k">def</span> <span class="nf">open</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">h5py</span><span class="o">.</span><span class="n">File</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Opens the h5 file in the proper mode.</span>
 
@@ -285,7 +296,7 @@
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_v</span>
 
 <div class="viewcode-block" id="Orbits.configure">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.configure">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.Orbits.configure">[docs]</a>
     <span class="k">def</span> <span class="nf">configure</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="n">t_arr</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
@@ -412,7 +423,7 @@
             <span class="p">)</span>
 
 <div class="viewcode-block" id="Orbits.get_light_travel_times">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.get_light_travel_times">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.Orbits.get_light_travel_times">[docs]</a>
     <span class="k">def</span> <span class="nf">get_light_travel_times</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">link</span><span class="p">:</span> <span class="nb">int</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
@@ -432,7 +443,7 @@
 
 
 <div class="viewcode-block" id="Orbits.get_normal_unit_vec">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.get_normal_unit_vec">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.Orbits.get_normal_unit_vec">[docs]</a>
     <span class="k">def</span> <span class="nf">get_normal_unit_vec</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">link</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute link normal vector as a function of time.</span>
 
@@ -450,7 +461,7 @@
 
 
 <div class="viewcode-block" id="Orbits.get_pos">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.Orbits.get_pos">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.Orbits.get_pos">[docs]</a>
     <span class="k">def</span> <span class="nf">get_pos</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">sc</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute spacecraft position as a function of time.</span>
 
@@ -475,7 +486,7 @@
 
 
 <div class="viewcode-block" id="EqualArmlengthOrbits">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.EqualArmlengthOrbits">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.EqualArmlengthOrbits">[docs]</a>
 <span class="k">class</span> <span class="nc">EqualArmlengthOrbits</span><span class="p">(</span><span class="n">Orbits</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Equal Armlength Orbits</span>
 
@@ -489,7 +500,7 @@
 
 
 <div class="viewcode-block" id="ESAOrbits">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.ESAOrbits">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.ESAOrbits">[docs]</a>
 <span class="k">class</span> <span class="nc">ESAOrbits</span><span class="p">(</span><span class="n">Orbits</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;ESA Orbits</span>
 
@@ -503,17 +514,14 @@
 
 
 
-<div class="viewcode-block" id="DefaultOrbits">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.DefaultOrbits">[docs]</a>
 <span class="k">class</span> <span class="nc">DefaultOrbits</span><span class="p">(</span><span class="n">EqualArmlengthOrbits</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Set default orbit class to Equal Armlength orbits for now.&quot;&quot;&quot;</span>
 
-    <span class="k">pass</span></div>
-
+    <span class="k">pass</span>
 
 
 <div class="viewcode-block" id="LISAModelSettings">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.LISAModelSettings">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.LISAModelSettings">[docs]</a>
 <span class="nd">@dataclass</span>
 <span class="k">class</span> <span class="nc">LISAModelSettings</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Required LISA model settings:</span>
@@ -534,7 +542,7 @@
 
 
 <div class="viewcode-block" id="LISAModel">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.LISAModel">[docs]</a>
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.LISAModel">[docs]</a>
 <span class="k">class</span> <span class="nc">LISAModel</span><span class="p">(</span><span class="n">LISAModelSettings</span><span class="p">,</span> <span class="n">ABC</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Model for the LISA Constellation</span>
 
@@ -559,14 +567,12 @@
 <span class="n">scirdv1</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">15.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">3.0e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;scirdv1&quot;</span><span class="p">)</span>
 <span class="n">proposal</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">10.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">3.0e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;proposal&quot;</span><span class="p">)</span>
 <span class="n">mrdv1</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">10.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">2.4e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;mrdv1&quot;</span><span class="p">)</span>
-<span class="n">sangria</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">10.0e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">2.4e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;sangria&quot;</span><span class="p">)</span>
+<span class="n">sangria</span> <span class="o">=</span> <span class="n">LISAModel</span><span class="p">((</span><span class="mf">7.9e-12</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="mf">2.4e-15</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">DefaultOrbits</span><span class="p">(),</span> <span class="s2">&quot;sangria&quot;</span><span class="p">)</span>
 
 <span class="n">__stock_list_models__</span> <span class="o">=</span> <span class="p">[</span><span class="n">scirdv1</span><span class="p">,</span> <span class="n">proposal</span><span class="p">,</span> <span class="n">mrdv1</span><span class="p">,</span> <span class="n">sangria</span><span class="p">]</span>
 <span class="n">__stock_list_models_name__</span> <span class="o">=</span> <span class="p">[</span><span class="n">tmp</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">tmp</span> <span class="ow">in</span> <span class="n">__stock_list_models__</span><span class="p">]</span>
 
 
-<div class="viewcode-block" id="get_available_default_lisa_models">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.get_available_default_lisa_models">[docs]</a>
 <span class="k">def</span> <span class="nf">get_available_default_lisa_models</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">LISAModel</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Get list of default LISA models</span>
 
@@ -574,12 +580,9 @@
 <span class="sd">        List of LISA models.</span>
 
 <span class="sd">    &quot;&quot;&quot;</span>
-    <span class="k">return</span> <span class="n">__stock_list_models__</span></div>
+    <span class="k">return</span> <span class="n">__stock_list_models__</span>
 
 
-
-<div class="viewcode-block" id="get_default_lisa_model_from_str">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.get_default_lisa_model_from_str">[docs]</a>
 <span class="k">def</span> <span class="nf">get_default_lisa_model_from_str</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LISAModel</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a LISA model from a ``str`` input.</span>
 
@@ -594,12 +597,9 @@
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
             <span class="s2">&quot;Requested string model is not available. See lisatools.detector documentation.&quot;</span>
         <span class="p">)</span>
-    <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">model</span><span class="p">]</span></div>
+    <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">model</span><span class="p">]</span>
 
 
-
-<div class="viewcode-block" id="check_lisa_model">
-<a class="viewcode-back" href="../../user/main.html#lisatools.detector.check_lisa_model">[docs]</a>
 <span class="k">def</span> <span class="nf">check_lisa_model</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LISAModel</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Check input LISA model.</span>
 
@@ -616,8 +616,7 @@
     <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">LISAModel</span><span class="p">):</span>
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;model argument not given correctly.&quot;</span><span class="p">)</span>
 
-    <span class="k">return</span> <span class="n">model</span></div>
-
+    <span class="k">return</span> <span class="n">model</span>
 </pre></div>
 
            </div>
