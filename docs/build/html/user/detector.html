@@ -56,7 +56,12 @@
 <li class="toctree-l2"><a class="reference internal" href="#lisa-models">LISA Models</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.detector.LISAModel"><code class="docutils literal notranslate"><span class="pre">LISAModel</span></code></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.detector.LISAModelSettings"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisa-models-stock-options">LISA Models Stock Options</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisa-models-stock-options">LISA Models Stock Options</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.get_available_default_lisa_models"><code class="docutils literal notranslate"><span class="pre">get_available_default_lisa_models()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.get_default_lisa_model_from_str"><code class="docutils literal notranslate"><span class="pre">get_default_lisa_model_from_str()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.check_lisa_model"><code class="docutils literal notranslate"><span class="pre">check_lisa_model()</span></code></a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#orbits">Orbits</a><ul>
@@ -173,6 +178,54 @@ to various needed computations.</p>
 
 <section id="lisa-models-stock-options">
 <h3>LISA Models Stock Options<a class="headerlink" href="#lisa-models-stock-options" title="Link to this heading"></a></h3>
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.detector.get_available_default_lisa_models">
+<span class="sig-prename descclassname"><span class="pre">lisatools.detector.</span></span><span class="sig-name descname"><span class="pre">get_available_default_lisa_models</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#get_available_default_lisa_models"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.get_available_default_lisa_models" title="Link to this definition"></a></dt>
+<dd><p>Get list of default LISA models</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<a class="reference internal" href="#lisatools.detector.LISAModel" title="lisatools.detector.LISAModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISAModel</span></code></a>]</span></p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of LISA models.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.detector.get_default_lisa_model_from_str">
+<span class="sig-prename descclassname"><span class="pre">lisatools.detector.</span></span><span class="sig-name descname"><span class="pre">get_default_lisa_model_from_str</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#get_default_lisa_model_from_str"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.get_default_lisa_model_from_str" title="Link to this definition"></a></dt>
+<dd><p>Return a LISA model from a <code class="docutils literal notranslate"><span class="pre">str</span></code> input.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a></span>) – Model indicated with a <code class="docutils literal notranslate"><span class="pre">str</span></code>.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.detector.LISAModel" title="lisatools.detector.LISAModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISAModel</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>LISA model associated to that <code class="docutils literal notranslate"><span class="pre">str</span></code>.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.detector.check_lisa_model">
+<span class="sig-prename descclassname"><span class="pre">lisatools.detector.</span></span><span class="sig-name descname"><span class="pre">check_lisa_model</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#check_lisa_model"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.check_lisa_model" title="Link to this definition"></a></dt>
+<dd><p>Check input LISA model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – LISA model to check.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.detector.LISAModel" title="lisatools.detector.LISAModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISAModel</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>LISA Model checked. Adjusted from <code class="docutils literal notranslate"><span class="pre">str</span></code> if <code class="docutils literal notranslate"><span class="pre">str</span></code> input.</p>
+</dd>
+</dl>
+</dd></dl>
+
 </section>
 </section>
 <section id="orbits">

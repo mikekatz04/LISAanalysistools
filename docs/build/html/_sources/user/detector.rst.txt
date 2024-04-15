@@ -15,11 +15,11 @@ LISA Models
 LISA Models Stock Options
 ****************************
 
-.. autofunc:: lisatools.detector.get_available_default_lisa_models
+.. autofunction:: lisatools.detector.get_available_default_lisa_models
 
-.. autofunc:: lisatools.detector.get_default_lisa_model_from_str
+.. autofunction:: lisatools.detector.get_default_lisa_model_from_str
 
-.. autofunc:: lisatools.detector.check_lisa_model
+.. autofunction:: lisatools.detector.check_lisa_model
 
     
 
