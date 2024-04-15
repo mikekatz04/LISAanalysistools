@@ -249,7 +249,7 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
 
         Args:
             f: Frequency array.
-            Tobs: Observation time in years.
+            Tobs: Observation time in seconds.
 
         Returns:
             PSD of the Galaxy foreground noise
