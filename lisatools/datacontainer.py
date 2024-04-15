@@ -28,14 +28,19 @@ class DataResidualArray:
 
 
 class DataResidualArray:
-    """Container to hold sensitivity information.
+    """Container to hold Data, residual, or template information.
+
+    This class abstracts the connection with the sensitivity matrices to make this analysis
+    as generic as possible for the user frontend, while handling
+    special computations in the backend.
 
     Args:
-        f: Frequency array.
-        sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
-            desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
-            or a string corresponding to the :class:`Sensitivity` object.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+        data_res_in: Data, residual, or template input information. Can be a list, numpy array
+            or another :class:`DataResidualArray`.
+        dt: Timestep in seconds.
+        f_arr: Frequency array.
+        df: Delta f in frequency domain.
+        **kwargs: For future compatibility.
 
     """
 
@@ -145,14 +150,17 @@ class DataResidualArray:
 
     @property
     def fmax(self):
+        """Maximum frequency."""
         return self._fmax
 
     @property
     def f_arr(self):
+        """Frequency array."""
         return self._f_arr
 
     @property
     def dt(self):
+        """Time step in seconds."""
         if self._dt is None:
             raise ValueError("dt cannot be determined from this f_arr input.")
 
@@ -160,6 +168,7 @@ class DataResidualArray:
 
     @property
     def Tobs(self):
+        """Observation time in seconds"""
         if self._Tobs is None:
             raise ValueError("Tobs cannot be determined from this f_arr input.")
 
@@ -167,6 +176,7 @@ class DataResidualArray:
 
     @property
     def df(self):
+        """Delta f in the frequency domain."""
         if self._df is None:
             raise ValueError("df cannot be determined from this f_arr input.")
 
@@ -174,14 +184,17 @@ class DataResidualArray:
 
     @property
     def frequency_arr(self) -> np.ndarray:
+        """Frequency array"""
         return self._f_arr
 
     @property
     def data_res_arr(self) -> np.ndarray:
+        """Actual data residual array"""
         return self._data_res_arr
 
     @data_res_arr.setter
     def data_res_arr(self, data_res_arr: List[np.ndarray] | np.ndarray) -> None:
+        """Set ``data_res_arr``."""
         self._data_res_arr_input = data_res_arr
 
         if (
@@ -214,17 +227,21 @@ class DataResidualArray:
         self._data_res_arr = np.asarray(list(new_out), dtype=complex)
 
     def __getitem__(self, index: tuple) -> np.ndarray:
+        """Index this class directly in ``self.data_res_arr``."""
         return self.data_res_arr[index]
 
     @property
     def ndim(self) -> int:
+        """Number of dimensions in the `data_res_arr`."""
         return self.data_res_arr.ndim
 
     def flatten(self) -> np.ndarray:
+        """Flatten the ``data_res_arr``."""
         return self.data_res_arr.flatten()
 
     @property
     def shape(self) -> tuple:
+        """Shape of ``data_res_arr``."""
         return self.data_res_arr.shape
 
     def loglog(

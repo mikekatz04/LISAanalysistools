@@ -124,14 +124,19 @@
 <div class="viewcode-block" id="DataResidualArray">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.datacontainer.DataResidualArray">[docs]</a>
 <span class="k">class</span> <span class="nc">DataResidualArray</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Container to hold sensitivity information.</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Container to hold Data, residual, or template information.</span>
+
+<span class="sd">    This class abstracts the connection with the sensitivity matrices to make this analysis</span>
+<span class="sd">    as generic as possible for the user frontend, while handling</span>
+<span class="sd">    special computations in the backend.</span>
 
 <span class="sd">    Args:</span>
-<span class="sd">        f: Frequency array.</span>
-<span class="sd">        sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the</span>
-<span class="sd">            desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,</span>
-<span class="sd">            or a string corresponding to the :class:`Sensitivity` object.</span>
-<span class="sd">        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.</span>
+<span class="sd">        data_res_in: Data, residual, or template input information. Can be a list, numpy array</span>
+<span class="sd">            or another :class:`DataResidualArray`.</span>
+<span class="sd">        dt: Timestep in seconds.</span>
+<span class="sd">        f_arr: Frequency array.</span>
+<span class="sd">        df: Delta f in frequency domain.</span>
+<span class="sd">        **kwargs: For future compatibility.</span>
 
 <span class="sd">    &quot;&quot;&quot;</span>
 
@@ -241,14 +246,17 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">fmax</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Maximum frequency.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fmax</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">f_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Frequency array.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_f_arr</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">dt</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Time step in seconds.&quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_dt</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;dt cannot be determined from this f_arr input.&quot;</span><span class="p">)</span>
 
@@ -256,6 +264,7 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">Tobs</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Observation time in seconds&quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_Tobs</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Tobs cannot be determined from this f_arr input.&quot;</span><span class="p">)</span>
 
@@ -263,6 +272,7 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">df</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Delta f in the frequency domain.&quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_df</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;df cannot be determined from this f_arr input.&quot;</span><span class="p">)</span>
 
@@ -270,14 +280,17 @@
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">frequency_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Frequency array&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_f_arr</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Actual data residual array&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr</span>
 
     <span class="nd">@data_res_arr</span><span class="o">.</span><span class="n">setter</span>
     <span class="k">def</span> <span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data_res_arr</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">]</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Set ``data_res_arr``.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr_input</span> <span class="o">=</span> <span class="n">data_res_arr</span>
 
         <span class="k">if</span> <span class="p">(</span>
@@ -310,17 +323,24 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">new_out</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">complex</span><span class="p">)</span>
 
     <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Index this class directly in ``self.data_res_arr``.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="p">[</span><span class="n">index</span><span class="p">]</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">ndim</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Number of dimensions in the `data_res_arr`.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">ndim</span>
 
+<div class="viewcode-block" id="DataResidualArray.flatten">
+<a class="viewcode-back" href="../../user/datacontainer.html#lisatools.datacontainer.DataResidualArray.flatten">[docs]</a>
     <span class="k">def</span> <span class="nf">flatten</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Flatten the ``data_res_arr``.&quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span></div>
+
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">shape</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Shape of ``data_res_arr``.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">data_res_arr</span><span class="o">.</span><span class="n">shape</span>
 
 <div class="viewcode-block" id="DataResidualArray.loglog">
