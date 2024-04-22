@@ -1,4 +1,3 @@
-from mpi4py import MPI
 import time
 import numpy as np
 import shutil

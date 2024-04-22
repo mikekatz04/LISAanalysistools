@@ -1,4 +1,6 @@
+print("START")
 from mpi4py import MPI
+print("END")
 from copy import deepcopy
 
 import time
@@ -26,11 +28,11 @@ if __name__ == "__main__":
     head_rank = 0
 
     global_fit_progression = [
-        # {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
-        # {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank, copy_settings_file=True)},
-        # {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
+        {"name": "initial psd search", "segment": InitialPSDSearch, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
+        {"name": "mbhb search", "segment": MBHSearchSegment, "args": (comm,), "kwargs": dict(head_rank=head_rank, copy_settings_file=True)},
+        {"name": "mbhb + psd mix", "segment": InitialMBHMixSegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
         # {"name": "gb search 1", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=10.0)},
-        # {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=7.0, copy_settings_file=True)},
+        {"name": "gb search 2", "segment": InitialGBSearchSegment, "args": (comm,), "kwargs": dict(snr_lim=7.0, copy_settings_file=True)},
         {"name": "all pe", "segment": FullPESegment, "args": (comm,), "kwargs": dict(copy_settings_file=True)},
     ]
     

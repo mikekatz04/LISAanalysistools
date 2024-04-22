@@ -40,7 +40,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "first_run_through_hidden"
+    base_file_name = "sixth_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -71,7 +71,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    ldc_source_file = "LDC2_sangria_blind_v2.h5"  # "LDC2_sangria_training_v2.h5"
+    ldc_source_file = "LDC2_sangria_training_v2.h5"
     with h5py.File(ldc_source_file, "r") as f:
         tXYZ = f["obs"]["tdi"][:]
 
@@ -122,7 +122,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [5, 6, 7, 7]
+    gpus = [4, 5, 6, 7]
 
     all_general_info = dict(
         file_information=file_information,
@@ -162,13 +162,13 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # should be one more rank than GPUs for refit
     gb_search_rank = [2, 3]
-    gb_search_gpu = gpus[1]
+    gb_search_gpu = gpus[1:2]
 
-    psd_rank = 4
-    psd_gpu = gpus[3]
+    psd_rank = 5
+    psd_gpu = gpus[2]
 
-    mbh_rank = 5
-    mbh_gpu = gpus[2]
+    mbh_rank = 6
+    mbh_gpu = gpus[3]
 
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
@@ -386,8 +386,8 @@ def get_global_fit_settings(copy_settings_file=False):
  
     priors_galfor = {
         0: uniform_dist(1e-45, 2e-43),  # amp
-        1: uniform_dist(1.0, 3.0),  # alpha
-        2: uniform_dist(5e1, 1e7),  # Slope1
+        1: uniform_dist(0.01, 3.0),  # alpha
+        2: uniform_dist(1e0, 1e7),  # Slope1
         3: uniform_dist(1e-4, 5e-2),  # knee
         4: uniform_dist(5e1, 8e3),  # Slope2
     }
@@ -506,7 +506,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # mcmc info for main run
     mbh_main_run_mcmc_info = dict(
         branch_names=["mbh"],
-        nleaves_max=6,
+        nleaves_max=15,
         ndim=11,
         ntemps=10,
         nwalkers=50,

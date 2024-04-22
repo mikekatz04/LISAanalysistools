@@ -5,7 +5,6 @@ import numpy as np
 import time
 import pickle
 import shutil
-from mpi4py import MPI
 
 from gbgpu.gbgpu import GBGPU
 
