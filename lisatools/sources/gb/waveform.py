@@ -13,9 +13,9 @@ from gbgpu.gbgpu import GBGPU
 
 
 class GBAETWaveform(AETTDIWaveform):
-    def __init__(self) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         # wave generating class
-        self.wave_gen = GBGPU()
+        self.wave_gen = GBGPU(*args, **kwargs)
 
     @property
     def f_arr(self) -> np.ndarray:

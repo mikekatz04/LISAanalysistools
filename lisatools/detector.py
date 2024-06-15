@@ -24,10 +24,32 @@ class Orbits(ABC):
 
     """
 
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, armlength: Optional[float | str] = 2.5e9) -> None:
         self.filename = filename
+
         self._setup()
+        self.armlength = armlength
         self.configured = False
+
+    @property
+    def armlength(self) -> float:
+        """Armlength parameter."""
+        return self._armlength
+
+    @armlength.setter
+    def armlength(self, armlength: float | str) -> None:
+        """armlength setter."""
+
+        if isinstance(armlength, float):
+            # TODO: put error check that it is close
+            self._armlength = armlength
+        elif isinstance(armlength, str):
+            assert armlength == "input"
+            breakpoint()
+            x = self.x_base[0, 0]
+
+        else:
+            raise ValueError("armlength must be float or str == 'input'.")
 
     @property
     def LINKS(self) -> List[int]:
@@ -272,6 +294,7 @@ class Orbits(ABC):
                 ll,
                 lsr,
                 lse,
+                self.armlength,
             )
             self.dt = dt
         else:

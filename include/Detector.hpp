@@ -28,11 +28,12 @@ public:
     double *x_arr;
     int nlinks;
     int nspacecraft;
+    double armlength;
     int links[6];
     int sc_r[6];
     int sc_e[6];
 
-    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_)
+    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
@@ -41,6 +42,7 @@ public:
         x_arr = x_arr_;
         nlinks = 6;
         nspacecraft = 3;
+        armlength = armlength_;
 
         // sc_r = sc_r_;
         // sc_e = sc_e_;
@@ -65,7 +67,7 @@ public:
     Vec get_pos(double t, int sc);
     void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
     void get_pos_ptr(Vec *vec, double t, int sc);
-    void dealloc(){
+    void dealloc() {
         // delete[] links;
         // delete[] sc_r;
         // delete[] sc_e;
