@@ -56,6 +56,8 @@ setup(
         "lisatools.utils",
         "lisatools.sources",
         "lisatools.sources.emri",
+        "lisatools.sources.bbh",
+        "lisatools.sources.gb",
         "src",
     ],
     # Since the package has c code, the egg cannot be zipped
