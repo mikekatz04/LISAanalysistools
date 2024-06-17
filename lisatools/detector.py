@@ -229,6 +229,8 @@ class Orbits(ABC):
                 t_arr = np.concatenate([t_arr, self.t_base[-1:]])
         elif t_arr is not None:
             assert np.all(t_arr >= self.t_base[0]) and np.all(t_arr <= self.t_base[-1])
+            make_cpp = True
+            dt = abs(t_arr[1] - t_arr[0])
 
         elif dt is not None:
             make_cpp = True
