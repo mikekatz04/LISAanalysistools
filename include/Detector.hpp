@@ -54,8 +54,23 @@ public:
             sc_r[i] = sc_r_[i];
             sc_e[i] = sc_e_[i];
             links[i] = links_[i];
-            // std::cout << i << " HAHAHAH " << sc_r_[i] << " " << sc_e_[i] << std::endl;
+            // std::cout << i << " HAHAHAH " << sc_r[i] << " " << sc_e[i] << " " << links[i] << std::endl;
         }
+    };
+
+    int get_sc_r_from_arr(int i)
+    {
+        return sc_r[i];
+    };
+
+    int get_sc_e_from_arr(int i)
+    {
+        return sc_e[i];
+    };
+
+    int get_link_from_arr(int i)
+    {
+        return links[i];
     };
 
     int get_window(double t);

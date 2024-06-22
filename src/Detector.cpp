@@ -51,8 +51,7 @@ int Orbits::get_sc_ind(int sc)
         printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
 #else
         std::ostringstream oss;
-        int xxxx = 1;
-        oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << xxxx;
+        oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << std::endl;
         std::string var = oss.str();
         throw std::invalid_argument(var);
 #endif // __CUDACC__

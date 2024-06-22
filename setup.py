@@ -82,13 +82,13 @@ import sys
 import os.path
 
 
-for tmp in os.listdir((path_to_package := numpy.__file__.split("numpy")[0])):
-    if tmp[:9] == "lisatools":
-        tmp2 = path_to_package + tmp + "/lisatools/cutils/"
-        if not os.path.exists(tmp2 + "src"):
-            os.mkdir(tmp2 + "src/")
-        if not os.path.exists(tmp2 + "include"):
-            os.mkdir(tmp2 + "include/")
+# for tmp in os.listdir((path_to_package := numpy.__file__.split("numpy")[0])):
+#     if tmp[:9] == "lisatools":
+#         tmp2 = path_to_package + tmp + "/cutils/"
+#         if not os.path.exists(tmp2 + "src"):
+#             os.mkdir(tmp2 + "src/")
+#         if not os.path.exists(tmp2 + "include"):
+#             os.mkdir(tmp2 + "include/")
 
-        shutil.copy("src/Detector.cpp", tmp2 + "src/Detector.cpp")
-        shutil.copy("include/Detector.hpp", tmp2 + "include/Detector.hpp")
+#         shutil.copy("src/Detector.cpp", tmp2 + "src/Detector.cpp")
+#         shutil.copy("include/Detector.hpp", tmp2 + "include/Detector.hpp")

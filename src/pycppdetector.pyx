@@ -22,6 +22,9 @@ cdef extern from "../include/Detector.hpp":
         double get_light_travel_time(double t, int link) except+
         VecWrap get_pos_ptr(VecWrap* out, double t, int sc) except+
         void dealloc();
+        int get_sc_r_from_arr(int i);
+        int get_sc_e_from_arr(int i);
+        int get_link_from_arr(int i);
         
 
 cdef class pycppDetector:
@@ -118,6 +121,15 @@ cdef class pycppDetector:
 
     def get_sc_ind(self, sc: int) -> int:
         return self.g.get_sc_ind(sc)
+
+    def get_sc_r_from_arr(self, i: int) -> int:
+        return self.g.get_sc_r_from_arr(i)
+
+    def get_sc_e_from_arr(self, i: int) -> int:
+        return self.g.get_sc_e_from_arr(i)
+
+    def get_link_from_arr(self, i: int) -> int:
+        return self.g.get_link_from_arr(i)
 
     def get_light_travel_time_single(self, t: float, link: int) -> float:
         return self.g.get_light_travel_time(t, link)
