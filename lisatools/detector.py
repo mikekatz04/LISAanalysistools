@@ -287,7 +287,6 @@ class Orbits(ABC):
         ll = np.asarray(self.LINKS).copy().astype(np.int32)
 
         if make_cpp:
-            breakpoint()
             self.pycppdetector_args = [
                 dt,
                 len(self.t),
@@ -323,7 +322,6 @@ class Orbits(ABC):
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
 
-        breakpoint()
         tmp_args = tuple([deepcopy(tmp) for tmp in self._pycppdetector_args])
         self._pycppdetector = pycppDetector(*tmp_args)
         return self._pycppdetector

@@ -1,1 +1,1 @@
-from .utils import CalculateSNR
+from .utils import CalculationController, BBHCalculatorController

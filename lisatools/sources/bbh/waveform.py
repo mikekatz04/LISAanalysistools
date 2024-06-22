@@ -32,8 +32,8 @@ class BBHSNRWaveform(SNRWaveform):
         self._f_arr = f_arr
 
     def __call__(
-        self, *params: Any, **kwargs: Any
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        self, *params: Any, return_array: bool = False, **kwargs: Any
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | np.ndarray:
         m1 = params[0]
         m2 = params[1]
 
@@ -49,4 +49,7 @@ class BBHSNRWaveform(SNRWaveform):
             **kwargs,
         )[0]
 
-        return (AET[0], AET[1], AET[2])
+        if return_array:
+            return AET
+        else:
+            return (AET[0], AET[1], AET[2])
