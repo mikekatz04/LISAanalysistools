@@ -1,1 +1,5 @@
-from .utils import CalculationController, BBHCalculatorController
+from .utils import (
+    CalculationController,
+    BBHCalculatorController,
+    GBCalculatorController,
+)

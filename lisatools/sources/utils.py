@@ -118,6 +118,8 @@ class BBHCalculatorController(CalculationController):
         if 6 in deriv_inds:
             deriv_inds = np.delete(deriv_inds, np.where(deriv_inds == 6)[0])
 
+        kwargs["return_array"] = True
+
         # ignore t channel for snr computation
         cov = covariance(
             eps,
@@ -137,3 +139,90 @@ class BBHCalculatorController(CalculationController):
         )
 
         return params[np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])], cov
+
+
+class GBCalculatorController(CalculationController):
+    def __init__(self, *args: Any, **kwargs: Any):
+        # fill_dict = {
+        #     "ndim_full": 12,
+        #     "fill_values": np.array([0.0]),
+        #     "fill_inds": np.array([6]),
+        # }
+        parameter_transforms = {
+            0: np.exp,
+            1: lambda x: x / 1e3,
+            2: np.exp,
+            5: np.arccos,
+            8: np.arcsin,
+            # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
+        }
+        self.transform_fn = TransformContainer(
+            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+        )
+
+        super(GBCalculatorController, self).__init__(*args, **kwargs)
+
+    def get_cov(
+        self,
+        *params: np.ndarray | list,
+        precision: bool = True,
+        more_accurate: bool = False,
+        eps: float = 1e-9,
+        deriv_inds: np.ndarray = None,
+        **kwargs: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+
+        assert len(params) == 9
+
+        if isinstance(params, tuple):
+            params = list(params)
+
+        params = np.asarray(params)
+
+        params[0] = np.log(params[0])
+        params[1] = params[1] * 1e3
+        params[2] = np.log(params[2])
+
+        if params[3] != 0.0:
+            raise NotImplementedError(
+                "This class has not been implemented for fddot != 0 yet."
+            )
+
+        params[5] = np.cos(params[5])
+        params[8] = np.cos(params[5])
+
+        if deriv_inds is None:
+            deriv_inds = np.delete(np.arange(9), 3)
+
+        if 3 in deriv_inds:
+            deriv_inds = np.delete(deriv_inds, np.where(deriv_inds == 3)[0])
+
+        kwargs["return_array"] = True
+
+        # ignore t channel for snr computation
+        cov = covariance(
+            eps,
+            self.aet_template_gen,
+            params,
+            parameter_transforms=self.transform_fn,
+            inner_product_kwargs=dict(
+                psd=self.psd,
+                psd_kwargs={**self.psd_kwargs, "model": self.model},
+                dt=self.aet_template_gen.dt,
+                f_arr=self.aet_template_gen.f_arr,
+                df=self.aet_template_gen.df,
+            ),
+            waveform_kwargs=kwargs,
+            more_accurate=more_accurate,
+            deriv_inds=deriv_inds,
+        )
+
+        return params[np.array([0, 1, 2, 4, 5, 6, 7, 8])], cov
+
+    def get_snr(self, *args: Any, **kwargs: Any) -> float:
+
+        if "tdi2" not in kwargs:
+            kwargs["tdi2"] = True
+
+        # ensures tdi2 is added correctly for GBGPU
+        return super(GBCalculatorController, self).get_snr(*args, **kwargs)

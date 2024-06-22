@@ -26,7 +26,7 @@ class GBAETWaveform(AETTDIWaveform):
         self._f_arr = f_arr
 
     def __call__(
-        self, *params: Any, **kwargs: Any
+        self, *params: Any, return_array: bool = False, **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         self.wave_gen.run_wave(
             *params,
@@ -38,4 +38,7 @@ class GBAETWaveform(AETTDIWaveform):
         E = self.wave_gen.E[0]
         T = self.wave_gen.X[0]
 
-        return (A, E, T)
+        if return_array:
+            return np.array([A, E, T])
+        else:
+            return (A, E, T)
