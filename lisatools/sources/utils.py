@@ -226,3 +226,68 @@ class GBCalculatorController(CalculationController):
 
         # ensures tdi2 is added correctly for GBGPU
         return super(GBCalculatorController, self).get_snr(*args, **kwargs)
+
+
+class EMRICalculatorController(CalculationController):
+    def __init__(self, *args: Any, **kwargs: Any):
+        # fill_dict = {
+        #     "ndim_full": 12,
+        #     "fill_values": np.array([0.0]),
+        #     "fill_inds": np.array([6]),
+        # }
+        parameter_transforms = {
+            0: np.exp,
+            5: np.arccos,
+            7: np.arccos,
+            9: np.arccos,
+            # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
+        }
+        self.transform_fn = TransformContainer(
+            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+        )
+
+        super(EMRICalculatorController, self).__init__(*args, **kwargs)
+
+    def get_cov(
+        self,
+        *params: np.ndarray | list,
+        precision: bool = True,
+        more_accurate: bool = False,
+        eps: float = 1e-9,
+        deriv_inds: np.ndarray = None,
+        **kwargs: Any
+    ) -> Tuple[np.ndarray, np.ndarray]:
+
+        assert len(params) == 14
+
+        if isinstance(params, tuple):
+            params = list(params)
+
+        params = np.asarray(params)
+
+        params[0] = np.log(params[0])
+        params[5] = np.cos(params[5])
+        params[7] = np.cos(params[7])
+        params[9] = np.cos(params[9])
+
+        kwargs["return_array"] = True
+
+        # ignore t channel for snr computation
+        cov = covariance(
+            eps,
+            self.aet_template_gen,
+            params,
+            parameter_transforms=self.transform_fn,
+            inner_product_kwargs=dict(
+                psd=self.psd,
+                psd_kwargs={**self.psd_kwargs, "model": self.model},
+                dt=self.aet_template_gen.dt,
+                f_arr=self.aet_template_gen.f_arr,
+                df=self.aet_template_gen.df,
+            ),
+            waveform_kwargs=kwargs,
+            more_accurate=more_accurate,
+            deriv_inds=deriv_inds,
+        )
+
+        return params[:], cov

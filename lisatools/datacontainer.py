@@ -224,7 +224,7 @@ class DataResidualArray:
                 raise ValueError
 
         self.nchannels = len(new_out)
-        self._data_res_arr = np.asarray(list(new_out), dtype=complex)
+        self._data_res_arr = np.asarray(list(new_out), dtype=new_out[0].dtype)
 
     def __getitem__(self, index: tuple) -> np.ndarray:
         """Index this class directly in ``self.data_res_arr``."""
