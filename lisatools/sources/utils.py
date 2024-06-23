@@ -20,12 +20,16 @@ class CalculationController:
         aet_template_gen: SNRWaveform | AETTDIWaveform,
         model: LISAModel,
         psd_kwargs: dict,
+        Tobs: float,
+        dt: float,
         psd: Sensitivity = A1TDISens,
     ) -> None:
         self.aet_template_gen = aet_template_gen
         self.psd_kwargs = psd_kwargs
         self.model = model
         self.psd = psd
+        self.Tobs = Tobs
+        self.dt = dt
 
     @property
     def parameter_transforms(self) -> TransformContainer:
@@ -75,6 +79,13 @@ class BBHCalculatorController(CalculationController):
 
         super(BBHCalculatorController, self).__init__(*args, **kwargs)
 
+    def get_snr(self, *args: Any, **kwargs: Any) -> float:
+        if "t_obs_start" not in kwargs:
+            kwargs["shift_t_limits"] = True
+            kwargs["t_obs_start"] = 0.0
+            kwargs["t_obs_end"] = self.Tobs
+        return super(BBHCalculatorController, self).get_snr(*args, **kwargs)
+
     def get_cov(
         self,
         *params: np.ndarray | list,
@@ -120,6 +131,11 @@ class BBHCalculatorController(CalculationController):
 
         kwargs["return_array"] = True
 
+        if "t_obs_start" not in kwargs:
+            kwargs["shift_t_limits"] = True
+            kwargs["t_obs_start"] = 0.0
+            kwargs["t_obs_end"] = self.Tobs
+
         # ignore t channel for snr computation
         cov = covariance(
             eps,
@@ -161,6 +177,7 @@ class GBCalculatorController(CalculationController):
         )
 
         super(GBCalculatorController, self).__init__(*args, **kwargs)
+        self.Tobs *= YRSID_SI
 
     def get_cov(
         self,
@@ -199,6 +216,9 @@ class GBCalculatorController(CalculationController):
 
         kwargs["return_array"] = True
 
+        kwargs["dt"] = self.dt
+        kwargs["T"] = self.Tobs
+
         # ignore t channel for snr computation
         cov = covariance(
             eps,
@@ -223,6 +243,9 @@ class GBCalculatorController(CalculationController):
 
         if "tdi2" not in kwargs:
             kwargs["tdi2"] = True
+
+        kwargs["dt"] = self.dt
+        kwargs["T"] = self.Tobs
 
         # ensures tdi2 is added correctly for GBGPU
         return super(GBCalculatorController, self).get_snr(*args, **kwargs)
@@ -271,6 +294,9 @@ class EMRICalculatorController(CalculationController):
         params[9] = np.cos(params[9])
 
         kwargs["return_array"] = True
+
+        assert self.aet_template_gen.response.dt == self.dt
+        assert self.aet_template_gen.response.T == self.Tobs
 
         # ignore t channel for snr computation
         cov = covariance(

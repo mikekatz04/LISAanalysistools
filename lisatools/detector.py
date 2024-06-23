@@ -90,31 +90,35 @@ class Orbits(ABC):
 
         assert isinstance(filename, str)
 
-        # get path
-        path_to_this_file = __file__.split("detector.py")[0]
+        if os.path.exists(filename):
+            self._filename = filename
 
-        # make sure orbit_files directory exists in the right place
-        if not os.path.exists(path_to_this_file + "orbit_files/"):
-            os.mkdir(path_to_this_file + "orbit_files/")
-        path_to_this_file = path_to_this_file + "orbit_files/"
+        else:
+            # get path
+            path_to_this_file = __file__.split("detector.py")[0]
 
-        if not os.path.exists(path_to_this_file + filename):
-            # download files from github if they are not there
-            github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
-            r = requests.get(github_file)
+            # make sure orbit_files directory exists in the right place
+            if not os.path.exists(path_to_this_file + "orbit_files/"):
+                os.mkdir(path_to_this_file + "orbit_files/")
+            path_to_this_file = path_to_this_file + "orbit_files/"
 
-            # if not success
-            if r.status_code != 200:
-                raise ValueError(
-                    f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
-                )
+            if not os.path.exists(path_to_this_file + filename):
+                # download files from github if they are not there
+                github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
+                r = requests.get(github_file)
 
-            # write the contents to a local file
-            with open(path_to_this_file + filename, "wb") as f:
-                f.write(r.content)
+                # if not success
+                if r.status_code != 200:
+                    raise ValueError(
+                        f"Path to {filename} does not exist. Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
+                    )
 
-        # store
-        self._filename = path_to_this_file + filename
+                # write the contents to a local file
+                with open(path_to_this_file + filename, "wb") as f:
+                    f.write(r.content)
+
+            # store
+            self._filename = path_to_this_file + filename
 
     def open(self) -> h5py.File:
         """Opens the h5 file in the proper mode.
