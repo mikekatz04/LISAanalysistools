@@ -589,22 +589,26 @@ class MPIControlGlobalFit:
 
 
 
-def run_gf_progression(global_fit_progression, comm, head_rank):
+def run_gf_progression(global_fit_progression, comm, head_rank, status_file):
     rank = comm.Get_rank()
     
     for g_i, global_fit_segment in enumerate(global_fit_progression):
-        segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
-
         # check if this segment has completed
-        if segment.current_info.general_info["file_information"]["status_file"].split("/")[-1] in os.listdir(segment.current_info.general_info["file_information"]["file_store_dir"]):
-            with open(segment.current_info.general_info["file_information"]["status_file"], "r") as fp:
+        if os.path.exists(status_file):
+            with open(status_file, "r") as fp:
                 lines = fp.readlines()
                 if global_fit_segment["name"] + "\n" in lines:
+                    print(f"continue {global_fit_segment['name']}")
                     continue
+
+        class_name = global_fit_segment["name"]
         if rank == head_rank:
-            class_name = global_fit_segment["name"]
             print(f"\n\nStarting {class_name}\n\n")
             st = time.perf_counter()
+        print(f"\n\nStarting {class_name}, {rank}\n\n")
+
+        segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
+        
         print("start", g_i, rank)
         segment.run()
         print("finished:", rank)

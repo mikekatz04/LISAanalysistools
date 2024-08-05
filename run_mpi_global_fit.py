@@ -17,10 +17,12 @@ from bbhx.utils.constants import *
 from bbhx.utils.transform import *
 
 from eryn.backends import HDFBackend
-
+from global_fit_input.global_fit_settings import get_global_fit_settings
 
 if __name__ == "__main__":
 
+    settings = get_global_fit_settings()
+    status_file = settings["general"]["file_information"]["status_file"] 
     # TODO: add command line args
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -53,7 +55,6 @@ if __name__ == "__main__":
 
     # if rank == head_rank:
     #     debug_search.para_mbh_search.run_parallel_mbh_search(testing_time_split=7)
-
-    run_gf_progression(global_fit_progression, comm, head_rank)
+    run_gf_progression(global_fit_progression, comm, head_rank, status_file)
      
 

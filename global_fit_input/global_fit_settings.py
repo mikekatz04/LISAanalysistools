@@ -19,6 +19,11 @@ from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
 
+def dtrend(t, y):
+    m, b = np.polyfit(t, y, 1)
+    ytmp = y - (m * t + b)
+    ydetrend = ytmp - np.mean(ytmp)
+    return ydetrend
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -40,7 +45,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "sixth_run_through"
+    base_file_name = "eighth_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -92,6 +97,11 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ["Y"].squeeze(),
         tXYZ["Z"].squeeze(),
     )
+
+    X = dtrend(t, X.copy())
+    Y = dtrend(t, Y.copy())
+    Z = dtrend(t, Z.copy())
+
     dt = t[1] - t[0]
 
     Nobs = len(t)
@@ -122,7 +132,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [4, 5, 6, 7]
+    gpus = [4, 6, 7, 7]
 
     all_general_info = dict(
         file_information=file_information,
