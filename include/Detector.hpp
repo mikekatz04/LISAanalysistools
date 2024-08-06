@@ -10,6 +10,7 @@ public:
     double y;
     double z;
 
+    CUDA_DEVICE
     Vec(double x_, double y_, double z_)
     {
         x = x_;
@@ -56,15 +57,15 @@ public:
         }
     };
 
-    int get_window(double t);
-    Vec get_normal_unit_vec(double t, int link);
-    double interpolate(double t, double *in_arr, int window, int major_ndim, int major_ind, int ndim, int pos);
-    int get_link_ind(int link);
-    int get_sc_ind(int sc);
-    double get_light_travel_time(double t, int link);
-    Vec get_pos(double t, int sc);
-    void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
-    void get_pos_ptr(Vec *vec, double t, int sc);
+    CUDA_DEVICE int get_window(double t);
+    CUDA_DEVICE Vec get_normal_unit_vec(double t, int link);
+    CUDA_DEVICE double interpolate(double t, double *in_arr, int window, int major_ndim, int major_ind, int ndim, int pos);
+    CUDA_DEVICE int get_link_ind(int link);
+    CUDA_DEVICE int get_sc_ind(int sc);
+    CUDA_DEVICE double get_light_travel_time(double t, int link);
+    CUDA_DEVICE Vec get_pos(double t, int sc);
+    CUDA_DEVICE void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
+    CUDA_DEVICE void get_pos_ptr(Vec *vec, double t, int sc);
     void dealloc(){
         // delete[] links;
         // delete[] sc_r;
