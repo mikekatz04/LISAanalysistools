@@ -1,7 +1,7 @@
 # from future.utils import iteritems
 import os
 from os.path import join as pjoin
-from setuptools import setup
+from setuptools import setup, find_packages
 from setuptools import Extension
 
 # from Cython.Distutils import build_ext
@@ -18,8 +18,11 @@ except AttributeError:
 
 detector_ext = Extension(
     "lisatools.cutils.detector",
-    sources=["src/Detector.cpp", "src/pycppdetector.pyx"],
-    include_dirs=["./include", numpy_include],
+    sources=[
+        "lisatools/cutils/src/Detector.cpp",
+        "lisatools/cutils/src/pycppdetector.pyx",
+    ],
+    include_dirs=["lisatools/cutils/include", numpy_include],
     language="c++",
     # extra_compile_args={"gcc": [], "nvcc": []},
 )
@@ -56,14 +59,16 @@ setup(
         "lisatools.utils",
         "lisatools.sources",
         "lisatools.sources.emri",
-        "src",
+        "lisatools.cutils",
+        "lisatools.cutils.src",
+        "lisatools.cutils.include",
     ],
     # Since the package has c code, the egg cannot be zipped
     zip_safe=False,
     long_description=long_description,
     long_description_content_type="text/markdown",
     version=version_string,
-    url="https://github.com/mikekatz04/lisa-on-gpu",
+    url="https://github.com/mikekatz04/LISAanalysistools",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU General Public License (GPL)",
@@ -74,6 +79,10 @@ setup(
         "Programming Language :: Python :: 3.12",
     ],
     python_requires=">=3.12",
+    package_data={
+        "lisatools.cutils.src": ["Detector.cpp", "pycppdetector.pyx"],
+        "lisatools.cutils.include": ["Detector.hpp"],
+    },
 )
 
 import sys
