@@ -1,6 +1,7 @@
 #ifndef __DETECTOR_HPP__
 #define __DETECTOR_HPP__
 
+#include "global.hpp"
 #include <iostream>
 
 class Vec
@@ -66,6 +67,7 @@ public:
     CUDA_DEVICE Vec get_pos(double t, int sc);
     CUDA_DEVICE void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
     CUDA_DEVICE void get_pos_ptr(Vec *vec, double t, int sc);
+    void get_light_travel_time_arr(double *ltt, double *t, int *link, int num);
     void dealloc(){
         // delete[] links;
         // delete[] sc_r;

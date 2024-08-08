@@ -27,4 +27,4 @@ recursive-include scripts   *
 include tutorial/*.ipynb
 
 # Include include files
-include include/*
+# include include/*

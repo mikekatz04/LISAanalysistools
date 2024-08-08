@@ -5,10 +5,18 @@ from dataclasses import dataclass
 import requests
 
 import numpy as np
+from lisatools.cutils.detector_cpu import pycppDetector as pycppDetector_cpu
+
+try:
+    import cupy as cp
+    from lisatools.cutils.detector_gpu import pycppDetector as pycppDetector_gpu
+
+except (ImportError, ModuleNotFoundError) as e:
+    pass
+
 import h5py
 from scipy import interpolate
 
-from lisatools.cutils.detector import pycppDetector
 
 SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
@@ -24,10 +32,17 @@ class Orbits(ABC):
 
     """
 
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, use_gpu: bool = False) -> None:
+        self.use_gpu = use_gpu
         self.filename = filename
         self._setup()
         self.configured = False
+
+    @property
+    def xp(self):
+        """numpy or cupy base on self.use_gpu"""
+        xp = np if not self.use_gpu else cp
+        return xp
 
     @property
     def LINKS(self) -> List[int]:
@@ -268,9 +283,9 @@ class Orbits(ABC):
             self.pycppdetector_args = (
                 dt,
                 len(self.t),
-                self.n.flatten().copy(),
-                self.ltt.flatten().copy(),
-                self.x.flatten().copy(),
+                self.xp.asarray(self.n.flatten().copy()),
+                self.xp.asarray(self.ltt.flatten().copy()),
+                self.xp.asarray(self.x.flatten().copy()),
                 ll,
                 lsr,
                 lse,
@@ -292,12 +307,13 @@ class Orbits(ABC):
         self._dt = dt
 
     @property
-    def pycppdetector(self) -> pycppDetector:
+    def pycppdetector(self) -> pycppDetector_cpu | pycppDetector_gpu:
         """C++ class"""
         if self._pycppdetector_args is None:
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
+        pycppDetector = pycppDetector_cpu if not self.use_gpu else pycppDetector_gpu
         self._pycppdetector = pycppDetector(*self._pycppdetector_args)
         return self._pycppdetector
 
@@ -337,7 +353,22 @@ class Orbits(ABC):
             Light travel times.
 
         """
-        return self.pycppdetector.get_light_travel_time(t, link)
+        if isinstance(t, float) and isinstance(link, int):
+            squeeze = True
+            t = self.xp.atleast_1d(t)
+            link = self.xp.atleast_1d(link).astype(np.int32)
+
+        else:
+            squeeze = False
+            t = self.xp.asarray(t)
+            link = self.xp.asarray(link).astype(np.int32)
+
+        ltt_out = self.xp.zeros_like(t)
+        self.pycppdetector.get_light_travel_time_arr_wrap(ltt_out, t, link, len(ltt_out))
+
+        if squeeze:
+            return ltt_out[0]
+        return ltt_out
 
     def get_normal_unit_vec(self, t: float | np.ndarray, link: int) -> np.ndarray:
         """Compute link normal vector as a function of time.
@@ -380,10 +411,13 @@ class EqualArmlengthOrbits(Orbits):
 
     Orbit file: equalarmlength-orbits.h5
 
+    Args:
+        *args, **kwargs: for :class:`Orbits`. 
+
     """
 
-    def __init__(self):
-        super().__init__("equalarmlength-orbits.h5")
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__("equalarmlength-orbits.h5", *args, **kwargs)
 
 
 class ESAOrbits(Orbits):
@@ -391,11 +425,14 @@ class ESAOrbits(Orbits):
 
     Orbit file: esa-trailing-orbits.h5
 
+    Args:
+        *args, **kwargs: for :class:`Orbits`. 
+
     """
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         # TODO: fix this up
-        super().__init__("esa-trailing-orbits.h5")
+        super().__init__("esa-trailing-orbits.h5", *args, **kwargs)
 
 
 class DefaultOrbits(EqualArmlengthOrbits):

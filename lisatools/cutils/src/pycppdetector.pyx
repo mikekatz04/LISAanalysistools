@@ -21,6 +21,7 @@ cdef extern from "../include/Detector.hpp":
         int get_sc_ind(int sc) except+
         double get_light_travel_time(double t, int link) except+
         VecWrap get_pos_ptr(VecWrap* out, double t, int sc) except+
+        void get_light_travel_time_arr(double *ltt, double *t, int *link, int num) except+
         void dealloc();
         
 
@@ -155,6 +156,21 @@ cdef class pycppDetector:
             return self.get_pos_single(t, sc)
         elif isinstance(t, np.ndarray):
             return self.get_pos_arr(t, sc)
+
+    def get_light_travel_time_arr_wrap(self, *args, **kwargs):
+        (ltt, t, link, num), tkwargs = wrapper(*args, **kwargs)
+
+        cdef size_t ltt_in = ltt
+        cdef size_t t_in = t
+        cdef size_t link_in = link
+
+        self.g.get_light_travel_time_arr(
+            <double *>ltt_in,
+            <double *>t_in,
+            <int *>link_in,
+            num
+        )
+        
 
     @property
     def ptr(self) -> long:

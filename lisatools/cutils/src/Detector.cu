@@ -1,10 +1,12 @@
 #include "stdio.h"
+#include "global.hpp"
 #include "Detector.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <sstream>
 
+CUDA_DEVICE
 int Orbits::get_window(double t)
 {
     int out = int(t / dt);
@@ -14,6 +16,7 @@ int Orbits::get_window(double t)
         return out;
 }
 
+CUDA_DEVICE
 int Orbits::get_link_ind(int link)
 {
     if (link == 12)
@@ -37,6 +40,7 @@ int Orbits::get_link_ind(int link)
     return -1;
 }
 
+CUDA_DEVICE
 int Orbits::get_sc_ind(int sc)
 {
     if (sc == 1)
@@ -60,6 +64,7 @@ int Orbits::get_sc_ind(int sc)
     return 0;
 }
 
+CUDA_DEVICE
 double Orbits::interpolate(double t, double *in_arr, int window, int major_ndim, int major_ind, int ndim, int pos)
 {
     double up = in_arr[((window + 1) * major_ndim + major_ind) * ndim + pos]; // down_ind * ndim + pos];
@@ -73,6 +78,7 @@ double Orbits::interpolate(double t, double *in_arr, int window, int major_ndim,
     return fin;
 }
 
+CUDA_DEVICE
 void Orbits::get_normal_unit_vec_ptr(Vec *vec, double t, int link)
 {
     Vec _tmp = get_normal_unit_vec(t, link);
@@ -81,6 +87,7 @@ void Orbits::get_normal_unit_vec_ptr(Vec *vec, double t, int link)
     vec->z = _tmp.z;
 }
 
+CUDA_DEVICE
 Vec Orbits::get_normal_unit_vec(double t, int link)
 {
     int window = get_window(t);
@@ -105,6 +112,7 @@ Vec Orbits::get_normal_unit_vec(double t, int link)
     return Vec(x_out, y_out, z_out);
 }
 
+CUDA_DEVICE
 double Orbits::get_light_travel_time(double t, int link)
 {
     int window = get_window(t);
@@ -126,6 +134,7 @@ double Orbits::get_light_travel_time(double t, int link)
     return ltt_out;
 }
 
+CUDA_DEVICE
 Vec Orbits::get_pos(double t, int sc)
 {
     int window = get_window(t);
@@ -146,10 +155,56 @@ Vec Orbits::get_pos(double t, int sc)
     return Vec(x_out, y_out, z_out);
 }
 
+CUDA_DEVICE
 void Orbits::get_pos_ptr(Vec *vec, double t, int sc)
 {
     Vec _tmp = get_pos(t, sc);
     vec->x = _tmp.x;
     vec->y = _tmp.y;
     vec->z = _tmp.z;
+}
+
+#define NUM_THREADS 64
+
+CUDA_KERNEL
+void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Orbits& orbits)
+{
+    int start, end, increment;
+    #ifdef __CUDACC__
+    start = blockIdx.x * blockDim.x + threadIdx.x;
+    end = num;
+    increment = gridDim.x * blockDim.x;
+    #else // __CUDACC__
+    start = 0;
+    end = num;
+    increment = 1;
+    #endif // __CUDACC__
+
+    for (int i = start; i < end; i += increment)
+    {
+        ltt[i] = orbits.get_light_travel_time(t[i], link[i]);
+    }
+}
+
+void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int num)
+{
+    #ifdef __CUDACC__
+    int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
+
+    // copy self to GPU
+    Orbits *orbits_gpu;
+    gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
+    gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
+
+    get_light_travel_time_kernel<<<num_blocks, NUM_THREADS>>>(ltt, t, link, num, *orbits_gpu);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
+    
+    gpuErrchk(cudaFree(orbits_gpu));
+
+    #else // __CUDACC__
+
+    get_light_travel_time_kernel(ltt, t, link, num, *this);
+
+    #endif // __CUDACC__
 }
