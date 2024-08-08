@@ -30,9 +30,9 @@ public:
     double *x_arr;
     int nlinks;
     int nspacecraft;
-    int links[6];
-    int sc_r[6];
-    int sc_e[6];
+    int *links;
+    int *sc_r;
+    int *sc_e;
 
     Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_)
     {
@@ -44,18 +44,18 @@ public:
         nlinks = 6;
         nspacecraft = 3;
 
-        // sc_r = sc_r_;
-        // sc_e = sc_e_;
-        // links = links_;
+        sc_r = sc_r_;
+        sc_e = sc_e_;
+        links = links_;
 
         // std::cout << " START " << std::endl;
-        for (int i = 0; i < nlinks; i += 1)
-        {
-            sc_r[i] = sc_r_[i];
-            sc_e[i] = sc_e_[i];
-            links[i] = links_[i];
-            // std::cout << i << " HAHAHAH " << sc_r_[i] << " " << sc_e_[i] << std::endl;
-        }
+        // for (int i = 0; i < nlinks; i += 1)
+        // {
+        //     sc_r[i] = sc_r_[i];
+        //     sc_e[i] = sc_e_[i];
+        //     links[i] = links_[i];
+        //     // std::cout << i << " HAHAHAH " << sc_r_[i] << " " << sc_e_[i] << std::endl;
+        // }
     };
 
     CUDA_DEVICE int get_window(double t);

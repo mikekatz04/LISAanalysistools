@@ -286,9 +286,9 @@ class Orbits(ABC):
                 self.xp.asarray(self.n.flatten().copy()),
                 self.xp.asarray(self.ltt.flatten().copy()),
                 self.xp.asarray(self.x.flatten().copy()),
-                ll,
-                lsr,
-                lse,
+                self.xp.asarray(ll),
+                self.xp.asarray(lsr),
+                self.xp.asarray(lse),
             )
             self.dt = dt
         else:
