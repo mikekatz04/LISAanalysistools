@@ -65,6 +65,7 @@ def locate_cuda():
 
     return cudaconfig
 
+
 def customize_compiler_for_nvcc(self):
 
     # track all the object files generated with cuda device code
@@ -102,6 +103,7 @@ class custom_build_ext(build_ext):
     def build_extensions(self):
         customize_compiler_for_nvcc(self.compiler)
         build_ext.build_extensions(self)
+
 
 try:
     CUDA = locate_cuda()
@@ -230,4 +232,3 @@ setup(
         "lisatools.cutils.include": ["Detector.hpp", "global.hpp"],
     },
 )
-

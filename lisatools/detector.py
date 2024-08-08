@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import requests
 
 import numpy as np
+
+# import for cpu/gpu
 from lisatools.cutils.detector_cpu import pycppDetector as pycppDetector_cpu
 
 try:
@@ -29,6 +31,7 @@ class Orbits(ABC):
 
     Args:
         filename: File name. File should be in the style of LISAOrbits
+        use_gpu: If ``True``, use a gpu.
 
     """
 
@@ -40,7 +43,7 @@ class Orbits(ABC):
 
     @property
     def xp(self):
-        """numpy or cupy base on self.use_gpu"""
+        """numpy or cupy based on self.use_gpu"""
         xp = np if not self.use_gpu else cp
         return xp
 
@@ -364,7 +367,9 @@ class Orbits(ABC):
             link = self.xp.asarray(link).astype(np.int32)
 
         ltt_out = self.xp.zeros_like(t)
-        self.pycppdetector.get_light_travel_time_arr_wrap(ltt_out, t, link, len(ltt_out))
+        self.pycppdetector.get_light_travel_time_arr_wrap(
+            ltt_out, t, link, len(ltt_out)
+        )
 
         if squeeze:
             return ltt_out[0]
@@ -412,7 +417,7 @@ class EqualArmlengthOrbits(Orbits):
     Orbit file: equalarmlength-orbits.h5
 
     Args:
-        *args, **kwargs: for :class:`Orbits`. 
+        *args, **kwargs: for :class:`Orbits`.
 
     """
 
@@ -426,7 +431,7 @@ class ESAOrbits(Orbits):
     Orbit file: esa-trailing-orbits.h5
 
     Args:
-        *args, **kwargs: for :class:`Orbits`. 
+        *args, **kwargs: for :class:`Orbits`.
 
     """
 

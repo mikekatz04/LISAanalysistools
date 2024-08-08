@@ -19,7 +19,9 @@ pip install lisaanalysistools
 
 If you want to install all of the tools associated with LISA Analysis Tools (Fast EMRI Waveforms, BBHx, GBGPU, fastlisaresponse, eryn), see the following instructions.
 
-LISA Analysis Tools leverages conda environments to install and use necessary packages. If you do not have [Anaconda](https://www.anaconda.com/download) or [miniconda](https://docs.anaconda.com/free/miniconda/index.html) installed, you must do this first and load your `base` conda environment. 
+LISA Analysis Tools leverages conda environments to install and use necessary packages. If you do not have [Anaconda](https://www.anaconda.com/download) or [miniconda](https://docs.anaconda.com/free/miniconda/index.html) installed, you must do this first and load your `base` conda environment. Recommended components for install in your conda environment are `lapack`, `gsl`, `hdf5`, which are needed for various waveform packages. 
+
+For an easy full install, follow these instructions.
 
 First, clone the repo and `cd` to the `LATW` directory.:
 ```
@@ -33,7 +35,11 @@ bash install.sh
 ```
 Running `bash install.sh -h` will also give you some basic install options. 
 
-If you want more flexibility, you can install each package given above separately. If you do this, you will also need # TODO: add. 
+If you want more flexibility, you can install each package given above separately.
+
+To install this software for use with NVIDIA GPUs (compute capability >5.0), you need the [CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html) and [CuPy](https://cupy.chainer.org/). The CUDA toolkit must have cuda version >8.0. Be sure to properly install CuPy within the correct CUDA toolkit version. Make sure the nvcc binary is on `$PATH` or set it as the `CUDA_HOME` environment variable.
+
+We are currently working on building wheels and making the GPU version pip installable. For now, to work with GPUs, git clone the repository and install it from source. 
 
 ## Contributing
 
@@ -43,7 +49,7 @@ Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduc
 
 We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/mikekatz04/LISAanalysistools/tags).
 
-Current Version: 1.0.5
+Current Version: 1.0.6
 
 ## Authors/Developers
 
