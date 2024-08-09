@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GW Source Tools &mdash; lisaanalysistools 1.0.6 documentation</title>
+  <title>GW Source Tools &mdash; lisaanalysistools 1.0.7 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
@@ -19,7 +19,7 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=e2a723ec"></script>
+        <script src="../_static/documentation_options.js?v=46dfa7f5"></script>
         <script src="../_static/doctools.js?v=888ff710"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -58,7 +58,10 @@
 <li class="toctree-l1"><a class="reference internal" href="datacontainer.html#analysis-container">Analysis Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="diagnostic.html">Diagnostics</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">GW Source Tools</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#emris">EMRIs</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#emris">EMRIs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.sources.emri.EMRITDIWaveform"><code class="docutils literal notranslate"><span class="pre">EMRITDIWaveform</span></code></a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -101,6 +104,24 @@
 <h1>GW Source Tools<a class="headerlink" href="#gw-source-tools" title="Link to this heading"></a></h1>
 <section id="emris">
 <h2>EMRIs<a class="headerlink" href="#emris" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="lisatools.sources.emri.EMRITDIWaveform">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.sources.emri.</span></span><span class="sig-name descname"><span class="pre">EMRITDIWaveform</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">T=1.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dt=10.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">emri_waveform_args=('FastSchwarzschildEccentricFlux'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">emri_waveform_kwargs={}</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">response_kwargs={'orbits':</span> <span class="pre">&lt;lisatools.detector.EqualArmlengthOrbits</span> <span class="pre">object&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">'order':</span> <span class="pre">25</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">'t0':</span> <span class="pre">30000.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">'tdi':</span> <span class="pre">'1st</span> <span class="pre">generation'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">'tdi_chan':</span> <span class="pre">'AET'}</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/sources/emri/tdiwaveform.html#EMRITDIWaveform"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sources.emri.EMRITDIWaveform" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ResponseWrapper</span></code></p>
+<p>Generate EMRI waveforms with the TDI LISA Response</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>T</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">1.0</span></code>) – Observation time in years.</p></li>
+<li><p><strong>dt</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">10.0</span></code>) – Time cadence in seconds.</p></li>
+<li><p><strong>emri_waveform_args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">('FastSchwarzschildEccentricFlux',)</span></code>) – Arguments for <code class="xref py py-class docutils literal notranslate"><span class="pre">GenerateEMRIWaveforms</span></code>.</p></li>
+<li><p><strong>emri_waveform_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">{}</span></code>) – Keyword arguments for <code class="xref py py-class docutils literal notranslate"><span class="pre">GenerateEMRIWaveforms</span></code>.</p></li>
+<li><p><strong>response_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">{'t0':</span> <span class="pre">30000.0,</span> <span class="pre">'order':</span> <span class="pre">25,</span> <span class="pre">'tdi':</span> <span class="pre">'1st</span> <span class="pre">generation',</span> <span class="pre">'tdi_chan':</span> <span class="pre">'AET',</span> <span class="pre">'orbits':</span> <span class="pre">&lt;lisatools.detector.EqualArmlengthOrbits</span> <span class="pre">object</span> <span class="pre">at</span> <span class="pre">0x15c15ed80&gt;}</span></code>) – Keyword arguments for <code class="xref py py-class docutils literal notranslate"><span class="pre">ResponseWrapper</span></code>.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
 </section>
 </section>
 

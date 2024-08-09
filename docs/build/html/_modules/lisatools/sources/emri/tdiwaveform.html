@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.sources.emri.tdiwaveform &mdash; lisaanalysistools 1.0.5 documentation</title>
+  <title>lisatools.sources.emri.tdiwaveform &mdash; lisaanalysistools 1.0.7 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,7 +18,7 @@
   
         <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../../../_static/documentation_options.js?v=d55fa986"></script>
+        <script src="../../../../_static/documentation_options.js?v=46dfa7f5"></script>
         <script src="../../../../_static/doctools.js?v=888ff710"></script>
         <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -92,7 +92,8 @@
            <div itemprop="articleBody">
              
   <h1>Source code for lisatools.sources.emri.tdiwaveform</h1><div class="highlight"><pre>
-<span></span><span class="kn">from</span> <span class="nn">lisatools.detector</span> <span class="kn">import</span> <span class="n">EqualArmlengthOrbits</span>
+<span></span><span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">annotations</span>
+<span class="kn">from</span> <span class="nn">lisatools.detector</span> <span class="kn">import</span> <span class="n">EqualArmlengthOrbits</span>
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
 <span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Any</span>
 <span class="kn">from</span> <span class="nn">copy</span> <span class="kn">import</span> <span class="n">deepcopy</span>
@@ -145,7 +146,7 @@
         <span class="n">gen_wave</span> <span class="o">=</span> <span class="n">GenerateEMRIWaveform</span><span class="p">(</span>
             <span class="o">*</span><span class="n">emri_waveform_args</span><span class="p">,</span>
             <span class="n">sum_kwargs</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">pad_output</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
-            <span class="o">**</span><span class="n">emri_waveform_kwargs</span>
+            <span class="o">**</span><span class="n">emri_waveform_kwargs</span><span class="p">,</span>
         <span class="p">)</span>
 
         <span class="n">response_kwargs_in</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="n">response_kwargs</span><span class="p">)</span>
@@ -160,7 +161,7 @@
             <span class="n">remove_sky_coords</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
             <span class="n">is_ecliptic_latitude</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
             <span class="n">remove_garbage</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>  <span class="c1"># removes the beginning of the signal that has bad information</span>
-            <span class="o">**</span><span class="n">response_kwargs_in</span>
+            <span class="o">**</span><span class="n">response_kwargs_in</span><span class="p">,</span>
         <span class="p">)</span>
 
     <span class="k">def</span> <span class="fm">__call__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>

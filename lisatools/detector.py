@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from typing import Any, List, Tuple, Optional
@@ -14,7 +15,7 @@ try:
     from lisatools.cutils.detector_gpu import pycppDetector as pycppDetector_gpu
 
 except (ImportError, ModuleNotFoundError) as e:
-    pass
+    pycppDetector_gpu = None  # for doc string purposes
 
 import h5py
 from scipy import interpolate

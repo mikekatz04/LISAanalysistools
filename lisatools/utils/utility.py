@@ -1,5 +1,4 @@
-from multiprocessing.sharedctypes import Value
-from types import ModuleType, NoneType
+from __future__ import annotations
 from typing import Tuple
 import numpy as np
 
@@ -14,7 +13,7 @@ except (ModuleNotFoundError, ImportError):
     pass
 
 
-def get_array_module(arr: np.ndarray | cp.ndarray) -> ModuleType:
+def get_array_module(arr: np.ndarray | cp.ndarray) -> object:
     """Return array library of an array (np/cp).
 
     Args:

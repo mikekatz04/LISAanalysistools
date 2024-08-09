@@ -1,5 +1,5 @@
+from __future__ import annotations
 import warnings
-from types import ModuleType, NoneType
 from typing import Optional, Any, Tuple, List
 
 import matplotlib.pyplot as plt
@@ -27,7 +27,7 @@ def inner_product(
     dt: Optional[float] = None,
     df: Optional[float] = None,
     f_arr: Optional[float] = None,
-    psd: Optional[str | NoneType | np.ndarray | SensitivityMatrix] = "LISASens",
+    psd: Optional[str | None | np.ndarray | SensitivityMatrix] = "LISASens",
     psd_args: Optional[tuple] = (),
     psd_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
@@ -243,7 +243,7 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
 
 def residual_full_source_and_noise_likelihood(
     data_res_arr: DataResidualArray,
-    psd: str | NoneType | np.ndarray | SensitivityMatrix,
+    psd: str | None | np.ndarray | SensitivityMatrix,
     **kwargs: dict,
 ) -> float | complex:
     """Calculate the full Likelihood including noise and source terms.
@@ -306,7 +306,7 @@ def data_signal_source_likelihood_term(
 def data_signal_full_source_and_noise_likelihood(
     data_arr: DataResidualArray,
     sig_arr: DataResidualArray,
-    psd: str | NoneType | np.ndarray | SensitivityMatrix,
+    psd: str | None | np.ndarray | SensitivityMatrix,
     **kwargs: dict,
 ) -> float | complex:
     """Calculate the full Likelihood including noise and source terms.

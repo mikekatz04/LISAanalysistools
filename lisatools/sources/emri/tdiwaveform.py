@@ -1,3 +1,4 @@
+from __future__ import annotations
 from lisatools.detector import EqualArmlengthOrbits
 import numpy as np
 from typing import Optional, Any
@@ -49,7 +50,7 @@ class EMRITDIWaveform(ResponseWrapper):
         gen_wave = GenerateEMRIWaveform(
             *emri_waveform_args,
             sum_kwargs=dict(pad_output=True),
-            **emri_waveform_kwargs
+            **emri_waveform_kwargs,
         )
 
         response_kwargs_in = deepcopy(response_kwargs)
@@ -64,7 +65,7 @@ class EMRITDIWaveform(ResponseWrapper):
             remove_sky_coords=False,
             is_ecliptic_latitude=False,
             remove_garbage=True,  # removes the beginning of the signal that has bad information
-            **response_kwargs_in
+            **response_kwargs_in,
         )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:

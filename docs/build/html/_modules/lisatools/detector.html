@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.detector &mdash; lisaanalysistools 1.0.5 documentation</title>
+  <title>lisatools.detector &mdash; lisaanalysistools 1.0.7 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,7 +18,7 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=d55fa986"></script>
+        <script src="../../_static/documentation_options.js?v=46dfa7f5"></script>
         <script src="../../_static/doctools.js?v=888ff710"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -92,17 +92,28 @@
            <div itemprop="articleBody">
              
   <h1>Source code for lisatools.detector</h1><div class="highlight"><pre>
-<span></span><span class="kn">import</span> <span class="nn">os</span>
+<span></span><span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">annotations</span>
+<span class="kn">import</span> <span class="nn">os</span>
 <span class="kn">from</span> <span class="nn">abc</span> <span class="kn">import</span> <span class="n">ABC</span><span class="p">,</span> <span class="n">abstractmethod</span>
 <span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span>
 <span class="kn">from</span> <span class="nn">dataclasses</span> <span class="kn">import</span> <span class="n">dataclass</span>
 <span class="kn">import</span> <span class="nn">requests</span>
 
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+
+<span class="c1"># import for cpu/gpu</span>
+<span class="kn">from</span> <span class="nn">lisatools.cutils.detector_cpu</span> <span class="kn">import</span> <span class="n">pycppDetector</span> <span class="k">as</span> <span class="n">pycppDetector_cpu</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">import</span> <span class="nn">cupy</span> <span class="k">as</span> <span class="nn">cp</span>
+    <span class="kn">from</span> <span class="nn">lisatools.cutils.detector_gpu</span> <span class="kn">import</span> <span class="n">pycppDetector</span> <span class="k">as</span> <span class="n">pycppDetector_gpu</span>
+
+<span class="k">except</span> <span class="p">(</span><span class="ne">ImportError</span><span class="p">,</span> <span class="ne">ModuleNotFoundError</span><span class="p">)</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="n">pycppDetector_gpu</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># for doc string purposes</span>
+
 <span class="kn">import</span> <span class="nn">h5py</span>
 <span class="kn">from</span> <span class="nn">scipy</span> <span class="kn">import</span> <span class="n">interpolate</span>
 
-<span class="kn">from</span> <span class="nn">lisatools.cutils.detector</span> <span class="kn">import</span> <span class="n">pycppDetector</span>
 
 <span class="n">SC</span> <span class="o">=</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">]</span>
 <span class="n">LINKS</span> <span class="o">=</span> <span class="p">[</span><span class="mi">12</span><span class="p">,</span> <span class="mi">23</span><span class="p">,</span> <span class="mi">31</span><span class="p">,</span> <span class="mi">13</span><span class="p">,</span> <span class="mi">32</span><span class="p">,</span> <span class="mi">21</span><span class="p">]</span>
@@ -117,13 +128,21 @@
 
 <span class="sd">    Args:</span>
 <span class="sd">        filename: File name. File should be in the style of LISAOrbits</span>
+<span class="sd">        use_gpu: If ``True``, use a gpu.</span>
 
 <span class="sd">    &quot;&quot;&quot;</span>
 
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">use_gpu</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">use_gpu</span> <span class="o">=</span> <span class="n">use_gpu</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">filename</span> <span class="o">=</span> <span class="n">filename</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_setup</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">configured</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span> <span class="nf">xp</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;numpy or cupy based on self.use_gpu&quot;&quot;&quot;</span>
+        <span class="n">xp</span> <span class="o">=</span> <span class="n">np</span> <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_gpu</span> <span class="k">else</span> <span class="n">cp</span>
+        <span class="k">return</span> <span class="n">xp</span>
 
     <span class="nd">@property</span>
     <span class="k">def</span> <span class="nf">LINKS</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]:</span>
@@ -330,6 +349,8 @@
                 <span class="n">t_arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">concatenate</span><span class="p">([</span><span class="n">t_arr</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_base</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">:]])</span>
         <span class="k">elif</span> <span class="n">t_arr</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">assert</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">t_arr</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_base</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="ow">and</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">t_arr</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">t_base</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+            <span class="n">make_cpp</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="n">dt</span> <span class="o">=</span> <span class="nb">abs</span><span class="p">(</span><span class="n">t_arr</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">t_arr</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
 
         <span class="k">elif</span> <span class="n">dt</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">make_cpp</span> <span class="o">=</span> <span class="kc">True</span>
@@ -367,12 +388,12 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector_args</span> <span class="o">=</span> <span class="p">(</span>
                 <span class="n">dt</span><span class="p">,</span>
                 <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">t</span><span class="p">),</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">n</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">(),</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">ltt</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">(),</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">x</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">(),</span>
-                <span class="n">ll</span><span class="p">,</span>
-                <span class="n">lsr</span><span class="p">,</span>
-                <span class="n">lse</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">n</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">()),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">ltt</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">()),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">x</span><span class="o">.</span><span class="n">flatten</span><span class="p">()</span><span class="o">.</span><span class="n">copy</span><span class="p">()),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">ll</span><span class="p">),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">lsr</span><span class="p">),</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">lse</span><span class="p">),</span>
             <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">dt</span> <span class="o">=</span> <span class="n">dt</span>
         <span class="k">else</span><span class="p">:</span>
@@ -392,12 +413,13 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_dt</span> <span class="o">=</span> <span class="n">dt</span>
 
     <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">pycppdetector</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pycppDetector</span><span class="p">:</span>
+    <span class="k">def</span> <span class="nf">pycppdetector</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">pycppDetector_cpu</span> <span class="o">|</span> <span class="n">pycppDetector_gpu</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;C++ class&quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
                 <span class="s2">&quot;Asking for c++ class. Need to set linear_interp_setup = True when configuring.&quot;</span>
             <span class="p">)</span>
+        <span class="n">pycppDetector</span> <span class="o">=</span> <span class="n">pycppDetector_cpu</span> <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_gpu</span> <span class="k">else</span> <span class="n">pycppDetector_gpu</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector</span> <span class="o">=</span> <span class="n">pycppDetector</span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector_args</span><span class="p">)</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pycppdetector</span>
 
@@ -439,7 +461,24 @@
 <span class="sd">            Light travel times.</span>
 
 <span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_light_travel_time</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">)</span></div>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="nb">float</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">link</span><span class="p">,</span> <span class="nb">int</span><span class="p">):</span>
+            <span class="n">squeeze</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="n">t</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">atleast_1d</span><span class="p">(</span><span class="n">t</span><span class="p">)</span>
+            <span class="n">link</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">atleast_1d</span><span class="p">(</span><span class="n">link</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">squeeze</span> <span class="o">=</span> <span class="kc">False</span>
+            <span class="n">t</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">t</span><span class="p">)</span>
+            <span class="n">link</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">link</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int32</span><span class="p">)</span>
+
+        <span class="n">ltt_out</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">xp</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">pycppdetector</span><span class="o">.</span><span class="n">get_light_travel_time_arr_wrap</span><span class="p">(</span>
+            <span class="n">ltt_out</span><span class="p">,</span> <span class="n">t</span><span class="p">,</span> <span class="n">link</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">ltt_out</span><span class="p">)</span>
+        <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">squeeze</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">ltt_out</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">ltt_out</span></div>
 
 
 <div class="viewcode-block" id="Orbits.get_normal_unit_vec">
@@ -492,10 +531,13 @@
 
 <span class="sd">    Orbit file: equalarmlength-orbits.h5</span>
 
+<span class="sd">    Args:</span>
+<span class="sd">        *args, **kwargs: for :class:`Orbits`.</span>
+
 <span class="sd">    &quot;&quot;&quot;</span>
 
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;equalarmlength-orbits.h5&quot;</span><span class="p">)</span></div>
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span><span class="p">):</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;equalarmlength-orbits.h5&quot;</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></div>
 
 
 
@@ -506,11 +548,14 @@
 
 <span class="sd">    Orbit file: esa-trailing-orbits.h5</span>
 
+<span class="sd">    Args:</span>
+<span class="sd">        *args, **kwargs: for :class:`Orbits`.</span>
+
 <span class="sd">    &quot;&quot;&quot;</span>
 
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">):</span>
         <span class="c1"># TODO: fix this up</span>
-        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;esa-trailing-orbits.h5&quot;</span><span class="p">)</span></div>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="s2">&quot;esa-trailing-orbits.h5&quot;</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span></div>
 
 
 
@@ -573,6 +618,8 @@
 <span class="n">__stock_list_models_name__</span> <span class="o">=</span> <span class="p">[</span><span class="n">tmp</span><span class="o">.</span><span class="n">name</span> <span class="k">for</span> <span class="n">tmp</span> <span class="ow">in</span> <span class="n">__stock_list_models__</span><span class="p">]</span>
 
 
+<div class="viewcode-block" id="get_available_default_lisa_models">
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.get_available_default_lisa_models">[docs]</a>
 <span class="k">def</span> <span class="nf">get_available_default_lisa_models</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">LISAModel</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Get list of default LISA models</span>
 
@@ -580,9 +627,12 @@
 <span class="sd">        List of LISA models.</span>
 
 <span class="sd">    &quot;&quot;&quot;</span>
-    <span class="k">return</span> <span class="n">__stock_list_models__</span>
+    <span class="k">return</span> <span class="n">__stock_list_models__</span></div>
 
 
+
+<div class="viewcode-block" id="get_default_lisa_model_from_str">
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.get_default_lisa_model_from_str">[docs]</a>
 <span class="k">def</span> <span class="nf">get_default_lisa_model_from_str</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LISAModel</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a LISA model from a ``str`` input.</span>
 
@@ -597,9 +647,12 @@
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
             <span class="s2">&quot;Requested string model is not available. See lisatools.detector documentation.&quot;</span>
         <span class="p">)</span>
-    <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">model</span><span class="p">]</span>
+    <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">model</span><span class="p">]</span></div>
 
 
+
+<div class="viewcode-block" id="check_lisa_model">
+<a class="viewcode-back" href="../../user/detector.html#lisatools.detector.check_lisa_model">[docs]</a>
 <span class="k">def</span> <span class="nf">check_lisa_model</span><span class="p">(</span><span class="n">model</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LISAModel</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Check input LISA model.</span>
 
@@ -616,7 +669,8 @@
     <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">LISAModel</span><span class="p">):</span>
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;model argument not given correctly.&quot;</span><span class="p">)</span>
 
-    <span class="k">return</span> <span class="n">model</span>
+    <span class="k">return</span> <span class="n">model</span></div>
+
 </pre></div>
 
            </div>
