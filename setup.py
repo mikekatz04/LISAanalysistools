@@ -226,7 +226,7 @@ setup(
         "Programming Language :: Python :: 3.12",
     ],
     cmdclass={"build_ext": custom_build_ext},
-    python_requires=">=3.12",
+    python_requires=">=3.6",
     package_data={
         "lisatools.cutils.src": ["Detector.cu", "Detector.cpp", "pycppdetector.pyx"],
         "lisatools.cutils.include": ["Detector.hpp", "global.hpp"],
