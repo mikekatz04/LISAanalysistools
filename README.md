@@ -23,7 +23,7 @@ LISA Analysis Tools leverages conda environments to install and use necessary pa
 
 For an easy full install, follow these instructions.
 
-First, clone the repo and `cd` to the `LATW` directory.:
+First, clone the repo and `cd` to the `LISAanalysistools` directory.:
 ```
 git clone https://github.com/mikekatz04/LISAanalysistools.git
 cd LISAanalysistools/
@@ -39,7 +39,7 @@ If you want more flexibility, you can install each package given above separatel
 
 To install this software for use with NVIDIA GPUs (compute capability >5.0), you need the [CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html) and [CuPy](https://cupy.chainer.org/). The CUDA toolkit must have cuda version >8.0. Be sure to properly install CuPy within the correct CUDA toolkit version. Make sure the nvcc binary is on `$PATH` or set it as the `CUDA_HOME` environment variable.
 
-We are currently working on building wheels and making the GPU version pip installable. For now, to work with GPUs, git clone the repository and install it from source. 
+We are currently working on building wheels and making the GPU version pip installable. For now, to work with GPUs, git clone the repository and install it from source. You must run `python scripts/prebuild.py` before running the install process.  
 
 ## Contributing
 
