@@ -1,1 +1,1 @@
-from .tdiwaveform import EMRITDIWaveform
+from .waveform import EMRITDIWaveform

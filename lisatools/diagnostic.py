@@ -413,7 +413,9 @@ def h_var_p_eps(
 
     if parameter_transforms is not None:
         # transform
-        params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps)
+        params_p_eps = parameter_transforms.transform_base_parameters(
+            params_p_eps[None, :]
+        )[0]
 
     args_in = tuple(params_p_eps) + tuple(waveform_args)
     dh = waveform_model(*args_in, **waveform_kwargs)

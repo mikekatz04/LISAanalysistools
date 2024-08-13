@@ -4,6 +4,11 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Tuple, Optional
 from dataclasses import dataclass
 import requests
+from copy import deepcopy
+import h5py
+from scipy import interpolate
+
+from .utils.constants import *
 
 import numpy as np
 
@@ -16,9 +21,6 @@ try:
 
 except (ImportError, ModuleNotFoundError) as e:
     pycppDetector_gpu = None  # for doc string purposes
-
-import h5py
-from scipy import interpolate
 
 
 SC = [1, 2, 3]
@@ -33,12 +35,19 @@ class Orbits(ABC):
     Args:
         filename: File name. File should be in the style of LISAOrbits
         use_gpu: If ``True``, use a gpu.
+        armlength: Armlength of detector.
 
     """
 
-    def __init__(self, filename: str, use_gpu: bool = False) -> None:
+    def __init__(
+        self,
+        filename: str,
+        use_gpu: bool = False,
+        armlength: Optional[float] = 2.5e9,
+    ) -> None:
         self.use_gpu = use_gpu
         self.filename = filename
+        self.armlength = armlength
         self._setup()
         self.configured = False
 
@@ -47,6 +56,22 @@ class Orbits(ABC):
         """numpy or cupy based on self.use_gpu"""
         xp = np if not self.use_gpu else cp
         return xp
+
+    @property
+    def armlength(self) -> float:
+        """Armlength parameter."""
+        return self._armlength
+
+    @armlength.setter
+    def armlength(self, armlength: float) -> None:
+        """armlength setter."""
+
+        if isinstance(armlength, float):
+            # TODO: put error check that it is close
+            self._armlength = armlength
+
+        else:
+            raise ValueError("armlength must be float.")
 
     @property
     def LINKS(self) -> List[int]:
@@ -85,31 +110,34 @@ class Orbits(ABC):
 
         assert isinstance(filename, str)
 
-        # get path
-        path_to_this_file = __file__.split("detector.py")[0]
+        if os.path.exists(filename):
+            self._filename = filename
 
-        # make sure orbit_files directory exists in the right place
-        if not os.path.exists(path_to_this_file + "orbit_files/"):
-            os.mkdir(path_to_this_file + "orbit_files/")
-        path_to_this_file = path_to_this_file + "orbit_files/"
+        else:
+            # get path
+            path_to_this_file = __file__.split("detector.py")[0]
 
-        if not os.path.exists(path_to_this_file + filename):
-            # download files from github if they are not there
-            github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
-            r = requests.get(github_file)
+            # make sure orbit_files directory exists in the right place
+            if not os.path.exists(path_to_this_file + "orbit_files/"):
+                os.mkdir(path_to_this_file + "orbit_files/")
+            path_to_this_file = path_to_this_file + "orbit_files/"
 
-            # if not success
-            if r.status_code != 200:
-                raise ValueError(
-                    f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
-                )
+            if not os.path.exists(path_to_this_file + filename):
+                # download files from github if they are not there
+                github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
+                r = requests.get(github_file)
 
-            # write the contents to a local file
-            with open(path_to_this_file + filename, "wb") as f:
-                f.write(r.content)
+                # if not success
+                if r.status_code != 200:
+                    raise ValueError(
+                        f"Cannot find {filename} within default files located at github.com/mikekatz04/LISAanalysistools/lisatools/orbit_files/."
+                    )
+                # write the contents to a local file
+                with open(path_to_this_file + filename, "wb") as f:
+                    f.write(r.content)
 
-        # store
-        self._filename = path_to_this_file + filename
+            # store
+            self._filename = path_to_this_file + filename
 
     def open(self) -> h5py.File:
         """Opens the h5 file in the proper mode.
@@ -284,7 +312,7 @@ class Orbits(ABC):
         ll = np.asarray(self.LINKS).copy().astype(np.int32)
 
         if make_cpp:
-            self.pycppdetector_args = (
+            self.pycppdetector_args = [
                 dt,
                 len(self.t),
                 self.xp.asarray(self.n.flatten().copy()),
@@ -293,7 +321,8 @@ class Orbits(ABC):
                 self.xp.asarray(ll),
                 self.xp.asarray(lsr),
                 self.xp.asarray(lse),
-            )
+                self.armlength,
+            ]
             self.dt = dt
         else:
             self.pycppdetector_args = None
@@ -483,6 +512,45 @@ class LISAModel(LISAModelSettings, ABC):
             out += f"{key}: {item}\n"
         return out
 
+    def lisanoises(
+        self,
+        f: float | np.ndarray,
+        unit: Optional[str] = "relative_frequency",
+    ) -> Tuple[float, float]:
+        """Calculate both LISA noise terms based on input model.
+        Args:
+            f: Frequency array.
+            unit: Either ``"relative_frequency"`` or ``"displacement"``.
+        Returns:
+            Tuple with acceleration term as first value and oms term as second value.
+        """
+
+        # TODO: fix this up
+        Soms_d_in = self.Soms_d
+        Sa_a_in = self.Sa_a
+
+        frq = f
+        ### Acceleration noise
+        ## In acceleration
+        Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
+        ## In displacement
+        Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
+        ## In relative frequency unit
+        Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
+        Spm = Sa_nu
+
+        ### Optical Metrology System
+        ## In displacement
+        Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
+        ## In relative frequency unit
+        Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
+        Sop = Soms_nu
+
+        if unit == "displacement":
+            return Sa_d, Soms_d
+        elif unit == "relative_frequency":
+            return Spm, Sop
+
 
 # defaults
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
@@ -538,3 +606,56 @@ def check_lisa_model(model: Any) -> LISAModel:
         raise ValueError("model argument not given correctly.")
 
     return model
+
+
+class Space2050Model(ABC):
+    """Model for the LISA Constellation
+
+    This includes sensitivity information computed in
+    :module:`lisatools.sensitivity` and orbital information
+    contained in an :class:`Orbits` class object.
+    This class is used to house high-level methods useful
+    to various needed computations.
+
+    """
+
+    def __init__(self, sens_file: str, orbits: Orbits, name: str):
+        # store spline
+        self.orbits = orbits
+        self.name = name
+        self.setup_splines(sens_file)
+
+    @property
+    def Sn_spl(self) -> interpolate.CubicSpline | None:
+        """Sensitivity file.
+        Must be 4 columns labelled f, A, E, T.
+        """
+        if not hasattr(self, "_Sn_spl"):
+            return None
+
+        return self._Sn_spl
+
+    @property
+    def fn(self) -> np.ndarray:
+        """Frequency array for spline."""
+        return self._fn
+
+    def setup_splines(self, sens_file: str) -> None:
+
+        assert isinstance(sens_file, str)
+        assert os.path.exists(sens_file)
+
+        sens_all = np.genfromtxt(f"{sens_file}", delimiter=",", names=True)
+
+        for check in ["f", "A", "E", "T"]:
+            if check not in sens_all.dtype.names:
+                raise ValueError(
+                    "Channel must be A, E, or T. These also must be the exact column names in the data file. Frequency must be the first column labelled f."
+                )
+
+        self._fn = sens_all["f"]
+        self._Sn_spl = {
+            key: interpolate.CubicSpline(self._fn, sens_all[key])
+            for key in ["A", "E", "T"]
+        }
+        self._sens_file = sens_file

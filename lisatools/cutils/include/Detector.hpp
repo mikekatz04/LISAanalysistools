@@ -30,11 +30,12 @@ public:
     double *x_arr;
     int nlinks;
     int nspacecraft;
+    double armlength;
     int *links;
     int *sc_r;
     int *sc_e;
 
-    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_)
+    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
@@ -47,15 +48,22 @@ public:
         sc_r = sc_r_;
         sc_e = sc_e_;
         links = links_;
+        armlength = armlength_;
+    };
 
-        // std::cout << " START " << std::endl;
-        // for (int i = 0; i < nlinks; i += 1)
-        // {
-        //     sc_r[i] = sc_r_[i];
-        //     sc_e[i] = sc_e_[i];
-        //     links[i] = links_[i];
-        //     // std::cout << i << " HAHAHAH " << sc_r_[i] << " " << sc_e_[i] << std::endl;
-        // }
+    int get_sc_r_from_arr(int i)
+    {
+        return sc_r[i];
+    };
+
+    int get_sc_e_from_arr(int i)
+    {
+        return sc_e[i];
+    };
+
+    int get_link_from_arr(int i)
+    {
+        return links[i];
     };
 
     CUDA_DEVICE int get_window(double t);
@@ -68,11 +76,7 @@ public:
     CUDA_DEVICE void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
     CUDA_DEVICE void get_pos_ptr(Vec *vec, double t, int sc);
     void get_light_travel_time_arr(double *ltt, double *t, int *link, int num);
-    void dealloc(){
-        // delete[] links;
-        // delete[] sc_r;
-        // delete[] sc_e;
-    };
+    void dealloc() {};
 };
 
 #endif // __DETECTOR_HPP__

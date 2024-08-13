@@ -112,17 +112,17 @@ class AnalysisContainer:
                     # char strain
                     ax[i * self.sens_mat.shape[1] + j].loglog(
                         self.data_res_arr.f_arr,
-                        self.data_res_arr.f_arr * self.data_res_arr[i],
+                        self.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
                     )
                     ax[i * self.sens_mat.shape[1] + j].loglog(
                         self.data_res_arr.f_arr,
-                        self.data_res_arr.f_arr * self.data_res_arr[j],
+                        self.data_res_arr.f_arr * np.abs(self.data_res_arr[j]),
                     )
         else:
             for i in range(self.sens_mat.shape[0]):
                 ax[i].loglog(
                     self.data_res_arr.f_arr,
-                    self.data_res_arr.f_arr * self.data_res_arr[i],
+                    self.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
                 )
         return (fig, ax)
 

@@ -7,8 +7,9 @@ from copy import deepcopy
 from few.waveform import GenerateEMRIWaveform
 
 # imports
+from ..waveformbase import AETTDIWaveform
 from fastlisaresponse import ResponseWrapper
-from lisatools.detector import EqualArmlengthOrbits
+from ...detector import EqualArmlengthOrbits
 
 default_response_kwargs = dict(
     t0=30000.0,
@@ -19,7 +20,7 @@ default_response_kwargs = dict(
 )
 
 
-class EMRITDIWaveform(ResponseWrapper):
+class EMRITDIWaveform(AETTDIWaveform):
     """Generate EMRI waveforms with the TDI LISA Response
 
     Args:
@@ -55,7 +56,7 @@ class EMRITDIWaveform(ResponseWrapper):
 
         response_kwargs_in = deepcopy(response_kwargs)
         # parameters
-        super(EMRITDIWaveform, self).__init__(
+        self.response = ResponseWrapper(
             gen_wave,
             T,
             dt,
@@ -68,6 +69,11 @@ class EMRITDIWaveform(ResponseWrapper):
             **response_kwargs_in,
         )
 
+    @property
+    def dt(self) -> float:
+        """timestep"""
+        return self.response.dt
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        __doc__ = super(EMRITDIWaveform, self).__call__.__doc__
-        return super(EMRITDIWaveform, self).__call__(*args, **kwargs)
+        __doc__ = ResponseWrapper.__call__.__doc__
+        return self.response(*args, **kwargs)

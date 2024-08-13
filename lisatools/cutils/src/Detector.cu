@@ -55,8 +55,7 @@ int Orbits::get_sc_ind(int sc)
         printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
 #else
         std::ostringstream oss;
-        int xxxx = 1;
-        oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << xxxx;
+        oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << std::endl;
         std::string var = oss.str();
         throw std::invalid_argument(var);
 #endif // __CUDACC__
@@ -167,18 +166,18 @@ void Orbits::get_pos_ptr(Vec *vec, double t, int sc)
 #define NUM_THREADS 64
 
 CUDA_KERNEL
-void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Orbits& orbits)
+void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Orbits &orbits)
 {
     int start, end, increment;
-    #ifdef __CUDACC__
+#ifdef __CUDACC__
     start = blockIdx.x * blockDim.x + threadIdx.x;
     end = num;
     increment = gridDim.x * blockDim.x;
-    #else // __CUDACC__
+#else  // __CUDACC__
     start = 0;
     end = num;
     increment = 1;
-    #endif // __CUDACC__
+#endif // __CUDACC__
 
     for (int i = start; i < end; i += increment)
     {
@@ -188,7 +187,7 @@ void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Or
 
 void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int num)
 {
-    #ifdef __CUDACC__
+#ifdef __CUDACC__
     int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
 
     // copy self to GPU
@@ -199,12 +198,12 @@ void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int nu
     get_light_travel_time_kernel<<<num_blocks, NUM_THREADS>>>(ltt, t, link, num, *orbits_gpu);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
-    
+
     gpuErrchk(cudaFree(orbits_gpu));
 
-    #else // __CUDACC__
+#else // __CUDACC__
 
     get_light_travel_time_kernel(ltt, t, link, num, *this);
 
-    #endif // __CUDACC__
+#endif // __CUDACC__
 }

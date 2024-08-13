@@ -206,6 +206,8 @@ setup(
         "lisatools.utils",
         "lisatools.sources",
         "lisatools.sources.emri",
+        "lisatools.sources.bbh",
+        "lisatools.sources.gb",
         "lisatools.cutils",
         "lisatools.cutils.src",
         "lisatools.cutils.include",

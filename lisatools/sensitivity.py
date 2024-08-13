@@ -3,6 +3,7 @@ import warnings
 from abc import ABC
 from typing import Any, Tuple, Optional, List
 from copy import deepcopy
+import os
 
 import math
 import numpy as np
@@ -30,7 +31,13 @@ The sensitivity code is heavily based on an original code by Stas Babak, Antoine
 
 
 class Sensitivity(ABC):
-    """Base Class for PSD information."""
+    """Base Class for PSD information.
+
+    The initialization function is only needed if using a file input.
+
+    """
+
+    channel: str = None
 
     @staticmethod
     def transform(
@@ -53,53 +60,6 @@ class Sensitivity(ABC):
         """
         raise NotImplementedError
 
-    @staticmethod
-    def lisanoises(
-        f: float | np.ndarray,
-        model: Optional[lisa_models.LISAModel | str] = lisa_models.scirdv1,
-        unit: Optional[str] = "relative_frequency",
-    ) -> Tuple[float, float]:
-        """Calculate both LISA noise terms based on input model.
-
-        Args:
-            f: Frequency array.
-            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
-            unit: Either ``"relative_frequency"`` or ``"displacement"``.
-
-        Returns:
-            Tuple with acceleration term as first value and oms term as second value.
-
-        """
-
-        if isinstance(model, str):
-            model = lisa_models.check_lisa_model(model)
-
-        # TODO: fix this up
-        Soms_d_in = model.Soms_d
-        Sa_a_in = model.Sa_a
-
-        frq = f
-        ### Acceleration noise
-        ## In acceleration
-        Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
-        ## In displacement
-        Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
-        ## In relative frequency unit
-        Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
-        Spm = Sa_nu
-
-        ### Optical Metrology System
-        ## In displacement
-        Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
-        ## In relative frequency unit
-        Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
-        Sop = Soms_nu
-
-        if unit == "displacement":
-            return Sa_d, Soms_d
-        elif unit == "relative_frequency":
-            return Spm, Sop
-
     @classmethod
     def get_Sn(
         cls,
@@ -119,11 +79,21 @@ class Sensitivity(ABC):
 
         """
 
-        # get noise values
-        Spm, Sop = cls.lisanoises(f, model)
+        if hasattr(model, "Sn_spl") and model.Sn_spl is not None:
+            spl = model.Sn_spl
+            if cls.channel not in spl:
+                raise ValueError("Calling a channel that is not available.")
 
-        # transform as desired for TDI combination
-        Sout = cls.transform(f, Spm, Sop, **kwargs)
+            Sout = spl[cls.channel](f)
+
+        else:
+            assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
+
+            # get noise values
+            Spm, Sop = model.lisanoises(f)
+
+            # transform as desired for TDI combination
+            Sout = cls.transform(f, Spm, Sop, **kwargs)
 
         # will add zero if ignored
         stochastic_contribution = cls.stochastic_transform(
@@ -207,6 +177,8 @@ class Sensitivity(ABC):
 
 
 class X1TDISens(Sensitivity):
+    channel: str = "X"
+
     @staticmethod
     def transform(
         f: float | np.ndarray,
@@ -236,16 +208,20 @@ class X1TDISens(Sensitivity):
 
 
 class Y1TDISens(X1TDISens):
+    channel: str = "Y"
     __doc__ = X1TDISens.__doc__
     pass
 
 
 class Z1TDISens(X1TDISens):
+    channel: str = "Z"
     __doc__ = X1TDISens.__doc__
     pass
 
 
 class XY1TDISens(Sensitivity):
+    channel: str = "XY"
+
     @staticmethod
     def transform(
         f: float | np.ndarray,
@@ -278,16 +254,20 @@ class XY1TDISens(Sensitivity):
 
 
 class ZX1TDISens(XY1TDISens):
+    channel: str = "ZX"
     __doc__ = XY1TDISens.__doc__
     pass
 
 
 class YZ1TDISens(XY1TDISens):
+    channel: str = "YZ"
     __doc__ = XY1TDISens.__doc__
     pass
 
 
 class X2TDISens(Sensitivity):
+    channel: str = "X"
+
     @staticmethod
     def transform(
         f: float | np.ndarray,
@@ -321,16 +301,20 @@ class X2TDISens(Sensitivity):
 
 
 class Y2TDISens(X2TDISens):
+    channel: str = "Y"
     __doc__ = X2TDISens.__doc__
     pass
 
 
 class Z2TDISens(X2TDISens):
+    channel: str = "Z"
     __doc__ = X2TDISens.__doc__
     pass
 
 
 class A1TDISens(Sensitivity):
+    channel: str = "A"
+
     @staticmethod
     def transform(
         f: float | np.ndarray,
@@ -369,11 +353,14 @@ class A1TDISens(Sensitivity):
 
 
 class E1TDISens(A1TDISens):
+    channel: str = "E"
     __doc__ = A1TDISens.__doc__
     pass
 
 
 class T1TDISens(Sensitivity):
+    channel: str = "T"
+
     @staticmethod
     def transform(
         f: float | np.ndarray,
@@ -428,6 +415,7 @@ class LISASens(Sensitivity):
             Sensitivity array.
 
         """
+        assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
 
         # get noise values
         Sa_d, Sop = cls.lisanoises(f, model, unit="displacement")
