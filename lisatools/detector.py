@@ -608,28 +608,24 @@ def check_lisa_model(model: Any) -> LISAModel:
     return model
 
 
+try:
+    from gwspaceperf import Mission
+    from gwspaceperf.performance import sensitivity, noise_psd
+except (ModuleNotFoundError, ImportError) as e:
+    Mission = None
+
+
 class Space2050Model(ABC):
-    """Model for the LISA Constellation
+    """Model for future space-based GW missions."""
 
-    This includes sensitivity information computed in
-    :module:`lisatools.sensitivity` and orbital information
-    contained in an :class:`Orbits` class object.
-    This class is used to house high-level methods useful
-    to various needed computations.
-
-    """
-
-    def __init__(self, sens_file: str, orbits: Orbits, name: str):
+    def __init__(self, mission: Mission, orbits: Orbits, name: str):
         # store spline
         self.orbits = orbits
         self.name = name
-        self.setup_splines(sens_file)
+        self.setup_splines(mission)
 
     @property
     def Sn_spl(self) -> interpolate.CubicSpline | None:
-        """Sensitivity file.
-        Must be 4 columns labelled f, A, E, T.
-        """
         if not hasattr(self, "_Sn_spl"):
             return None
 
@@ -640,22 +636,11 @@ class Space2050Model(ABC):
         """Frequency array for spline."""
         return self._fn
 
-    def setup_splines(self, sens_file: str) -> None:
+    def setup_splines(self, mission: Mission) -> None:
 
-        assert isinstance(sens_file, str)
-        assert os.path.exists(sens_file)
-
-        sens_all = np.genfromtxt(f"{sens_file}", delimiter=",", names=True)
-
-        for check in ["f", "A", "E", "T"]:
-            if check not in sens_all.dtype.names:
-                raise ValueError(
-                    "Channel must be A, E, or T. These also must be the exact column names in the data file. Frequency must be the first column labelled f."
-                )
-
-        self._fn = sens_all["f"]
+        Sn = noise_psd(mission, "AET")
+        self._fn = mission.f
         self._Sn_spl = {
-            key: interpolate.CubicSpline(self._fn, sens_all[key])
-            for key in ["A", "E", "T"]
+            key: interpolate.CubicSpline(self._fn, Sn[:, i])
+            for i, key in enumerate(["A", "E", "T"])
         }
-        self._sens_file = sens_file
