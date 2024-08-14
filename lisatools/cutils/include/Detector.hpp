@@ -76,6 +76,8 @@ public:
     CUDA_DEVICE void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
     CUDA_DEVICE void get_pos_ptr(Vec *vec, double t, int sc);
     void get_light_travel_time_arr(double *ltt, double *t, int *link, int num);
+    void get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num);
+    void get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num);
     void dealloc() {};
 };
 

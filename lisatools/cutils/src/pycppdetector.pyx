@@ -23,6 +23,8 @@ cdef extern from "../include/Detector.hpp":
         VecWrap get_pos_ptr(VecWrap* out, double t, int sc) except+
         void get_light_travel_time_arr(double *ltt, double *t, int *link, int num) except+
         void dealloc();
+        void get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num) except+
+        void get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num) except+
         int get_sc_r_from_arr(int i) except+
         int get_sc_e_from_arr(int i) except+
         int get_link_from_arr(int i) except+
@@ -163,6 +165,42 @@ cdef class pycppDetector:
             return self.get_pos_single(t, sc)
         elif isinstance(t, np.ndarray):
             return self.get_pos_arr(t, sc)
+
+    def get_pos_arr_wrap(self, *args, **kwargs):
+        (pos_x, pos_y, pos_z, t, sc, num), tkwargs = wrapper(*args, **kwargs)
+
+        cdef size_t pos_x_in = pos_x
+        cdef size_t pos_y_in = pos_y
+        cdef size_t pos_z_in = pos_z
+        cdef size_t t_in = t
+        cdef size_t sc_in = sc
+
+        self.g.get_pos_arr(
+            <double *>pos_x_in,
+            <double *>pos_y_in,
+            <double *>pos_z_in,
+            <double *>t_in,
+            <int *>sc_in,
+            num
+        )
+    
+    def get_normal_unit_vec_arr_wrap(self, *args, **kwargs):
+        (normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, sc, num), tkwargs = wrapper(*args, **kwargs)
+
+        cdef size_t normal_unit_vec_x_in = normal_unit_vec_x
+        cdef size_t normal_unit_vec_y_in = normal_unit_vec_y
+        cdef size_t normal_unit_vec_z_in = normal_unit_vec_z
+        cdef size_t t_in = t
+        cdef size_t sc_in = sc
+
+        self.g.get_normal_unit_vec_arr(
+            <double *>normal_unit_vec_x_in,
+            <double *>normal_unit_vec_y_in,
+            <double *>normal_unit_vec_z_in,
+            <double *>t_in,
+            <int *>sc_in,
+            num
+        )
 
     def get_light_travel_time_arr_wrap(self, *args, **kwargs):
         (ltt, t, link, num), tkwargs = wrapper(*args, **kwargs)

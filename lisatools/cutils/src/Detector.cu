@@ -165,6 +165,7 @@ void Orbits::get_pos_ptr(Vec *vec, double t, int sc)
 
 #define NUM_THREADS 64
 
+
 CUDA_KERNEL
 void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Orbits &orbits)
 {
@@ -207,3 +208,100 @@ void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int nu
 
 #endif // __CUDACC__
 }
+
+
+CUDA_KERNEL
+void get_pos_kernel(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num, Orbits &orbits)
+{
+    int start, end, increment;
+#ifdef __CUDACC__
+    start = blockIdx.x * blockDim.x + threadIdx.x;
+    end = num;
+    increment = gridDim.x * blockDim.x;
+#else  // __CUDACC__
+    start = 0;
+    end = num;
+    increment = 1;
+#endif // __CUDACC__
+    Vec _tmp(0.0, 0.0, 0.0);
+
+    for (int i = start; i < end; i += increment)
+    {
+        _tmp = orbits.get_pos(t[i], sc[i]);
+        pos_x[i] = _tmp.x;
+        pos_y[i] = _tmp.y;
+        pos_z[i] = _tmp.z;
+    }
+}
+
+void Orbits::get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num)
+{
+#ifdef __CUDACC__
+    int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
+
+    // copy self to GPU
+    Orbits *orbits_gpu;
+    gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
+    gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
+
+    get_pos_kernel<<<num_blocks, NUM_THREADS>>>(pos_x, pos_y, pos_z, t, sc, num, *orbits_gpu);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
+
+    gpuErrchk(cudaFree(orbits_gpu));
+
+#else // __CUDACC__
+
+    get_pos_kernel(pos_x, pos_y, pos_z, t, sc, num, *this);
+
+#endif // __CUDACC__
+}
+
+
+CUDA_KERNEL
+void get_normal_unit_vec_kernel(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num, Orbits &orbits)
+{
+    int start, end, increment;
+#ifdef __CUDACC__
+    start = blockIdx.x * blockDim.x + threadIdx.x;
+    end = num;
+    increment = gridDim.x * blockDim.x;
+#else  // __CUDACC__
+    start = 0;
+    end = num;
+    increment = 1;
+#endif // __CUDACC__
+    Vec _tmp(0.0, 0.0, 0.0);
+
+    for (int i = start; i < end; i += increment)
+    {
+        _tmp = orbits.get_normal_unit_vec(t[i], link[i]);
+        normal_unit_vec_x[i] = _tmp.x;
+        normal_unit_vec_y[i] = _tmp.y;
+        normal_unit_vec_z[i] = _tmp.z;
+    }
+}
+
+void Orbits::get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num)
+{
+#ifdef __CUDACC__
+    int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
+
+    // copy self to GPU
+    Orbits *orbits_gpu;
+    gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
+    gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
+
+    get_normal_unit_vec_kernel<<<num_blocks, NUM_THREADS>>>(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *orbits_gpu);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
+
+    gpuErrchk(cudaFree(orbits_gpu));
+
+#else // __CUDACC__
+
+    get_normal_unit_vec_kernel(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *this);
+
+#endif // __CUDACC__
+}
+

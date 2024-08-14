@@ -372,7 +372,7 @@ class Orbits(ABC):
             )
 
     def get_light_travel_times(
-        self, t: float | np.ndarray, link: int
+        self, t: float | np.ndarray, link: int | np.ndarray
     ) -> float | np.ndarray:
         """Compute light travel time as a function of time.
 
@@ -405,7 +405,44 @@ class Orbits(ABC):
             return ltt_out[0]
         return ltt_out
 
-    def get_normal_unit_vec(self, t: float | np.ndarray, link: int) -> np.ndarray:
+    def get_pos(
+        self, t: float | np.ndarray, sc: int | np.ndarray
+    ) -> np.ndarray:
+        """Compute light travel time as a function of time.
+
+        Computes with the c++ backend.
+
+        Args:
+            t: Time array in seconds.
+            sc: which spacecraft. Must be ``in self.SC``.
+
+        Returns:
+            Position of spacecraft.
+
+        """
+        if isinstance(t, float) and isinstance(sc, int):
+            squeeze = True
+            t = self.xp.atleast_1d(t)
+            sc = self.xp.atleast_1d(sc).astype(np.int32)
+
+        else:
+            squeeze = False
+            t = self.xp.asarray(t)
+            sc = self.xp.asarray(sc).astype(np.int32)
+
+        pos_x = self.xp.zeros_like(t)
+        pos_y = self.xp.zeros_like(t)
+        pos_z = self.xp.zeros_like(t)
+
+        self.pycppdetector.get_pos_arr_wrap(
+            pos_x, pos_y, pos_z, t, sc, len(pos_x)
+        )
+        output = self.xp.array([pos_x, pos_y, pos_z]).T
+        if squeeze:
+            return output.squeeze()
+        return output
+
+    def get_normal_unit_vec(self, t: float | np.ndarray, link: int | np.ndarray) -> np.ndarray:
         """Compute link normal vector as a function of time.
 
         Computes with the c++ backend.
@@ -418,23 +455,28 @@ class Orbits(ABC):
             Link normal vectors.
 
         """
-        return self.pycppdetector.get_normal_unit_vec(t, link)
+        if isinstance(t, float) and isinstance(link, int):
+            squeeze = True
+            t = self.xp.atleast_1d(t)
+            link = self.xp.atleast_1d(link).astype(np.int32)
 
-    def get_pos(self, t: float | np.ndarray, sc: int) -> np.ndarray:
-        """Compute spacecraft position as a function of time.
+        else:
+            squeeze = False
+            t = self.xp.asarray(t)
+            link = self.xp.asarray(link).astype(np.int32)
 
-        Computes with the c++ backend.
+        normal_unit_vec_x = self.xp.zeros_like(t)
+        normal_unit_vec_y = self.xp.zeros_like(t)
+        normal_unit_vec_z = self.xp.zeros_like(t)
 
-        Args:
-            t: Time array in seconds.
-            sc: which spacecraft. Must be ``in self.SC``.
-
-        Returns:
-            Spacecraft positions.
-
-        """
-        return self.pycppdetector.get_pos(t, sc)
-
+        self.pycppdetector.get_normal_unit_vec_arr_wrap(
+            normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, len(normal_unit_vec_x)
+        )
+        output = self.xp.array([normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]).T
+        if squeeze:
+            return output.squeeze()
+        return output
+        
     @property
     def ptr(self) -> int:
         """pointer to c++ class"""
