@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Detector Information &mdash; lisaanalysistools 1.0.8 documentation</title>
+  <title>Detector Information &mdash; lisaanalysistools 1.0.9 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
@@ -19,7 +19,7 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=aec50437"></script>
+        <script src="../_static/documentation_options.js?v=0abd802e"></script>
         <script src="../_static/doctools.js?v=888ff710"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -55,7 +55,13 @@
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Detector Information</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#lisa-models">LISA Models</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.detector.LISAModel"><code class="docutils literal notranslate"><span class="pre">LISAModel</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#lisatools.detector.LISAModelSettings"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lisatools.detector.LISAModelSettings"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.LISAModelSettings.Soms_d"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings.Soms_d</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.LISAModelSettings.Sa_a"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings.Sa_a</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.LISAModelSettings.orbits"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings.orbits</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.LISAModelSettings.name"><code class="docutils literal notranslate"><span class="pre">LISAModelSettings.name</span></code></a></li>
+</ul>
+</li>
 <li class="toctree-l3"><a class="reference internal" href="#lisa-models-stock-options">LISA Models Stock Options</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.get_available_default_lisa_models"><code class="docutils literal notranslate"><span class="pre">get_available_default_lisa_models()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.get_default_lisa_model_from_str"><code class="docutils literal notranslate"><span class="pre">get_default_lisa_model_from_str()</span></code></a></li>
@@ -66,32 +72,33 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#orbits">Orbits</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.detector.Orbits"><code class="docutils literal notranslate"><span class="pre">Orbits</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.xp"><code class="docutils literal notranslate"><span class="pre">Orbits.xp</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.armlength"><code class="docutils literal notranslate"><span class="pre">Orbits.armlength</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.LINKS"><code class="docutils literal notranslate"><span class="pre">Orbits.LINKS</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.SC"><code class="docutils literal notranslate"><span class="pre">Orbits.SC</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.link_space_craft_r"><code class="docutils literal notranslate"><span class="pre">Orbits.link_space_craft_r</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.link_space_craft_e"><code class="docutils literal notranslate"><span class="pre">Orbits.link_space_craft_e</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.filename"><code class="docutils literal notranslate"><span class="pre">Orbits.filename</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.open"><code class="docutils literal notranslate"><span class="pre">Orbits.open()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.t_base"><code class="docutils literal notranslate"><span class="pre">Orbits.t_base</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.ltt_base"><code class="docutils literal notranslate"><span class="pre">Orbits.ltt_base</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.n_base"><code class="docutils literal notranslate"><span class="pre">Orbits.n_base</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.x_base"><code class="docutils literal notranslate"><span class="pre">Orbits.x_base</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.v_base"><code class="docutils literal notranslate"><span class="pre">Orbits.v_base</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.t"><code class="docutils literal notranslate"><span class="pre">Orbits.t</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.ltt"><code class="docutils literal notranslate"><span class="pre">Orbits.ltt</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.n"><code class="docutils literal notranslate"><span class="pre">Orbits.n</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.x"><code class="docutils literal notranslate"><span class="pre">Orbits.x</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.v"><code class="docutils literal notranslate"><span class="pre">Orbits.v</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.configure"><code class="docutils literal notranslate"><span class="pre">Orbits.configure()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.dt"><code class="docutils literal notranslate"><span class="pre">Orbits.dt</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.filename"><code class="docutils literal notranslate"><span class="pre">Orbits.filename</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.get_light_travel_times"><code class="docutils literal notranslate"><span class="pre">Orbits.get_light_travel_times()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.get_normal_unit_vec"><code class="docutils literal notranslate"><span class="pre">Orbits.get_normal_unit_vec()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.get_pos"><code class="docutils literal notranslate"><span class="pre">Orbits.get_pos()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.link_space_craft_e"><code class="docutils literal notranslate"><span class="pre">Orbits.link_space_craft_e</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.link_space_craft_r"><code class="docutils literal notranslate"><span class="pre">Orbits.link_space_craft_r</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.ltt"><code class="docutils literal notranslate"><span class="pre">Orbits.ltt</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.ltt_base"><code class="docutils literal notranslate"><span class="pre">Orbits.ltt_base</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.n"><code class="docutils literal notranslate"><span class="pre">Orbits.n</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.n_base"><code class="docutils literal notranslate"><span class="pre">Orbits.n_base</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.open"><code class="docutils literal notranslate"><span class="pre">Orbits.open()</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.ptr"><code class="docutils literal notranslate"><span class="pre">Orbits.ptr</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.pycppdetector"><code class="docutils literal notranslate"><span class="pre">Orbits.pycppdetector</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.pycppdetector_args"><code class="docutils literal notranslate"><span class="pre">Orbits.pycppdetector_args</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.size"><code class="docutils literal notranslate"><span class="pre">Orbits.size</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.t"><code class="docutils literal notranslate"><span class="pre">Orbits.t</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.t_base"><code class="docutils literal notranslate"><span class="pre">Orbits.t_base</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.v"><code class="docutils literal notranslate"><span class="pre">Orbits.v</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.v_base"><code class="docutils literal notranslate"><span class="pre">Orbits.v_base</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.x"><code class="docutils literal notranslate"><span class="pre">Orbits.x</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.x_base"><code class="docutils literal notranslate"><span class="pre">Orbits.x_base</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.xp"><code class="docutils literal notranslate"><span class="pre">Orbits.xp</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.get_light_travel_times"><code class="docutils literal notranslate"><span class="pre">Orbits.get_light_travel_times()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.get_pos"><code class="docutils literal notranslate"><span class="pre">Orbits.get_pos()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.get_normal_unit_vec"><code class="docutils literal notranslate"><span class="pre">Orbits.get_normal_unit_vec()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.detector.Orbits.ptr"><code class="docutils literal notranslate"><span class="pre">Orbits.ptr</span></code></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="#stock-orbit-options">Stock Orbit Options</a><ul>
@@ -154,7 +161,7 @@
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.detector.</span></span><span class="sig-name descname"><span class="pre">LISAModel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">Soms_d</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">Sa_a</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">orbits</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#LISAModel"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.LISAModel" title="Link to this definition"></a></dt>
 <dd><p>Model for the LISA Constellation</p>
 <p>This includes sensitivity information computed in
-<a href="#id1"><span class="problematic" id="id2">:module:`lisatools.sensitivity`</span></a> and orbital information
+<code class="xref py py-mod docutils literal notranslate"><span class="pre">lisatools.sensitivity</span></code> and orbital information
 contained in an <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a> class object.</p>
 <p>This class is used to house high-level methods useful
 to various needed computations.</p>
@@ -175,6 +182,26 @@ to various needed computations.</p>
 </ul>
 </dd>
 </dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.detector.LISAModelSettings.Soms_d">
+<span class="sig-name descname"><span class="pre">Soms_d</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></em><a class="headerlink" href="#lisatools.detector.LISAModelSettings.Soms_d" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.detector.LISAModelSettings.Sa_a">
+<span class="sig-name descname"><span class="pre">Sa_a</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></em><a class="headerlink" href="#lisatools.detector.LISAModelSettings.Sa_a" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.detector.LISAModelSettings.orbits">
+<span class="sig-name descname"><span class="pre">orbits</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a></em><a class="headerlink" href="#lisatools.detector.LISAModelSettings.orbits" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.detector.LISAModelSettings.name">
+<span class="sig-name descname"><span class="pre">name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a></em><a class="headerlink" href="#lisatools.detector.LISAModelSettings.name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
 </dd></dl>
 
 <section id="lisa-models-stock-options">
@@ -233,7 +260,7 @@ to various needed computations.</p>
 <h2>Orbits<a class="headerlink" href="#orbits" title="Link to this heading"></a></h2>
 <dl class="py class">
 <dt class="sig sig-object py" id="lisatools.detector.Orbits">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.detector.</span></span><span class="sig-name descname"><span class="pre">Orbits</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_gpu</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits" title="Link to this definition"></a></dt>
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.detector.</span></span><span class="sig-name descname"><span class="pre">Orbits</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_gpu</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">armlength</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2500000000.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/abc.html#abc.ABC" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></a></p>
 <p>LISA Orbit Base Class</p>
 <dl class="field-list simple">
@@ -241,9 +268,22 @@ to various needed computations.</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>filename</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a></span>) – File name. File should be in the style of LISAOrbits</p></li>
 <li><p><strong>use_gpu</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, use a gpu.</p></li>
+<li><p><strong>armlength</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">2500000000.0</span></code>) – Armlength of detector.</p></li>
 </ul>
 </dd>
 </dl>
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.xp">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">xp</span></span><a class="headerlink" href="#lisatools.detector.Orbits.xp" title="Link to this definition"></a></dt>
+<dd><p>numpy or cupy based on self.use_gpu</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.armlength">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">armlength</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><span class="pre">float</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.armlength" title="Link to this definition"></a></dt>
+<dd><p>Armlength parameter.</p>
+</dd></dl>
+
 <dl class="py property">
 <dt class="sig sig-object py" id="lisatools.detector.Orbits.LINKS">
 <em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">LINKS</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><span class="pre">List</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.detector.Orbits.LINKS" title="Link to this definition"></a></dt>
@@ -254,6 +294,101 @@ to various needed computations.</p>
 <dt class="sig sig-object py" id="lisatools.detector.Orbits.SC">
 <em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">SC</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><span class="pre">List</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.detector.Orbits.SC" title="Link to this definition"></a></dt>
 <dd><p>Spacecraft order.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.link_space_craft_r">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">link_space_craft_r</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><span class="pre">List</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.detector.Orbits.link_space_craft_r" title="Link to this definition"></a></dt>
+<dd><p>Receiver (first) spacecraft</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.link_space_craft_e">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">link_space_craft_e</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><span class="pre">List</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.detector.Orbits.link_space_craft_e" title="Link to this definition"></a></dt>
+<dd><p>Sender (second) spacecraft</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.filename">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">filename</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><span class="pre">str</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.filename" title="Link to this definition"></a></dt>
+<dd><p>Orbit file name.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.open">
+<span class="sig-name descname"><span class="pre">open</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.open"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.open" title="Link to this definition"></a></dt>
+<dd><p>Opens the h5 file in the proper mode.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Opened file.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>H5 file object</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.12)"><strong>RuntimeError</strong></a> – If backend is opened for writing when it is read-only.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.t_base">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">t_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.t_base" title="Link to this definition"></a></dt>
+<dd><p>Time array from file.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.ltt_base">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ltt_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.ltt_base" title="Link to this definition"></a></dt>
+<dd><p>Light travel times along links from file.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.n_base">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">n_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.n_base" title="Link to this definition"></a></dt>
+<dd><p>Normal unit vectors towards receiver along links from file.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.x_base">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">x_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.x_base" title="Link to this definition"></a></dt>
+<dd><p>Spacecraft position from file.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.v_base">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">v_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.v_base" title="Link to this definition"></a></dt>
+<dd><p>Spacecraft velocities from file.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.t">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">t</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.t" title="Link to this definition"></a></dt>
+<dd><p>Configured time array.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.ltt">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ltt</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.ltt" title="Link to this definition"></a></dt>
+<dd><p>Light travel time.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.n">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">n</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.n" title="Link to this definition"></a></dt>
+<dd><p>Normal vectors along links.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.x">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">x</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.x" title="Link to this definition"></a></dt>
+<dd><p>Spacecraft positions.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.v">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">v</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.v" title="Link to this definition"></a></dt>
+<dd><p>Spacecraft velocities.</p>
 </dd></dl>
 
 <dl class="py method">
@@ -285,134 +420,6 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 </dd></dl>
 
 <dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.filename">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">filename</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.12)"><span class="pre">str</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.filename" title="Link to this definition"></a></dt>
-<dd><p>Orbit file name.</p>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.get_light_travel_times">
-<span class="sig-name descname"><span class="pre">get_light_travel_times</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">link</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.get_light_travel_times"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.get_light_travel_times" title="Link to this definition"></a></dt>
-<dd><p>Compute light travel time as a function of time.</p>
-<p>Computes with the c++ backend.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
-<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
-</dd>
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>Light travel times.</p>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.get_normal_unit_vec">
-<span class="sig-name descname"><span class="pre">get_normal_unit_vec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">link</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.get_normal_unit_vec"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.get_normal_unit_vec" title="Link to this definition"></a></dt>
-<dd><p>Compute link normal vector as a function of time.</p>
-<p>Computes with the c++ backend.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
-<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
-</dd>
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>Link normal vectors.</p>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.get_pos">
-<span class="sig-name descname"><span class="pre">get_pos</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sc</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.get_pos"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.get_pos" title="Link to this definition"></a></dt>
-<dd><p>Compute spacecraft position as a function of time.</p>
-<p>Computes with the c++ backend.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
-<li><p><strong>sc</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a></span>) – which spacecraft. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.SC</span></code>.</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
-</dd>
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>Spacecraft positions.</p>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.link_space_craft_e">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">link_space_craft_e</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><span class="pre">List</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.detector.Orbits.link_space_craft_e" title="Link to this definition"></a></dt>
-<dd><p>Sender (second) spacecraft</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.link_space_craft_r">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">link_space_craft_r</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.12)"><span class="pre">List</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.detector.Orbits.link_space_craft_r" title="Link to this definition"></a></dt>
-<dd><p>Receiver (first) spacecraft</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.ltt">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ltt</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.ltt" title="Link to this definition"></a></dt>
-<dd><p>Light travel time.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.ltt_base">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ltt_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.ltt_base" title="Link to this definition"></a></dt>
-<dd><p>Light travel times along links from file.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.n">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">n</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.n" title="Link to this definition"></a></dt>
-<dd><p>Normal vectors along links.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.n_base">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">n_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.n_base" title="Link to this definition"></a></dt>
-<dd><p>Normal unit vectors towards receiver along links from file.</p>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.open">
-<span class="sig-name descname"><span class="pre">open</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.open"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.open" title="Link to this definition"></a></dt>
-<dd><p>Opens the h5 file in the proper mode.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>Opened file.</p>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p>H5 file object</p>
-</dd>
-<dt class="field-odd">Raises<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.12)"><strong>RuntimeError</strong></a> – If backend is opened for writing when it is read-only.</p>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.ptr">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ptr</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.ptr" title="Link to this definition"></a></dt>
-<dd><p>pointer to c++ class</p>
-</dd></dl>
-
-<dl class="py property">
 <dt class="sig sig-object py" id="lisatools.detector.Orbits.pycppdetector">
 <em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pycppdetector</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">pycppDetector</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.12)"><span class="pre">None</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.pycppdetector" title="Link to this definition"></a></dt>
 <dd><p>C++ class</p>
@@ -430,46 +437,73 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 <dd><p>Number of time points.</p>
 </dd></dl>
 
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.t">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">t</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.t" title="Link to this definition"></a></dt>
-<dd><p>Configured time array.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.get_light_travel_times">
+<span class="sig-name descname"><span class="pre">get_light_travel_times</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">link</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.get_light_travel_times"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.get_light_travel_times" title="Link to this definition"></a></dt>
+<dd><p>Compute light travel time as a function of time.</p>
+<p>Computes with the c++ backend.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
+<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Light travel times.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.get_pos">
+<span class="sig-name descname"><span class="pre">get_pos</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sc</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.get_pos"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.get_pos" title="Link to this definition"></a></dt>
+<dd><p>Compute light travel time as a function of time.</p>
+<p>Computes with the c++ backend.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
+<li><p><strong>sc</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – which spacecraft. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.SC</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Position of spacecraft.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.get_normal_unit_vec">
+<span class="sig-name descname"><span class="pre">get_normal_unit_vec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">link</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/detector.html#Orbits.get_normal_unit_vec"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.detector.Orbits.get_normal_unit_vec" title="Link to this definition"></a></dt>
+<dd><p>Compute link normal vector as a function of time.</p>
+<p>Computes with the c++ backend.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
+<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Link normal vectors.</p>
+</dd>
+</dl>
 </dd></dl>
 
 <dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.t_base">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">t_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.t_base" title="Link to this definition"></a></dt>
-<dd><p>Time array from file.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.v">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">v</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.v" title="Link to this definition"></a></dt>
-<dd><p>Spacecraft velocities.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.v_base">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">v_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.v_base" title="Link to this definition"></a></dt>
-<dd><p>Spacecraft velocities from file.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.x">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">x</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.x" title="Link to this definition"></a></dt>
-<dd><p>Spacecraft positions.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.x_base">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">x_base</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ndarray</span></em><a class="headerlink" href="#lisatools.detector.Orbits.x_base" title="Link to this definition"></a></dt>
-<dd><p>Spacecraft position from file.</p>
-</dd></dl>
-
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.detector.Orbits.xp">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">xp</span></span><a class="headerlink" href="#lisatools.detector.Orbits.xp" title="Link to this definition"></a></dt>
-<dd><p>numpy or cupy based on self.use_gpu</p>
+<dt class="sig sig-object py" id="lisatools.detector.Orbits.ptr">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ptr</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.12)"><span class="pre">int</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.ptr" title="Link to this definition"></a></dt>
+<dd><p>pointer to c++ class</p>
 </dd></dl>
 
 </dd></dl>
@@ -485,9 +519,8 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p></li>
-<li><p><strong>**kwargs</strong> – <p>for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p>
-</p></li>
+<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – Arguments for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.12)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – Kwargs for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p></li>
 </ul>
 </dd>
 </dl>
@@ -502,9 +535,8 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>*args</strong> – for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p></li>
-<li><p><strong>**kwargs</strong> – <p>for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p>
-</p></li>
+<li><p><strong>*args</strong> – Arguments for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p></li>
+<li><p><strong>**kwargs</strong> – Kwargs for <a class="reference internal" href="#lisatools.detector.Orbits" title="lisatools.detector.Orbits"><code class="xref py py-class docutils literal notranslate"><span class="pre">Orbits</span></code></a>.</p></li>
 </ul>
 </dd>
 </dl>

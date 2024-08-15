@@ -93,6 +93,12 @@ autodoc_type_aliases = {
     "ArrayLike": "ArrayLike",
 }
 
+autodoc_default_options = {
+    "member-order": "bysource",
+    "undoc-members": True,
+    "special-members": "__call__",
+}
+
 typehints_defaults = "comma"
 
 # configuration for intersphinx: refer to the Python standard library.

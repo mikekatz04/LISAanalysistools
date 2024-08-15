@@ -266,7 +266,9 @@ class Orbits(ABC):
 
         x_orig = self.t_base
 
+        # everything up base on input
         if linear_interp_setup:
+            # setup spline
             make_cpp = True
             dt = LINEAR_INTERP_TIMESTEP
             Tobs = self.t_base[-1]
@@ -275,11 +277,13 @@ class Orbits(ABC):
             if t_arr[-1] < self.t_base[-1]:
                 t_arr = np.concatenate([t_arr, self.t_base[-1:]])
         elif t_arr is not None:
+            # check array inputs and fill dt
             assert np.all(t_arr >= self.t_base[0]) and np.all(t_arr <= self.t_base[-1])
             make_cpp = True
             dt = abs(t_arr[1] - t_arr[0])
 
         elif dt is not None:
+            # fill array based on dt and base t
             make_cpp = True
             Tobs = self.t_base[-1]
             Nobs = int(Tobs / dt)
@@ -294,6 +298,7 @@ class Orbits(ABC):
         x_new = t_arr.copy()
         self.t = t_arr.copy()
 
+        # use base quantities, and interpolate to prepare new arrays accordingly
         for which in ["ltt", "x", "n", "v"]:
             arr = getattr(self, which + "_base")
             arr_tmp = arr.reshape(self.size_base, -1)
@@ -305,12 +310,15 @@ class Orbits(ABC):
             arr_out = arr_out_tmp.reshape((len(x_new),) + arr.shape[1:])
             setattr(self, "_" + which, arr_out)
 
-        self.configured = True
-
+        # make sure base spacecraft and link inormation is ready
         lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
         lse = np.asarray(self.link_space_craft_e).copy().astype(np.int32)
         ll = np.asarray(self.LINKS).copy().astype(np.int32)
 
+        # indicate this class instance has been configured
+        self.configured = True
+
+        # prepare cpp class args to load when needed
         if make_cpp:
             self.pycppdetector_args = [
                 dt,
@@ -386,28 +394,38 @@ class Orbits(ABC):
             Light travel times.
 
         """
+        # test and prepare inputs
         if isinstance(t, float) and isinstance(link, int):
             squeeze = True
             t = self.xp.atleast_1d(t)
             link = self.xp.atleast_1d(link).astype(np.int32)
 
-        else:
+        elif isinstance(t, self.xp.ndarray) and isinstance(link, int):
+            squeeze = False
+            t = self.xp.atleast_1d(t)
+            link = self.xp.full_like(t, link, dtype=np.int32)
+
+        elif isinstance(t, self.xp.ndarray) and isinstance(link, self.xp.ndarray):
             squeeze = False
             t = self.xp.asarray(t)
             link = self.xp.asarray(link).astype(np.int32)
+        else:
+            raise ValueError(
+                "(t, link) can be (float, int), (np.ndarray, int), (np.ndarray, np.ndarray)."
+            )
 
+        # buffer array and c computation
         ltt_out = self.xp.zeros_like(t)
         self.pycppdetector.get_light_travel_time_arr_wrap(
             ltt_out, t, link, len(ltt_out)
         )
 
+        # prepare output
         if squeeze:
             return ltt_out[0]
         return ltt_out
 
-    def get_pos(
-        self, t: float | np.ndarray, sc: int | np.ndarray
-    ) -> np.ndarray:
+    def get_pos(self, t: float | np.ndarray, sc: int | np.ndarray) -> np.ndarray:
         """Compute light travel time as a function of time.
 
         Computes with the c++ backend.
@@ -420,29 +438,43 @@ class Orbits(ABC):
             Position of spacecraft.
 
         """
+        # test and setup inputs accordingly
         if isinstance(t, float) and isinstance(sc, int):
             squeeze = True
             t = self.xp.atleast_1d(t)
             sc = self.xp.atleast_1d(sc).astype(np.int32)
 
-        else:
+        elif isinstance(t, self.xp.ndarray) and isinstance(sc, int):
+            squeeze = False
+            t = self.xp.atleast_1d(t)
+            sc = self.xp.full_like(t, sc, dtype=np.int32)
+
+        elif isinstance(t, self.xp.ndarray) and isinstance(sc, self.xp.ndarray):
             squeeze = False
             t = self.xp.asarray(t)
             sc = self.xp.asarray(sc).astype(np.int32)
+        else:
+            raise ValueError(
+                "(t, sc) can be (float, int), (np.ndarray, int), (np.ndarray, np.ndarray)."
+            )
 
+        # buffer arrays for input into c code
         pos_x = self.xp.zeros_like(t)
         pos_y = self.xp.zeros_like(t)
         pos_z = self.xp.zeros_like(t)
 
-        self.pycppdetector.get_pos_arr_wrap(
-            pos_x, pos_y, pos_z, t, sc, len(pos_x)
-        )
+        # c code computation
+        self.pycppdetector.get_pos_arr_wrap(pos_x, pos_y, pos_z, t, sc, len(pos_x))
+
+        # prepare output
         output = self.xp.array([pos_x, pos_y, pos_z]).T
         if squeeze:
             return output.squeeze()
         return output
 
-    def get_normal_unit_vec(self, t: float | np.ndarray, link: int | np.ndarray) -> np.ndarray:
+    def get_normal_unit_vec(
+        self, t: float | np.ndarray, link: int | np.ndarray
+    ) -> np.ndarray:
         """Compute link normal vector as a function of time.
 
         Computes with the c++ backend.
@@ -455,28 +487,49 @@ class Orbits(ABC):
             Link normal vectors.
 
         """
+        # test and prepare inputs
         if isinstance(t, float) and isinstance(link, int):
             squeeze = True
             t = self.xp.atleast_1d(t)
             link = self.xp.atleast_1d(link).astype(np.int32)
 
-        else:
+        elif isinstance(t, self.xp.ndarray) and isinstance(link, int):
+            squeeze = False
+            t = self.xp.atleast_1d(t)
+            link = self.xp.full_like(t, link, dtype=np.int32)
+
+        elif isinstance(t, self.xp.ndarray) and isinstance(link, self.xp.ndarray):
             squeeze = False
             t = self.xp.asarray(t)
             link = self.xp.asarray(link).astype(np.int32)
+        else:
+            raise ValueError(
+                "(t, link) can be (float, int), (np.ndarray, int), (np.ndarray, np.ndarray)."
+            )
 
+        # c code with buffers
         normal_unit_vec_x = self.xp.zeros_like(t)
         normal_unit_vec_y = self.xp.zeros_like(t)
         normal_unit_vec_z = self.xp.zeros_like(t)
 
+        # c code
         self.pycppdetector.get_normal_unit_vec_arr_wrap(
-            normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, len(normal_unit_vec_x)
+            normal_unit_vec_x,
+            normal_unit_vec_y,
+            normal_unit_vec_z,
+            t,
+            link,
+            len(normal_unit_vec_x),
         )
-        output = self.xp.array([normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]).T
+
+        # prep outputs
+        output = self.xp.array(
+            [normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]
+        ).T
         if squeeze:
             return output.squeeze()
         return output
-        
+
     @property
     def ptr(self) -> int:
         """pointer to c++ class"""
@@ -489,7 +542,8 @@ class EqualArmlengthOrbits(Orbits):
     Orbit file: equalarmlength-orbits.h5
 
     Args:
-        *args, **kwargs: for :class:`Orbits`.
+        *args: Arguments for :class:`Orbits`.
+        **kwargs: Kwargs for :class:`Orbits`.
 
     """
 
@@ -503,12 +557,12 @@ class ESAOrbits(Orbits):
     Orbit file: esa-trailing-orbits.h5
 
     Args:
-        *args, **kwargs: for :class:`Orbits`.
+        *args: Arguments for :class:`Orbits`.
+        **kwargs: Kwargs for :class:`Orbits`.
 
     """
 
     def __init__(self, *args, **kwargs):
-        # TODO: fix this up
         super().__init__("esa-trailing-orbits.h5", *args, **kwargs)
 
 
@@ -540,7 +594,7 @@ class LISAModel(LISAModelSettings, ABC):
     """Model for the LISA Constellation
 
     This includes sensitivity information computed in
-    :module:`lisatools.sensitivity` and orbital information
+    :py:mod:`lisatools.sensitivity` and orbital information
     contained in an :class:`Orbits` class object.
 
     This class is used to house high-level methods useful
@@ -648,41 +702,3 @@ def check_lisa_model(model: Any) -> LISAModel:
         raise ValueError("model argument not given correctly.")
 
     return model
-
-
-try:
-    from gwspaceperf import Mission
-    from gwspaceperf.performance import sensitivity, noise_psd
-except (ModuleNotFoundError, ImportError) as e:
-    Mission = None
-
-
-class Space2050Model(ABC):
-    """Model for future space-based GW missions."""
-
-    def __init__(self, mission: Mission, orbits: Orbits, name: str):
-        # store spline
-        self.orbits = orbits
-        self.name = name
-        self.setup_splines(mission)
-
-    @property
-    def Sn_spl(self) -> interpolate.CubicSpline | None:
-        if not hasattr(self, "_Sn_spl"):
-            return None
-
-        return self._Sn_spl
-
-    @property
-    def fn(self) -> np.ndarray:
-        """Frequency array for spline."""
-        return self._fn
-
-    def setup_splines(self, mission: Mission) -> None:
-
-        Sn = noise_psd(mission, "AET")
-        self._fn = mission.f
-        self._Sn_spl = {
-            key: interpolate.CubicSpline(self._fn, Sn[:, i])
-            for i, key in enumerate(["A", "E", "T"])
-        }

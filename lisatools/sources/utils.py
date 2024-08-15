@@ -15,6 +15,20 @@ from eryn.utils import TransformContainer
 
 
 class CalculationController:
+    """Wrapper class to controll investigative computations.
+
+    Args:
+        aet_template_gen: Template waveform generator.
+        model: Model for LISA.
+        psd_kwargs: psd_kwargs for :func:`lisatools.sensitivity.get_sensitivity`.
+        Tobs: Observation time in **years**.
+        dt: Timestep in seconds.
+        psd: Sensitivity curve type to use. Default is :class:`A1TDISens`
+            because we ignore ``T`` in these simplified calculations and
+            the ``A`` and ``E`` sensitivities are equivalent.
+
+    """
+
     def __init__(
         self,
         aet_template_gen: SNRWaveform | AETTDIWaveform,
@@ -24,6 +38,8 @@ class CalculationController:
         dt: float,
         psd: Sensitivity = A1TDISens,
     ) -> None:
+
+        # Store everything.
         self.aet_template_gen = aet_template_gen
         self.psd_kwargs = psd_kwargs
         self.model = model
@@ -33,17 +49,31 @@ class CalculationController:
 
     @property
     def parameter_transforms(self) -> TransformContainer:
+        """Transform parameters from sampling basis to waveform basis."""
         return self._parameter_transforms
 
     @parameter_transforms.setter
     def parameter_transforms(self, parameter_transforms: TransformContainer) -> None:
+        """Set parameter transforms."""
         assert isinstance(parameter_transforms, TransformContainer)
         self._parameter_transforms = parameter_transforms
 
-    def get_snr(self, *params: np.ndarray | list, **kwargs: Any) -> float:
+    def get_snr(self, *params: Any, **kwargs: Any) -> float:
+        """Compute the SNR.
+
+        Args:
+            *params: Parameters to go into waveform generator.
+            **kwargs: Kwargs for waveform generator.
+
+        Returns:
+            SNR.
+
+        """
+        # generate waveform
         a_chan, e_chan, t_chan = self.aet_template_gen(*params, **kwargs)
 
         # ignore t channel for snr computation
+        # compute SNR
         opt_snr = snr_func(
             [a_chan, e_chan],
             psd=self.psd,
@@ -53,19 +83,25 @@ class CalculationController:
             df=self.aet_template_gen.df,
         )
 
+        # prepare outputs
         self.f_arr = self.aet_template_gen.f_arr
         self.last_output = (a_chan, e_chan)
 
         return opt_snr
 
 
-class BBHCalculatorController(CalculationController):
+class BBHCalculationController(CalculationController):
+    """Calculation controller for BBHs.
+
+    Args:
+        *args: Args for :class:`CalculationController`.
+        *kwargs: Kwargs for :class:`CalculationController`.
+
+    """
+
     def __init__(self, *args: Any, **kwargs: Any):
-        # fill_dict = {
-        #     "ndim_full": 12,
-        #     "fill_values": np.array([0.0]),
-        #     "fill_inds": np.array([6]),
-        # }
+
+        # transforms from information matrix basis
         parameter_transforms = {
             0: np.exp,
             4: lambda x: x * 1e9 * PC_SI,
@@ -77,25 +113,54 @@ class BBHCalculatorController(CalculationController):
             parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
         )
 
-        super(BBHCalculatorController, self).__init__(*args, **kwargs)
+        super(BBHCalculationController, self).__init__(*args, **kwargs)
 
     def get_snr(self, *args: Any, **kwargs: Any) -> float:
+        """Compute the SNR.
+
+        Args:
+            *params: Parameters to go into waveform generator.
+            **kwargs: Kwargs for waveform generator.
+
+        Returns:
+            SNR.
+
+        """
+        # adjust kwargs to simplify calculation
         if "t_obs_start" not in kwargs:
             kwargs["shift_t_limits"] = True
             kwargs["t_obs_start"] = 0.0
             kwargs["t_obs_end"] = self.Tobs
-        return super(BBHCalculatorController, self).get_snr(*args, **kwargs)
+        # compute snr
+        return super(BBHCalculationController, self).get_snr(*args, **kwargs)
 
     def get_cov(
         self,
-        *params: np.ndarray | list,
-        precision: bool = True,
+        *params: Any,
         more_accurate: bool = False,
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
+        precision: bool = False,
         **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get covariance matrix.
 
+        Args:
+            *params: Parameters for BBH. Must include ``f_ref``.
+            more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
+            eps: Absolute **derivative** step size. See :func:`lisatools.diagnostic.info_matrix`.
+            deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
+                If ``None``, it will be ``np.arange(len(params))``.
+            precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_).
+                This is typically a good idea as the information matrix can be highly ill-conditioned.
+            **kwargs: Kwargs for waveform generation.
+
+        Returns:
+            Parameters and covariance matrix.
+
+        """
+
+        # setup all bbh specific quantities.
         assert len(params) == 12
 
         if isinstance(params, tuple):
@@ -123,9 +188,11 @@ class BBHCalculatorController(CalculationController):
         params[9] = np.sin(params[9])
         params[11] = params[11] / YRSID_SI
 
+        # default deriv inds
         if deriv_inds is None:
             deriv_inds = np.delete(np.arange(12), 6)
 
+        # remove f_ref derivative
         if 6 in deriv_inds:
             deriv_inds = np.delete(deriv_inds, np.where(deriv_inds == 6)[0])
 
@@ -136,7 +203,7 @@ class BBHCalculatorController(CalculationController):
             kwargs["t_obs_start"] = 0.0
             kwargs["t_obs_end"] = self.Tobs
 
-        # ignore t channel for snr computation
+        # compute covariance
         cov = covariance(
             eps,
             self.aet_template_gen,
@@ -152,18 +219,25 @@ class BBHCalculatorController(CalculationController):
             waveform_kwargs=kwargs,
             more_accurate=more_accurate,
             deriv_inds=deriv_inds,
+            precision=precision,
         )
 
-        return params[np.array([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11])], cov
+        # return parameters and their covariance
+        return params[deriv_inds], cov
 
 
-class GBCalculatorController(CalculationController):
+class GBCalculationController(CalculationController):
+    """Calculation controller for GBs.
+
+    Args:
+        *args: Args for :class:`CalculationController`.
+        *kwargs: Kwargs for :class:`CalculationController`.
+
+    """
+
     def __init__(self, *args: Any, **kwargs: Any):
-        # fill_dict = {
-        #     "ndim_full": 12,
-        #     "fill_values": np.array([0.0]),
-        #     "fill_inds": np.array([6]),
-        # }
+
+        # parameter transforms from sampling basis to waveform basis
         parameter_transforms = {
             0: np.exp,
             1: lambda x: x / 1e3,
@@ -176,19 +250,35 @@ class GBCalculatorController(CalculationController):
             parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
         )
 
-        super(GBCalculatorController, self).__init__(*args, **kwargs)
+        super(GBCalculationController, self).__init__(*args, **kwargs)
+        # convert back to seconds
         self.Tobs *= YRSID_SI
 
     def get_cov(
         self,
         *params: np.ndarray | list,
-        precision: bool = True,
         more_accurate: bool = False,
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
+        precision: bool = False,
         **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get covariance matrix.
 
+        Args:
+            *params: Parameters for GB. Must include ``fddot``.
+            more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
+            eps: Absolute **derivative** step size. See :func:`lisatools.diagnostic.info_matrix`.
+            deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
+                If ``None``, it will be ``np.arange(len(params))``.
+            precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_).
+                This is typically a good idea as the information matrix can be highly ill-conditioned.
+            **kwargs: Kwargs for waveform generation.
+
+        Returns:
+            Parameters and covariance matrix.
+
+        """
         assert len(params) == 9
 
         if isinstance(params, tuple):
@@ -211,6 +301,7 @@ class GBCalculatorController(CalculationController):
         if deriv_inds is None:
             deriv_inds = np.delete(np.arange(9), 3)
 
+        # remove fddot for now
         if 3 in deriv_inds:
             deriv_inds = np.delete(deriv_inds, np.where(deriv_inds == 3)[0])
 
@@ -219,7 +310,6 @@ class GBCalculatorController(CalculationController):
         kwargs["dt"] = self.dt
         kwargs["T"] = self.Tobs
 
-        # ignore t channel for snr computation
         cov = covariance(
             eps,
             self.aet_template_gen,
@@ -235,12 +325,23 @@ class GBCalculatorController(CalculationController):
             waveform_kwargs=kwargs,
             more_accurate=more_accurate,
             deriv_inds=deriv_inds,
+            precision=precision,
         )
 
-        return params[np.array([0, 1, 2, 4, 5, 6, 7, 8])], cov
+        return params[deriv_inds], cov
 
     def get_snr(self, *args: Any, **kwargs: Any) -> float:
+        """Compute the SNR.
 
+        Args:
+            *params: Parameters to go into waveform generator.
+            **kwargs: Kwargs for waveform generator.
+
+        Returns:
+            SNR.
+
+        """
+        # make sure it is TDI 2
         if "tdi2" not in kwargs:
             kwargs["tdi2"] = True
 
@@ -248,16 +349,21 @@ class GBCalculatorController(CalculationController):
         kwargs["T"] = self.Tobs
 
         # ensures tdi2 is added correctly for GBGPU
-        return super(GBCalculatorController, self).get_snr(*args, **kwargs)
+        return super(GBCalculationController, self).get_snr(*args, **kwargs)
 
 
-class EMRICalculatorController(CalculationController):
+class EMRICalculationController(CalculationController):
+    """Calculation controller for EMRIs.
+
+    Args:
+        *args: Args for :class:`CalculationController`.
+        *kwargs: Kwargs for :class:`CalculationController`.
+
+    """
+
     def __init__(self, *args: Any, **kwargs: Any):
-        # fill_dict = {
-        #     "ndim_full": 12,
-        #     "fill_values": np.array([0.0]),
-        #     "fill_inds": np.array([6]),
-        # }
+
+        # parameter transforms for EMRIs
         parameter_transforms = {
             0: np.exp,
             5: np.arccos,
@@ -269,18 +375,33 @@ class EMRICalculatorController(CalculationController):
             parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
         )
 
-        super(EMRICalculatorController, self).__init__(*args, **kwargs)
+        super(EMRICalculationController, self).__init__(*args, **kwargs)
 
     def get_cov(
         self,
         *params: np.ndarray | list,
-        precision: bool = True,
         more_accurate: bool = False,
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
+        precision: bool = False,
         **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """Get covariance matrix.
 
+        Args:
+            *params: Parameters for EMRIs.
+            more_accurate: If ``True``, run a more accurate derivate requiring 2x more waveform generations.
+            eps: Absolute **derivative** step size. See :func:`lisatools.diagnostic.info_matrix`.
+            deriv_inds: Subset of parameters of interest for which to calculate the information matrix, by index.
+                If ``None``, it will be ``np.arange(len(params))``.
+            precision: If ``True``, uses 500-dps precision to compute the information matrix inverse (requires `mpmath <https://mpmath.org>`_).
+                This is typically a good idea as the information matrix can be highly ill-conditioned.
+            **kwargs: Kwargs for waveform generation.
+
+        Returns:
+            Parameters and covariance matrix.
+
+        """
         assert len(params) == 14
 
         if isinstance(params, tuple):
@@ -298,7 +419,6 @@ class EMRICalculatorController(CalculationController):
         assert self.aet_template_gen.response.dt == self.dt
         assert self.aet_template_gen.response.T == self.Tobs
 
-        # ignore t channel for snr computation
         cov = covariance(
             eps,
             self.aet_template_gen,
@@ -314,6 +434,7 @@ class EMRICalculatorController(CalculationController):
             waveform_kwargs=kwargs,
             more_accurate=more_accurate,
             deriv_inds=deriv_inds,
+            precision=precision,
         )
 
-        return params[:], cov
+        return params[deriv_inds], cov

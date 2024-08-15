@@ -1,42 +1,41 @@
 from abc import ABC
 from typing import Union, Tuple
+import numpy as np
 
 
 class AETTDIWaveform(ABC):
-    # @classmethod
-    # @property
-    # def domain_variables(self) -> dict:
-    #     breakpoint()
-    #     return {"dt": self.dt, "f_arr": self.f_arr, "df": self.df}
+    """Base class for an AET TDI Waveform."""
 
     @property
     def dt(self) -> float:
+        """Timestep in seconds."""
         return None
 
     @property
-    def f_arr(self) -> float:
+    def f_arr(self) -> np.ndarray:
+        """Frequency array."""
         return None
 
     @property
     def df(self) -> float:
+        """Frequency bin size."""
         return None
 
 
 class SNRWaveform(ABC):
-    # @classmethod
-    # @property
-    # def domain_variables(self) -> dict:
-    #     breakpoint()
-    #     return {"dt": self.dt, "f_arr": self.f_arr, "df": self.df}
+    """Base class for a waveform built in a simpler fashion for SNR calculations."""
 
     @property
     def dt(self) -> float:
+        """Timestep in seconds."""
         return None
 
     @property
-    def f_arr(self) -> float:
+    def f_arr(self) -> np.ndarray:
+        """Frequency array."""
         return None
 
     @property
     def df(self) -> float:
+        """Frequency bin size."""
         return None

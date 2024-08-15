@@ -71,14 +71,29 @@ class Sensitivity(ABC):
 
         Args:
             f: Frequency array.
-            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
+            model: Noise model. Object of type :class:`lisa_models.LISAModel`.
+                It can also be a string corresponding to one of the stock models.
+                The model object must include attributes for ``Soms_d`` (shot noise)
+                and ``Sa_a`` (acceleration noise) or a spline as attribute ``Sn_spl``.
+                In the case of a spline, this must be a dictionary with
+                channel names as keys and callable PSD splines. For example,
+                if using ``scipy.interpolate.CubicSpline``, an input option
+                can be:
+
+                ```
+                noise_model.Sn_spl = {
+                    "A": CubicSpline(f, Sn_A)),
+                    "E": CubicSpline(f, Sn_E)),
+                    "T": CubicSpline(f, Sn_T))
+                }
+                ```
             **kwargs: For interoperability.
 
         Returns:
             PSD values.
 
         """
-
+        # spline or stock computation
         if hasattr(model, "Sn_spl") and model.Sn_spl is not None:
             spl = model.Sn_spl
             if cls.channel not in spl:
@@ -87,6 +102,7 @@ class Sensitivity(ABC):
             Sout = spl[cls.channel](f)
 
         else:
+            model = lisa_models.check_lisa_model(model)
             assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
 
             # get noise values
@@ -415,10 +431,11 @@ class LISASens(Sensitivity):
             Sensitivity array.
 
         """
+        model = lisa_models.check_lisa_model(model)
         assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
 
         # get noise values
-        Sa_d, Sop = cls.lisanoises(f, model, unit="displacement")
+        Sa_d, Sop = model.lisanoises(f, unit="displacement")
 
         all_m = np.sqrt(4.0 * Sa_d + Sop)
         ## Average the antenna response

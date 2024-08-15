@@ -4,7 +4,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stochastic Signals &mdash; lisaanalysistools 1.0.8 documentation</title>
+  <title>Stochastic Signals &mdash; lisaanalysistools 1.0.9 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
@@ -19,7 +19,7 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=aec50437"></script>
+        <script src="../_static/documentation_options.js?v=0abd802e"></script>
         <script src="../_static/doctools.js?v=888ff710"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -58,6 +58,8 @@
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Stochastic Signals</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#stochastic-base-class">Stochastic Base Class</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution"><code class="docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution.ndim"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.ndim</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution.added_stochastic_list"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.added_stochastic_list</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution.get_Sh"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.get_Sh()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution.specific_Sh_function"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.specific_Sh_function()</span></code></a></li>
 </ul>
@@ -66,18 +68,30 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#combinatorial-stochastic-container">Combinatorial Stochastic Container</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer.get_Sh"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.get_Sh()</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.stochastic_contribution_dict</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContributionContainer.get_Sh"><code class="docutils literal notranslate"><span class="pre">StochasticContributionContainer.get_Sh()</span></code></a></li>
 </ul>
 </li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#stock-stochastic-models">Stock Stochastic Models</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground"><code class="docutils literal notranslate"><span class="pre">HyperbolicTangentGalacticForeground</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground.ndim"><code class="docutils literal notranslate"><span class="pre">HyperbolicTangentGalacticForeground.ndim</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground.specific_Sh_function"><code class="docutils literal notranslate"><span class="pre">HyperbolicTangentGalacticForeground.specific_Sh_function()</span></code></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.ndim"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.ndim</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.amp"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.amp</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.alpha"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.alpha</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.day"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.day</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.month"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.month</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.year"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.year</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Xobs"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.Xobs</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.knee"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.knee</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Slope1"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.Slope1</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Slope2"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.Slope2</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Tmax"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.Tmax</span></code></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.specific_Sh_function"><code class="docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground.specific_Sh_function()</span></code></a></li>
 </ul>
 </li>
@@ -134,6 +148,16 @@
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.stochastic.</span></span><span class="sig-name descname"><span class="pre">StochasticContribution</span></span><a class="reference internal" href="../_modules/lisatools/stochastic.html#StochasticContribution"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.StochasticContribution" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/abc.html#abc.ABC" title="(in Python v3.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></a></p>
 <p>Base Class for Stochastic Contributions to the PSD.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.StochasticContribution.ndim">
+<span class="sig-name descname"><span class="pre">ndim</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#lisatools.stochastic.StochasticContribution.ndim" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.StochasticContribution.added_stochastic_list">
+<span class="sig-name descname"><span class="pre">added_stochastic_list</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#lisatools.stochastic.StochasticContribution.added_stochastic_list" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
 <dl class="py method">
 <dt class="sig sig-object py" id="lisatools.stochastic.StochasticContribution.get_Sh">
 <em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_Sh</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">params</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#StochasticContribution.get_Sh"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.StochasticContribution.get_Sh" title="Link to this definition"></a></dt>
@@ -189,6 +213,12 @@
 Keys are the names and values are of type <a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a>.</p>
 </dd>
 </dl>
+<dl class="py property">
+<dt class="sig sig-object py" id="lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">stochastic_contribution_dict</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><span class="pre">StochasticContribution</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict" title="Link to this definition"></a></dt>
+<dd><p>Stochastic contribution storage.</p>
+</dd></dl>
+
 <dl class="py method">
 <dt class="sig sig-object py" id="lisatools.stochastic.StochasticContributionContainer.get_Sh">
 <span class="sig-name descname"><span class="pre">get_Sh</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">params_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kwargs_dict</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#StochasticContributionContainer.get_Sh"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.StochasticContributionContainer.get_Sh" title="Link to this definition"></a></dt>
@@ -212,12 +242,6 @@ Values are the keyword argument dicts for each associated model.</p></li>
 </dl>
 </dd></dl>
 
-<dl class="py property">
-<dt class="sig sig-object py" id="lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">stochastic_contribution_dict</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.12)"><span class="pre">dict</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><span class="pre">StochasticContribution</span></a><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#lisatools.stochastic.StochasticContributionContainer.stochastic_contribution_dict" title="Link to this definition"></a></dt>
-<dd><p>Stochastic contribution storage.</p>
-</dd></dl>
-
 </dd></dl>
 
 </section>
@@ -228,6 +252,11 @@ Values are the keyword argument dicts for each associated model.</p></li>
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.stochastic.</span></span><span class="sig-name descname"><span class="pre">HyperbolicTangentGalacticForeground</span></span><a class="reference internal" href="../_modules/lisatools/stochastic.html#HyperbolicTangentGalacticForeground"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a></p>
 <p>Hyperbolic Tangent-based foreground fitting function.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.HyperbolicTangentGalacticForeground.ndim">
+<span class="sig-name descname"><span class="pre">ndim</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">5</span></em><a class="headerlink" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground.ndim" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
 <dl class="py method">
 <dt class="sig sig-object py" id="lisatools.stochastic.HyperbolicTangentGalacticForeground.specific_Sh_function">
 <em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">specific_Sh_function</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">amp</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fk</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alpha</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">s1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">s2</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#HyperbolicTangentGalacticForeground.specific_Sh_function"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground.specific_Sh_function" title="Link to this definition"></a></dt>
@@ -264,6 +293,61 @@ and <span class="math notranslate nohighlight">\(s_2\)</span> is a slope paramet
 <dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground">
 <em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">lisatools.stochastic.</span></span><span class="sig-name descname"><span class="pre">FittedHyperbolicTangentGalacticForeground</span></span><a class="reference internal" href="../_modules/lisatools/stochastic.html#FittedHyperbolicTangentGalacticForeground"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground" title="Link to this definition"></a></dt>
 <dd><p>Bases: <a class="reference internal" href="#lisatools.stochastic.HyperbolicTangentGalacticForeground" title="lisatools.stochastic.HyperbolicTangentGalacticForeground"><code class="xref py py-class docutils literal notranslate"><span class="pre">HyperbolicTangentGalacticForeground</span></code></a></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.ndim">
+<span class="sig-name descname"><span class="pre">ndim</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.ndim" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.amp">
+<span class="sig-name descname"><span class="pre">amp</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">3.26651613e-44</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.amp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.alpha">
+<span class="sig-name descname"><span class="pre">alpha</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1.18300266</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.alpha" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.day">
+<span class="sig-name descname"><span class="pre">day</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">86400.0</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.day" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.month">
+<span class="sig-name descname"><span class="pre">month</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">2635200.0</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.month" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.year">
+<span class="sig-name descname"><span class="pre">year</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">31557600.0</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.year" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Xobs">
+<span class="sig-name descname"><span class="pre">Xobs</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[86400.0,</span> <span class="pre">7905600.0,</span> <span class="pre">15811200.0,</span> <span class="pre">31557600.0,</span> <span class="pre">63115200.0,</span> <span class="pre">126230400.0,</span> <span class="pre">315576000.0]</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Xobs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.knee">
+<span class="sig-name descname"><span class="pre">knee</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[0.0115120924,</span> <span class="pre">0.00401884128,</span> <span class="pre">0.00347302482,</span> <span class="pre">0.00277606177,</span> <span class="pre">0.00241178384,</span> <span class="pre">0.00209278117,</span> <span class="pre">0.00157362626]</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.knee" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Slope1">
+<span class="sig-name descname"><span class="pre">Slope1</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[941.315118,</span> <span class="pre">1368.87568,</span> <span class="pre">1687.29474,</span> <span class="pre">1763.27234,</span> <span class="pre">2326.78814,</span> <span class="pre">3014.30978,</span> <span class="pre">3749.70124]</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Slope1" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Slope2">
+<span class="sig-name descname"><span class="pre">Slope2</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[103.239773,</span> <span class="pre">1033.51646,</span> <span class="pre">1622.04855,</span> <span class="pre">1686.31844,</span> <span class="pre">2068.21665,</span> <span class="pre">2957.74596,</span> <span class="pre">3151.99454]</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Slope2" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Tmax">
+<span class="sig-name descname"><span class="pre">Tmax</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">315581497.635456</span></em><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.Tmax" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
 <dl class="py method">
 <dt class="sig sig-object py" id="lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.specific_Sh_function">
 <em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">specific_Sh_function</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">f</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">Tobs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#FittedHyperbolicTangentGalacticForeground.specific_Sh_function"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.specific_Sh_function" title="Link to this definition"></a></dt>

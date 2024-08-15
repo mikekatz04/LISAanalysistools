@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.sensitivity &mdash; lisaanalysistools 1.0.7 documentation</title>
+  <title>lisatools.sensitivity &mdash; lisaanalysistools 1.0.9 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,7 +18,7 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=46dfa7f5"></script>
+        <script src="../../_static/documentation_options.js?v=0abd802e"></script>
         <script src="../../_static/doctools.js?v=888ff710"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -97,6 +97,7 @@
 <span class="kn">from</span> <span class="nn">abc</span> <span class="kn">import</span> <span class="n">ABC</span>
 <span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">List</span>
 <span class="kn">from</span> <span class="nn">copy</span> <span class="kn">import</span> <span class="n">deepcopy</span>
+<span class="kn">import</span> <span class="nn">os</span>
 
 <span class="kn">import</span> <span class="nn">math</span>
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
@@ -126,7 +127,13 @@
 <div class="viewcode-block" id="Sensitivity">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Sensitivity">[docs]</a>
 <span class="k">class</span> <span class="nc">Sensitivity</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Base Class for PSD information.&quot;&quot;&quot;</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Base Class for PSD information.</span>
+
+<span class="sd">    The initialization function is only needed if using a file input.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span>
 
 <div class="viewcode-block" id="Sensitivity.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Sensitivity.transform">[docs]</a>
@@ -152,56 +159,6 @@
         <span class="k">raise</span> <span class="ne">NotImplementedError</span></div>
 
 
-<div class="viewcode-block" id="Sensitivity.lisanoises">
-<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Sensitivity.lisanoises">[docs]</a>
-    <span class="nd">@staticmethod</span>
-    <span class="k">def</span> <span class="nf">lisanoises</span><span class="p">(</span>
-        <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span>
-        <span class="n">model</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">lisa_models</span><span class="o">.</span><span class="n">LISAModel</span> <span class="o">|</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">lisa_models</span><span class="o">.</span><span class="n">scirdv1</span><span class="p">,</span>
-        <span class="n">unit</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;relative_frequency&quot;</span><span class="p">,</span>
-    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate both LISA noise terms based on input model.</span>
-
-<span class="sd">        Args:</span>
-<span class="sd">            f: Frequency array.</span>
-<span class="sd">            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.</span>
-<span class="sd">            unit: Either ``&quot;relative_frequency&quot;`` or ``&quot;displacement&quot;``.</span>
-
-<span class="sd">        Returns:</span>
-<span class="sd">            Tuple with acceleration term as first value and oms term as second value.</span>
-
-<span class="sd">        &quot;&quot;&quot;</span>
-
-        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
-            <span class="n">model</span> <span class="o">=</span> <span class="n">lisa_models</span><span class="o">.</span><span class="n">check_lisa_model</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
-
-        <span class="c1"># TODO: fix this up</span>
-        <span class="n">Soms_d_in</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">Soms_d</span>
-        <span class="n">Sa_a_in</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">Sa_a</span>
-
-        <span class="n">frq</span> <span class="o">=</span> <span class="n">f</span>
-        <span class="c1">### Acceleration noise</span>
-        <span class="c1">## In acceleration</span>
-        <span class="n">Sa_a</span> <span class="o">=</span> <span class="n">Sa_a_in</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="p">(</span><span class="mf">0.4e-3</span> <span class="o">/</span> <span class="n">frq</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="p">(</span><span class="n">frq</span> <span class="o">/</span> <span class="mf">8e-3</span><span class="p">)</span> <span class="o">**</span> <span class="mi">4</span><span class="p">)</span>
-        <span class="c1">## In displacement</span>
-        <span class="n">Sa_d</span> <span class="o">=</span> <span class="n">Sa_a</span> <span class="o">*</span> <span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">frq</span><span class="p">)</span> <span class="o">**</span> <span class="p">(</span><span class="o">-</span><span class="mf">4.0</span><span class="p">)</span>
-        <span class="c1">## In relative frequency unit</span>
-        <span class="n">Sa_nu</span> <span class="o">=</span> <span class="n">Sa_d</span> <span class="o">*</span> <span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">frq</span> <span class="o">/</span> <span class="n">C_SI</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span>
-        <span class="n">Spm</span> <span class="o">=</span> <span class="n">Sa_nu</span>
-
-        <span class="c1">### Optical Metrology System</span>
-        <span class="c1">## In displacement</span>
-        <span class="n">Soms_d</span> <span class="o">=</span> <span class="n">Soms_d_in</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="p">(</span><span class="mf">2.0e-3</span> <span class="o">/</span> <span class="n">f</span><span class="p">)</span> <span class="o">**</span> <span class="mi">4</span><span class="p">)</span>
-        <span class="c1">## In relative frequency unit</span>
-        <span class="n">Soms_nu</span> <span class="o">=</span> <span class="n">Soms_d</span> <span class="o">*</span> <span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">frq</span> <span class="o">/</span> <span class="n">C_SI</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span>
-        <span class="n">Sop</span> <span class="o">=</span> <span class="n">Soms_nu</span>
-
-        <span class="k">if</span> <span class="n">unit</span> <span class="o">==</span> <span class="s2">&quot;displacement&quot;</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Sa_d</span><span class="p">,</span> <span class="n">Soms_d</span>
-        <span class="k">elif</span> <span class="n">unit</span> <span class="o">==</span> <span class="s2">&quot;relative_frequency&quot;</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">Spm</span><span class="p">,</span> <span class="n">Sop</span></div>
-
-
 <div class="viewcode-block" id="Sensitivity.get_Sn">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Sensitivity.get_Sn">[docs]</a>
     <span class="nd">@classmethod</span>
@@ -215,19 +172,45 @@
 
 <span class="sd">        Args:</span>
 <span class="sd">            f: Frequency array.</span>
-<span class="sd">            model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.</span>
+<span class="sd">            model: Noise model. Object of type :class:`lisa_models.LISAModel`.</span>
+<span class="sd">                It can also be a string corresponding to one of the stock models.</span>
+<span class="sd">                The model object must include attributes for ``Soms_d`` (shot noise)</span>
+<span class="sd">                and ``Sa_a`` (acceleration noise) or a spline as attribute ``Sn_spl``.</span>
+<span class="sd">                In the case of a spline, this must be a dictionary with</span>
+<span class="sd">                channel names as keys and callable PSD splines. For example,</span>
+<span class="sd">                if using ``scipy.interpolate.CubicSpline``, an input option</span>
+<span class="sd">                can be:</span>
+
+<span class="sd">                ```</span>
+<span class="sd">                noise_model.Sn_spl = {</span>
+<span class="sd">                    &quot;A&quot;: CubicSpline(f, Sn_A)),</span>
+<span class="sd">                    &quot;E&quot;: CubicSpline(f, Sn_E)),</span>
+<span class="sd">                    &quot;T&quot;: CubicSpline(f, Sn_T))</span>
+<span class="sd">                }</span>
+<span class="sd">                ```</span>
 <span class="sd">            **kwargs: For interoperability.</span>
 
 <span class="sd">        Returns:</span>
 <span class="sd">            PSD values.</span>
 
 <span class="sd">        &quot;&quot;&quot;</span>
+        <span class="c1"># spline or stock computation</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;Sn_spl&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="n">model</span><span class="o">.</span><span class="n">Sn_spl</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">spl</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">Sn_spl</span>
+            <span class="k">if</span> <span class="bp">cls</span><span class="o">.</span><span class="n">channel</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">spl</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;Calling a channel that is not available.&quot;</span><span class="p">)</span>
 
-        <span class="c1"># get noise values</span>
-        <span class="n">Spm</span><span class="p">,</span> <span class="n">Sop</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">lisanoises</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span>
+            <span class="n">Sout</span> <span class="o">=</span> <span class="n">spl</span><span class="p">[</span><span class="bp">cls</span><span class="o">.</span><span class="n">channel</span><span class="p">](</span><span class="n">f</span><span class="p">)</span>
 
-        <span class="c1"># transform as desired for TDI combination</span>
-        <span class="n">Sout</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">transform</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">Spm</span><span class="p">,</span> <span class="n">Sop</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">model</span> <span class="o">=</span> <span class="n">lisa_models</span><span class="o">.</span><span class="n">check_lisa_model</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+            <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;Soms_d&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;Sa_a&quot;</span><span class="p">)</span>
+
+            <span class="c1"># get noise values</span>
+            <span class="n">Spm</span><span class="p">,</span> <span class="n">Sop</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">lisanoises</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+            <span class="c1"># transform as desired for TDI combination</span>
+            <span class="n">Sout</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">transform</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">Spm</span><span class="p">,</span> <span class="n">Sop</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
 
         <span class="c1"># will add zero if ignored</span>
         <span class="n">stochastic_contribution</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">stochastic_transform</span><span class="p">(</span>
@@ -321,6 +304,8 @@
 <div class="viewcode-block" id="X1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.X1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">X1TDISens</span><span class="p">(</span><span class="n">Sensitivity</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;X&quot;</span>
+
 <div class="viewcode-block" id="X1TDISens.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.X1TDISens.transform">[docs]</a>
     <span class="nd">@staticmethod</span>
@@ -359,6 +344,7 @@
 <div class="viewcode-block" id="Y1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Y1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">Y1TDISens</span><span class="p">(</span><span class="n">X1TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;Y&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">X1TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -367,6 +353,7 @@
 <div class="viewcode-block" id="Z1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Z1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">Z1TDISens</span><span class="p">(</span><span class="n">X1TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;Z&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">X1TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -375,6 +362,8 @@
 <div class="viewcode-block" id="XY1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.XY1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">XY1TDISens</span><span class="p">(</span><span class="n">Sensitivity</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;XY&quot;</span>
+
 <div class="viewcode-block" id="XY1TDISens.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.XY1TDISens.transform">[docs]</a>
     <span class="nd">@staticmethod</span>
@@ -416,6 +405,7 @@
 <div class="viewcode-block" id="ZX1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.ZX1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">ZX1TDISens</span><span class="p">(</span><span class="n">XY1TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;ZX&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">XY1TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -424,6 +414,7 @@
 <div class="viewcode-block" id="YZ1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.YZ1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">YZ1TDISens</span><span class="p">(</span><span class="n">XY1TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;YZ&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">XY1TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -432,6 +423,8 @@
 <div class="viewcode-block" id="X2TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.X2TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">X2TDISens</span><span class="p">(</span><span class="n">Sensitivity</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;X&quot;</span>
+
 <div class="viewcode-block" id="X2TDISens.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.X2TDISens.transform">[docs]</a>
     <span class="nd">@staticmethod</span>
@@ -474,6 +467,7 @@
 <div class="viewcode-block" id="Y2TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Y2TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">Y2TDISens</span><span class="p">(</span><span class="n">X2TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;Y&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">X2TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -482,6 +476,7 @@
 <div class="viewcode-block" id="Z2TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Z2TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">Z2TDISens</span><span class="p">(</span><span class="n">X2TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;Z&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">X2TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -490,6 +485,8 @@
 <div class="viewcode-block" id="A1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.A1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">A1TDISens</span><span class="p">(</span><span class="n">Sensitivity</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;A&quot;</span>
+
 <div class="viewcode-block" id="A1TDISens.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.A1TDISens.transform">[docs]</a>
     <span class="nd">@staticmethod</span>
@@ -537,6 +534,7 @@
 <div class="viewcode-block" id="E1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.E1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">E1TDISens</span><span class="p">(</span><span class="n">A1TDISens</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;E&quot;</span>
     <span class="vm">__doc__</span> <span class="o">=</span> <span class="n">A1TDISens</span><span class="o">.</span><span class="vm">__doc__</span>
     <span class="k">pass</span></div>
 
@@ -545,6 +543,8 @@
 <div class="viewcode-block" id="T1TDISens">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.T1TDISens">[docs]</a>
 <span class="k">class</span> <span class="nc">T1TDISens</span><span class="p">(</span><span class="n">Sensitivity</span><span class="p">):</span>
+    <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;T&quot;</span>
+
 <div class="viewcode-block" id="T1TDISens.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.T1TDISens.transform">[docs]</a>
     <span class="nd">@staticmethod</span>
@@ -610,9 +610,11 @@
 <span class="sd">            Sensitivity array.</span>
 
 <span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">model</span> <span class="o">=</span> <span class="n">lisa_models</span><span class="o">.</span><span class="n">check_lisa_model</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;Soms_d&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">&quot;Sa_a&quot;</span><span class="p">)</span>
 
         <span class="c1"># get noise values</span>
-        <span class="n">Sa_d</span><span class="p">,</span> <span class="n">Sop</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">lisanoises</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">model</span><span class="p">,</span> <span class="n">unit</span><span class="o">=</span><span class="s2">&quot;displacement&quot;</span><span class="p">)</span>
+        <span class="n">Sa_d</span><span class="p">,</span> <span class="n">Sop</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">lisanoises</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">unit</span><span class="o">=</span><span class="s2">&quot;displacement&quot;</span><span class="p">)</span>
 
         <span class="n">all_m</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="mf">4.0</span> <span class="o">*</span> <span class="n">Sa_d</span> <span class="o">+</span> <span class="n">Sop</span><span class="p">)</span>
         <span class="c1">## Average the antenna response</span>
