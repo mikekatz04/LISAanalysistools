@@ -134,7 +134,6 @@ echo "python: $python_here"
 echo "pip: $pip_here"
 if [[ "$install_type" == "sampling" ]]; then
     "$pip_here" install corner eryn chainconsumer;
-    "$pip_here" install git+https://github.com/mikekatz04/LISAanalysistools.git@dev;
 elif [[ "$install_type" == "development" ]]; then
     conda install sphinx sphinx_rtd_theme pypandoc --yes;
     "$pip_here" install nbsphinx;
@@ -146,15 +145,8 @@ fi
 
 machine=$(uname -m)
 
-wget https://github.com/mikekatz04/lisa-on-gpu/raw/master/orbit_files/esa-trailing-orbits.h5
-wget https://github.com/mikekatz04/lisa-on-gpu/raw/master/orbit_files/equalarmlength-trailing-fit.h5
-mv esa-trailing-orbits.h5 equalarmlength-trailing-fit.h5 examples/
-
-"$python_here" -m pip install --index-url https://test.pypi.org/simple/ lisaanalysistools
-"$python_here" -m pip install --index-url https://test.pypi.org/simple/ fastlisaresponse
-"$python_here" -m pip install --index-url https://test.pypi.org/simple/ bbhx
-"$python_here" -m pip install --index-url https://test.pypi.org/simple/ fastemriwaveforms
-"$python_here" -m pip install --index-url https://test.pypi.org/simple/ gbgpu
+"$python_here" -m pip install lisaanalysistools
+"$python_here" -m pip install fastlisaresponse bbhx fastemriwaveforms gbgpu
 
 conda activate "$env_name"
 # if [[ "$run_tests" == "true" ]]; 

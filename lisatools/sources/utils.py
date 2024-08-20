@@ -90,6 +90,14 @@ class CalculationController:
         return opt_snr
 
 
+def dist_convert(x: float) -> float:
+    return x * 1e9 * PC_SI
+
+
+def time_convert(x: float) -> float:
+    return x * YRSID_SI
+
+
 class BBHCalculationController(CalculationController):
     """Calculation controller for BBHs.
 
@@ -104,10 +112,10 @@ class BBHCalculationController(CalculationController):
         # transforms from information matrix basis
         parameter_transforms = {
             0: np.exp,
-            4: lambda x: x * 1e9 * PC_SI,
+            4: dist_convert,
             7: np.arccos,
             9: np.arcsin,
-            11: lambda x: x * YRSID_SI,
+            11: time_convert,
         }
         self.transform_fn = TransformContainer(
             parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
