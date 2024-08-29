@@ -1,7 +1,7 @@
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
 from .state import State
-from .plot import RunResultsProduction
+# from .plot import RunResultsProduction
 import time
 import shutil
 
@@ -9,7 +9,7 @@ import shutil
 def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_rank, plot_iter, backup_iter):
 
     print("starting run SAVE")
-    run_results_production = RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
+    run_results_production = None ## RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
     run = True
     i = 0
     while run:
@@ -184,7 +184,6 @@ class HDFBackend(eryn_HDFBackend):
         )
 
     def grow(self, ngrow, *args):
-
         super().grow(ngrow, *args)
         
         # open the file in append mode
@@ -283,7 +282,9 @@ class HDFBackend(eryn_HDFBackend):
                 across the branches.
 
         """
-        return self.get_value("band_info", **kwargs)
+        tmp = self.get_value("band_info", **kwargs)
+        tmp["initialized"] = True
+        return tmp
 
     def save_step_main(
         self,

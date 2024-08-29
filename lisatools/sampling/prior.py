@@ -314,7 +314,13 @@ class AmplitudeFromSNR:
     def get_Sn_f(self, f0, psds=None, walker_inds=None, Sn_f=None, **noise_kwargs):
         if Sn_f is not None:
             assert len(f0) == len(Sn_f)
-            assert isinstance(f0, type(Sn_f))
+            if not isinstance(f0, type(Sn_f)):
+                if isinstance(f0, np.ndarray):
+                    assert isinstance(Sn_f, cp.ndarray)
+                    Sn_f = Sn_f.get()
+                else:
+                    assert isinstance(Sn_f, np.ndarray)
+                    f0 = cp.asarray(f0)
 
         elif psds is not None:
             Sn_f = self.interp_psd(f0, psds, walker_inds=walker_inds)

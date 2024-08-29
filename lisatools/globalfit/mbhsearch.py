@@ -5,7 +5,6 @@ from copy import deepcopy
 from eryn.state import State
 from eryn.ensemble import EnsembleSampler
 from eryn.prior import ProbDistContainer, uniform_dist
-from lisatools.glitch import tdi_glitch_XYZ1
 import corner
 from lisatools.utils.utility import AET
 from global_fit_input.global_fit_settings import get_global_fit_settings

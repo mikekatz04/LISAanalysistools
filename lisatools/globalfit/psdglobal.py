@@ -11,12 +11,10 @@ from copy import deepcopy
 mempool = xp.get_default_memory_pool()
 
 from eryn.ensemble import EnsembleSampler
-from single_mcmc_run import run_single_band_search
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from eryn.moves.tempering import make_ladder
 from eryn.state import State, BranchSupplimental
-from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
 from lisatools.sampling.prior import GBPriorWrap
 from eryn.prior import ProbDistContainer
 from gbgpu.gbgpu import GBGPU
@@ -56,9 +54,9 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     E_Soms_d_in_all = xp.asarray(psd_pars[:, 2])
     E_Sa_a_in_all = xp.asarray(psd_pars[:, 3])
     Amp_all = xp.asarray(galfor_pars[:, 0])
-    alpha_all = xp.asarray(galfor_pars[:, 1])
-    sl1_all = xp.asarray(galfor_pars[:, 2])
-    kn_all = xp.asarray(galfor_pars[:, 3])
+    kn_all = xp.asarray(galfor_pars[:, 1])
+    alpha_all = xp.asarray(galfor_pars[:, 2])
+    sl1_all = xp.asarray(galfor_pars[:, 3])
     sl2_all = xp.asarray(galfor_pars[:, 4])
     num_data = 1
     num_psds = psd_pars.shape[0]
@@ -84,43 +82,53 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
 
 
 class PSDwithGBPriorWrap:
-    def __init__(self, gb, psd_prior, gb_prior=None, gb_params=None, walker_inds=None, walker_inds_map=None, gb_inds=None):
+    def __init__(self, nwalkers, gb, priors):
         self.gb = gb
-        self.psd_prior = psd_prior
-        self.gb_prior = gb_prior
-        self.gb_params = gb_params
-        self.walker_inds = walker_inds
-        self.walker_inds_map = walker_inds_map
-        self.gb_inds = gb_inds
+        self.priors = priors 
+        self.nwalkers = nwalkers
+        
+    @property
+    def full_state(self):
+        if not hasattr(self, "_full_state") or self._full_state is None:
+            raise ValueError("Need to provide a full state when working with calculations of nwalkers < self.nwalkers.")
+        return self._full_state
 
-        if (
-            self.walker_inds is not None 
-            or self.walker_inds_map is not None
-            or self.gb_prior is not None
-            or self.gb_params is not None
-            or self.gb_inds is not None
-        ):
-            if (
-                self.walker_inds is None 
-                or self.walker_inds_map is None
-                or self.gb_prior is None
-                or self.gb_params is None
-                or self.gb_inds is None
-            ):
-                raise ValueError("If providing walker inds, map, gb_params, or priors, must provide all.")
+    @full_state.setter
+    def full_state(self, full_state):
+        assert full_state.log_like.shape[-1] == self.nwalkers
+        self._full_state = full_state
 
     def logpdf(self, coords, inds, supps=None, branch_supps=None):
 
         psd_pars = coords["psd"].reshape(-1, coords["psd"].shape[-1])
         galfor_pars = coords["galfor"].reshape(-1, coords["galfor"].shape[-1])
 
-        if self.walker_inds is not None:
+        ntemps, nwalkers = coords["psd"].shape[:2]
+        # qwalker_inds = np.arange(nwalkers)
+
+        psd_logpdf = self.priors["psd"].logpdf(psd_pars)
+        galfor_logpdf = self.priors["galfor"].logpdf(galfor_pars)
+
+        if nwalkers == self.nwalkers:
+            mbh_params = coords["mbh"][0].copy()
+            gb_params = coords["gb"][0]
+            gb_inds = inds["gb"][0]
+        else:
+            mbh_params = self.full_state.branches["mbh"].coords[0].copy()
+            gb_params = self.full_state.branches["gb"].coords[0].copy()
+            gb_inds = self.full_state.branches["gb"].inds[0].copy()
+
+        mbh_logpdf_tmp = self.priors["mbh"].logpdf(mbh_params.reshape(-1, mbh_params.shape[-1])).reshape(mbh_params.shape[:-1]).sum(axis=-1)
+        mbh_logpdf = mbh_logpdf_tmp[supps[:]["walker_inds"].flatten()]
+        
+        if gb_inds.sum() > 0:  # more than zero binaries
             assert supps is not None
-            walker_inds_in = self.walker_inds[supps[:]["walker_inds"].flatten()]
-            gb_inds_in = self.gb_inds[supps[:]["walker_inds"].flatten()]
-            gb_params_in = self.gb_params[supps[:]["walker_inds"].flatten()][gb_inds_in]
-            current_group_inds = np.repeat(np.arange(psd_pars.shape[0])[:, None], walker_inds_in.shape[1], axis=-1)
-            noise_index_all = xp.asarray(current_group_inds[gb_inds_in]).astype(np.int32)
+            # walker_inds_in = walker_inds[supps[:]["walker_inds"].flatten()]
+            gb_inds_in = gb_inds[supps[:]["walker_inds"].flatten()]
+            gb_params_in = gb_params[supps[:]["walker_inds"].flatten()][gb_inds_in]
+            # current_group_inds = np.repeat(np.arange(psd_pars.shape[0])[:, None], walker_inds_in.shape[1], axis=-1)
+            # noise_index_all = xp.asarray(current_group_inds[gb_inds_in]).astype(np.int32)
+            noise_index_all = xp.repeat(xp.arange(ntemps * nwalkers)[:, None], gb_inds.shape[-1], axis=-1)[gb_inds_in].astype(np.int32)
 
             A_Soms_d_in_all = xp.asarray(psd_pars[:, 0])
             A_Sa_a_in_all = xp.asarray(psd_pars[:, 1])
@@ -140,19 +148,20 @@ class PSDwithGBPriorWrap:
             if len(f0) > 0:
                 self.gb.get_lisasens_val(Sn_A, Sn_E, f0, noise_index_all, A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, num_f)
             
-            gb_logpdf_contrib = self.gb_prior["gb"].logpdf(gb_params_in, Sn_f=Sn_A)
+            gb_logpdf_contrib = self.priors["gb"].logpdf(gb_params_in, Sn_f=Sn_A)
             logpdf_contribution = np.zeros_like(gb_inds_in, dtype=np.float64)
 
-            logpdf_contribution[gb_inds_in] = gb_logpdf_contrib.get()
+            try:
+                tmp = gb_logpdf_contrib.get()
+            except AttributeError:
+                tmp = gb_logpdf_contrib
+            logpdf_contribution[gb_inds_in] = tmp
             gb_logpdf = logpdf_contribution.sum(axis=-1)
             
         else:
             gb_logpdf = 0.0
 
-        psd_logpdf = self.psd_prior["psd"].logpdf(psd_pars)
-        galfor_logpdf = self.psd_prior["galfor"].logpdf(galfor_pars)
-
-        all_logpdf = (gb_logpdf + psd_logpdf + galfor_logpdf).reshape(coords["psd"].shape[:2])
+        all_logpdf = (gb_logpdf + psd_logpdf + galfor_logpdf + mbh_logpdf).reshape(coords["psd"].shape[:2])
         if np.all(np.isnan(all_logpdf)):
             raise ValueError("All log prior are inf")
         elif np.any(np.isnan(all_logpdf)):

@@ -7,7 +7,8 @@ from scipy import stats
 import warnings
 import time
 from gbgpu.utils.utility import get_N
-from lisatools.sensitivity import Soms_d_all, Sa_a_all
+from lisatools.detector import sangria
+
 
 try:
     import cupy as xp
@@ -76,11 +77,11 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         self.num_repeat_proposals = num_repeat_proposals
         self.use_prior_removal = use_prior_removal
 
-        for key in priors:
-            if not isinstance(priors[key], ProbDistContainer) and not isinstance(priors[key], GBPriorWrap):
-                raise ValueError(
-                    "Priors need to be eryn.priors.ProbDistContainer object."
-                )
+        # for key in priors:
+        #     if not isinstance(priors[key], ProbDistContainer) and not isinstance(priors[key], GBPriorWrap):
+        #         raise ValueError(
+        #             "Priors need to be eryn.priors.ProbDistContainer object."
+        #         )
         
         self.priors = priors
         self.gb = gb
@@ -334,7 +335,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
             if name != "gb":
                 continue
 
-            if not self.is_rj_prop and self.time % self.n_iter_update == 0:
+            if self.time % self.n_iter_update == 0:  # not self.is_rj_prop and 
                 self.setup_gbs(branch)
 
             elif self.is_rj_prop and self.time == 0:
@@ -591,7 +592,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
             bands_list = []
             for N_now in unique_N:
                 N_now = N_now.item()
-                if N_now == 0:  #  or N_now != 1024:
+                if N_now == 0:  #  or N_now != 128:
                     continue
 
                 # old_data_1 = self.mgh.data_shaped[0][0][11].copy()
@@ -600,7 +601,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 # TODO; check the maximum allowable band
                 keep = (
                     (band_indices % units == remainder)
-                    # & (temp_indices == 0)  #  & (walker_indices == 2)  #  & (band_indices < 50)
+                    # & (temp_indices == 0)  & (walker_indices == 0)  #  & (band_indices < 50)
                     & (self.band_N_vals[band_indices] == N_now)
                     & (band_indices < len(self.band_edges) - 2)
                     # & (band_indices == 1)
@@ -677,7 +678,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 band_inds = band_inds_here[uni_index_special_band_inds_here]
                 band_temps_inds = temp_inds_here[uni_index_special_band_inds_here]
                 band_walkers_inds = walker_inds_here[uni_index_special_band_inds_here]
-                
+                    
                 band_inv_temp_vals_here = band_temps[band_inds, band_temps_inds]
 
                 indiv_info.append((temp_inds_here, walker_inds_here, leaf_inds_here))
@@ -743,8 +744,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                     N_now,
                     params_curr.shape[0],
                     self.start_freq_ind, 
-                    Soms_d_all["sangria"] ** (1/2),
-                    Sa_a_all["sangria"] ** (1/2),
+                    sangria.Soms_d ** (1/2), # TODO: not sure if this is right or even needed
+                    sangria.Sa_a ** (1/2),
                     1e-100, 0.0, 0.0, 0.0, 0.0,  # foreground params for snr -> amp transform
                 )
 
@@ -855,8 +856,12 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 # tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
                 # print(f"BEFORE {tmp_check}, {self.mgh.channel1_data[0][11 * self.data_length + 3911].real} , {self.mgh.channel1_data[0][29 * self.data_length + 3911].real} , {self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real} ")
                 # print(f"BEFORE2 {params_curr_separated[1].min().item()} ")
+                # before1 = self.mgh.get_ll()
+                # before2 = self.mgh.get_psd_term()
                 self.gb.SharedMemoryMakeNewMove_wrap(*inputs_now)
                 self.xp.cuda.runtime.deviceSynchronize()
+                # after1 = self.mgh.get_ll()
+                # after2 = self.mgh.get_psd_term()
                 # tmp_check = self.mgh.channel1_data[0][11 * self.data_length + 3911].real + self.mgh.channel1_data[0][29 * self.data_length + 3911].real - self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real
                 # print(f"After {tmp_check}, {self.mgh.channel1_data[0][11 * self.data_length + 3911].real} , {self.mgh.channel1_data[0][29 * self.data_length + 3911].real} , {self.mgh.channel1_base_data[0][11 * self.data_length + 3911].real} ")
                 # print(f"After2 {params_curr_separated[1].min().item()} ")
@@ -1256,8 +1261,8 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                         N_now,
                         coords_in.shape[0],
                         self.start_freq_ind, 
-                        Soms_d_all["sangria"] ** (1/2),
-                        Sa_a_all["sangria"] ** (1/2),
+                        sangria.Soms_d ** (1/2),
+                        sangria.Sa_a ** (1/2),
                         1e-100, 0.0, 0.0, 0.0, 0.0,  # foreground params for snr -> amp transform
                     )
 
@@ -1477,7 +1482,7 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
                 walker_inds=group_temp_finder[1].get()[new_state.branches_inds["gb"]]
             )
 
-            new_state.log_prior[:] = log_prior_new_per_bin.sum(axis=-1).get()
+            # new_state.log_prior[:] = log_prior_new_per_bin.sum(axis=-1).get()
             
             ratios = (band_swaps_accepted / band_swaps_proposed).T #  self.swaps_accepted / self.swaps_proposed
             ratios[np.isnan(ratios)] = 0.0
@@ -1553,8 +1558,10 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
 
         self.mempool.free_all_blocks()
 
+        new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
         if self.is_rj_prop:
             pass  # print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
+
         return new_state, accepted
 
     def check_ll_inject(self, new_state, verbose=False):

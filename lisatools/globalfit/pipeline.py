@@ -146,17 +146,13 @@ class FullPESegment(GlobalFitSegment):
 
     def run(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
         
-        stopper_rank = self.mpi_controller.gb_pe_rank
-        other_ranks = [
-            self.mpi_controller.psd_rank,
-            self.mpi_controller.mbh_rank,
-        ] + self.mpi_controller.gb_search_rank
+        stopper_rank = self.mpi_controller.main_rank
 
         # had to go after initialization of mpi because it needs the ranks
-        stop_fn = GBBandLogLConvergeStopping(self.current_info.general_info["fd"], self.current_info.gb_info["band_edges"], **self.current_info.gb_info["pe_info"]["stop_kwargs"])
-        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
-        self.current_info.psd_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
-        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
-        self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        # stop_fn = GBBandLogLConvergeStopping(self.current_info.general_info["fd"], self.current_info.gb_info["band_edges"], **self.current_info.gb_info["pe_info"]["stop_kwargs"])
+        # self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        # self.current_info.psd_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        # self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        # self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
 
         self.mpi_controller.run_global_fit(run_psd=run_psd, run_mbhs=run_mbhs, run_gbs_pe=run_gbs_pe, run_gbs_search=run_gbs_search)

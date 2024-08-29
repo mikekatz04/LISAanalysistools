@@ -10,12 +10,10 @@ import numpy as np
 mempool = xp.get_default_memory_pool()
 
 from eryn.ensemble import EnsembleSampler
-from single_mcmc_run import run_single_band_search
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from eryn.moves.tempering import make_ladder, TemperatureControl
 from eryn.state import BranchSupplimental
-from lisatools.sampling.moves.specialforegroundmove import GBForegroundSpecialMove
 from lisatools.sampling.moves.mbhspecialmove import MBHSpecialMove
 from .state import MBHState
 from .hdfbackend import MBHHDFBackend

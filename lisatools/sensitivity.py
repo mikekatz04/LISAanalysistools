@@ -14,7 +14,7 @@ try:
     import cupy as cp
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as cp
+    pass
 
 from . import detector as lisa_models
 from .utils.utility import AET, get_array_module
@@ -22,6 +22,7 @@ from .utils.constants import *
 from .stochastic import (
     StochasticContribution,
     FittedHyperbolicTangentGalacticForeground,
+    check_stochastic
 )
 
 """
@@ -38,6 +39,18 @@ class Sensitivity(ABC):
     """
 
     channel: str = None
+
+    @staticmethod
+    def get_xp(array: np.nddary) -> object:
+        """Numpy or Cupy"""
+        if isinstance(array, np.ndarray):
+            return np
+        elif isinstance(array, cp.ndarray):
+            return cp
+        else:
+            if isinstance(array, float):
+                return np
+            raise ValueError("array must be a numpy or cupy array.")
 
     @staticmethod
     def transform(
@@ -134,8 +147,10 @@ class Sensitivity(ABC):
         sensitivity contribution. The ``transform_factor`` can transform that
         output to the correct TDI contribution.
 
+        This function has GPU capabilities if a Cupy frequency array is entered.
+
         Args:
-            f: Frequency array.
+            f: Frequency array. If a Cupy array is provided, the GPU is used. 
             stochastic_params: Parameters (arguments) to feed to ``stochastic_function``.
             stochastic_kwargs: Keyword arguments to feeed to ``stochastic_function``.
             stochastic_function: Stochastic class or string name of stochastic class. Takes ``stochastic_args`` and ``stochastic_kwargs``.
@@ -146,14 +161,14 @@ class Sensitivity(ABC):
 
 
         """
-
+        xp = cls.get_xp(f)
         if isinstance(f, float):
-            f = np.ndarray([f])
+            f = xp.ndarray([f])
             squeeze = True
         else:
             squeeze = False
 
-        sgal = np.zeros_like(f)
+        sgal = xp.zeros_like(f)
 
         if (
             (stochastic_params != () and stochastic_params is not None)
@@ -163,6 +178,8 @@ class Sensitivity(ABC):
             if stochastic_function is None:
                 stochastic_function = FittedHyperbolicTangentGalacticForeground
                 assert len(stochastic_params) == 1
+            
+            stochastic_function = check_stochastic(stochastic_function)
 
             sgal[:] = stochastic_function.get_Sh(
                 f, *stochastic_params, **stochastic_kwargs
@@ -520,7 +537,8 @@ class FlatPSDFunction(LISASens):
     @staticmethod
     def get_Sn(f: float | np.ndarray, val: float, **kwargs: dict) -> float | np.ndarray:
         # TODO: documentation here
-        out = np.full_like(f, val)
+        xp = cls.get_xp(f)
+        out = xp.full_like(f, val)
         if isinstance(f, float):
             out = out.item()
         return out
@@ -824,12 +842,7 @@ def get_sensitivity(
     """
 
     if isinstance(sens_fn, str):
-        try:
-            sensitivity = globals()[sens_fn]
-        except KeyError:
-            raise ValueError(
-                f"{sens_fn} sensitivity is not available. Available stock sensitivities are"
-            )
+        sensitivity = check_sensitivity(sens_fn)
 
     elif hasattr(sens_fn, "get_Sn"):
         sensitivity = sens_fn
@@ -898,3 +911,39 @@ def get_stock_sensitivity_matrix_options() -> List[SensitivityMatrix]:
 
     """
     return __stock_sensitivity_mat_options__
+
+
+def get_default_sensitivity_from_str(sensitivity: str) -> Sensitivity:
+    """Return a LISA sensitivity from a ``str`` input.
+
+    Args:
+        sensitivity: Sensitivity indicated with a ``str``.
+
+    Returns:
+        Sensitivity associated to that ``str``.
+
+    """
+    if sensitivity not in __stock_sens_options__:
+        raise ValueError(
+            "Requested string sensitivity is not available. See lisatools.sensitivity documentation."
+        )
+    return globals()[sensitivity]
+
+
+def check_sensitivity(sensitivity: Any) -> Sensitivity:
+    """Check input sensitivity.
+
+    Args:
+        sensitivity: Sensitivity to check.
+
+    Returns:
+        Sensitivity checked. Adjusted from ``str`` if ``str`` input.
+
+    """
+    if isinstance(sensitivity, str):
+        sensitivity = get_default_sensitivity_from_str(sensitivity)
+
+    if not issubclass(sensitivity, Sensitivity):
+        raise ValueError("sensitivity argument not given correctly.")
+
+    return sensitivity

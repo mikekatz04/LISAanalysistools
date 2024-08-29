@@ -2,11 +2,11 @@ import cupy as xp
 import numpy as np
 from lisatools.sensitivity import get_sensitivity
 import time
-
+from copy import deepcopy
+from lisatools.detector import sangria
 
 class MultiGPUDataHolder:
     def __init__(self, gpus, channel1_data, channel2_data, channel1_base_data, channel2_base_data, channel1_psd, channel2_psd, channel1_lisasens, channel2_lisasens, df, base_injections=None, base_psd=None):
-
         if isinstance(gpus, int):
             gpus = [gpus]
 
@@ -133,6 +133,9 @@ class MultiGPUDataHolder:
 
     def reshape(self, input_value):
         return input_value.reshape(-1, self.data_length)
+
+    def __deepcopy__(self, *args, **kwargs):
+        return self
 
     @property
     def data_list(self):
@@ -359,12 +362,15 @@ class MultiGPUDataHolder:
     def set_psd_vals(self, psd_params, overall_inds=None, foreground_params=None):
 
         if overall_inds is None:
+            raise NotImplementedError
             overall_inds = np.arange(self.ntemps * self.nwalkers)
         return_to_main = xp.cuda.runtime.getDevice()
 
         fd_gpu = [None for _ in self.gpus]
         A_tmp = [None for _ in self.gpus]
         E_tmp = [None for _ in self.gpus]
+        A_lisasens_tmp = [None for _ in self.gpus]
+        E_lisasens_tmp = [None for _ in self.gpus]
         # st = time.perf_counter()
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):
@@ -384,20 +390,35 @@ class MultiGPUDataHolder:
                         foreground_pars_in = None
 
                     psd_params_A_in = psd_params[i][:2]
-                    
-                    A_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="noisepsd_AE", model=psd_params_A_in, foreground_params=foreground_pars_in, xp=xp)
+                    tmp_lisa_model_A = deepcopy(sangria)
+                    tmp_lisa_model_A.Soms_d = psd_params_A_in[0] ** 2
+                    tmp_lisa_model_A.Sa_a = psd_params_A_in[1] ** 2
+            
+                    A_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="A1TDISens", model=tmp_lisa_model_A, stochastic_params=foreground_pars_in, stochastic_function="HyperbolicTangentGalacticForeground")
                     A_tmp[gpu_i][0] = A_tmp[gpu_i][1]
+                    A_lisasens_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="LISASens", model=tmp_lisa_model_A, stochastic_params=foreground_pars_in, stochastic_function="HyperbolicTangentGalacticForeground")
+                    A_lisasens_tmp[gpu_i][0] = A_lisasens_tmp[gpu_i][1]
+                    
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
+
                     self.channel1_psd[gpu_i][inds_slice] = A_tmp[gpu_i]
+                    self.channel1_lisasens[gpu_i][inds_slice] = A_lisasens_tmp[gpu_i]
                     if xp.any(A_tmp[gpu_i] < 0.0):
                         breakpoint()
 
                     psd_params_E_in = psd_params[i][2:]
-
-                    E_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="noisepsd_AE", model=psd_params_E_in, foreground_params=foreground_pars_in, xp=xp)
+                    tmp_lisa_model_E = deepcopy(sangria)
+                    tmp_lisa_model_E.Soms_d = psd_params_E_in[0] ** 2
+                    tmp_lisa_model_E.Sa_a = psd_params_E_in[1] ** 2
+            
+                    E_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="E1TDISens", model=tmp_lisa_model_E, stochastic_params=foreground_pars_in, stochastic_function="HyperbolicTangentGalacticForeground")
                     E_tmp[gpu_i][0] = E_tmp[gpu_i][1]
+                    E_lisasens_tmp[gpu_i] = get_sensitivity(fd_gpu[gpu_i], sens_fn="LISASens", model=tmp_lisa_model_E, stochastic_params=foreground_pars_in, stochastic_function="HyperbolicTangentGalacticForeground")
+                    E_lisasens_tmp[gpu_i][0] = E_lisasens_tmp[gpu_i][1]
+                    
                     inds_slice = slice(overall_index_here * self.data_length, (overall_index_here + 1) * self.data_length)
                     self.channel2_psd[gpu_i][inds_slice] = E_tmp[gpu_i]
+                    self.channel2_lisasens[gpu_i][inds_slice] = E_lisasens_tmp[gpu_i]
                     if xp.any(E_tmp[gpu_i] < 0.0):
                         breakpoint()
 
@@ -405,7 +426,7 @@ class MultiGPUDataHolder:
             with xp.cuda.device.Device(gpu):
                 xp.cuda.runtime.deviceSynchronize()
 
-                del fd_gpu[gpu_i], A_tmp[gpu_i], E_tmp[gpu_i]
+                del fd_gpu[gpu_i], A_tmp[gpu_i], E_tmp[gpu_i], A_lisasens_tmp[gpu_i], E_lisasens_tmp[gpu_i]
                 xp.get_default_memory_pool().free_all_blocks()
 
         xp.cuda.runtime.setDevice(return_to_main)
@@ -517,7 +538,7 @@ class MultiGPUDataHolder:
         # print("get psd term", et - st)
         return psd_term
 
-    def sub_in_data_and_psd(self, data, psd, lisasens):
+    def sub_in_psd(self, psd, lisasens):
         """Must be the same size at current data
         
         
@@ -532,6 +553,17 @@ class MultiGPUDataHolder:
         # adjust lisasens
         self.channel1_lisasens[gpu_i][:] = xp.asarray(lisasens[0].flatten())
         self.channel2_lisasens[gpu_i][:] = xp.asarray(lisasens[1].flatten())
+
+        return        
+
+    def sub_in_data(self, data):
+        """Must be the same size at current data
+        
+        Need to be more particular that this cannot have GBs in it. 
+
+        """
+        assert len(self.gpus) == 1
+        gpu_i = 0
 
         # remove injected data + previous templates
         self.channel1_data[gpu_i][:self.nwalkers * self.data_length] -= self.channel1_base_data[gpu_i][:]
@@ -552,7 +584,6 @@ class MultiGPUDataHolder:
         self.channel2_data[gpu_i][self.nwalkers * self.data_length:] += self.channel2_base_data[gpu_i][:]
 
         return        
-
 
     def get_inner_product(self, *args, overall_inds=None, band_edge_inds=None, **kwargs):
         reshape = False
@@ -717,6 +748,26 @@ class MultiGPUDataHolder:
                     out[key_2].append(getattr(self, key_2)[gpu_i].get().copy().reshape(-1, self.data_length))
 
         return out
+
+    def swap_out_in_base_data(self, old_contrib, new_contrib):
+        """
+        Need to wrap to properly handle special GB data setup
+        """
+        if len(self.gpus) > 1:
+            raise NotImplementedError
+
+        base_data_channel1 = self.channel1_base_data[0].reshape(self.nwalkers, self.data_length).copy()
+        base_data_channel2 = self.channel2_base_data[0].reshape(self.nwalkers, self.data_length).copy()
+        
+        base_data_channel1 += old_contrib[0]
+        base_data_channel2 += old_contrib[1]
+
+        base_data_channel1 -= new_contrib[0]
+        base_data_channel2 -= new_contrib[1]
+
+        base_data = [base_data_channel1, base_data_channel2]
+
+        self.sub_in_data(base_data)
 
 
 

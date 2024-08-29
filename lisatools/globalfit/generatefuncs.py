@@ -4,7 +4,7 @@ import warnings
 
 from lisatools.sensitivity import get_sensitivity
 from lisatools.globalfit.hdfbackend import HDFBackend as GBHDFBackend
-
+from lisatools.detector import sangria
 from bbhx.waveformbuild import BBHWaveformFD
 
 from gbgpu.gbgpu import GBGPU
@@ -25,7 +25,7 @@ class GetPSDModel:
     def __init__(self, psd_kwargs):
         self.psd_kwargs = psd_kwargs
 
-    def __call__(self, psd_info, general_info, only_max_ll=False, n_gen_in=None, return_lisasens=False, return_prior_val=False):
+    def __call__(self, current_state, psd_info, general_info, only_max_ll=False, n_gen_in=None, return_lisasens=False, return_prior_val=False):
 
         if "use_gpu" in self.psd_kwargs and self.psd_kwargs["use_gpu"]:
             xp = cp
@@ -35,13 +35,13 @@ class GetPSDModel:
             use_gpu = False
 
         if only_max_ll:
-            best = psd_info["cc_ll"].argmax()
-            psd_params_A = psd_info["cc_A"][best:best + 1]
-            psd_params_E = psd_info["cc_E"][best:best + 1]
-            psd_foreground_params = psd_info["cc_foreground_params"][best:best + 1]
+            best = current_state.log_like[0].argmax()
+            psd_params_A = current_state.branches["psd"].coords[0, best:best + 1, 0, :2]
+            psd_params_E = current_state.branches["psd"].coords[0, best:best + 1, 0, 2:]
+            psd_foreground_params = current_state.branches["galfor"].coords[0, best:best + 1, 0, :]
 
         else:
-            num_psd_walkers = psd_info["cc_A"].shape[0]
+            num_psd_walkers = current_state.log_like.shape[-1]
 
             inds = np.arange(num_psd_walkers)
 
@@ -50,9 +50,9 @@ class GetPSDModel:
                 if num_psd_walkers > n_gen_in:
                     inds = np.random.choice(np.arange(num_psd_walkers), n_gen_in, replace=False)
                 
-            psd_params_A = psd_info["cc_A"][inds].copy()
-            psd_params_E = psd_info["cc_E"][inds].copy()
-            psd_foreground_params = psd_info["cc_foreground_params"][inds].copy()
+            psd_params_A = current_state.branches["psd"].coords[0, inds, 0, :2].copy()
+            psd_params_E = current_state.branches["psd"].coords[0, inds, 0, 2:].copy()
+            psd_foreground_params = current_state.branches["galfor"].coords[0, inds, 0, :].copy()
 
         num_psds = len(psd_params_A)
         num_freqs = len(general_info["fd"])
@@ -60,13 +60,20 @@ class GetPSDModel:
         E_psd = np.zeros((num_psds, num_freqs))
         freqs = xp.asarray(general_info["fd"])
         psd_kwargs_in = self.psd_kwargs.copy()
+    
         if return_lisasens:
-            psd_kwargs_in["sens_fn"] = "lisasens"
+            psd_kwargs_in["sens_fn"] = "LISASens"
 
+        tmp_lisa_model_A = deepcopy(sangria)
+        tmp_lisa_model_E = deepcopy(sangria)
         for i, (A_params, E_params, foreground_params) in enumerate(zip(psd_params_A, psd_params_E, psd_foreground_params)):
-            A_tmp1 = get_sensitivity(freqs, model=A_params, foreground_params=foreground_params, **psd_kwargs_in)
-            E_tmp1 = get_sensitivity(freqs, model=E_params, foreground_params=foreground_params, **psd_kwargs_in)
-
+            tmp_lisa_model_A.Soms_d = A_params[0] ** 2
+            tmp_lisa_model_A.Sa_a = A_params[1] ** 2
+            A_tmp1 = get_sensitivity(freqs, model=tmp_lisa_model_A, stochastic_params=foreground_params, stochastic_function="HyperbolicTangentGalacticForeground",  **psd_kwargs_in)
+            
+            tmp_lisa_model_E.Soms_d = E_params[0] ** 2
+            tmp_lisa_model_E.Sa_a = E_params[1] ** 2
+            E_tmp1 = get_sensitivity(freqs, model=tmp_lisa_model_E, stochastic_params=foreground_params, stochastic_function="HyperbolicTangentGalacticForeground", **psd_kwargs_in)
             if use_gpu:
                 A_tmp2 = A_tmp1.get()
                 E_tmp2 = E_tmp1.get()
@@ -101,7 +108,7 @@ class GetMBHTemplates:
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
 
-    def __call__(self, mbh_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False):
+    def __call__(self, current_state, mbh_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False):
 
         if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
@@ -112,15 +119,15 @@ class GetMBHTemplates:
 
         mbh_gen = BBHWaveformFD(**self.initialization_kwargs)
 
-        num_mbh = len(mbh_info["cc_params"])
+        num_mbh = current_state.branches["mbh"].shape[2]  # index 2 is leaf count
         num_freqs = len(general_info["fd"])
     
         if only_max_ll:
-            best = mbh_info["cc_ll"].argmax()
-            mbh_params = mbh_info["cc_params"][best:best + 1]
+            best = current_state.log_like[0].argmax()
+            mbh_params = current_state.branches["mbh"].coords[0, best:best + 1].copy()
 
         else:
-            num_mbh_walkers = mbh_info["cc_params"].shape[0]
+            num_mbh_walkers = current_state.log_like.shape[-1]
             
             inds = np.arange(num_mbh_walkers)
 
@@ -129,7 +136,7 @@ class GetMBHTemplates:
                 if num_mbh_walkers > n_gen_in:
                     inds = np.random.choice(np.arange(num_mbh_walkers), n_gen_in, replace=False)
                 
-            mbh_params = mbh_info["cc_params"][inds].copy()
+            mbh_params = current_state.branches["mbh"].coords[0, inds].copy()
 
         freqs = xp.asarray(general_info["fd"])
 
@@ -171,7 +178,7 @@ class GetGBTemplates:
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
 
-    def __call__(self, gb_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False, lisasens=None):
+    def __call__(self, current_state, gb_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False, lisasens=None):
 
         gb_gen = GBGPU(**self.initialization_kwargs)
 
@@ -183,13 +190,14 @@ class GetGBTemplates:
             xp = np
 
         if only_max_ll:
-            best = gb_info["cc_ll"].argmax()
-            gb_params = gb_info["cc_params"][best:best + 1]
-            gb_inds = gb_info["cc_inds"][best:best + 1]
+            best = current_state.log_like[0].argmax()
+            gb_params = current_state.branches["gb"].coords[0, best:best + 1]
+            gb_inds = current_state.branches["gb"].inds[0, best:best + 1]
 
         else:
-            gb_params = gb_info["cc_params"].copy()
-            gb_inds = gb_info["cc_inds"].copy()
+            # TODO: check this
+            gb_params = current_state.branches["gb"].coords[0].copy()
+            gb_inds = current_state.branches["gb"].inds[0].copy()
 
         num_gb = len(gb_params)
         num_freqs = len(general_info["fd"])
@@ -255,43 +263,34 @@ class GenerateCurrentState:
     def __init__(self, A_inj, E_inj):
         self.A_inj, self.E_inj = A_inj, E_inj
 
-    def __call__(self, general_info, include_mbhs=True, include_gbs=True, include_psd=True, include_lisasens=True, only_max_ll=False, n_gen_in=None, include_ll=False, include_source_only_ll=False, return_prior_val=False, fix_val_in_gen=None):
+    def __call__(self, current_state, general_info, include_mbhs=True, include_gbs=True, include_psd=True, include_lisasens=True, only_max_ll=False, n_gen_in=None, include_ll=False, include_source_only_ll=False, return_prior_val=False, fix_val_in_gen=None):
         
         info_dict = {}
         n_gen_check_it = []
-        if include_mbhs and "cc_params" in general_info.mbh_info:
-            A_mbh, E_mbh, prior_vals = general_info.mbh_info["get_templates"](general_info.mbh_info, general_info.general_info, only_max_ll=only_max_ll, n_gen_in=n_gen_in, return_prior_val=return_prior_val)
+        if include_mbhs:
+            A_mbh, E_mbh, prior_vals = general_info["mbh"]["get_templates"](current_state, general_info["mbh"], general_info["general"], only_max_ll=only_max_ll, n_gen_in=n_gen_in, return_prior_val=return_prior_val)
             n_mbh = A_mbh.shape[0]
             info_dict["mbh"] = {"n": n_mbh, "A": A_mbh, "E": E_mbh, "prior": prior_vals}
             n_gen_check_it.append(n_mbh)
-        elif include_mbhs and "cc_params" not in general_info.mbh_info:
-            include_mbhs = False
-            
-        if include_gbs and "cc_params" in general_info.gb_info:
-            A_gb, E_gb = general_info.gb_info["get_templates"](general_info.gb_info, general_info.general_info, only_max_ll=only_max_ll, return_prior_val=True)
+
+        if include_gbs:
+            A_gb, E_gb = general_info["gb"]["get_templates"](current_state, general_info["gb"], general_info["general"], only_max_ll=only_max_ll, return_prior_val=True)
             n_gb = A_gb.shape[0]
             info_dict["gb"] = {"n": n_gb, "A": A_gb, "E": E_gb, "prior": None}
             n_gen_check_it.append(n_gb)
 
-        elif include_gbs and "cc_params" not in general_info.gb_info:
-            include_gbs = False
-
-        if include_psd and "cc_A" in general_info.psd_info:
-            A_psd, E_psd, psd_prior_val = general_info.psd_info["get_psd"](general_info.psd_info, general_info.general_info, only_max_ll=only_max_ll, return_lisasens=False, return_prior_val=return_prior_val)
+        if include_psd:
+            A_psd, E_psd, psd_prior_val = general_info["psd"]["get_psd"](current_state, general_info["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=False, return_prior_val=return_prior_val)
             n_psd = A_psd.shape[0]
             info_dict["psd"] = {"n": n_psd, "A": A_psd, "E": E_psd, "prior": psd_prior_val}
             n_gen_check_it.append(n_psd)
-        elif include_psd and "cc_A" not in general_info.psd_info:
-            include_psd = False
 
-        if include_lisasens and "cc_A" in general_info.psd_info:
-            A_lisasens, E_lisasens, _ = general_info.psd_info["get_psd"](general_info.psd_info, general_info.general_info, only_max_ll=only_max_ll, return_lisasens=True, return_prior_val=False)
+        if include_lisasens:
+            A_lisasens, E_lisasens, _ = general_info["psd"]["get_psd"](current_state, general_info["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=True, return_prior_val=False)
             n_lisasens = A_lisasens.shape[0]
             info_dict["lisasens"] = {"n": n_lisasens, "A": A_lisasens, "E": E_lisasens, "prior": None}
             n_gen_check_it.append(n_lisasens)
-        elif include_lisasens and "cc_A" not in general_info.psd_info:
-            include_lisasens = False
-
+       
         if n_gen_in is None and len(n_gen_check_it) > 0:
             n_gen = np.max(n_gen_check_it)
 
@@ -394,7 +393,7 @@ class GenerateCurrentState:
             # calculate prior
             if return_prior_val:
                 if "lisasens" in info_dict and "A" in info_dict["lisasens"] and info_dict["lisasens"]["A"] is not None and "walker_inds" in info_dict["gb"]:
-                    info_dict["gb"]["prior"] = general_info.gb_info["get_templates"].get_gb_prior(general_info.gb_info, info_dict["lisasens"]["A"], info_dict["gb"]["walker_inds"])
+                    info_dict["gb"]["prior"] = general_info["gb"]["get_templates"].get_gb_prior(general_info["gb"], info_dict["lisasens"]["A"], info_dict["gb"]["walker_inds"])
 
         if only_max_ll:
             data_A = data_A.squeeze()
@@ -428,15 +427,16 @@ class GenerateCurrentState:
             output["total_prior_val"] = total_prior_val
         if include_ll or include_source_only_ll:
             if not include_psd:
-                warnings.UserWarning("If requesting ll and/or inner product, include_psd must be True.")
+                warnings.warn("If requesting ll and/or inner product, include_psd must be True.")
+                include_psd = True
             else:
                 if include_source_only_ll and not include_ll:
-                    output["ll"] = get_ll_source(output["data"], output["psd"], general_info.general_info["df"])
+                    output["ll"] = get_ll_source(output["data"], output["psd"], general_info["general"]["df"])
                 elif not include_source_only_ll and include_ll:
-                    output["ll"] = get_ll(output["data"], output["psd"], general_info.general_info["df"], return_source_only_ll=False)
+                    output["ll"] = get_ll(output["data"], output["psd"], general_info["general"]["df"], return_source_only_ll=False)
                 else:
                     # get both
-                    output["ll"], output["ll_source"] = get_ll(output["data"], output["psd"], general_info.general_info["df"], return_source_only_ll=True)
+                    output["ll"], output["ll_source"] = get_ll(output["data"], output["psd"], general_info["general"]["df"], return_source_only_ll=True)
 
         if only_max_ll:
             output["data"] = [output["data"][0].squeeze(), output["data"][1].squeeze()]

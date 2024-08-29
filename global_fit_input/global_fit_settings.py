@@ -45,7 +45,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "eighth_run_through"
+    base_file_name = "rework_1st_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -53,7 +53,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information["fp_psd_search"] = file_store_dir + base_file_name + "_search_psd.h5"
     file_information["fp_mbh_search_base"] = file_store_dir + base_file_name + "_search_mbh"
 
-
+    file_information["fp_main"] = file_store_dir + base_file_name + "_parameter_estimation_main.h5"
     file_information["fp_gb_pe"] = file_store_dir + base_file_name + "_parameter_estimation_gb.h5"
     file_information["fp_psd_pe"] = file_store_dir + base_file_name + "_parameter_estimation_psd.h5"
     file_information["fp_mbh_pe"] = file_store_dir + base_file_name + "_parameter_estimation_mbh.h5"
@@ -385,7 +385,7 @@ def get_global_fit_settings(copy_settings_file=False):
         3: uniform_dist(2.0e-15, 20.0e-15),  # Sa_a
     }
 
-    psd_kwargs = dict(sens_fn="noisepsd_AE", use_gpu=True)
+    psd_kwargs = dict(sens_fn="A1TDISens")  # , use_gpu=False)
     psd_initialize_kwargs = {}
 
     get_psd = GetPSDModel(
@@ -396,9 +396,9 @@ def get_global_fit_settings(copy_settings_file=False):
  
     priors_galfor = {
         0: uniform_dist(1e-45, 2e-43),  # amp
-        1: uniform_dist(0.01, 3.0),  # alpha
-        2: uniform_dist(1e0, 1e7),  # Slope1
-        3: uniform_dist(1e-4, 5e-2),  # knee
+        1: uniform_dist(1e-4, 5e-2),  # knee
+        2: uniform_dist(0.01, 3.0),  # alpha
+        3: uniform_dist(1e0, 1e7),  # Slope1
         4: uniform_dist(5e1, 8e3),  # Slope2
     }
 
