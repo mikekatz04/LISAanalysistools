@@ -14,7 +14,7 @@ from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from eryn.moves.tempering import make_ladder, TemperatureControl
 from eryn.state import BranchSupplimental
-from lisatools.sampling.moves.mbhspecialmove import MBHSpecialMove
+from lisatools.globalfit.moves import MBHSpecialMove
 from .state import MBHState
 from .hdfbackend import MBHHDFBackend
 

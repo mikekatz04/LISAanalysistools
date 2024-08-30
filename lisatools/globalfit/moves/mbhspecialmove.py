@@ -8,11 +8,12 @@ from lisatools.globalfit.state import State
 from lisatools.sampling.moves.skymodehop import SkyMove
 from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
+from .globalfitmove import GlobalFitMove
 
 
-class MBHSpecialMove(RedBlueMove):
+class MBHSpecialMove(GlobalFitMove, RedBlueMove):
     def __init__(self, waveform_gen, mgh, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, temperature_controls, **kwargs):
-
+        
         RedBlueMove.__init__(self, **kwargs)
         self.mgh = mgh
         self.waveform_gen = waveform_gen

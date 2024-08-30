@@ -9,7 +9,7 @@ import shutil
 from gbgpu.gbgpu import GBGPU
 
 
-from lisatools.sampling.moves.gbspecialstretch import GBSpecialStretchMove
+from lisatools.globalfit.moves import GBSpecialStretchMove
 from gbgpu.utils.utility import get_fdot
 
 mempool = xp.get_default_memory_pool()

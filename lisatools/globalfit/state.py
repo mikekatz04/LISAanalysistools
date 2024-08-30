@@ -1,7 +1,8 @@
 import numpy as np
 from copy import deepcopy
-
+from dataclasses import dataclass
 from eryn.state import State as eryn_State
+from eryn.state import Branch as eryn_Branch
 
 class GBState(eryn_State):
 
@@ -123,3 +124,83 @@ class State(GBState, MBHState, eryn_State):
     def from_eryn(self, state):
         breakpoint()
         breakpoint()
+
+class AllGFBranchInfo:
+    def __init__(self, branch_1, branch_2):
+        
+        for key in ["name", "ndims", "nleaves_max", "nleaves_min"]:
+            if isinstance(branch_1, AllGFBranchInfo) and isinstance(branch_2, AllGFBranchInfo):
+                if key == "name":
+                    self.branch_names = branch_1.branch_names + branch_2.name
+                    continue
+                setattr(self, key, {**getattr(branch_1, key), **getattr(branch_2, key)})
+                
+            elif isinstance(branch_1, GFBranchInfo) and isinstance(branch_2, GFBranchInfo):
+                if key == "name":
+                    self.branch_names = [branch_1.name, branch_2.name]
+                    continue
+                setattr(self, key, {branch_1.name: getattr(branch_1, key), branch_2.name: getattr(branch_2, key)})
+            else:
+                if not isinstance(branch_2, GFBranchInfo):
+                    # switch so all branch is in position 1
+                    tmp = branch_1
+                    branch_1 = branch_2
+                    branch_2 = tmp
+                if key == "name":
+                    self.branch_names = branch_1.branch_names + [branch_2.name]
+                    continue
+                setattr(self, key, {**getattr(branch_1, key), branch_2.name: getattr(branch_2, key)})
+        
+    def __add__(self, branch_2):
+        return AllGFBranchInfo(self, branch_2)
+    
+    @property
+    def ndims(self):
+        return self._ndims
+    
+    @ndims.setter
+    def ndims(self, ndims):
+        assert isinstance(ndims, dict)
+        self._ndims = ndims
+
+    @property
+    def branch_names(self):
+        return self._branch_names
+    
+    @branch_names.setter
+    def branch_names(self, branch_names):
+        assert isinstance(branch_names, list)
+        self._branch_names = branch_names
+
+    @property
+    def nleaves_max(self):
+        return self._nleaves_max
+    
+    @nleaves_max.setter
+    def nleaves_max(self, nleaves_max):
+        assert isinstance(nleaves_max, dict)
+        self._nleaves_max = nleaves_max
+
+    @property
+    def nleaves_min(self):
+        return self._nleaves_min
+    
+    @nleaves_min.setter
+    def nleaves_min(self, nleaves_min):
+        assert isinstance(nleaves_min, dict)
+        self._nleaves_min = nleaves_min
+
+@dataclass
+class GFBranchInfo:
+    name: str
+    ndims: int
+    nleaves_max: int
+    nleaves_min: int
+
+    def __add__(self, branch_2):
+        return AllGFBranchInfo(self, branch_2)
+
+
+
+    
+

@@ -132,7 +132,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [4, 6, 7, 7]
+    gpus = [2]
 
     all_general_info = dict(
         file_information=file_information,
@@ -165,37 +165,23 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    head_rank = 0
+    head_rank = 1
 
-    gb_pe_rank = 1
-    gb_pe_gpu = gpus[0]
-
-    # should be one more rank than GPUs for refit
-    gb_search_rank = [2, 3]
-    gb_search_gpu = gpus[1:2]
-
-    psd_rank = 5
-    psd_gpu = gpus[2]
-
-    mbh_rank = 6
-    mbh_gpu = gpus[3]
+    main_rank = 0
+    main_gpu = gpus[0]
+    other_gpus = gpus[1:]
 
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
     rank_info = dict(
         head_rank=head_rank,
-        gb_pe_rank=gb_pe_rank,
-        gb_search_rank=gb_search_rank,
-        psd_rank=psd_rank,
-        mbh_rank=mbh_rank,
+        main_rank=main_rank
     )
 
     gpu_assignments = dict(
-        gb_pe_gpu=gb_pe_gpu,
-        gb_search_gpu=gb_search_gpu,
-        psd_gpu=psd_gpu,
-        mbh_gpu=mbh_gpu,
+        main_gpu=main_gpu,
+        other_gpus=other_gpus
     )
 
     ##################################

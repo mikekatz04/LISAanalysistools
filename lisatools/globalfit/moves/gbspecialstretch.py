@@ -7,7 +7,8 @@ from scipy import stats
 import warnings
 import time
 from gbgpu.utils.utility import get_N
-from lisatools.detector import sangria
+from ...detector import sangria
+from .globalfitmove import GlobalFitMove
 
 
 try:
@@ -35,9 +36,13 @@ from lisatools.sampling.prior import GBPriorWrap
 
 __all__ = ["GBSpecialStretchMove"]
 
+def gb_search_func(comm):
+    assert comm is not None
+    print(f"INSIDE GB SPECIAL, RANK: {comm.Get_rank()}")
+
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBSpecialStretchMove(GroupStretchMove, Move):
+class GBSpecialStretchMove(GlobalFitMove, GroupStretchMove, Move):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -66,12 +71,16 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         num_repeat_proposals=1,
         name=None,
         use_prior_removal=False,
-        phase_maximize=False, 
+        phase_maximize=False,
+        ranks_needed=0,
+        gpus_needed=0,
         **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
         GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
-
+        
+        self.ranks_needed = ranks_needed
+        self.gpus_needed = gpus_needed
         self.gpu_priors = gpu_priors
         self.name = name
         self.num_repeat_proposals = num_repeat_proposals
@@ -121,6 +130,9 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         # setup N vals for bands
         band_mean_f = (self.band_edges[1:] + self.band_edges[:-1]).get() / 2
         self.band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"]))
+
+    def get_rank_function(self):
+        return gb_search_func
 
     def setup_gbs(self, branch):
         st = time.perf_counter()
@@ -1611,6 +1623,30 @@ class GBSpecialStretchMove(GroupStretchMove, Move):
         # breakpoint()
         return check_ll_new
 
+    @property
+    def ranks_needed(self): 
+        if not hasattr(self, "_ranks_needed"):
+            raise ValueError("Need to set ranks needed for this class.")
+
+        return self._ranks_needed
+
+    @ranks_needed.setter
+    def ranks_needed(self, ranks_needed):
+        assert isinstance(ranks_needed, int)
+        self._ranks_needed = ranks_needed
+        
+    @property
+    def gpus_needed(self): 
+        if not hasattr(self, "_gpus_needed"):
+            raise ValueError("Need to set gpus needed for this class.")
+
+        return self._gpus_needed
+
+    @gpus_needed.setter
+    def gpus_needed(self, gpus_needed):
+        assert isinstance(gpus_needed, int)
+        self._gpus_needed = gpus_needed
+        
         # breakpoint()
 
         # # print(self.accepted / self.num_proposals)
