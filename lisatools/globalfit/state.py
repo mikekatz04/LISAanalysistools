@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from eryn.state import State as eryn_State
 from eryn.state import Branch as eryn_Branch
 
+def return_x(x):
+    return x
+
 class GBState(eryn_State):
 
     @property
@@ -16,7 +19,7 @@ class GBState(eryn_State):
     def __init__(self, possible_state, band_info=None, copy=False, **kwargs):
 
         if isinstance(possible_state, self.__class__):
-            dc = deepcopy if copy else lambda x: x
+            dc = deepcopy if copy else return_x
             if possible_state.band_initialized and hasattr(possible_state, "band_info"):
                 self.band_info = dc(possible_state.band_info)
         elif band_info is not None:
@@ -96,7 +99,7 @@ class MBHState(eryn_State):
     remove_kwargs = ["betas_all"]
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
         if isinstance(possible_state, self.__class__):
-            dc = deepcopy if copy else lambda x: x
+            dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
 
         elif betas_all is not None:

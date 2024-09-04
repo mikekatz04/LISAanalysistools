@@ -12,9 +12,13 @@ from .globalfitmove import GlobalFitMove
 
 
 class MBHSpecialMove(GlobalFitMove, RedBlueMove):
-    def __init__(self, waveform_gen, mgh, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, temperature_controls, **kwargs):
+    def __init__(self, waveform_gen, mgh, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, temperature_controls, 
+        psd_like=None, **kwargs):
         
         RedBlueMove.__init__(self, **kwargs)
+        
+        self.psd_like = psd_like
+        assert psd_like is not None
         self.mgh = mgh
         self.waveform_gen = waveform_gen
         self.num_repeats = num_repeats
@@ -291,6 +295,8 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
         self.replace_residuals(state, new_state)
 
         new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
+        new_state.log_like[:] = self.psd_like(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental, logp=new_state.log_prior)[0]
+        assert np.abs(new_state.log_like[0] - self.mgh.get_ll(include_psd_info=True)).max() < 1e-4
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):

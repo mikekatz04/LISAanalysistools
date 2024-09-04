@@ -22,9 +22,11 @@ from eryn.ensemble import _FunctionWrapper
 from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
 from lisatools.globalfit.moves import GlobalFitMove
+from lisatools.globalfit.hdfbackend import save_to_backend_asynchronously_and_plot
 cp.cuda.runtime.setDevice(2)
-
-from lisatools.globalfit.moves import GBSpecialStretchMove
+from eryn.moves import CombineMove
+from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove
+from lisatools.globalfit.galaxyglobal import make_gmm
 
 class PlaceHolder(Move):
     def __init__(self, *args, **kwargs):
@@ -72,6 +74,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         tmp_logl = psd_log_like([psd_coords, galfor_coords], cp.asarray(self.mgh.fd), data, self.gb, self.mgh.df, self.mgh.data_length, supps=supps, **self.psd_kwargs)
 
         logl[logp_keep] = tmp_logl
+
+        self.prev_logl = logl.copy()
         return logl, None
 
     # def compute_log_prior(self, coords, inds=None, supps=None, branch_supps=None):
@@ -110,6 +114,15 @@ class PSDMove(GlobalFitMove, StretchMove):
         eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplimental=state.supplimental, branch_supplimental=state.branches_supplimental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
         before_vals = state.mgh.get_ll(include_psd_info=True).copy()
         
+        if np.any(np.abs(before_vals - state.log_like[0]) > 1e-4) :
+            breakpoint()
+
+        # breakpoint()
+        # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplimental)
+        # logl_test = self.compute_log_like(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, logp=logp)
+        
+        tmp_coords_check = state.branches["psd"].coords[0,:,0].copy()
+
         tmp_model = Model(
             state,
             self.compute_log_like,
@@ -118,6 +131,13 @@ class PSDMove(GlobalFitMove, StretchMove):
             model.map_fn,
             model.random,
         )
+
+        # state.mgh.set_psd_vals(
+        #     state.branches["psd"].coords[0, :, 0], 
+        #     overall_inds=np.arange(state.branches["psd"].shape[1]), 
+        #     foreground_params=state.branches["galfor"].coords[0, :, 0]
+        # )
+        # avs_vals = state.mgh.get_ll(include_psd_info=True).copy()
 
         tmp_state, accepted = super(PSDMove, self).propose(tmp_model, state)
         new_state = State(
@@ -140,6 +160,8 @@ class PSDMove(GlobalFitMove, StretchMove):
             foreground_params=new_state.branches["galfor"].coords[0, :, 0]
         )
         after_vals = new_state.mgh.get_ll(include_psd_info=True)
+        if np.any(np.abs(after_vals - new_state.log_like[0]) > 1e-4) :
+            breakpoint()
         return new_state, accepted
 
 
@@ -451,7 +473,9 @@ class GlobalFit:
                 )
 
             inner_moves = mbh_info["pe_info"]["inner_moves"]
-            mbh_move = MBHSpecialMove(wave_gen, mgh, mbh_info["pe_info"]["num_prop_repeats"], mbh_info["transform"], priors, mbh_info["waveform_kwargs"].copy(), inner_moves, df, temperature_controls)
+            mbh_move = MBHSpecialMove(wave_gen, mgh, mbh_info["pe_info"]["num_prop_repeats"], mbh_info["transform"], priors, mbh_info["waveform_kwargs"].copy(), inner_moves, df, temperature_controls, 
+                psd_like=psd_move.compute_log_like,  # cleanup
+                )
 
             ########### GB
 
@@ -493,8 +517,8 @@ class GlobalFit:
                 use_gpu=True,
                 nfriends=nwalkers,
                 phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
-                ranks_needed=5,
-                gpus_needed=0,
+                ranks_needed=0,
+                gpus=[],
                 **gb_info["pe_info"]["group_proposal_kwargs"]
             )
 
@@ -513,6 +537,7 @@ class GlobalFit:
 
             gb_move = GBSpecialStretchMove(
                 *gb_args,
+                psd_like=psd_move.compute_log_like,  # cleanup
                 **gb_kwargs,
             )
 
@@ -537,7 +562,7 @@ class GlobalFit:
                 nfriends=nwalkers,
                 phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
                 ranks_needed=0,
-                gpus_needed=0,
+                gpus=[],
                 **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
             )
 
@@ -552,29 +577,74 @@ class GlobalFit:
                 gpu_priors,
             )
 
-            rj_move_prior = GBSpecialStretchMove(
+            rj_move_prior = GBSpecialRJPriorMove(
                 *gb_args_rj,
+                psd_like=psd_move.compute_log_like,  # cleanup
                 **gb_kwargs_rj,
             )
 
-            rj_moves_in.append(rj_move_prior)
-            rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
+            # rj_moves_in.append(rj_move_prior)
+            # rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
+
+            gb_kwargs_rj_search = dict(
+                waveform_kwargs=waveform_kwargs,
+                parameter_transforms=gb_info["transform"],
+                search=False,
+                provide_betas=True,
+                skip_supp_names_update=["group_move_points"],
+                random_seed=general_info["random_seed"],
+                use_gpu=True,
+                rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
+                name="rj_search",
+                use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+                nfriends=nwalkers,
+                phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+                ranks_needed=5,
+                gpus=[3],
+                **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+            )
+
+            gb_args_rj_search = (
+                gb,
+                priors,
+                general_info["start_freq_ind"],
+                mgh.data_length,
+                mgh,
+                np.asarray(fd),
+                band_edges,
+                gpu_priors,
+            )
+
+            rj_move_search = GBSpecialRJSearchMove(
+                *gb_args_rj_search,
+                psd_like=psd_move.compute_log_like,  # cleanup
+                **gb_kwargs_rj_search,
+            )
+
+            rj_moves_in.append(rj_move_search)
+            rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
+
+            GBSpecialRJSearchMove
 
             total_frac = sum(rj_moves_in_frac)
 
             rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
-            for rj_move in rj_moves:
-                rj_move[0].gb.gpus = gpus
-
-            in_model_moves = [mbh_move, psd_move, gb_move]
+            in_model_moves = [psd_move, mbh_move, gb_move]
 
             rank_instructions = {}
-            for move in in_model_moves:
+            for move in in_model_moves + rj_moves:
+                if isinstance(move, tuple) or isinstance(move, list):
+                    move = move[0]
+
                 if not isinstance(move, GlobalFitMove):
                     raise ValueError("All moves must be a subclass of GlobalFitMove.")
+                
                 move.comm = self.comm
-                if move.ranks_needed > 0:
+                if len(move.gpus) > 0 or (move.ranks_needed > 0 and not move.ranks_initialized):
+                    if len(move.gpus) > 0:
+                        assert move.ranks_needed > 0
+
                     tmp_ranks = []
                     for _ in range(move.ranks_needed):
                         try:
@@ -584,8 +654,9 @@ class GlobalFit:
                     self.used_ranks += tmp_ranks
                     move.assign_ranks(tmp_ranks)
                     for rank in tmp_ranks:
-                        rank_instructions[rank] = move.get_rank_function()
-            breakpoint()
+                        rank_instructions[rank] = {"function": move.get_rank_function(), "class_rank_list": tmp_ranks, "gpus": move.gpus}
+            
+            
 
             # stop unneeded processes
             for rank in self.all_ranks:
@@ -593,21 +664,20 @@ class GlobalFit:
                     continue
                 self.comm.send("stop", dest=rank)
                 
-            for rank, function in rank_instructions.items():
-                self.comm.send({"rank": rank, "function": function}, dest=rank)
+            for rank, tmp in rank_instructions.items():
+                self.comm.send({"rank": rank, **tmp}, dest=rank)
             
-            breakpoint()
             # permute False is there for the PSD sampling for now
             sampler_mix = EnsembleSampler(
                 nwalkers,
                 ndims,  # assumes ndim_max
                 like_mix,
                 priors,
-                tempering_kwargs={"betas": betas, "permute": False, "skip_swap_branches": ["mbh", "gb"]},
+                tempering_kwargs={"betas": betas, "permute": False, "skip_swap_branches": ["mbh", "gb"], "skip_swap_supp_names": ["walker_inds"]},
                 nbranches=len(branch_names),
                 nleaves_max=nleaves_max,
                 nleaves_min=nleaves_min,
-                moves=in_model_moves,
+                moves=CombineMove(in_model_moves),
                 rj_moves=rj_moves,
                 kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
                 backend=backend,
@@ -625,18 +695,20 @@ class GlobalFit:
 
             state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like = psd_move.compute_log_like(state.branches_coords, logp=state.log_prior, inds=state.branches_inds, supps=supps)[0]
-
-            sampler_mix.run_mcmc(state, 10, progress=True, store=False)
+            
+            sampler_mix.run_mcmc(state, 10, progress=True, store=True)
+            self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
-            print("RESULTS RANK")
+            save_to_backend_asynchronously_and_plot(self.curr.backend, self.comm, self.main_rank, self.head_rank, self.curr.general_info["plot_iter"], self.curr.general_info["backup_iter"])
+
         else:
             info = self.comm.recv(source=self.main_rank)
             if isinstance(info, dict):
                 launch_rank = info["rank"]
                 assert launch_rank == self.rank
                 launch_function = info["function"]
-                launch_function(self.comm)
+                launch_function(self.comm, self.curr, self.main_rank, info["gpus"], info["class_rank_list"])
 
             print(f"Process {self.rank} finished.")
             

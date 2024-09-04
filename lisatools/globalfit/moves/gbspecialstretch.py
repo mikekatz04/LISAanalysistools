@@ -9,6 +9,7 @@ import time
 from gbgpu.utils.utility import get_N
 from ...detector import sangria
 from .globalfitmove import GlobalFitMove
+from ..galaxyglobal import run_gb_bulk_search, fit_each_leaf, make_gmm
 
 
 try:
@@ -36,13 +37,58 @@ from lisatools.sampling.prior import GBPriorWrap
 
 __all__ = ["GBSpecialStretchMove"]
 
-def gb_search_func(comm):
+def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
     assert comm is not None
-    print(f"INSIDE GB SPECIAL, RANK: {comm.Get_rank()}")
+
+    # get current rank and get index into class_ranks_list
+    print(f"INSIDE GB search, RANK: {comm.Get_rank()}")
+    rank = comm.Get_rank()
+    rank_index = class_ranks_list.index(rank)
+    gather_rank = class_ranks_list[0]
+    if rank_index == 0:
+        split_remainder = 1  # will fix this setup in the future
+        num_search = 2
+        gpu = class_extra_gpus[0]
+        comm_info = {"process_ranks_for_fit": class_ranks_list[1:]}
+        # run search here
+        run_gb_bulk_search(gpu, curr, comm, comm_info, main_rank, num_search, split_remainder)
+        pass
+
+    else:
+        # run GMM fit here
+        fit_each_leaf(rank, curr, gather_rank, comm)
+        pass
+
+
+def gb_refit_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
+    assert comm is not None
+
+    # get current rank and get index into class_ranks_list
+    print(f"INSIDE GB refit, RANK: {comm.Get_rank()}")
+    rank = comm.Get_rank()
+    rank_index = class_ranks_list.index(rank)
+    gather_rank = class_ranks_list[0]
+    if rank_index == 0:
+        split_remainder = 0  # will fix this setup in the future
+        num_search = 2
+        gpu = class_extra_gpus[0]
+        comm_info = {"process_ranks_for_fit": class_ranks_list[1:]}
+        # run search here
+        # run_gb_bulk_search(gpu, curr, comm, comm_info, main_rank, num_search, split_remainder)
+        pass
+
+    else:
+        # run GMM fit here
+        # fit_each_leaf(rank, curr, gather_rank, comm)
+        pass
+
+
+    
+    
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBSpecialStretchMove(GlobalFitMove, GroupStretchMove, Move):
+class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -73,14 +119,16 @@ class GBSpecialStretchMove(GlobalFitMove, GroupStretchMove, Move):
         use_prior_removal=False,
         phase_maximize=False,
         ranks_needed=0,
-        gpus_needed=0,
+        gpus=[],
+        psd_like=None,
         **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
         GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
-        
+        self.psd_like = psd_like
+        assert psd_like is not None
         self.ranks_needed = ranks_needed
-        self.gpus_needed = gpus_needed
+        self.gpus = gpus
         self.gpu_priors = gpu_priors
         self.name = name
         self.num_repeat_proposals = num_repeat_proposals
@@ -130,9 +178,6 @@ class GBSpecialStretchMove(GlobalFitMove, GroupStretchMove, Move):
         # setup N vals for bands
         band_mean_f = (self.band_edges[1:] + self.band_edges[:-1]).get() / 2
         self.band_N_vals = xp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"]))
-
-    def get_rank_function(self):
-        return gb_search_func
 
     def setup_gbs(self, branch):
         st = time.perf_counter()
@@ -1574,6 +1619,9 @@ class GBSpecialStretchMove(GlobalFitMove, GroupStretchMove, Move):
         if self.is_rj_prop:
             pass  # print(self.name, "2nd count check:", new_state.branches["gb"].inds.sum(axis=-1).mean(axis=-1), "\nll:", new_state.log_like[0] - orig_store, new_state.log_like[0])
 
+        new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
+        new_state.log_like[:] = self.psd_like(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental, logp=new_state.log_prior)[0]
+        assert np.abs(new_state.log_like[0] - self.mgh.get_ll(include_psd_info=True)).max() < 1e-4
         return new_state, accepted
 
     def check_ll_inject(self, new_state, verbose=False):
@@ -1634,256 +1682,54 @@ class GBSpecialStretchMove(GlobalFitMove, GroupStretchMove, Move):
     def ranks_needed(self, ranks_needed):
         assert isinstance(ranks_needed, int)
         self._ranks_needed = ranks_needed
-        
-    @property
-    def gpus_needed(self): 
-        if not hasattr(self, "_gpus_needed"):
-            raise ValueError("Need to set gpus needed for this class.")
+    
 
-        return self._gpus_needed
+class GBSpecialStretchMove(GBSpecialBase):
+    pass
 
-    @gpus_needed.setter
-    def gpus_needed(self, gpus_needed):
-        assert isinstance(gpus_needed, int)
-        self._gpus_needed = gpus_needed
-        
-        # breakpoint()
+class GBSpecialRJPriorMove(GBSpecialBase):
+    pass
 
-        # # print(self.accepted / self.num_proposals)
+class GBSpecialRJSearchMove(GBSpecialBase):
+    def get_rank_function(self):
+        return gb_search_func
 
-        # # MULTIPLE TRY after RJ
+    def setup(self, branches):
+        self.interact_with_search()
+        super(GBSpecialRJSearchMove, self).setup(branches)
 
-        # if False: # self.is_rj_prop:
+    def interact_with_search(self):
+        search_rank = self.ranks[0]
+
+        search_ch = self.comm.irecv(source=search_rank)
+        if search_ch.get_status():
+            search_req = search_ch.wait()
+
+            if "receive" in search_req and search_req["receive"]:
+                search_dict = self.comm.recv(source=search_rank)
+                self.rj_proposal_distribution["gb"] = make_gmm(self.gb, search_dict["search"])
+
+            if "send" in search_req and search_req["send"]:
+                # get random instance of residual, psd, lisasens
+                # TODO: decide about random versus max ll
+                random_ind = np.random.randint(self.nwalkers)
+
+                data = [self.mgh.data_shaped[0][0][random_ind].get(), self.mgh.data_shaped[1][0][random_ind].get()]
+                psd = [self.mgh.psd_shaped[0][0][random_ind].get(), self.mgh.psd_shaped[1][0][random_ind].get()]
+                lisasens = [self.mgh.psd_shaped[0][0][random_ind].get(), self.mgh.lisasens_shaped[1][0][random_ind].get()]
+                
+                output_data = dict(
+                    data=data,
+                    psd=psd,
+                    lisasens=lisasens
+                )
+                self.comm.send(output_data, dest=search_rank)
+
+        else:
+            search_ch.cancel()
             
-        #     inds_added = np.where(new_state.branches["gb"].inds.astype(int) - state.branches["gb"].inds.astype(int) == +1)
+        print("CHECK INSIDE PROP")
 
-        #     new_coords = xp.asarray(new_state.branches["gb"].coords[inds_added])
-        #     temp_inds_add = xp.repeat(xp.arange(ntemps)[:, None], nwalkers * nleaves_max, axis=-1).reshape(ntemps, nwalkers, nleaves_max)[inds_added]
-        #     walker_inds_add = xp.repeat(xp.arange(nwalkers)[:, None], ntemps * nleaves_max, axis=-1).reshape(nwalkers, ntemps, nleaves_max).transpose(1, 0, 2)[inds_added]
-        #     leaf_inds_add = xp.repeat(xp.arange(nleaves_max)[:, None], ntemps * nwalkers, axis=-1).reshape(nleaves_max, ntemps, nwalkers).transpose(1, 2, 0)[inds_added]
-        #     band_inds_add = xp.searchsorted(self.band_edges, new_coords[:, 1] / 1e3, side="right") - 1
-        #     N_vals_add = xp.asarray(new_state.branches["gb"].branch_supplimental.holder["N_vals"][inds_added])
-            
-        #     #### RIGHT NOW WE ARE EXPERIMENTING WITH NO OR SMALL CHANGE IN FREQUENCY
-        #     # because if it is added in RJ, it has locked on in frequency in some form
-            
-        #     # randomize order
-        #     inds_random = xp.random.permutation(xp.arange(len(new_coords)))
-        #     new_coords = new_coords[inds_random]
-        #     temp_inds_add = temp_inds_add[inds_random]
-        #     walker_inds_add = walker_inds_add[inds_random]
-        #     leaf_inds_add = leaf_inds_add[inds_random]
-        #     band_inds_add = band_inds_add[inds_random]
-        #     N_vals_add = N_vals_add[inds_random]
-
-        #     special_band_map = leaf_inds_add * int(1e12) + walker_inds_add * int(1e6) + band_inds_add
-        #     inds_sorted_special = xp.argsort(special_band_map)
-        #     special_band_map = special_band_map[inds_sorted_special]
-        #     new_coords = new_coords[inds_sorted_special]
-        #     temp_inds_add = temp_inds_add[inds_sorted_special]
-        #     walker_inds_add = walker_inds_add[inds_sorted_special]
-        #     leaf_inds_add = leaf_inds_add[inds_sorted_special]
-        #     band_inds_add = band_inds_add[inds_sorted_special]
-        #     N_vals_add = N_vals_add[inds_sorted_special]
-
-        #     unique_special_bands, unique_special_bands_index, unique_special_bands_inverse = xp.unique(special_band_map, return_index=True, return_inverse=True)
-        #     group_index = xp.arange(len(special_band_map)) - xp.arange(len(special_band_map))[unique_special_bands_index][unique_special_bands_inverse]
-            
-        #     band_splits = 3
-        #     num_try = 1000
-        #     for group in range(group_index.max().item()):
-        #         for split_i in range(band_splits):
-        #             group_split = (group_index == group) & (band_inds_add % band_splits == split_i)
-                    
-        #             new_coords_group_split = new_coords[group_split]
-        #             temp_inds_add_group_split = temp_inds_add[group_split]
-        #             walker_inds_add_group_split = walker_inds_add[group_split]
-        #             leaf_inds_add_group_split = leaf_inds_add[group_split]
-        #             band_inds_add_group_split = band_inds_add[group_split]
-        #             N_vals_add_group_split = N_vals_add[group_split]
-
-        #             coords_remove = xp.repeat(new_coords_group_split, num_try, axis=0)
-        #             coords_add = coords_remove.copy()
-
-        #             inds_params = xp.array([0, 2, 3, 4, 5, 6, 7])
-        #             coords_add[:, inds_params] = self.gpu_priors["gb"].rvs(size=coords_remove.shape[0])[:, inds_params]
-                    
-        #             log_proposal_pdf = self.gpu_priors["gb"].logpdf(coords_add)
-        #             # remove logpdf from fchange for now
-        #             log_proposal_pdf -= self.gpu_priors["gb"].priors_in[1].logpdf(coords_add[:, 1])
-
-        #             priors_remove = self.gpu_priors["gb"].logpdf(coords_remove)
-        #             priors_add = self.gpu_priors["gb"].logpdf(coords_add)
-
-        #             if xp.any(coords_add[:, 1] != coords_remove[:, 1]):
-        #                 raise NotImplementedError("Assumes frequencies are the same.")
-        #                 independent = False
-        #             else:
-        #                 independent = True
-
-        #             coords_remove_in = self.parameter_transforms.both_transforms(coords_remove, xp=xp)
-        #             coords_add_in = self.parameter_transforms.both_transforms(coords_add, xp=xp)
-                    
-        #             waveform_kwargs_tmp = self.waveform_kwargs.copy()
-        #             waveform_kwargs_tmp.pop("N")
-
-        #             data_index_in = xp.repeat(temp_inds_add_group_split * nwalkers + walker_inds_add_group_split, num_try).astype(xp.int32)
-        #             noise_index_in = data_index_in.copy()
-        #             N_vals_add_group_split_in = self.xp.repeat(N_vals_add_group_split, num_try)
-
-        #             ll_diff = self.xp.asarray(self.gb.swap_likelihood_difference(coords_remove_in, coords_add_in, self.mgh.data_list, self.mgh.psd_list, data_index=data_index_in, noise_index=noise_index_in, N=N_vals_add_group_split_in, data_length=self.data_length, data_splits=self.mgh.gpu_splits, **waveform_kwargs_tmp))
-                    
-        #             ll_diff[self.xp.isnan(ll_diff)] = -1e300
-
-        #             band_inv_temps = self.xp.repeat(band_temps[(band_inds_add_group_split, temp_inds_add_group_split)], num_try)
-                    
-        #             logP = band_inv_temps * ll_diff + priors_add
-
-        #             from eryn.moves.multipletry import logsumexp, get_mt_computations
-
-        #             band_inv_temps = band_inv_temps.reshape(-1, num_try)
-        #             ll_diff = ll_diff.reshape(-1, num_try)
-        #             logP = logP.reshape(-1, num_try)
-        #             priors_add = priors_add.reshape(-1, num_try)
-        #             log_proposal_pdf = log_proposal_pdf.reshape(-1, num_try)
-        #             coords_add = coords_add.reshape(-1, num_try, ndim)
-                    
-        #             log_importance_weights, log_sum_weights, inds_group_split = get_mt_computations(logP, log_proposal_pdf, symmetric=False, xp=self.xp)
-                    
-        #             inds_tuple = (self.xp.arange(len(inds_group_split)), inds_group_split)
-
-        #             ll_diff_out = ll_diff[inds_tuple]
-        #             logP_out = logP[inds_tuple]
-        #             priors_add_out = priors_add[inds_tuple]
-        #             coords_add_out = coords_add[inds_tuple]
-        #             log_proposal_pdf_out = log_proposal_pdf[inds_tuple]
-
-        #             if not independent:
-        #                 raise NotImplementedError
-        #             else:
-        #                 aux_coords_add = coords_add.copy()
-        #                 aux_ll_diff = ll_diff.copy()
-        #                 aux_priors_add = priors_add.copy()
-        #                 aux_log_proposal_pdf = log_proposal_pdf.copy()
-
-        #                 aux_coords_add[:, 0] = new_coords_group_split
-        #                 aux_ll_diff[:, 0] = 0.0  # diff is zero because the points are already in the data
-        #                 aux_priors_add[:, 0] = priors_remove[::num_try]
-
-        #                 initial_log_proposal_pdf = self.gpu_priors["gb"].logpdf(new_coords_group_split)
-        #                 # remove logpdf from fchange for now
-        #                 initial_log_proposal_pdf -= self.gpu_priors["gb"].priors_in[1].logpdf(new_coords_group_split[:, 1])
-
-        #                 aux_log_proposal_pdf[:, 0] = initial_log_proposal_pdf
-
-        #                 aux_logP = band_inv_temps * aux_ll_diff + aux_priors_add
-
-        #                 aux_log_importane_weights, aux_log_sum_weights, _ = get_mt_computations(aux_logP, aux_log_proposal_pdf, symmetric=False, xp=self.xp)
-
-        #                 aux_logP_out = aux_logP[:, 0]
-        #                 aux_log_proposal_pdf_out = aux_log_proposal_pdf[:, 0]
-
-        #             factors = ((aux_logP_out - aux_log_sum_weights)- aux_log_proposal_pdf_out + aux_log_proposal_pdf_out) - ((logP_out - log_sum_weights) - log_proposal_pdf_out + log_proposal_pdf_out)
-
-        #             lnpdiff = factors + logP_out - aux_logP_out
-
-        #             keep = lnpdiff > self.xp.asarray(self.xp.log(self.xp.random.rand(*logP_out.shape)))
-
-        #             coords_remove_keep = new_coords_group_split[keep]
-        #             coords_add_keep = coords_add_out[keep]
-        #             temp_inds_add_keep = temp_inds_add_group_split[keep]
-        #             walker_inds_add_keep = walker_inds_add_group_split[keep]
-        #             leaf_inds_add_keep = leaf_inds_add_group_split[keep]
-        #             band_inds_add_keep = band_inds_add_group_split[keep]
-        #             N_vals_add_keep = N_vals_add_group_split[keep]
-        #             ll_diff_keep = ll_diff_out[keep]
-        #             priors_add_keep = priors_add_out[keep]
-        #             priors_remove_keep = priors_remove[::num_try][keep]
-
-        #             # adjust everything
-        #             ll_band_diff = xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1))
-        #             ll_band_diff[temp_inds_add_keep, walker_inds_add_keep, band_inds_add_keep] = ll_diff_keep
-        #             lp_band_diff = xp.zeros((ntemps, nwalkers, len(self.band_edges) - 1))
-        #             lp_band_diff[temp_inds_add_keep, walker_inds_add_keep, band_inds_add_keep] = priors_add_keep - priors_remove_keep
-
-        #             new_state.branches["gb"].coords[temp_inds_add_keep.get(), walker_inds_add_keep.get(), band_inds_add_keep.get()] = coords_add_keep.get()
-        #             new_state.log_like += ll_band_diff.sum(axis=-1).get()
-        #             new_state.log_prior += ll_band_diff.sum(axis=-1).get()
-
-        #             waveform_kwargs_tmp = self.waveform_kwargs.copy()
-        #             waveform_kwargs_tmp.pop("N")
-        #             coords_remove_keep_in = self.parameter_transforms.both_transforms(coords_remove_keep, xp=self.xp)
-        #             coords_add_keep_in = self.parameter_transforms.both_transforms(coords_add_keep, xp=self.xp)
-                   
-        #             coords_in = xp.concatenate([coords_remove_keep_in, coords_add_keep_in], axis=0)
-        #             factors = xp.concatenate([+xp.ones(coords_remove_keep_in.shape[0]), -xp.ones(coords_remove_keep_in.shape[0])])
-        #             data_index_tmp = (temp_inds_add_keep * nwalkers + walker_inds_add_keep).astype(xp.int32)
-        #             data_index_in = xp.concatenate([data_index_tmp, data_index_tmp], dtype=xp.int32)
-        #             N_vals_in = xp.concatenate([N_vals_add_keep, N_vals_add_keep])
-        #             self.gb.generate_global_template(
-        #                 coords_in,
-        #                 data_index_in,
-        #                 self.mgh.data_list,
-        #                 N=N_vals_in,
-        #                 data_length=self.data_length,
-        #                 data_splits=self.mgh.gpu_splits,
-        #                 factors=factors,
-        #                 **waveform_kwargs_tmp
-        #             )
-        #             self.xp.cuda.runtime.deviceSynchronize()
-
-        #     ll_after = (
-        #         self.mgh.get_ll(include_psd_info=True)
-        #         .flatten()[new_state.supplimental[:]["overall_inds"]]
-        #         .reshape(ntemps, nwalkers)
-        #     )
-        #     # print(np.abs(new_state.log_like - ll_after).max())
-        #     store_max_diff = np.abs(new_state.log_like - ll_after).max()
-        #     breakpoint()
-        #     self.mempool.free_all_blocks()
-
-                # self.mgh.restore_base_injections()
-
-                # for name in new_state.branches.keys():
-                #     if name not in ["gb", "gb"]:
-                #         continue
-                #     new_state_branch = new_state.branches[name]
-                #     coords_here = new_state_branch.coords[new_state_branch.inds]
-                #     ntemps, nwalkers, nleaves_max_here, ndim = new_state_branch.shape
-                #     try:
-                #         group_index = self.xp.asarray(
-                #             self.mgh.get_mapped_indices(
-                #                 np.repeat(
-                #                     np.arange(ntemps * nwalkers).reshape(
-                #                         ntemps, nwalkers, 1
-                #                     ),
-                #                     nleaves_max,
-                #                     axis=-1,
-                #                 )[new_state_branch.inds]
-                #             ).astype(self.xp.int32)
-                #         )
-                #     except IndexError:
-                #         breakpoint()
-                #     coords_here_in = self.parameter_transforms.both_transforms(
-                #         coords_here, xp=np
-                #     )
-
-                #     waveform_kwargs_fill = self.waveform_kwargs.copy()
-                #     waveform_kwargs_fill["start_freq_ind"] = self.start_freq_ind
-
-                #     if "N" in waveform_kwargs_fill:
-                #         waveform_kwargs_fill.pop("N")
-
-                #     self.mgh.multiply_data(-1.0)
-                #     self.gb.generate_global_template(
-                #         coords_here_in,
-                #         group_index,
-                #         self.mgh.data_list,
-                #         data_length=self.data_length,
-                #         data_splits=self.mgh.gpu_splits,
-                #         **waveform_kwargs_fill
-                #     )
-                #     self.xp.cuda.runtime.deviceSynchronize()
-                #     self.mgh.multiply_data(-1.0)
-
-
+class GBSpecialRJRefitMove(GBSpecialBase):
+    def get_rank_function(self):
+        return gb_refit_func

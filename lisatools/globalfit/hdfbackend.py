@@ -1,12 +1,12 @@
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
 from .state import State
-# from .plot import RunResultsProduction
+from .plot import RunResultsProduction
 import time
 import shutil
 
 
-def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_rank, plot_iter, backup_iter):
+def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_rank, plot_iter, backup_iter):
 
     print("starting run SAVE")
     run_results_production = None ## RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
@@ -14,7 +14,7 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, gb_pe_rank, head_ra
     i = 0
     while run:
         print("WAITING FOR DATA")
-        save_dict = comm.recv(source=gb_pe_rank, tag=90)
+        save_dict = comm.recv(source=main_rank)
         print("RECEIVED FOR DATA")
         if "finish_run" in save_dict and save_dict["finish_run"]:
             run = False
@@ -342,12 +342,15 @@ class HDFBackend(eryn_HDFBackend):
 
         """
 
-        if self.comm is None:
+        if self.comm is None or self.comm.Get_size() < 3:
             self.save_step_main(*args, **kwargs)
         
         else:
-            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank, tag=90)
-
+            state = args[0]
+            mgh = state.mgh
+            state.mgh = None
+            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
+            state.mgh = mgh
 
     def get_a_sample(self, it):
         """Access a sample in the chain

@@ -9,7 +9,7 @@ import shutil
 from gbgpu.gbgpu import GBGPU
 
 
-from lisatools.globalfit.moves import GBSpecialStretchMove
+# from lisatools.globalfit.moves import GBSpecialStretchMove
 from gbgpu.utils.utility import get_fdot
 
 mempool = xp.get_default_memory_pool()
@@ -131,14 +131,14 @@ class UpdateNewResiduals(Update):
             "cc_lp": last_sample.log_prior[0].copy(),
             "last_state": last_sample
         }
-        self.comm.send({"send": True, "receive": True}, dest=self.head_rank, tag=50)
+        self.comm.send({"send": True, "receive": True}, dest=self.head_rank)
 
-        self.comm.send({"gb_update": update_dict}, dest=self.head_rank, tag=58)
+        self.comm.send({"gb_update": update_dict}, dest=self.head_rank)
 
         if self.verbose:
             print("Requesting updated data from head process.")
 
-        new_info = self.comm.recv(source=self.head_rank, tag=51)
+        new_info = self.comm.recv(source=self.head_rank)
         
         if self.verbose:
             print("Received new data from head process.")
@@ -280,7 +280,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     gb = GBGPU(use_gpu=True)
     # from lisatools.sampling.stopping import SearchConvergeStopping2
-    gf_information = comm.recv(source=head_rank, tag=255)
+    gf_information = comm.recv(source=head_rank)
 
     gb_info = gf_information.gb_info
     band_edges = gb_info["band_edges"]
@@ -535,8 +535,8 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         waiting = True
         while waiting:
             time.sleep(20.0)
-            comm.send({"send": True, "no_binaries": True}, dest=head_rank, tag=50)
-            new_info = comm.recv(source=head_rank, tag=51)
+            comm.send({"send": True, "no_binaries": True}, dest=head_rank)
+            new_info = comm.recv(source=head_rank)
             # print("CHECKING:", new_info.gb_info["search_gmm_info"])
             if new_info.gb_info["search_gmm_info"] is not None:
                 waiting = False
@@ -675,8 +675,8 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     print("ending mix ll best:", out.log_like.max(axis=-1))
 
     # communicate end of run to head process
-    comm.send({"finish_run": True}, dest=backend.save_plot_rank, tag=90)
-    comm.send({"finish_run": True}, dest=head_rank, tag=50)
+    comm.send({"finish_run": True}, dest=backend.save_plot_rank)
+    comm.send({"finish_run": True}, dest=head_rank)
 
     del mgh
     
@@ -756,7 +756,7 @@ def fit_gmm(samples, comm, comm_info):
                 # time.sleep(0.6)
                 if current_status[proc_i]:
                     rec_tag = int(str(proc_rank) + "4545")
-                    check_output = comm.irecv(source=proc_rank, tag=rec_tag)
+                    check_output = comm.irecv(source=proc_rank)
 
                     if not check_output.get_status():
                         check_output.cancel()
@@ -813,15 +813,13 @@ def fit_gmm(samples, comm, comm_info):
     return output
 
 
-def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
+def fit_each_leaf(rank, curr, gather_rank, comm):
 
     run_process = True
 
-    rec_tag = int(str(rank) + "67676")
-    send_tag = int(str(rank) + "4545")
     while run_process:
         try:
-            check = comm.recv(source=gather_rank, tag=rec_tag)
+            check = comm.recv(source=gather_rank)
         except (pickle.UnpicklingError, UnicodeDecodeError, ValueError, OverflowError) as e:
             # print("BAD BAD ", rank)
             comm.send({"BAD": "receiving issue"}, dest=gather_rank, tag=send_tag)
@@ -887,12 +885,12 @@ def fit_each_leaf(rank, gather_rank, rec_tag, send_tag, comm):
                 breakpoint()"""
 
         if bad:
-            comm.send({"BAD": "ValueError"}, dest=gather_rank, tag=send_tag)
+            comm.send({"BAD": "ValueError"}, dest=gather_rank)
             continue
         if keep_components >= 19:
             print(keep_components)
         output_list = [keep_mix.weights_, keep_mix.means_, keep_mix.covariances_, np.array([np.linalg.inv(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), np.array([np.linalg.det(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), sample_mins, sample_maxs]
-        comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank, tag=send_tag)
+        comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank)
     return
 
 def run_iterative_subtraction_mcmc(current_info, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data_in, psd_in, lisasens_in, comm, comm_info):
@@ -1394,7 +1392,7 @@ def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_s
     
     return fit_gmm(samples_gathered, comm, comm_info)
 
-def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remainder):
+def run_gb_bulk_search(gpu, curr, comm, comm_info, head_rank, num_search, split_remainder):
     gpus = [gpu]
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -1405,11 +1403,7 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
     stop = True
 
     rank = comm.Get_rank()
-    tag = int(str(2929) + str(rank))
-    print("CHECK yep", rank, tag, head_rank)
-    gf_information = comm.recv(source=head_rank, tag=tag)
-    print("CHECK n", rank, tag, head_rank)
-    gb_info = gf_information.gb_info
+    gb_info = curr.gb_info
     band_edges = gb_info["band_edges"]
 
     band_inds_running = np.zeros_like(band_edges[:-1], dtype=bool)
@@ -1446,25 +1440,30 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
     # do not run the last band
     band_inds_running[-1] = False
 
-    # stopping function
-    stopping_function_here = deepcopy(gb_info["search_info"]["stopping_function"])
-
     run_counter = 0
     print("start run")
     run = True
+    output_dict = {}
+    send_out_dict = None
     while run:
         try:
-            comm.send({"send": True}, dest=head_rank, tag=20)
+            output_dict["send"] = True
+            comm.send(output_dict, dest=head_rank)
+            if "receive" in output_dict and output_dict["receive"]:
+                print("sending results.")
+                comm.send(send_out_dict, dest=head_rank)
+            
             print("waiting for data")
-            incoming_data = comm.recv(source=head_rank, tag=27)
+            incoming_data = comm.recv(source=head_rank)
+
+            # need to reset it 
+            output_dict = {}
+            if isinstance(incoming_data, str) and incoming_data == "stop":
+                run = False
+                continue
             print("received data")
 
-            if "cc_ll" not in incoming_data.psd_info or "cc_ll" not in incoming_data.mbh_info or "cc_ll" not in incoming_data.gb_info:
-                time.sleep(20.0)
-                print("Do not have maximum likelihood for all pieces for search. Waiting and then will try again.")
-                continue
-
-            generated_info = incoming_data.get_data_psd(only_max_ll=True, return_prior_val=True, fix_val_in_gen=["gb"]) 
+            # generated_info = incoming_data.get_data_psd(only_max_ll=True, return_prior_val=True, fix_val_in_gen=["gb"]) 
             # generated_info_0 = generate_class(incoming_data, only_max_ll=True, include_mbhs=False, include_gbs=False, include_ll=True, include_source_only_ll=True)
             # generated_info_1 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_ll=True, include_source_only_ll=True)
             # generated_info_2 = generate_class(incoming_data, only_max_ll=True, include_mbhs=True, include_gbs=True, include_ll=True, include_source_only_ll=True)
@@ -1473,9 +1472,9 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
             # plt.savefig("check1.png")
             # breakpoint()
 
-            data_cpu = generated_info["data"]
-            psd_cpu = generated_info["psd"]
-            lisasens_cpu = generated_info["lisasens"]
+            data_cpu = incoming_data["data"]
+            psd_cpu = incoming_data["psd"]
+            lisasens_cpu = incoming_data["lisasens"]
 
             data = [xp.asarray(tmp) for tmp in data_cpu]
             psd = [xp.asarray(tmp) for tmp in psd_cpu]
@@ -1485,8 +1484,8 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
             
             # run refit
             if split_remainder == 0:
-                if os.path.exists(incoming_data.gb_info["reader"].filename) and incoming_data.gb_info["reader"].iteration > incoming_data.gb_info["pe_info"]["start_resample_iter"] and (run_counter % incoming_data.gb_info["pe_info"]["iter_count_per_resample"]) == 0:
-                    gmm_samples_refit = refit_gmm(incoming_data, gpu, comm, comm_info, incoming_data.gb_info["reader"], data, psd, 100)
+                if os.path.exists(curr.backend.filename) and curr.backend.iteration > curr.gb_info["pe_info"]["start_resample_iter"] and (run_counter % curr.gb_info["pe_info"]["iter_count_per_resample"]) == 0:
+                    gmm_samples_refit = refit_gmm(curr, gpu, comm, comm_info, curr.gb_info["reader"], data, psd, 100)
 
                 else:
                     gmm_samples_refit = None
@@ -1494,25 +1493,13 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
                 send_out_dict = {"sample_refit": gmm_samples_refit}
 
             else:
-                gmm_mcmc_search_info = run_iterative_subtraction_mcmc(incoming_data, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
+                gmm_mcmc_search_info = run_iterative_subtraction_mcmc(curr, gpu, ndim, nwalkers, ntemps, band_inds_running, priors_good, f0_maxs, f0_mins, fdot_maxs, fdot_mins, data, psd, lisasens, comm, comm_info)
                 send_out_dict = {"search": gmm_mcmc_search_info}
 
-            print("AFTER SEARCH", comm.Get_rank())
-            comm.send({"receive": True}, dest=head_rank, tag=20)
-            comm.send(send_out_dict, dest=head_rank, tag=29)
-            print("SENT AFTER SEARCH", comm.Get_rank())
-            if not hasattr(stopping_function_here, "comm") and hasattr(stopping_function_here, "add_comm"):
-                stopping_function_here.add_comm(comm)
-
-            print("load comm if needed AFTER SEARCH", comm.Get_rank())
-            
-            stop = stopping_function_here(incoming_data)
-            print("after stop function AFTER SEARCH", comm.Get_rank())
+            output_dict["receive"] = True
             
             run_counter += 1
-            if stop:
-                break
-        
+            
         except BlockingIOError as e:
             print("bulk", e)
             time.sleep(20.0)  
@@ -1538,9 +1525,9 @@ def run_gb_bulk_search(gpu, comm, comm_info, head_rank, num_search, split_remain
     # communicate end of run to head process
     for rank in comm_info["process_ranks_for_fit"]:
         rec_tag = int(str(rank) + "67676")
-        comm.send("end", dest=rank, tag=rec_tag)
+        comm.send("end", dest=rank)
 
-    comm.send({"finish_run": True}, dest=head_rank, tag=20)
+    comm.send({"finish_run": True}, dest=head_rank)
 
     try:
         for i in range(len(data)):
