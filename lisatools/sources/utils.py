@@ -90,6 +90,13 @@ class CalculationController:
         return opt_snr
 
 
+def mT_q_to_m1_m2(mT: float, q: float) -> Tuple[float, float]:
+    """
+    q <= 1.0
+    """
+    return (mT / (1 + q), (q * mT) / (1 + q))
+
+
 def dist_convert(x: float) -> float:
     return x * 1e9 * PC_SI
 
@@ -116,6 +123,7 @@ class BBHCalculationController(CalculationController):
             7: np.arccos,
             9: np.arcsin,
             11: time_convert,
+            (0, 1): mT_q_to_m1_m2,
         }
         self.transform_fn = TransformContainer(
             parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
