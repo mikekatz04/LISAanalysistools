@@ -11,6 +11,8 @@ import numpy as np
 from scipy import interpolate
 import matplotlib.pyplot as plt
 
+from eryn.utils import TransformContainer
+
 
 try:
     import cupy as cp
@@ -286,6 +288,7 @@ class AnalysisContainer:
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
+        transform_fn: Optional[TransformContainer] = None,
         **kwargs: dict,
     ) -> float | complex:
         """Return the likelihood of a generated signal with the data.
@@ -308,8 +311,14 @@ class AnalysisContainer:
         if data_res_arr_kwargs == {}:
             data_res_arr_kwargs = self.data_res_arr.init_kwargs
 
+        if transform_fn is not None:
+            args_tmp = np.asarray(args)
+            args_in = tuple(transform_fn.both_transforms(args_tmp))
+        else:
+            args_in = args
+
         template = DataResidualArray(
-            self.signal_gen(*args, **waveform_kwargs), **data_res_arr_kwargs
+            self.signal_gen(*args_in, **waveform_kwargs), **data_res_arr_kwargs
         )
 
         args_2 = (template,)

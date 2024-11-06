@@ -162,11 +162,11 @@ class Sensitivity(ABC):
         ):
             if stochastic_function is None:
                 stochastic_function = FittedHyperbolicTangentGalacticForeground
+                assert len(stochastic_params) == 1
 
-                check = stochastic_function.get_Sh(
-                    f, *stochastic_params, **stochastic_kwargs
-                )
-            sgal[:] = check
+            sgal[:] = stochastic_function.get_Sh(
+                f, *stochastic_params, **stochastic_kwargs
+            )
 
         if squeeze:
             sgal = sgal.squeeze()

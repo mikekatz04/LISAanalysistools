@@ -1,5 +1,5 @@
 import warnings
-from eryn.state import Branch, BranchSupplimental
+from eryn.state import Branch, BranchSupplemental
 
 import numpy as np
 
