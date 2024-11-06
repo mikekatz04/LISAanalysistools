@@ -435,7 +435,30 @@ class AnalysisContainer:
             **kwargs,
         )
 
-    def eryn_likelihood_function(self, x, *args, **kwargs):
+    def eryn_likelihood_function(
+        self, x: np.ndarray | list | tuple, *args: Any, **kwargs: Any
+    ) -> np.ndarray | float:
+        """Likelihood function for Eryn sampler.
+
+        This function is not vectorized.
+
+        ``signal_gen`` must be set to use this function.
+
+        Args:
+            x: Parameters. Can be 1D list, tuple, array or 2D array.
+                If a 2D array is input, the computation is done serially.
+            *args: Likelihood args.
+            **kwargs: Likelihood kwargs.
+
+        Returns:
+            Likelihood value(s).
+
+        """
+        assert self.signal_gen is not None
+
+        if isinstance(x, list) or isinstance(x, tuple):
+            x = np.asarray(x)
+
         if x.ndim == 1:
             input_vals = tuple(x) + tuple(args)
             return self.calculate_signal_likelihood(*input_vals, **kwargs)

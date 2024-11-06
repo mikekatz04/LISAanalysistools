@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.sensitivity &mdash; lisaanalysistools 1.0.10 documentation</title>
+  <title>lisatools.sensitivity &mdash; lisaanalysistools 1.0.11 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
@@ -18,7 +18,7 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=377e76b0"></script>
+        <script src="../../_static/documentation_options.js?v=9306f2a9"></script>
         <script src="../../_static/doctools.js?v=888ff710"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
@@ -266,11 +266,11 @@
         <span class="p">):</span>
             <span class="k">if</span> <span class="n">stochastic_function</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">stochastic_function</span> <span class="o">=</span> <span class="n">FittedHyperbolicTangentGalacticForeground</span>
+                <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">stochastic_params</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span>
 
-                <span class="n">check</span> <span class="o">=</span> <span class="n">stochastic_function</span><span class="o">.</span><span class="n">get_Sh</span><span class="p">(</span>
-                    <span class="n">f</span><span class="p">,</span> <span class="o">*</span><span class="n">stochastic_params</span><span class="p">,</span> <span class="o">**</span><span class="n">stochastic_kwargs</span>
-                <span class="p">)</span>
-            <span class="n">sgal</span><span class="p">[:]</span> <span class="o">=</span> <span class="n">check</span>
+            <span class="n">sgal</span><span class="p">[:]</span> <span class="o">=</span> <span class="n">stochastic_function</span><span class="o">.</span><span class="n">get_Sh</span><span class="p">(</span>
+                <span class="n">f</span><span class="p">,</span> <span class="o">*</span><span class="n">stochastic_params</span><span class="p">,</span> <span class="o">**</span><span class="n">stochastic_kwargs</span>
+            <span class="p">)</span>
 
         <span class="k">if</span> <span class="n">squeeze</span><span class="p">:</span>
             <span class="n">sgal</span> <span class="o">=</span> <span class="n">sgal</span><span class="o">.</span><span class="n">squeeze</span><span class="p">()</span>

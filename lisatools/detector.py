@@ -9,6 +9,7 @@ import h5py
 from scipy import interpolate
 
 from .utils.constants import *
+from .utils.utility import get_array_module
 
 import numpy as np
 
@@ -453,9 +454,10 @@ class Orbits(ABC):
             squeeze = False
             t = self.xp.asarray(t)
             sc = self.xp.asarray(sc).astype(np.int32)
+
         else:
             raise ValueError(
-                "(t, sc) can be (float, int), (np.ndarray, int), (np.ndarray, np.ndarray)."
+                "(t, sc) can be (float, int), (np.ndarray, int), (np.ndarray, np.ndarray). If the inputs follow this, make sure the orbits class GPU setting matches the arrays coming in (GPU or CPU)."
             )
 
         # buffer arrays for input into c code
