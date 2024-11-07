@@ -104,11 +104,12 @@ class DataResidualArray:
             self._Tobs = self.data_length * dt
             self._df = 1 / self._Tobs
             self._fmax = 1 / (2 * dt)
-            self._f_arr = np.fft.rfftfreq(self.data_length, dt)
+            xp = get_array_module(self.data_res_arr)
+            self._f_arr = xp.asarray(np.fft.rfftfreq(self.data_length, dt))
 
             # transform data
             tmp = (
-                get_array_module(self.data_res_arr).fft.rfft(self.data_res_arr, axis=-1)
+                xp.fft.rfft(self.data_res_arr, axis=-1)
                 * self._dt
             )
             del self._data_res_arr
@@ -225,7 +226,8 @@ class DataResidualArray:
                 raise ValueError
 
         self.nchannels = len(new_out)
-        self._data_res_arr = np.asarray(list(new_out), dtype=new_out[0].dtype)
+        xp = get_array_module(new_out[0])
+        self._data_res_arr = xp.asarray(list(new_out), dtype=new_out[0].dtype)
 
     def __getitem__(self, index: tuple) -> np.ndarray:
         """Index this class directly in ``self.data_res_arr``."""

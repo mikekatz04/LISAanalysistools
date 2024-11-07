@@ -95,7 +95,7 @@ def inner_product(
             "The two signals are two different lengths. Must be the same length."
         )
 
-    freqs = sig1.f_arr
+    freqs = xp.asarray(sig1.f_arr)
 
     # get psd weighting
     if not isinstance(psd, SensitivityMatrix):
@@ -192,6 +192,17 @@ def inner_product(
         raise ValueError("Normalize must be True, False, 'sig1', or 'sig2'.")
 
     out /= normalization_value
+
+    # remove from cupy if needed
+    try:
+        out = out.item()
+    except AttributeError:
+        pass
+
+    # add copy function to complex value for compatibility
+    if complex:
+        out = np.complex128(out)
+
     return out
 
 

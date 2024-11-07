@@ -17,7 +17,7 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
 from . import detector as lisa_models
-from .utils.utility import AET
+from .utils.utility import AET, get_array_module
 from .utils.constants import *
 from .stochastic import (
     StochasticContribution,
@@ -638,8 +638,9 @@ class SensitivityMatrix:
             else:
                 raise ValueError
 
+        xp = get_array_module(new_out[0])
         # setup in array form
-        self._sens_mat = np.asarray(list(new_out), dtype=float).reshape(
+        self._sens_mat = xp.asarray(list(new_out), dtype=float).reshape(
             self.return_shape + (-1,)
         )
 
