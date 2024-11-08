@@ -50,7 +50,13 @@ class BBHSNRWaveform(SNRWaveform):
         self._f_arr = f_arr
 
     def __call__(
-        self, *params: Any, return_array: Optional[bool] = False, **kwargs: Any
+        self,
+        *params: Any,
+        return_array: Optional[bool] = False,
+        mf_min: Optional[float] = 1e-4,
+        mf_max: Optional[float] = 0.6,
+        freqs: Optional[np.ndarray] = None,
+        **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | np.ndarray:
         """Generate waveforms for SNR calculations.
 
@@ -59,6 +65,10 @@ class BBHSNRWaveform(SNRWaveform):
                 for :class:`BBHWaveformFD`.
             return_array: If ``True``, return ``array([A, E, T]).
                 If ``False``, return (A, E, T).
+            mf_min: Minimum dimensionless frequency to evaluate.
+            mf_max: Maximum dimensionless frequency to evaluate.
+            freqs: If ``None``, then default will be ``np.logspace(mf_min / M, mf_max / M, 1024)``.
+                Otherwise, it will calulate frequencies based on this exact array.
             **kwargs: ``kwargs`` for the ``__call__`` function
                 for :class:`BBHWaveformFD`.
 
@@ -71,9 +81,14 @@ class BBHSNRWaveform(SNRWaveform):
         m1 = params[0]
         m2 = params[1]
 
-        min_f = 1e-4 / (MTSUN_SI * (m1 + m2))
-        max_f = 0.6 / (MTSUN_SI * (m1 + m2))
-        self.f_arr = np.logspace(np.log10(min_f), np.log10(max_f), 1024)
+        if freqs is None:
+            min_f = mf_min / (MTSUN_SI * (m1 + m2))
+            max_f = mf_max / (MTSUN_SI * (m1 + m2))
+            self.f_arr = np.logspace(np.log10(min_f), np.log10(max_f), 1024)
+
+        else:
+            assert isinstance(freqs, np.ndarray)
+            self.f_arr = freqs
 
         # generate waveform with proper settings
         AET = self.wave_gen(
