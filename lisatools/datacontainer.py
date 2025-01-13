@@ -300,7 +300,7 @@ class DataResidualArray:
         for i, ax_tmp in zip(inds_list, ax):
             plot_in = np.abs(self.data_res_arr[i])
             if char_strain:
-                plot_in *= self.frequency_arr
+                plot_in *= 2 * self.frequency_arr
             ax_tmp.loglog(self.frequency_arr, plot_in, **kwargs)
 
         return (fig, ax)
@@ -308,4 +308,4 @@ class DataResidualArray:
     @property
     def char_strain(self) -> np.ndarray:
         """Characteristic strain representation of the data."""
-        return np.sqrt(self.f_arr) * np.abs(self.data_res_arr)
+        return 2 * self.f_arr * np.abs(self.data_res_arr)
