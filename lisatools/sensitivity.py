@@ -22,6 +22,7 @@ from .utils.constants import *
 from .stochastic import (
     StochasticContribution,
     FittedHyperbolicTangentGalacticForeground,
+    check_stochastic,
 )
 
 """
@@ -38,6 +39,18 @@ class Sensitivity(ABC):
     """
 
     channel: str = None
+
+    @staticmethod
+    def get_xp(array: np.ndarray) -> object:
+        """Numpy or Cupy (or float)"""
+        try:
+            return get_array_module(array)
+        except ValueError:
+            if isinstance(array, float):
+                return np
+            raise ValueError(
+                "array must be a numpy or cupy array (it can be a float as well)."
+            )
 
     @staticmethod
     def transform(
@@ -146,14 +159,14 @@ class Sensitivity(ABC):
 
 
         """
-
+        xp = cls.get_xp(f)
         if isinstance(f, float):
-            f = np.ndarray([f])
+            f = xp.ndarray([f])
             squeeze = True
         else:
             squeeze = False
 
-        sgal = np.zeros_like(f)
+        sgal = xp.zeros_like(f)
 
         if (
             (stochastic_params != () and stochastic_params is not None)
@@ -162,7 +175,8 @@ class Sensitivity(ABC):
         ):
             if stochastic_function is None:
                 stochastic_function = FittedHyperbolicTangentGalacticForeground
-                assert len(stochastic_params) == 1
+
+            stochastic_function = check_stochastic(stochastic_function)
 
             sgal[:] = stochastic_function.get_Sh(
                 f, *stochastic_params, **stochastic_kwargs
@@ -517,10 +531,13 @@ class CornishLISASens(LISASens):
 class FlatPSDFunction(LISASens):
     """White Noise PSD function."""
 
-    @staticmethod
-    def get_Sn(f: float | np.ndarray, val: float, **kwargs: dict) -> float | np.ndarray:
+    @classmethod
+    def get_Sn(
+        cls, f: float | np.ndarray, val: float, **kwargs: dict
+    ) -> float | np.ndarray:
         # TODO: documentation here
-        out = np.full_like(f, val)
+        xp = cls.get_xp(f)
+        out = xp.full_like(f, val)
         if isinstance(f, float):
             out = out.item()
         return out
@@ -643,6 +660,23 @@ class SensitivityMatrix:
         self._sens_mat = xp.asarray(list(new_out), dtype=float).reshape(
             self.return_shape + (-1,)
         )
+
+        xp = get_array_module(self.sens_mat)
+
+        # setup detC
+        """Determinant and inverse of TDI matrix."""
+        if self.sens_mat.ndim < 3:
+            self.detC = xp.prod(self.sens_mat, axis=0)
+            self.invC = 1 / self.sens_mat
+
+        else:
+            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
+            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
+            invC[self.detC != 0.0] = xp.linalg.inv(
+                self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0]
+            )
+            invC[self.detC == 0.0] = 1e-100
+            self.invC = invC.transpose(1, 2, 0)
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
@@ -804,6 +838,7 @@ def get_sensitivity(
     *args: tuple,
     sens_fn: Optional[Sensitivity | str] = LISASens,
     return_type="PSD",
+    fill_nans: float = 1e10,
     **kwargs,
 ) -> float | np.ndarray:
     """Generic sensitivity generator
@@ -816,6 +851,8 @@ def get_sensitivity(
         sens_fn: String or class that represents the name of the desired PSD function.
         return_type: Described the desired output. Choices are ASD,
             PSD, or char_strain (characteristic strain). Default is ASD.
+        fill_nans: Value to fill nans in sensitivity (at 0 frequency).
+            If ``None``, thens nans will be left in the array.
         **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
 
     Return:
@@ -824,12 +861,7 @@ def get_sensitivity(
     """
 
     if isinstance(sens_fn, str):
-        try:
-            sensitivity = globals()[sens_fn]
-        except KeyError:
-            raise ValueError(
-                f"{sens_fn} sensitivity is not available. Available stock sensitivities are"
-            )
+        sensitivity = check_sensitivity(sens_fn)
 
     elif hasattr(sens_fn, "get_Sn"):
         sensitivity = sens_fn
@@ -840,6 +872,10 @@ def get_sensitivity(
         )
 
     PSD = sensitivity.get_Sn(f, *args, **kwargs)
+
+    if fill_nans is not None:
+        assert isinstance(fill_nans, float)
+        PSD[np.isnan(PSD)] = fill_nans
 
     if return_type == "PSD":
         return PSD
@@ -898,3 +934,39 @@ def get_stock_sensitivity_matrix_options() -> List[SensitivityMatrix]:
 
     """
     return __stock_sensitivity_mat_options__
+
+
+def get_stock_sensitivity_from_str(sensitivity: str) -> Sensitivity:
+    """Return a LISA sensitivity from a ``str`` input.
+
+    Args:
+        sensitivity: Sensitivity indicated with a ``str``.
+
+    Returns:
+        Sensitivity associated to that ``str``.
+
+    """
+    if sensitivity not in __stock_sens_options__:
+        raise ValueError(
+            "Requested string sensitivity is not available. See lisatools.sensitivity documentation."
+        )
+    return globals()[sensitivity]
+
+
+def check_sensitivity(sensitivity: Any) -> Sensitivity:
+    """Check input sensitivity.
+
+    Args:
+        sensitivity: Sensitivity to check.
+
+    Returns:
+        Sensitivity checked. Adjusted from ``str`` if ``str`` input.
+
+    """
+    if isinstance(sensitivity, str):
+        sensitivity = get_stock_sensitivity_from_str(sensitivity)
+
+    if not issubclass(sensitivity, Sensitivity):
+        raise ValueError("sensitivity argument not given correctly.")
+
+    return sensitivity

@@ -4,10 +4,10 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Introduction &mdash; lisaanalysistools 1.0.13 documentation</title>
+  <title>Introduction &mdash; lisaanalysistools 1.0.14 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
-      <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
+      <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
@@ -20,8 +20,8 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=0086fcda"></script>
-        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/documentation_options.js?v=cb0f6c17"></script>
+        <script src="../_static/doctools.js?v=9bcbadda"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
         <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
@@ -95,6 +95,7 @@
 <li class="toctree-l2"><a class="reference internal" href="#Build-a-template-generation-model-and-add-to-the-AnalysisContainer">Build a template generation model and add to the <code class="docutils literal notranslate"><span class="pre">AnalysisContainer</span></code></a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="#Comparing-XYZ-and-AET">Comparing XYZ and AET</a></li>
 </ul>
 
         </div>
@@ -148,7 +149,11 @@
 </section>
 <section id="LISA-Sensitivity">
 <h1>LISA Sensitivity<a class="headerlink" href="#LISA-Sensitivity" title="Link to this heading"></a></h1>
-<p>We will begin with generating the LISA sensitivity. You can do this with the <code class="docutils literal notranslate"><span class="pre">lisatools.sensitivity.get_sensitivity</span></code> function. Some helpful keyword arguments: * <code class="docutils literal notranslate"><span class="pre">sens_fn</span></code>: Type of sensitivity response function. Base sensitivity or TDI sensitivity. Base sensitivity: <code class="docutils literal notranslate"><span class="pre">LISASens</span></code>. TDI sensitivities are shown below. * return_type: PSD, ASD, or characteristic strain.</p>
+<p>We will begin with generating the LISA sensitivity. You can do this with the <code class="docutils literal notranslate"><span class="pre">lisatools.sensitivity.get_sensitivity</span></code> function. Some helpful keyword arguments:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">sens_fn</span></code>: Type of sensitivity response function. Base sensitivity or TDI sensitivity. Base sensitivity: <code class="docutils literal notranslate"><span class="pre">LISASens</span></code>. TDI sensitivities are shown below.</p></li>
+<li><p>return_type: PSD, ASD, or characteristic strain.</p></li>
+</ul>
 <div class="nbinput docutils container">
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[2]:
 </pre></div>
@@ -709,10 +714,10 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[LISAModel(Soms_d=2.25e-22, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x119c51640&gt;, name=&#39;scirdv1&#39;),
- LISAModel(Soms_d=9.999999999999999e-23, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x1170d7e00&gt;, name=&#39;proposal&#39;),
- LISAModel(Soms_d=9.999999999999999e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x127276720&gt;, name=&#39;mrdv1&#39;),
- LISAModel(Soms_d=6.241e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x1271ef2f0&gt;, name=&#39;sangria&#39;)]
+[LISAModel(Soms_d=2.25e-22, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x128f126c0&gt;, name=&#39;scirdv1&#39;),
+ LISAModel(Soms_d=9.999999999999999e-23, Sa_a=9e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x12fc18560&gt;, name=&#39;proposal&#39;),
+ LISAModel(Soms_d=9.999999999999999e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x118aa04a0&gt;, name=&#39;mrdv1&#39;),
+ LISAModel(Soms_d=6.241e-23, Sa_a=5.76e-30, orbits=&lt;lisatools.detector.DefaultOrbits object at 0x11870f470&gt;, name=&#39;sangria&#39;)]
 </pre></div></div>
 </div>
 <p>Compare two models.</p>
@@ -735,7 +740,7 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-&lt;matplotlib.legend.Legend at 0x128cedd00&gt;
+&lt;matplotlib.legend.Legend at 0x148514620&gt;
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -804,17 +809,17 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:630: RuntimeWarning: divide by zero encountered in divide
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:633: RuntimeWarning: divide by zero encountered in divide
   Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:632: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:635: RuntimeWarning: divide by zero encountered in power
   Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:634: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:637: RuntimeWarning: invalid value encountered in multiply
   Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:639: RuntimeWarning: divide by zero encountered in divide
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:642: RuntimeWarning: divide by zero encountered in divide
   Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:641: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:644: RuntimeWarning: invalid value encountered in multiply
   Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:178: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:178: RuntimeWarning: divide by zero encountered in power
   * (f ** (-7.0 / 3.0))
 </pre></div></div>
 </div>
@@ -824,7 +829,7 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 <div class="output_area docutils container">
 <div class="highlight"><pre>
 Inner product &lt;h1|h2&gt;: 1981.3392667268324
-Complex inner product &lt;h1|h2&gt;: (1981.3392667268324+401.63841799838985j), phase maximized value: 2021.6376304090384
+Complex inner product &lt;h1|h2&gt;: (1981.3392667268322+401.63841799838985j), phase maximized value: 2021.6376304090381
 Normalized inner product &lt;h1|h2&gt;: 0.9800664328144687
 </pre></div></div>
 </div>
@@ -834,7 +839,7 @@ Normalized inner product &lt;h1|h2&gt;: 0.9800664328144687
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-(1e-05, 0.10206431774793984)
+(1e-05, np.float64(0.10206431774793984))
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -926,7 +931,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[&lt;matplotlib.lines.Line2D at 0x1291db3b0&gt;]
+[&lt;matplotlib.lines.Line2D at 0x148caf8f0&gt;]
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -965,7 +970,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[&lt;matplotlib.lines.Line2D at 0x12924af60&gt;]
+[&lt;matplotlib.lines.Line2D at 0x148d8d040&gt;]
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -1017,9 +1022,9 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[[ 4.94652789e-04 -1.34368122e-13  1.19037481e-08]
- [-1.34368122e-13  1.46157988e-13 -1.45604730e-08]
- [ 1.19037481e-08 -1.45604730e-08  1.95551222e-03]]
+[[ 4.94652789e-04 -1.34367659e-13  1.19036834e-08]
+ [-1.34367659e-13  1.46157988e-13 -1.45604730e-08]
+ [ 1.19036834e-08 -1.45604730e-08  1.95551222e-03]]
 </pre></div></div>
 </div>
 <p>Visualizing your information matrix.</p>
@@ -1038,7 +1043,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-&lt;matplotlib.colorbar.Colorbar at 0x129447fe0&gt;
+&lt;matplotlib.colorbar.Colorbar at 0x14fe7e480&gt;
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
@@ -1142,9 +1147,9 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 <div class="output_area docutils container">
 <div class="highlight"><pre>
 (array([4.94652788e-04, 1.95551222e-03, 3.77427245e-14]),
- array([[ 1.00000000e+00,  8.14845550e-06,  9.24577096e-11],
-        [-3.17854393e-11, -7.44586141e-06,  1.00000000e+00],
-        [-8.14845550e-06,  1.00000000e+00,  7.44586141e-06]]))
+ array([[ 1.00000000e+00,  8.14841119e-06,  9.24577470e-11],
+        [-3.17858065e-11, -7.44586141e-06,  1.00000000e+00],
+        [-8.14841119e-06,  1.00000000e+00,  7.44586140e-06]]))
 </pre></div></div>
 </div>
 </section>
@@ -1175,23 +1180,6 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 <div class="nboutput docutils container">
 <div class="prompt empty docutils container">
 </div>
-<div class="output_area stderr docutils container">
-<div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:630: RuntimeWarning: divide by zero encountered in divide
-  Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:632: RuntimeWarning: divide by zero encountered in power
-  Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:634: RuntimeWarning: invalid value encountered in multiply
-  Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:639: RuntimeWarning: divide by zero encountered in divide
-  Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:641: RuntimeWarning: invalid value encountered in multiply
-  Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
-</pre></div></div>
-</div>
-<div class="nboutput docutils container">
-<div class="prompt empty docutils container">
-</div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
 [1.49875455 1.49875455 1.49875455 ... 1.49875455 1.49875455 1.49875455]
@@ -1202,7 +1190,17 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:178: RuntimeWarning: divide by zero encountered in power
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:633: RuntimeWarning: divide by zero encountered in divide
+  Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:635: RuntimeWarning: divide by zero encountered in power
+  Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:637: RuntimeWarning: invalid value encountered in multiply
+  Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:642: RuntimeWarning: divide by zero encountered in divide
+  Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/detector.py:644: RuntimeWarning: invalid value encountered in multiply
+  Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/stochastic.py:178: RuntimeWarning: divide by zero encountered in power
   * (f ** (-7.0 / 3.0))
 </pre></div></div>
 </div>
@@ -1246,7 +1244,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-[2.02172681e+03 1.59046154e+04 1.94227045e-01] [ 1.00005281e+00 -7.75106680e-10  1.72300764e-04]
+[2.02172681e+03 1.59046154e+04 1.94227122e-01] [ 1.00005281e+00 -7.75106867e-10  1.72300784e-04]
 </pre></div></div>
 </div>
 </section>
@@ -1326,7 +1324,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/Users/mlkatz1/miniconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:712: RuntimeWarning: invalid value encountered in multiply
+/Users/mlkatz1/anaconda3/envs/lisa_env/lib/python3.12/site-packages/lisatools/sensitivity.py:747: RuntimeWarning: invalid value encountered in multiply
   plot_in = np.sqrt(self.frequency_arr * plot_in)
 </pre></div></div>
 </div>
@@ -1362,7 +1360,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-1646.1603122108788
+1646.1603122108786
 </pre></div></div>
 </div>
 <div class="nbinput docutils container">
@@ -1379,7 +1377,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-142084780.59000048
+np.float64(-inf)
 </pre></div></div>
 </div>
 <div class="nbinput docutils container">
@@ -1396,7 +1394,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
--823.0801561054394
+-823.0801561054393
 </pre></div></div>
 </div>
 <div class="nbinput docutils container">
@@ -1413,7 +1411,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-142085603.6701566
+np.float64(-inf)
 </pre></div></div>
 </div>
 <div class="nbinput docutils container">
@@ -1457,8 +1455,8 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-Template Inner product: 1728.46487088591
-Template SNR: (42.60154626551122, 40.572820059473216)
+Template Inner product: 1728.4648708859095
+Template SNR: (np.float64(42.60154626551122), np.float64(40.572820059473216))
 Template Likelihood: -2.0611573257758664
 </pre></div></div>
 </div>
@@ -1501,16 +1499,105 @@ Template Likelihood: -2.0611573257758664
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-With parameters likelihood: 2.2737367544323206e-13
-With parameters snr: (40.57290120524879, 40.5729012052488)
-With parameters inner product: 1646.1603122108788
+With parameters likelihood: -0.0
+With parameters snr: (np.float64(40.57290120524879), np.float64(40.57290120524879))
+With parameters inner product: 1646.1603122108786
 Adjust amplitude:
 With parameters likelihood: -0.7407721404947551
-With parameters snr: (41.79008824140625, 40.57290120524879)
+With parameters snr: (np.float64(41.79008824140625), np.float64(40.57290120524879))
 With parameters inner product: 1695.545121577205
 </pre></div></div>
 </div>
 </section>
+</section>
+<section id="Comparing-XYZ-and-AET">
+<h1>Comparing XYZ and AET<a class="headerlink" href="#Comparing-XYZ-and-AET" title="Link to this heading"></a></h1>
+<p>The XYZ TDI channels have correlated noise. In matrix form, you can imagine this as</p>
+<div class="math notranslate nohighlight">
+\[\begin{split}C = \left(\begin{matrix}
+    XX &amp; XY &amp; XZ \\
+    YX &amp; YY &amp; YZ \\
+    ZX &amp; ZY &amp; ZZ
+\end{matrix}\right).\end{split}\]</div>
+<p>.</p>
+<p>For AET, this becomes diagonalized:</p>
+<div class="math notranslate nohighlight">
+\[\begin{split}C' = \left(\begin{matrix}
+    AA &amp; 0 &amp; 0 \\
+    0 &amp; EE &amp; 0 \\
+    0 &amp; 0 &amp; TT
+\end{matrix}\right).\end{split}\]</div>
+<p>In the inner product equation, the multiplication of the template and noise is given as <span class="math notranslate nohighlight">\((\mathbf{h}^T \mathbf{C}^{-1} \mathbf{h})\)</span>. In the XYZ basis, the full 3x3 matrix at each frequency must be inverted. In the AET basis, the inversion is equivalent to taking 1 over the sensitivity value themselves.</p>
+<p>A good check is to verify that your inner product values are equivalent in both bases. To do this, you need real TDI templates. So, we will use <code class="docutils literal notranslate"><span class="pre">GBGPU</span></code> to put in one Galactic binary waveform.</p>
+<div class="nbinput docutils container">
+<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[46]:
+</pre></div>
+</div>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="c1"># setup a data stream</span>
+<span class="n">dt</span> <span class="o">=</span> <span class="mf">10.0</span>
+<span class="n">Tobs</span> <span class="o">=</span> <span class="n">YRSID_SI</span> <span class="o">/</span> <span class="mf">2.0</span>
+<span class="n">N</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">Tobs</span> <span class="o">/</span> <span class="n">dt</span><span class="p">)</span>
+<span class="n">Tobs</span> <span class="o">=</span> <span class="n">N</span> <span class="o">*</span> <span class="n">dt</span>
+<span class="n">t</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">N</span><span class="p">)</span> <span class="o">*</span> <span class="n">dt</span>
+
+<span class="n">data_xyz</span> <span class="o">=</span> <span class="n">DataResidualArray</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">),</span>
+        <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">),</span>
+        <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">),</span>
+    <span class="p">],</span>
+    <span class="n">dt</span><span class="o">=</span><span class="n">dt</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">data_aet</span> <span class="o">=</span> <span class="n">DataResidualArray</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">),</span>
+        <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">),</span>
+        <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">t</span><span class="p">),</span>
+    <span class="p">],</span>
+    <span class="n">dt</span><span class="o">=</span><span class="n">dt</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># build waveforms</span>
+<span class="kn">from</span> <span class="nn">gbgpu.gbgpu</span> <span class="kn">import</span> <span class="n">GBGPU</span>
+<span class="n">gb</span> <span class="o">=</span> <span class="n">GBGPU</span><span class="p">()</span>
+<span class="n">gb</span><span class="o">.</span><span class="n">run_wave</span><span class="p">(</span>
+    <span class="mf">1e-23</span><span class="p">,</span> <span class="mf">0.003</span><span class="p">,</span> <span class="mf">1e-17</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">,</span> <span class="mf">0.8</span><span class="p">,</span> <span class="mf">0.9</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="n">T</span><span class="o">=</span><span class="n">Tobs</span><span class="p">,</span> <span class="n">dt</span><span class="o">=</span><span class="n">dt</span><span class="p">,</span> <span class="n">oversample</span><span class="o">=</span><span class="mi">4</span>
+<span class="p">)</span>
+
+<span class="c1"># inject waveforms</span>
+<span class="n">data_xyz</span><span class="p">[:,</span> <span class="n">gb</span><span class="o">.</span><span class="n">start_inds</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="p">:</span> <span class="n">gb</span><span class="o">.</span><span class="n">start_inds</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">gb</span><span class="o">.</span><span class="n">A</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]]</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">gb</span><span class="o">.</span><span class="n">XYZf</span><span class="p">[:]</span>
+<span class="p">)</span>
+<span class="n">data_aet</span><span class="p">[:,</span> <span class="n">gb</span><span class="o">.</span><span class="n">start_inds</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="p">:</span> <span class="n">gb</span><span class="o">.</span><span class="n">start_inds</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="n">gb</span><span class="o">.</span><span class="n">A</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]]</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">AET</span><span class="p">(</span><span class="o">*</span><span class="n">gb</span><span class="o">.</span><span class="n">XYZf</span><span class="p">[</span><span class="mi">0</span><span class="p">]))</span>
+<span class="p">)</span>
+
+<span class="c1"># set sensitivity matrices</span>
+<span class="n">sens_xyz</span> <span class="o">=</span> <span class="n">XYZ1SensitivityMatrix</span><span class="p">(</span><span class="n">data_xyz</span><span class="o">.</span><span class="n">f_arr</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;scirdv1&quot;</span><span class="p">)</span>
+<span class="n">sens_aet</span> <span class="o">=</span> <span class="n">AET1SensitivityMatrix</span><span class="p">(</span><span class="n">data_aet</span><span class="o">.</span><span class="n">f_arr</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">&quot;scirdv1&quot;</span><span class="p">)</span>
+
+<span class="n">ac_xyz</span> <span class="o">=</span> <span class="n">AnalysisContainer</span><span class="p">(</span><span class="n">data_xyz</span><span class="p">,</span> <span class="n">sens_xyz</span><span class="p">)</span>
+<span class="n">ac_aet</span> <span class="o">=</span> <span class="n">AnalysisContainer</span><span class="p">(</span><span class="n">data_aet</span><span class="p">,</span> <span class="n">sens_aet</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">ac_xyz</span><span class="o">.</span><span class="n">inner_product</span><span class="p">(),</span> <span class="n">ac_aet</span><span class="o">.</span><span class="n">inner_product</span><span class="p">())</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">ac_xyz</span><span class="o">.</span><span class="n">likelihood</span><span class="p">(</span><span class="n">source_only</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span> <span class="n">ac_aet</span><span class="o">.</span><span class="n">likelihood</span><span class="p">(</span><span class="n">source_only</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+
+<span class="c1"># TODO: currently a small difference in noise-included likelihoodm</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">ac_xyz</span><span class="o">.</span><span class="n">likelihood</span><span class="p">(),</span> <span class="n">ac_aet</span><span class="o">.</span><span class="n">likelihood</span><span class="p">())</span>
+</pre></div>
+</div>
+</div>
+<div class="nboutput nblast docutils container">
+<div class="prompt empty docutils container">
+</div>
+<div class="output_area docutils container">
+<div class="highlight"><pre>
+19.134165338394837 19.134165338394727
+-9.567082669197418 -9.567082669197363
+108203542.2031658 108203940.3557624
+</pre></div></div>
+</div>
 </section>
 
 

@@ -108,10 +108,7 @@ class DataResidualArray:
             self._f_arr = xp.asarray(np.fft.rfftfreq(self.data_length, dt))
 
             # transform data
-            tmp = (
-                xp.fft.rfft(self.data_res_arr, axis=-1)
-                * self._dt
-            )
+            tmp = xp.fft.rfft(self.data_res_arr, axis=-1) * self._dt
             del self._data_res_arr
             self._data_res_arr = tmp
             self.data_length = self._data_res_arr.shape[-1]
@@ -232,6 +229,10 @@ class DataResidualArray:
     def __getitem__(self, index: tuple) -> np.ndarray:
         """Index this class directly in ``self.data_res_arr``."""
         return self.data_res_arr[index]
+
+    def __setitem__(self, index: tuple, value: float | np.ndarray) -> np.ndarray:
+        """Index this class directly in ``self.data_res_arr``."""
+        self.data_res_arr[index] = value
 
     @property
     def ndim(self) -> int:

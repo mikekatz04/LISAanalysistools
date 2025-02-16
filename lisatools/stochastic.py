@@ -289,3 +289,39 @@ def get_stock_gb_stochastic_options() -> List[StochasticContribution]:
 
     """
     return __stock_gb_stochastic_options__
+
+
+def get_default_stochastic_from_str(stochastic: str) -> StochasticContribution:
+    """Return a LISA stochastic from a ``str`` input.
+
+    Args:
+        stochastic: Stochastic contribution indicated with a ``str``.
+
+    Returns:
+        Stochastic contribution associated to that ``str``.
+
+    """
+    if stochastic not in __stock_gb_stochastic_options__:
+        raise ValueError(
+            "Requested string stochastic is not available. See lisatools.stochastic documentation."
+        )
+    return globals()[stochastic]
+
+
+def check_stochastic(stochastic: Any) -> StochasticContribution:
+    """Check input stochastic contribution.
+
+    Args:
+        stochastic: Stochastic contribution to check.
+
+    Returns:
+        Stochastic contribution checked. Adjusted from ``str`` if ``str`` input.
+
+    """
+    if isinstance(stochastic, str):
+        stochastic = get_default_stochastic_from_str(stochastic)
+
+    if not issubclass(stochastic, StochasticContribution):
+        raise ValueError("stochastic argument not given correctly.")
+
+    return stochastic

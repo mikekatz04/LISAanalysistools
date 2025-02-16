@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.diagnostic &mdash; lisaanalysistools 1.0.12 documentation</title>
+  <title>lisatools.diagnostic &mdash; lisaanalysistools 1.0.13 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
-      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
+      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
@@ -18,8 +18,8 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=a4fe78c3"></script>
-        <script src="../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../_static/documentation_options.js?v=0086fcda"></script>
+        <script src="../../_static/doctools.js?v=9bcbadda"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../../_static/js/theme.js"></script>
@@ -65,6 +65,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Diagnostics">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Analysis-Container">Analysis Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Comparing-XYZ-and-AET">Comparing XYZ and AET</a></li>
 </ul>
 
         </div>
@@ -236,12 +237,12 @@
 
         <span class="n">temp1</span> <span class="o">=</span> <span class="n">sig1</span><span class="p">[</span><span class="n">op_set</span><span class="p">[</span><span class="s2">&quot;sig1_ind&quot;</span><span class="p">]]</span>
         <span class="n">temp2</span> <span class="o">=</span> <span class="n">sig2</span><span class="p">[</span><span class="n">op_set</span><span class="p">[</span><span class="s2">&quot;sig2_ind&quot;</span><span class="p">]]</span>
-        <span class="n">psd_tmp</span> <span class="o">=</span> <span class="n">psd</span><span class="p">[</span><span class="n">op_set</span><span class="p">[</span><span class="s2">&quot;psd_ind&quot;</span><span class="p">]]</span>
+        <span class="n">inv_psd_tmp</span> <span class="o">=</span> <span class="n">psd</span><span class="o">.</span><span class="n">invC</span><span class="p">[</span><span class="n">op_set</span><span class="p">[</span><span class="s2">&quot;psd_ind&quot;</span><span class="p">]]</span>
 
-        <span class="n">ind_start</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="n">psd_tmp</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="k">else</span> <span class="mi">0</span>
+        <span class="n">ind_start</span> <span class="o">=</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="n">inv_psd_tmp</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="k">else</span> <span class="mi">0</span>
 
         <span class="n">y</span> <span class="o">=</span> <span class="p">(</span>
-            <span class="n">func</span><span class="p">(</span><span class="n">temp1</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:]</span><span class="o">.</span><span class="n">conj</span><span class="p">()</span> <span class="o">*</span> <span class="n">temp2</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:])</span> <span class="o">/</span> <span class="n">psd_tmp</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:]</span>
+            <span class="n">func</span><span class="p">(</span><span class="n">temp1</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:]</span><span class="o">.</span><span class="n">conj</span><span class="p">()</span> <span class="o">*</span> <span class="n">temp2</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:])</span> <span class="o">*</span> <span class="n">inv_psd_tmp</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:]</span>
         <span class="p">)</span>  <span class="c1"># assumes right summation rule</span>
         <span class="c1"># df is sunk into trapz</span>
         <span class="n">tmp_out</span> <span class="o">=</span> <span class="n">factor</span> <span class="o">*</span> <span class="mi">4</span> <span class="o">*</span> <span class="n">xp</span><span class="o">.</span><span class="n">trapz</span><span class="p">(</span><span class="n">y</span><span class="p">,</span> <span class="n">x</span><span class="o">=</span><span class="n">x</span><span class="p">[</span><span class="n">ind_start</span><span class="p">:])</span>
@@ -350,7 +351,9 @@
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">fix</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="n">psd</span><span class="p">[:])</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">isinf</span><span class="p">(</span><span class="n">psd</span><span class="p">[:])</span>
     <span class="k">assert</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">fix</span><span class="p">)</span> <span class="o">==</span> <span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="n">psd</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span> <span class="ow">or</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">fix</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span>
-    <span class="n">nl_val</span> <span class="o">=</span> <span class="o">-</span><span class="mf">1.0</span> <span class="o">/</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">psd</span><span class="p">[</span><span class="o">~</span><span class="n">fix</span><span class="p">]))</span>
+    <span class="c1"># TODO: check on this</span>
+    <span class="n">detC</span> <span class="o">=</span> <span class="n">psd</span><span class="o">.</span><span class="n">detC</span>
+    <span class="n">nl_val</span> <span class="o">=</span> <span class="o">-</span><span class="mf">1.0</span> <span class="o">/</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">detC</span><span class="p">[</span><span class="n">detC</span> <span class="o">!=</span> <span class="mf">0.0</span><span class="p">])))</span>
     <span class="k">return</span> <span class="n">nl_val</span></div>
 
 

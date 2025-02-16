@@ -14,6 +14,9 @@ In addition, posterior samples for each candidate are stored as separate data fr
 
     <div class="sphx-glr-thumbnails">
 
+.. thumbnail-parent-div-open
+
+.. thumbnail-parent-div-close
 
 .. raw:: html
 

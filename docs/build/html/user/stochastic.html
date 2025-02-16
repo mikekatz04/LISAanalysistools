@@ -4,10 +4,10 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stochastic Signals &mdash; lisaanalysistools 1.0.13 documentation</title>
+  <title>Stochastic Signals &mdash; lisaanalysistools 1.0.14 documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
-      <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=61a4c737" />
+      <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
@@ -19,8 +19,8 @@
   
         <script src="../_static/jquery.js?v=5d32c60e"></script>
         <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=0086fcda"></script>
-        <script src="../_static/doctools.js?v=888ff710"></script>
+        <script src="../_static/documentation_options.js?v=cb0f6c17"></script>
+        <script src="../_static/doctools.js?v=9bcbadda"></script>
         <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
         <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
@@ -56,6 +56,7 @@
 <li class="toctree-l1"><a class="reference internal" href="sensitivity.html">Sensitivity Information</a></li>
 <li class="toctree-l1"><a class="reference internal" href="detector.html">Detector Information</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Stochastic Signals</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.check_stochastic"><code class="docutils literal notranslate"><span class="pre">check_stochastic()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#stochastic-base-class">Stochastic Base Class</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution"><code class="docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution.ndim"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.ndim</span></code></a></li>
@@ -113,6 +114,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../tutorial/lisatools_tutorial.html#Diagnostics">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../tutorial/lisatools_tutorial.html#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../tutorial/lisatools_tutorial.html#Analysis-Container">Analysis Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorial/lisatools_tutorial.html#Comparing-XYZ-and-AET">Comparing XYZ and AET</a></li>
 </ul>
 
         </div>
@@ -141,6 +143,23 @@
              
   <section id="stochastic-signals">
 <h1>Stochastic Signals<a class="headerlink" href="#stochastic-signals" title="Link to this heading"></a></h1>
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.sensitivity.check_stochastic">
+<span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">check_stochastic</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stochastic</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#check_stochastic"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.check_stochastic" title="Link to this definition"></a></dt>
+<dd><p>Check input stochastic contribution.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>stochastic</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – Stochastic contribution to check.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Stochastic contribution checked. Adjusted from <code class="docutils literal notranslate"><span class="pre">str</span></code> if <code class="docutils literal notranslate"><span class="pre">str</span></code> input.</p>
+</dd>
+</dl>
+</dd></dl>
+
 <section id="stochastic-base-class">
 <h2>Stochastic Base Class<a class="headerlink" href="#stochastic-base-class" title="Link to this heading"></a></h2>
 <dl class="py class">

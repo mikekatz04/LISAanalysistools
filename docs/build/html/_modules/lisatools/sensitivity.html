@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.sensitivity &mdash; lisaanalysistools 1.0.12 documentation</title>
+  <title>lisatools.sensitivity &mdash; lisaanalysistools 1.0.13 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
-      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
+      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
@@ -18,8 +18,8 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=a4fe78c3"></script>
-        <script src="../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../_static/documentation_options.js?v=0086fcda"></script>
+        <script src="../../_static/doctools.js?v=9bcbadda"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../../_static/js/theme.js"></script>
@@ -65,6 +65,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Diagnostics">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Analysis-Container">Analysis Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Comparing-XYZ-and-AET">Comparing XYZ and AET</a></li>
 </ul>
 
         </div>
@@ -116,6 +117,7 @@
 <span class="kn">from</span> <span class="nn">.stochastic</span> <span class="kn">import</span> <span class="p">(</span>
     <span class="n">StochasticContribution</span><span class="p">,</span>
     <span class="n">FittedHyperbolicTangentGalacticForeground</span><span class="p">,</span>
+    <span class="n">check_stochastic</span><span class="p">,</span>
 <span class="p">)</span>
 
 <span class="sd">&quot;&quot;&quot;</span>
@@ -134,6 +136,21 @@
 <span class="sd">    &quot;&quot;&quot;</span>
 
     <span class="n">channel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="kc">None</span>
+
+<div class="viewcode-block" id="Sensitivity.get_xp">
+<a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Sensitivity.get_xp">[docs]</a>
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span> <span class="nf">get_xp</span><span class="p">(</span><span class="n">array</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">object</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Numpy or Cupy (or float)&quot;&quot;&quot;</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">get_array_module</span><span class="p">(</span><span class="n">array</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">array</span><span class="p">,</span> <span class="nb">float</span><span class="p">):</span>
+                <span class="k">return</span> <span class="n">np</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;array must be a numpy or cupy array (it can be a float as well).&quot;</span>
+            <span class="p">)</span></div>
+
 
 <div class="viewcode-block" id="Sensitivity.transform">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.Sensitivity.transform">[docs]</a>
@@ -250,14 +267,14 @@
 
 
 <span class="sd">        &quot;&quot;&quot;</span>
-
+        <span class="n">xp</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">get_xp</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
         <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="nb">float</span><span class="p">):</span>
-            <span class="n">f</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">([</span><span class="n">f</span><span class="p">])</span>
+            <span class="n">f</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">ndarray</span><span class="p">([</span><span class="n">f</span><span class="p">])</span>
             <span class="n">squeeze</span> <span class="o">=</span> <span class="kc">True</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">squeeze</span> <span class="o">=</span> <span class="kc">False</span>
 
-        <span class="n">sgal</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+        <span class="n">sgal</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="p">(</span>
             <span class="p">(</span><span class="n">stochastic_params</span> <span class="o">!=</span> <span class="p">()</span> <span class="ow">and</span> <span class="n">stochastic_params</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">)</span>
@@ -266,7 +283,8 @@
         <span class="p">):</span>
             <span class="k">if</span> <span class="n">stochastic_function</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">stochastic_function</span> <span class="o">=</span> <span class="n">FittedHyperbolicTangentGalacticForeground</span>
-                <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">stochastic_params</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span>
+
+            <span class="n">stochastic_function</span> <span class="o">=</span> <span class="n">check_stochastic</span><span class="p">(</span><span class="n">stochastic_function</span><span class="p">)</span>
 
             <span class="n">sgal</span><span class="p">[:]</span> <span class="o">=</span> <span class="n">stochastic_function</span><span class="o">.</span><span class="n">get_Sh</span><span class="p">(</span>
                 <span class="n">f</span><span class="p">,</span> <span class="o">*</span><span class="n">stochastic_params</span><span class="p">,</span> <span class="o">**</span><span class="n">stochastic_kwargs</span>
@@ -708,10 +726,13 @@
 
 <div class="viewcode-block" id="FlatPSDFunction.get_Sn">
 <a class="viewcode-back" href="../../user/sensitivity.html#lisatools.sensitivity.FlatPSDFunction.get_Sn">[docs]</a>
-    <span class="nd">@staticmethod</span>
-    <span class="k">def</span> <span class="nf">get_Sn</span><span class="p">(</span><span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">val</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span> <span class="nf">get_Sn</span><span class="p">(</span>
+        <span class="bp">cls</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">val</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
         <span class="c1"># TODO: documentation here</span>
-        <span class="n">out</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">full_like</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">val</span><span class="p">)</span>
+        <span class="n">xp</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="n">get_xp</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+        <span class="n">out</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">full_like</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="n">val</span><span class="p">)</span>
         <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="nb">float</span><span class="p">):</span>
             <span class="n">out</span> <span class="o">=</span> <span class="n">out</span><span class="o">.</span><span class="n">item</span><span class="p">()</span>
         <span class="k">return</span> <span class="n">out</span></div>
@@ -847,6 +868,23 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">new_out</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="nb">float</span><span class="p">)</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">return_shape</span> <span class="o">+</span> <span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,)</span>
         <span class="p">)</span>
+
+        <span class="n">xp</span> <span class="o">=</span> <span class="n">get_array_module</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">)</span>
+
+        <span class="c1"># setup detC</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Determinant and inverse of TDI matrix.&quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">ndim</span> <span class="o">&lt;</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">detC</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">invC</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">detC</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">det</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+            <span class="n">invC</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+            <span class="n">invC</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">detC</span> <span class="o">!=</span> <span class="mf">0.0</span><span class="p">]</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">inv</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">sens_mat</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">)[</span><span class="bp">self</span><span class="o">.</span><span class="n">detC</span> <span class="o">!=</span> <span class="mf">0.0</span><span class="p">]</span>
+            <span class="p">)</span>
+            <span class="n">invC</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">detC</span> <span class="o">==</span> <span class="mf">0.0</span><span class="p">]</span> <span class="o">=</span> <span class="mf">1e-100</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">invC</span> <span class="o">=</span> <span class="n">invC</span><span class="o">.</span><span class="n">transpose</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
 
     <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">index</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Indexing the class indexes the array.&quot;&quot;&quot;</span>
@@ -1029,6 +1067,7 @@
     <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">,</span>
     <span class="n">sens_fn</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Sensitivity</span> <span class="o">|</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">LISASens</span><span class="p">,</span>
     <span class="n">return_type</span><span class="o">=</span><span class="s2">&quot;PSD&quot;</span><span class="p">,</span>
+    <span class="n">fill_nans</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">1e10</span><span class="p">,</span>
     <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Generic sensitivity generator</span>
@@ -1041,6 +1080,8 @@
 <span class="sd">        sens_fn: String or class that represents the name of the desired PSD function.</span>
 <span class="sd">        return_type: Described the desired output. Choices are ASD,</span>
 <span class="sd">            PSD, or char_strain (characteristic strain). Default is ASD.</span>
+<span class="sd">        fill_nans: Value to fill nans in sensitivity (at 0 frequency).</span>
+<span class="sd">            If ``None``, thens nans will be left in the array.</span>
 <span class="sd">        **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.</span>
 
 <span class="sd">    Return:</span>
@@ -1049,12 +1090,7 @@
 <span class="sd">    &quot;&quot;&quot;</span>
 
     <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">sens_fn</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
-        <span class="k">try</span><span class="p">:</span>
-            <span class="n">sensitivity</span> <span class="o">=</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">sens_fn</span><span class="p">]</span>
-        <span class="k">except</span> <span class="ne">KeyError</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
-                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">sens_fn</span><span class="si">}</span><span class="s2"> sensitivity is not available. Available stock sensitivities are&quot;</span>
-            <span class="p">)</span>
+        <span class="n">sensitivity</span> <span class="o">=</span> <span class="n">check_sensitivity</span><span class="p">(</span><span class="n">sens_fn</span><span class="p">)</span>
 
     <span class="k">elif</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">sens_fn</span><span class="p">,</span> <span class="s2">&quot;get_Sn&quot;</span><span class="p">):</span>
         <span class="n">sensitivity</span> <span class="o">=</span> <span class="n">sens_fn</span>
@@ -1065,6 +1101,10 @@
         <span class="p">)</span>
 
     <span class="n">PSD</span> <span class="o">=</span> <span class="n">sensitivity</span><span class="o">.</span><span class="n">get_Sn</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">fill_nans</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">fill_nans</span><span class="p">,</span> <span class="nb">float</span><span class="p">)</span>
+        <span class="n">PSD</span><span class="p">[</span><span class="n">np</span><span class="o">.</span><span class="n">isnan</span><span class="p">(</span><span class="n">PSD</span><span class="p">)]</span> <span class="o">=</span> <span class="n">fill_nans</span>
 
     <span class="k">if</span> <span class="n">return_type</span> <span class="o">==</span> <span class="s2">&quot;PSD&quot;</span><span class="p">:</span>
         <span class="k">return</span> <span class="n">PSD</span>
@@ -1130,6 +1170,42 @@
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="n">__stock_sensitivity_mat_options__</span></div>
 
+
+
+<span class="k">def</span> <span class="nf">get_stock_sensitivity_from_str</span><span class="p">(</span><span class="n">sensitivity</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Sensitivity</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a LISA sensitivity from a ``str`` input.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        sensitivity: Sensitivity indicated with a ``str``.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Sensitivity associated to that ``str``.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">sensitivity</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">__stock_sens_options__</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="s2">&quot;Requested string sensitivity is not available. See lisatools.sensitivity documentation.&quot;</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">sensitivity</span><span class="p">]</span>
+
+
+<span class="k">def</span> <span class="nf">check_sensitivity</span><span class="p">(</span><span class="n">sensitivity</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Sensitivity</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Check input sensitivity.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        sensitivity: Sensitivity to check.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Sensitivity checked. Adjusted from ``str`` if ``str`` input.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">sensitivity</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="n">sensitivity</span> <span class="o">=</span> <span class="n">get_stock_sensitivity_from_str</span><span class="p">(</span><span class="n">sensitivity</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">issubclass</span><span class="p">(</span><span class="n">sensitivity</span><span class="p">,</span> <span class="n">Sensitivity</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;sensitivity argument not given correctly.&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">sensitivity</span>
 </pre></div>
 
            </div>

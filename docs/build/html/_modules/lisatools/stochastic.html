@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.stochastic &mdash; lisaanalysistools 1.0.9 documentation</title>
+  <title>lisatools.stochastic &mdash; lisaanalysistools 1.0.13 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
-      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
+      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
@@ -18,8 +18,8 @@
   
         <script src="../../_static/jquery.js?v=5d32c60e"></script>
         <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=0abd802e"></script>
-        <script src="../../_static/doctools.js?v=888ff710"></script>
+        <script src="../../_static/documentation_options.js?v=0086fcda"></script>
+        <script src="../../_static/doctools.js?v=9bcbadda"></script>
         <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
         <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../../_static/js/theme.js"></script>
@@ -65,6 +65,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Diagnostics">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Analysis-Container">Analysis Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Comparing-XYZ-and-AET">Comparing XYZ and AET</a></li>
 </ul>
 
         </div>
@@ -410,6 +411,42 @@
 
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="n">__stock_gb_stochastic_options__</span>
+
+
+<span class="k">def</span> <span class="nf">get_default_stochastic_from_str</span><span class="p">(</span><span class="n">stochastic</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a LISA stochastic from a ``str`` input.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        stochastic: Stochastic contribution indicated with a ``str``.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Stochastic contribution associated to that ``str``.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">stochastic</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">__stock_gb_stochastic_options__</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="s2">&quot;Requested string stochastic is not available. See lisatools.stochastic documentation.&quot;</span>
+        <span class="p">)</span>
+    <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">stochastic</span><span class="p">]</span>
+
+
+<span class="k">def</span> <span class="nf">check_stochastic</span><span class="p">(</span><span class="n">stochastic</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Check input stochastic contribution.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        stochastic: Stochastic contribution to check.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Stochastic contribution checked. Adjusted from ``str`` if ``str`` input.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">stochastic</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="n">stochastic</span> <span class="o">=</span> <span class="n">get_default_stochastic_from_str</span><span class="p">(</span><span class="n">stochastic</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">issubclass</span><span class="p">(</span><span class="n">stochastic</span><span class="p">,</span> <span class="n">StochasticContribution</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;stochastic argument not given correctly.&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">stochastic</span>
 </pre></div>
 
            </div>
