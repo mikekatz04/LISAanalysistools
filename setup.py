@@ -201,6 +201,7 @@ setup(
     # Inject our custom trigger
     packages=[
         "lisatools",
+        "lisatools.globalfit",
         "lisatools.sampling",
         "lisatools.sampling.moves",
         "lisatools.utils",
