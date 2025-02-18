@@ -472,3 +472,58 @@ class AnalysisContainer:
 
         else:
             raise ValueError("x must be a 1D or 2D array.")
+
+
+class AnalysisContainerArray:
+    def __init__(self, analysis_containers):
+        if isinstance(analysis_containers, AnalysisContainer):
+            acs = np.array([analysis_containers], dtype=object)
+        elif isinstance(analysis_containers, np.ndarray):
+            assert analysis_containers.dtype == object
+            assert np.all([isinstance(tmp, AnalysisContainer) for tmp in analysis_containers.flatten()])
+            acs = analysis_containers
+        elif isinstance(analysis_containers, list):
+            if isinstance(analysis_containers[0], list):
+                raise ValueError("If inputing list of containers, must be 1D. Use a numpy object array for 2+D.")
+            acs = np.asarray(analysis_containers, dtype=object)
+        else:
+            raise ValueError("Analysis container must be single container, 1D list, or numpy object array.")
+        
+        self.acs = acs
+        self.acs_shape = acs.shape
+        self.acs_total_entries = np.prod(acs.shape)
+        try:
+            self.nchannels, self.data_length = acs.flatten()[0].data_res_arr.shape
+        except ValueError:
+            self.data_length = acs.flatten()[0].data_res_arr.shape[0]
+            self.nchannels = 1
+
+        xp = get_array_module(acs.flatten()[0].data_res_arr[0])
+        # reset so that all data are linear in memory
+        self.linear_data_arr = xp.zeros(self.data_length * self.nchannels * self.acs_total_entries, dtype=complex)
+
+        for i, ac in enumerate(acs.flatten()):
+            self.linear_data_arr[i * self.data_length * self.nchannels: (i + 1) * self.data_length * self.nchannels] = ac.data_res_arr[:].flatten()
+            ac.data_res_arr._data_res_arr = self.linear_data_arr[i * self.data_length * self.nchannels: (i + 1) * self.data_length * self.nchannels].reshape(self.nchannels, self.data_length)
+
+        # TODO: make data_res_arr have item assignment.
+        # TODO: same for SENS MAT 
+        # TODO: clear memory        
+
+    def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
+        output = np.zeros(self.acs_total_entries)
+        for i, ac in enumerate(self.acs.flatten()):
+            output[i] = getattr(ac, operation)(**kwargs)
+        return output.reshape(self.acs_shape)
+
+    def inner_product(self, **kwargs):
+        return self._loop_operation("inner_product", **kwargs)
+
+    def likelihood(self, **kwargs):
+        return self._loop_operation("likelihood", **kwargs)
+
+    def snr(self, **kwargs):
+        return self._loop_operation("snr", **kwargs)
+
+    def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:
+        return self.acs[index]

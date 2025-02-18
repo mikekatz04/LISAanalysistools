@@ -140,12 +140,12 @@ def inner_product(
 
         temp1 = sig1[op_set["sig1_ind"]]
         temp2 = sig2[op_set["sig2_ind"]]
-        psd_tmp = psd[op_set["psd_ind"]]
+        inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
-        ind_start = 1 if np.isnan(psd_tmp[0]) else 0
+        ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
 
         y = (
-            func(temp1[ind_start:].conj() * temp2[ind_start:]) / psd_tmp[ind_start:]
+            func(temp1[ind_start:].conj() * temp2[ind_start:]) * inv_psd_tmp[ind_start:]
         )  # assumes right summation rule
         # df is sunk into trapz
         tmp_out = factor * 4 * xp.trapz(y, x=x[ind_start:])
@@ -248,7 +248,9 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
     """
     fix = np.isnan(psd[:]) | np.isinf(psd[:])
     assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
-    nl_val = -1.0 / 2.0 * np.sum(np.log(psd[~fix]))
+    # TODO: check on this
+    detC = psd.detC
+    nl_val = -1.0 / 2.0 * np.sum(np.log(np.abs(detC[detC != 0.0])))
     return nl_val
 
 

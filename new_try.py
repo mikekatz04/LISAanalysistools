@@ -23,7 +23,7 @@ from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.globalfit.hdfbackend import save_to_backend_asynchronously_and_plot
-cp.cuda.runtime.setDevice(2)
+cp.cuda.runtime.setDevice(0)
 from eryn.moves import CombineMove
 from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove
 from lisatools.globalfit.galaxyglobal import make_gmm
@@ -294,7 +294,7 @@ class GlobalFit:
             A_lisasens_in = np.repeat(lisasens[0], 1, axis=0).reshape(nwalkers, 1, general_info["data_length"]).transpose(1, 0, 2)
             E_lisasens_in = np.repeat(lisasens[1], 1, axis=0).reshape(nwalkers, 1, general_info["data_length"]).transpose(1, 0, 2)
 
-            gpus = [2]
+            gpus = [5]
             mgh = MultiGPUDataHolder(
                 gpus,
                 A_going_in,
@@ -600,7 +600,7 @@ class GlobalFit:
                 nfriends=nwalkers,
                 phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
                 ranks_needed=5,
-                gpus=[3],
+                gpus=[0],
                 **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
             )
 
@@ -667,6 +667,7 @@ class GlobalFit:
             for rank, tmp in rank_instructions.items():
                 self.comm.send({"rank": rank, **tmp}, dest=rank)
             
+            breakpoint()
             # permute False is there for the PSD sampling for now
             sampler_mix = EnsembleSampler(
                 nwalkers,

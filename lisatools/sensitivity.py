@@ -662,9 +662,27 @@ class SensitivityMatrix:
             self.return_shape + (-1,)
         )
 
+        # setup detC
+        """Determinant of TDI matrix."""
+        if self.sens_mat.ndim < 3:
+            self.detC = self.sens_mat
+            self.invC = 1/self.sens_mat
+
+        else:
+            xp = get_array_module(self.sens_mat)
+            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
+            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
+            invC[self.detC != 0.0] = xp.linalg.inv(self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0])
+            self.invC = invC.transpose(1, 2, 0)
+            invC[self.detC == 0.0] = 1e-100
+
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
         return self.sens_mat[index]
+
+    def __setitem__(self, index: Any, value: np.ndarray) -> np.ndarray:
+        """Indexing the class indexes the array."""
+        self.sens_mat[index] = value
 
     @property
     def ndim(self) -> int:
@@ -820,8 +838,9 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
 def get_sensitivity(
     f: float | np.ndarray,
     *args: tuple,
-    sens_fn: Optional[Sensitivity | str] = LISASens,
-    return_type="PSD",
+    sens_fn: Sensitivity | str = LISASens,
+    return_type: str="PSD",
+    fill_nans: float =1e10,
     **kwargs,
 ) -> float | np.ndarray:
     """Generic sensitivity generator
@@ -834,6 +853,8 @@ def get_sensitivity(
         sens_fn: String or class that represents the name of the desired PSD function.
         return_type: Described the desired output. Choices are ASD,
             PSD, or char_strain (characteristic strain). Default is ASD.
+        fill_nans: Value to fill nans in sensitivity (at 0 frequency). 
+            If ``None``, thens nans will be left in the array.
         **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
 
     Return:
@@ -853,6 +874,10 @@ def get_sensitivity(
         )
 
     PSD = sensitivity.get_Sn(f, *args, **kwargs)
+
+    if fill_nans is not None:
+        assert isinstance(fill_nans, float)
+        PSD[np.isnan(PSD)] = fill_nans
 
     if return_type == "PSD":
         return PSD
