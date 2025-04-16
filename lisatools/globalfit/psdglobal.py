@@ -14,7 +14,7 @@ from eryn.ensemble import EnsembleSampler
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from eryn.moves.tempering import make_ladder
-from eryn.state import State, BranchSupplimental
+from eryn.state import State, BranchSupplemental
 from lisatools.sampling.prior import GBPriorWrap
 from eryn.prior import ProbDistContainer
 from gbgpu.gbgpu import GBGPU
@@ -61,7 +61,7 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     num_data = 1
     num_psds = psd_pars.shape[0]
 
-    gb.psd_likelihood(ll, freqs, A_data, E_data, data_index_all,  A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, 
+    gb.psd_likelihood(ll, freqs, data, data_index_all,  A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, 
                      Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, df, data_length, num_data, num_psds)
     
     # # galfor_pars = None
@@ -148,7 +148,7 @@ class PSDwithGBPriorWrap:
             if len(f0) > 0:
                 self.gb.get_lisasens_val(Sn_A, Sn_E, f0, noise_index_all, A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, num_f)
             
-            gb_logpdf_contrib = self.priors["gb"].logpdf(gb_params_in, Sn_f=Sn_A)
+            gb_logpdf_contrib = self.priors["gb"].logpdf(gb_params_in)
             logpdf_contribution = np.zeros_like(gb_inds_in, dtype=np.float64)
 
             try:

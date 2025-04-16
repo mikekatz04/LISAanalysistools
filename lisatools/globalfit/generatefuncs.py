@@ -3,7 +3,6 @@ from copy import deepcopy
 import warnings
 
 from lisatools.sensitivity import get_sensitivity
-from lisatools.globalfit.hdfbackend import HDFBackend as GBHDFBackend
 from lisatools.detector import sangria
 from bbhx.waveformbuild import BBHWaveformFD
 

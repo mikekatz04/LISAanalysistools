@@ -1,6 +1,6 @@
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
-from .state import State
+from .state import GFState, MBHState, GBState
 from .plot import RunResultsProduction
 import time
 import shutil
@@ -51,9 +51,8 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_ran
     return 
 
 
-class HDFBackend(eryn_HDFBackend):
-
-    def __init__(self, *args, comm=None, save_plot_rank=None, **kwargs):
+class GFHDFBackend(eryn_HDFBackend):
+    def __init__(self, *args, comm=None, sub_states=None, save_plot_rank=None, **kwargs):
 
         super().__init__(*args, **kwargs)
 
@@ -63,19 +62,157 @@ class HDFBackend(eryn_HDFBackend):
 
         self.comm = comm
         self.save_plot_rank = save_plot_rank
+        
+        
+        self.sub_states = sub_states
+        if self.sub_states is not None:
+            self.sub_states = {key: self.sub_states[key](*args, **kwargs) for key in self.sub_states}
     
+    def reset(self, *args, **kwargs):
+        # regular reset
+        super().reset(*args, **kwargs)
+        
+        if self.sub_states is not None:
+            with self.open("a") as f:
+                g = f[self.name]
+                if "sub_states" not in g:
+                    g.create_group("sub_states")
+            
+            for sub_state in self.sub_states.values():
+                sub_state.reset(*args, **kwargs)
+
+
+    def grow(self, ngrow, *args):
+        super().grow(ngrow, *args)
+        
+        # open the file in append mode
+        if self.sub_states is not None:
+            with self.open("a") as f:
+                # resize all the arrays accordingly
+                g = f[self.name]
+                ntot = g.attrs["iteration"] + ngrow
+
+                for sub_state in self.sub_states.values():
+                    if sub_state is None:
+                        continue
+                    sub_state.grow(ngrow, *args)
+
+    def save_step_main(
+        self,
+        state,
+        *args, 
+        **kwargs
+    ):
+
+        super().save_step(state, *args, **kwargs)
+        
+        # open for appending in with statement
+        with self.open("a") as f:
+            g = f[self.name]
+            # get the iteration left off on
+            # minus one because it was updated in the super function
+            iteration = g.attrs["iteration"] - 1
+
+            if self.sub_states is not None:
+                # resize all the arrays accordingly
+
+                sub_group = g["sub_states"]
+                for sub_state in self.sub_states.values():
+                    if sub_state is None:
+                        continue
+                    sub_state.save_step(state, *args, **kwargs)
+        
+    def save_step(
+        self,
+        *args, 
+        **kwargs
+    ):
+        """Save a step to the backend
+
+        Args:
+            state (GFState): The :class:`GFState` of the ensemble.
+            accepted (ndarray): An array of boolean flags indicating whether
+                or not the proposal for each walker was accepted.
+            rj_accepted (ndarray, optional): An array of the number of accepted steps
+                for the reversible jump proposal for each walker.
+                If :code:`self.rj` is True, then rj_accepted must be an array with
+                :code:`rj_accepted.shape == accepted.shape`. If :code:`self.rj`
+                is False, then rj_accepted must be None, which is the default.
+            swaps_accepted (ndarray, optional): 1D array with number of swaps accepted
+                for the in-model step. (default: ``None``)
+            moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the 
+                moves in the sampler. This dict must have the same keys as ``self.move_keys``.
+                (default: ``None``)
+
+        """
+
+        if self.comm is None or self.comm.Get_size() < 3:
+            self.save_step_main(*args, **kwargs)
+        
+        else:
+            state = args[0]
+            mgh = state.mgh
+            state.mgh = None
+            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
+            state.mgh = mgh
+
+    def get_a_sample(self, it):
+        """Access a sample in the chain
+
+        Args:
+            it (int): iteration of State to return.
+
+        Returns:
+            State: :class:`eryn.state.State` object containing the sample from the chain.
+
+        Raises:
+            AttributeError: Backend is not initialized.
+
+        """
+        if (not self.initialized) or self.iteration <= 0:
+            raise AttributeError(
+                "you must run the sampler with "
+                "'store == True' before accessing the "
+                "results"
+            )
+
+        tmp_state = super().get_a_sample(it)
+        state = GFState(tmp_state, is_eryn_state_input=True)
+
+        # open for appending in with statement
+        if self.sub_states is not None:
+            # resize all the arrays accordingly
+            sub_states = {}
+            sub_state_bases = {}
+            for key in self.branch_names:
+                sub_state = self.sub_states.get(key, None)
+                if sub_state is None:
+                    sub_states[key] = None
+                    sub_state_bases[key] = None
+                    continue
+
+                sub_states[key] = sub_state.get_a_sample(it)
+                sub_state_bases[key] = type(sub_states[key])
+        
+        else:
+            sub_states = None
+            sub_state_bases = None
+
+        state.sub_states = sub_states
+        state.sub_state_bases = sub_state_bases
+        return state
+
+class GBHDFBackend(eryn_HDFBackend):
+
     def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
         if num_bands is None or band_edges is None:
             raise ValueError("Must provide num_bands and band_edges kwargs.")
 
-        # regular reset
-        super().reset(nwalkers, *args, ntemps=ntemps, **kwargs)
-
         # open file in append mode
         with self.open("a") as f:
-            g = f[self.name]
+            g = f[self.name]["sub_states"]
 
-            band_info = g.create_group("band_info")
+            band_info = g.create_group("gb")
 
             band_info.create_dataset(
                 "band_edges",
@@ -163,39 +300,33 @@ class HDFBackend(eryn_HDFBackend):
     def num_bands(self):
         """Get num_bands from h5 file."""
         with self.open() as f:
-            return f[self.name]["band_info"].attrs["num_bands"]
+            return f[self.name]["sub_states"]["gb"].attrs["num_bands"]
 
     @property
     def band_edges(self):
         """Get band_edges from h5 file."""
         with self.open() as f:
-            return f[self.name]["band_info"]["band_edges"][:]
+            return f[self.name]["sub_states"]["gb"]["band_edges"][:]
 
     @property
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
         return dict(
-            nleaves_max=self.nleaves_max,
-            ntemps=self.ntemps,
-            branch_names=self.branch_names,
-            rj=self.rj,
-            moves=self.moves,
             num_bands=self.num_bands
         )
 
     def grow(self, ngrow, *args):
-        super().grow(ngrow, *args)
-        
+    
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
-
+            band_info = g["sub_states"]["gb"]
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
-            for key in g["band_info"]:
+            for key in band_info:
                 if key == "band_edges":
                     continue
-                g["band_info"][key].resize(ntot, axis=0)
+                band_info[key].resize(ntot, axis=0)
 
     def get_value(self, name, thin=1, discard=0, slice_vals=None):
         """Returns a requested value to user.
@@ -228,7 +359,7 @@ class HDFBackend(eryn_HDFBackend):
             )
 
         if name != "band_info":
-            return super().get_value(name, thin=thin, discard=discard, slice_vals=slice_vals) 
+            raise ValueError(f"No {name} in this backend.")
 
         if slice_vals is None:
             slice_vals = slice(discard + thin - 1, self.iteration, thin)
@@ -250,8 +381,9 @@ class HDFBackend(eryn_HDFBackend):
                             "results"
                         )
 
-                    v_all = {key: g["band_info"][key][slice_vals] for key in g["band_info"] if key != "band_edges"}
-                    v_all["band_edges"] = g["band_info"]["band_edges"][:]
+                    gb_group = g["sub_states"]["gb"]
+                    v_all = {key: gb_group[key][slice_vals] for key in gb_group if key != "band_edges"}
+                    v_all["band_edges"] = gb_group["band_edges"][:]
                     successful = True
             except OSError:
                 num_try += 1
@@ -286,21 +418,21 @@ class HDFBackend(eryn_HDFBackend):
         tmp["initialized"] = True
         return tmp
 
-    def save_step_main(
+    def save_step(
         self,
         state,
         *args, 
         **kwargs
     ):
-
-        super().save_step(state, *args, **kwargs)
-        
+ 
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]
             # get the iteration left off on
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
+
+            gb_group = g["sub_states"]["gb"]
 
             # make sure the backend has all the information needed to store everything
             for key in [
@@ -310,69 +442,34 @@ class HDFBackend(eryn_HDFBackend):
                     setattr(self, key, g.attrs[key])
 
             # branch-specific
-            for name, dat in state.band_info.items():
+            for name, dat in state.sub_states["gb"].band_info.items():
                 if not isinstance(dat, np.ndarray) or name == "band_edges":
                     continue
-                g["band_info"][name][iteration] = dat
+                gb_group[name][iteration] = dat
 
         # reset the counter for band info
-        state.reset_band_counters()
+        state.sub_states["gb"].reset_band_counters()
         
-    def save_step(
-        self,
-        *args, 
-        **kwargs
-    ):
-        """Save a step to the backend
-
-        Args:
-            state (State): The :class:`State` of the ensemble.
-            accepted (ndarray): An array of boolean flags indicating whether
-                or not the proposal for each walker was accepted.
-            rj_accepted (ndarray, optional): An array of the number of accepted steps
-                for the reversible jump proposal for each walker.
-                If :code:`self.rj` is True, then rj_accepted must be an array with
-                :code:`rj_accepted.shape == accepted.shape`. If :code:`self.rj`
-                is False, then rj_accepted must be None, which is the default.
-            swaps_accepted (ndarray, optional): 1D array with number of swaps accepted
-                for the in-model step. (default: ``None``)
-            moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the 
-                moves in the sampler. This dict must have the same keys as ``self.move_keys``.
-                (default: ``None``)
-
-        """
-
-        if self.comm is None or self.comm.Get_size() < 3:
-            self.save_step_main(*args, **kwargs)
-        
-        else:
-            state = args[0]
-            mgh = state.mgh
-            state.mgh = None
-            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
-            state.mgh = mgh
-
     def get_a_sample(self, it):
         """Access a sample in the chain
 
         Args:
-            it (int): iteration of State to return.
+            it (int): iteration of GFState to return.
 
         Returns:
-            State: :class:`eryn.state.State` object containing the sample from the chain.
+            GFState: :class:`eryn.state.GFState` object containing the sample from the chain.
 
         Raises:
             AttributeError: Backend is not initialized.
 
         """
-        sample = State(super().get_a_sample(it))
-
+        
         thin = self.iteration - it if it != self.iteration else 1
         discard = it + 1 - thin
 
-        sample.band_info = self.get_band_info(discard=discard, thin=thin)
+        band_info = self.get_band_info(discard=discard, thin=thin)
+        sample = GBState(None, band_info=band_info)
         sample.band_info["initialized"] = True
-
         return sample
 
     
@@ -384,16 +481,15 @@ class MBHHDFBackend(eryn_HDFBackend):
         if num_mbhs is None:
             raise ValueError("Must provide num_mbhs kwarg.")
 
-        # regular reset
-        super().reset(nwalkers, *args, ntemps=ntemps, **kwargs)
-
         # open file in append mode
         with self.open("a") as f:
-            g = f[self.name]
+            g = f[self.name]["sub_states"]
 
-            g.attrs["num_mbhs"] = num_mbhs
+            mbh_group = g.create_group("mbh")
 
-            g.create_dataset(
+            mbh_group.attrs["num_mbhs"] = num_mbhs
+
+            mbh_group.create_dataset(
                 "betas_all",
                 (0, num_mbhs, ntemps),
                 maxshape=(None, num_mbhs, ntemps),
@@ -412,25 +508,18 @@ class MBHHDFBackend(eryn_HDFBackend):
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
         return dict(
-            nleaves_max=self.nleaves_max,
-            ntemps=self.ntemps,
-            branch_names=self.branch_names,
-            rj=self.rj,
-            moves=self.moves,
             num_bands=self.num_mbhs
         )
 
     def grow(self, ngrow, *args):
-
-        super().grow(ngrow, *args)
         
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
-
+            mbh_group = f[self.name]["sub_states"]["mbh"]
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
-            g["betas_all"].resize(ntot, axis=0)
+            mbh_group["betas_all"].resize(ntot, axis=0)
 
     def get_value(self, name, thin=1, discard=0, slice_vals=None):
         """Returns a requested value to user.
@@ -463,7 +552,7 @@ class MBHHDFBackend(eryn_HDFBackend):
             )
 
         if name != "betas_all":
-            return super().get_value(name, thin=thin, discard=discard, slice_vals=slice_vals) 
+            raise ValueError(f"No {name} in this backend.")
 
         if slice_vals is None:
             slice_vals = slice(discard + thin - 1, self.iteration, thin)
@@ -480,7 +569,8 @@ class MBHHDFBackend(eryn_HDFBackend):
                     "results"
                 )
 
-            v_all = g["betas_all"][slice_vals]
+            mbh_group = g["sub_states"]["mbh"]
+            v_all = mbh_group["betas_all"][slice_vals]
         return v_all
 
     def get_betas_all(self, **kwargs):
@@ -512,37 +602,34 @@ class MBHHDFBackend(eryn_HDFBackend):
         **kwargs
     ):
 
-        super().save_step(state, *args, **kwargs)
-        
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]
             # get the iteration left off on
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
-
-            g["betas_all"][iteration] = state.betas_all
+            mbh_group = g["sub_states"]["mbh"]
+            mbh_group["betas_all"][iteration] = state.sub_states["mbh"].betas_all
 
     def get_a_sample(self, it):
         """Access a sample in the chain
 
         Args:
-            it (int): iteration of State to return.
+            it (int): iteration of GFState to return.
 
         Returns:
-            State: :class:`eryn.state.State` object containing the sample from the chain.
+            GFState: :class:`eryn.state.GFState` object containing the sample from the chain.
 
         Raises:
             AttributeError: Backend is not initialized.
 
         """
-        sample = State(super().get_a_sample(it))
-
         thin = self.iteration - it if it != self.iteration else 1
         discard = it + 1 - thin
 
-        sample.betas_all = self.get_betas_all(discard=discard, thin=thin)
+        betas_all = self.get_betas_all(discard=discard, thin=thin)
 
+        sample = MBHState(None, betas_all=betas_all)
         return sample
 
     

@@ -32,6 +32,7 @@ def inner_product(
     psd_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
     complex: Optional[bool] = False,
+    sum_instead_of_trapz: Optional[bool] = False,
 ) -> float | complex:
     """Compute the inner product between two signals weighted by a psd.
 
@@ -143,12 +144,19 @@ def inner_product(
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
         ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
-
         y = (
             func(temp1[ind_start:].conj() * temp2[ind_start:]) * inv_psd_tmp[ind_start:]
         )  # assumes right summation rule
         # df is sunk into trapz
-        tmp_out = factor * 4 * xp.trapz(y, x=x[ind_start:])
+        if sum_instead_of_trapz:
+            df = x[1] - x[0]
+            if np.all(df != xp.diff(x)):
+                raise ValueError("If using sum_instead_of_trapz, frequencies must be equaly spaced.")
+
+            tmp_out = df * factor * 4 * xp.sum(y)
+        else:
+            tmp_out = factor * 4 * xp.trapz(y, x=x[ind_start:])
+
         out += tmp_out
 
     # normalize the inner produce
@@ -250,7 +258,7 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
     assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
     # TODO: check on this
     detC = psd.detC
-    nl_val = -1.0 / 2.0 * np.sum(np.log(np.abs(detC[detC != 0.0])))
+    nl_val = -np.sum(np.log(np.abs(detC[detC != 0.0])))
     return nl_val
 
 

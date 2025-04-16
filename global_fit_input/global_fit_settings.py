@@ -45,7 +45,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_1st_run_through"
+    base_file_name = "rework_2nd_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -132,7 +132,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [5]
+    gpus = [7]
 
     all_general_info = dict(
         file_information=file_information,
@@ -192,7 +192,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # limits on parameters
     delta_safe = 1e-5
-    A_lims = [7e-24, 1e-21]
+    A_lims = [7e-26, 1e-19]
     f0_lims = [0.05e-3, 2.5e-2]
     m_chirp_lims = [0.001, 1.0]
     # now with negative fdots
@@ -232,12 +232,13 @@ def get_global_fit_settings(copy_settings_file=False):
         dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample
     )
 
-    gb_initialize_kwargs = dict(use_gpu=True)
+    gb_initialize_kwargs = dict(use_gpu=True, gpus=gpus)
 
     L = 2.5e9
-    amp_transform = AmplitudeFromSNR(L, Tobs, fd, model="sangria", sens_fn="lisasens")
+    # amp_transform = AmplitudeFromSNR(L, Tobs, fd, model="sangria", sens_fn="lisasens")
 
     gb_transform_fn_in = {
+        0: np.exp,
         1: f_ms_to_s,
         5: np.arccos,
         8: np.arcsin,
@@ -254,13 +255,14 @@ def get_global_fit_settings(copy_settings_file=False):
     gb_periodic = {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}
 
     # prior setup
-    rho_star = 10.0
+    rho_star = 5.0
     # snr_prior = SNRPrior(rho_star)
 
-    frequency_prior = uniform_dist(*(np.asarray(f0_lims) * 1e3))
+    # frequency_prior = uniform_dist(*(np.asarray(f0_lims) * 1e3))
 
     priors_gb = {
-        (0, 1): AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
+        0: uniform_dist(*(np.log(np.asarray(A_lims)))),
+        1: uniform_dist(*(np.asarray(f0_lims) * 1e3)), # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
         2: uniform_dist(*fdot_lims),
         3: uniform_dist(*phi0_lims),
         4: uniform_dist(*np.cos(iota_lims)),
@@ -269,7 +271,8 @@ def get_global_fit_settings(copy_settings_file=False):
         7: uniform_dist(*np.sin(beta_sky_lims)),
     }
 
-    priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
+    # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
+    priors_gb_fin = ProbDistContainer(priors_gb)
 
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
     ntemps_pe = 24  # len(snrs_ladder)
@@ -366,9 +369,9 @@ def get_global_fit_settings(copy_settings_file=False):
 
     priors_psd = {
         0: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-        1: uniform_dist(2.0e-15, 20.0e-15),  # Sa_a
+        1: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
         2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-        3: uniform_dist(2.0e-15, 20.0e-15),  # Sa_a
+        3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
     }
 
     psd_kwargs = dict(sens_fn="A1TDISens")  # , use_gpu=False)

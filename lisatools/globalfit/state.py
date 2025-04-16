@@ -9,6 +9,7 @@ def return_x(x):
 
 class GBState(eryn_State):
 
+    # copy this still for each. At general hdf5 function to deal with these setups rather than specific
     @property
     def band_initialized(self):
         if hasattr(self, "band_info") and "initialized" in self.band_info:
@@ -93,7 +94,100 @@ class GBState(eryn_State):
         self.band_info["band_swaps_proposed"][:] = 0
         self.band_info["band_swaps_accepted"][:] = 0
 
+    def reset_backend(self, h5_group, h5_kwargs, nwalkers, *args, ntemps=1, **kwargs):
 
+        assert self.band_initialized
+
+        band_group = h5_group.create_group("gb_sub_state")
+
+        band_group.create_dataset(
+            "band_edges",
+            data=self.band_info["band_edges"],
+            **h5_kwargs
+        )
+        num_bands = self.band_info["num_bands"]
+        band_group.attrs["num_bands"] = num_bands
+
+        band_group.create_dataset(
+            "band_temps",
+            (0, num_bands, ntemps),
+            maxshape=(None, num_bands, ntemps),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_swaps_proposed",
+            (0, num_bands, ntemps - 1),
+            maxshape=(None, num_bands, ntemps - 1),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_swaps_accepted",
+            (0, num_bands, ntemps - 1),
+            maxshape=(None, num_bands, ntemps - 1),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_num_proposed",
+            (0, num_bands, ntemps),
+            maxshape=(None, num_bands, ntemps),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_num_accepted",
+            (0, num_bands, ntemps),
+            maxshape=(None, num_bands, ntemps),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_num_proposed_rj",
+            (0, num_bands, ntemps),
+            maxshape=(None, num_bands, ntemps),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_num_accepted_rj",
+            (0, num_bands, ntemps),
+            maxshape=(None, num_bands, ntemps),
+            **h5_kwargs
+        )
+
+        band_group.create_dataset(
+            "band_num_binaries",
+            (0, ntemps, nwalkers, num_bands),
+            maxshape=(None, ntemps, nwalkers, num_bands),
+            **h5_kwargs
+        )
+
+    def grow_backend(self, h5_group, ngrow, *args):
+        band_group = h5_group["gb_sub_state"]
+        for key in band_group:
+            if key == "band_edges":
+                continue
+            band_group[key].resize(ngrow, axis=0)
+
+    def save_step(self, iteration, h5_group, state, *args, **kwargs):
+        # make sure the backend has all the information needed to store everything
+        gb_group = h5_group["gb_sub_state"]
+        for key in [
+            "num_bands",
+        ]:
+            if not hasattr(self, key):
+                setattr(self, key, gb_group.attrs[key])
+
+        # branch-specific
+        for name, dat in state.sub_states["gb"].band_info.items():
+            if not isinstance(dat, np.ndarray) or name == "band_edges":
+                continue
+            gb_group[name][iteration] = dat
+
+        # reset the counter for band info
+        state.sub_states["gb"].reset_band_counters()
 
 class MBHState(eryn_State):
     remove_kwargs = ["betas_all"]
@@ -101,37 +195,77 @@ class MBHState(eryn_State):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
-
-        elif betas_all is not None:
+        else:
             self.betas_all = betas_all
 
-class State(GBState, MBHState, eryn_State):
+    def reset_backend(self, h5_group, h5_kwargs, nwalkers, *args, ntemps=1, **kwargs):
+        if "nleaves_max" not in kwargs:
+            raise ValueError("Must provide nleaves_max kwarg.")
+            
+        num_mbhs = kwargs["nleaves_max"]["mbh"]
+
+        mbh_group = h5_group.create_group("mbh_sub_state")
+
+        mbh_group.attrs["num_mbhs"] = num_mbhs
+
+        mbh_group.create_dataset(
+            "betas_all",
+            (0, num_mbhs, ntemps),
+            maxshape=(None, num_mbhs, ntemps),
+            **h5_kwargs
+        )
+
+    def grow_backend(self, h5_group, ngrow, *args):
+        mbh_group = h5_group["mbh_sub_state"]
+        mbh_group["betas_all"].resize(ngrow, axis=0)
+
+    def save_step(self, iteration, h5_group, state, *args, **kwargs):
+        # make sure the backend has all the information needed to store everything
+        mbh_group = h5_group["mbh_sub_state"]
+        mbh_group["betas_all"][iteration] = state.sub_states["mbh"].betas_all
+        
+class GFState(eryn_State):
     # TODO: bandaid fix this
 
     remove_kwargs = ["betas_all", "band_info"]
-    def __init__(self, possible_state, *args, mgh=None, **kwargs):
-        MBHState.__init__(self, possible_state, *args, **kwargs)
-        GBState.__init__(self, possible_state, *args, **kwargs)
-        for key in self.remove_kwargs:
-            if key in kwargs:
-                kwargs.pop(key)
-        eryn_State.__init__(self, possible_state, *args, **kwargs)
+    def __init__(self, possible_state, *args, is_eryn_state_input:bool=False, sub_state_bases: dict=None, **kwargs):
         
-        if isinstance(possible_state, type(self)):
-            if mgh is not None:
-                raise ValueError("When inputing a State object, cannot provide mbh kwarg as well.")
-            self.mgh = possible_state.mgh
-        else:
-            self.mgh = mgh
+        eryn_State.__init__(self, possible_state, *args, **kwargs)
+        self.sub_states = {}
+        if isinstance(possible_state, type(self)) and not is_eryn_state_input:
+            self.sub_state_bases = possible_state.sub_state_bases
+            for name in self.branches:
+                sub_state_base = self.sub_state_bases.get(name, None)
+                if sub_state_base is not None:
+                    self.sub_states[name] = sub_state_base(
+                        possible_state.sub_states[name],
+                        *args,
+                        **kwargs
+                    )
+                else:
+                    self.sub_states[name] = None
+                
+        # elif sub_state_bases is None and is_eryn_state_input:
+        #     raise ValueError
+        
+        # elif is_eryn_state_input:
+        #     self.sub_state_bases = sub_state_bases
+        #     for name in self.branches:
+        #         sub_state_base = sub_state_bases.get(name, None)
+        #         if sub_state_base is not None:
+        #             self.sub_states[name] = sub_state_base(
+        #                 None,
+        #                 *args, 
+        #                 **kwargs
+        #             )
+        #         else:
+        #             self.sub_states[name] = None
 
-    def from_eryn(self, state):
-        breakpoint()
-        breakpoint()
 
 class AllGFBranchInfo:
     def __init__(self, branch_1, branch_2):
         
-        for key in ["name", "ndims", "nleaves_max", "nleaves_min"]:
+        for key in ["name", "ndims", "nleaves_max", "nleaves_min", "branch_state"]:
             if isinstance(branch_1, AllGFBranchInfo) and isinstance(branch_2, AllGFBranchInfo):
                 if key == "name":
                     self.branch_names = branch_1.branch_names + branch_2.name
@@ -193,12 +327,22 @@ class AllGFBranchInfo:
         assert isinstance(nleaves_min, dict)
         self._nleaves_min = nleaves_min
 
+    @property
+    def branch_state(self):
+        return self._branch_states
+
+    @branch_state.setter
+    def branch_state(self, branch_state):
+        self._branch_states = branch_state
+
+
 @dataclass
 class GFBranchInfo:
     name: str
     ndims: int
     nleaves_max: int
     nleaves_min: int
+    branch_state: eryn_State = None  # TODO: update this
 
     def __add__(self, branch_2):
         return AllGFBranchInfo(self, branch_2)

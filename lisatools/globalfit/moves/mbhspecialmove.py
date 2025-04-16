@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from eryn.moves import RedBlueMove, StretchMove
 # from eryn.state import State
-from lisatools.globalfit.state import State
+from lisatools.globalfit.state import GFState
 from lisatools.sampling.moves.skymodehop import SkyMove
 from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
@@ -12,14 +12,14 @@ from .globalfitmove import GlobalFitMove
 
 
 class MBHSpecialMove(GlobalFitMove, RedBlueMove):
-    def __init__(self, waveform_gen, mgh, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, temperature_controls, 
+    def __init__(self, waveform_gen, acs, num_repeats, transform_fn, mbh_priors, mbh_kwargs, moves, df, temperature_controls, 
         psd_like=None, **kwargs):
         
         RedBlueMove.__init__(self, **kwargs)
         
         self.psd_like = psd_like
         assert psd_like is not None
-        self.mgh = mgh
+        self.acs = acs
         self.waveform_gen = waveform_gen
         self.num_repeats = num_repeats
         self.transform_fn = transform_fn
@@ -32,19 +32,16 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
         self.df = df
         self.temperature_controls = temperature_controls
 
-    def get_logl(self):
-        return -1/2 * (4 * self.df * self.xp.sum((data_residuals[:2].conj() * data_residuals[:2]) / psd[:2], axis=-1)).get()
-
     def propose(self, model, state):
         new_state = deepcopy(state)
-
+        
         # TODO: in TF, can we do multiple together?
         # TODO: switch to heterodyning
-        data_tmp = self.mgh.data_shaped
-        data = xp.asarray([data_tmp[0][0].copy(), data_tmp[1][0].copy(), xp.zeros_like(data_tmp[1][0])])
-        psd = xp.asarray([self.mgh.psd_shaped[0][0], self.mgh.psd_shaped[1][0], xp.full_like(self.mgh.psd_shaped[1][0], 1e10)])
-        fd = xp.asarray(self.mgh.fd)
-        data_residuals = data
+        
+        # data_tmp = model.acs.data_shaped
+        # data = xp.asarray([data_tmp[0][0].copy(), data_tmp[1][0].copy(), xp.zeros_like(data_tmp[1][0])])
+        # psd = xp.asarray([self.acs.psd_shaped[0][0], self.acs.psd_shaped[1][0], xp.full_like(self.acs.psd_shaped[1][0], 1e10)])
+        fd = xp.asarray(model.analysis_container_arr.f_arr)
         ntemps, nwalkers, nleaves, ndim = new_state.branches["mbh"].shape
 
         assert len(self.temperature_controls) == nleaves
@@ -53,30 +50,33 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
         walker_inds_base = np.tile(np.arange(nwalkers), (ntemps, 1))
 
         start_leaf = np.random.randint(0, nleaves)
+        print("remove 1")
         for base_leaf in range(nleaves):
             leaf = (base_leaf + start_leaf) % nleaves
-
             temperature_control_here = self.temperature_controls[leaf]
-            temperature_control_here.betas[:] = new_state.betas_all[leaf]
+            temperature_control_here.betas[:] = new_state.sub_states["mbh"].betas_all[leaf]
 
             # remove cold chain sources
             xp.get_default_memory_pool().free_all_blocks()
             removal_coords = new_state.branches["mbh"].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
 
-            removal_waveforms = self.waveform_gen(*removal_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs).transpose(1, 0, 2)
-            assert removal_waveforms.shape == data_residuals.shape
-
+            removal_waveforms = self.waveform_gen(*removal_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs)[:, :model.analysis_container_arr.nchannels]
+            assert removal_waveforms.shape == (
+                nwalkers,
+                model.analysis_container_arr.nchannels,
+                model.analysis_container_arr.data_length
+            )
             # TODO: fix T channel 
             # d - h -> need to add removal waveforms
             # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+            ll_tmp2 = model.analysis_container_arr.likelihood(source_only=True)  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+            model.analysis_container_arr.remove_signal_from_residual(
+                removal_waveforms, data_index=None, start_index=None
+            )
+            ll_tmp3 = model.analysis_container_arr.likelihood(source_only=True)  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
-            ll_tmp2 = ((-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2))))  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-
-            data_residuals[:2] += removal_waveforms[:2]
-            ll_tmp3 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2))) #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-
-            psd_term = -xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2)).get()
+            psd_term = model.analysis_container_arr.likelihood(noise_only=True) 
 
             keep_het = ll_tmp2.argmax().item()
             del removal_waveforms
@@ -88,15 +88,15 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
             like_het = NewHeterodynedLikelihood(
                 self.waveform_gen,
                 fd,
-                data_residuals.transpose(1, 0, 2).copy(),
-                psd.transpose(1, 0, 2).copy(),
+                model.analysis_container_arr.data_shaped[0],
+                model.analysis_container_arr.psd_shaped[0],
                 het_coords,
                 256,
                 data_index=data_index,
                 noise_index=noise_index,
-                use_gpu=True,  # self.use_gpu,
+                gpu=xp.cuda.runtime.getDevice(),  # self.use_gpu,
             )
-            
+
             ll_tmp = like_het.get_ll(
                 removal_coords_in, 
                 constants_index=data_index,
@@ -250,22 +250,28 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
             add_coords = new_state.branches["mbh"].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
 
-            add_waveforms = self.waveform_gen(*add_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs).transpose(1, 0, 2)
-            assert add_waveforms.shape == data_residuals.shape
+            add_waveforms = self.waveform_gen(*add_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs)[:, :model.analysis_container_arr.nchannels]
+            assert add_waveforms.shape == (
+                nwalkers,
+                model.analysis_container_arr.nchannels,
+                model.analysis_container_arr.data_length
+            )
 
             # d - h -> need to subtract added waveforms
-            ll_tmp4 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
-
-            data_residuals[:2] -= add_waveforms[:2]
-            ll_tmp5 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
-
+            ll_tmp4 = model.analysis_container_arr.likelihood(source_only=True)  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+            
+            model.analysis_container_arr.add_signal_to_residual(
+                add_waveforms, data_index=None, start_index=None
+            )
+            ll_tmp5 = model.analysis_container_arr.likelihood(source_only=True)  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+            
             del like_het
             del add_waveforms
             xp.get_default_memory_pool().free_all_blocks()
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
             # read out all betas from temperature controls
-            new_state.betas_all[leaf] = temperature_control_here.betas[:]
+            new_state.sub_states["mbh"].betas_all[leaf] = temperature_control_here.betas[:]
             # print(leaf)
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
@@ -273,8 +279,7 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
         # udpate at the end
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
-
-        current_ll = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        current_ll = model.analysis_container_arr.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         xp.get_default_memory_pool().free_all_blocks()
         # TODO: add check with last used logl
 
@@ -290,17 +295,17 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
         # print(current_ll.max(), self.best_last_ll, current_ll.min(), self.low_last_ll)
         self.best_last_ll = current_ll.max()
         self.low_last_ll = current_ll.min()
+
         self.temperature_control.swaps_accepted = self.temperature_controls[0].swaps_accepted
         
-        self.replace_residuals(state, new_state)
-
-        new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
-        new_state.log_like[:] = self.psd_like(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental, logp=new_state.log_prior)[0]
-        assert np.abs(new_state.log_like[0] - self.mgh.get_ll(include_psd_info=True)).max() < 1e-4
+        # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
+        new_state.log_like[:] = model.analysis_container_arr.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+            
+        # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
-        fd = xp.asarray(self.mgh.fd)
+        fd = xp.asarray(self.acs.fd)
         old_contrib = [None, None]
         new_contrib = [None, None]
         for leaf in range(old_state.branches["mbh"].shape[-2]):
@@ -323,6 +328,6 @@ class MBHSpecialMove(GlobalFitMove, RedBlueMove):
                 new_contrib[0] += add_waveforms[0]
                 new_contrib[1] += add_waveforms[1]
             
-        self.mgh.swap_out_in_base_data(old_contrib, new_contrib)
+        self.acs.swap_out_in_base_data(old_contrib, new_contrib)
         xp.get_default_memory_pool().free_all_blocks()
 

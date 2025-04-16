@@ -18,7 +18,7 @@ from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 from eryn.moves import CombineMove
 from lisatools.sampling.prior import FullGaussianMixtureModel, GBPriorWrap
 from eryn.moves.tempering import make_ladder
-from eryn.state import BranchSupplimental
+from eryn.state import BranchSupplemental
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.ensemble import EnsembleSampler
 from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR
@@ -32,8 +32,8 @@ warnings.filterwarnings("ignore")
 stop_here = True
 
 from eryn.moves import Move
-from .state import State as GBState
-from .hdfbackend import HDFBackend as GBHDFBackend
+from .state import GFState as GBState
+from .hdfbackend import GFHDFBackend
 
 
 from copy import deepcopy
@@ -601,7 +601,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     nleaves_max = {"gb": gb_info["pe_info"]["nleaves_max"]}
         
     moves = moves_in_model + rj_moves
-    backend = GBHDFBackend(
+    backend = GFHDFBackend(
         gf_information.general_info["file_information"]["fp_gb_pe"],
         compression="gzip",
         compression_opts=9,

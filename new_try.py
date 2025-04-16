@@ -3,12 +3,19 @@ from mpi4py import MPI
 import os
 import warnings
 from copy import deepcopy
-from lisatools.globalfit.state import State
-from lisatools.globalfit.hdfbackend import HDFBackend as GBHDFBackend
+from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from lisatools.datacontainer import DataResidualArray
+from lisatools.sensitivity import AE1SensitivityMatrix
+from lisatools.globalfit.state import GFState
+from lisatools.detector import EqualArmlengthOrbits
+from lisatools.stochastic import HyperbolicTangentGalacticForeground
+from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
 from eryn.backends import HDFBackend
 from eryn.moves import Move
-from eryn.state import BranchSupplimental
+from lisatools.detector import LISAModel
+from eryn.state import BranchSupplemental
 from eryn.ensemble import EnsembleSampler
+from lisatools.globalfit.engine import GlobalFitEngine
 from global_fit_input.global_fit_settings import get_global_fit_settings
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 import cupy as cp
@@ -44,9 +51,9 @@ from eryn.model import Model
 
 from eryn.moves import StretchMove
 class PSDMove(GlobalFitMove, StretchMove):
-    def __init__(self, gb, mgh, priors, gpu_priors, *args, psd_kwargs={}, **kwargs):
+    def __init__(self, gb, acs, priors, gpu_priors, *args, psd_kwargs={}, **kwargs):
         super(PSDMove, self).__init__(*args, **kwargs)
-        self.mgh = mgh
+        self.acs = acs
         self.gb = gb
         self.psd_kwargs = psd_kwargs
         self.priors = priors
@@ -66,12 +73,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_coords = coords["psd"][logp_keep][:, 0]
         galfor_coords = coords["galfor"][logp_keep][:, 0]
 
-        data_tmp = self.mgh.data_shaped
-        data = [data_tmp[0][0].copy().flatten(), data_tmp[1][0].copy().flatten()]
-
         supps = supps[logp_keep]
-
-        tmp_logl = psd_log_like([psd_coords, galfor_coords], cp.asarray(self.mgh.fd), data, self.gb, self.mgh.df, self.mgh.data_length, supps=supps, **self.psd_kwargs)
+        
+        tmp_logl = psd_log_like([psd_coords, galfor_coords], cp.asarray(self.acs.f_arr), self.acs.linear_data_arr[0], self.gb, self.acs.df, self.acs.data_length, supps=supps, **self.psd_kwargs)
 
         logl[logp_keep] = tmp_logl
 
@@ -98,7 +102,7 @@ class PSDMove(GlobalFitMove, StretchMove):
     #     gb_coords = cp.tile(cp.asarray(coords["gb"][0]), (ntemps, 1, 1, 1))[gb_inds_tiled]
     #     walker_inds = cp.repeat(cp.arange(ntemps * nwalkers)[:, None], nleaves_max_gb, axis=-1).reshape(ntemps, nwalkers, nleaves_max_gb)[gb_inds_tiled]
     #     logp_per_bin = cp.zeros((ntemps, nwalkers, nleaves_max_gb))
-    #     logp_per_bin[gb_inds_tiled] = self.gpu_priors["gb"].logpdf(gb_coords, psds=self.mgh.lisasens_list[0][0],walker_inds=walker_inds)
+    #     logp_per_bin[gb_inds_tiled] = self.gpu_priors["gb"].logpdf(gb_coords, psds=self.acs.lisasens_list[0][0],walker_inds=walker_inds)
     #     logp[:] += logp_per_bin.sum(axis=-1).get()
         
 
@@ -110,70 +114,111 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.priors["all_models_together"].full_state = state
 
         # ensuring it is up to date. Should not change anything.
-        self.mgh = state.mgh
-        eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplimental=state.supplimental, branch_supplimental=state.branches_supplimental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
-        before_vals = state.mgh.get_ll(include_psd_info=True).copy()
+        eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplemental=state.supplemental, branch_supplemental=state.branches_supplemental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
+        before_vals = model.analysis_container_arr.likelihood(sum_instead_of_trapz=True).copy()
         
         if np.any(np.abs(before_vals - state.log_like[0]) > 1e-4) :
             breakpoint()
 
+        # TODO: separate temp control from ensemble sampler
+  
         # breakpoint()
-        # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplimental)
-        # logl_test = self.compute_log_like(state.branches_coords, inds=state.branches_inds, supps=state.supplimental, logp=logp)
+        # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplemental)
+        # logl_test = self.compute_log_like(state.branches_coords, inds=state.branches_inds, supps=state.supplemental, logp=logp)
         
         tmp_coords_check = state.branches["psd"].coords[0,:,0].copy()
-
         tmp_model = Model(
             state,
             self.compute_log_like,
             self.priors["all_models_together"].logpdf,  # self.compute_log_prior,
-            model.temperature_control,
+            self.temperature_control,
             model.map_fn,
             model.random,
         )
 
-        # state.mgh.set_psd_vals(
+        # state.acs.set_psd_vals(
         #     state.branches["psd"].coords[0, :, 0], 
         #     overall_inds=np.arange(state.branches["psd"].shape[1]), 
         #     foreground_params=state.branches["galfor"].coords[0, :, 0]
         # )
-        # avs_vals = state.mgh.get_ll(include_psd_info=True).copy()
+        # avs_vals = state.acs.get_ll(include_psd_info=True).copy()
 
         tmp_state, accepted = super(PSDMove, self).propose(tmp_model, state)
-        new_state = State(
-            tmp_state.branches_coords,
-            inds=tmp_state.branches_inds,
-            log_like=tmp_state.log_like,
-            log_prior=tmp_state.log_prior,
-            betas=tmp_state.betas,
-            betas_all=state.betas_all,
-            band_info=state.band_info,
-            supplimental=tmp_state.supplimental,
-            branch_supplimental=tmp_state.branches_supplimental,
-            random_state=tmp_state.random_state,
-            mgh=state.mgh
+        # CHECK THIS STATE SETUP
+        new_state = GFState(
+            tmp_state,
+            copy=True
         )
+        new_state.sub_states = state.sub_states
+        new_state.sub_states = state.sub_states
 
-        new_state.mgh.set_psd_vals(
-            new_state.branches["psd"].coords[0, :, 0], 
-            overall_inds=np.arange(new_state.branches["psd"].shape[1]), 
-            foreground_params=new_state.branches["galfor"].coords[0, :, 0]
-        )
-        after_vals = new_state.mgh.get_ll(include_psd_info=True)
+        breakpoint()
+
+        nwalkers = len(self.acs)
+        for w in range(nwalkers):
+            psd_params = state.branches_coords["psd"][0, w, 0]
+            galfor_params = state.branches_coords["galfor"][0, w, 0]
+            sens_AE = new_sens_mat(f"walker_{w}", psd_params, galfor_params, self.acs.f_arr)
+            self.acs[w].sens_mat = sens_AE
+
+        self.acs.reset_linear_psd_arr()
+        after_vals = self.acs.likelihood(sum_instead_of_trapz=True)
         if np.any(np.abs(after_vals - new_state.log_like[0]) > 1e-4) :
             breakpoint()
+                   
+        # TODO: NEED TO ADJUST ACS WITH NEW PSDS AND RESET LINEAR ARRAY
         return new_state, accepted
 
 
-class BasicResidualMGHLikelihood:
-    def __init__(self, mgh):
-        self.mgh = mgh
+class BasicResidualacsLikelihood:
+    def __init__(self, acs):
+        self.acs = acs
 
     def __call__(self, *args, supps=None, **kwargs):
-        ll_temp = self.mgh.get_ll()
+        ll_temp = self.acs.likelihood()
         overall_inds = supps["overal_inds"]
         breakpoint()
         return ll_temp[overall_inds]
+
+from lisatools.detector import sangria
+from lisatools.sensitivity import get_sensitivity, SensitivityMatrix
+
+def new_sens_mat(name, psd_params, galfor_params, f_arr):
+    orbits = EqualArmlengthOrbits()
+    A_params = psd_params[:2]
+    E_params = psd_params[2:]
+
+    # amp, fk, alpha, s1, s2 = galfor_params
+    # lisa_model_A = LISAModel(A_Soms_d**2, A_Sa_a**2, orbits, f"{name}_A_channel")
+    # lisa_model_E = LISAModel(E_Soms_d**2, E_Sa_a**2, orbits, f"{name}_E_channel")
+    # psd_kwargs = [
+    #     dict(
+    #         model=lisa_model_A,
+    #         stochastic_params=galfor_params,
+    #         stochastic_function=HyperbolicTangentGalacticForeground
+    #     ),
+    #     dict(
+    #         model=lisa_model_E,
+    #         stochastic_params=galfor_params,
+    #         stochastic_function=HyperbolicTangentGalacticForeground
+    #     ),
+    # ]
+    tmp_lisa_model_A = deepcopy(sangria)
+    tmp_lisa_model_E = deepcopy(sangria)
+
+    # TODO: use PSD generating function from general setup
+    tmp_lisa_model_A.Soms_d = A_params[0] ** 2
+    tmp_lisa_model_A.Sa_a = A_params[1] ** 2
+    A_tmp1 = get_sensitivity(f_arr, model=tmp_lisa_model_A, stochastic_params=galfor_params, stochastic_function="HyperbolicTangentGalacticForeground",  sens_fn="A1TDISens")
+    A_tmp1[0] = A_tmp1[1]
+
+    tmp_lisa_model_E.Soms_d = E_params[0] ** 2
+    tmp_lisa_model_E.Sa_a = E_params[1] ** 2
+    E_tmp1 = get_sensitivity(f_arr, model=tmp_lisa_model_E, stochastic_params=galfor_params, stochastic_function="HyperbolicTangentGalacticForeground",  sens_fn="A1TDISens")
+    E_tmp1[0] = E_tmp1[1]
+          
+    sens_AE = SensitivityMatrix(f_arr.copy(), np.asarray([A_tmp1, E_tmp1]))
+    return sens_AE
 
 class GlobalFit:
     def __init__(self, curr, comm):
@@ -206,8 +251,13 @@ class GlobalFit:
             gb_info = self.curr.settings_dict["gb"]
             mbh_info = self.curr.settings_dict["mbh"]
             psd_info = self.curr.settings_dict["psd"]
-
-            gf_branch_information = GFBranchInfo("mbh", 11, 15, 15) + GFBranchInfo("gb", 8, 15000, 0) + GFBranchInfo("galfor", 5, 1, 1) + GFBranchInfo("psd", 4, 1, 1)
+            from lisatools.globalfit.state import MBHState, GBState
+            gf_branch_information = (
+                GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState) 
+                + GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState) 
+                + GFBranchInfo("galfor", 5, 1, 1) 
+                + GFBranchInfo("psd", 4, 1, 1)
+            )
 
             branch_names = gf_branch_information.branch_names
             ndims = gf_branch_information.ndims
@@ -222,21 +272,38 @@ class GlobalFit:
 
             supps_base_shape = (ntemps, nwalkers)
             walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
-            supps = BranchSupplimental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
+            supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
 
-            if os.path.exists("test_new.h5"):
-                state = GBHDFBackend("test_new.h5").get_a_sample(0)
+            if os.path.exists("test_new_3.h5"):
+                state = GFHDFBackend("test_new_3.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend}).get_a_sample(0)
 
             else:
                 coords = {key: np.zeros((ntemps, nwalkers, nleaves_max[key], ndims[key])) for key in branch_names}
                 inds = {key: np.ones((ntemps, nwalkers, nleaves_max[key]), dtype=bool) for key in branch_names}
                 inds["gb"][:] = False
-                state = State(coords, inds=inds, random_state=np.random.get_state())
-                state.initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+                state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=gf_branch_information.branch_state)
+                state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
 
-            state.supplimental = supps
+            state.supplemental = supps
 
-            # gb_backend = GBHDFBackend("global_fit_output/eighth_run_through_parameter_estimation_gb.h5")
+            backend = GFHDFBackend("test_new_3.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            # backend.reset(
+            #     nwalkers,
+            #     ndims,
+            #     nleaves_max=nleaves_max,
+            #     ntemps=ntemps,
+            #     branch_names=branch_names,
+            #     nbranches=len(branch_names),
+            #     rj=True,
+            #     moves=None,
+            #     num_mbhs=nleaves_max["mbh"],
+            #     num_bands=state.sub_states["gb"].band_info["num_bands"],
+            #     band_edges=state.sub_states["gb"].band_info["band_edges"],
+            # )
+           
+            # backend.grow(1, None)
+
+            # gb_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_gb.h5")
             # psd_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_psd.h5")
             # mbh_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_mbh.h5")
 
@@ -257,12 +324,20 @@ class GlobalFit:
             # state.branches["galfor"].coords[:] = galfor_coords
             # state.branches["mbh"].coords[:] = last_mbh.branches["mbh"].coords[0, :nwalkers]
 
-            # FOR TESTING
+            # # FOR TESTING
             # state.branches["gb"].coords[:] = state.branches["gb"].coords[0, 0][None, None, :, :]
             # state.branches["gb"].inds[:] = state.branches["gb"].inds[0, 0][None, None, :]
             # state.branches["mbh"].coords[:] = state.branches["mbh"].coords[0, 0][None, None, :, :]
             # state.branches["psd"].coords[:] = state.branches["psd"].coords[0, 0][None, None, :, :]
             # state.branches["galfor"].coords[:] = state.branches["galfor"].coords[0, 0][None, None, :, :]
+
+            # accepted = np.zeros((ntemps, nwalkers), dtype=int)
+            # swaps_accepted = np.zeros((ntemps - 1,), dtype=int)
+            # state.log_like = np.zeros((ntemps, nwalkers))
+            # state.log_prior = np.zeros((ntemps, nwalkers))
+            # state.betas = np.ones((ntemps,))
+
+            # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
 
             from lisatools.globalfit.generatefuncs import GenerateCurrentState
 
@@ -271,46 +346,37 @@ class GlobalFit:
 
             generate = GenerateCurrentState(A_inj, E_inj)
 
-            accepted = np.zeros((ntemps, nwalkers), dtype=int)
-            swaps_accepted = np.zeros((ntemps - 1,), dtype=int)
-            state.log_like = np.zeros((ntemps, nwalkers))
-            state.log_prior = np.zeros((ntemps, nwalkers))
-            state.betas = np.ones((ntemps,))
-
-            generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
-            generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+            
+            generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=True, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+            generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
 
             data = generated_info["data"]
             psd = generated_info["psd"]
             lisasens = generated_info["lisasens"]
 
             df = general_info["df"]
-            A_going_in = np.repeat(data[0], 2, axis=0).reshape(nwalkers, 2, general_info["data_length"]).transpose(1, 0, 2)
-            E_going_in = np.repeat(data[1], 2, axis=0).reshape(nwalkers, 2, general_info["data_length"]).transpose(1, 0, 2)
+            N = data[0].shape[-1]
 
-            A_psd_in = np.repeat(psd[0], 1, axis=0).reshape(nwalkers, 1, general_info["data_length"]).transpose(1, 0, 2)
-            E_psd_in = np.repeat(psd[1], 1, axis=0).reshape(nwalkers, 1, general_info["data_length"]).transpose(1, 0, 2)
+            f_arr = np.arange(N) * df
 
-            A_lisasens_in = np.repeat(lisasens[0], 1, axis=0).reshape(nwalkers, 1, general_info["data_length"]).transpose(1, 0, 2)
-            E_lisasens_in = np.repeat(lisasens[1], 1, axis=0).reshape(nwalkers, 1, general_info["data_length"]).transpose(1, 0, 2)
-
-            gpus = [5]
-            mgh = MultiGPUDataHolder(
-                gpus,
-                A_going_in,
-                E_going_in,
-                A_going_in, # store as base
-                E_going_in, # store as base
-                A_psd_in,
-                E_psd_in,
-                A_lisasens_in,
-                E_lisasens_in,
-                df,
-                base_injections=[general_info["A_inj"], general_info["E_inj"]],
-                base_psd=None,  # [psd.copy(), psd.copy()]
-            )
-
-            state.mgh = mgh
+            acs_tmp = []
+            orbits = EqualArmlengthOrbits()
+                
+            for w in range(nwalkers):
+                data_res_arr = DataResidualArray([
+                    data[0][w].copy(), 
+                    data[1][w].copy(),
+                ], f_arr=f_arr)
+                psd_params = state.branches_coords["psd"][0, w, 0]
+                galfor_params = state.branches_coords["galfor"][0, w, 0]
+                sens_AE = new_sens_mat(f"walker_{w}", psd_params, galfor_params, data_res_arr.f_arr)
+                # sens_AE[0] = psd[0][w]
+                # sens_AE[1] = psd[1][w]
+                acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
+            
+            gpus = [7]
+            acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+            state.log_like[:] = acs.likelihood()
 
             priors = {**mbh_info["priors"], **psd_info["priors"], "gb": gb_info["priors"]}
             periodic = {**mbh_info["periodic"], "gb": gb_info["periodic"]}
@@ -320,11 +386,12 @@ class GlobalFit:
                 item.use_cupy = True
 
             from eryn.prior import ProbDistContainer
-            gpu_priors = {"gb": GBPriorWrap(gb_info["pe_info"]["ndim"], ProbDistContainer(gpu_priors_in, use_cupy=True))}
+            gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
 
 
             from gbgpu.gbgpu import GBGPU
             gb = GBGPU(use_gpu=True)
+            gb.gpus = gpus
 
             priors["all_models_together"] = PSDwithGBPriorWrap(
                 nwalkers, 
@@ -357,7 +424,8 @@ class GlobalFit:
 
                 walker_inds = np.repeat(np.arange(nwalkers)[:, None], nleaves_max_gb, axis=-1)[state.branches["gb"].inds[0]]
                 
-                check = priors["gb"].logpdf(coords_out_gb, psds=lisasens[0], walker_inds=walker_inds)
+                # TODO: rejection sample SNR?
+                check = priors["gb"].logpdf(coords_out_gb)
 
                 if np.any(np.isinf(check)):
                     raise ValueError("Starting priors are inf.")
@@ -374,7 +442,7 @@ class GlobalFit:
                     np.arange(nwalkers), (nleaves_max_gb, 1)
                 ).transpose((1, 0))[state.branches["gb"].inds[0]]
 
-                data_index_1 = ((band_inds % 2) + 0) * nwalkers + walker_vals
+                data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
 
                 data_index = cp.asarray(data_index_1).astype(
                     cp.int32
@@ -393,38 +461,51 @@ class GlobalFit:
 
                 print("before global template")
                 # TODO: add test to make sure that the genertor send in the general information matches this one
-                gb.gpus = mgh.gpus
+                gb.gpus = gpus
+
                 gb.generate_global_template(
                     coords_in_in,
                     data_index,
-                    mgh.data_list,
-                    data_length=mgh.data_length,
+                    acs.linear_data_arr,
+                    data_length=acs.data_length,
                     factors=factors,
-                    data_splits=mgh.gpu_splits,
+                    data_splits=acs.gpu_map,
                     N=N_vals,
+                    CHECK=True,
                     **waveform_kwargs,
                 )
+
                 print("after global template")
                 del data_index
                 del factors
                 cp.get_default_memory_pool().free_all_blocks()
-
+                import matplotlib.pyplot as plt
+                plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][0:acs.data_length].get()))
+                plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[0].get()), '--')
+                plt.savefig("check0.png")
+                plt.close()
+                plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][acs.data_length:2*acs.data_length].get()))
+                plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[1].get()), '--')
+                plt.savefig("check1.png")
+                plt.close()
+                # breakpoint()
             psd_move = PSDMove(
-                gb, mgh, priors, gpu_priors, live_dangerously=True, 
+                gb, acs, priors, gpu_priors, live_dangerously=True, 
                 gibbs_sampling_setup=[{
                     "psd": np.ones((1, ndims["psd"]), dtype=bool),
                     "galfor": np.ones((1, ndims["galfor"]), dtype=bool)
                 }]
             )
 
-            like_mix = BasicResidualMGHLikelihood(None)
+            like_mix = BasicResidualacsLikelihood(acs)
 
-            backend = GBHDFBackend(
-                self.curr.settings_dict["general"]["file_information"]["fp_main"],
+            backend = GFHDFBackend(
+                "test_new_3.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
-                save_plot_rank=self.results_rank
+                save_plot_rank=self.results_rank,
+                sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend}
             )
 
             if not backend.initialized:
@@ -437,8 +518,9 @@ class GlobalFit:
                     nbranches=len(branch_names),
                     rj=True,
                     moves=None,
-                    num_bands=len(band_edges) - 1,
-                    band_edges=band_edges
+                    num_mbhs=nleaves_max["mbh"],
+                    num_bands=state.sub_states["gb"].band_info["num_bands"],
+                    band_edges=state.sub_states["gb"].band_info["band_edges"],
                 )
 
 
@@ -453,14 +535,15 @@ class GlobalFit:
 
             from eryn.moves.tempering import TemperatureControl, make_ladder
 
-            if hasattr(state, "betas_all") and state.betas_all is not None:
-                    betas_all = state.betas_all
+            if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
+                    betas_all = state.sub_states["mbh"].betas_all
             else:
+                print("remove the False above")
                 betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps), (mbh_info["pe_info"]["nleaves_max"], 1))
 
             # to make the states work 
             betas = betas_all[0]
-            state.betas_all = betas_all
+            state.sub_states["mbh"].betas_all = betas_all
 
             temperature_controls = [None for _ in range(mbh_info["pe_info"]["nleaves_max"])]
             for leaf in range(mbh_info["pe_info"]["nleaves_max"]):
@@ -473,9 +556,10 @@ class GlobalFit:
                 )
 
             inner_moves = mbh_info["pe_info"]["inner_moves"]
-            mbh_move = MBHSpecialMove(wave_gen, mgh, mbh_info["pe_info"]["num_prop_repeats"], mbh_info["transform"], priors, mbh_info["waveform_kwargs"].copy(), inner_moves, df, temperature_controls, 
+            mbh_move = MBHSpecialMove(wave_gen, acs, mbh_info["pe_info"]["num_prop_repeats"], mbh_info["transform"], priors, mbh_info["waveform_kwargs"].copy(), inner_moves, df, temperature_controls, 
                 psd_like=psd_move.compute_log_like,  # cleanup
-                )
+                use_gpu=True
+            )
 
             ########### GB
 
@@ -491,9 +575,9 @@ class GlobalFit:
             #    del state.band_info
 
             band_temps = np.tile(np.asarray(betas_gb), (len(band_edges) - 1, 1))
-            state.initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+            state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
             if adjust_temps:
-                state.band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
+                state.sub_states["gb"].band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
 
             band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
             N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
@@ -504,7 +588,7 @@ class GlobalFit:
                 N_vals_in[state.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state.branches["gb"].inds]]
 
             branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
-            state.branches["gb"].branch_supplimental = BranchSupplimental(
+            state.branches["gb"].branch_supplemental = BranchSupplemental(
                 {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
             )
 
@@ -528,8 +612,8 @@ class GlobalFit:
                 gb,
                 priors,
                 general_info["start_freq_ind"],
-                mgh.data_length,
-                mgh,
+                acs.data_length,
+                acs,
                 np.asarray(fd),
                 band_edges,
                 gpu_priors,
@@ -570,8 +654,8 @@ class GlobalFit:
                 gb,
                 priors,
                 general_info["start_freq_ind"],
-                mgh.data_length,
-                mgh,
+                acs.data_length,
+                acs,
                 np.asarray(fd),
                 band_edges,
                 gpu_priors,
@@ -583,54 +667,54 @@ class GlobalFit:
                 **gb_kwargs_rj,
             )
 
-            # rj_moves_in.append(rj_move_prior)
-            # rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
+            rj_moves_in.append(rj_move_prior)
+            rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
-            gb_kwargs_rj_search = dict(
-                waveform_kwargs=waveform_kwargs,
-                parameter_transforms=gb_info["transform"],
-                search=False,
-                provide_betas=True,
-                skip_supp_names_update=["group_move_points"],
-                random_seed=general_info["random_seed"],
-                use_gpu=True,
-                rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
-                name="rj_search",
-                use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
-                nfriends=nwalkers,
-                phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
-                ranks_needed=5,
-                gpus=[0],
-                **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
-            )
+            # gb_kwargs_rj_search = dict(
+            #     waveform_kwargs=waveform_kwargs,
+            #     parameter_transforms=gb_info["transform"],
+            #     search=False,
+            #     provide_betas=True,
+            #     skip_supp_names_update=["group_move_points"],
+            #     random_seed=general_info["random_seed"],
+            #     use_gpu=True,
+            #     rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
+            #     name="rj_search",
+            #     use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+            #     nfriends=nwalkers,
+            #     phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+            #     ranks_needed=5,
+            #     gpus=[6],
+            #     **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+            # )
 
-            gb_args_rj_search = (
-                gb,
-                priors,
-                general_info["start_freq_ind"],
-                mgh.data_length,
-                mgh,
-                np.asarray(fd),
-                band_edges,
-                gpu_priors,
-            )
+            # gb_args_rj_search = (
+            #     gb,
+            #     priors,
+            #     general_info["start_freq_ind"],
+            #     acs.data_length,
+            #     acs,
+            #     np.asarray(fd),
+            #     band_edges,
+            #     gpu_priors,
+            # )
 
-            rj_move_search = GBSpecialRJSearchMove(
-                *gb_args_rj_search,
-                psd_like=psd_move.compute_log_like,  # cleanup
-                **gb_kwargs_rj_search,
-            )
+            # rj_move_search = GBSpecialRJSearchMove(
+            #     *gb_args_rj_search,
+            #     psd_like=psd_move.compute_log_like,  # cleanup
+            #     **gb_kwargs_rj_search,
+            # )
 
-            rj_moves_in.append(rj_move_search)
-            rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
+            # rj_moves_in.append(rj_move_search)
+            # rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
 
-            GBSpecialRJSearchMove
+            
 
             total_frac = sum(rj_moves_in_frac)
 
             rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
-            in_model_moves = [psd_move, mbh_move, gb_move]
+            in_model_moves = [gb_move]  # psd_move]  # , mbh_move, gb_move]
 
             rank_instructions = {}
             for move in in_model_moves + rj_moves:
@@ -667,9 +751,9 @@ class GlobalFit:
             for rank, tmp in rank_instructions.items():
                 self.comm.send({"rank": rank, **tmp}, dest=rank)
             
-            breakpoint()
             # permute False is there for the PSD sampling for now
-            sampler_mix = EnsembleSampler(
+            sampler_mix = GlobalFitEngine(
+                acs,
                 nwalkers,
                 ndims,  # assumes ndim_max
                 like_mix,
@@ -688,7 +772,7 @@ class GlobalFit:
                 # update_fn=update,  # stop_converge_mix,
                 # update_iterations=gb_info["pe_info"]["update_iterations"],
                 provide_groups=True,
-                provide_supplimental=True,
+                provide_supplemental=True,
                 track_moves=False,
                 # stopping_fn=stopping_fn,
                 # stopping_iterations=stopping_iterations,
@@ -697,6 +781,8 @@ class GlobalFit:
             state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like = psd_move.compute_log_like(state.branches_coords, logp=state.log_prior, inds=state.branches_inds, supps=supps)[0]
             
+            check_like = acs.likelihood(sum_instead_of_trapz=True)
+
             sampler_mix.run_mcmc(state, 10, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

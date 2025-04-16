@@ -2,8 +2,8 @@ import numpy as np
 from copy import deepcopy
 
 from ..sensitivity import get_sensitivity
-from .hdfbackend import HDFBackend as GBHDFBackend
-from .state import State
+from .hdfbackend import GFHDFBackend
+from .state import GFState
 from bbhx.waveformbuild import BBHWaveformFD
 
 from .mbhsearch import ParallelMBHSearchControl
@@ -39,7 +39,7 @@ class CurrentInfoGlobalFit:
         self.settings_dict = settings
         self.current_info = deepcopy(settings)
 
-        self.backend = GBHDFBackend(settings["general"]["file_information"]["fp_main"])
+        self.backend = GFHDFBackend(settings["general"]["file_information"]["fp_main"])
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         

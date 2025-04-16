@@ -233,6 +233,10 @@ class DataResidualArray:
         """Index this class directly in ``self.data_res_arr``."""
         return self.data_res_arr[index]
 
+    def __setitem__(self, index: tuple, val: np.ndarray) -> np.ndarray:
+        """Index this class directly in ``self.data_res_arr``."""
+        self.data_res_arr[index] = val
+
     @property
     def ndim(self) -> int:
         """Number of dimensions in the `data_res_arr`."""

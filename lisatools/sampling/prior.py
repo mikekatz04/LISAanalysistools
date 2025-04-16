@@ -61,8 +61,9 @@ class AmplitudeFrequencySNRPrior:
         Jac = xp.abs(rho / amp)
 
         logpdf_amp = np.log(np.abs(Jac * rho_pdf))
-        logpdf_f = self.frequency_prior.logpdf(f0_ms)
 
+        # TODO: fix this?
+        logpdf_f = xp.asarray(self.frequency_prior.logpdf(f0_ms))
         return logpdf_amp + logpdf_f
 
     def rvs(self, size=1, f0_input=None, **noise_kwargs):
@@ -361,7 +362,7 @@ class GBPriorWrap:
         xp = np if not self.use_cupy else cp
         assert x.shape[1] == self.ndim and x.ndim == 2
 
-        logpdf_everything_else = self.base_prior.logpdf(x, keys=self.keys_sep)
+        logpdf_everything_else = xp.asarray(self.base_prior.logpdf(x, keys=self.keys_sep))
 
         f0 = xp.asarray(x[:, 1])
         amp = xp.asarray(x[:, 0])
