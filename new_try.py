@@ -150,9 +150,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             copy=True
         )
         new_state.sub_states = state.sub_states
-        new_state.sub_states = state.sub_states
-
-        breakpoint()
+        new_state.sub_state_bases = state.sub_state_bases
 
         nwalkers = len(self.acs)
         for w in range(nwalkers):
@@ -374,7 +372,7 @@ class GlobalFit:
                 # sens_AE[1] = psd[1][w]
                 acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
             
-            gpus = [7]
+            gpus = [2]
             acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
             state.log_like[:] = acs.likelihood()
 
@@ -714,7 +712,7 @@ class GlobalFit:
 
             rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
-            in_model_moves = [gb_move]  # psd_move]  # , mbh_move, gb_move]
+            in_model_moves = [gb_move]  # psd_move]  # , mbh_move, ]
 
             rank_instructions = {}
             for move in in_model_moves + rj_moves:
