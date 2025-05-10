@@ -7,7 +7,7 @@ from eryn.ensemble import EnsembleSampler
 from eryn.prior import ProbDistContainer, uniform_dist
 import corner
 from lisatools.utils.utility import AET
-from global_fit_input.global_fit_settings import get_global_fit_settings
+# from global_fit_input.global_fit_settings import get_global_fit_settings
 import os
 from bbhx.waveformbuild import BBHWaveformFD
 from bbhx.waveforms.phenomhm import PhenomHMAmpPhase

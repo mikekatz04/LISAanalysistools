@@ -189,6 +189,14 @@ class GBState(eryn_State):
         # reset the counter for band info
         state.sub_states["gb"].reset_band_counters()
 
+    @property
+    def reset_kwargs(self):
+        # TODO: this okay for future?
+        return dict(
+            num_bands=len(self.band_info["band_edges"]) - 1,
+            band_edges=self.band_info["band_edges"],
+        )
+
 class MBHState(eryn_State):
     remove_kwargs = ["betas_all"]
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
@@ -224,6 +232,13 @@ class MBHState(eryn_State):
         mbh_group = h5_group["mbh_sub_state"]
         mbh_group["betas_all"][iteration] = state.sub_states["mbh"].betas_all
         
+    @property
+    def reset_kwargs(self):
+        # TODO: this okay for future?
+        return dict(
+            num_mbhs=self.betas_all.shape[0]
+        )
+
 class GFState(eryn_State):
     # TODO: bandaid fix this
 
@@ -265,7 +280,7 @@ class GFState(eryn_State):
 class AllGFBranchInfo:
     def __init__(self, branch_1, branch_2):
         
-        for key in ["name", "ndims", "nleaves_max", "nleaves_min", "branch_state"]:
+        for key in ["name", "ndims", "nleaves_max", "nleaves_min", "branch_state", "branch_backend"]:
             if isinstance(branch_1, AllGFBranchInfo) and isinstance(branch_2, AllGFBranchInfo):
                 if key == "name":
                     self.branch_names = branch_1.branch_names + branch_2.name
@@ -329,12 +344,21 @@ class AllGFBranchInfo:
 
     @property
     def branch_state(self):
-        return self._branch_states
+        return self._branch_state
 
     @branch_state.setter
     def branch_state(self, branch_state):
-        self._branch_states = branch_state
+        self._branch_state = branch_state
 
+    @property
+    def branch_backend(self):
+        return self._branch_backend
+
+    @branch_backend.setter
+    def branch_backend(self, branch_backend):
+        self._branch_backend = branch_backend
+
+from eryn.backends import backend as eryn_Backend
 
 @dataclass
 class GFBranchInfo:
@@ -342,8 +366,9 @@ class GFBranchInfo:
     ndims: int
     nleaves_max: int
     nleaves_min: int
-    branch_state: eryn_State = None  # TODO: update this
-
+    branch_state: eryn_State = None
+    branch_backend: eryn_Backend = None
+    
     def __add__(self, branch_2):
         return AllGFBranchInfo(self, branch_2)
 

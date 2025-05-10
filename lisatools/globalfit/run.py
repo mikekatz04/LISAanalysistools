@@ -1,6 +1,41 @@
 import numpy as np
 from copy import deepcopy
 
+from .generatefuncs import GenerateCurrentState
+import numpy as np
+from mpi4py import MPI
+import os
+import warnings
+from copy import deepcopy
+from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ..datacontainer import DataResidualArray
+from ..sensitivity import AE1SensitivityMatrix
+from .state import GFState
+from ..detector import EqualArmlengthOrbits
+from ..stochastic import HyperbolicTangentGalacticForeground
+from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
+from eryn.backends import HDFBackend
+from eryn.moves import Move
+from ..detector import LISAModel
+from eryn.state import BranchSupplemental
+from eryn.ensemble import EnsembleSampler
+from .engine import GlobalFitEngine
+# from global_fit_input.global_fit_settings import get_global_fit_settings
+from ..utils.multigpudataholder import MultiGPUDataHolder
+import cupy as cp
+from ..sampling.prior import GBPriorWrap
+from .psdglobal import log_like as psd_log_like
+from .psdglobal import PSDwithGBPriorWrap
+from .moves import MBHSpecialMove
+
+from eryn.state import State as eryn_State
+from eryn.ensemble import _FunctionWrapper
+from .moves import GlobalFitMove
+from .hdfbackend import save_to_backend_asynchronously_and_plot
+cp.cuda.runtime.setDevice(5)
+from .utils import new_sens_mat, BasicResidualacsLikelihood
+from .utils import SetupInfoTransfer, AllSetupInfoTransfer
+
 from ..sensitivity import get_sensitivity
 from .hdfbackend import GFHDFBackend
 from .state import GFState
@@ -11,9 +46,9 @@ from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
 from .psdglobal import run_psd_pe
 from .mbhglobal import run_mbh_pe
 
-from lisatools.sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
-from lisatools.globalfit.plot import RunResultsProduction
-from lisatools.globalfit.hdfbackend import save_to_backend_asynchronously_and_plot
+from ..sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
+from .plot import RunResultsProduction
+from .hdfbackend import save_to_backend_asynchronously_and_plot
 
 from gbgpu.gbgpu import GBGPU
 
@@ -30,7 +65,7 @@ try:
 except (ImportError, ModuleNotFoundError) as e:
     pass
 
-from global_fit_input.global_fit_settings import get_global_fit_settings
+# from global_fit_input.global_fit_settings import get_global_fit_settings
 
 
 class CurrentInfoGlobalFit:
@@ -60,16 +95,16 @@ class CurrentInfoGlobalFit:
             gb_search_proposal_gmm_info = None
             gb_refit_proposal_gmm_info = None
 
-        self.current_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
-        self.current_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
+        self.source_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
+        self.source_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
     
     def initialize_mbh_state_from_search(self, mbh_output_point_info):
         output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
-        coords = np.zeros((self.current_info["gb"]["pe_info"]["ntemps"], self.current_info["gb"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.current_info["mbh"]["pe_info"]["ndim"]))
-        assert output_points_pruned.shape[0] >= self.current_info["mbh"]["pe_info"]["nwalkers"]
+        coords = np.zeros((self.source_info["gb"]["pe_info"]["ntemps"], self.source_info["gb"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.source_info["mbh"]["pe_info"]["ndim"]))
+        assert output_points_pruned.shape[0] >= self.source_info["mbh"]["pe_info"]["nwalkers"]
         
-        coords[:] = output_points_pruned[None, :self.current_info["mbh"]["pe_info"]["nwalkers"]]
-        self.current_info["mbh"]["mbh_init_points"] = coords.copy()
+        coords[:] = output_points_pruned[None, :self.source_info["mbh"]["pe_info"]["nwalkers"]]
+        self.source_info["mbh"]["mbh_init_points"] = coords.copy()
     
     def get_data_psd(self, **kwargs):
         # self passed here to access all current info
@@ -84,20 +119,12 @@ class CurrentInfoGlobalFit:
         return self.current_info
 
     @property
-    def gb_info(self):
-        return self.current_info["gb"]
-
-    @property
-    def mbh_info(self):
-        return self.current_info["mbh"]
-
-    @property
-    def psd_info(self):
-        return self.current_info["psd"]
-
-    @property
     def general_info(self):
         return self.current_info["general"]
+
+    @property
+    def source_info(self):
+        return self.current_info["source_info"]
 
     @property
     def rank_info(self):
@@ -107,11 +134,346 @@ class CurrentInfoGlobalFit:
     def gpu_assignments(self):
         return self.current_info["gpu_assignments"]
 
+import numpy as np
+from mpi4py import MPI
+import os
+import warnings
+from copy import deepcopy
+from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ..datacontainer import DataResidualArray
+from ..sensitivity import AE1SensitivityMatrix
+from .state import GFState
+from ..detector import EqualArmlengthOrbits
+from ..stochastic import HyperbolicTangentGalacticForeground
+from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
+from eryn.backends import HDFBackend
+from eryn.moves import Move
+from ..detector import LISAModel
+from eryn.state import BranchSupplemental
+from eryn.ensemble import EnsembleSampler
+from .engine import GlobalFitEngine
+# from global_fit_input.global_fit_settings import get_global_fit_settings
+from ..utils.multigpudataholder import MultiGPUDataHolder
+import cupy as cp
+from ..sampling.prior import GBPriorWrap
+from .psdglobal import log_like as psd_log_like
+from .psdglobal import PSDwithGBPriorWrap
+from eryn.model import Model
+from eryn.state import State as eryn_State
+from eryn.ensemble import _FunctionWrapper
+from .run import CurrentInfoGlobalFit
+from .moves import GlobalFitMove
+from .hdfbackend import save_to_backend_asynchronously_and_plot
+from eryn.moves import CombineMove
+from .moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove
+from .galaxyglobal import make_gmm
+from .utils import new_sens_mat, BasicResidualacsLikelihood
 
+class GlobalFit:
+    def __init__(self, gf_branch_information, curr, comm):
+        self.gf_branch_information = gf_branch_information
+        self.comm = comm
+        self.curr = curr
+        self.rank = comm.Get_rank()
+        self.nwalkers = self.curr.general_info["nwalkers"]
+        self.ntemps = self.curr.general_info["ntemps"]
+        self.all_ranks = list(range(self.comm.Get_size()))
+        self.used_ranks = []
+        self.head_rank = self.curr.rank_info["head_rank"]
+        self.main_rank = self.curr.rank_info["main_rank"]
+        self.used_ranks.append(self.head_rank)
+        self.used_ranks.append(self.main_rank)
+
+        self.ranks_to_give =  deepcopy(self.all_ranks)
+        if self.head_rank in self.ranks_to_give:
+            self.ranks_to_give.remove(self.head_rank)
+        self.ranks_to_give.remove(self.main_rank)
+
+        if comm.Get_size() < 3:
+            self.results_rank = self.main_rank
+        else:
+            self.results_rank = self.ranks_to_give.pop()
+            self.used_ranks.append(self.results_rank)
+
+    def load_info(self):
+        print("need to adjust file path")
+        if os.path.exists("test_new_3.h5"):
+            state = GFHDFBackend("test_new_3.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend}).get_a_sample(0)
+
+        else:
+            raise NotImplementedError
+            coords = {key: np.zeros((self.ntemps, self.nwalkers, self.nleaves_max[key], self.ndims[key])) for key in self.branch_names}
+            inds = {key: np.ones((self.ntemps, self.nwalkers, self.nleaves_max[key]), dtype=bool) for key in self.branch_names}
+            inds["gb"][:] = False
+            state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+        return state
+
+    def setup_acs(self, generate, state):
+    
+        generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=True, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+        generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+
+        data = generated_info["data"]
+        psd = generated_info["psd"]
+        lisasens = generated_info["lisasens"]
+
+        df = self.curr.general_info["df"]
+        N = data[0].shape[-1]
+
+        f_arr = np.arange(N) * df
+
+        acs_tmp = []
+        orbits = EqualArmlengthOrbits()
+            
+        for w in range(self.nwalkers):
+            data_res_arr = DataResidualArray([
+                data[0][w].copy(), 
+                data[1][w].copy(),
+            ], f_arr=f_arr)
+            psd_params = state.branches_coords["psd"][0, w, 0]
+            galfor_params = state.branches_coords["galfor"][0, w, 0]
+            sens_AE = new_sens_mat(f"walker_{w}", psd_params, galfor_params, data_res_arr.f_arr)
+            # sens_AE[0] = psd[0][w]
+            # sens_AE[1] = psd[1][w]
+            acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
+        
+        gpus = [5]
+        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)            
+        return acs 
+
+    def run_global_fit(self):
+        
+        if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
+
+            general_info = self.curr.settings_dict["general"]
+            # gb_info = self.curr.settings_dict["gb"]
+            # mbh_info = self.curr.settings_dict["mbh"]
+            # psd_info = self.curr.settings_dict["psd"]
+            
+            branch_names = self.gf_branch_information.branch_names
+            ndims = self.gf_branch_information.ndims
+            nleaves_max = self.gf_branch_information.nleaves_max
+            nleaves_min = self.gf_branch_information.nleaves_min
+            nwalkers = general_info["nwalkers"]
+            ntemps = general_info["ntemps"]
+           
+            state = self.load_info()
+
+            supps_base_shape = (ntemps, nwalkers)
+            walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
+            supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
+            state.supplemental = supps
+
+            backend = GFHDFBackend("test_new_3.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            # backend.reset(
+            #     nwalkers,
+            #     ndims,
+            #     nleaves_max=nleaves_max,
+            #     ntemps=ntemps,
+            #     branch_names=branch_names,
+            #     nbranches=len(branch_names),
+            #     rj=True,
+            #     moves=None,
+            #     num_mbhs=nleaves_max["mbh"],
+            #     num_bands=state.sub_states["gb"].band_info["num_bands"],
+            #     band_edges=state.sub_states["gb"].band_info["band_edges"],
+            # )
+           
+            # backend.grow(1, None)
+
+            # gb_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_gb.h5")
+            # psd_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_psd.h5")
+            # mbh_backend = HDFBackend("global_fit_output/eighth_run_through_parameter_estimation_mbh.h5")
+
+            # last_gb = gb_backend.get_last_sample()
+            # last_psd = psd_backend.get_last_sample()
+            # last_mbh = mbh_backend.get_last_sample()
+
+            # state.branches["gb"] = deepcopy(last_gb.branches["gb"])
+            # state.branches["psd"].coords[:] = last_psd.branches["psd"].coords[0, :nwalkers]
+            # # order of call function changed for galfor 
+            # galfor_coords_orig = last_psd.branches["galfor"].coords[0, :nwalkers]
+            # galfor_coords = np.zeros_like(galfor_coords_orig)
+            # galfor_coords[:, :, 0] = galfor_coords_orig[:, :, 0]
+            # galfor_coords[:, :, 1] = galfor_coords_orig[:, :, 3]
+            # galfor_coords[:, :, 2] = galfor_coords_orig[:, :, 1]
+            # galfor_coords[:, :, 3] = galfor_coords_orig[:, :, 2]
+            # galfor_coords[:, :, 4] = galfor_coords_orig[:, :, 4]
+            # state.branches["galfor"].coords[:] = galfor_coords
+            # state.branches["mbh"].coords[:] = last_mbh.branches["mbh"].coords[0, :nwalkers]
+
+            # # FOR TESTING
+            # state.branches["gb"].coords[:] = state.branches["gb"].coords[0, 0][None, None, :, :]
+            # state.branches["gb"].inds[:] = state.branches["gb"].inds[0, 0][None, None, :]
+            # state.branches["mbh"].coords[:] = state.branches["mbh"].coords[0, 0][None, None, :, :]
+            # state.branches["psd"].coords[:] = state.branches["psd"].coords[0, 0][None, None, :, :]
+            # state.branches["galfor"].coords[:] = state.branches["galfor"].coords[0, 0][None, None, :, :]
+
+            # accepted = np.zeros((ntemps, nwalkers), dtype=int)
+            # swaps_accepted = np.zeros((ntemps - 1,), dtype=int)
+            # state.log_like = np.zeros((ntemps, nwalkers))
+            # state.log_prior = np.zeros((ntemps, nwalkers))
+            # state.betas = np.ones((ntemps,))
+
+            # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
+
+            A_inj = general_info["A_inj"].copy()
+            E_inj = general_info["E_inj"].copy()
+
+            generate = GenerateCurrentState(A_inj, E_inj)
+
+            acs = self.setup_acs(generate, state)
+
+            state.log_like[:] = acs.likelihood()
+
+            priors = {}
+            periodic = {}
+            for name in branch_names:
+                if name not in self.curr.source_info:
+                    continue
+                for key, value in self.curr.source_info[name]["priors"].items():
+                    priors[key] = value
+                
+                if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
+                    for key, value in self.curr.source_info[name]["periodic"].items():
+                        periodic[key] = value
+                # breakpoint()
+            
+            like_mix = BasicResidualacsLikelihood(acs)
+
+            backend = GFHDFBackend(
+                "test_new_3.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                compression="gzip",
+                compression_opts=9,
+                comm=self.comm,
+                save_plot_rank=self.results_rank,
+                sub_states=self.gf_branch_information.branch_backend
+            )
+
+            extra_reset_kwargs = {}
+            for name in branch_names:
+                if name in state.sub_states and state.sub_states[name] is not None:
+                    extra_reset_kwargs = {**extra_reset_kwargs, **state.sub_states[name].reset_kwargs}
+
+            if not backend.initialized:
+                backend.reset(
+                    nwalkers,
+                    ndims,
+                    nleaves_max=nleaves_max,
+                    ntemps=ntemps,
+                    branch_names=branch_names,
+                    nbranches=len(branch_names),
+                    rj=True,
+                    moves=None,
+                    **extra_reset_kwargs
+                )
+
+            setup_info_all = None
+            for name in branch_names:
+                if name not in self.curr.source_info:
+                    setup_info = SetupInfoTransfer(name=name)
+                    
+                elif "setup_func" in self.curr.source_info[name]:
+                    setup_info = self.curr.source_info[name]["setup_func"](self.gf_branch_information, self.curr, acs, priors, state)
+                else:
+                    setup_info = SetupInfoTransfer(name=name)
+
+                if setup_info_all is None:
+                    setup_info_all = setup_info
+                else:
+                    setup_info_all += setup_info
+
+            # backend.grow(1, None)
+            # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
+            # exit()
+           
+            rank_instructions = {}
+            for move in setup_info_all.in_model_moves + setup_info_all.rj_moves:
+                if isinstance(move, tuple) or isinstance(move, list):
+                    move = move[0]
+
+                if not isinstance(move, GlobalFitMove):
+                    raise ValueError("All moves must be a subclass of GlobalFitMove.")
+                
+                move.comm = self.comm
+                if len(move.gpus) > 0 or (move.ranks_needed > 0 and not move.ranks_initialized):
+                    if len(move.gpus) > 0:
+                        assert move.ranks_needed > 0
+
+                    tmp_ranks = []
+                    for _ in range(move.ranks_needed):
+                        try:
+                            tmp_ranks.append(self.ranks_to_give.pop())
+                        except IndexError:
+                            raise ValueError("Not enough MPI ranks to give.")
+                    self.used_ranks += tmp_ranks
+                    move.assign_ranks(tmp_ranks)
+                    for rank in tmp_ranks:
+                        rank_instructions[rank] = {"function": move.get_rank_function(), "class_rank_list": tmp_ranks, "gpus": move.gpus}
+            
+            
+
+            # stop unneeded processes
+            for rank in self.all_ranks:
+                if rank in self.used_ranks:
+                    continue
+                self.comm.send("stop", dest=rank)
+                
+            for rank, tmp in rank_instructions.items():
+                self.comm.send({"rank": rank, **tmp}, dest=rank)
+            
+            # permute False is there for the PSD sampling for now
+            sampler_mix = GlobalFitEngine(
+                acs,
+                self.nwalkers,
+                ndims,  # assumes ndim_max
+                like_mix,
+                priors,
+                tempering_kwargs={"ntemps": self.ntemps},
+                nbranches=len(branch_names),
+                nleaves_max=nleaves_max,
+                nleaves_min=nleaves_min,
+                moves=setup_info_all.in_model_moves,
+                rj_moves=setup_info_all.rj_moves,
+                kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
+                backend=backend,
+                vectorize=True,
+                periodic=periodic,  # TODO: add periodic to proposals
+                branch_names=branch_names,
+                # update_fn=update,  # stop_converge_mix,
+                # update_iterations=gb_info["pe_info"]["update_iterations"],
+                provide_groups=True,
+                provide_supplemental=True,
+                track_moves=False,
+                # stopping_fn=stopping_fn,
+                # stopping_iterations=stopping_iterations,
+            )
+
+            state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
+            state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
+            
+            sampler_mix.run_mcmc(state, 10, progress=True, store=True)
+            self.comm.send({"finish_run": True}, dest=self.results_rank)
+
+        elif self.rank == self.results_rank:
+            save_to_backend_asynchronously_and_plot(self.curr.backend, self.comm, self.main_rank, self.head_rank, self.curr.general_info["plot_iter"], self.curr.general_info["backup_iter"])
+
+        else:
+            info = self.comm.recv(source=self.main_rank)
+            if isinstance(info, dict):
+                launch_rank = info["rank"]
+                assert launch_rank == self.rank
+                launch_function = info["function"]
+                launch_function(self.comm, self.curr, self.main_rank, info["gpus"], info["class_rank_list"])
+
+            print(f"Process {self.rank} finished.")
+            
+            
 class GlobalFitSegment(ABC):
     def __init__(self, comm, copy_settings_file=False):
         self.comm = comm
-        self.base_settings = get_global_fit_settings(copy_settings_file=copy_settings_file)
+        # self.base_settings = get_global_fit_settings(copy_settings_file=copy_settings_file)
         settings = deepcopy(self.base_settings)
         self.gpus = settings["general"]["gpus"]
         self.adjust_settings(settings)

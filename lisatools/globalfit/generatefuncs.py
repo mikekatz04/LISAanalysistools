@@ -267,25 +267,25 @@ class GenerateCurrentState:
         info_dict = {}
         n_gen_check_it = []
         if include_mbhs:
-            A_mbh, E_mbh, prior_vals = general_info["mbh"]["get_templates"](current_state, general_info["mbh"], general_info["general"], only_max_ll=only_max_ll, n_gen_in=n_gen_in, return_prior_val=return_prior_val)
+            A_mbh, E_mbh, prior_vals = general_info["source_info"]["mbh"]["get_templates"](current_state, general_info["source_info"]["mbh"], general_info["general"], only_max_ll=only_max_ll, n_gen_in=n_gen_in, return_prior_val=return_prior_val)
             n_mbh = A_mbh.shape[0]
             info_dict["mbh"] = {"n": n_mbh, "A": A_mbh, "E": E_mbh, "prior": prior_vals}
             n_gen_check_it.append(n_mbh)
 
         if include_gbs:
-            A_gb, E_gb = general_info["gb"]["get_templates"](current_state, general_info["gb"], general_info["general"], only_max_ll=only_max_ll, return_prior_val=True)
+            A_gb, E_gb = general_info["source_info"]["gb"]["get_templates"](current_state, general_info["source_info"]["gb"], general_info["general"], only_max_ll=only_max_ll, return_prior_val=True)
             n_gb = A_gb.shape[0]
             info_dict["gb"] = {"n": n_gb, "A": A_gb, "E": E_gb, "prior": None}
             n_gen_check_it.append(n_gb)
 
         if include_psd:
-            A_psd, E_psd, psd_prior_val = general_info["psd"]["get_psd"](current_state, general_info["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=False, return_prior_val=return_prior_val)
+            A_psd, E_psd, psd_prior_val = general_info["source_info"]["psd"]["get_psd"](current_state, general_info["source_info"]["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=False, return_prior_val=return_prior_val)
             n_psd = A_psd.shape[0]
             info_dict["psd"] = {"n": n_psd, "A": A_psd, "E": E_psd, "prior": psd_prior_val}
             n_gen_check_it.append(n_psd)
 
         if include_lisasens:
-            A_lisasens, E_lisasens, _ = general_info["psd"]["get_psd"](current_state, general_info["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=True, return_prior_val=False)
+            A_lisasens, E_lisasens, _ = general_info["source_info"]["psd"]["get_psd"](current_state, general_info["source_info"]["psd"], general_info["general"], only_max_ll=only_max_ll, return_lisasens=True, return_prior_val=False)
             n_lisasens = A_lisasens.shape[0]
             info_dict["lisasens"] = {"n": n_lisasens, "A": A_lisasens, "E": E_lisasens, "prior": None}
             n_gen_check_it.append(n_lisasens)
@@ -392,7 +392,7 @@ class GenerateCurrentState:
             # calculate prior
             if return_prior_val:
                 if "lisasens" in info_dict and "A" in info_dict["lisasens"] and info_dict["lisasens"]["A"] is not None and "walker_inds" in info_dict["gb"]:
-                    info_dict["gb"]["prior"] = general_info["gb"]["get_templates"].get_gb_prior(general_info["gb"], info_dict["lisasens"]["A"], info_dict["gb"]["walker_inds"])
+                    info_dict["gb"]["prior"] = general_info["source_info"]["gb"]["get_templates"].get_gb_prior(general_info["gb"], info_dict["lisasens"]["A"], info_dict["gb"]["walker_inds"])
 
         if only_max_ll:
             data_A = data_A.squeeze()

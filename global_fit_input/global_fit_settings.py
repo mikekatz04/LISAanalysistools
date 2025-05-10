@@ -2,8 +2,17 @@ import h5py
 import numpy as np
 import shutil
 
+from eryn.moves import TemperatureControl
 from gbgpu.utils.constants import *
 from gbgpu.utils.utility import get_fdot
+from eryn.state import BranchSupplemental
+from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
+from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
+from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
+# from global_fit_input.global_fit_settings import get_global_fit_settings
+
+from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
+from lisatools.globalfit.state import MBHState, GBState
 
 from bbhx.utils.transform import *
 
@@ -18,8 +27,13 @@ from eryn.prior import ProbDistContainer
 from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
+from eryn.moves import CombineMove
+from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove
+from lisatools.globalfit.galaxyglobal import make_gmm
+from lisatools.globalfit.moves import GlobalFitMove
 
 def dtrend(t, y):
+    # @Nikos data setup
     m, b = np.polyfit(t, y, 1)
     ytmp = y - (m * t + b)
     ydetrend = ytmp - np.mean(ytmp)
@@ -32,6 +46,367 @@ def f_ms_to_s(x):
 
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
+
+
+def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
+    gb_info = curr.source_info["gb"]
+    general_info = curr.general_info
+    band_edges = gb_info["band_edges"]
+    betas = gb_info["pe_info"]["betas"]
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    
+    band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
+
+    gpu_priors_in = deepcopy(priors["gb"].priors_in)
+    for key, item in gpu_priors_in.items():
+        item.use_cupy = True
+
+    from eryn.prior import ProbDistContainer
+    gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
+
+
+    from gbgpu.gbgpu import GBGPU
+    gb = GBGPU(use_gpu=True)
+    gpus = curr.general_info["gpus"]
+    gb.gpus = gpus
+
+    # this is not needed anymore
+    # priors["all_models_together"] = PSDwithGBPriorWrap(
+    #     nwalkers, 
+    #     gb, 
+    #     priors
+    # )
+
+    waveform_kwargs = gb_info["pe_info"]["pe_waveform_kwargs"].copy()
+    if "N" in waveform_kwargs:
+        waveform_kwargs.pop("N")
+
+    if state.branches["gb"].inds[0].sum() > 0:
+        
+        # from ..sampling.prior import SNRPrior, AmplitudeFromSNR
+        # L = 2.5e9
+        # amp_transform = AmplitudeFromSNR(L, general_info['Tobs'], fd=general_info["fd"])
+
+        # walker_inds = np.repeat(np.arange(nwalkers)[:, None], ntemps * nleaves_max_gb, axis=-1).reshape(nwalkers, ntemps, nleaves_max_gb).transpose(1, 0, 2)[state.branches["gb"].inds]
+        
+        # coords_fix = state.branches["gb"].coords[state.branches["gb"].inds]
+        # coords_fix[:, 0], _ = amp_transform(coords_fix[:, 0], coords_fix[:, 1] / 1e3, psds=psd[0], walker_inds=walker_inds)
+        
+        # state.branches["gb"].coords[state.branches["gb"].inds, 0] = coords_fix[:, 0]
+
+        coords_out_gb = state.branches["gb"].coords[0,
+            state.branches["gb"].inds[0]
+        ]
+
+        nleaves_max_gb = state.branches["gb"].shape[-2]
+    
+        walker_inds = np.repeat(np.arange(nwalkers)[:, None], nleaves_max_gb, axis=-1)[state.branches["gb"].inds[0]]
+        
+        # TODO: rejection sample SNR?
+        check = priors["gb"].logpdf(coords_out_gb)
+
+        if np.any(np.isinf(check)):
+            raise ValueError("Starting priors are inf.")
+
+        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
+        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
+        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
+        
+        coords_in_in = gb_info["transform"].both_transforms(coords_out_gb)
+
+        band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+
+        walker_vals = np.tile(
+            np.arange(nwalkers), (nleaves_max_gb, 1)
+        ).transpose((1, 0))[state.branches["gb"].inds[0]]
+
+        data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
+
+        data_index = cp.asarray(data_index_1).astype(
+            cp.int32
+        )
+
+        # goes in as -h
+        factors = -cp.ones_like(data_index, dtype=cp.float64)
+
+
+        band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
+        from gbgpu.utils.utility import get_N
+
+        band_N_vals = cp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
+
+        N_vals = band_N_vals[band_inds]
+
+        print("before global template")
+        # TODO: add test to make sure that the genertor send in the general information matches this one
+        gb.gpus = gpus
+
+        gb.generate_global_template(
+            coords_in_in,
+            data_index,
+            acs.linear_data_arr,
+            data_length=acs.data_length,
+            factors=factors,
+            data_splits=acs.gpu_map,
+            N=N_vals,
+            CHECK=True,
+            **waveform_kwargs,
+        )
+
+        print("after global template")
+        del data_index
+        del factors
+        cp.get_default_memory_pool().free_all_blocks()
+        import matplotlib.pyplot as plt
+        plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][0:acs.data_length].get()))
+        plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[0].get()), '--')
+        plt.savefig("check0.png")
+        plt.close()
+        plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][acs.data_length:2*acs.data_length].get()))
+        plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[1].get()), '--')
+        plt.savefig("check1.png")
+        plt.close()
+
+        band_edges = gb_info["band_edges"]
+        num_sub_bands = len(band_edges)
+        betas_gb = gb_info["pe_info"]["betas"]
+
+        adjust_temps = False
+
+        if hasattr(state, "band_info"):
+            band_info_check = deepcopy(state.band_info)
+            adjust_temps = True
+        #    del state.band_info
+
+        band_temps = np.tile(np.asarray(betas_gb), (len(band_edges) - 1, 1))
+        state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+        if adjust_temps:
+            state.sub_states["gb"].band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
+
+        band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+        N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+
+        if state.branches["gb"].inds.sum() > 0:
+            f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
+            band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
+            N_vals_in[state.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state.branches["gb"].inds]]
+
+        branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
+        state.branches["gb"].branch_supplemental = BranchSupplemental(
+            {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
+        )
+
+        ########### GB
+
+        gb_kwargs = dict(
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=gb_info["transform"],
+            provide_betas=True,
+            skip_supp_names_update=["group_move_points"],
+            random_seed=general_info["random_seed"],
+            use_gpu=True,
+            nfriends=nwalkers,
+            phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
+            ranks_needed=0,
+            gpus=[],
+            **gb_info["pe_info"]["group_proposal_kwargs"]
+        )
+
+        fd = general_info["fd"].copy()
+
+        gb_args = (
+            gb,
+            priors,
+            general_info["start_freq_ind"],
+            acs.data_length,
+            acs,
+            np.asarray(fd),
+            band_edges,
+            gpu_priors,
+        )
+
+        gb_move = GBSpecialStretchMove(
+            *gb_args,
+            **gb_kwargs,
+        )
+
+        # add the other
+        gb_move.gb.gpus = gpus
+
+        rj_moves_in = []
+        rj_moves_in_frac = []
+
+        gb_kwargs_rj = dict(
+            waveform_kwargs=waveform_kwargs,
+            parameter_transforms=gb_info["transform"],
+            search=False,
+            provide_betas=True,
+            skip_supp_names_update=["group_move_points"],
+            random_seed=general_info["random_seed"],
+            use_gpu=True,
+            rj_proposal_distribution=gpu_priors,
+            name="rj_prior",
+            use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+            nfriends=nwalkers,
+            phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+            ranks_needed=0,
+            gpus=[],
+            **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+        )
+
+        gb_args_rj = (
+            gb,
+            priors,
+            general_info["start_freq_ind"],
+            acs.data_length,
+            acs,
+            np.asarray(fd),
+            band_edges,
+            gpu_priors,
+        )
+
+        rj_move_prior = GBSpecialRJPriorMove(
+            *gb_args_rj,
+            **gb_kwargs_rj,
+        )
+
+        rj_moves_in.append(rj_move_prior)
+        rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
+
+        # gb_kwargs_rj_search = dict(
+        #     waveform_kwargs=waveform_kwargs,
+        #     parameter_transforms=gb_info["transform"],
+        #     search=False,
+        #     provide_betas=True,
+        #     skip_supp_names_update=["group_move_points"],
+        #     random_seed=general_info["random_seed"],
+        #     use_gpu=True,
+        #     rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
+        #     name="rj_search",
+        #     use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+        #     nfriends=nwalkers,
+        #     phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+        #     ranks_needed=5,
+        #     gpus=[6],
+        #     **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+        # )
+
+        # gb_args_rj_search = (
+        #     gb,
+        #     priors,
+        #     general_info["start_freq_ind"],
+        #     acs.data_length,
+        #     acs,
+        #     np.asarray(fd),
+        #     band_edges,
+        #     gpu_priors,
+        # )
+
+        # rj_move_search = GBSpecialRJSearchMove(
+        #     *gb_args_rj_search,
+        #     psd_like=psd_move.compute_log_like,  # cleanup
+        #     **gb_kwargs_rj_search,
+        # )
+
+        # rj_moves_in.append(rj_move_search)
+        # rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
+        
+        total_frac = sum(rj_moves_in_frac)
+
+        rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
+
+        return SetupInfoTransfer(
+            name="gb",
+            in_model_moves=[gb_move] + rj_moves, # probably better to run them all together
+            # rj_moves=rj_moves,
+        )
+
+            
+def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
+
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    mbh_info = curr.source_info["mbh"]
+    from bbhx.waveformbuild import BBHWaveformFD
+
+    wave_gen = BBHWaveformFD(
+        **mbh_info["initialize_kwargs"]
+    )
+
+    from eryn.moves.tempering import TemperatureControl, make_ladder
+
+    if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
+            betas_all = state.sub_states["mbh"].betas_all
+    else:
+        print("remove the False above")
+        betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps), (mbh_info["pe_info"]["nleaves_max"], 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["mbh"].betas_all = betas_all
+
+    temperature_controls = [None for _ in range(mbh_info["pe_info"]["nleaves_max"])]
+    for leaf in range(mbh_info["pe_info"]["nleaves_max"]):
+        temperature_controls[leaf] = TemperatureControl(
+            mbh_info["pe_info"]["ndim"],
+            nwalkers,
+            betas=betas_all[leaf],
+            permute=False,
+            skip_swap_branches=["psd", "gb", "galfor"]
+        )
+
+    inner_moves = mbh_info["pe_info"]["inner_moves"]
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False, skip_swap_branches=["psd", "gb", "galfor"])
+    
+    coords_shape = (ntemps, nwalkers, mbh_info["pe_info"]["nleaves_max"], mbh_info["pe_info"]["ndim"])
+
+    mbh_move_args = (
+        "mbh",  # branch_name,
+        coords_shape,
+        wave_gen,
+        tempering_kwargs,
+        mbh_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
+        mbh_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        acs,
+        mbh_info["pe_info"]["num_prop_repeats"],
+        mbh_info["transform"],
+        priors,
+        inner_moves,
+        acs.df
+    )
+    
+    mbh_move = MBHSpecialMove(*mbh_move_args, use_gpu=True,)
+
+    return SetupInfoTransfer(
+        name="mbh",
+        in_model_moves=[mbh_move],
+    )
+
+
+def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
+    gpus = curr.general_info["gpus"]
+    gb = GBGPU(use_gpu=True)
+    gb.gpus = gpus
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    
+    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
+    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf)
+    psd_move = PSDMove(
+        gb, acs, priors, live_dangerously=True, 
+        gibbs_sampling_setup=[{
+            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
+            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
+        }],
+        temperature_control=temperature_control
+    )
+
+    return SetupInfoTransfer(
+        name="psd",
+        in_model_moves=[psd_move],
+    )
+
 
 
 def get_global_fit_settings(copy_settings_file=False):
@@ -132,7 +507,10 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [2]
+    gpus = [5]
+
+    nwalkers = 36
+    ntemps = 24
 
     all_general_info = dict(
         file_information=file_information,
@@ -155,6 +533,8 @@ def get_global_fit_settings(copy_settings_file=False):
         begin_new_likelihood=False,
         plot_iter=4,
         backup_iter=10,
+        nwalkers=nwalkers,
+        ntemps=ntemps,
         gpus=gpus
     )
 
@@ -252,7 +632,7 @@ def get_global_fit_settings(copy_settings_file=False):
         parameter_transforms=gb_transform_fn_in, fill_dict=gb_fill_dict
     )
 
-    gb_periodic = {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}
+    gb_periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}}
 
     # prior setup
     rho_star = 5.0
@@ -272,7 +652,7 @@ def get_global_fit_settings(copy_settings_file=False):
     }
 
     # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
-    priors_gb_fin = ProbDistContainer(priors_gb)
+    priors_gb_fin = {"gb": ProbDistContainer(priors_gb)}
 
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
     ntemps_pe = 24  # len(snrs_ladder)
@@ -298,7 +678,7 @@ def get_global_fit_settings(copy_settings_file=False):
         ndim=8,
         ntemps=len(betas),
         betas=betas,
-        nwalkers=36,
+        nwalkers=nwalkers,
         start_resample_iter=-1,  # -1 so that it starts right at the start of PE
         iter_count_per_resample=10,
         pe_waveform_kwargs=pe_gb_waveform_kwargs,
@@ -347,6 +727,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     all_gb_info = dict(
+        setup_func=setup_gb_functionality,
         band_edges=band_edges,
         periodic=gb_periodic,
         priors=priors_gb_fin,
@@ -412,6 +793,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     all_psd_info = dict(
+        setup_func=setup_psd_functionality,
         periodic=None,
         priors={"psd": ProbDistContainer(priors_psd), "galfor": ProbDistContainer(priors_galfor)},
         psd_kwargs=psd_kwargs,
@@ -543,6 +925,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     all_mbh_info = dict(
+        setup_func=setup_mbh_functionality,
         periodic=periodic_mbh,
         priors={"mbh": ProbDistContainer(priors_mbh)},
         transform=transform_fn_mbh,
@@ -558,14 +941,25 @@ def get_global_fit_settings(copy_settings_file=False):
     ## READ OUT ##
     ##############
 
+    gf_branch_information = (
+        GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
+        + GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        + GFBranchInfo("galfor", 5, 1, 1) 
+        + GFBranchInfo("psd", 4, 1, 1)
+    )
+
     return {
-        "gb": all_gb_info,
-        "mbh": all_mbh_info,
-        "psd": all_psd_info,
+        "gf_branch_information": gf_branch_information,
+        "source_info":{
+            "gb": all_gb_info,
+            "mbh": all_mbh_info,
+            "psd": all_psd_info,
+        },
         "general": all_general_info,
         "rank_info": rank_info,
         "gpu_assignments": gpu_assignments,
     }
+
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ class GFHDFBackend(eryn_HDFBackend):
         
         self.sub_states = sub_states
         if self.sub_states is not None:
-            self.sub_states = {key: self.sub_states[key](*args, **kwargs) for key in self.sub_states}
+            self.sub_states = {key: self.sub_states[key](*args, **kwargs) for key in self.sub_states if self.sub_states[key] is not None}
     
     def reset(self, *args, **kwargs):
         # regular reset
