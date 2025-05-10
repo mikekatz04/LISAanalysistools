@@ -11,6 +11,27 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
     pass
+    
+
+def tukey(N, alpha, xp=None):
+
+    if xp is None:
+        xp = np
+
+    assert 0.0 < alpha < 1.0
+    n = xp.arange(int(xp.ceil(N/2.)))
+    in_window_edge = (n < alpha * N / 2)
+
+    tmp = (
+        (in_window_edge) * 1. / 2. * (1. - xp.cos(2. * np.pi * n / (alpha * N)))
+        + (~in_window_edge) * 1.0
+    )
+    tukey_out = xp.zeros(N, dtype=float)
+    # TODO: check this works for odd functions
+    tukey_out[:tmp.shape[0]] = tmp
+    tukey_out[-tmp.shape[0]:] = tmp[::-1]
+
+    return tukey_out
 
 
 def get_array_module(arr: np.ndarray | cp.ndarray) -> object:

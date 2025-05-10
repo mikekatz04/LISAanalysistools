@@ -2,17 +2,20 @@ import h5py
 import numpy as np
 import shutil
 
+from eryn.moves.tempering import TemperatureControl, make_ladder
+
+from lisatools.detector import EqualArmlengthOrbits
 from eryn.moves import TemperatureControl
 from gbgpu.utils.constants import *
 from gbgpu.utils.utility import get_fdot
 from eryn.state import BranchSupplemental
-from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
+from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
 from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
 from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
-from lisatools.globalfit.state import MBHState, GBState
+from lisatools.globalfit.state import MBHState, EMRIState, GBState
 
 from bbhx.utils.transform import *
 
@@ -28,9 +31,11 @@ from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
 from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove
+from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
+from lisatools.utils.utility import tukey
+
 
 def dtrend(t, y):
     # @Nikos data setup
@@ -334,8 +339,6 @@ def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
         **mbh_info["initialize_kwargs"]
     )
 
-    from eryn.moves.tempering import TemperatureControl, make_ladder
-
     if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
             betas_all = state.sub_states["mbh"].betas_all
     else:
@@ -346,18 +349,8 @@ def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
     betas = betas_all[0]
     state.sub_states["mbh"].betas_all = betas_all
 
-    temperature_controls = [None for _ in range(mbh_info["pe_info"]["nleaves_max"])]
-    for leaf in range(mbh_info["pe_info"]["nleaves_max"]):
-        temperature_controls[leaf] = TemperatureControl(
-            mbh_info["pe_info"]["ndim"],
-            nwalkers,
-            betas=betas_all[leaf],
-            permute=False,
-            skip_swap_branches=["psd", "gb", "galfor"]
-        )
-
     inner_moves = mbh_info["pe_info"]["inner_moves"]
-    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False, skip_swap_branches=["psd", "gb", "galfor"])
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
     
     coords_shape = (ntemps, nwalkers, mbh_info["pe_info"]["nleaves_max"], mbh_info["pe_info"]["ndim"])
 
@@ -407,6 +400,86 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
         in_model_moves=[psd_move],
     )
 
+from lisatools.sources.emri import EMRITDIWaveform
+
+class WrapEMRI:
+    def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind):
+        self.waveform_gen_td = waveform_gen_td
+        self.tukey_alpha = tukey_alpha
+        self.nchannels = nchannels
+        self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
+
+    def __call__(self, *args, **kwargs):
+        AET_t = cp.asarray(self.waveform_gen_td(*args, **kwargs))
+        fft_input = AET_t * tukey(AET_t.shape[-1], self.tukey_alpha, xp=cp)[None, :]
+        AET_f = cp.fft.rfft(fft_input, axis=-1)[None, :self.nchannels, self.start_freq_ind: self.end_freq_ind]
+        return AET_f
+
+
+def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    emri_info = curr.source_info["emri"]
+
+    # TODO: mix this with the actual generatefuncs.py 
+    emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info["tukey_alpha"], curr.general_info["start_freq_ind"], curr.general_info["end_freq_ind"])
+
+    num_emris = gf_branch_info.nleaves_max["emri"]
+    ndim = gf_branch_info.ndims["emri"]
+    # need to inject emris since they are not in the data set yet. 
+    emri_inj_params = priors["emri"].rvs(size=(num_emris,))
+    emri_inj_params_in = emri_info["transform"].both_transforms(emri_inj_params)   
+    start = curr.general_info["start_freq_ind"]
+    end = curr.general_info["end_freq_ind"]
+    for inj in emri_inj_params_in:
+        AET_f = emri_gen(*inj)
+        # this will go into every residual because it is the data
+        for i in range(nwalkers):
+            # TODO: let's chat about how to work all the "remove from" / "add from" etc.
+            acs.remove_signal_from_residual(AET_f, data_index=np.array([i]))
+    
+    emri_start_params = emri_inj_params[None, None] * (1 + 1e-6 * np.random.randn(ntemps, nwalkers, num_emris, ndim))
+
+    from eryn.state import Branch
+    state.branches["emri"] = Branch(emri_start_params)
+    
+    if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
+            betas_all = state.sub_states["emri"].betas_all
+    else:
+        print("remove the False above")
+        betas_all = np.tile(make_ladder(emri_info["pe_info"]["ndim"], ntemps=ntemps), (emri_info["pe_info"]["nleaves_max"], 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["emri"].betas_all = betas_all
+
+    inner_moves = emri_info["pe_info"]["inner_moves"]
+    # should do skip_swap_branches in the add one / remove one move
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    coords_shape = (ntemps, nwalkers, emri_info["pe_info"]["nleaves_max"], emri_info["pe_info"]["ndim"])
+
+    emri_move_args = (
+        "emri",  # branch_name,
+        coords_shape,
+        emri_gen,
+        tempering_kwargs,
+        emri_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
+        emri_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        acs,
+        emri_info["pe_info"]["num_prop_repeats"],
+        emri_info["transform"],
+        priors,
+        inner_moves,
+        acs.df
+    )
+    
+    emri_move = ResidualAddOneRemoveOneMove(*emri_move_args, use_gpu=True,)
+    
+    return SetupInfoTransfer(
+        name="emri",
+        in_model_moves=[emri_move],
+    )
 
 
 def get_global_fit_settings(copy_settings_file=False):
@@ -473,9 +546,13 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ["Z"].squeeze(),
     )
 
-    X = dtrend(t, X.copy())
-    Y = dtrend(t, Y.copy())
-    Z = dtrend(t, Z.copy())
+    # TODO: @nikos what do you think about the window needed here. For this case at 1 year, I do not think it matters. But for other stuff.
+    # the time domain waveforms like emris right now will apply this as well
+    tukey_alpha = 0.05
+    tukey_here = tukey(X.shape[0], tukey_alpha)
+    X = dtrend(t, tukey_here * X.copy())
+    Y = dtrend(t, tukey_here * Y.copy())
+    Z = dtrend(t, tukey_here * Z.copy())
 
     dt = t[1] - t[0]
 
@@ -495,6 +572,9 @@ def get_global_fit_settings(copy_settings_file=False):
     Af, Ef, Tf = AET(Xf, Yf, Zf)
 
     start_freq_ind = 0
+    # TODO: check this. 
+    # This is here because of data storage size 
+    # and an issue I think with a zero in the response psd
     end_freq_ind = int(0.034 / df)  # len(A_inj) - 1
     
     A_inj, E_inj = (
@@ -507,11 +587,13 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [5]
+    gpus = [6]
 
     nwalkers = 36
     ntemps = 24
 
+    orbits = EqualArmlengthOrbits()
+    gpu_orbits = EqualArmlengthOrbits(use_gpu=True)
     all_general_info = dict(
         file_information=file_information,
         fd=fd,
@@ -521,6 +603,7 @@ def get_global_fit_settings(copy_settings_file=False):
         X=X,
         Y=Y,
         Z=Z,
+        orbits=orbits,
         data_length=data_length,
         start_freq_ind=start_freq_ind,
         end_freq_ind=end_freq_ind,
@@ -535,6 +618,7 @@ def get_global_fit_settings(copy_settings_file=False):
         backup_iter=10,
         nwalkers=nwalkers,
         ntemps=ntemps,
+        tukey_alpha=tukey_alpha,
         gpus=gpus
     )
 
@@ -650,6 +734,8 @@ def get_global_fit_settings(copy_settings_file=False):
         6: uniform_dist(*lam_lims),
         7: uniform_dist(*np.sin(beta_sky_lims)),
     }
+
+    # TODO: orbits check against sangria/sangria_hm
 
     # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
     priors_gb_fin = {"gb": ProbDistContainer(priors_gb)}
@@ -937,13 +1023,130 @@ def get_global_fit_settings(copy_settings_file=False):
         stop_kwargs=search_stopping_kwargs,
     )
 
+
+    ##################################
+    ##################################
+    ### EMRI Settings ################
+    ##################################
+    ##################################
+
+
+    # for transforms
+    # this is an example of how you would fill parameters 
+    # if you want to keep them fixed
+    # (you need to remove them from the other parts of initialization)
+    fill_dict_emri = {
+       "ndim_full": 14,
+       "fill_values": np.array([0.0, 0.0]), # inclination and Phi_theta
+       "fill_inds": np.array([5, 12]),
+    }
+
+    # priors
+    priors_emri = {
+        0: uniform_dist(np.log(1e5), np.log(1e6)),  # M total mass
+        1: uniform_dist(1.0, 100.0),  # mu
+        2: uniform_dist(0.01, 0.98),  # a
+        3: uniform_dist(12.0, 16.0),  # p0
+        4: uniform_dist(0.001, 0.4),  # e0
+        5: uniform_dist(0.01, 100.0),  # dist in Gpc
+        6: uniform_dist(-0.99999, 0.99999),  # qS
+        7: uniform_dist(0.0, 2 * np.pi),  # phiS
+        8: uniform_dist(-0.99999, 0.99999),  # qK
+        9: uniform_dist(0.0, 2 * np.pi),  # phiK
+        10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+        11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+    }
+
+    # transforms from pe to waveform generation
+    # after the fill happens (this is a little confusing)
+    # on my list of things to improve
+    parameter_transforms_emri = {
+        0: np.exp,  # M 
+        7: np.arccos, # qS
+        9: np.arccos,  # qK
+    }
+
+    transform_fn_emri = TransformContainer(
+        parameter_transforms=parameter_transforms_emri,
+        fill_dict=fill_dict_emri,
+
+    )
+
+    # sampler treats periodic variables by wrapping them properly
+    # TODO: really need to create map for transform_fn with keywork names
+    periodic_emri = {
+        "emri": {7: 2 * np.pi, 9: np.pi, 10: 2 * np.pi, 11: 2 * np.pi}
+    }
+
+    response_kwargs = dict(
+        t0=30000.0,
+        order=25,
+        tdi="1st generation",
+        tdi_chan="AE",
+        orbits=gpu_orbits,
+        use_gpu=True,
+    )
+
+    # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
+    # so spin results are currently meaningless and will lead to slower code
+    
+    # waveform kwargs
+    initialize_kwargs_emri = dict(
+        T=Tobs / YRSID_SI, # TODO: check these conversions all align
+        dt=dt,
+        emri_waveform_args=("FastSchwarzschildEccentricFlux",),
+        emri_waveform_kwargs=dict(use_gpu=True),
+        response_kwargs=response_kwargs,
+    )
+    
+    
+    # for EMRI waveform class initialization
+    waveform_kwargs_emri = deepcopy(initialize_kwargs_emri)
+
+    get_emri = GetEMRITemplates(
+        initialize_kwargs_emri,
+        waveform_kwargs_emri
+    )
+
+    inner_moves_emri = [
+        (StretchMove(), 1.0)
+    ]
+
+    # mcmc info for main run
+    emri_main_run_mcmc_info = dict(
+        branch_names=["emri"],
+        nleaves_max=8,
+        ndim=12,
+        ntemps=ntemps,
+        nwalkers=nwalkers,
+        num_prop_repeats=10,
+        inner_moves=inner_moves_emri,
+        progress=False,
+        thin_by=1,
+       # stop_kwargs=mix_stopping_kwargs,
+        # stopping_iterations=1
+    )
+
+    all_emri_info = dict(
+        setup_func=setup_emri_functionality,
+        periodic=periodic_emri,
+        priors={"emri": ProbDistContainer(priors_emri)},
+        transform=transform_fn_emri,
+        waveform_kwargs=waveform_kwargs_emri,
+        initialize_kwargs=initialize_kwargs_emri,
+        pe_info=emri_main_run_mcmc_info,
+        get_templates=get_emri,
+    )
+
     ##############
     ## READ OUT ##
     ##############
 
+    # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
         GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
         + GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        + GFBranchInfo("emri", 12, 8, 8, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )
@@ -954,6 +1157,7 @@ def get_global_fit_settings(copy_settings_file=False):
             "gb": all_gb_info,
             "mbh": all_mbh_info,
             "psd": all_psd_info,
+            "emri": all_emri_info,
         },
         "general": all_general_info,
         "rank_info": rank_info,

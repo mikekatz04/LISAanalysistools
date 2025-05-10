@@ -54,7 +54,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
 
         xp.get_default_memory_pool().free_all_blocks()
         
-    def compute_like(self, new_points_in, data_index=None):
+    def compute_like(self, new_points_in, data_index):
         assert data_index is not None
         logl = like_het.get_ll(
             new_points_in, 

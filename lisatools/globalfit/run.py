@@ -32,7 +32,7 @@ from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
-cp.cuda.runtime.setDevice(5)
+cp.cuda.runtime.setDevice(6)
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
@@ -197,16 +197,20 @@ class GlobalFit:
 
     def load_info(self):
         print("need to adjust file path")
-        if os.path.exists("test_new_3.h5"):
-            state = GFHDFBackend("test_new_3.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend}).get_a_sample(0)
+        if os.path.exists("test_new_5.h5"):
+            state = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend}).get_a_sample(0)
 
         else:
-            raise NotImplementedError
-            coords = {key: np.zeros((self.ntemps, self.nwalkers, self.nleaves_max[key], self.ndims[key])) for key in self.branch_names}
-            inds = {key: np.ones((self.ntemps, self.nwalkers, self.nleaves_max[key]), dtype=bool) for key in self.branch_names}
-            inds["gb"][:] = False
-            state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
-            state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+            print("update this somehow")
+            # coords = {key: np.zeros((self.ntemps, self.nwalkers, self.nleaves_max[key], self.ndims[key])) for key in self.branch_names}
+            # inds = {key: np.ones((self.ntemps, self.nwalkers, self.nleaves_max[key]), dtype=bool) for key in self.branch_names}
+            # inds["gb"][:] = False
+            # state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            # state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+            import pickle
+            with open("pickle_state.pickle", "rb") as fp:
+                state = pickle.load(fp)
+            print("pickle state load success")
         return state
 
     def setup_acs(self, generate, state):
@@ -238,7 +242,7 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
         
-        gpus = [5]
+        gpus = [6]
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)            
         return acs 
 
@@ -265,7 +269,7 @@ class GlobalFit:
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
 
-            backend = GFHDFBackend("test_new_3.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            backend = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
             # backend.reset(
             #     nwalkers,
             #     ndims,
@@ -343,7 +347,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_3.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_5.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
@@ -364,7 +368,7 @@ class GlobalFit:
                     ntemps=ntemps,
                     branch_names=branch_names,
                     nbranches=len(branch_names),
-                    rj=True,
+                    rj=False,
                     moves=None,
                     **extra_reset_kwargs
                 )
@@ -434,12 +438,12 @@ class GlobalFit:
                 nbranches=len(branch_names),
                 nleaves_max=nleaves_max,
                 nleaves_min=nleaves_min,
-                moves=setup_info_all.in_model_moves,
-                rj_moves=setup_info_all.rj_moves,
-                kwargs=None,  # {"start_freq_ind": start_freq_ind, **waveform_kwargs},
+                moves=setup_info_all.in_model_moves_input,
+                rj_moves=setup_info_all.rj_moves_input,
+                kwargs=None,
                 backend=backend,
                 vectorize=True,
-                periodic=periodic,  # TODO: add periodic to proposals
+                periodic=periodic,
                 branch_names=branch_names,
                 # update_fn=update,  # stop_converge_mix,
                 # update_iterations=gb_info["pe_info"]["update_iterations"],
@@ -452,7 +456,7 @@ class GlobalFit:
 
             state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
-            
+
             sampler_mix.run_mcmc(state, 10, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

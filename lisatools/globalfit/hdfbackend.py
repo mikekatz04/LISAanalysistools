@@ -1,6 +1,6 @@
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
-from .state import GFState, MBHState, GBState
+from .state import GFState, MBHState, EMRIState, GBState
 from .plot import RunResultsProduction
 import time
 import shutil
@@ -474,7 +474,6 @@ class GBHDFBackend(eryn_HDFBackend):
 
     
 
-
 class MBHHDFBackend(eryn_HDFBackend):
 
     def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int=None, **kwargs):
@@ -508,7 +507,7 @@ class MBHHDFBackend(eryn_HDFBackend):
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
         return dict(
-            num_bands=self.num_mbhs
+            num_mbhs=self.num_mbhs
         )
 
     def grow(self, ngrow, *args):
@@ -630,6 +629,169 @@ class MBHHDFBackend(eryn_HDFBackend):
         betas_all = self.get_betas_all(discard=discard, thin=thin)
 
         sample = MBHState(None, betas_all=betas_all)
+        return sample
+
+    
+# TODO: @ alessandro, we can use the same for EMRIs and MBHs
+# for now, but I assume we will want it separate in the end
+
+
+
+class EMRIHDFBackend(eryn_HDFBackend):
+
+    def reset(self, nwalkers, *args, ntemps=1, num_emris: int=None, **kwargs):
+        if num_emris is None:
+            raise ValueError("Must provide num_emris kwarg.")
+
+        # open file in append mode
+        with self.open("a") as f:
+            g = f[self.name]["sub_states"]
+
+            emri_group = g.create_group("emri")
+
+            emri_group.attrs["num_emris"] = num_emris
+
+            emri_group.create_dataset(
+                "betas_all",
+                (0, num_emris, ntemps),
+                maxshape=(None, num_emris, ntemps),
+                dtype=self.dtype,
+                compression=self.compression,
+                compression_opts=self.compression_opts,
+            )
+
+    @property
+    def num_emris(self):
+        """Get num_bands from h5 file."""
+        with self.open() as f:
+            return f[self.name].attrs["num_emris"]
+
+    @property
+    def reset_kwargs(self):
+        """Get reset_kwargs from h5 file."""
+        return dict(
+            num_emris=self.num_emris
+        )
+
+    def grow(self, ngrow, *args):
+        
+        # open the file in append mode
+        with self.open("a") as f:
+            g = f[self.name]
+            emri_group = f[self.name]["sub_states"]["emri"]
+            # resize all the arrays accordingly
+            ntot = g.attrs["iteration"] + ngrow
+            emri_group["betas_all"].resize(ntot, axis=0)
+
+    def get_value(self, name, thin=1, discard=0, slice_vals=None):
+        """Returns a requested value to user.
+
+        This function helps to streamline the backend for both
+        basic and hdf backend.
+
+        Args:
+            name (str): Name of value requested.
+            thin (int, optional): Take only every ``thin`` steps from the
+                chain. (default: ``1``)
+            discard (int, optional): Discard the first ``discard`` steps in
+                the chain as burn-in. (default: ``0``)
+            slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
+                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be 
+                ignored if slice_vals is not ``None``. This is particularly useful if files are 
+                very large and the user only wants a small subset of the overall array.
+                (default: ``None``)
+
+        Returns:
+            dict or np.ndarray: Values requested.
+
+        """
+        # check if initialized
+        if not self.initialized:
+            raise AttributeError(
+                "You must run the sampler with "
+                "'store == True' before accessing the "
+                "results"
+            )
+
+        if name != "betas_all":
+            raise ValueError(f"No {name} in this backend.")
+
+        if slice_vals is None:
+            slice_vals = slice(discard + thin - 1, self.iteration, thin)
+
+        # open the file wrapped in a "with" statement
+        with self.open() as f:
+            # get the group that everything is stored in
+            g = f[self.name]
+            iteration = g.attrs["iteration"]
+            if iteration <= 0:
+                raise AttributeError(
+                    "You must run the sampler with "
+                    "'store == True' before accessing the "
+                    "results"
+                )
+
+            emri_group = g["sub_states"]["emri"]
+            v_all = emri_group["betas_all"][slice_vals]
+        return v_all
+
+    def get_betas_all(self, **kwargs):
+        """Get the stored chain of MCMC samples
+
+        Args:
+            thin (int, optional): Take only every ``thin`` steps from the
+                chain. (default: ``1``)
+            discard (int, optional): Discard the first ``discard`` steps in
+                the chain as burn-in. (default: ``0``)
+            slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
+                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``. 
+                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``. 
+                This is particularly useful if files are very large and the user only wants a 
+                small subset of the overall array. (default: ``None``)
+
+        Returns:
+            dict: MCMC samples
+                The dictionary contains np.ndarrays of samples
+                across the branches.
+
+        """
+        return self.get_value("betas_all", **kwargs)
+
+    def save_step(
+        self,
+        state,
+        *args, 
+        **kwargs
+    ):
+
+        # open for appending in with statement
+        with self.open("a") as f:
+            g = f[self.name]
+            # get the iteration left off on
+            # minus one because it was updated in the super function
+            iteration = g.attrs["iteration"] - 1
+            emri_group = g["sub_states"]["emri"]
+            emri_group["betas_all"][iteration] = state.sub_states["emri"].betas_all
+
+    def get_a_sample(self, it):
+        """Access a sample in the chain
+
+        Args:
+            it (int): iteration of GFState to return.
+
+        Returns:
+            GFState: :class:`eryn.state.GFState` object containing the sample from the chain.
+
+        Raises:
+            AttributeError: Backend is not initialized.
+
+        """
+        thin = self.iteration - it if it != self.iteration else 1
+        discard = it + 1 - thin
+
+        betas_all = self.get_betas_all(discard=discard, thin=thin)
+
+        sample = EMRIState(None, betas_all=betas_all)
         return sample
 
     

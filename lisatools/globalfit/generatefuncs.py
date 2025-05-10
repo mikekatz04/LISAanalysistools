@@ -2,9 +2,10 @@ import numpy as np
 from copy import deepcopy
 import warnings
 
-from lisatools.sensitivity import get_sensitivity
-from lisatools.detector import sangria
+from ..sensitivity import get_sensitivity
+from ..detector import sangria
 from bbhx.waveformbuild import BBHWaveformFD
+from ..sources.emri.waveform import EMRITDIWaveform
 
 from gbgpu.gbgpu import GBGPU
 
@@ -170,6 +171,83 @@ class GetMBHTemplates:
         else:
             return_tuple += (None,)
         return return_tuple
+
+
+
+class GetEMRITemplates:
+
+    def __init__(self, initialization_kwargs, runtime_kwargs):
+        self.initialization_kwargs = initialization_kwargs
+        self.runtime_kwargs = runtime_kwargs
+
+    def __call__(self, current_state, emri_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False):
+
+        if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
+            xp = cp
+            use_gpu = True
+        else:
+            xp = np
+            use_gpu = False
+
+        emri_gen = EMRITDIWaveform(**self.initialization_kwargs)
+
+        num_emri = current_state.branches["emri"].shape[2]  # index 2 is leaf count
+        num_freqs = len(general_info["fd"])
+    
+        if only_max_ll:
+            best = current_state.log_like[0].argmax()
+            emri_params = current_state.branches["emri"].coords[0, best:best + 1].copy()
+
+        else:
+            num_emri_walkers = current_state.log_like.shape[-1]
+            
+            inds = np.arange(num_emri_walkers)
+
+            # adjust if looking for less
+            if n_gen_in is not None and isinstance(n_gen_in, int):
+                if num_emri_walkers > n_gen_in:
+                    inds = np.random.choice(np.arange(num_emri_walkers), n_gen_in, replace=False)
+                
+            emri_params = current_state.branches["emri"].coords[0, inds].copy()
+
+        freqs = xp.asarray(general_info["fd"])
+
+        # TODO: adjust for AET/XYZ rather than AE
+        out = np.zeros((emri_params.shape[0], 2, general_info["fd"].shape[0]), dtype=complex)
+
+        for i in range(emri_params.shape[0]):
+            for leaf in range(emri_params.shape[1]):
+                emri_params_in = emri_info["transform"].both_transforms(emri_params[i, leaf:leaf + 1].reshape(-1, emri_info["pe_info"]["ndim"]))
+            
+                for emri_params_in_i in emri_params_in: 
+                    AET_t = emri_gen(*emri_params_in_i, **self.runtime_kwargs)
+                    breakpoint()
+                    tmp1 = xp.fft.rfft(AET_t, axis=-1)
+                    assert tmp1.shape[0] == freqs.shape[0]
+
+                    if use_gpu:
+                        tmp2 = tmp1.get()
+                    else:
+                        tmp2 = tmp1
+
+                    out[i] += tmp2
+
+        del emri_gen, freqs, AET, tmp2
+
+        if use_gpu:
+            xp.get_default_memory_pool().free_all_blocks()
+        
+        return_tuple = (out[:, 0], out[:, 1])
+        # TODO: delete GPU data if needed?
+
+        if return_prior_val:
+            prior_val = emri_info["priors"]["emri"].logpdf(emri_params.reshape(-1, emri_params.shape[-1])).reshape(emri_params.shape[:-1]).sum(axis=-1)
+            return_tuple += (prior_val,)
+        else:
+            return_tuple += (None,)
+        return return_tuple
+
+# TODO: generalize this setup to adjustable model inputs
 
 class GetGBTemplates:
 

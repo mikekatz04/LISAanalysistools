@@ -206,37 +206,28 @@ class MBHState(eryn_State):
         else:
             self.betas_all = betas_all
 
-    def reset_backend(self, h5_group, h5_kwargs, nwalkers, *args, ntemps=1, **kwargs):
-        if "nleaves_max" not in kwargs:
-            raise ValueError("Must provide nleaves_max kwarg.")
-            
-        num_mbhs = kwargs["nleaves_max"]["mbh"]
-
-        mbh_group = h5_group.create_group("mbh_sub_state")
-
-        mbh_group.attrs["num_mbhs"] = num_mbhs
-
-        mbh_group.create_dataset(
-            "betas_all",
-            (0, num_mbhs, ntemps),
-            maxshape=(None, num_mbhs, ntemps),
-            **h5_kwargs
-        )
-
-    def grow_backend(self, h5_group, ngrow, *args):
-        mbh_group = h5_group["mbh_sub_state"]
-        mbh_group["betas_all"].resize(ngrow, axis=0)
-
-    def save_step(self, iteration, h5_group, state, *args, **kwargs):
-        # make sure the backend has all the information needed to store everything
-        mbh_group = h5_group["mbh_sub_state"]
-        mbh_group["betas_all"][iteration] = state.sub_states["mbh"].betas_all
-        
     @property
     def reset_kwargs(self):
         # TODO: this okay for future?
         return dict(
             num_mbhs=self.betas_all.shape[0]
+        )
+
+
+class EMRIState(eryn_State):
+    remove_kwargs = ["betas_all"]
+    def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
+        if isinstance(possible_state, self.__class__):
+            dc = deepcopy if copy else return_x
+            self.betas_all = dc(possible_state.betas_all)
+        else:
+            self.betas_all = betas_all
+
+    @property
+    def reset_kwargs(self):
+        # TODO: this okay for future?
+        return dict(
+            num_emris=self.betas_all.shape[0]
         )
 
 class GFState(eryn_State):

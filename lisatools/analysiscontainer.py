@@ -281,6 +281,8 @@ class AnalysisContainer:
                 self.data_res_arr, self.sens_mat, **kwargs
             )
 
+    # TODO: make sure there is a way for backends to check TDI channel structure/domain is equivalent
+
     def _calculate_signal_operation(
         self,
         calc: str,
@@ -289,6 +291,7 @@ class AnalysisContainer:
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
         transform_fn: Optional[TransformContainer] = None,
+        signal_gen: Optional[callable] = None,
         **kwargs: dict,
     ) -> float | complex:
         """Return the likelihood of a generated signal with the data.
@@ -301,6 +304,9 @@ class AnalysisContainer:
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
                 This can be used if any transforms are desired prior to the Likelihood computation. If it is not input,
                 the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.
+            transform_fn: Transform information for signal parameters if they 
+                are entered on a basis other than the waveform basis.
+            signal_gen: In scope waveform generator. Replaces ``self.signal_gen`` if this input is not ``None``. 
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
 
         Returns:
@@ -317,8 +323,10 @@ class AnalysisContainer:
         else:
             args_in = args
 
+        signal_gen_here = self.signal_gen if signal_gen is None else signal_gen
+
         template = DataResidualArray(
-            self.signal_gen(*args_in, **waveform_kwargs), **data_res_arr_kwargs
+            signal_gen_here(*args_in, **waveform_kwargs), **data_res_arr_kwargs
         )
 
         args_2 = (template,)

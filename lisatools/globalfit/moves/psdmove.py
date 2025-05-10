@@ -90,8 +90,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         if np.any(np.abs(before_vals - state.log_like[0]) > 1e-4) :
             breakpoint()
 
-        # TODO: separate temp control from ensemble sampler
-  
         # breakpoint()
         # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplemental)
         # logl_test = self.compute_log_like(state.branches_coords, inds=state.branches_inds, supps=state.supplemental, logp=logp)
@@ -132,6 +130,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         if np.any(np.abs(after_vals - new_state.log_like[0]) > 1e-4) :
             breakpoint()
                    
-        # TODO: NEED TO ADJUST ACS WITH NEW PSDS AND RESET LINEAR ARRAY
+        breakpoint()
         return new_state, accepted
 

@@ -11,7 +11,7 @@ from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 
 
-class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
+class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def __init__(self, branch_name, coords_shape, waveform_gen, tempering_kwargs, waveform_gen_kwargs, waveform_like_kwargs, acs, num_repeats, transform_fn, priors, inner_moves, df, 
         Tmax=np.inf, betas_all = None, **kwargs):
         
@@ -19,6 +19,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
 
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = coords_shape
         
+        self.branch_name = branch_name
         self.acs = acs
         self.waveform_gen = waveform_gen
         self.num_repeats = num_repeats
@@ -55,16 +56,17 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
     def check_add_skip_swap_info(self, state):
         if len(state.branches) > 1:
             if self.temperature_controls[0].skip_swap_branches is None:
-                breakpoint()
                 skip_swap_branches = [key for key in state.branches.keys()]
                 skip_swap_branches.remove(self.branch_name)
                 for i in range(self.nleaves_max):
                     self.temperature_controls[i].skip_swap_branches = skip_swap_branches
+    
     def add_back_in_cold_chain_sources(self, coords):
 
         # TODO: fix T channel 
         # d - h -> need to add removal waveforms
         # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        breakpoint()
         removal_waveforms = self.get_waveform_here(coords)
         ll_tmp2 = self.acs.likelihood(source_only=True)  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.remove_signal_from_residual(
@@ -91,6 +93,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
 
     def get_waveform_here(self, coords):
         xp.get_default_memory_pool().free_all_blocks()
+        coords_in = self.transform_fn.both_transforms(coords)
         waveforms = self.waveform_gen(coords, **self.waveform_gen_kwargs)
         assert waveforms.shape == (
             nwalkers,
@@ -99,7 +102,18 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
         )
         return waveforms
 
-    
+    def setup_likelihood_here(self, coords):
+        pass
+
+    def compute_like(self, old_coords_in, data_index):
+        # TODO: we should probably move the prior in here even though 
+        # in general with current setup it should only be points in the prior
+        # that make it here
+        ll = np.full_like(data_index, -1e300, dtype=float)
+        for i, (coords_in_now, data_index_now) in enumerate(zip(old_coords_in, data_index)):
+            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(coords_in_now, signal_gen=self.waveform_gen)
+        return ll
+
     def propose(self, model, state):
         new_state = deepcopy(state)
 
@@ -118,10 +132,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
 
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
+
             temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[leaf]
 
             # remove cold chain sources
-            removal_coords = new_state.branches[self.branch_bame].coords[0, :, leaf]
+            removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
             self.add_back_in_cold_chain_sources(removal_coords_in)
             breakpoint()
@@ -302,6 +317,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, Move):
         new_state.log_like[:] = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
             
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
+        breakpoint()
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
