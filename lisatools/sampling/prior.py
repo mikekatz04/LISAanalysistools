@@ -5,6 +5,12 @@ from ..utils.constants import *
 from ..sensitivity import get_sensitivity
 from eryn.moves.multipletry import logsumexp
 
+try:
+    from ..cutils.psd_gpu import compute_logpdf
+    
+except (ModuleNotFoundError, ImportError) as e:
+    pass
+
 from typing import Union, Optional, Tuple, List
 
 import sys
@@ -401,7 +407,6 @@ class GBPriorWrap:
 class FullGaussianMixtureModel:
     def __init__(
         self,
-        gb,
         weights,
         means,
         covs,
@@ -418,8 +423,6 @@ class FullGaussianMixtureModel:
             xp = cp
         else:
             xp = np
-
-        self.gb = gb
 
         indexing = []
         for i, weight in enumerate(weights):
@@ -514,7 +517,7 @@ class FullGaussianMixtureModel:
 
         logpdf_out_tmp = xp.zeros(points_sorted_in.shape[0])
 
-        self.gb.compute_logpdf(
+        compute_logpdf(
             logpdf_out_tmp,
             components_keep_in.astype(xp.int32),
             points_sorted_in,

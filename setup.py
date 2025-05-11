@@ -119,12 +119,7 @@ except AttributeError:
     numpy_include = numpy.get_numpy_include()
 
 if run_cuda_install:
-    detector_gpu_ext = Extension(
-        "lisatools.cutils.detector_gpu",
-        sources=[
-            "lisatools/cutils/src/Detector.cu",
-            "lisatools/cutils/src/pycppdetector.pyx",
-        ],
+    gpu_kwargs = dict(
         include_dirs=["lisatools/cutils/include", numpy_include, CUDA["include"]],
         libraries=["cudart"],
         library_dirs=[CUDA["lib64"]],
@@ -159,6 +154,23 @@ if run_cuda_install:
             # "nvcclink": ['-arch=sm_80', '--device-link', "--compiler-options", "'-fPIC'"]
         },
     )
+    detector_gpu_ext = Extension(
+        "lisatools.cutils.detector_gpu",
+        sources=[
+            "lisatools/cutils/src/Detector.cu",
+            "lisatools/cutils/src/pycppdetector.pyx",
+        ],
+        **gpu_kwargs
+    )
+
+    psd_gpu_ext = Extension(
+        "lisatools.cutils.psd_gpu",
+        sources=[
+            "lisatools/cutils/src/PSD.cu",
+            "lisatools/cutils/src/psdgen.pyx",
+        ],
+        **gpu_kwargs
+    )
 
 detector_cpu_ext = Extension(
     "lisatools.cutils.detector_cpu",
@@ -174,7 +186,7 @@ detector_cpu_ext = Extension(
 extensions = [detector_cpu_ext]
 
 if run_cuda_install:
-    extensions += [detector_gpu_ext]
+    extensions += [detector_gpu_ext, psd_gpu_ext]
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
