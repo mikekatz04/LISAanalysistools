@@ -93,7 +93,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     def get_waveform_here(self, coords):
         xp.get_default_memory_pool().free_all_blocks()
-        coords_in = self.transform_fn.both_transforms(coords)
         waveforms = self.waveform_gen(coords, **self.waveform_gen_kwargs)
         assert waveforms.shape == (
             nwalkers,

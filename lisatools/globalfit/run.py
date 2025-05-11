@@ -32,7 +32,7 @@ from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
-cp.cuda.runtime.setDevice(6)
+cp.cuda.runtime.setDevice(5)
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
@@ -242,7 +242,7 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
         
-        gpus = [6]
+        gpus = [5]
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)            
         return acs 
 
