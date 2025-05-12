@@ -66,7 +66,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # TODO: fix T channel 
         # d - h -> need to add removal waveforms
         # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        breakpoint()
         removal_waveforms = self.get_waveform_here(coords)
         ll_tmp2 = self.acs.likelihood(source_only=True)  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.remove_signal_from_residual(
@@ -93,12 +92,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     def get_waveform_here(self, coords):
         xp.get_default_memory_pool().free_all_blocks()
-        waveforms = self.waveform_gen(coords, **self.waveform_gen_kwargs)
-        assert waveforms.shape == (
-            nwalkers,
-            self.acs.nchannels,
-            self.acs.data_length
-        )
+        waveforms = xp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
+        
+        for i in range(coords.shape[0]):
+            waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+        
         return waveforms
 
     def setup_likelihood_here(self, coords):
@@ -108,8 +106,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # TODO: we should probably move the prior in here even though 
         # in general with current setup it should only be points in the prior
         # that make it here
-        ll = np.full_like(data_index, -1e300, dtype=float)
-        for i, (coords_in_now, data_index_now) in enumerate(zip(old_coords_in, data_index)):
+        ll = np.full_like(data_index.get(), -1e300, dtype=float)
+        for i, (coords_in_now, data_index_now) in enumerate(zip(old_coords_in, data_index.get())):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(coords_in_now, signal_gen=self.waveform_gen)
         return ll
 
@@ -133,6 +131,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             temperature_control_here = self.temperature_controls[leaf]
 
             temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[leaf]
+
+            ndim = new_state.branches[self.branch_name].coords.shape[-1]
 
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]

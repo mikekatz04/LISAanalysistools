@@ -6,11 +6,54 @@ from eryn.state import State as eryn_State
 from ..state import GFState
 from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
-from ..psdglobal import log_like as psd_log_like
 import warnings
 from eryn.moves import RedBlueMove, StretchMove
 from ..moves import GlobalFitMove
 from ..utils import new_sens_mat
+from ...cutils.psd_gpu import psd_likelihood
+
+def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
+    if supps is None:
+        raise ValueError("Must provide supps to identify the data streams.")
+
+    wi = supps["walker_inds"]
+    psd_pars = x[0]
+    galfor_pars = x[1]
+    A_data = data[0]
+    E_data = data[1]
+    
+    data_index_all = xp.asarray(wi).astype(np.int32)
+    ll = xp.zeros(psd_pars.shape[0]) 
+    A_Soms_d_in_all = xp.asarray(psd_pars[:, 0])
+    A_Sa_a_in_all = xp.asarray(psd_pars[:, 1])
+    E_Soms_d_in_all = xp.asarray(psd_pars[:, 2])
+    E_Sa_a_in_all = xp.asarray(psd_pars[:, 3])
+    Amp_all = xp.asarray(galfor_pars[:, 0])
+    kn_all = xp.asarray(galfor_pars[:, 1])
+    alpha_all = xp.asarray(galfor_pars[:, 2])
+    sl1_all = xp.asarray(galfor_pars[:, 3])
+    sl2_all = xp.asarray(galfor_pars[:, 4])
+    num_data = 1
+    num_psds = psd_pars.shape[0]
+
+    psd_likelihood(ll, freqs, data, data_index_all,  A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, 
+                     Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, df, data_length, num_data, num_psds)
+    
+    # # galfor_pars = None
+    # ll2 = xp.zeros_like(ll)
+    # for i, (psd_pars_i, galfor_pars_i) in enumerate(zip(psd_pars, galfor_pars)):
+    #     psd = [
+    #         get_sensitivity(freqs, model=psd_pars_i[:2], foreground_params=galfor_pars_i, **sens_kwargs),
+    #         get_sensitivity(freqs, model=psd_pars_i[2:], foreground_params=galfor_pars_i, **sens_kwargs)
+    #     ]
+    #     psd[0][0] = psd[0][1]
+    #     psd[1][0] = psd[1][1]
+
+    #     # inner_product = 4 * df * (xp.sum(data[0][wi].conj() * data[0][wi] / psd[0]) + xp.sum(data[1][wi].conj() * data[1][wi] / psd[1])).real
+    #     inner_product = 4 * df * (xp.sum(data[0].conj() * data[0] / psd[0]) + xp.sum(data[1].conj() * data[1] / psd[1])).real
+    #     ll2[i] = -1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd)))
+    # assert np.allclose(ll.get(), ll2.get())
+    return ll.get()
 
 class PSDMove(GlobalFitMove, StretchMove):
     def __init__(self, gb, acs, priors, *args, psd_kwargs={}, **kwargs):

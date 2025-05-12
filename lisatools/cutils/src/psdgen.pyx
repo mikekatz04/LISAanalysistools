@@ -9,23 +9,6 @@ assert sizeof(int) == sizeof(np.int32_t)
 cdef extern from "../include/PSD.hpp":
     ctypedef void* cmplx 'cmplx'
     
-    void specialty_piece_wise_likelihoods_wrap(
-        double* lnL,
-        cmplx* data,
-        double* noise,
-        int* data_index,
-        int* noise_index,
-        int* start_inds,
-        int* lengths,
-        double df, 
-        int num_parts,
-        int start_freq_ind,
-        int data_length,
-        int tdi_channel_setup,
-        bool do_synchronize,
-        int num_data, 
-        int num_noise
-    ) except+
     void psd_likelihood_wrap(double* like_contrib_final, double *f_arr, cmplx* data, int* data_index_all, double* A_Soms_d_in_all, double* A_Sa_a_in_all, double* E_Soms_d_in_all, double* E_Sa_a_in_all, 
                     double* Amp_all, double* alpha_all, double* sl1_all, double* kn_all, double* sl2_all, double df, int data_length, int num_data, int num_psds) except+
         
@@ -36,50 +19,6 @@ cdef extern from "../include/PSD.hpp":
                                double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f) except+
     void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
                                double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f) except+
-
-def specialty_piece_wise_likelihoods(*args, **kwargs):
-    (lnL,
-        data,
-        noise,
-        data_index,
-        noise_index,
-        start_inds,
-        lengths,
-        df, 
-        num_parts,
-        start_freq_ind,
-        data_length,
-        tdi_channel_setup,
-        do_synchronize,
-        num_data, 
-        num_noise
-    ), tkwargs = wrapper(*args, **kwargs)
-
-    cdef size_t lnL_in = lnL
-    cdef size_t data_in = data
-    cdef size_t noise_in = noise
-    cdef size_t data_index_in = data_index
-    cdef size_t noise_index_in = noise_index
-    cdef size_t start_inds_in = start_inds
-    cdef size_t lengths_in = lengths
-
-    specialty_piece_wise_likelihoods_wrap(
-        <double*> lnL_in,
-        <cmplx*> data_in,
-        <double*> noise_in,
-        <int*> data_index_in,
-        <int*> noise_index_in,
-        <int*> start_inds_in,
-        <int*> lengths_in,
-        df, 
-        num_parts,
-        start_freq_ind,
-        data_length,
-        tdi_channel_setup,
-        do_synchronize,
-        num_data, 
-        num_noise
-    )   
 
 def psd_likelihood(*args, **kwargs):
 

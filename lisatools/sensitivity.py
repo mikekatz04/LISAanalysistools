@@ -171,7 +171,7 @@ class Sensitivity(ABC):
         sgal = xp.zeros_like(f)
 
         if (
-            (stochastic_params != () and stochastic_params is not None)
+            (tuple(stochastic_params) != tuple() and stochastic_params is not None)
             or (stochastic_kwargs != {} and stochastic_kwargs is not None)
             or stochastic_function is not None
         ):

@@ -403,16 +403,17 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
 from lisatools.sources.emri import EMRITDIWaveform
 
 class WrapEMRI:
-    def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind):
+    def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind, dt):
         self.waveform_gen_td = waveform_gen_td
         self.tukey_alpha = tukey_alpha
         self.nchannels = nchannels
         self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
+        self.dt = dt
 
     def __call__(self, *args, **kwargs):
         AET_t = cp.asarray(self.waveform_gen_td(*args, **kwargs))
         fft_input = AET_t * tukey(AET_t.shape[-1], self.tukey_alpha, xp=cp)[None, :]
-        AET_f = cp.fft.rfft(fft_input, axis=-1)[None, :self.nchannels, self.start_freq_ind: self.end_freq_ind]
+        AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[None, :self.nchannels, self.start_freq_ind: self.end_freq_ind]
         return AET_f
 
 
@@ -422,7 +423,7 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     emri_info = curr.source_info["emri"]
 
     # TODO: mix this with the actual generatefuncs.py 
-    emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info["tukey_alpha"], curr.general_info["start_freq_ind"], curr.general_info["end_freq_ind"])
+    emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info["tukey_alpha"], curr.general_info["start_freq_ind"], curr.general_info["end_freq_ind"], curr.general_info["dt"])
 
     num_emris = gf_branch_info.nleaves_max["emri"]
     ndim = gf_branch_info.ndims["emri"]
@@ -439,7 +440,16 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
             acs.remove_signal_from_residual(AET_f, data_index=np.array([i]))
     
     emri_start_params = emri_inj_params[None, None] * (1 + 1e-6 * np.random.randn(ntemps, nwalkers, num_emris, ndim))
-
+    emri_start_params_in = emri_info["transform"].both_transforms(emri_start_params.reshape(-1, ndim)).reshape(emri_start_params.shape[:-1] + (-1,))   
+    
+    # now we need to actually subtract cold-chain from their specific residuals
+    for i in range(nwalkers):
+        for leaf in range(num_emris):
+            temp = emri_start_params_in[0, i, leaf]
+            AET_f = emri_gen(*temp)
+            acs.add_signal_to_residual(AET_f, data_index=np.array([i]))
+  
+    cp.get_default_memory_pool().free_all_blocks()
     from eryn.state import Branch
     state.branches["emri"] = Branch(emri_start_params)
     
@@ -604,6 +614,7 @@ def get_global_fit_settings(copy_settings_file=False):
         Y=Y,
         Z=Z,
         orbits=orbits,
+        gpu_orbits=gpu_orbits, 
         data_length=data_length,
         start_freq_ind=start_freq_ind,
         end_freq_ind=end_freq_ind,
@@ -942,7 +953,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # waveform kwargs
     initialize_kwargs_mbh = dict(
         amp_phase_kwargs=dict(run_phenomd=True),
-        response_kwargs=dict(TDItag="AET"),
+        response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
         use_gpu=True
     )
 
@@ -1101,7 +1112,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     
     # for EMRI waveform class initialization
-    waveform_kwargs_emri = deepcopy(initialize_kwargs_emri)
+    waveform_kwargs_emri = {}  #  deepcopy(initialize_kwargs_emri)
 
     get_emri = GetEMRITemplates(
         initialize_kwargs_emri,

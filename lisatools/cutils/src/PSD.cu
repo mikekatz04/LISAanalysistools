@@ -537,3 +537,152 @@ void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, in
 }
 
 
+
+
+#define NUM_THREADS_LIKE 64
+
+// __global__ void specialty_piece_wise_likelihoods(
+//     double *lnL,
+//     cmplx *data,
+//     double *noise,
+//     int *data_index,
+//     int *noise_index,
+//     int *start_inds,
+//     int *lengths,
+//     double df,
+//     int num_parts,
+//     int start_freq_ind,
+//     int data_length,
+//     int tdi_channel_setup,
+//     int num_data, 
+//     int num_noise)
+// {
+//     using complex_type = cmplx;
+
+//     int tid = threadIdx.x;
+//     __shared__ double lnL_tmp_for_sum[NUM_THREADS_LIKE];
+
+//     int nchannels = 3;
+//     if (tdi_channel_setup == TDI_CHANNEL_SETUP_AE) nchannels = 2;
+//     for (int i = threadIdx.x; i < NUM_THREADS_LIKE; i += blockDim.x)
+//     {
+//         lnL_tmp_for_sum[i] = 0.0;
+//     }
+//     __syncthreads();
+
+//     cmplx tmp1;
+//     int data_ind, noise_ind, start_ind, length;
+
+//     int jj = 0;
+//     // example::io<FFT>::load_to_smem(this_block_data, shared_mem);
+
+//     cmplx d, h;
+//     cmplx _ignore_this = 0.0;
+//     cmplx _ignore_this_2 = 0.0;
+//     double n;
+//     for (int part_i = blockIdx.x; part_i < num_parts; part_i += gridDim.x)
+//     {
+
+//         data_ind = data_index[part_i];
+//         noise_ind = noise_index[part_i];
+//         start_ind = start_inds[part_i];
+//         length = lengths[part_i];
+
+//         tmp1 = 0.0;
+//         for (int i = threadIdx.x; i < length; i += blockDim.x)
+//         {
+//             jj = i + start_ind - start_freq_ind;
+//             // d_A = data_A[data_ind * data_length + jj];
+//             // d_E = data_E[data_ind * data_length + jj];
+//             // n_A = noise_A[noise_ind * data_length + jj];
+//             // n_E = noise_E[noise_ind * data_length + jj];
+//             add_inner_product_contribution(
+//                 &tmp1, &_ignore_this, &_ignore_this_2,
+//                 data, data, 
+//                 jj, jj, 
+//                 ARRAY_TYPE_DATA, ARRAY_TYPE_DATA,
+//                 noise, noise_ind, jj,
+//                 data_ind, tdi_channel_setup, data_length, -1,
+//                 num_data, num_noise
+//             );
+
+//             // if (part_i == 0)
+//             //{
+//             //     printf("check vals %d %d %d %d %.12e %.12e %.12e %.12e %.12e %.12e %.12e\n", i, jj, start_ind, part_i, d_A.real(), d_A.imag(), d_E.real(), d_E.imag(), n_A, n_E, df);
+//             // }
+//             // tmp1 += (gcmplx::conj(d_A) * d_A / n_A + gcmplx::conj(d_E) * d_E / n_E).real();
+//         }
+//         __syncthreads();
+//         lnL_tmp_for_sum[tid] = tmp1.real();
+
+//         __syncthreads();
+//         if (tid == 0)
+//         {
+//             lnL[part_i] = -1. / 2. * (4.0 * df * lnL_tmp_for_sum[0]);
+//         }
+
+//         __syncthreads();
+//         for (unsigned int s = 1; s < blockDim.x; s *= 2)
+//         {
+//             if (tid % (2 * s) == 0)
+//             {
+//                 lnL_tmp_for_sum[tid] += lnL_tmp_for_sum[tid + s];
+//             }
+//             __syncthreads();
+//         }
+//         __syncthreads();
+
+//         if (tid == 0)
+//         {
+//             lnL[part_i] = -1. / 2. * (4.0 * df * lnL_tmp_for_sum[0]);
+//         }
+//         __syncthreads();
+
+//         // example::io<FFT>::store_from_smem(shared_mem, this_block_data);
+//     }
+//     //
+// }
+
+// void specialty_piece_wise_likelihoods_wrap(
+//     double *lnL,
+//     cmplx *data,
+//     double *noise,
+//     int *data_index,
+//     int *noise_index,
+//     int *start_inds,
+//     int *lengths,
+//     double df,
+//     int num_parts,
+//     int start_freq_ind,
+//     int data_length,
+//     int tdi_channel_setup,
+//     bool do_synchronize,
+//     int num_data, 
+//     int num_noise)
+// {
+//     if (num_parts == 0)
+//     {
+//         printf("num_parts is 0\n");
+//         return;
+//     }
+//     specialty_piece_wise_likelihoods<<<num_parts, NUM_THREADS_LIKE>>>(
+//         lnL,
+//         data,
+//         noise,
+//         data_index,
+//         noise_index,
+//         start_inds,
+//         lengths,
+//         df,
+//         num_parts,
+//         start_freq_ind,
+//         data_length,
+//         tdi_channel_setup,
+//         num_data, 
+//         num_noise);
+
+//     CUDA_CHECK_AND_EXIT(cudaPeekAtLastError());
+
+//     if (do_synchronize)
+//         CUDA_CHECK_AND_EXIT(cudaDeviceSynchronize());
+// }

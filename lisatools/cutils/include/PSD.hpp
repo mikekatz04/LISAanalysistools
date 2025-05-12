@@ -3,23 +3,23 @@
 
 #include "global.hpp"
 
-void specialty_piece_wise_likelihoods_wrap(
-    double* lnL,
-    cmplx* data,
-    double* noise,
-    int* data_index,
-    int* noise_index,
-    int* start_inds,
-    int* lengths,
-    double df, 
-    int num_parts,
-    int start_freq_ind,
-    int data_length,
-    int tdi_channel_setup,
-    bool do_synchronize,
-    int num_data, 
-    int num_noise
-);
+// void specialty_piece_wise_likelihoods_wrap(
+//     double* lnL,
+//     cmplx* data,
+//     double* noise,
+//     int* data_index,
+//     int* noise_index,
+//     int* start_inds,
+//     int* lengths,
+//     double df, 
+//     int num_parts,
+//     int start_freq_ind,
+//     int data_length,
+//     int tdi_channel_setup,
+//     bool do_synchronize,
+//     int num_data, 
+//     int num_noise
+// );
 
 
 void psd_likelihood_wrap(double* like_contrib_final, double *f_arr, cmplx* data, int* data_index_all, double* A_Soms_d_in_all, double* A_Sa_a_in_all, double* E_Soms_d_in_all, double* E_Sa_a_in_all, 
