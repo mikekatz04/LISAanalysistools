@@ -32,7 +32,7 @@ from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
-cp.cuda.runtime.setDevice(5)
+cp.cuda.runtime.setDevice(7)
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
@@ -197,8 +197,10 @@ class GlobalFit:
 
     def load_info(self):
         print("need to adjust file path")
+        breakpoint()
+        # TODO: update to generalize
         if os.path.exists("test_new_5.h5"):
-            state = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend}).get_a_sample(0)
+            state = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
 
         else:
             print("update this somehow")
@@ -242,7 +244,7 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
         
-        gpus = [5]
+        gpus = [7]
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)            
         return acs 
 
@@ -388,9 +390,11 @@ class GlobalFit:
                 else:
                     setup_info_all += setup_info
 
-            # backend.grow(1, None)
-            # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
-            # exit()
+            backend.grow(1, None)
+            accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
+            swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
+            backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
+            exit()
            
             rank_instructions = {}
             for move in setup_info_all.in_model_moves + setup_info_all.rj_moves:

@@ -597,7 +597,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [5]
+    gpus = [7]
 
     nwalkers = 36
     ntemps = 24
