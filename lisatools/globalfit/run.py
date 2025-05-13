@@ -390,11 +390,11 @@ class GlobalFit:
                 else:
                     setup_info_all += setup_info
 
-            backend.grow(1, None)
-            accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
-            swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
-            backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
-            exit()
+            # backend.grow(1, None)
+            # accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
+            # swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
+            # backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
+            # exit()
            
             rank_instructions = {}
             for move in setup_info_all.in_model_moves + setup_info_all.rj_moves:
