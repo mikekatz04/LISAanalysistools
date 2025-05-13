@@ -13,7 +13,7 @@ from ..sensitivity import AE1SensitivityMatrix
 from .state import GFState
 from ..detector import EqualArmlengthOrbits
 from ..stochastic import HyperbolicTangentGalacticForeground
-from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
+from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
 from eryn.backends import HDFBackend
 from eryn.moves import Move
 from ..detector import LISAModel
