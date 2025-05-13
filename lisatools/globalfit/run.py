@@ -197,7 +197,6 @@ class GlobalFit:
 
     def load_info(self):
         print("need to adjust file path")
-        breakpoint()
         # TODO: update to generalize
         if os.path.exists("test_new_5.h5"):
             state = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
