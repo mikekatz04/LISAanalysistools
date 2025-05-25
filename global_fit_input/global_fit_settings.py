@@ -87,6 +87,8 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     if "N" in waveform_kwargs:
         waveform_kwargs.pop("N")
 
+    nleaves_max_gb = state.branches["gb"].shape[-2]
+    
     if state.branches["gb"].inds[0].sum() > 0:
         
         # from ..sampling.prior import SNRPrior, AmplitudeFromSNR
@@ -104,8 +106,6 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
             state.branches["gb"].inds[0]
         ]
 
-        nleaves_max_gb = state.branches["gb"].shape[-2]
-    
         walker_inds = np.repeat(np.arange(nwalkers)[:, None], nleaves_max_gb, axis=-1)[state.branches["gb"].inds[0]]
         
         # TODO: rejection sample SNR?
@@ -173,159 +173,159 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         plt.savefig("check1.png")
         plt.close()
 
-        band_edges = gb_info["band_edges"]
-        num_sub_bands = len(band_edges)
-        betas_gb = gb_info["pe_info"]["betas"]
+    band_edges = gb_info["band_edges"]
+    num_sub_bands = len(band_edges)
+    betas_gb = gb_info["pe_info"]["betas"]
 
-        adjust_temps = False
+    adjust_temps = False
 
-        if hasattr(state, "band_info"):
-            band_info_check = deepcopy(state.band_info)
-            adjust_temps = True
-        #    del state.band_info
+    if hasattr(state, "band_info"):
+        band_info_check = deepcopy(state.band_info)
+        adjust_temps = True
+    #    del state.band_info
 
-        band_temps = np.tile(np.asarray(betas_gb), (len(band_edges) - 1, 1))
-        state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
-        if adjust_temps:
-            state.sub_states["gb"].band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
+    band_temps = np.tile(np.asarray(betas_gb), (len(band_edges) - 1, 1))
+    state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+    if adjust_temps:
+        state.sub_states["gb"].band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
 
-        band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
-        N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+    band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+    N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
 
-        if state.branches["gb"].inds.sum() > 0:
-            f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
-            band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
-            N_vals_in[state.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state.branches["gb"].inds]]
+    if state.branches["gb"].inds.sum() > 0:
+        f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
+        band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
+        N_vals_in[state.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state.branches["gb"].inds]]
 
-        branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
-        state.branches["gb"].branch_supplemental = BranchSupplemental(
-            {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
-        )
+    branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
+    state.branches["gb"].branch_supplemental = BranchSupplemental(
+        {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
+    )
 
-        ########### GB
+    ########### GB
 
-        gb_kwargs = dict(
-            waveform_kwargs=waveform_kwargs,
-            parameter_transforms=gb_info["transform"],
-            provide_betas=True,
-            skip_supp_names_update=["group_move_points"],
-            random_seed=general_info["random_seed"],
-            use_gpu=True,
-            nfriends=nwalkers,
-            phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
-            ranks_needed=0,
-            gpus=[],
-            **gb_info["pe_info"]["group_proposal_kwargs"]
-        )
+    gb_kwargs = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=gb_info["transform"],
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=general_info["random_seed"],
+        use_gpu=True,
+        nfriends=nwalkers,
+        phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
+        ranks_needed=0,
+        gpus=[],
+        **gb_info["pe_info"]["group_proposal_kwargs"]
+    )
 
-        fd = general_info["fd"].copy()
+    fd = general_info["fd"].copy()
 
-        gb_args = (
-            gb,
-            priors,
-            general_info["start_freq_ind"],
-            acs.data_length,
-            acs,
-            np.asarray(fd),
-            band_edges,
-            gpu_priors,
-        )
+    gb_args = (
+        gb,
+        priors,
+        general_info["start_freq_ind"],
+        acs.data_length,
+        acs,
+        np.asarray(fd),
+        band_edges,
+        gpu_priors,
+    )
 
-        gb_move = GBSpecialStretchMove(
-            *gb_args,
-            **gb_kwargs,
-        )
+    gb_move = GBSpecialStretchMove(
+        *gb_args,
+        **gb_kwargs,
+    )
 
-        # add the other
-        gb_move.gb.gpus = gpus
+    # add the other
+    gb_move.gb.gpus = gpus
 
-        rj_moves_in = []
-        rj_moves_in_frac = []
+    rj_moves_in = []
+    rj_moves_in_frac = []
 
-        gb_kwargs_rj = dict(
-            waveform_kwargs=waveform_kwargs,
-            parameter_transforms=gb_info["transform"],
-            search=False,
-            provide_betas=True,
-            skip_supp_names_update=["group_move_points"],
-            random_seed=general_info["random_seed"],
-            use_gpu=True,
-            rj_proposal_distribution=gpu_priors,
-            name="rj_prior",
-            use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
-            nfriends=nwalkers,
-            phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
-            ranks_needed=0,
-            gpus=[],
-            **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
-        )
+    gb_kwargs_rj = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=gb_info["transform"],
+        search=False,
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=general_info["random_seed"],
+        use_gpu=True,
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior",
+        use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+        nfriends=nwalkers,
+        phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        gpus=[],
+        **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+    )
 
-        gb_args_rj = (
-            gb,
-            priors,
-            general_info["start_freq_ind"],
-            acs.data_length,
-            acs,
-            np.asarray(fd),
-            band_edges,
-            gpu_priors,
-        )
+    gb_args_rj = (
+        gb,
+        priors,
+        general_info["start_freq_ind"],
+        acs.data_length,
+        acs,
+        np.asarray(fd),
+        band_edges,
+        gpu_priors,
+    )
 
-        rj_move_prior = GBSpecialRJPriorMove(
-            *gb_args_rj,
-            **gb_kwargs_rj,
-        )
+    rj_move_prior = GBSpecialRJPriorMove(
+        *gb_args_rj,
+        **gb_kwargs_rj,
+    )
 
-        rj_moves_in.append(rj_move_prior)
-        rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
+    rj_moves_in.append(rj_move_prior)
+    rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
-        # gb_kwargs_rj_search = dict(
-        #     waveform_kwargs=waveform_kwargs,
-        #     parameter_transforms=gb_info["transform"],
-        #     search=False,
-        #     provide_betas=True,
-        #     skip_supp_names_update=["group_move_points"],
-        #     random_seed=general_info["random_seed"],
-        #     use_gpu=True,
-        #     rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
-        #     name="rj_search",
-        #     use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
-        #     nfriends=nwalkers,
-        #     phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
-        #     ranks_needed=5,
-        #     gpus=[6],
-        #     **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
-        # )
+    # gb_kwargs_rj_search = dict(
+    #     waveform_kwargs=waveform_kwargs,
+    #     parameter_transforms=gb_info["transform"],
+    #     search=False,
+    #     provide_betas=True,
+    #     skip_supp_names_update=["group_move_points"],
+    #     random_seed=general_info["random_seed"],
+    #     use_gpu=True,
+    #     rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
+    #     name="rj_search",
+    #     use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+    #     nfriends=nwalkers,
+    #     phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+    #     ranks_needed=5,
+    #     gpus=[6],
+    #     **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+    # )
 
-        # gb_args_rj_search = (
-        #     gb,
-        #     priors,
-        #     general_info["start_freq_ind"],
-        #     acs.data_length,
-        #     acs,
-        #     np.asarray(fd),
-        #     band_edges,
-        #     gpu_priors,
-        # )
+    # gb_args_rj_search = (
+    #     gb,
+    #     priors,
+    #     general_info["start_freq_ind"],
+    #     acs.data_length,
+    #     acs,
+    #     np.asarray(fd),
+    #     band_edges,
+    #     gpu_priors,
+    # )
 
-        # rj_move_search = GBSpecialRJSearchMove(
-        #     *gb_args_rj_search,
-        #     psd_like=psd_move.compute_log_like,  # cleanup
-        #     **gb_kwargs_rj_search,
-        # )
+    # rj_move_search = GBSpecialRJSearchMove(
+    #     *gb_args_rj_search,
+    #     psd_like=psd_move.compute_log_like,  # cleanup
+    #     **gb_kwargs_rj_search,
+    # )
 
-        # rj_moves_in.append(rj_move_search)
-        # rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
-        
-        total_frac = sum(rj_moves_in_frac)
+    # rj_moves_in.append(rj_move_search)
+    # rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
+    
+    total_frac = sum(rj_moves_in_frac)
 
-        rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
+    rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
-        return SetupInfoTransfer(
-            name="gb",
-            in_model_moves=[gb_move] + rj_moves, # probably better to run them all together
-            # rj_moves=rj_moves,
-        )
+    return SetupInfoTransfer(
+        name="gb",
+        in_model_moves=[gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
+        # rj_moves=rj_moves,
+    )
 
             
 def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
@@ -373,7 +373,7 @@ def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
 
     return SetupInfoTransfer(
         name="mbh",
-        in_model_moves=[mbh_move],
+        in_model_moves=[], #mbh_move],
     )
 
 
@@ -397,7 +397,7 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
 
     return SetupInfoTransfer(
         name="psd",
-        in_model_moves=[psd_move],
+        in_model_moves=[],  # [psd_move],
     )
 
 from lisatools.sources.emri import EMRITDIWaveform
@@ -488,7 +488,7 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     
     return SetupInfoTransfer(
         name="emri",
-        in_model_moves=[emri_move],
+        in_model_moves=[],  # [emri_move],
     )
 
 
@@ -538,8 +538,8 @@ def get_global_fit_settings(copy_settings_file=False):
     with h5py.File(ldc_source_file, "r") as f:
         tXYZ = f["obs"]["tdi"][:]
 
-        # remove mbhb and igb
-        for source in []:  # "igb"]:  # "vgb" "mbhb",
+        # remove sources
+        for source in ["mbhb"]:  # "igb"]:  # "vgb" ,
             change_arr = f["sky"][source]["tdi"][:]
             for change in ["X", "Y", "Z"]:
                 tXYZ[change] -= change_arr[change]
@@ -582,10 +582,12 @@ def get_global_fit_settings(copy_settings_file=False):
     Af, Ef, Tf = AET(Xf, Yf, Zf)
 
     start_freq_ind = 0
+    # start_freq_ind = int(0.004 / df)
     # TODO: check this. 
     # This is here because of data storage size 
     # and an issue I think with a zero in the response psd
-    end_freq_ind = int(0.034 / df)  # len(A_inj) - 1
+    # end_freq_ind = int(0.034 / df)  # len(A_inj) - 1
+    end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
     
     A_inj, E_inj = (
         Af[start_freq_ind:end_freq_ind],
@@ -597,7 +599,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [7]
+    gpus = [3]
 
     nwalkers = 36
     ntemps = 24
@@ -692,8 +694,13 @@ def get_global_fit_settings(copy_settings_file=False):
     high_fs_propose = np.append(
         np.arange(second_barrier, f0_lims[-1], width_high * df)[:-1], np.array([f0_lims[-1]])
     )
-
     band_edges = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])
+    band_edges = band_edges[400:405]
+
+    f0_lims = [band_edges.min(), band_edges.max()]
+    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
+    fdot_lims = [-fdot_max_val, fdot_max_val]
+    
     num_sub_bands = len(band_edges)
 
     # waveform settings
@@ -1155,9 +1162,9 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
-        GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        + GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        + GFBranchInfo("emri", 12, 8, 8, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
+        # GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
+        GFBranchInfo("gb", 8, 200, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        # + GFBranchInfo("emri", 12, 8, 8, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )
@@ -1166,9 +1173,9 @@ def get_global_fit_settings(copy_settings_file=False):
         "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": all_gb_info,
-            "mbh": all_mbh_info,
+            # "mbh": all_mbh_info,
             "psd": all_psd_info,
-            "emri": all_emri_info,
+            # "emri": all_emri_info,
         },
         "general": all_general_info,
         "rank_info": rank_info,

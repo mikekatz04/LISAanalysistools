@@ -232,8 +232,6 @@ class EMRIState(eryn_State):
 
 class GFState(eryn_State):
     # TODO: bandaid fix this
-
-    remove_kwargs = ["betas_all", "band_info"]
     def __init__(self, possible_state, *args, is_eryn_state_input:bool=False, sub_state_bases: dict=None, **kwargs):
         
         eryn_State.__init__(self, possible_state, *args, **kwargs)
@@ -245,6 +243,19 @@ class GFState(eryn_State):
                 if sub_state_base is not None:
                     self.sub_states[name] = sub_state_base(
                         possible_state.sub_states[name],
+                        *args,
+                        **kwargs
+                    )
+                else:
+                    self.sub_states[name] = None
+
+        else:
+            self.sub_state_bases = sub_state_bases
+            for name in self.branches:
+                sub_state_base = sub_state_bases.get(name, None)
+                if sub_state_base is not None:
+                    self.sub_states[name] = sub_state_base(
+                        possible_state, # this is just coords in the first input
                         *args,
                         **kwargs
                     )

@@ -32,7 +32,7 @@ from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
-cp.cuda.runtime.setDevice(7)
+cp.cuda.runtime.setDevice(3)
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
@@ -198,26 +198,32 @@ class GlobalFit:
     def load_info(self):
         print("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_5.h5"):
-            state = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
+        if os.path.exists("test_new_gb_7.h5"):
+            state = GFHDFBackend("test_new_gb_7.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
 
         else:
             print("update this somehow")
-            # coords = {key: np.zeros((self.ntemps, self.nwalkers, self.nleaves_max[key], self.ndims[key])) for key in self.branch_names}
-            # inds = {key: np.ones((self.ntemps, self.nwalkers, self.nleaves_max[key]), dtype=bool) for key in self.branch_names}
-            # inds["gb"][:] = False
-            # state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
-            # state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+            # breakpoint()
+            coords = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key], self.gf_branch_information.ndims[key])) for key in self.gf_branch_information.branch_names}
+            inds = {key: np.ones((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
+            inds["gb"][:] = False
+            state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
+            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
             import pickle
             with open("pickle_state.pickle", "rb") as fp:
-                state = pickle.load(fp)
+                tmp_state = pickle.load(fp)
             print("pickle state load success")
+            for key in ["psd", "galfor"]:
+                state.branches[key] = deepcopy(tmp_state.branches[key])
+            state.log_like = np.zeros((self.ntemps, self.nwalkers))
+            state.log_prior = np.zeros((self.ntemps, self.nwalkers))
         return state
 
     def setup_acs(self, generate, state):
     
-        generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=True, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
-        generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+        generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=False, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+        generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=False, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
 
         data = generated_info["data"]
         psd = generated_info["psd"]
@@ -243,7 +249,7 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
         
-        gpus = [7]
+        gpus = [3]
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)            
         return acs 
 
@@ -252,9 +258,6 @@ class GlobalFit:
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
-            # gb_info = self.curr.settings_dict["gb"]
-            # mbh_info = self.curr.settings_dict["mbh"]
-            # psd_info = self.curr.settings_dict["psd"]
             
             branch_names = self.gf_branch_information.branch_names
             ndims = self.gf_branch_information.ndims
@@ -270,7 +273,7 @@ class GlobalFit:
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
 
-            backend = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            backend = GFHDFBackend("test_new_gb_7.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
             # backend.reset(
             #     nwalkers,
             #     ndims,
@@ -348,7 +351,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_5.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_gb_7.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
@@ -394,7 +397,7 @@ class GlobalFit:
             # swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
             # backend.save_step(state, accepted, swaps_accepted=swaps_accepted)
             # exit()
-           
+
             rank_instructions = {}
             for move in setup_info_all.in_model_moves + setup_info_all.rj_moves:
                 if isinstance(move, tuple) or isinstance(move, list):
@@ -460,7 +463,7 @@ class GlobalFit:
             state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
 
-            sampler_mix.run_mcmc(state, 10, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 10, thin_by=1000, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:

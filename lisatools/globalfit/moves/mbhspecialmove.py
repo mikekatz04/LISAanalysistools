@@ -63,6 +63,16 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
                     
         return logl
 
+    def get_waveform_here(self, coords):
+        breakpoint()
+        xp.get_default_memory_pool().free_all_blocks()
+        waveforms = xp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
+        
+        for i in range(coords.shape[0]):
+            waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+        
+        return waveforms
+
     def replace_residuals(self, old_state, new_state):
         fd = xp.asarray(self.acs.fd)
         old_contrib = [None, None]

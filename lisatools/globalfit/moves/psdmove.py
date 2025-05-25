@@ -22,17 +22,17 @@ def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs)
     A_data = data[0]
     E_data = data[1]
     
-    data_index_all = xp.asarray(wi).astype(np.int32)
-    ll = xp.zeros(psd_pars.shape[0]) 
-    A_Soms_d_in_all = xp.asarray(psd_pars[:, 0])
-    A_Sa_a_in_all = xp.asarray(psd_pars[:, 1])
-    E_Soms_d_in_all = xp.asarray(psd_pars[:, 2])
-    E_Sa_a_in_all = xp.asarray(psd_pars[:, 3])
-    Amp_all = xp.asarray(galfor_pars[:, 0])
-    kn_all = xp.asarray(galfor_pars[:, 1])
-    alpha_all = xp.asarray(galfor_pars[:, 2])
-    sl1_all = xp.asarray(galfor_pars[:, 3])
-    sl2_all = xp.asarray(galfor_pars[:, 4])
+    data_index_all = cp.asarray(wi).astype(np.int32)
+    ll = cp.zeros(psd_pars.shape[0]) 
+    A_Soms_d_in_all = cp.asarray(psd_pars[:, 0])
+    A_Sa_a_in_all = cp.asarray(psd_pars[:, 1])
+    E_Soms_d_in_all = cp.asarray(psd_pars[:, 2])
+    E_Sa_a_in_all = cp.asarray(psd_pars[:, 3])
+    Amp_all = cp.asarray(galfor_pars[:, 0])
+    kn_all = cp.asarray(galfor_pars[:, 1])
+    alpha_all = cp.asarray(galfor_pars[:, 2])
+    sl1_all = cp.asarray(galfor_pars[:, 3])
+    sl2_all = cp.asarray(galfor_pars[:, 4])
     num_data = 1
     num_psds = psd_pars.shape[0]
 
@@ -170,9 +170,8 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         self.acs.reset_linear_psd_arr()
         after_vals = self.acs.likelihood(sum_instead_of_trapz=True)
-        if np.any(np.abs(after_vals - new_state.log_like[0]) > 1e-4) :
-            breakpoint()
+        
+        new_state.log_like[0] = after_vals
                    
-        breakpoint()
         return new_state, accepted
 
