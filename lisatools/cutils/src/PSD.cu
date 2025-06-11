@@ -264,7 +264,7 @@ void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data,
 }
 
 #define PDF_NUM_THREADS 32
-#define PDF_NDIM 6
+#define PDF_NDIM 8
 
 __global__
 void compute_logpdf(double *logpdf_out, int *component_index, double *points,

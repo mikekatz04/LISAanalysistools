@@ -99,6 +99,10 @@ class AnalysisContainer:
         assert hasattr(signal_gen, "__call__")
         self._signal_gen = signal_gen
 
+    @property
+    def start_freq_ind(self):
+        return self.data_res_arr.start_freq_ind
+        
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
 
@@ -604,10 +608,24 @@ class AnalysisContainerArray:
         return len(self.acs)
         
     def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
-        output = np.zeros(self.acs_total_entries)
         for i, ac in enumerate(self.acs.flatten()):
-            output[i] = getattr(ac, operation)(**kwargs)
+            _tmp = getattr(ac, operation)
+            if callable(_tmp):
+                _tmp_output = _tmp(**kwargs)
+            else:
+                # must be property or attribute
+                _tmp_output = _tmp
+
+            if i == 0:
+                output = np.zeros(self.acs_total_entries, dtype=type(_tmp_output))
+
+            output[i] = _tmp_output
+
         return output.reshape(self.acs_shape)
+
+    @property
+    def start_freq_ind(self):
+        return self._loop_operation("start_freq_ind")
 
     def inner_product(self, **kwargs):
         return self._loop_operation("inner_product", **kwargs)
@@ -670,3 +688,5 @@ class AnalysisContainerArray:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
             out.append(tmp.reshape(-1, self.nchannels, self.data_length)) 
         return out
+
+    

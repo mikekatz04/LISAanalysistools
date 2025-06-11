@@ -32,7 +32,6 @@ from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
-cp.cuda.runtime.setDevice(3)
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
@@ -74,7 +73,8 @@ class CurrentInfoGlobalFit:
         self.settings_dict = settings
         self.current_info = deepcopy(settings)
 
-        self.backend = GFHDFBackend(settings["general"]["file_information"]["fp_main"])
+        print("generalize the backend stuff")
+        self.backend = GFHDFBackend("test_new_gb_12.h5")
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         
@@ -162,7 +162,7 @@ from eryn.model import Model
 from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .run import CurrentInfoGlobalFit
-from .moves import GlobalFitMove
+from .moves import GlobalFitMove, GFCombineMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
 from eryn.moves import CombineMove
 from .moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove
@@ -198,8 +198,8 @@ class GlobalFit:
     def load_info(self):
         print("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_gb_7.h5"):
-            state = GFHDFBackend("test_new_gb_7.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
+        if os.path.exists("test_new_gb_12.h5"):
+            state = GFHDFBackend("test_new_gb_12.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
 
         else:
             print("update this somehow")
@@ -220,27 +220,20 @@ class GlobalFit:
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
         return state
 
-    def setup_acs(self, generate, state):
+    def setup_acs(self, state):
     
-        generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=False, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
-        generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=False, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
-
-        data = generated_info["data"]
-        psd = generated_info["psd"]
-        lisasens = generated_info["lisasens"]
+        cp.cuda.runtime.setDevice(self.curr.general_info["gpus"][0])
 
         df = self.curr.general_info["df"]
-        N = data[0].shape[-1]
+        N = self.curr.general_info["A_inj"].shape[-1]
 
-        f_arr = np.arange(N) * df
+        f_arr = (np.arange(N) + self.curr.general_info["start_freq_ind"]) * df
 
         acs_tmp = []
-        orbits = EqualArmlengthOrbits()
-            
         for w in range(self.nwalkers):
             data_res_arr = DataResidualArray([
-                data[0][w].copy(), 
-                data[1][w].copy(),
+                self.curr.general_info["A_inj"].copy(), 
+                self.curr.general_info["E_inj"].copy(), 
             ], f_arr=f_arr)
             psd_params = state.branches_coords["psd"][0, w, 0]
             galfor_params = state.branches_coords["galfor"][0, w, 0]
@@ -249,12 +242,35 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
         
-        gpus = [3]
-        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)            
+        gpus = self.curr.general_info["gpus"]
+        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)   
+
+        for name, source_info in self.curr.source_info.items():
+            if name not in self.curr.all_info["gf_branch_information"].branch_names:
+                continue
+
+            if name == "psd":
+                continue
+
+            templates_tmp = cp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
+
+            acs.add_signal_to_residual(templates_tmp)  # no need to adjust data index or start_freq_ind as it is taken care of
+
+            del templates_tmp
+            cp.get_default_memory_pool().free_all_blocks()
+            print(f"added {name} to acs.")
+        # generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=False, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+        # generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=False, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
+
+        # data = generated_info["data"]
+        # psd = generated_info["psd"]
+        # lisasens = generated_info["lisasens"]
+
         return acs 
 
     def run_global_fit(self):
         
+        backend = GFHDFBackend("test_new_gb_12.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
@@ -273,7 +289,7 @@ class GlobalFit:
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
 
-            backend = GFHDFBackend("test_new_gb_7.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            
             # backend.reset(
             #     nwalkers,
             #     ndims,
@@ -331,7 +347,7 @@ class GlobalFit:
 
             generate = GenerateCurrentState(A_inj, E_inj)
 
-            acs = self.setup_acs(generate, state)
+            acs = self.setup_acs(state)
 
             state.log_like[:] = acs.likelihood()
 
@@ -351,12 +367,13 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_gb_7.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_gb_12.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
                 save_plot_rank=self.results_rank,
-                sub_states=self.gf_branch_information.branch_backend
+                sub_backend=self.gf_branch_information.branch_backend,
+                sub_state_bases=self.gf_branch_information.branch_state
             )
 
             extra_reset_kwargs = {}
@@ -399,31 +416,36 @@ class GlobalFit:
             # exit()
 
             rank_instructions = {}
-            for move in setup_info_all.in_model_moves + setup_info_all.rj_moves:
-                if isinstance(move, tuple) or isinstance(move, list):
-                    move = move[0]
+            for move_tmp in setup_info_all.in_model_moves + setup_info_all.rj_moves:  
+                if isinstance(move_tmp, tuple) or isinstance(move_tmp, list):
+                    move_tmp = move_tmp[0]
 
-                if not isinstance(move, GlobalFitMove):
-                    raise ValueError("All moves must be a subclass of GlobalFitMove.")
+                # adjust for combine move
+                if isinstance(move_tmp, GFCombineMove):
+                    moves_list = move_tmp.moves
+                else:
+                    moves_list = [move_tmp]
+
+                for move in moves_list:
+                    if not isinstance(move, GlobalFitMove):
+                        raise ValueError("All moves must be a subclass of GlobalFitMove.")
+                    
+                    move.comm = self.comm
+                    if len(move.gpus) > 0 or (move.ranks_needed > 0 and not move.ranks_initialized):
+                        if len(move.gpus) > 0:
+                            assert move.ranks_needed > 0
+
+                        tmp_ranks = []
+                        for _ in range(move.ranks_needed):
+                            try:
+                                tmp_ranks.append(self.ranks_to_give.pop())
+                            except IndexError:
+                                raise ValueError("Not enough MPI ranks to give.")
+                        self.used_ranks += tmp_ranks
+                        move.assign_ranks(tmp_ranks)
+                        for rank in tmp_ranks:
+                            rank_instructions[rank] = {"function": move.get_rank_function(), "class_rank_list": tmp_ranks, "gpus": move.gpus}
                 
-                move.comm = self.comm
-                if len(move.gpus) > 0 or (move.ranks_needed > 0 and not move.ranks_initialized):
-                    if len(move.gpus) > 0:
-                        assert move.ranks_needed > 0
-
-                    tmp_ranks = []
-                    for _ in range(move.ranks_needed):
-                        try:
-                            tmp_ranks.append(self.ranks_to_give.pop())
-                        except IndexError:
-                            raise ValueError("Not enough MPI ranks to give.")
-                    self.used_ranks += tmp_ranks
-                    move.assign_ranks(tmp_ranks)
-                    for rank in tmp_ranks:
-                        rank_instructions[rank] = {"function": move.get_rank_function(), "class_rank_list": tmp_ranks, "gpus": move.gpus}
-            
-            
-
             # stop unneeded processes
             for rank in self.all_ranks:
                 if rank in self.used_ranks:
@@ -463,11 +485,11 @@ class GlobalFit:
             state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
 
-            sampler_mix.run_mcmc(state, 10, thin_by=1000, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 100, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
-            save_to_backend_asynchronously_and_plot(self.curr.backend, self.comm, self.main_rank, self.head_rank, self.curr.general_info["plot_iter"], self.curr.general_info["backup_iter"])
+            save_to_backend_asynchronously_and_plot(backend, self.comm, self.main_rank, self.head_rank, self.curr.general_info["plot_iter"], self.curr.general_info["backup_iter"])
 
         else:
             info = self.comm.recv(source=self.main_rank)

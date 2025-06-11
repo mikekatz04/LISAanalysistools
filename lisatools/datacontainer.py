@@ -93,6 +93,13 @@ class DataResidualArray:
             )
         self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
 
+    @property
+    def start_freq_ind(self):
+        if self.df is not None:
+            return int(self.f_arr[0] / self.df)
+        else:
+            return None
+        
     def _store_time_and_frequency_information(
         self,
         dt: Optional[float] = None,
@@ -127,7 +134,7 @@ class DataResidualArray:
             self._f_arr = f_arr
             self._fmax = f_arr.max()
             # constant spacing
-            if np.all(np.diff(f_arr) == np.diff(f_arr)[0]):
+            if np.allclose(np.diff(f_arr), np.diff(f_arr)[0]):
                 self._df = np.diff(f_arr)[0].item()
 
                 if f_arr[0] == 0.0:

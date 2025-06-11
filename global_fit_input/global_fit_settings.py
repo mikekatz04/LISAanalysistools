@@ -2,6 +2,11 @@ import h5py
 import numpy as np
 import shutil
 
+try:
+    import cupy as cp
+except (ModuleNotFoundError, ImportError) as e:
+    import numpy as cp
+
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
 from lisatools.detector import EqualArmlengthOrbits
@@ -31,7 +36,7 @@ from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
 from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove
+from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
@@ -51,8 +56,7 @@ def f_ms_to_s(x):
 
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
-
-
+    
 def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     gb_info = curr.source_info["gb"]
     general_info = curr.general_info
@@ -74,41 +78,81 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     from gbgpu.gbgpu import GBGPU
     gb = GBGPU(use_gpu=True)
     gpus = curr.general_info["gpus"]
+    cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
-
-    # this is not needed anymore
-    # priors["all_models_together"] = PSDwithGBPriorWrap(
-    #     nwalkers, 
-    #     gb, 
-    #     priors
-    # )
-
+    nleaves_max_gb = state.branches["gb"].shape[-2]
     waveform_kwargs = gb_info["pe_info"]["pe_waveform_kwargs"].copy()
     if "N" in waveform_kwargs:
         waveform_kwargs.pop("N")
 
-    nleaves_max_gb = state.branches["gb"].shape[-2]
+    # print("REMOVE THIS AFTER TESTING")
+    # inj = np.load("ldc2a_inj_395_405_bands.npy")
+    # injection_params = np.array([
+    #     inj["Amplitude"], 
+    #     inj["Frequency"],
+    #     inj["FrequencyDerivative"],
+    #     np.zeros_like(inj["FrequencyDerivative"]),
+    #     inj["InitialPhase"],
+    #     inj["Inclination"],
+    #     inj["Polarization"],
+    #     inj["EclipticLongitude"],
+    #     inj["EclipticLatitude"]
+    # ]).T
     
+    # coords_in_in = np.tile(injection_params, (nwalkers, 1))
+    # data_index = np.repeat(cp.arange(nwalkers, dtype=np.int32), injection_params.shape[0])
+    # factors = cp.ones_like(data_index, dtype=np.float64)
+    # N_vals = cp.full_like(data_index, 256, dtype=np.int32)
+    
+    # # ll_source_0 = acs.likelihood(source_only=True)
+    # # ll_all_0 = acs.likelihood()
+    # gb.generate_global_template(
+    #     coords_in_in,
+    #     data_index,
+    #     acs.linear_data_arr,
+    #     data_length=acs.data_length,
+    #     factors=factors,
+    #     data_splits=acs.gpu_map,
+    #     # start_freq_ind=start_freq_ind,  # included in waveform_kwargs
+    #     N=N_vals,
+    #     **waveform_kwargs,
+    # )
+    # ll_source_1 = acs.likelihood(source_only=True)
+    # ll_all_1 = acs.likelihood()
+    # gb.d_d = 0.0
+    # check = gb.get_ll(
+    #     coords_in_in,
+    #     acs.linear_data_arr,
+    #     acs.linear_psd_arr,
+    #     data_index=data_index,
+    #     noise_index=data_index,
+    #     data_length=acs.data_length,
+    #     data_splits=acs.gpu_map,
+    #     # start_freq_ind=start_freq_ind,  # included in waveform_kwargs
+    #     N=N_vals,
+    #     **waveform_kwargs,
+    # )
+    
+    # gb.generate_global_template(
+    #     coords_in_in,
+    #     data_index,
+    #     acs.linear_data_arr,
+    #     data_length=acs.data_length,
+    #     factors=-1 * factors,
+    #     data_splits=acs.gpu_map,
+    #     # start_freq_ind=start_freq_ind,  # included in waveform_kwargs
+    #     N=N_vals,
+    #     **waveform_kwargs,
+    # )
+    # ll_source_2 = acs.likelihood(source_only=True)
+    # ll_all_2 = acs.likelihood()
+    # breakpoint()
     if state.branches["gb"].inds[0].sum() > 0:
         
-        # from ..sampling.prior import SNRPrior, AmplitudeFromSNR
-        # L = 2.5e9
-        # amp_transform = AmplitudeFromSNR(L, general_info['Tobs'], fd=general_info["fd"])
-
-        # walker_inds = np.repeat(np.arange(nwalkers)[:, None], ntemps * nleaves_max_gb, axis=-1).reshape(nwalkers, ntemps, nleaves_max_gb).transpose(1, 0, 2)[state.branches["gb"].inds]
-        
-        # coords_fix = state.branches["gb"].coords[state.branches["gb"].inds]
-        # coords_fix[:, 0], _ = amp_transform(coords_fix[:, 0], coords_fix[:, 1] / 1e3, psds=psd[0], walker_inds=walker_inds)
-        
-        # state.branches["gb"].coords[state.branches["gb"].inds, 0] = coords_fix[:, 0]
-
         coords_out_gb = state.branches["gb"].coords[0,
             state.branches["gb"].inds[0]
         ]
 
-        walker_inds = np.repeat(np.arange(nwalkers)[:, None], nleaves_max_gb, axis=-1)[state.branches["gb"].inds[0]]
-        
-        # TODO: rejection sample SNR?
         check = priors["gb"].logpdf(coords_out_gb)
 
         if np.any(np.isinf(check)):
@@ -155,23 +199,27 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
             factors=factors,
             data_splits=acs.gpu_map,
             N=N_vals,
-            CHECK=True,
             **waveform_kwargs,
         )
 
         print("after global template")
-        del data_index
-        del factors
-        cp.get_default_memory_pool().free_all_blocks()
-        import matplotlib.pyplot as plt
-        plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][0:acs.data_length].get()))
-        plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[0].get()), '--')
-        plt.savefig("check0.png")
-        plt.close()
-        plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][acs.data_length:2*acs.data_length].get()))
-        plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[1].get()), '--')
-        plt.savefig("check1.png")
-        plt.close()
+        # del data_index
+        # del factors
+        # cp.get_default_memory_pool().free_all_blocks()
+    # import matplotlib.pyplot as plt
+    # # plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][0:acs.data_length].get()))
+    # plt.loglog(general_info["fd"], np.abs(general_info["A_inj"]))
+    # plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[0].get()), '--')
+    # plt.xlim(band_edges.min(), band_edges.max())
+    # plt.savefig("check0.png")
+    # plt.close()
+    # # plt.loglog(acs.f_arr, np.abs(acs.linear_data_arr[0][acs.data_length:2*acs.data_length].get()))
+    # plt.loglog(general_info["fd"], np.abs(general_info["E_inj"]))
+    # plt.loglog(acs.f_arr, np.abs(acs[0].data_res_arr[1].get()), '--')
+    # plt.xlim(band_edges.min(), band_edges.max())
+    # plt.savefig("check1.png")
+    # plt.close()
+    # breakpoint()
 
     band_edges = gb_info["band_edges"]
     num_sub_bands = len(band_edges)
@@ -191,6 +239,10 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
 
     band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
     N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+    band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
+    from gbgpu.utils.utility import get_N
+
+    band_N_vals = cp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, waveform_kwargs["T"], waveform_kwargs["oversample"]))
 
     if state.branches["gb"].inds.sum() > 0:
         f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
@@ -252,13 +304,15 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         use_gpu=True,
         rj_proposal_distribution=gpu_priors,
         name="rj_prior",
-        use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
+        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
         nfriends=nwalkers,
-        phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
+        phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
         ranks_needed=0,
+        run_swaps=True, 
         gpus=[],
         **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
     )
+    print("using prior removal and combine move")
 
     gb_args_rj = (
         gb,
@@ -276,7 +330,35 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         **gb_kwargs_rj,
     )
 
-    rj_moves_in.append(rj_move_prior)
+    # rj_moves_in.append(rj_move_prior)
+    # rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
+
+    ranks_needed_here = 16
+    gb_kwargs_rj2 = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=gb_info["transform"],
+        search=False,
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=general_info["random_seed"],
+        use_gpu=True,
+        rj_proposal_distribution=gpu_priors,
+        name="rj_fstat_mcmc_search",
+        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
+        nfriends=nwalkers,
+        phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=ranks_needed_here,
+        gpus=[],
+        **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+    )
+
+    rj_serial_search_move = GBSpecialRJSerialSearchMCMC(
+        *gb_args_rj,
+        **gb_kwargs_rj2,
+    )
+    rj_serial_search_move.rj_proposal_distribution = None
+
+    rj_moves_in.append(rj_serial_search_move)
     rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
     # gb_kwargs_rj_search = dict(
@@ -321,9 +403,10 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
 
     rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
+    moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
     return SetupInfoTransfer(
         name="gb",
-        in_model_moves=[gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
+        in_model_moves=[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
         # rj_moves=rj_moves,
     )
 
@@ -379,6 +462,7 @@ def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
 
 def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
     gpus = curr.general_info["gpus"]
+    cp.cuda.runtime.setDevice(gpus[0])
     gb = GBGPU(use_gpu=True)
     gb.gpus = gpus
     nwalkers = curr.general_info["nwalkers"]
@@ -539,7 +623,7 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ = f["obs"]["tdi"][:]
 
         # remove sources
-        for source in ["mbhb"]:  # "igb"]:  # "vgb" ,
+        for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
             change_arr = f["sky"][source]["tdi"][:]
             for change in ["X", "Y", "Z"]:
                 tXYZ[change] -= change_arr[change]
@@ -580,14 +664,17 @@ def get_global_fit_settings(copy_settings_file=False):
     # f***ing dt
     Xf, Yf, Zf = (np.fft.rfft(X) * dt, np.fft.rfft(Y) * dt, np.fft.rfft(Z) * dt)
     Af, Ef, Tf = AET(Xf, Yf, Zf)
+    # Af[:] = 0.0
+    # Ef[:] = 0.0
+    # Tf[:] = 0.0
 
     start_freq_ind = 0
     # start_freq_ind = int(0.004 / df)
     # TODO: check this. 
     # This is here because of data storage size 
     # and an issue I think with a zero in the response psd
-    # end_freq_ind = int(0.034 / df)  # len(A_inj) - 1
-    end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
+    end_freq_ind = int(0.030 / df)  # len(A_inj) - 1
+    # end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
     
     A_inj, E_inj = (
         Af[start_freq_ind:end_freq_ind],
@@ -595,12 +682,12 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     data_length = len(A_inj)
-    fd = np.arange(data_length) * df
+    fd = (np.arange(data_length) + start_freq_ind) * df
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [3]
-
+    gpus = [4]
+    cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 24
 
@@ -688,17 +775,20 @@ def get_global_fit_settings(copy_settings_file=False):
 
     first_barrier = (0.001 / df).astype(int) * df
     second_barrier = (0.01 / df).astype(int) * df
-
+    print("adjust band determination from high freq to low freq due to size of waveform")
     low_fs_propose = np.arange(f0_lims[0], first_barrier - width_mid * df, width_low * df)
     mid_fs_propose = np.arange(first_barrier, second_barrier - width_high * df, width_mid * df)
     high_fs_propose = np.append(
         np.arange(second_barrier, f0_lims[-1], width_high * df)[:-1], np.array([f0_lims[-1]])
     )
-    band_edges = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])
-    band_edges = band_edges[400:405]
+    band_edges = np.concatenate([low_fs_propose, mid_fs_propose, high_fs_propose])   
+    band_edges = band_edges[395:]
 
+    print("NEED TO THINK ABOUT mCHIRP prior")
     f0_lims = [band_edges.min(), band_edges.max()]
+
     fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
+
     fdot_lims = [-fdot_max_val, fdot_max_val]
     
     num_sub_bands = len(band_edges)
@@ -711,7 +801,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     pe_gb_waveform_kwargs = dict(
-        dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample
+        dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample, start_freq_ind=start_freq_ind
     )
 
     gb_initialize_kwargs = dict(use_gpu=True, gpus=gpus)
@@ -741,7 +831,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # snr_prior = SNRPrior(rho_star)
 
     # frequency_prior = uniform_dist(*(np.asarray(f0_lims) * 1e3))
-
+    print("Decide how to treat fdot prior")
     priors_gb = {
         0: uniform_dist(*(np.log(np.asarray(A_lims)))),
         1: uniform_dist(*(np.asarray(f0_lims) * 1e3)), # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
@@ -790,7 +880,7 @@ def get_global_fit_settings(copy_settings_file=False):
             n_iter_update=1,
             live_dangerously=True,
             a=1.75,
-            num_repeat_proposals=30
+            num_repeat_proposals=100
         ),
         other_tempering_kwargs=dict(
             adaptation_time=2,
@@ -862,10 +952,6 @@ def get_global_fit_settings(copy_settings_file=False):
     psd_kwargs = dict(sens_fn="A1TDISens")  # , use_gpu=False)
     psd_initialize_kwargs = {}
 
-    get_psd = GetPSDModel(
-        psd_kwargs
-    )
-
     ### Galactic Foreground Settings #
  
     priors_galfor = {
@@ -902,7 +988,6 @@ def get_global_fit_settings(copy_settings_file=False):
         priors={"psd": ProbDistContainer(priors_psd), "galfor": ProbDistContainer(priors_galfor)},
         psd_kwargs=psd_kwargs,
         initalize_kwargs=psd_initialize_kwargs,
-        get_psd=get_psd,
         pe_info=psd_main_run_mcmc_info,
         stopping_iterations=1,
     )
@@ -1123,7 +1208,9 @@ def get_global_fit_settings(copy_settings_file=False):
 
     get_emri = GetEMRITemplates(
         initialize_kwargs_emri,
-        waveform_kwargs_emri
+        waveform_kwargs_emri,
+        start_freq_ind,
+        end_freq_ind
     )
 
     inner_moves_emri = [
@@ -1163,7 +1250,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
         # GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        GFBranchInfo("gb", 8, 200, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
         # + GFBranchInfo("emri", 12, 8, 8, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)

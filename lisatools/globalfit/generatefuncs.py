@@ -20,95 +20,13 @@ except (ImportError, ModuleNotFoundError) as e:
     pass
 
 
-class GetPSDModel:
-
-    def __init__(self, psd_kwargs):
-        self.psd_kwargs = psd_kwargs
-
-    def __call__(self, current_state, psd_info, general_info, only_max_ll=False, n_gen_in=None, return_lisasens=False, return_prior_val=False):
-
-        if "use_gpu" in self.psd_kwargs and self.psd_kwargs["use_gpu"]:
-            xp = cp
-            use_gpu = True
-        else:
-            xp = np
-            use_gpu = False
-
-        if only_max_ll:
-            best = current_state.log_like[0].argmax()
-            psd_params_A = current_state.branches["psd"].coords[0, best:best + 1, 0, :2]
-            psd_params_E = current_state.branches["psd"].coords[0, best:best + 1, 0, 2:]
-            psd_foreground_params = current_state.branches["galfor"].coords[0, best:best + 1, 0, :]
-
-        else:
-            num_psd_walkers = current_state.log_like.shape[-1]
-
-            inds = np.arange(num_psd_walkers)
-
-            # adjust if looking for less
-            if n_gen_in is not None and isinstance(n_gen_in, int):
-                if num_psd_walkers > n_gen_in:
-                    inds = np.random.choice(np.arange(num_psd_walkers), n_gen_in, replace=False)
-                
-            psd_params_A = current_state.branches["psd"].coords[0, inds, 0, :2].copy()
-            psd_params_E = current_state.branches["psd"].coords[0, inds, 0, 2:].copy()
-            psd_foreground_params = current_state.branches["galfor"].coords[0, inds, 0, :].copy()
-
-        num_psds = len(psd_params_A)
-        num_freqs = len(general_info["fd"])
-        A_psd = np.zeros((num_psds, num_freqs))
-        E_psd = np.zeros((num_psds, num_freqs))
-        freqs = xp.asarray(general_info["fd"])
-        psd_kwargs_in = self.psd_kwargs.copy()
-    
-        if return_lisasens:
-            psd_kwargs_in["sens_fn"] = "LISASens"
-
-        tmp_lisa_model_A = deepcopy(sangria)
-        tmp_lisa_model_E = deepcopy(sangria)
-        for i, (A_params, E_params, foreground_params) in enumerate(zip(psd_params_A, psd_params_E, psd_foreground_params)):
-            tmp_lisa_model_A.Soms_d = A_params[0] ** 2
-            tmp_lisa_model_A.Sa_a = A_params[1] ** 2
-            A_tmp1 = get_sensitivity(freqs, model=tmp_lisa_model_A, stochastic_params=foreground_params, stochastic_function="HyperbolicTangentGalacticForeground",  **psd_kwargs_in)
-            
-            tmp_lisa_model_E.Soms_d = E_params[0] ** 2
-            tmp_lisa_model_E.Sa_a = E_params[1] ** 2
-            E_tmp1 = get_sensitivity(freqs, model=tmp_lisa_model_E, stochastic_params=foreground_params, stochastic_function="HyperbolicTangentGalacticForeground", **psd_kwargs_in)
-            if use_gpu:
-                A_tmp2 = A_tmp1.get()
-                E_tmp2 = E_tmp1.get()
-            else:
-                A_tmp2 = A_tmp1
-                E_tmp2 = E_tmp1
-
-            A_psd[i] = A_tmp2
-            E_psd[i] = E_tmp2
-
-        del freqs, A_tmp1, E_tmp1
-        if use_gpu:
-            xp.get_default_memory_pool().free_all_blocks()
-
-        A_psd[:, 0] = A_psd[:, 1]
-        E_psd[:, 0] = E_psd[:, 1]
-
-        return_tuple = (A_psd, E_psd)
-        if return_prior_val:
-            psd_prior = psd_info["priors"]["psd"].logpdf(np.concatenate([A_params, E_params], axis=-1))
-            galfor_prior = psd_info["priors"]["galfor"].logpdf(psd_foreground_params)
-            all_prior = psd_prior + galfor_prior
-            return_tuple += (all_prior,)
-        else:
-            return_tuple += (None,)
-        return return_tuple
-
-
 class GetMBHTemplates:
 
     def __init__(self, initialization_kwargs, runtime_kwargs):
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
 
-    def __call__(self, current_state, mbh_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False):
+    def __call__(self, current_state, mbh_info, general_info):
 
         if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
@@ -122,22 +40,6 @@ class GetMBHTemplates:
         num_mbh = current_state.branches["mbh"].shape[2]  # index 2 is leaf count
         num_freqs = len(general_info["fd"])
     
-        if only_max_ll:
-            best = current_state.log_like[0].argmax()
-            mbh_params = current_state.branches["mbh"].coords[0, best:best + 1].copy()
-
-        else:
-            num_mbh_walkers = current_state.log_like.shape[-1]
-            
-            inds = np.arange(num_mbh_walkers)
-
-            # adjust if looking for less
-            if n_gen_in is not None and isinstance(n_gen_in, int):
-                if num_mbh_walkers > n_gen_in:
-                    inds = np.random.choice(np.arange(num_mbh_walkers), n_gen_in, replace=False)
-                
-            mbh_params = current_state.branches["mbh"].coords[0, inds].copy()
-
         freqs = xp.asarray(general_info["fd"])
 
         out = np.zeros((mbh_params.shape[0], 3, general_info["fd"].shape[0]), dtype=complex)
@@ -162,25 +64,18 @@ class GetMBHTemplates:
         if use_gpu:
             xp.get_default_memory_pool().free_all_blocks()
         
-        return_tuple = (out[:, 0], out[:, 1])
-        # TODO: delete GPU data if needed?
-
-        if return_prior_val:
-            prior_val = mbh_info["priors"]["mbh"].logpdf(mbh_params.reshape(-1, mbh_params.shape[-1])).reshape(mbh_params.shape[:-1]).sum(axis=-1)
-            return_tuple += (prior_val,)
-        else:
-            return_tuple += (None,)
-        return return_tuple
-
+        # TODO: change for XYZ
+        return out[:, :2]
 
 
 class GetEMRITemplates:
 
-    def __init__(self, initialization_kwargs, runtime_kwargs):
+    def __init__(self, initialization_kwargs, runtime_kwargs, start_freq_ind, end_freq_ind):
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
+        self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
 
-    def __call__(self, current_state, emri_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False):
+    def __call__(self, current_state, emri_info, general_info):
 
         if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
@@ -194,22 +89,6 @@ class GetEMRITemplates:
         num_emri = current_state.branches["emri"].shape[2]  # index 2 is leaf count
         num_freqs = len(general_info["fd"])
     
-        if only_max_ll:
-            best = current_state.log_like[0].argmax()
-            emri_params = current_state.branches["emri"].coords[0, best:best + 1].copy()
-
-        else:
-            num_emri_walkers = current_state.log_like.shape[-1]
-            
-            inds = np.arange(num_emri_walkers)
-
-            # adjust if looking for less
-            if n_gen_in is not None and isinstance(n_gen_in, int):
-                if num_emri_walkers > n_gen_in:
-                    inds = np.random.choice(np.arange(num_emri_walkers), n_gen_in, replace=False)
-                
-            emri_params = current_state.branches["emri"].coords[0, inds].copy()
-
         freqs = xp.asarray(general_info["fd"])
 
         # TODO: adjust for AET/XYZ rather than AE
@@ -221,8 +100,7 @@ class GetEMRITemplates:
             
                 for emri_params_in_i in emri_params_in: 
                     AET_t = emri_gen(*emri_params_in_i, **self.runtime_kwargs)
-                    breakpoint()
-                    tmp1 = xp.fft.rfft(AET_t, axis=-1)
+                    tmp1 = xp.fft.rfft(AET_t, axis=-1)[:, self.start_freq_ind:self.end_freq_ind]
                     assert tmp1.shape[0] == freqs.shape[0]
 
                     if use_gpu:
@@ -237,15 +115,7 @@ class GetEMRITemplates:
         if use_gpu:
             xp.get_default_memory_pool().free_all_blocks()
         
-        return_tuple = (out[:, 0], out[:, 1])
-        # TODO: delete GPU data if needed?
-
-        if return_prior_val:
-            prior_val = emri_info["priors"]["emri"].logpdf(emri_params.reshape(-1, emri_params.shape[-1])).reshape(emri_params.shape[:-1]).sum(axis=-1)
-            return_tuple += (prior_val,)
-        else:
-            return_tuple += (None,)
-        return return_tuple
+        return out
 
 # TODO: generalize this setup to adjustable model inputs
 
@@ -255,7 +125,7 @@ class GetGBTemplates:
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
 
-    def __call__(self, current_state, gb_info, general_info, only_max_ll=False, n_gen_in=None, return_prior_val=False, lisasens=None):
+    def __call__(self, current_state, gb_info, general_info):
 
         gb_gen = GBGPU(**self.initialization_kwargs)
 
@@ -266,26 +136,19 @@ class GetGBTemplates:
         else:
             xp = np
 
-        if only_max_ll:
-            best = current_state.log_like[0].argmax()
-            gb_params = current_state.branches["gb"].coords[0, best:best + 1]
-            gb_inds = current_state.branches["gb"].inds[0, best:best + 1]
+        gb_params = current_state.branches["gb"].coords[0].copy()
+        gb_inds = current_state.branches["gb"].inds[0].copy()
 
-        else:
-            # TODO: check this
-            gb_params = current_state.branches["gb"].coords[0].copy()
-            gb_inds = current_state.branches["gb"].inds[0].copy()
-
-        num_gb = len(gb_params)
+        nwalkers = len(gb_params)
         num_freqs = len(general_info["fd"])
 
         gb_params_flat = gb_params[gb_inds]
 
-        group_index = xp.asarray(np.repeat(np.arange(num_gb)[:, None], repeats=gb_params.shape[1], axis=-1)[gb_inds].astype(np.int32))
+        group_index = xp.asarray(np.repeat(np.arange(nwalkers)[:, None], repeats=gb_params.shape[1], axis=-1)[gb_inds].astype(np.int32))
 
         gb_params_in = gb_info["transform"].both_transforms(gb_params_flat)
         
-        templates_in_tmp = xp.zeros((num_gb, 2, num_freqs), dtype=complex)
+        templates_in_tmp = xp.zeros((nwalkers, 2, num_freqs), dtype=complex)
 
         gb_gen.generate_global_template(gb_params_in, group_index, templates_in_tmp, **self.runtime_kwargs)
         
@@ -302,22 +165,7 @@ class GetGBTemplates:
         
         # TODO: delete GPU data if needed?
 
-        return_tuple = (templates_in[:, 0], templates_in[:, 1])
-
-        if return_prior_val:
-            self.gb_inds_store = gb_inds.copy()
-            self.gb_params_store = gb_params.copy()
-        return return_tuple
-
-    def get_gb_prior(self, gb_info, lisasens, sampler_walker_inds):
-        nwalkers, nleaves_max = self.gb_inds_store.shape
-        gb_params_flat = self.gb_params_store[sampler_walker_inds][self.gb_inds_store[sampler_walker_inds]]
-        each_source_walker_inds = np.repeat(sampler_walker_inds[:, None], repeats=nleaves_max, axis=-1)[self.gb_inds_store[sampler_walker_inds]]
-        tmp = np.zeros_like(self.gb_inds_store[sampler_walker_inds], dtype=float)
-
-        tmp[self.gb_inds_store[sampler_walker_inds]] = gb_info["priors"].logpdf(gb_params_flat, psds=lisasens, walker_inds=each_source_walker_inds)
-        prior_out = tmp.sum(axis=-1)
-        return prior_out
+        return templates_in
 
 def get_ll_source(data, psd, df):
     inner_here = -1. / 2. * df * 4 * np.sum(np.asarray([data_i.conj() * data_i / psd_i for data_i, psd_i in zip(data, psd)]).transpose(1, 0, 2), axis=(1, 2)).real

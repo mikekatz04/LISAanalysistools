@@ -28,19 +28,19 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_ran
         gb_reader.save_step_main(*save_args, **save_kwargs)
         et = time.perf_counter()
         print("SAVE STEP, time:", et - st)
-        if ((i + 1) % plot_iter) == 0:
-            print("ASK FOR DATA FOR PLOT")
-            comm.send({"send": True}, dest=head_rank, tag=91)
-            current_info = comm.recv(source=head_rank, tag=92)
+        # if ((i + 1) % plot_iter) == 0:
+        #     print("ASK FOR DATA FOR PLOT")
+        #     comm.send({"send": True}, dest=head_rank, tag=91)
+        #     current_info = comm.recv(source=head_rank, tag=92)
 
-            # remove GPU component for GB waveform build
-            current_info.current_info["gb"]["get_templates"].initialization_kwargs["use_gpu"] = False
-            current_info.current_info["mbh"]["get_templates"].initialization_kwargs["use_gpu"] = False
-            current_info.current_info["gb"]["get_templates"].runtime_kwargs["use_c_implementation"] = False
+        #     # remove GPU component for GB waveform build
+        #     current_info.current_info["gb"]["get_templates"].initialization_kwargs["use_gpu"] = False
+        #     current_info.current_info["mbh"]["get_templates"].initialization_kwargs["use_gpu"] = False
+        #     current_info.current_info["gb"]["get_templates"].runtime_kwargs["use_c_implementation"] = False
 
-            print("STARTING PLOT")
-            run_results_production.build_plots(current_info)
-            print("FINISHED PLOT")
+        #     print("STARTING PLOT")
+        #     run_results_production.build_plots(current_info)
+        #     print("FINISHED PLOT")
 
         if ((i + 1) % backup_iter) == 0:
             print("copy to backup file")
@@ -52,7 +52,7 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_ran
 
 
 class GFHDFBackend(eryn_HDFBackend):
-    def __init__(self, *args, comm=None, sub_states=None, save_plot_rank=None, **kwargs):
+    def __init__(self, *args, comm=None, sub_backend=None, sub_state_bases=None, save_plot_rank=None, **kwargs):
 
         super().__init__(*args, **kwargs)
 
@@ -64,38 +64,40 @@ class GFHDFBackend(eryn_HDFBackend):
         self.save_plot_rank = save_plot_rank
         
         
-        self.sub_states = sub_states
-        if self.sub_states is not None:
-            self.sub_states = {key: self.sub_states[key](*args, **kwargs) for key in self.sub_states if self.sub_states[key] is not None}
+        self.sub_backend = sub_backend
+        if self.sub_backend is not None:
+            self.sub_backend = {key: self.sub_backend[key](*args, **kwargs) for key in self.sub_backend if self.sub_backend[key] is not None}
     
+        self.sub_state_bases = sub_state_bases
+        
     def reset(self, *args, **kwargs):
         # regular reset
         super().reset(*args, **kwargs)
         
-        if self.sub_states is not None:
+        if self.sub_backend is not None:
             with self.open("a") as f:
                 g = f[self.name]
-                if "sub_states" not in g:
-                    g.create_group("sub_states")
+                if "sub_backend" not in g:
+                    g.create_group("sub_backend")
             
-            for sub_state in self.sub_states.values():
-                sub_state.reset(*args, **kwargs)
+            for sub_backend_tmp in self.sub_backend.values():
+                sub_backend_tmp.reset(*args, **kwargs)
 
 
     def grow(self, ngrow, *args):
         super().grow(ngrow, *args)
         
         # open the file in append mode
-        if self.sub_states is not None:
+        if self.sub_backend is not None:
             with self.open("a") as f:
                 # resize all the arrays accordingly
                 g = f[self.name]
                 ntot = g.attrs["iteration"] + ngrow
 
-                for sub_state in self.sub_states.values():
-                    if sub_state is None:
+                for sub_backend_tmp in self.sub_backend.values():
+                    if sub_backend_tmp is None:
                         continue
-                    sub_state.grow(ngrow, *args)
+                    sub_backend_tmp.grow(ngrow, *args)
 
     def save_step_main(
         self,
@@ -113,11 +115,11 @@ class GFHDFBackend(eryn_HDFBackend):
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
 
-            if self.sub_states is not None:
+            if self.sub_backend is not None:
                 # resize all the arrays accordingly
 
-                sub_group = g["sub_states"]
-                for sub_state in self.sub_states.values():
+                sub_group = g["sub_backend"]
+                for sub_state in self.sub_backend.values():
                     if sub_state is None:
                         continue
                     sub_state.save_step(state, *args, **kwargs)
@@ -151,11 +153,8 @@ class GFHDFBackend(eryn_HDFBackend):
         
         else:
             state = args[0]
-            mgh = state.mgh
-            state.mgh = None
             self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
-            state.mgh = mgh
-
+            
     def get_a_sample(self, it):
         """Access a sample in the chain
 
@@ -177,21 +176,21 @@ class GFHDFBackend(eryn_HDFBackend):
             )
 
         tmp_state = super().get_a_sample(it)
-        state = GFState(tmp_state, is_eryn_state_input=True)
+        state = GFState(tmp_state, sub_state_bases=self.sub_state_bases, is_eryn_state_input=True)
 
         # open for appending in with statement
-        if self.sub_states is not None:
+        if self.sub_backend is not None:
             # resize all the arrays accordingly
             sub_states = {}
             sub_state_bases = {}
             for key in self.branch_names:
-                sub_state = self.sub_states.get(key, None)
-                if sub_state is None:
+                sub_backend_tmp = self.sub_backend.get(key, None)
+                if sub_backend_tmp is None:
                     sub_states[key] = None
                     sub_state_bases[key] = None
                     continue
 
-                sub_states[key] = sub_state.get_a_sample(it)
+                sub_states[key] = sub_backend_tmp.get_a_sample(it)
                 sub_state_bases[key] = type(sub_states[key])
         
         else:
@@ -210,7 +209,7 @@ class GBHDFBackend(eryn_HDFBackend):
 
         # open file in append mode
         with self.open("a") as f:
-            g = f[self.name]["sub_states"]
+            g = f[self.name]["sub_backend"]
 
             band_info = g.create_group("gb")
 
@@ -300,13 +299,13 @@ class GBHDFBackend(eryn_HDFBackend):
     def num_bands(self):
         """Get num_bands from h5 file."""
         with self.open() as f:
-            return f[self.name]["sub_states"]["gb"].attrs["num_bands"]
+            return f[self.name]["sub_backend"]["gb"].attrs["num_bands"]
 
     @property
     def band_edges(self):
         """Get band_edges from h5 file."""
         with self.open() as f:
-            return f[self.name]["sub_states"]["gb"]["band_edges"][:]
+            return f[self.name]["sub_backend"]["gb"]["band_edges"][:]
 
     @property
     def reset_kwargs(self):
@@ -320,7 +319,7 @@ class GBHDFBackend(eryn_HDFBackend):
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
-            band_info = g["sub_states"]["gb"]
+            band_info = g["sub_backend"]["gb"]
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
             for key in band_info:
@@ -381,7 +380,7 @@ class GBHDFBackend(eryn_HDFBackend):
                             "results"
                         )
 
-                    gb_group = g["sub_states"]["gb"]
+                    gb_group = g["sub_backend"]["gb"]
                     v_all = {key: gb_group[key][slice_vals] for key in gb_group if key != "band_edges"}
                     v_all["band_edges"] = gb_group["band_edges"][:]
                     successful = True
@@ -432,7 +431,7 @@ class GBHDFBackend(eryn_HDFBackend):
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
 
-            gb_group = g["sub_states"]["gb"]
+            gb_group = g["sub_backend"]["gb"]
 
             # make sure the backend has all the information needed to store everything
             for key in [
@@ -482,7 +481,7 @@ class MBHHDFBackend(eryn_HDFBackend):
 
         # open file in append mode
         with self.open("a") as f:
-            g = f[self.name]["sub_states"]
+            g = f[self.name]["sub_backend"]
 
             mbh_group = g.create_group("mbh")
 
@@ -515,7 +514,7 @@ class MBHHDFBackend(eryn_HDFBackend):
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
-            mbh_group = f[self.name]["sub_states"]["mbh"]
+            mbh_group = f[self.name]["sub_backend"]["mbh"]
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
             mbh_group["betas_all"].resize(ntot, axis=0)
@@ -568,7 +567,7 @@ class MBHHDFBackend(eryn_HDFBackend):
                     "results"
                 )
 
-            mbh_group = g["sub_states"]["mbh"]
+            mbh_group = g["sub_backend"]["mbh"]
             v_all = mbh_group["betas_all"][slice_vals]
         return v_all
 
@@ -607,7 +606,7 @@ class MBHHDFBackend(eryn_HDFBackend):
             # get the iteration left off on
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
-            mbh_group = g["sub_states"]["mbh"]
+            mbh_group = g["sub_backend"]["mbh"]
             mbh_group["betas_all"][iteration] = state.sub_states["mbh"].betas_all
 
     def get_a_sample(self, it):
@@ -645,7 +644,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
 
         # open file in append mode
         with self.open("a") as f:
-            g = f[self.name]["sub_states"]
+            g = f[self.name]["sub_backend"]
 
             emri_group = g.create_group("emri")
 
@@ -678,7 +677,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
-            emri_group = f[self.name]["sub_states"]["emri"]
+            emri_group = f[self.name]["sub_backend"]["emri"]
             # resize all the arrays accordingly
             ntot = g.attrs["iteration"] + ngrow
             emri_group["betas_all"].resize(ntot, axis=0)
@@ -731,7 +730,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
                     "results"
                 )
 
-            emri_group = g["sub_states"]["emri"]
+            emri_group = g["sub_backend"]["emri"]
             v_all = emri_group["betas_all"][slice_vals]
         return v_all
 
@@ -770,7 +769,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
             # get the iteration left off on
             # minus one because it was updated in the super function
             iteration = g.attrs["iteration"] - 1
-            emri_group = g["sub_states"]["emri"]
+            emri_group = g["sub_backend"]["emri"]
             emri_group["betas_all"][iteration] = state.sub_states["emri"].betas_all
 
     def get_a_sample(self, it):
