@@ -36,7 +36,6 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
-
 def dtrend(t, y):
     # @Nikos data setup
     m, b = np.polyfit(t, y, 1)
@@ -323,7 +322,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
 
         return SetupInfoTransfer(
             name="gb",
-            in_model_moves=[gb_move] + rj_moves, # probably better to run them all together
+            in_model_moves=[] #[gb_move] + rj_moves, # probably better to run them all together
             # rj_moves=rj_moves,
         )
 
@@ -373,7 +372,7 @@ def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
 
     return SetupInfoTransfer(
         name="mbh",
-        in_model_moves=[mbh_move],
+        in_model_moves=[], #[mbh_move],
     )
 
 
@@ -397,10 +396,10 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
 
     return SetupInfoTransfer(
         name="psd",
-        in_model_moves=[psd_move],
+        in_model_moves=[], #[psd_move],
     )
 
-from lisatools.sources.emri import EMRITDIWaveform
+from lisatools.sources.emri import EMRITDIWaveform  
 
 class WrapEMRI:
     def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind, dt):
@@ -1048,7 +1047,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # (you need to remove them from the other parts of initialization)
     fill_dict_emri = {
        "ndim_full": 14,
-       "fill_values": np.array([0.0, 0.0]), # inclination and Phi_theta
+       "fill_values": np.array([1.0, 0.0]), # inclination and Phi_theta
        "fill_inds": np.array([5, 12]),
     }
 
@@ -1100,12 +1099,11 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
     # so spin results are currently meaningless and will lead to slower code
-    
     # waveform kwargs
     initialize_kwargs_emri = dict(
         T=Tobs / YRSID_SI, # TODO: check these conversions all align
         dt=dt,
-        emri_waveform_args=("FastSchwarzschildEccentricFlux",),
+        emri_waveform_args=("FastKerrEccentricEquatorialFlux",),
         emri_waveform_kwargs=dict(use_gpu=True),
         response_kwargs=response_kwargs,
     )
