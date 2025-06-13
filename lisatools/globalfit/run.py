@@ -4,7 +4,7 @@ from copy import deepcopy
 from .generatefuncs import GenerateCurrentState
 import numpy as np
 from mpi4py import MPI
-import os
+import sys, os
 import warnings
 from copy import deepcopy
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
@@ -33,6 +33,7 @@ from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
 cp.cuda.runtime.setDevice(7)
+#os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
@@ -59,14 +60,28 @@ import os
 import pickle
 
 from abc import ABC
-
-try:
-    import cupy as cp
-except (ImportError, ModuleNotFoundError) as e:
-    pass
+import logging
 
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
+def init_logger(filename=None, level=logging.DEBUG, name='GlobalFit'):
+    """ Initialize a logger.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    if (len(logger.handlers) < 2):
+        formatter = logging.Formatter("%(asctime)s - %(name)s - "
+                                      "%(levelname)s - %(message)s")
+        if filename:
+            rfhandler = logging.FileHandler(filename)
+            logger.addHandler(rfhandler)
+            rfhandler.setFormatter(formatter)
+        if level:
+            shandler = logging.StreamHandler(sys.stdout)
+            shandler.setLevel(level)
+            shandler.setFormatter(formatter)
+            logger.addHandler(shandler)
+    return logger
 
 class CurrentInfoGlobalFit:
     def __init__(self, settings, get_last_state_info=True):
@@ -195,14 +210,18 @@ class GlobalFit:
             self.results_rank = self.ranks_to_give.pop()
             self.used_ranks.append(self.results_rank)
 
+        level = logging.DEBUG
+        name = "GlobalFit"
+        self.logger = init_logger(filename="global_fit.log", level=level, name=name)
+
     def load_info(self):
-        print("need to adjust file path")
+        self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_5.h5"):
-            state = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
+        if os.path.exists("test_new_7.h5"):
+            state = GFHDFBackend("test_new_7.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend, "emri": EMRIHDFBackend}).get_a_sample(0)
 
         else:
-            print("update this somehow")
+            self.logger.debug("update this somehow")
             # coords = {key: np.zeros((self.ntemps, self.nwalkers, self.nleaves_max[key], self.ndims[key])) for key in self.branch_names}
             # inds = {key: np.ones((self.ntemps, self.nwalkers, self.nleaves_max[key]), dtype=bool) for key in self.branch_names}
             # inds["gb"][:] = False
@@ -211,7 +230,7 @@ class GlobalFit:
             import pickle
             with open("pickle_state.pickle", "rb") as fp:
                 state = pickle.load(fp)
-            print("pickle state load success")
+            self.logger.debug("pickle state load success")
         return state
 
     def setup_acs(self, generate, state):
@@ -264,13 +283,15 @@ class GlobalFit:
             ntemps = general_info["ntemps"]
            
             state = self.load_info()
+            self.logger.debug("state loaded")
 
             supps_base_shape = (ntemps, nwalkers)
             walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
 
-            backend = GFHDFBackend("test_new_5.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            backend = GFHDFBackend("test_new_7.h5", sub_states={"gb": GBHDFBackend, "mbh": MBHHDFBackend})
+            self.logger.debug("backend created")
             # backend.reset(
             #     nwalkers,
             #     ndims,
@@ -327,8 +348,10 @@ class GlobalFit:
             E_inj = general_info["E_inj"].copy()
 
             generate = GenerateCurrentState(A_inj, E_inj)
+            self.logger.debug("generate function created")
 
             acs = self.setup_acs(generate, state)
+            self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood()
 
@@ -348,7 +371,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_5.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_7.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,

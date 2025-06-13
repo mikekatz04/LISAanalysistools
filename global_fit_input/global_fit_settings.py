@@ -36,6 +36,9 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
+import few
+few.get_backend('cuda12x')
+
 def dtrend(t, y):
     # @Nikos data setup
     m, b = np.polyfit(t, y, 1)
@@ -399,8 +402,6 @@ def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
         in_model_moves=[], #[psd_move],
     )
 
-from lisatools.sources.emri import EMRITDIWaveform  
-
 class WrapEMRI:
     def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind, dt):
         self.waveform_gen_td = waveform_gen_td
@@ -417,6 +418,9 @@ class WrapEMRI:
 
 
 def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+
+    from lisatools.sources.emri import EMRITDIWaveform  
+
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
     emri_info = curr.source_info["emri"]
@@ -597,6 +601,7 @@ def get_global_fit_settings(copy_settings_file=False):
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
     gpus = [7]
+    #cp.cuda.runtime.setDevice(gpus[0])
 
     nwalkers = 36
     ntemps = 24
@@ -1124,11 +1129,11 @@ def get_global_fit_settings(copy_settings_file=False):
     # mcmc info for main run
     emri_main_run_mcmc_info = dict(
         branch_names=["emri"],
-        nleaves_max=8,
+        nleaves_max=1,
         ndim=12,
         ntemps=ntemps,
         nwalkers=nwalkers,
-        num_prop_repeats=10,
+        num_prop_repeats=1,
         inner_moves=inner_moves_emri,
         progress=False,
         thin_by=1,
@@ -1155,7 +1160,7 @@ def get_global_fit_settings(copy_settings_file=False):
     gf_branch_information = (
         GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
         + GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        + GFBranchInfo("emri", 12, 8, 8, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
+        + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )

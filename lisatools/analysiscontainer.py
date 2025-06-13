@@ -326,7 +326,7 @@ class AnalysisContainer:
         signal_gen_here = self.signal_gen if signal_gen is None else signal_gen
 
         template = DataResidualArray(
-            signal_gen_here(*args_in, **waveform_kwargs), **data_res_arr_kwargs
+            signal_gen_here(*args_in, **waveform_kwargs)[0], **data_res_arr_kwargs
         )
 
         args_2 = (template,)
