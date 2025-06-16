@@ -2161,49 +2161,54 @@ class GMMFit:
         self.sample_maxs = sample_maxs = samples_in.max(axis=0)
 
         samples = self.transform_to_gmm_basis(samples_in)
-        bad = False
-        for n_components in range(1, 30):
-            if not run:
-                continue
-            #fit_gaussian_mixture_model(n_components, samples)
-            #breakpoint()
-            try:
-                mixture = GaussianMixture(n_components=n_components, verbose=False, verbose_interval=2)
+
+        mixture = GaussianMixture(n_components=30, verbose=False, verbose_interval=2)
     
-                mixture.fit(samples)
-                test_bic = mixture.bic(samples)
-            except ValueError:
-                # print("ValueError", samples)
-                run = False
-                bad = True
-                continue
-            # print(n_components, test_bic)
-            if test_bic < min_bic:
-                min_bic = test_bic
-                keep_mix = mixture
-                keep_components = n_components
-                
-            else:
-                run = False
-    
-                # print(leaf, n_components - 1, et - st)
-            
-            """if keep_components >= 9:
-                new_samples = keep_mix.sample(n_samples=100000)[0]
-                old_samples = samples
-                fig = corner.corner(old_samples, hist_kwargs=dict(density=True, color="r"), color="r", plot_datapoints=False, plot_density=False)
-                corner.corner(new_samples, hist_kwargs=dict(density=True, color="b"), color="b", plot_datapoints=False, plot_contours=True, plot_density=False, fig=fig)
-                fig.savefig("mix_check.png")
-                plt.close()
-                breakpoint()"""
-    
-        if bad:
-            print("BAD")
-        if keep_components >= 19:
-            print(keep_components)
-        # output_list = [keep_mix.weights_, keep_mix.means_, keep_mix.covariances_, np.array([np.linalg.inv(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), np.array([np.linalg.det(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), sample_mins, sample_maxs]
+        mixture.fit(samples)
         
-        self.keep_mix = keep_mix
+        # bad = False
+        # for n_components in range(1, 31)[-1:]:
+        #     if not run:
+        #         continue
+        #     #fit_gaussian_mixture_model(n_components, samples)
+        #     #breakpoint()
+        #     try:
+        #         mixture = GaussianMixture(n_components=n_components, verbose=False, verbose_interval=2)
+    
+        #         mixture.fit(samples)
+        #         test_bic = mixture.bic(samples)
+        #     except ValueError:
+        #         # print("ValueError", samples)
+        #         run = False
+        #         bad = True
+        #         continue
+        #     # print(n_components, test_bic)
+        #     if test_bic < min_bic:
+        #         min_bic = test_bic
+        #         keep_mix = mixture
+        #         keep_components = n_components
+                
+        #     else:
+        #         run = False
+    
+        #         # print(leaf, n_components - 1, et - st)
+            
+        #     """if keep_components >= 9:
+        #         new_samples = keep_mix.sample(n_samples=100000)[0]
+        #         old_samples = samples
+        #         fig = corner.corner(old_samples, hist_kwargs=dict(density=True, color="r"), color="r", plot_datapoints=False, plot_density=False)
+        #         corner.corner(new_samples, hist_kwargs=dict(density=True, color="b"), color="b", plot_datapoints=False, plot_contours=True, plot_density=False, fig=fig)
+        #         fig.savefig("mix_check.png")
+        #         plt.close()
+        #         breakpoint()"""
+    
+        # if bad:
+        #     print("BAD")
+        # if keep_components >= 19:
+        #     print(keep_components)
+        # # output_list = [keep_mix.weights_, keep_mix.means_, keep_mix.covariances_, np.array([np.linalg.inv(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), np.array([np.linalg.det(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]), sample_mins, sample_maxs]
+        
+        self.keep_mix = mixture
 
     def transform_to_gmm_basis(self, samples):
         return ((samples - self.sample_mins[None, :]) / (self.sample_maxs[None, :] - self.sample_mins[None, :])) * 2 - 1
@@ -2239,7 +2244,7 @@ def gather_gmms(gmms):
         sample_maxs
     )
 
-from ...sampling.gmm import GMMFit as GPUGMMFit
+from ...sampling.gmm import vec_fit_gmm_min_bic
 
 class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
     comm_info = None
@@ -2415,30 +2420,39 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         np.save("samples_examples", samples_2)
         import time
         st = time.perf_counter()
-        samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])
-        _gmms = GPUGMMFit(samples_2_tmp, use_gpu=True)
+        samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[:, :, np.array([0, 1, 2, 4, 6, 7])]
+        full_gmm = vec_fit_gmm_min_bic(samples_2_tmp, min_comp=1, max_comp=30, n_samp_bic_test=5000, use_gpu=True, verbose=False)
         et = time.perf_counter()
         print(f"GPU GMM FIT: {et - st}")
-        breakpoint()
-            
-        if self.ranks_needed == 0:
-            gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])]
-            gmm_info = gather_gmms(gmms)
+  
+        rj_dist = ProbDistContainer(
+            {
+                (0, 1, 2, 4, 6, 7): full_gmm, 
+                3: uniform_dist(0.0, 2 * np.pi),
+                5: uniform_dist(0.0, np.pi),
+            },
+            use_cupy=True
+        )
+        # if self.ranks_needed == 0:
+        #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
+        #     gmm_info = gather_gmms(gmms)
 
-        else:
-            if self.comm_info is None:
-                # this only happens the first time through
-                self.comm_info = self.comm.recv(tag=232342)
+        # else:
+        #     if self.comm_info is None:
+        #         # this only happens the first time through
+        #         self.comm_info = self.comm.recv(tag=232342)
                 
-            gmm_info = fit_gmm(samples_2.get(), self.comm, self.comm_info)
+        #     gmm_info = fit_gmm(samples_2.get(), self.comm, self.comm_info)
         
-        full_gmm = FullGaussianMixtureModel(*gmm_info, use_cupy=self.use_gpu)
-        
-        gen_samp = self.xp.asarray(full_gmm.rvs(100))
-        gen_ll, gen_opt_snr = para_log_like(gen_samp, *ll_args, fstat=False, return_snr=True)
-        print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
+        # full_gmm = FullGaussianMixtureModel(*gmm_info, use_cupy=self.use_gpu)
         # breakpoint()
-        self.rj_proposal_distribution = {"gb": full_gmm}
+
+        gen_samp = self.xp.asarray(rj_dist.rvs(1000))
+        gen_ll, gen_opt_snr = para_log_like(gen_samp, *ll_args, fstat=False, return_snr=True)
+        # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
+        # breakpoint()
+        
+        self.rj_proposal_distribution = {"gb": rj_dist}
     
    
 class GBSpecialRJSearchMove(GBSpecialBase):

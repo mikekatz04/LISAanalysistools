@@ -26,7 +26,7 @@ from lisatools.utils.utility import searchsorted2d_vec
 # from ..utils import check_random_state
 # from ..utils._param_validation import Interval, StrOptions
 # from ..utils.validation import check_is_fitted, validate_data
-
+from lisatools.sampling.prior import FullGaussianMixtureModel
 
 def _check_shape(param, param_shape, name, xp=None):
     """Validate the shape of the input parameter 'param'.
@@ -141,44 +141,6 @@ def _check_shape(param, param_shape, name, xp=None):
 #     @abstractmethod
 #     def _set_parameters(self, params):
 #         pass
-
-#     def score_samples(self, X):
-#         """Compute the log-likelihood of each sample.
-
-#         Parameters
-#         ----------
-#         X : array-like of shape (n_samples, n_features)
-#             List of n_features-dimensional data points. Each row
-#             corresponds to a single data point.
-
-#         Returns
-#         -------
-#         log_prob : array, shape (n_samples,)
-#             Log-likelihood of each sample in `X` under the current model.
-#         """
-#         check_is_fitted(self)
-#         X = validate_data(self, X, reset=False)
-
-#         return logsumexp(self._estimate_weighted_log_prob(X), axis=1)
-
-#     def score(self, X, y=None):
-#         """Compute the per-sample average log-likelihood of the given data X.
-
-#         Parameters
-#         ----------
-#         X : array-like of shape (n_samples, n_dimensions)
-#             List of n_features-dimensional data points. Each row
-#             corresponds to a single data point.
-
-#         y : Ignored
-#             Not used, present for API consistency by convention.
-
-#         Returns
-#         -------
-#         log_likelihood : float
-#             Log-likelihood of `X` under the Gaussian mixture model.
-#         """
-#         return self.score_samples(X).mean()
 
 #     def predict(self, X):
 #         """Predict the labels for the data samples in X using trained model.
@@ -1131,11 +1093,11 @@ class GaussianMixtureModel:
         )
         if compute_resp:
             # super()._initialize_parameters(X, random_state)
-            self._initialize_parameters(X, random_state)
+            self._initialize_parameters_inner(X, random_state)
         else:
             self._initialize(X, None)
     
-    def _initialize_parameters(self, X, random_state):
+    def _initialize_parameters_inner(self, X, random_state):
         """Initialize the model parameters.
 
         Parameters
@@ -1213,14 +1175,50 @@ class GaussianMixtureModel:
                 covariances, self.covariance_type, xp=self.xp
             )
         else:
-            raise NotImplementedError
             self.precisions_cholesky_ = _compute_precision_cholesky_from_precisions(
                 self.precisions_init, self.covariance_type
             )
 
+    def score_samples(self, X):
+        """Compute the log-likelihood of each sample.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            List of n_features-dimensional data points. Each row
+            corresponds to a single data point.
+
+        Returns
+        -------
+        log_prob : array, shape (n_samples,)
+            Log-likelihood of each sample in `X` under the current model.
+        """
+        # check_is_fitted(self)
+        # X = validate_data(self, X, reset=False)
+
+        return self.logsumexp(self._estimate_weighted_log_prob(X), axis=-1)
+
+    def score(self, X, y=None):
+        """Compute the per-sample average log-likelihood of the given data X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_dimensions)
+            List of n_features-dimensional data points. Each row
+            corresponds to a single data point.
+
+        y : Ignored
+            Not used, present for API consistency by convention.
+
+        Returns
+        -------
+        log_likelihood : float
+            Log-likelihood of `X` under the Gaussian mixture model.
+        """
+        return self.score_samples(X).mean(axis=-1)
+
     def logpdf(self, X):
-        _, log_resp = self._estimate_log_prob_resp(X)
-        return self.logsumexp(log_resp, axis=-1)
+        return self.score_samples(X)
 
     def predict_proba(self, X):
         """Evaluate the components' density for each sample.
@@ -1238,7 +1236,7 @@ class GaussianMixtureModel:
         """
         # check_is_fitted(self)
         # X = validate_data(self, X, reset=False)
-        
+        _, log_resp = self._estimate_log_prob_resp(X)
         return self.xp.exp(log_resp)
 
 
@@ -1287,7 +1285,7 @@ class GaussianMixtureModel:
 
         return self._estimate_log_prob(X, converged=converged) + self._estimate_log_weights(converged=converged)[:, None, :]
 
-    def sample(self, n_samples=1):
+    def sample(self, n_samples=1, flat=False):
         """Generate random samples from the fitted Gaussian distribution.
 
         Parameters
@@ -1311,21 +1309,37 @@ class GaussianMixtureModel:
                 "least one sample." % (self.n_components)
             )
 
-        n_groups, _, n_features = self.means_.shape
+        if not flat:
+            weights = self.weights_
+            means = self.means_
+            covariances = self.covariances_
+            n_components = self.n_components
+
+        else:
+            weights = self.weights_.reshape(1, -1) / self.weights_.sum()
+            means = self.means_.reshape((1, -1) + self.means_.shape[-1:])
+            covariances = self.covariances_.reshape((1, -1) + self.covariances_.shape[-2:])
+            n_components = self.weights_.shape[0] * self.n_components
+            # new_precisions_cholesky = self.gmm.precisions_cholesky_.reshape((1, -1) + self.gmm.precisions_cholesky_.shape[-2:])
+        
+        n_groups, _, n_features = means.shape
         rng = self.random_state
 
-        n_samples_comp = draw_multinomial_vec(n_samples, self.weights_, rng, xp=self.xp)
+        n_samples_comp = draw_multinomial_vec(n_samples, weights, rng, xp=self.xp)
         # n_samples_comp = rng.multinomial(n_samples, self.weights_)
-        n_features = self.means_.shape[-1]
+        n_features = means.shape[-1]
         X = self.xp.zeros((n_groups, n_samples, n_features))
         samples_so_far = self.xp.zeros((n_groups, n_samples), dtype=bool)
-        chol_decomp = self.xp.linalg.cholesky(self.covariances_)
+        comp_out = self.xp.zeros((n_groups, n_samples), dtype=int)
+        chol_decomp = self.xp.linalg.cholesky(covariances)
         if self.covariance_type == "full":
-            for k in range(self.n_components):
+            for k in range(n_components):
                 n_samp_k = n_samples_comp[:, k]
                 n_samp_k_max = n_samp_k.max().item()
+                if n_samp_k_max == 0:
+                    continue
                 z = rng.randn(n_groups, n_samp_k_max, n_features)
-                _samples = self.means_[:, k][:, None, :] + self.xp.einsum("ijk,imk->imj", chol_decomp[:, k], z)
+                _samples = means[:, k][:, None, :] + self.xp.einsum("ijk,imk->imj", chol_decomp[:, k], z)
                 try:
                     repeat_arg = list(n_samp_k.get())
                 except AttributeError:
@@ -1340,6 +1354,7 @@ class GaussianMixtureModel:
                 X[tmp0, tmp_fill] = _samples[tmp0, tmp1]
                 assert self.xp.all(~samples_so_far[tmp0, tmp_fill])
                 samples_so_far[tmp0, tmp_fill] = True
+                comp_out[tmp0, tmp_fill] = k
 
             assert self.xp.all(samples_so_far)
             # X = self.xp.vstack(
@@ -1373,7 +1388,7 @@ class GaussianMixtureModel:
         #     [self.xp.full(sample, j, dtype=int) for j, sample in enumerate(n_samples_comp)]
         # )
         
-        return (X, n_samples_comp)
+        return (X, n_samples_comp, comp_out)
 
 
     def fit(self, X, y=None):
@@ -1531,7 +1546,7 @@ class GaussianMixtureModel:
                 ConvergenceWarning,
             )
 
-        self._set_parameters(best_params)
+        self._set_parameters(best_params, store_all=True)
         self.n_iter_ = best_n_iter
         self.lower_bound_ = max_lower_bound
         self.lower_bounds_ = best_lower_bounds
@@ -1598,12 +1613,24 @@ class GaussianMixtureModel:
     def _estimate_log_weights(self, converged=None):
         if converged is None:
             converged = self.xp.full(self.weights_.shape[0], False)
-         
+
         return self.xp.log(self.weights_[~converged])
 
     def _compute_lower_bound(self, _, log_prob_norm):
         return log_prob_norm
 
+    def _estimate_weighted_log_prob_for_flat(self, X):
+        # must be converged already
+        logpdf_gaussian = _estimate_log_gaussian_prob(
+            X, self.means_, self.precisions_cholesky_, self.covariance_type, xp=self.xp
+        )
+        
+        weights = self.weights_ / self.weights_.sum()
+        log_weights = self.xp.log(weights)
+        logpdf_all_components = logpdf_gaussian + log_weights[:, None, :]
+        logpdf = self.logsumexp(logpdf_all_components, axis=-1)
+        return logpdf
+            
     def _get_parameters(self):
         return (
             self.weights_,
@@ -1612,7 +1639,7 @@ class GaussianMixtureModel:
             self.precisions_cholesky_,
         )
 
-    def _set_parameters(self, params):
+    def _set_parameters(self, params, store_all=False):
         (
             self.weights_,
             self.means_,
@@ -1641,9 +1668,13 @@ class GaussianMixtureModel:
             raise NotImplementedError
             self.precisions_ = self.precisions_cholesky_**2
 
+        if store_all:
+            self.inv_covs_ = self.xp.linalg.inv(self.covariances_)
+            self.det_covs_ = self.xp.linalg.det(self.covariances_)
+
     def _n_parameters(self):
         """Return the number of free parameters in the model."""
-        _, n_features = self.means_.shape
+        n_groups, _, n_features = self.means_.shape
         if self.covariance_type == "full":
             cov_params = self.n_components * n_features * (n_features + 1) / 2.0
         elif self.covariance_type == "diag":
@@ -1674,10 +1705,31 @@ class GaussianMixtureModel:
         bic : float
             The lower the better.
         """
-        raise NotImplementedError
-        return -2 * self.score(X) * X.shape[0] + self._n_parameters() * np.log(
-            X.shape[0]
+        return -2 * self.score(X) * X.shape[1] + self._n_parameters() * np.log(
+            X.shape[1]
         )
+
+    def general_way_logpdf(self, X, flat=True):
+        
+        n_groups, n_components, n_features, _ = self.inv_covs_.shape
+        
+        x_minus_mu = X[:, :, None, :] - self.means_[:, None, :, :]
+        _tmp1 = self.xp.einsum("ijkl,iklm->ijkm", x_minus_mu, self.inv_covs_)
+        kernel = self.xp.einsum("ijkl,ijkl->ijk", _tmp1, x_minus_mu)
+
+        if flat:
+            weights = self.weights_ / self.weights_.sum()
+        else:
+            weights = self.weights_
+
+        _logpdf = (
+            self.xp.log(weights)[:, None, :]
+            -(n_features / 2.) * self.xp.log(2 * np.pi)
+            - (1./2.) * self.xp.log(self.det_covs_)[:, None, :]
+            - (1./2.) * kernel
+        )
+        logpdf = self.logsumexp(_logpdf, axis=-1)
+        return logpdf
 
     def aic(self, X):
         """Akaike information criterion for the current model on the input X.
@@ -1709,23 +1761,19 @@ class GMMFit:
         else:
             return np
 
-    def __init__(self, samples_in, n_components=15, use_gpu=False):
+    def __init__(self, samples_in=None, n_components=30, use_gpu=False):
 
         self.use_gpu = use_gpu
-        assert isinstance(samples_in, self.xp.ndarray)
         self.fitted = False
         run = True
         min_bic = self.xp.inf
-        self.sample_mins = sample_mins = samples_in.min(axis=1)
-        self.sample_maxs = sample_maxs = samples_in.max(axis=1)
-        self.n_groups = samples_in.shape[0]
-        samples = self.transform_to_gmm_basis(samples_in)
-        self.gmm = GaussianMixtureModel(
+        
+        self.gmm_init_kwargs = dict(
             n_components=n_components,
             covariance_type="full",
             tol=1e-3,
             reg_covar=1e-6,
-            max_iter=100,
+            max_iter=1000,
             n_init=1,
             init_params="random_from_data",
             weights_init=None,
@@ -1737,49 +1785,271 @@ class GMMFit:
             verbose_interval=10,
             use_gpu=use_gpu
         )
-        self.gmm.fit(samples)
-        self.fitted = True
-        self.ndim = samples.shape[-1]
-        self.log_det_J = (self.ndim * self.xp.log(2) - self.xp.sum(self.xp.log(self.sample_maxs - self.sample_mins), axis=-1))
+        self.gmm = GaussianMixtureModel(**self.gmm_init_kwargs)
 
-    def transform_to_gmm_basis(self, samples):
-        return ((samples - self.sample_mins[:, None, :]) / (self.sample_maxs[:, None, :] - self.sample_mins[:, None, :])) * 2 - 1
+        assert samples_in is not None
         
-    def transform_from_gmm_basis(self, samples):
-        return (samples + 1.) / 2. * (self.sample_maxs[:, None, :] - self.sample_mins[:, None, :]) + self.sample_mins[:, None, :]
+        assert isinstance(samples_in, self.xp.ndarray)
+        self.sample_mins = sample_mins = samples_in.min(axis=1)
+        self.sample_maxs = sample_maxs = samples_in.max(axis=1)
+        self.n_groups = samples_in.shape[0]
+        samples = self.transform_to_gmm_basis(samples_in)
+        self.ndim = samples.shape[-1]
+    
+        self.gmm.fit(samples)
+        self.log_det_J = (self.ndim * self.xp.log(2) - self.xp.sum(self.xp.log(self.sample_maxs - self.sample_mins), axis=-1))
+        self.fitted = True
+        
+    def transform_to_gmm_basis(self, samples):
+        squeeze = samples.ndim == 2
+        if squeeze:
+            samples = samples[None, :]
+        
+        maxs = self.sample_maxs[:, None, :]
+        mins = self.sample_mins[:, None, :]
+        
+        tmp = ((samples - mins) / (maxs - mins)) * 2 - 1
+        if squeeze:
+            return tmp[0]
+        else:
+            return tmp
+        
+    def transform_from_gmm_basis(self, samples, inds_component=None):
+        squeeze = samples.ndim == 2
+        if squeeze:
+            samples = samples[None, :]
+        if inds_component is None:
+            maxs = self.sample_maxs[:, None, :]
+            mins = self.sample_mins[:, None, :]
+            
+        else:
+            assert inds_component.ndim == 1
+            assert inds_component.shape[0] == samples.shape[1]
+            assert inds_component.min() >= 0
+            assert inds_component.max() <= self.sample_maxs.shape[0]
+            maxs = self.sample_maxs[inds_component][None, :]
+            mins = self.sample_mins[inds_component][None, :]
+        
+        tmp = (samples + 1.) / 2. * (maxs - mins) + mins
+        if squeeze:
+            return tmp[0]
+        else:
+            return tmp
 
-    def rvs(self, size=(1,)):
+    def rvs(self, size=(1,), flat=False):
         assert self.fitted
         if isinstance(size, int):
             size = (size,)
 
-        _samples = self.gmm.sample(np.prod(size))[0]
-        samples = self.transform_from_gmm_basis(_samples).reshape((_samples.shape[0],) + size + (_samples.shape[-1],))
+        _samples, _comp_counts, _comps = self.gmm.sample(np.prod(size), flat=flat)
+        if not flat:
+            inds_component = None
+            squeeze = False
+        else:
+            # combined GMM
+            assert _comps.shape[0] == 1 and _samples.shape[0] == 1
+            inds_component = _comps[0] // self.gmm.n_components
+            squeeze = True
+
+        samples = self.transform_from_gmm_basis(_samples, inds_component=inds_component)
+        if squeeze:
+            return samples[0]
         return samples
 
-    def logpdf(self, x):
-        assert x.shape[0] == self.n_groups
-        assert x.ndim == 3
-        assert x.shape[2] == self.ndim
-        logpdf = self.gmm.logpdf(x)
-        logpdf += self.log_det_J[:, None]
+    def logpdf(self, x, flat=False):
+        
+        if not flat:
+            x_in = self.transform_to_gmm_basis(x)
+            _logpdf = self.gmm.logpdf(x_in)
+        
+        else:
+            assert x.ndim == 2
+            _x = self.xp.tile(x, (self.sample_maxs.shape[0], 1, 1))
+            x_in = self.transform_to_gmm_basis(_x)
+            _logpdf = self.gmm._estimate_weighted_log_prob_for_flat(x_in)
+            # tmp = self.gmm.general_way_logpdf(x_in, flat=flat)
+
+        # np.save("tmp", x_in)
+        # np.save("logpdf", _logpdf)
+        # print(x_in, _logpdf)
+        _logpdf += self.log_det_J[:, None, ]
+        # tmp += self.log_det_J[:, None, ]
+        if flat:
+            logpdf = self.gmm.logsumexp(_logpdf, axis=0)
+            # tmp2 = self.gmm.logsumexp(tmp, axis=0)
+
+        else:
+            logpdf = _logpdf
+
         return logpdf
 
+    def bic(self, x, flat=False):
+        
+        if not flat:
+            x_in = self.transform_to_gmm_basis(x)
+            
+        else:
+            assert x.ndim == 2
+            _x = self.xp.tile(x, (self.sample_maxs.shape[0], 1, 1))
+            x_in = self.transform_to_gmm_basis(_x)
 
+        bic = self.gmm.bic(x_in)
+        return bic
+        
+
+    # def combine_into_single_gmm(self):
+
+    #     new_weights = self.gmm.weights_.reshape(1, -1) / self.gmm.weights_.sum()
+    #     new_means = self.gmm.means_.reshape((1, -1) + self.gmm.means_.shape[-1:])
+    #     new_covariances = self.gmm.covariances_.reshape((1, -1) + self.gmm.covariances_.shape[-2:])
+    #     new_precisions_cholesky = self.gmm.precisions_cholesky_.reshape((1, -1) + self.gmm.precisions_cholesky_.shape[-2:])
+        
+    #     init_info = dict(
+    #         weights_=new_weights,
+    #         means_=new_means,
+    #         covariances_=new_covariances,
+    #         precisions_cholesky_=new_precisions_cholesky,
+    #         sample_mins=self.sample_mins,
+    #         sample_maxs=self.sample_maxs,
+    #         log_det_J=self.log_det_J
+    #     )
+    #     new_gmm = GMMFit(n_components=new_weights.shape[-1], init_info=init_info, use_gpu=self.use_gpu)
+    #     return new_gmm
+
+
+def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, use_gpu=False, verbose=False):
+
+    if use_gpu:
+        xp = cp
+    else:
+        xp = np
+    
+    n_groups, n_samples, ndim = samples.shape
+    samples = xp.asarray(samples)
+    
+    converged = xp.zeros(n_groups, dtype=bool)
+    counts_above_min_bic = xp.zeros(n_groups, dtype=int)
+    min_bic = xp.full(n_groups, +np.inf)
+    minimum_bic_i = xp.zeros(samples.shape[0], dtype=int)
+    weights = []
+    means = []
+    covs = []
+    inv_covs = []
+    dets = []
+    maxs = []
+    mins = []
+    final_gmm_info = [None for _ in range(n_groups)]
+    for comp_i in range(min_comp, max_comp + 1):
+        if xp.all(converged):
+            break
+
+        inds_here = xp.arange(n_groups)[~converged]
+        samples_here = samples[inds_here]
+        gmm = GMMFit(samples_here, n_components=comp_i, use_gpu=use_gpu)
+        samp = gmm.rvs(n_samp_bic_test)
+        bic = gmm.bic(samp)
+
+        above_min_bic = bic > min_bic[inds_here]
+        below_min_bic = bic < min_bic[inds_here]
+
+        counts_above_min_bic[inds_here] += (above_min_bic).astype(int)
+        # print(i, (bic < min_bic).sum() / bic.shape[0])
+        update_main_with_min_bic = inds_here[below_min_bic]
+        update_here_with_min_bic = xp.arange(bic.shape[0])[below_min_bic]
+        minimum_bic_i[update_main_with_min_bic] = comp_i
+        min_bic[update_main_with_min_bic] = bic[below_min_bic]
+
+        for main_update_i, here_update_i in zip(update_main_with_min_bic, update_here_with_min_bic):
+            main_update_i = main_update_i.item()
+            here_update_i = here_update_i.item()
+            _weights = gmm.gmm.weights_[here_update_i]
+            _means = gmm.gmm.means_[here_update_i]
+            _covs = gmm.gmm.covariances_[here_update_i]
+            _inv_covs = gmm.gmm.inv_covs_[here_update_i]
+            _dets = gmm.gmm.det_covs_[here_update_i]
+            _mins = gmm.sample_mins[here_update_i]
+            _maxs = gmm.sample_maxs[here_update_i]
+
+            final_gmm_info[main_update_i] = [
+                _weights, 
+                _means, 
+                _covs, 
+                _inv_covs,
+                _dets,
+                _mins,
+                _maxs
+            ]
+        
+        converged = (counts_above_min_bic >= 2)
+        converged_here = converged[inds_here]
+       
+        del gmm
+        if use_gpu:
+            cp.get_default_memory_pool().free_all_blocks()
+        if verbose:
+            print(f"{comp_i} components: {converged.sum()} converged out of {converged.shape[0]}.")
+
+    if use_gpu:
+        cp.get_default_memory_pool().free_all_blocks()
+    
+    for tmp, n_comp in zip(final_gmm_info, minimum_bic_i):
+        assert tmp[0].shape[0] == n_comp
+
+    weights = [tmp[0] for tmp in final_gmm_info]
+    means = [tmp[1] for tmp in final_gmm_info]
+    covs = [tmp[2] for tmp in final_gmm_info]
+    invcovs = [tmp[3] for tmp in final_gmm_info]
+    dets = [tmp[4] for tmp in final_gmm_info]
+    mins = [tmp[5] for tmp in final_gmm_info]
+    maxs = [tmp[6] for tmp in final_gmm_info]
+
+    full_gmm = FullGaussianMixtureModel(weights, means, covs, invcovs, dets, mins, maxs, use_cupy=use_gpu)
+    return full_gmm
+
+    
 if __name__ == "__main__":
-    samples_tmp = np.load("samples_examples.npy")# [:3]
+    samples_tmp = np.load("samples_examples.npy")[:, :, :, np.array([0, 1, 2, 4, 6, 7])]  # [:1]
     samples_tmp = samples_tmp.reshape(samples_tmp.shape[0], -1, samples_tmp.shape[-1])
+    full_gmm = vec_fit_gmm_min_bic(samples_tmp, use_gpu=True, verbose=True)
+    samp_gen = full_gmm.rvs(size=(int(1e6),))
+    samp_logpdf = full_gmm.logpdf(samp_gen)
+    import matplotlib.pyplot as plt
+    plt.scatter(samp_gen[:, 1].get(), samp_gen[:, 0].get())
+    plt.savefig("check0.png")
+    breakpoint()
+    
+    # sample_mins = samples_tmp.min(axis=1)
+    # sample_maxs = samples_tmp.max(axis=1)
+    # samples2 = ((samples_tmp - sample_mins[:, None, :]) / (sample_maxs[:, None, :] - sample_mins[:, None, :])) * 2.0 - 1.0
 
-    sample_mins = samples_tmp.min(axis=1)
-    sample_maxs = samples_tmp.max(axis=1)
-    # samples = ((samples_tmp - sample_mins[:, None, :]) / (sample_maxs[:, None, :] - sample_mins[:, None, :])) * 2.0 - 1.0
+    # # gmm = GaussianMixtureModel(
+    # #     n_components=25,
+    # #     covariance_type="full",
+    # #     tol=1e-3,
+    # #     reg_covar=1e-6,
+    # #     max_iter=100,
+    # #     n_init=1,
+    # #     init_params="random_from_data",
+    # #     weights_init=None,
+    # #     means_init=None,
+    # #     precisions_init=None,
+    # #     random_state=None,
+    # #     warm_start=False,
+    # #     verbose=0,
+    # #     verbose_interval=10,
+    # # )
+    # check2 = full_gmm.logpdf(out2)
+    # breakpoint()
+    # print(f"max diff: {np.abs(check2 - tmp2).max()}")
+    # breakpoint()
+    # from sklearn.mixture import GaussianMixture
 
-    # gmm = GaussianMixtureModel(
-    #     n_components=25,
+    # gmm2 = GaussianMixture(
+    #     n_components=30,
     #     covariance_type="full",
     #     tol=1e-3,
     #     reg_covar=1e-6,
-    #     max_iter=100,
+    #     max_iter=1000,
     #     n_init=1,
     #     init_params="random_from_data",
     #     weights_init=None,
@@ -1791,31 +2061,12 @@ if __name__ == "__main__":
     #     verbose_interval=10,
     # )
 
-    gmm = GMMFit(cp.asarray(samples_tmp), use_gpu=True)
-    out = gmm.rvs(size=300)
-    tmp = gmm.logpdf(out)
-    from sklearn.mixture import GaussianMixture
-
-    gmm2 = GaussianMixture(
-        n_components=25,
-        covariance_type="full",
-        tol=1e-3,
-        reg_covar=1e-6,
-        max_iter=100,
-        n_init=1,
-        init_params="random_from_data",
-        weights_init=None,
-        means_init=None,
-        precisions_init=None,
-        random_state=None,
-        warm_start=False,
-        verbose=0,
-        verbose_interval=10,
-    )
-
-    gmm2.fit(samples[0])
-    gmm.fit(samples)
-    samp = gmm.sample(1000)
-    check1 = gmm.logpdf(samp[0])
-    check2 = logsumexp_cpu(gmm2.predict_proba(samp[0][0]), axis=-1)
-    breakpoint()
+    # gmm2.fit(samples2[0])
+    # # gmm.fit(samples)
+    # samp = gmm2.sample(1)
+    # samp_pdf = gmm2.score_samples(samp[0])
+    # breakpoint()
+    
+    # check1 = gmm.logpdf(samp[0])
+    # check2 = logsumexp_cpu(gmm2.predict_proba(samp[0][0]), axis=-1)
+    # breakpoint()

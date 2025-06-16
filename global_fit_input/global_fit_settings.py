@@ -333,7 +333,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     # rj_moves_in.append(rj_move_prior)
     # rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
 
-    ranks_needed_here = 16
+    ranks_needed_here = 0
     gb_kwargs_rj2 = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=gb_info["transform"],
@@ -686,7 +686,7 @@ def get_global_fit_settings(copy_settings_file=False):
     
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [4]
+    gpus = [7]
     cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 24
@@ -757,7 +757,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # limits on parameters
     delta_safe = 1e-5
     A_lims = [7e-26, 1e-19]
-    f0_lims = [0.05e-3, 2.5e-2]
+    f0_lims = [0.05e-3, 2.5e-2]  # TODO: this upper limit leads to an issue at 23 mHz where there is no source?
     m_chirp_lims = [0.001, 1.0]
     # now with negative fdots
     fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])

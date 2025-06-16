@@ -264,7 +264,7 @@ void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data,
 }
 
 #define PDF_NUM_THREADS 32
-#define PDF_NDIM 8
+#define PDF_NDIM 6
 
 __global__
 void compute_logpdf(double *logpdf_out, int *component_index, double *points,
@@ -347,12 +347,12 @@ void compute_logpdf(double *logpdf_out, int *component_index, double *points,
                     kernel_sum += diff_from_mean[k] * tmp;
                 }
                 log_main_part = -1./2. * kernel_sum;
-                log_norm_factor = (double(PDF_NDIM) / 2.) * log(2 * M_PI) + (1. / 2.) * log(det_here);
+                log_norm_factor = -(double(PDF_NDIM) / 2.) * log(2 * M_PI) - (1. / 2.) * log(det_here);
                 log_weighted_pdf = log(weight_here) + log_norm_factor + log_main_part;
 
                 log_sum_arr[tid] = log_weighted_pdf + log_J_here;
                 max_log_sum_arr[tid] = log_weighted_pdf + log_J_here;
-                // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %.10e\n", component_here, log_weighted_pdf);
+                // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %.10e %.10e %.10e %.10e\n", component_here, log(weight_here), log(det_here), kernel_sum, -(double(PDF_NDIM) / 2.) * log(2 * M_PI));
                 
             }
             __syncthreads();
