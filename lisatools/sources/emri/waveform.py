@@ -1,8 +1,16 @@
 from __future__ import annotations
 from lisatools.detector import EqualArmlengthOrbits
 import numpy as np
+
+# try:
+#     import cupy as cp
+# except ImportError:
+#     pass
+
 from typing import Optional, Any
 from copy import deepcopy
+
+# _ = few.get_backend('cuda12x')
 
 from few.waveform import GenerateEMRIWaveform
 
@@ -39,7 +47,8 @@ class EMRITDIWaveform(AETTDIWaveform):
         emri_waveform_args: Optional[tuple] = ("FastSchwarzschildEccentricFlux",),
         emri_waveform_kwargs: Optional[dict] = {},
         response_kwargs: Optional[dict] = default_response_kwargs,
-    ):
+    ): 
+        
         # sky parameters in GenerateEMRIWaveform
         index_lambda = 8
         index_beta = 7
@@ -76,4 +85,8 @@ class EMRITDIWaveform(AETTDIWaveform):
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         __doc__ = ResponseWrapper.__call__.__doc__
-        return self.response(*args, **kwargs)
+        try:
+            return self.response(*args, **kwargs)
+        except Exception as e:
+            print(e)
+            breakpoint()    

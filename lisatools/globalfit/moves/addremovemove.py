@@ -1,6 +1,7 @@
 import numpy as np
 import cupy as xp
 from copy import deepcopy
+import time
 
 from eryn.moves import Move, StretchMove, TemperatureControl
 # from eryn.state import State
@@ -15,7 +16,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def __init__(self, branch_name, coords_shape, waveform_gen, tempering_kwargs, waveform_gen_kwargs, waveform_like_kwargs, acs, num_repeats, transform_fn, priors, inner_moves, df, 
         Tmax=np.inf, betas_all = None, **kwargs):
         
-        Move.__init__(self, **kwargs)
+        # Move.__init__(self, **kwargs)
+        StretchMove.__init__(self, **kwargs)
 
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = coords_shape
         
@@ -107,11 +109,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # in general with current setup it should only be points in the prior
         # that make it here
         ll = np.full_like(data_index.get(), -1e300, dtype=float)
+
         for i, (coords_in_now, data_index_now) in enumerate(zip(old_coords_in, data_index.get())):
-            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(coords_in_now, signal_gen=self.waveform_gen)
+            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(*coords_in_now, signal_gen=self.waveform_gen)
         return ll
 
     def propose(self, model, state):
+        print("PROPOSING")
+        print("------" * 20)
+        tic = time.time()   
+
         new_state = deepcopy(state)
 
         self.acs = model.analysis_container_arr
@@ -126,6 +133,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         for base_leaf in range(self.nleaves_max):
             # second step of randomizing order (making sure it does not run over)
             leaf = (base_leaf + start_leaf) % self.nleaves_max
+            print(f"Processing leaf {leaf}")
 
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
@@ -138,7 +146,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
             self.add_back_in_cold_chain_sources(removal_coords_in)
-            breakpoint()
+           
             self.setup_likelihood_here(removal_coords_in)
 
             old_coords = new_state.branches[self.branch_name].coords[:, :, leaf].reshape(-1, ndim)
@@ -152,9 +160,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             prev_logl = self.compute_like(
                 old_coords_in, 
                 data_index=data_index_in,
-            ).reshape((ntemps, nwalkers)).real
+            ).reshape((self.ntemps, self.nwalkers)).real
+            
+            print(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
 
-            prev_logp = self.priors[self.branch_name].logpdf(old_coords).reshape((ntemps, nwalkers))
+            prev_logp = self.priors[self.branch_name].logpdf(old_coords).reshape((self.ntemps, self.nwalkers))
 
             prev_logP = temperature_control_here.compute_log_posterior_tempered(prev_logl, prev_logp)
             
@@ -166,14 +176,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 move_here = self.moves[model.random.choice(np.arange(len(self.moves)), p=self.move_weights)]
 
                 # Split the ensemble in half and iterate over these two halves.
-                accepted = np.zeros((ntemps, nwalkers), dtype=bool)
-                all_inds = np.tile(np.arange(nwalkers), (ntemps, 1))
+                accepted = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
+                all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
                 inds = all_inds % self.nsplits
                 if self.randomize_split:
                     [np.random.shuffle(x) for x in inds]
 
                 # prepare accepted fraction
-                accepted_here = np.zeros((ntemps, nwalkers), dtype=bool)
+                accepted_here = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
                 for split in range(self.nsplits):
                     # get split information
                     S1 = inds == split
@@ -186,12 +196,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     # prepare the sets for each model
                     # goes into the proposal as (ntemps * (nwalkers / subset size), nleaves_max, ndim)
                     sets = [
-                        new_state.branches[self.branch_name].coords[inds == j][:, leaf].reshape(ntemps, -1, 1, ndim)
+                        new_state.branches[self.branch_name].coords[inds == j][:, leaf].reshape(self.ntemps, -1, 1, ndim)
                         for j in range(self.nsplits)
                     ]
 
-                    old_points = sets[split].reshape((ntemps, nwalkers_here, ndim))
-                    
+                    old_points = sets[split].reshape((self.ntemps, nwalkers_here, ndim))
+
                     # setup s and c based on splits
                     s = {self.branch_name: sets[split]}
                     c = {self.branch_name: sets[:split] + sets[split + 1 :]}
@@ -205,7 +215,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     else:
                         q, factors = move_here.get_proposal(s, model.random)
 
-                    new_points = q[self.branch_name].reshape((ntemps, nwalkers_here, ndim))
+                    new_points = q[self.branch_name].reshape((self.ntemps, nwalkers_here, ndim))
 
                     # Compute prior of the proposed position
                     # new_inds_prior is adjusted if product-space is used
@@ -224,21 +234,25 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     # logl[~np.isinf(logp)] = self.waveform_gen.get_direct_ll(fd, data_residuals.flatten(), psd.flatten(), self.df, *new_points_in.T, noise_index=noise_index, data_index=data_index, **self.waveform_kwargs).real.get()
                     logl[~np.isinf(logp)] = self.compute_like(
                         new_points_in, 
-                        constants_index=data_index,
+                        data_index=data_index,
+                        #constants_index=data_index,
                     )
-                    logl = logl.reshape(ntemps, nwalkers_here)
-                    
-                    logp = logp.reshape(ntemps, nwalkers_here)
-                    prev_logp_here = prev_logp[inds == split].reshape(ntemps, nwalkers_here)
 
-                    prev_logl_here = prev_logl[inds == split].reshape(ntemps, nwalkers_here)
+                    print(f"new logl: {logl}. elapsed: {time.time() - tic}")
+
+                    logl = logl.reshape(self.ntemps, nwalkers_here)
+                    
+                    logp = logp.reshape(self.ntemps, nwalkers_here)
+                    prev_logp_here = prev_logp[inds == split].reshape(self.ntemps, nwalkers_here)
+
+                    prev_logl_here = prev_logl[inds == split].reshape(self.ntemps, nwalkers_here)
 
                     prev_logP_here = temperature_control_here.compute_log_posterior_tempered(prev_logl_here, prev_logp_here)
                     logP = temperature_control_here.compute_log_posterior_tempered(logl, logp)
 
                     lnpdiff = factors + logP - prev_logP_here
 
-                    keep = lnpdiff > np.log(model.random.rand(ntemps, nwalkers_here))
+                    keep = lnpdiff > np.log(model.random.rand(self.ntemps, nwalkers_here))
 
                     temp_inds_update = temp_inds_here[keep.flatten()]
                     walker_inds_update = walker_inds_here[keep.flatten()]
@@ -293,7 +307,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # udpate at the end
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
+        print("before computing current likelihood. elapsed: ", time.time() - tic)
         current_ll = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        print("after computing current likelihood. elapsed: ", time.time() - tic)
         xp.get_default_memory_pool().free_all_blocks()
         # TODO: add check with last used logl
 
@@ -316,7 +332,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         new_state.log_like[:] = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
             
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
-        breakpoint()
+        # breakpoint()
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):

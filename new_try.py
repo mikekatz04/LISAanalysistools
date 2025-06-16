@@ -3,6 +3,13 @@ from mpi4py import MPI
 import os
 import warnings
 from copy import deepcopy
+#os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+
+# import cupy as cp
+# cp.cuda.runtime.setDevice(7)
+# import few
+# few.get_backend("cuda12x")
+# print("Process ID:", os.getpid())
 
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
 from global_fit_input.global_fit_settings import get_global_fit_settings

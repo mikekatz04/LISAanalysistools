@@ -4,7 +4,7 @@ from copy import deepcopy
 from .generatefuncs import GenerateCurrentState
 import numpy as np
 from mpi4py import MPI
-import os
+import sys, os
 import warnings
 from copy import deepcopy
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
@@ -58,14 +58,28 @@ import os
 import pickle
 
 from abc import ABC
-
-try:
-    import cupy as cp
-except (ImportError, ModuleNotFoundError) as e:
-    pass
+import logging
 
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
+def init_logger(filename=None, level=logging.DEBUG, name='GlobalFit'):
+    """ Initialize a logger.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    if (len(logger.handlers) < 2):
+        formatter = logging.Formatter("%(asctime)s - %(name)s - "
+                                      "%(levelname)s - %(message)s")
+        if filename:
+            rfhandler = logging.FileHandler(filename)
+            logger.addHandler(rfhandler)
+            rfhandler.setFormatter(formatter)
+        if level:
+            shandler = logging.StreamHandler(sys.stdout)
+            shandler.setLevel(level)
+            shandler.setFormatter(formatter)
+            logger.addHandler(shandler)
+    return logger
 
 class CurrentInfoGlobalFit:
     def __init__(self, settings, get_last_state_info=True):
@@ -74,7 +88,7 @@ class CurrentInfoGlobalFit:
         self.current_info = deepcopy(settings)
 
         print("generalize the backend stuff")
-        self.backend = GFHDFBackend("test_new_gb_12.h5")
+        self.backend = GFHDFBackend("test_new_gb_14.h5")
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         
@@ -195,15 +209,20 @@ class GlobalFit:
             self.results_rank = self.ranks_to_give.pop()
             self.used_ranks.append(self.results_rank)
 
+        level = logging.DEBUG
+        name = "GlobalFit"
+        self.logger = init_logger(filename="global_fit.log", level=level, name=name)
+
     def load_info(self):
-        print("need to adjust file path")
+        self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_gb_12.h5"):
-            state = GFHDFBackend("test_new_gb_12.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+        if os.path.exists("test_new_gb_14.h5"):
+            state = GFHDFBackend("test_new_gb_14.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
 
         else:
-            print("update this somehow")
-            # breakpoint()
+            self.logger.debug("update this somehow")
+            # print("update this somehow")
+            # # breakpoint()
             coords = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key], self.gf_branch_information.ndims[key])) for key in self.gf_branch_information.branch_names}
             inds = {key: np.ones((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
             inds["gb"][:] = False
@@ -216,8 +235,10 @@ class GlobalFit:
             print("pickle state load success")
             for key in ["psd", "galfor"]:
                 state.branches[key] = deepcopy(tmp_state.branches[key])
+            state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
+            self.logger.debug("pickle state load success")
         return state
 
     def setup_acs(self, state):
@@ -249,7 +270,8 @@ class GlobalFit:
             if name not in self.curr.all_info["gf_branch_information"].branch_names:
                 continue
 
-            if name == "psd":
+            print("want to remove this emri thing eventually")
+            if name == "psd" or name == "emri":
                 continue
 
             templates_tmp = cp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
@@ -270,7 +292,7 @@ class GlobalFit:
 
     def run_global_fit(self):
         
-        backend = GFHDFBackend("test_new_gb_12.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
+        backend = GFHDFBackend("test_new_gb_14.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
@@ -283,13 +305,13 @@ class GlobalFit:
             ntemps = general_info["ntemps"]
            
             state = self.load_info()
+            self.logger.debug("state loaded")
 
             supps_base_shape = (ntemps, nwalkers)
             walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
 
-            
             # backend.reset(
             #     nwalkers,
             #     ndims,
@@ -346,8 +368,10 @@ class GlobalFit:
             E_inj = general_info["E_inj"].copy()
 
             generate = GenerateCurrentState(A_inj, E_inj)
+            self.logger.debug("generate function created")
 
             acs = self.setup_acs(state)
+            self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood()
 
@@ -367,7 +391,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_gb_12.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_gb_14.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
