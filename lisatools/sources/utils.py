@@ -255,9 +255,9 @@ class GBCalculationController(CalculationController):
 
         # parameter transforms from sampling basis to waveform basis
         parameter_transforms = {
-            0: np.exp,
+            0: lambda x: x * 1e-23,
             1: lambda x: x / 1e3,
-            2: np.exp,
+            2: lambda x: x * 1e-18,
             5: np.arccos,
             8: np.arcsin,
             # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
@@ -302,9 +302,10 @@ class GBCalculationController(CalculationController):
 
         params = np.asarray(params)
 
-        params[0] = np.log(params[0])
+        # params[0] = np.log(params[0])
+        params[0] = params[0] / 1e-23
         params[1] = params[1] * 1e3
-        params[2] = np.log(params[2])
+        params[2] = params[2] / 1e-18
 
         if params[3] != 0.0:
             raise NotImplementedError(

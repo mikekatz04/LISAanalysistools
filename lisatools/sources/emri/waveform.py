@@ -21,7 +21,7 @@ default_response_kwargs = dict(
 
 
 class EMRITDIWaveform(AETTDIWaveform):
-    """Generate EMRI waveforms with the TDI LISA Response
+    """Generate EMRI waveforms with the TDI LISA Response.
 
     Args:
         T: Observation time in years.
@@ -36,7 +36,7 @@ class EMRITDIWaveform(AETTDIWaveform):
         self,
         T: Optional[float] = 1.0,
         dt: Optional[float] = 10.0,
-        emri_waveform_args: Optional[tuple] = ("FastSchwarzschildEccentricFlux",),
+        emri_waveform_args: Optional[tuple] = ("FastKerrEccentricEquatorialFlux",),
         emri_waveform_kwargs: Optional[dict] = {},
         response_kwargs: Optional[dict] = default_response_kwargs,
     ):
