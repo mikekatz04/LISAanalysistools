@@ -114,9 +114,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(*coords_in_now, signal_gen=self.waveform_gen)
         return ll
 
+    def setup(self, model, state):
+        return
+
     def propose(self, model, state):
         print("PROPOSING")
         print("------" * 20)
+
+        self.setup(model, state)
         tic = time.time()   
 
         new_state = deepcopy(state)

@@ -18,6 +18,26 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         
         ResidualAddOneRemoveOneMove.__init__(self, *args, **kwargs)
 
+    def setup(self, model, state):
+        from eryn.ensemble import EnsembleSampler
+
+        # TODO: adjust these moves?
+        _moves = [(move_i, weight_i) for move_i, weight_i in zip(self.moves, self.move_weights)]
+        max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
+        
+        data = model.analysis_container_arr.data_shaped[0][max_logl_walker].copy()
+        psd = model.analysis_container_arr.psd_shaped[0][max_logl_walker].copy()
+
+        fd = cp.asarray(model.analysis_container_arr.f_arr)
+        df = model.analysis_container_arr.df
+
+        ntemps = 10
+        nwalkers = 50
+        start_params = self.priors["mbh"].rvs(size=(ntemps, nwalkers, 1))
+        ll = wave_gen.get_direct_ll(fd, data, psd, df, *x_in.T, **self.waveform_like_kwargs).real.get()
+        
+        breakpoint()
+
     def setup_likelihood_here(self, coords):
         # TODO: should we try to pick specifically based on max ll for MBHs rather than data as a whole
         start_likelihood = self.acs.likelihood()
@@ -35,8 +55,8 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         self.like_fn = NewHeterodynedLikelihood(
             self.waveform_gen,
             self.fd,
-            model.analysis_container_arr.data_shaped[0],
-            model.analysis_container_arr.psd_shaped[0],
+            self.acs.data_shaped[0],
+            self.acs.psd_shaped[0],
             het_coords,
             256,
             data_index=data_index,
@@ -64,7 +84,6 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         return logl
 
     def get_waveform_here(self, coords):
-        breakpoint()
         xp.get_default_memory_pool().free_all_blocks()
         waveforms = xp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
         

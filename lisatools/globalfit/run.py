@@ -88,7 +88,7 @@ class CurrentInfoGlobalFit:
         self.current_info = deepcopy(settings)
 
         print("generalize the backend stuff")
-        self.backend = GFHDFBackend("test_new_gb_14.h5")
+        self.backend = GFHDFBackend("test_new_gb_17.h5")
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         
@@ -109,9 +109,11 @@ class CurrentInfoGlobalFit:
             gb_search_proposal_gmm_info = None
             gb_refit_proposal_gmm_info = None
 
-        self.source_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
-        self.source_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
-    
+        # TODO: remove this?
+        if "gb" in self.source_info:
+            self.source_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
+            self.source_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
+
     def initialize_mbh_state_from_search(self, mbh_output_point_info):
         output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
         coords = np.zeros((self.source_info["gb"]["pe_info"]["ntemps"], self.source_info["gb"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.source_info["mbh"]["pe_info"]["ndim"]))
@@ -216,8 +218,8 @@ class GlobalFit:
     def load_info(self):
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_gb_14.h5"):
-            state = GFHDFBackend("test_new_gb_14.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+        if os.path.exists("test_new_gb_17.h5"):
+            state = GFHDFBackend("test_new_gb_17.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
 
         else:
             self.logger.debug("update this somehow")
@@ -235,7 +237,7 @@ class GlobalFit:
             print("pickle state load success")
             for key in ["psd", "galfor"]:
                 state.branches[key] = deepcopy(tmp_state.branches[key])
-            state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
+            # # state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             self.logger.debug("pickle state load success")
@@ -271,7 +273,7 @@ class GlobalFit:
                 continue
 
             print("want to remove this emri thing eventually")
-            if name == "psd" or name == "emri":
+            if True:  # name == "psd" or name == "emri":
                 continue
 
             templates_tmp = cp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
@@ -292,7 +294,7 @@ class GlobalFit:
 
     def run_global_fit(self):
         
-        backend = GFHDFBackend("test_new_gb_14.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
+        backend = GFHDFBackend("test_new_gb_17.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
@@ -391,7 +393,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_gb_14.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_gb_17.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
@@ -401,6 +403,7 @@ class GlobalFit:
             )
 
             extra_reset_kwargs = {}
+            # TODO: fix this somehow
             for name in branch_names:
                 if name in state.sub_states and state.sub_states[name] is not None:
                     extra_reset_kwargs = {**extra_reset_kwargs, **state.sub_states[name].reset_kwargs}
@@ -506,9 +509,9 @@ class GlobalFit:
                 # stopping_iterations=stopping_iterations,
             )
 
-            state.log_prior = sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
-
+            state.log_prior = np.zeros_like(state.log_like)  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
+            
             sampler_mix.run_mcmc(state, 100, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

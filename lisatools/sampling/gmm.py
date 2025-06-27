@@ -12,7 +12,7 @@ import numpy as np
 from scipy.special import logsumexp as logsumexp_cpu
 try:
     import cupy as cp
-    cp.cuda.runtime.setDevice(7)
+    # cp.cuda.runtime.setDevice(7)
     from cupyx.scipy.special import logsumexp as logsumexp_gpu
 except (ModuleNotFoundError, ImportError) as e:
     pass
@@ -2002,6 +2002,10 @@ def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, 
     dets = [tmp[4] for tmp in final_gmm_info]
     mins = [tmp[5] for tmp in final_gmm_info]
     maxs = [tmp[6] for tmp in final_gmm_info]
+
+    # import pickle
+    # with open("gmm_tmp_2.pickle", "wb") as fp:
+    #     pickle.dump((weights, means, covs, invcovs, dets, mins, maxs), fp, pickle.HIGHEST_PROTOCOL)
 
     full_gmm = FullGaussianMixtureModel(weights, means, covs, invcovs, dets, mins, maxs, use_cupy=use_gpu)
     return full_gmm

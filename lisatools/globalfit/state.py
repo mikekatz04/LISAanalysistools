@@ -210,7 +210,7 @@ class MBHState(eryn_State):
     def reset_kwargs(self):
         # TODO: this okay for future?
         return dict(
-            num_mbhs=self.betas_all.shape[0]
+            num_mbhs=15,  # self.betas_all.shape[0]
         )
 
 

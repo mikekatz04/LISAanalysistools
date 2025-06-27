@@ -4,6 +4,7 @@ from abc import ABC
 from typing import Any, Tuple, Optional, List
 from copy import deepcopy
 import os
+from lisatools.utils.utility import get_array_module
 
 import math
 import numpy as np
@@ -691,7 +692,8 @@ class SensitivityMatrix:
                     raise ValueError
 
             # setup in array form
-            self._sens_mat = np.asarray(list(new_out), dtype=float).reshape(
+            xp = get_array_module(new_out[0])
+            self._sens_mat = xp.asarray(list(new_out), dtype=float).reshape(
                 self.return_shape + (-1,)
             )
             

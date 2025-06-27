@@ -30,7 +30,9 @@ from eryn.moves import StretchMove
 from eryn.prior import ProbDistContainer
 from eryn.utils.utility import groups_from_inds
 from eryn.utils import PeriodicContainer
-
+from eryn.paraensemble import ParaEnsembleSampler
+from eryn.prior import uniform_dist
+        
 from eryn.moves import GroupStretchMove, Move
 from eryn.moves.multipletry import logsumexp, get_mt_computations
 from ...utils.utility import get_array_module
@@ -277,23 +279,26 @@ class Buffer:
             return np
     
     def get_index(self, special_inds_test):
-        special_indices_unique_sort, special_indices_unique = self.index_info
-        now_index = (special_indices_unique_sort[cp.searchsorted(special_indices_unique[special_indices_unique_sort], special_inds_test, side="right") - 1]).astype(cp.int32)
+        now_index = (self.special_indices_unique_sort[cp.searchsorted(self.special_indices_unique[self.special_indices_unique_sort], special_inds_test, side="right") - 1]).astype(cp.int32)
         return now_index 
 
-    def __init__(self, gb, band_edges, unique_band_combos, params_interest, num_bands_now, nchannels, data_length, uni_info, transform_fn, waveform_kwargs, df, sources_now_map, sources_inject_now_map, index_info, special_band_inds, opt_snr_rej_samp_limit=10.0, use_gpu=True, use_template_arr=False, *args, **kwargs):
+    def __init__(self, is_rj, nwalkers, gb, band_edges, band_N_vals, unique_band_combos, params_interest, num_bands_now, nchannels, data_length, special_indices_unique, transform_fn, waveform_kwargs, df, sources_now_map, sources_inject_now_map, special_band_inds, opt_snr_rej_samp_limit=10.0, use_gpu=True, use_template_arr=False, *args, **kwargs):
         self.use_gpu = use_gpu
         assert self.use_gpu == gb.use_gpu
         self.gb = gb
         self.df = df
+        self.nwalkers = nwalkers
         self.sources_now_map, self.sources_inject_now_map = sources_now_map, sources_inject_now_map
         self.band_edges, self.unique_band_combos = band_edges, unique_band_combos
         self.num_bands = len(self.band_edges) - 1
         self.params_interest = params_interest
-        
-        self.index_info = index_info
         self.num_bands_now, self.nchannels, self.data_length = num_bands_now, nchannels, data_length
-        self.uni_special, self.uni_special_index, self.uni_special_reverse, self.uni_special_counts = uni_info
+        self.band_N_vals = band_N_vals
+        # TODO: adjust this
+        self.edge_buffer = 2000
+        self.is_rj = is_rj
+
+        self.special_indices_unique = special_indices_unique
         self.transform_fn = transform_fn
         self.waveform_kwargs = waveform_kwargs
         self.opt_snr_rej_samp_limit = opt_snr_rej_samp_limit
@@ -321,8 +326,32 @@ class Buffer:
 
             self.template_buffer = self.template_buffer_tmp.reshape((self.num_bands_now, self.nchannels, self.data_length))
         
-        # TODO: adjust this
-        self.edge_buffer = 2000
+        # TODO: fix this 4????
+        self.special_band_inds = special_band_inds
+        assert special_band_inds.shape[0] == self.params_interest.shape[0]
+        self.now_index = self.get_index(special_band_inds)
+        
+    def update_special_indices(self, new_special_indices, inds_fill=None):
+        if inds_fill is None:
+            inds_fill = cp.arange(self.num_bands_now)
+
+        assert inds_fill.shape[0] == new_special_indices.shape[0]
+        _tmp_indices = self.special_indices_unique.copy()
+        _tmp_indices[inds_fill] = new_special_indices
+        self.special_indices_unique = _tmp_indices
+
+    @property
+    def special_indices_unique(self):
+        return self._special_indices_unique
+
+    @special_indices_unique.setter
+    def special_indices_unique(self, special_indices_unique):
+        self._special_indices_unique_sort = self.xp.argsort(special_indices_unique)
+        self._special_indices_unique = special_indices_unique
+        
+        _temp_inds, _walker_inds, _band_inds = self.get_separate_inds_from_special_index(special_indices_unique)
+
+        self.unique_band_combos = self.xp.array([_temp_inds, _walker_inds, _band_inds]).T
 
         if self.num_bands == 1:
             tmp_buffer_start_index = (self.band_edges[0] / self.df).astype(np.int32) - self.edge_buffer
@@ -336,14 +365,20 @@ class Buffer:
             
         self.start_freq_inds = self.buffer_start_index.copy().astype(np.int32)
         
-        # TODO: fix this 4????
         lower_f_lim = self.band_edges[self.unique_band_combos[:, 2]]  #  - self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
         higher_f_lim = self.band_edges[self.unique_band_combos[:, 2] + 1]  #  + self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
-        self.frequency_lims = [lower_f_lim, higher_f_lim]
-        self.special_band_inds = special_band_inds
-        assert special_band_inds.shape[0] == self.params_interest.shape[0]
-        self.now_index = self.get_index(special_band_inds)
         
+        # allow to move over band edge when proposing in-model
+        if self.is_rj:
+            lower_f_lim -= self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
+            higher_f_lim += self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
+        self.frequency_lims = [lower_f_lim, higher_f_lim]
+        
+        
+    @property
+    def special_indices_unique_sort(self):
+        return self._special_indices_unique_sort
+
     def likelihood(self, source_only: bool = False, noise_only: bool = False) -> float:
         assert not (source_only and noise_only) 
 
@@ -370,14 +405,17 @@ class Buffer:
         cp.get_default_memory_pool().free_all_blocks()
         return source_term + psd_term
 
-    def _get_fill_buffer_ind_map(self, acs):
+    def _get_fill_buffer_ind_map(self, acs, inds_fill=None):
+        if inds_fill is None:
+            inds_fill = cp.arange(self.num_bands_now)
+
         assert np.all(acs.start_freq_ind[0] == acs.start_freq_ind)
         start_freq_ind = acs.start_freq_ind[0]
-        assert np.all((self.buffer_start_index - start_freq_ind) >= 0)
-        assert np.all((self.buffer_start_index - start_freq_ind + self.data_length) <= acs.data_length)
-        inds1 = cp.repeat(self.unique_band_combos[:, 1], self.nchannels * self.data_length).reshape((self.num_bands_now,) + self.band_buffer.shape[1:])
-        inds2 = cp.repeat(cp.arange(self.nchannels), (self.num_bands_now * self.band_buffer.shape[-1])).reshape(self.nchannels, self.num_bands_now, self.band_buffer.shape[-1]).transpose(1, 0, 2)
-        inds3 = (cp.arange(self.band_buffer.shape[-1])[None, None, :] + (cp.repeat(self.buffer_start_index, self.nchannels * self.band_buffer.shape[-1]).reshape((self.num_bands_now,) + self.band_buffer.shape[1:]))) - start_freq_ind
+        assert np.all((self.buffer_start_index[inds_fill] - start_freq_ind) >= 0)
+        assert np.all((self.buffer_start_index[inds_fill] - start_freq_ind + self.data_length) <= acs.data_length)
+        inds1 = cp.repeat(self.unique_band_combos[inds_fill, 1], self.nchannels * self.data_length).reshape((len(inds_fill),) + self.band_buffer.shape[1:])
+        inds2 = cp.repeat(cp.arange(self.nchannels), (len(inds_fill) * self.band_buffer.shape[-1])).reshape(self.nchannels, len(inds_fill), self.band_buffer.shape[-1]).transpose(1, 0, 2)
+        inds3 = (cp.arange(self.band_buffer.shape[-1])[None, None, :] + (cp.repeat(self.buffer_start_index[inds_fill], self.nchannels * self.band_buffer.shape[-1]).reshape((len(inds_fill),) + self.band_buffer.shape[1:]))) - start_freq_ind
         inds_get = (inds1.flatten(), inds2.flatten(), inds3.flatten())
         return inds_get
 
@@ -489,32 +527,42 @@ class Buffer:
         # opt_snr_2 = self.gb.add_add.real ** (1/2)
         
         # TODO: change limit
-        ll_diff[opt_snr < self.opt_snr_rej_samp_limit] = -1e300
+        # reject sample only for adding, not removing
+        # when removing this opt_snr will be very small due to amp_add being super small
+        reject = ((opt_snr < self.opt_snr_rej_samp_limit)& (params_add_in[:, 0] > 1e-30))
+        ll_diff[reject] = -1e300
         return ll_diff
 
-    def reset_residual_buffers(self):
-        self.band_buffer[:] = 0.0
-    def reset_psd_buffers(self):
-        self.psd_buffer[:] = 0.0
+    def reset_residual_buffers(self, inds_fill=None):
+        if inds_fill is None:
+            inds_fill = cp.arange(self.num_bands_now)
+        self.band_buffer[inds_fill] = 0.0
+    def reset_psd_buffers(self, inds_fill=None):
+        if inds_fill is None:
+            inds_fill = cp.arange(self.num_bands_now)
+        self.psd_buffer[inds_fill] = 0.0
 
-    def fill_buffer_residual_from_acs(self, acs):
-        inds_get = self._get_fill_buffer_ind_map(acs)
-        self.reset_residual_buffers()
-        self.band_buffer[:self.num_bands_now] += rest_of_data[:]
+    # def fill_buffer_residual_from_acs(self, acs):
+    #     inds_get = self._get_fill_buffer_ind_map(acs)
+    #     self.reset_residual_buffers()
+    #     self.band_buffer[:self.num_bands_now] += rest_of_data[:]
 
-    def fill_buffer_psd_from_acs(self, acs):
-        inds_get = self._get_fill_buffer_ind_map(acs)
-        self.reset_psd_buffers()
-        self.psd_buffer[:self.num_bands_now] = acs.psd_shaped[0][inds_get].reshape((self.num_bands_now,) + self.band_buffer.shape[1:])
+    # def fill_buffer_psd_from_acs(self, acs):
+    #     inds_get = self._get_fill_buffer_ind_map(acs)
+    #     self.reset_psd_buffers()
+    #     self.psd_buffer[:self.num_bands_now] = acs.psd_shaped[0][inds_get].reshape((self.num_bands_now,) + self.band_buffer.shape[1:])
         
-    def fill_buffer_residual_and_psd_from_acs(self, acs):
-        inds_get = self._get_fill_buffer_ind_map(acs)
-        rest_of_data = acs.data_shaped[0][inds_get].reshape((self.num_bands_now,) + self.band_buffer.shape[1:])
+    def fill_buffer_residual_and_psd_from_acs(self, acs, inds_fill=None):
+        if inds_fill is None:
+            inds_fill = cp.arange(self.num_bands_now)
+
+        inds_get = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill)
+        rest_of_data = acs.data_shaped[0][inds_get].reshape((len(inds_fill),) + self.band_buffer.shape[1:])
         # load rest of data into buffer (has current sources removed)
-        self.reset_residual_buffers()
-        self.band_buffer[:self.num_bands_now] += rest_of_data[:]
-        self.reset_psd_buffers()
-        self.psd_buffer[:self.num_bands_now] = acs.psd_shaped[0][inds_get].reshape((self.num_bands_now,) + self.band_buffer.shape[1:])
+        self.reset_residual_buffers(inds_fill=inds_fill)
+        self.band_buffer[inds_fill] += rest_of_data[:]
+        self.reset_psd_buffers(inds_fill=inds_fill)
+        self.psd_buffer[inds_fill] = acs.psd_shaped[0][inds_get].reshape((len(inds_fill),) + self.band_buffer.shape[1:])
 
     # def adjust_sources_in_template_buffer(self, factor, params, params_index, N_vals, *args, **kwargs) -> None:
         
@@ -586,6 +634,17 @@ class Buffer:
        
     def add_sources_to_band_buffer(self, *args, **kwargs) -> None:
         self.adjust_sources_in_band_buffer(-1, self.band_buffer_tmp, *args, **kwargs)
+
+    def get_special_band_index(self, temp_inds: np.ndarray, walker_inds: np.ndarray, band_inds: np.ndarray) -> np.ndarray:
+        special_indices = (temp_inds * self.nwalkers + walker_inds) * int(1e6) + band_inds
+        return special_indices
+
+    def get_separate_inds_from_special_index(self, special_band_inds: np.ndarray) -> tuple:
+        temp_walker_inds_now = cp.floor(special_band_inds / 1e6).astype(int)
+        temp_inds_now = temp_walker_inds_now // self.nwalkers
+        walker_inds_now = temp_walker_inds_now % self.nwalkers
+        band_inds_now = (special_band_inds - temp_walker_inds_now * int(1e6)).astype(int)
+        return (temp_inds_now, walker_inds_now, band_inds_now)
 
 def return_x(x):
     return x
@@ -779,6 +838,8 @@ class BandSorter:
         walker: Optional[int] = None,
         leaf: Optional[int] = None,
         band: Optional[int] = None,
+        apply_inds: Optional[bool] = False,
+        special_band_inds: Optional[int | np.ndarray] = None,
         extra_bool: Optional[np.ndarray] = None,
         full_bool:Optional[np.ndarray] = None
     ) -> np.ndarray:
@@ -811,6 +872,17 @@ class BandSorter:
                 assert isinstance(extra_bool, self.xp.ndarray)
                 assert extra_bool.shape == (self.num_sources,)
                 inds_keep &= extra_bool
+            
+            if apply_inds:
+                inds_keep &= self.inds
+
+            if special_band_inds is not None:
+                if isinstance(special_band_inds, int):
+                    inds_keep &= (self.special_band_inds == special_band_inds)
+
+                elif isinstance(special_band_inds, self.xp.ndarray):
+                    inds_keep &= self.xp.in1d(self.special_band_inds, special_band_inds)
+
         else:
             assert full_bool.shape[0] == self.num_sources
             inds_keep = full_bool
@@ -826,17 +898,14 @@ class BandSorter:
     def main_band_sorter(self, main_band_sorter):
         self._main_band_sorter = main_band_sorter
 
-    def get_buffer(self, acs, special_indices_unique, special_indices_index, now_bool_full, num_band_preload : int = None, **kwargs) -> Buffer:
+    def get_buffer(self, acs, special_indices_unique, inds_fill=None, buffer_obj=None, **kwargs) -> Buffer:
 
-        if num_band_preload is None:
-            num_band_preload = len(special_indices_unique)
+        num_band_preload = len(special_indices_unique)
         
-        special_indices_unique, special_indices_index = (special_indices_unique[:num_band_preload], special_indices_index[:num_band_preload])
-  
         # CAN USE main_band_sorter TO GET SOURCES IN BANDS OF INTEREST THAT ARE NOT CURRENTLY OF INTEREST THEMSELVES
 
         # TODO: check the end of this line, is this covered ??
-        sources_now_map = cp.arange(self.main_band_sorter.special_band_inds.shape[0])[cp.in1d(self.main_band_sorter.special_band_inds, special_indices_unique) & now_bool_full]
+        sources_now_map = cp.arange(self.main_band_sorter.special_band_inds.shape[0])[cp.in1d(self.main_band_sorter.special_band_inds, special_indices_unique)]
         
         # NOTE: self.main_band_sorter.inds needed to only inject real sources
         # inject sources must include sources that have been turned off in these bands
@@ -848,30 +917,28 @@ class BandSorter:
         all_unique_band_combos = cp.asarray([temp_inds_now, walker_inds_now, band_inds_now]).T
         num_bands_here_total = all_unique_band_combos.shape[0]
         num_bands_now = special_indices_unique.shape[0]
+
+        points_curr_tmp = self.main_band_sorter.coords[sources_now_map].copy()
+        curr_special_band_inds = self.main_band_sorter.special_band_inds[sources_now_map].copy()
         
         # sort these sources by band
-        inds_sort_tmp = cp.argsort(self.main_band_sorter.special_band_inds[sources_now_map])
-        sources_now_map[:] = sources_now_map[inds_sort_tmp]
-        special_indices_now = self.main_band_sorter.special_band_inds[sources_now_map].copy()
-        uni_info_now = cp.unique(special_indices_now, return_index=True, return_counts=True, return_inverse=True) 
-        unique_special_indices_now, unique_special_indices_now_index, unique_special_indices_now_inverse, unique_special_indices_now_counts = uni_info_now
-        points_curr_tmp = self.main_band_sorter.coords[sources_now_map].copy()
-        special_indices_unique_sort = cp.argsort(special_indices_unique)
-        index_info = (special_indices_unique_sort, special_indices_unique)
-        if all_unique_band_combos.min() < 0:
-            breakpoint()
-        buffer_obj = Buffer(self.gb, self.band_edges, all_unique_band_combos, points_curr_tmp, num_bands_now, acs.nchannels, self.max_data_store_size, uni_info_now, self.transform_fn, self.waveform_kwargs, acs.df, sources_now_map, sources_inject_now_map, index_info, self.main_band_sorter.special_band_inds[sources_now_map], **kwargs)
+        if inds_fill is None:
+            inds_fill = cp.arange(num_band_preload)
+            assert buffer_obj is None
+            buffer_obj = Buffer(self.rj_prop, self.nwalkers, self.gb, self.band_edges, self.band_N_vals, all_unique_band_combos, points_curr_tmp, num_bands_now, acs.nchannels, self.max_data_store_size, special_indices_unique, self.transform_fn, self.waveform_kwargs, acs.df, sources_now_map, sources_inject_now_map, self.main_band_sorter.special_band_inds[sources_now_map], **kwargs)
         
-        buffer_obj.fill_buffer_residual_and_psd_from_acs(acs)
+        else:
+            assert isinstance(buffer_obj, Buffer)
+            assert inds_fill.max() <= buffer_obj.num_bands_now
+            # THIS NEEDS TO HAPPEN before updating data
+            buffer_obj.update_special_indices(special_indices_unique, inds_fill=inds_fill)
+
+        buffer_obj.fill_buffer_residual_and_psd_from_acs(acs, inds_fill=inds_fill)
         buffer_obj.acs = acs
         # includes sources in these sub-bands that are no longer getting proposals
-        inj_inds_sort_tmp = cp.argsort(self.main_band_sorter.special_band_inds[sources_inject_now_map])
-        sources_inject_now_map[:] = sources_inject_now_map[inj_inds_sort_tmp]
-        inj_special_indices_now = self.main_band_sorter.special_band_inds[sources_inject_now_map].copy()
-        inj_unique_special_indices_now, inj_unique_special_indices_now_index, inj_unique_special_indices_now_inverse, inj_unique_special_indices_now_counts = cp.unique(inj_special_indices_now, return_index=True, return_counts=True, return_inverse=True) 
-        
         coords_to_inject = self.main_band_sorter.coords[sources_inject_now_map].copy()
-
+        inj_special_indices_now = self.main_band_sorter.special_band_inds[sources_inject_now_map].copy()
+        
         inject_index = buffer_obj.get_index(inj_special_indices_now)
         inject_N_vals = self.band_N_vals[self.main_band_sorter.band_inds[sources_inject_now_map]].copy()
         
@@ -1001,7 +1068,232 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         self.band_N_vals = cp.asarray(get_N(np.full_like(band_mean_f, 1e-30), band_mean_f, self.waveform_kwargs["T"], self.waveform_kwargs["oversample"]))
 
     def setup(self, model, branches):
-        return 
+        return
+
+    def setup_gb_friends(self, band_sorter):
+        st = time.perf_counter()
+        coords = band_sorter.coords
+        inds = band_sorter.inds
+        temp_index = band_sorter.temp_inds
+
+        # supps = branch.branch_supplemental
+        ntemps = self.ntemps
+        nwalkers = self.nwalkers
+        all_remaining_freqs = coords[inds & (temp_index == 0)][:, 1]
+
+        all_remaining_cords = coords[inds & (temp_index == 0)]
+
+        num_remaining = len(all_remaining_freqs)
+
+        all_temp_fs = self.xp.asarray(coords[inds][:, 1])
+
+        # TODO: improve this?
+        self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
+        self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
+        self.all_coords_sorted = self.xp.asarray(all_remaining_cords)[
+            self.inds_freqs_sorted
+        ]
+
+        left_inds, right_inds = self.find_friends_init(all_temp_fs)
+
+        start_inds = left_inds.copy().get()
+
+        start_inds_all = -np.ones_like(inds, dtype=np.int32)
+        start_inds_all[inds] = start_inds.astype(np.int32)
+        
+        band_sorter.friend_start_inds = start_inds_all
+
+        # if "friend_start_inds" not in supps:
+        #     supps.add_objects({"friend_start_inds": start_inds_all})
+        # else:
+        #     supps[:] = {"friend_start_inds": start_inds_all}
+
+        et = time.perf_counter()
+        self.mempool.free_all_blocks()
+        
+
+        self.has_setup_group = True
+        # print("SETUP:", et - st)
+        # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
+        # freqs_sorted_here = self.freqs_sorted.get()
+        # freqs_remaining_here = all_remaining_freqs
+
+        # start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
+
+        # best_index = (
+        #     np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right") - 1
+        # )
+        # best_index[best_index < self.nfriends] = self.nfriends
+        # best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = (
+        #     len(freqs_sorted_here) - self.nfriends
+        # )
+        # check_inds = (
+        #     best_index[:, None]
+        #     + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1))
+        #     - self.nfriends
+        # )
+
+        # check_freqs = freqs_sorted_here[check_inds]
+        # breakpoint()
+
+        # # batch_count = 1000
+        # # split_inds = np.arange(batch_count, freqs_remaining_here.shape[0], batch_count)
+
+        # # splits_remain = np.split(freqs_remaining_here, split_inds)
+        # # splits_check = np.split(check_freqs, split_inds)
+
+        # # out = []
+        # # for i, (split_r, split_c) in enumerate(zip(splits_remain, splits_check)):
+        # #     out.append(np.abs(split_r[:, None] - split_c))
+        # #     print(i)
+
+        # # freq_distance = np.asarray(out)
+
+        # freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
+        # breakpoint()
+
+        # keep_min_inds = np.argsort(freq_distance, axis=-1)[:, : self.nfriends].min(
+        #     axis=-1
+        # )
+        # start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
+
+        # start_inds_freq_out[inds] = start_inds_freq
+
+        # start_inds_freq_out[~inds] = -1
+
+        # if "friend_start_inds" not in supps:
+        #     supps.add_objects({"friend_start_inds": start_inds_freq_out})
+        # else:
+        #     supps[:] = {"friend_start_inds": start_inds_freq_out}
+
+        # self.all_friends_start_inds_sorted = self.xp.asarray(
+        #     start_inds_freq_out[inds][self.inds_freqs_sorted.get()]
+        # )
+    def find_friends_init(self, all_temp_fs):
+
+        total_binaries = all_temp_fs.shape[0]
+        still_going = cp.ones(total_binaries, dtype=bool) 
+        inds_zero = cp.searchsorted(self.freqs_sorted, all_temp_fs, side="right") - 1
+        left_inds = inds_zero - int(self.nfriends / 2)
+        right_inds = inds_zero + int(self.nfriends / 2) - 1
+
+        # do right first here
+        right_inds[left_inds < 0] = self.nfriends - 1
+        left_inds[left_inds < 0] = 0
+        
+        # do left first here
+        left_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - self.nfriends
+        right_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - 1
+
+        assert np.all(right_inds - left_inds == self.nfriends - 1)
+        assert not np.any(right_inds < 0) and not np.any(right_inds > len(self.freqs_sorted) - 1) and not np.any(left_inds < 0) and not np.any(left_inds > len(self.freqs_sorted) - 1)
+        
+        jjj = 0
+        while np.any(still_going):
+            distance_left = np.abs(all_temp_fs[still_going] - self.freqs_sorted[left_inds[still_going]])
+            distance_right = np.abs(all_temp_fs[still_going] - self.freqs_sorted[right_inds[still_going]])
+
+            check_move_right = (distance_right <= distance_left)
+            check_left_inds = left_inds[still_going][check_move_right] + 1
+            check_right_inds = right_inds[still_going][check_move_right] + 1
+
+            new_distance_right = np.abs(all_temp_fs[still_going][check_move_right] - self.freqs_sorted[check_right_inds])
+
+            change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_right][(new_distance_right < distance_left[check_move_right]) & (check_right_inds < len(self.freqs_sorted))]
+
+            left_inds[change_inds] += 1
+            right_inds[change_inds] += 1
+
+            stop_inds_right_1 = cp.arange(len(all_temp_fs))[still_going][check_move_right][(check_right_inds >= len(self.freqs_sorted))]
+
+            # last part is just for up here, below it will remove if it is still equal
+            stop_inds_right_2 = cp.arange(len(all_temp_fs))[still_going][check_move_right][(new_distance_right >= distance_left[check_move_right]) & (check_right_inds < len(self.freqs_sorted)) & (distance_right[check_move_right] != distance_left[check_move_right])]
+            stop_inds_right = cp.concatenate([stop_inds_right_1, stop_inds_right_2])
+            assert np.all(still_going[stop_inds_right])
+
+            # equal to should only be left over if it was equal above and moving right did not help
+            check_move_left = (distance_left <= distance_right)
+            check_left_inds = left_inds[still_going][check_move_left] - 1
+            check_right_inds = right_inds[still_going][check_move_left] - 1
+
+            new_distance_left = np.abs(all_temp_fs[still_going][check_move_left] - self.freqs_sorted[check_left_inds])
+            
+            change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_left][(new_distance_left < distance_right[check_move_left]) & (check_left_inds >= 0)]
+
+            left_inds[change_inds] -= 1
+            right_inds[change_inds] -= 1
+
+            stop_inds_left_1 = cp.arange(len(all_temp_fs))[still_going][check_move_left][(check_left_inds < 0)]
+            stop_inds_left_2 = cp.arange(len(all_temp_fs))[still_going][check_move_left][(new_distance_left >= distance_right[check_move_left]) & (check_left_inds >= 0)]
+            stop_inds_left = cp.concatenate([stop_inds_left_1, stop_inds_left_2])
+            
+            stop_inds = cp.concatenate([stop_inds_right, stop_inds_left])
+            still_going[stop_inds] = False
+            # print(jjj, still_going.sum())
+            if jjj >= self.nfriends:
+                breakpoint()
+            jjj += 1
+
+        return left_inds, right_inds
+
+    def fix_friends(self, band_sorter, new_inds):
+        
+        assert self.xp.all(band_sorter.inds[new_inds])
+        all_temp_fs = self.xp.asarray(band_sorter.coords[new_inds][:, 1])
+        
+        self.find_friends_init(all_temp_fs)
+
+        start_inds = left_inds.copy().get()
+        # TODO: remove .get()?
+        band_sorter.friend_start_inds[new_inds] = start_inds_all
+
+    def find_friends(self, name, gb_points_to_move, s_inds=None, branch_supps=None):
+        if s_inds is None:  #  or branch_supps is None:
+            raise ValueError
+
+        inds_points_to_move = self.xp.asarray(s_inds.flatten())
+
+        half_friends = int(self.nfriends / 2)
+
+        gb_points_for_move = gb_points_to_move.reshape(-1, 8).copy()
+
+        if not hasattr(self, "ntemps"):
+            self.ntemps = 1
+
+        # TODO: update how this is done
+        inds_start_freq_to_move = self.friend_start_inds_now  # self.xp.asarray(branch_supps[:]["friend_start_inds"].flatten())
+        assert inds_points_to_move.sum().item() == inds_start_freq_to_move.shape[0]
+
+        deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
+
+        inds_keep_friends = inds_start_freq_to_move + deviation
+
+        inds_keep_friends[inds_keep_friends < 0] = 0
+        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (len(self.all_coords_sorted) - 1)
+
+        gb_points_for_move[inds_points_to_move] = self.all_coords_sorted[inds_keep_friends]
+        return gb_points_for_move[None, :, None, :]
+
+    def new_find_friends(self, name, inds_in):
+        inds_start_freq_to_move = self.current_friends_start_inds[tuple(inds_in)]
+
+        deviation = self.xp.random.randint(
+            0, self.nfriends, size=len(inds_start_freq_to_move)
+        )
+
+        inds_keep_friends = inds_start_freq_to_move + deviation
+
+        inds_keep_friends[inds_keep_friends < 0] = 0
+        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
+            len(self.all_coords_sorted) - 1
+        )
+
+        gb_points_for_move = self.all_coords_sorted[
+            inds_keep_friends
+        ]
+
+        return gb_points_for_move
+ 
 
     def adjust_sources_in_residual_buffer(self, factor, model, band_sorter: BandSorter, *args, **kwargs) -> None:
         
@@ -1026,6 +1318,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
 
     def remove_cold_chain_sources_from_residual(self, *args, **kwargs) -> None:
         kwargs["temp"] = 0
+        kwargs["apply_inds"] = True
         self.remove_sources_from_residual(*args, **kwargs)
 
     def remove_sources_from_residual(self, *args, **kwargs) -> None:
@@ -1033,13 +1326,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
        
     def add_cold_chain_sources_to_residual(self, *args, **kwargs) -> None:
         kwargs["temp"] = 0
+        kwargs["apply_inds"] = True
         self.add_sources_to_residual(*args, **kwargs)
 
     def add_sources_to_residual(self, *args, **kwargs) -> None:
         self.adjust_sources_in_residual_buffer(-1, *args, **kwargs)
 
     def run_proposal(self, model, state, band_sorter, band_temps):
-        num_proposals_here = self.num_repeat_proposals if not self.is_rj_prop else 1
         source_prop_counter = cp.zeros(band_sorter.coords.shape[0], dtype=int)
         
         ll_change_log = cp.zeros((self.ntemps, self.nwalkers, self.num_bands))
@@ -1059,73 +1352,178 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
 
             # add back in all sources in the cold-chain 
             # residual from this group
+            # llaf1 = model.analysis_container_arr.likelihood(source_only=True)
             self.remove_cold_chain_sources_from_residual(model, band_sorter, units=units, remainder=remainder)
+            # llaf2 = model.analysis_container_arr.likelihood(source_only=True)
+
             # keep1 = (
             #     (band_indices % units == remainder) 
             #     & (band_indices < len(self.band_edges) - 2)
             #     & (band_indices > 1)
             #     & (self.band_N_vals[band_indices] < 1024)  # TESTING
             # ) 
-            subset_of_interest = band_sorter.get_subset(units=units, remainder=remainder, extra_bool=(source_prop_counter < num_proposals_here))
-
+            # TODO: check issue at ~23.5 mHz, removing for now. 
+            apply_inds = (not self.is_rj_prop)
+            subset_of_interest = band_sorter.get_subset(units=units, remainder=remainder, apply_inds=apply_inds, extra_bool=((band_sorter.band_inds < 463)))
             if subset_of_interest is None:
                 continue
                 
             # start all false, then highlight sources of interest
-            sources_of_interest = self.xp.zeros_like(source_prop_counter, dtype=bool)
-            sources_of_interest[subset_of_interest.inds_main_band_sorter] = True
+            # sources_of_interest = self.xp.zeros_like(source_prop_counter, dtype=bool)
+            # sources_of_interest[subset_of_interest.inds_main_band_sorter] = True
+            # # remove this
+            # sources_of_interest[(band_sorter.band_inds >= 463)] = False
+            
             iteration_num = 0
 
             # with open("tmp.dat", "w") as fp:
             #     tmp = f"{iteration_num}, {sources_of_interest.sum()}\n"
             #     fp.write(tmp)
             #     print(tmp)
+            special_indices_unique, special_indices_index, special_indices_count = cp.unique(subset_of_interest.special_band_inds, return_index=True, return_counts=True)
+            sort = self.xp.argsort(special_indices_count)[::-1]
+            special_indices_unique[:] = special_indices_unique[sort]
+            special_indices_index[:] = special_indices_index[sort]
+            special_indices_count[:] = special_indices_count[sort]
+            run_count = self.xp.zeros_like(special_indices_count)
+            still_to_run = self.xp.ones_like(special_indices_count, dtype=bool)
+            currently_running_special_inds = -self.xp.ones(self.num_band_preload, dtype=int)
+            start_index_buf = 0
+            _inds_now_tmp = self.xp.arange(special_indices_count.shape[0])
+                
+            # MAKE THIS INTO A GENERATOR
+            inds_now = _inds_now_tmp[still_to_run][:self.num_band_preload]
+            special_indices_unique_now = special_indices_unique[inds_now]
+            
+            special_indices_index_now = special_indices_index[inds_now]
+            special_indices_count_now = special_indices_count[inds_now]
+            currently_running_special_inds[:] = special_indices_unique_now
+            switch_now = self.xp.zeros(self.num_band_preload, dtype=bool)
+            run_it = self.xp.ones(self.num_band_preload, dtype=bool)
+            buffer_obj = subset_of_interest.get_buffer(model.analysis_container_arr, special_indices_unique_now)
 
+            accepted_out = self.xp.zeros((self.ntemps, self.nwalkers, self.num_bands), dtype=int)   
+            current_ind_start = self.num_band_preload
             # TODO: move sources of interest inside? I do not think so right now
-            while np.any(sources_of_interest):
-                # st_1 = time.perf_counter()
-                # MAKE THIS INTO A GENERATOR
-                special_indices_unique, special_indices_index = cp.unique(band_sorter.special_band_inds[sources_of_interest], return_index=True)
-                now_bool_full = source_prop_counter < num_proposals_here
-                if not cp.any(now_bool_full):
-                    continue
-
-                buffer_obj = subset_of_interest.get_buffer(model.analysis_container_arr, special_indices_unique, special_indices_index, now_bool_full, num_band_preload=self.num_band_preload)
-                
-                # with open("tmp.dat", "a") as fp:
-                #     tmp = f"inject: {iteration_num}, {sources_of_interest.sum()}"
-                #     fp.write(tmp + "\n")
-                #     print(tmp)
-                # et_1 = time.perf_counter()
-                # print("1st:", et_1 - st_1)
-                
-                for move_i in range(num_proposals_here):
-                    # st_1 = time.perf_counter()
-                    choice_fraction = cp.random.rand(buffer_obj.num_bands_now)
+            init_band = False
+            while self.xp.any(still_to_run):
+                st_1 = time.perf_counter()
+    
+                if self.xp.any(switch_now):
+                    # breakpoint()
+                    num_new_sub_bands = switch_now.sum().item()
+                    currend_end_ind = current_ind_start + num_new_sub_bands
+                    if currend_end_ind > len(special_indices_unique):
+                        currend_end_ind = len(special_indices_unique)
+                        num_new_sub_bands = currend_end_ind - current_ind_start
                     
-                    sources_picked_for_update = buffer_obj.uni_special_index + cp.floor(choice_fraction * buffer_obj.uni_special_counts).astype(int)
+                    if num_new_sub_bands > 0:
+                        inds_fill = self.xp.arange(switch_now.shape[0])[switch_now][:num_new_sub_bands]
 
-                    params_to_update = buffer_obj.params_interest[sources_picked_for_update].copy()
+                        inds_now[inds_fill] = current_ind_start + self.xp.arange(num_new_sub_bands)
+                        special_indices_unique_now = special_indices_unique[current_ind_start:currend_end_ind]
+                        special_indices_index_now = special_indices_index[current_ind_start:currend_end_ind]
+                        special_indices_count_now = special_indices_count[current_ind_start:currend_end_ind]
+                        currently_running_special_inds[inds_fill] = special_indices_unique_now
+                        
+                        subset_of_interest.get_buffer(model.analysis_container_arr, special_indices_unique_now, inds_fill=inds_fill, buffer_obj=buffer_obj)
+                        current_ind_start = currend_end_ind
+                    else:
+                        assert num_new_sub_bands == 0
+                        run_it = run_count[inds_now] < special_indices_count[inds_now]
+
+                # print("run")
+                prev_inds_now = inds_now.copy()[run_it]
+                assert self.xp.all(buffer_obj.special_indices_unique == currently_running_special_inds)
+                source_map_now = band_sorter.get_subset_inds(special_band_inds=buffer_obj.special_indices_unique[run_it])
+                coords_now = band_sorter.coords[source_map_now]
+                special_band_inds_now = band_sorter.special_band_inds[source_map_now]
+                
+                # randomly permute rj order
+                permute_inds = self.xp.random.permutation(self.xp.arange(special_band_inds_now.shape[0]))
+                special_band_inds_now = special_band_inds_now[permute_inds]
+                coords_now[:] = coords_now[permute_inds]
+                source_map_now[:] = source_map_now[permute_inds]
+                sort2 = self.xp.argsort(special_band_inds_now)
+                special_band_inds_now[:] = special_band_inds_now[sort2]
+                coords_now[:] = coords_now[sort2]
+                source_map_now[:] = source_map_now[sort2]
+                uni_special, uni_special_index, uni_special_counts = self.xp.unique(special_band_inds_now, return_index=True, return_counts=True)
+                current_rj_counter = self.xp.zeros_like(uni_special_index)
+                try:
+                    current_rj_counter[:] = run_count[inds_now[run_it]]
+                except ValueError:
+                    breakpoint()
+                max_counts = uni_special_counts.max().item()
+                num_proposals_here = 100  # self.num_repeat_proposals  #  if not self.is_rj_prop else max_counts
+
+                have_not_run_in_model = True
+                previous_inds = band_sorter.inds.copy()
+                for move_i in range(num_proposals_here):
+                    is_rj_now = bool(np.random.choice([0, 1], p=[0.97, 0.03]))
+                    
+                    if band_sorter.inds[source_map_now].sum() == 0:
+                        is_rj_now = True
+
+                    # if not self.is_rj_prop:
+                    if not is_rj_now:
+                        _new_source_map_here_in_model = self.xp.arange(source_map_now.shape[0])[band_sorter.inds[source_map_now]]
+
+                        uni_special_in_model, uni_special_index_in_model, uni_special_counts_in_model = self.xp.unique(special_band_inds_now[band_sorter.inds[source_map_now]], return_index=True, return_counts=True)
+                
+                        choice_fraction = cp.random.rand(len(uni_special_in_model))
+                        try:
+                            sources_picked_for_update = _new_source_map_here_in_model[uni_special_index_in_model + cp.floor(choice_fraction * uni_special_counts_in_model).astype(int)]
+                        except ValueError:
+                            breakpoint()
+                        run_now_tmp = self.xp.in1d(currently_running_special_inds, band_sorter.special_band_inds[source_map_now[sources_picked_for_update]])
+                        assert self.xp.all(band_sorter.inds[source_map_now[sources_picked_for_update]])
+                        
+                        if have_not_run_in_model: 
+                            self.setup_gb_friends(band_sorter)
+                            have_not_run_in_model = False
+                        else:
+                            is_new = (band_sorter.inds & (~previous_inds))
+                            if self.xp.any(is_new):
+                                breakpoint()
+                                new_inds_friends = self.xp.arange(band_sorter.inds.shape[0])[is_new]
+                                self.fix_friends(band_sorter, new_inds_friends)
+
+                    # st_1 = time.perf_counter()    
+                    else:
+                        run_now_tmp = (current_rj_counter < uni_special_counts)
+                        sources_picked_for_update = (uni_special_index + current_rj_counter)[run_now_tmp]
+                        current_rj_counter[run_now_tmp] += 1
+                        
+                    inds_to_update = source_map_now[sources_picked_for_update].copy()
+                         
+                    if not is_rj_now:  # self.is_rj_prop:
+                        assert self.xp.all(band_sorter.inds[inds_to_update])
+
+                    params_to_update = coords_now[sources_picked_for_update].copy()
+                    special_band_inds_to_update = special_band_inds_now[sources_picked_for_update].copy()
+
                     # make sure periodic parameters are wrapped
                     params_to_update[:] = self.periodic.wrap({"gb": params_to_update[:, None, :]}, xp=self.xp)["gb"][:, 0]
                     
-                    inds_to_update = buffer_obj.sources_now_map[sources_picked_for_update].copy()
-                    data_index_to_update = buffer_obj.now_index[sources_picked_for_update].copy()
+                    data_index_to_update = buffer_obj.get_index(special_band_inds_to_update)
                     # map is back to full band and coords
                     map_to_update = (band_sorter.temp_inds[inds_to_update], band_sorter.walker_inds[inds_to_update], band_sorter.band_inds[inds_to_update])
                     map_to_update_cpu = (band_sorter.temp_inds[inds_to_update].get(), band_sorter.walker_inds[inds_to_update].get(), band_sorter.band_inds[inds_to_update].get())
-                    
-                    if not self.is_rj_prop:
+                    if self.xp.any(params_to_update[:, 0] < -100.0):
+                        breakpoint()
+                    if not is_rj_now:  # self.is_rj_prop:
+                        old_coords = params_to_update.copy()
                         # custom group stretch
                         # TODO: work into main group stretch somehow
                         params_into_proposal = params_to_update[None, :, None, :]
 
-                        friends_into_proposal = state.branches_supplemental["gb"][map_to_update_cpu]["friend_start_inds"][None, :, None]
-                        branch_supps_into_proposal = BranchSupplemental({"friend_start_inds": friends_into_proposal}, base_shape=friends_into_proposal.shape)
+                        self.friend_start_inds_now = band_sorter.friend_start_inds[inds_to_update]
+                        # branch_supps_into_proposal = BranchSupplemental({"friend_start_inds": friends_into_proposal}, base_shape=friends_into_proposal.shape)
                         inds_into_proposal = self.xp.ones(params_into_proposal.shape[:-1], dtype=bool)
 
                         # TODO: check detailed balance
-                        q, update_factors = self.get_proposal({"gb": params_into_proposal}, model.random, s_inds_all={"gb": inds_into_proposal}, cp=self.xp, return_gpu=True, branch_supps=branch_supps_into_proposal)         
+                        q, update_factors = self.get_proposal({"gb": params_into_proposal}, model.random, s_inds_all={"gb": inds_into_proposal}, cp=self.xp, return_gpu=True)  # , branch_supps=branch_supps_into_proposal)         
                         new_coords = q["gb"][0, :, 0, :]
                         
                         new_coords[:] = self.periodic.wrap({"gb": new_coords[:, None, :]}, xp=self.xp)["gb"][:, 0]
@@ -1134,16 +1532,20 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                         curr_logp = cp.asarray(self.gpu_priors["gb"].logpdf(new_coords))  # , psds=self.mgh.psd_shaped[0][0], walker_inds=curr_index)
 
                     else:
-                        
-                        logp_tmp = cp.asarray(self.gpu_priors["gb"].logpdf(params_to_update))
+                        old_coords = params_to_update.copy()
+                        new_coords = params_to_update.copy()
+                        logp_tmp = cp.asarray(self.gpu_priors["gb"].logpdf(old_coords))
+                        # if self.xp.any(self.xp.isinf(logp_tmp[run_now_tmp])):
+                        #     breakpoint()
+
                         prev_logp = cp.zeros_like(logp_tmp)
                         curr_logp = cp.zeros_like(logp_tmp)
 
-                        new_coords = params_to_update.copy()
-                        
                         inds = band_sorter.inds[inds_to_update].copy()
                         update_factors = band_sorter.factors[inds_to_update].copy()
-                        params_to_update[~inds, 0] = np.log(1e-80)
+                        # prevent unecessar
+                        
+                        old_coords[~inds, 0] = np.log(1e-80)
                         new_coords[inds, 0] = np.log(1e-80)
                         # wrap in case
                         new_coords[:] = self.periodic.wrap({"gb": new_coords[:, None, :]}, xp=self.xp)["gb"][:, 0]
@@ -1151,15 +1553,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                         prev_logp[inds] = logp_tmp[inds]
                         curr_logp[~inds] = logp_tmp[~inds]
 
-                    if cp.any(cp.isinf(prev_logp)):
+                    if cp.any(cp.isinf(prev_logp)):  # [run_now_tmp]
                         breakpoint()
                     # inputs into swap proposal
-                    
                     # guard on the edges with too-large frequency proposals out of band that would not be physical
-                    curr_logp[(new_coords[:, 1] / 1e3 < buffer_obj.frequency_lims[0]) | (new_coords[:, 1] / 1e3 > buffer_obj.frequency_lims[1])] = -np.inf
-                    # TODO: 2 vs 4?
-                    curr_logp[(cp.abs(params_to_update[:, 1] / 1e3 - new_coords[:, 1] / 1e3) / self.df).astype(int) > (self.band_N_vals[band_sorter.band_inds[inds_to_update]] / 4).astype(int)] = -np.inf
+                    if is_rj_now and self.xp.any(~band_sorter.inds[inds_to_update] & ((new_coords[:, 1] / 1e3 < buffer_obj.frequency_lims[0][data_index_to_update]) | (new_coords[:, 1] / 1e3 > buffer_obj.frequency_lims[1][data_index_to_update]))):
+                        breakpoint()
 
+                    # if not is_rj_now and self.xp.any((old_coords[:, 1] / 1e3 < buffer_obj.frequency_lims[0][data_index_to_update]) | (old_coords[:, 1] / 1e3 > buffer_obj.frequency_lims[1][data_index_to_update])):
+                    #     breakpoint()
+                    # if self.xp.any(~run_now_tmp):
+                    #     breakpoint()
+
+                    if is_rj_now:
+                        curr_logp[(new_coords[:, 1] / 1e3 < buffer_obj.frequency_lims[0][data_index_to_update]) | (new_coords[:, 1] / 1e3 > buffer_obj.frequency_lims[1][data_index_to_update])] = -np.inf
+
+                    # TODO: 2 vs 4?
+                    else:
+                        curr_logp[(cp.abs(old_coords[:, 1] / 1e3 - new_coords[:, 1] / 1e3) / self.df).astype(int) > (self.band_N_vals[band_sorter.band_inds[inds_to_update]] / 4).astype(int)] = -np.inf
+                    
+                    # outside wavelength / 4 of band
+                    curr_logp[(cp.abs(new_coords[:, 1] / 1e3 / self.df).astype(int) < (buffer_obj.frequency_lims[0][data_index_to_update] / self.df).astype(int) -  (self.band_N_vals[band_sorter.band_inds[inds_to_update]] / 4).astype(int))] = -np.inf
+                    curr_logp[(cp.abs(new_coords[:, 1] / 1e3 / self.df).astype(int) > (buffer_obj.frequency_lims[1][data_index_to_update] / self.df).astype(int) + (self.band_N_vals[band_sorter.band_inds[inds_to_update]] / 4).astype(int))] = -np.inf
+
+                    # remove any from log like comp when finished running for that band
+                    # curr_logp[~run_now_tmp] = -np.inf
                     ll_diff = cp.full_like(prev_logp, -1e300)
                     opt_snr = cp.full_like(prev_logp, 0.0)
                     keep2 = ~cp.isinf(curr_logp)
@@ -1167,7 +1585,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                     # print("2nd:", et_1 - st_1)
                 
                     # st_1 = time.perf_counter()
-                    params_remove = params_to_update[keep2].copy()
+                    params_remove = old_coords[keep2].copy()
                     params_add = new_coords[keep2].copy()
 
                     # data indexes align with the buffers (1 per buffer except for inf priors)
@@ -1181,22 +1599,43 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                     if self.phase_maximize:
                         new_coords[keep2] = params_add[:]
 
-                    curr_beta = band_temps[map_to_update[0], map_to_update[2]]
+                    curr_beta = band_temps[map_to_update[2], map_to_update[0]]
                     # print("change priors?, need to adjust here")
                     
                     delta_logP = curr_beta * ll_diff + (curr_logp - prev_logp)
                     lnpdiff = delta_logP + update_factors.squeeze()
                     accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
+                    # if self.is_rj_prop:
+                    #     _band_count = self.xp.asarray(band_sorter.get_band_info()["band_counts"][map_to_update_cpu])
+                    #     # TODO: remove this for PE part
+                    #     accept[(_band_count >= (self.time + 1)) & (~band_sorter.inds[inds_to_update])] = False
+
+                    # if self.xp.any(special_band_inds_now == 65):
+                    #     breakpoint()
                     # need to copy to old array before changing in place
                     old_params_to_update = params_to_update.copy()
-                    params_to_update[accept] = new_coords[accept]
-                    buffer_obj.params_interest[sources_picked_for_update] = params_to_update[:]
+                    if self.xp.any(params_to_update[:, 0] < -100.0):
+                        breakpoint()
+                    # if rj prop, then the parameters do not change, just inds
+                    if is_rj_now:  # self.is_rj_prop:
+                        # adjust phase in case of phase maximization
+                        # NEEDED in search to work properly
+                        # index 3 is phi0, all other parameters are the same
+                        params_to_update[accept, 3] = new_coords[accept, 3]
+
+                    else:
+                        params_to_update[accept] = new_coords[accept]
+
+                    coords_now[sources_picked_for_update] = params_to_update[:]
+    
+                    if self.xp.any(params_to_update[:, 0] < -100.0):
+                        breakpoint()
                     
                     if cp.any(accept):
                         inds_update_accept = inds_to_update[accept]
-                        
+
                         ll_accept = ll_diff[accept]
-                        if self.is_rj_prop:
+                        if is_rj_now:  # self.is_rj_prop:
                             # update indsf
                             band_sorter.inds[inds_update_accept] = (~band_sorter.inds[inds_update_accept])
                         
@@ -1204,25 +1643,34 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                         walker_inds_accept = band_sorter.walker_inds[inds_update_accept]
                         band_inds_accept = band_sorter.band_inds[inds_update_accept]
                         ll_change_log[temp_inds_accept, walker_inds_accept, band_inds_accept] += ll_accept
-
+                        accepted_out[temp_inds_accept, walker_inds_accept, band_inds_accept] += 1
                         # switch accepted waveform
-                        old_coords_for_change = old_params_to_update[accept].copy()
+                        old_coords_for_change = old_coords[accept].copy()
                         new_coords_for_change = new_coords[accept].copy()
 
                         old_change_index = data_index_to_update[accept].copy().astype(np.int32)
                         new_change_index = old_change_index.copy()
                         
-                        old_change_N_vals = self.band_N_vals[band_sorter.band_inds[inds_to_update[accept]]].copy()
+                        old_change_N_vals = self.band_N_vals[band_sorter.band_inds[inds_update_accept]].copy()
                         new_change_N_vals = old_change_N_vals.copy()
 
                         # TODO: should we combine this to make faster
+                        # ll_before = buffer_obj.likelihood(source_only=True)
                         buffer_obj.remove_sources_from_band_buffer(old_coords_for_change, old_change_index, old_change_N_vals)
+                        # ll_mid = buffer_obj.likelihood(source_only=True)
                         buffer_obj.add_sources_to_band_buffer(new_coords_for_change, new_change_index, new_change_N_vals)
-                        
+                        # ll_after = buffer_obj.likelihood(source_only=True)
+                        # if move_i % 25 == 0:
+                        #     try:
+                        #         if 1e-4 < np.abs((ll_after - ll_before)[data_index_to_update] - ll_diff * accept).max():
+                        #             breakpoint()
+                        #     except ValueError:
+                        #         breakpoint()
                     # print(iteration_num, move_i)
                     self.mempool.free_all_blocks()
+                    previous_inds = band_sorter.inds.copy()
+                
                     source_prop_counter[inds_to_update] += 1
-
                     # with open("tmp.dat", "a") as fp:
                     #     tmp = f"move {move_i}: {iteration_num}, {sources_of_interest.sum()}"
                     #     fp.write(tmp + "\n")
@@ -1230,13 +1678,23 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                     # will recalculate prior anyways so leaving that out
 
                     # change WAVEFORMS THAT HAVE BEEN ACCEPTED
-
-                    # et_1 = time.perf_counter()
-                    # print("3rd:", et_1 - st_1)
+                # I THINK THIS SHOULD BE OK WITHOUT COUNTING IN MODEL
+                # RJ COUNT IS PROPORTIONAL TO NUMBER OF SOURCES IN THE BAND,
+                # SO IT WILL ALSO ACCOUNT FOR NUM_REPEAT_PROPOSALS FOR IN-MODEL
+                run_count[inds_now[run_it]] = current_rj_counter
                 
-                band_sorter.coords[buffer_obj.sources_now_map] = buffer_obj.params_interest[:]
+                # if not self.is_rj_prop:
+                #     # should be subset for in model
+                #     switch_now[:] = run_count[inds_now] >= special_indices_count[inds_now]
+                #     still_to_run = run_count < special_indices_count
+                # else:
+                #     # should all for RJ
+                switch_now[:] = run_count[inds_now] >= special_indices_count[inds_now]
+                still_to_run = run_count < special_indices_count
+
+                band_sorter.coords[source_map_now] = coords_now[:]
+                
                 # inds change is taken care of inplace
-                sources_of_interest[sources_of_interest] = (source_prop_counter[sources_of_interest] < self.num_repeat_proposals)
                 iteration_num += 1
                 # with open("tmp.dat", "a") as fp:
                 #     tmp = f"{iteration_num}, {sources_of_interest.sum()}"
@@ -1244,13 +1702,19 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                 #     print(tmp)
                 self.mempool.free_all_blocks()
                 # update prop counter
-            
+                print(self.name, "running", still_to_run.sum())
             # add back in all sources in the cold-chain 
             # residual from this group
+            # llaf1 = model.analysis_container_arr.likelihood()
+
             self.add_cold_chain_sources_to_residual(model, band_sorter, units=units, remainder=remainder)
+            # llaf2 = model.analysis_container_arr.likelihood()
+
+            # ll_change_sum = ll_change_log.sum(axis=-1)
+            # check_in = state.log_like[0] + ll_change_sum[0].get()
 
             self.xp.cuda.runtime.deviceSynchronize()
-        
+
         return ll_change_log
 
     def run_tempering(self, model, state, band_sorter, band_temps):
@@ -1288,15 +1752,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                 special_inds_now_flat = special_inds_now.flatten()
 
                 # need to include inds
-                now_bool_full = cp.in1d(band_sorter.special_band_inds, special_inds_now_flat)  # & band_sorter.inds
-                if not cp.any(now_bool_full):
-                    num_bands_run += num_bands_preload_temp
-                    # print("num bands", num_bands_run)
-                    continue
+                # now_bool_full = cp.in1d(band_sorter.special_band_inds, special_inds_now_flat)  # & band_sorter.inds
+                # if not cp.any(now_bool_full):
+                #     num_bands_run += num_bands_preload_temp
+                #     # print("num bands", num_bands_run)
+                #     continue
 
-                _, special_inds_index = cp.unique(band_sorter.special_band_inds[now_bool_full], return_index=True)
-                
-                buffer_obj = band_sorter.get_buffer(model.analysis_container_arr, special_inds_now_flat, special_inds_index, now_bool_full, num_band_preload=num_bands_now * self.ntemps, use_template_arr=True)
+                # _, special_inds_index = cp.unique(band_sorter.special_band_inds[now_bool_full], return_index=True)
+                buffer_obj = band_sorter.get_buffer(model.analysis_container_arr, special_inds_now_flat, use_template_arr=True)
 
                 current_lls = buffer_obj.likelihood(source_only=True).reshape(-1, self.ntemps)
                 band_combo_map = buffer_obj.unique_band_combos.reshape(-1, self.ntemps, 3)
@@ -1507,8 +1970,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         per_walker_band_proposals = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         per_walker_band_accepted = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         
+        st_prop = time.perf_counter()
         ll_change_log = self.run_proposal(model, new_state, band_sorter, band_temps)
-
+        et_prop = time.perf_counter()
+        print(self.name, "reg prop:", et_prop - st_prop)
+        
         print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum = ll_change_log.sum(axis=-1)
         new_state.log_like[0] += ll_change_sum[0].get()
@@ -1537,6 +2003,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
             and self.run_swaps
             # and False
         ):  
+            st_temp = time.perf_counter()
             ll_change_sum_temp, band_swaps_accepted, band_swaps_proposed = self.run_tempering(model, new_state, band_sorter, band_temps)
             
             new_state.log_like[0] += ll_change_sum_temp[0].get()
@@ -1545,7 +2012,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
             check = ll_after - new_state.log_like[0]
             assert np.abs(check).max() < 1e-4
             self.mempool.free_all_blocks()
-
+            et_temp = time.perf_counter()
+            print(self.name, "tempering", et_temp - st_temp)
         print("make sure this works for rj")
         special_indices_finish = (band_sorter.temp_inds[band_sorter.inds] * nwalkers + band_sorter.walker_inds[band_sorter.inds]) * int(1e6) + band_sorter.coords[band_sorter.inds, 1]
         special_inds_temp_walker = (band_sorter.temp_inds[band_sorter.inds] * nwalkers + band_sorter.walker_inds[band_sorter.inds])
@@ -1729,207 +2197,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
     
 
 class GBSpecialStretchMove(GBSpecialBase):
-    def setup_gbs(self, model, branch):
-        st = time.perf_counter()
-        coords = branch.coords
-        inds = branch.inds
-        supps = branch.branch_supplemental
-        ntemps, nwalkers, nleaves_max, ndim = branch.shape
-        all_remaining_freqs = coords[0][inds[0]][:, 1]
-
-        all_remaining_cords = coords[0][inds[0]]
-
-        num_remaining = len(all_remaining_freqs)
-
-        all_temp_fs = self.xp.asarray(coords[inds][:, 1])
-
-        # TODO: improve this?
-        self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
-        self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
-        self.all_coords_sorted = self.xp.asarray(all_remaining_cords)[
-            self.inds_freqs_sorted
-        ]
-
-        total_binaries = inds.sum().item()
-        still_going = cp.ones(total_binaries, dtype=bool) 
-        inds_zero = cp.searchsorted(self.freqs_sorted, all_temp_fs, side="right") - 1
-        left_inds = inds_zero - int(self.nfriends / 2)
-        right_inds = inds_zero + int(self.nfriends / 2) - 1
-
-        # do right first here
-        right_inds[left_inds < 0] = self.nfriends - 1
-        left_inds[left_inds < 0] = 0
-        
-        # do left first here
-        left_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - self.nfriends
-        right_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - 1
-
-        assert np.all(right_inds - left_inds == self.nfriends - 1)
-        assert not np.any(right_inds < 0) and not np.any(right_inds > len(self.freqs_sorted) - 1) and not np.any(left_inds < 0) and not np.any(left_inds > len(self.freqs_sorted) - 1)
-        
-        jjj = 0
-        while np.any(still_going):
-            distance_left = np.abs(all_temp_fs[still_going] - self.freqs_sorted[left_inds[still_going]])
-            distance_right = np.abs(all_temp_fs[still_going] - self.freqs_sorted[right_inds[still_going]])
-
-            check_move_right = (distance_right <= distance_left)
-            check_left_inds = left_inds[still_going][check_move_right] + 1
-            check_right_inds = right_inds[still_going][check_move_right] + 1
-
-            new_distance_right = np.abs(all_temp_fs[still_going][check_move_right] - self.freqs_sorted[check_right_inds])
-
-            change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_right][(new_distance_right < distance_left[check_move_right]) & (check_right_inds < len(self.freqs_sorted))]
-
-            left_inds[change_inds] += 1
-            right_inds[change_inds] += 1
-
-            stop_inds_right_1 = cp.arange(len(all_temp_fs))[still_going][check_move_right][(check_right_inds >= len(self.freqs_sorted))]
-
-            # last part is just for up here, below it will remove if it is still equal
-            stop_inds_right_2 = cp.arange(len(all_temp_fs))[still_going][check_move_right][(new_distance_right >= distance_left[check_move_right]) & (check_right_inds < len(self.freqs_sorted)) & (distance_right[check_move_right] != distance_left[check_move_right])]
-            stop_inds_right = cp.concatenate([stop_inds_right_1, stop_inds_right_2])
-            assert np.all(still_going[stop_inds_right])
-
-            # equal to should only be left over if it was equal above and moving right did not help
-            check_move_left = (distance_left <= distance_right)
-            check_left_inds = left_inds[still_going][check_move_left] - 1
-            check_right_inds = right_inds[still_going][check_move_left] - 1
-
-            new_distance_left = np.abs(all_temp_fs[still_going][check_move_left] - self.freqs_sorted[check_left_inds])
-            
-            change_inds = cp.arange(len(all_temp_fs))[still_going][check_move_left][(new_distance_left < distance_right[check_move_left]) & (check_left_inds >= 0)]
-
-            left_inds[change_inds] -= 1
-            right_inds[change_inds] -= 1
-
-            stop_inds_left_1 = cp.arange(len(all_temp_fs))[still_going][check_move_left][(check_left_inds < 0)]
-            stop_inds_left_2 = cp.arange(len(all_temp_fs))[still_going][check_move_left][(new_distance_left >= distance_right[check_move_left]) & (check_left_inds >= 0)]
-            stop_inds_left = cp.concatenate([stop_inds_left_1, stop_inds_left_2])
-            
-            stop_inds = cp.concatenate([stop_inds_right, stop_inds_left])
-            still_going[stop_inds] = False
-            # print(jjj, still_going.sum())
-            if jjj >= self.nfriends:
-                breakpoint()
-            jjj += 1
-
-        start_inds = left_inds.copy().get()
-
-        start_inds_all = np.zeros_like(inds, dtype=np.int32)
-        start_inds_all[inds] = start_inds.astype(np.int32)
-
-        if "friend_start_inds" not in supps:
-            supps.add_objects({"friend_start_inds": start_inds_all})
-        else:
-            supps[:] = {"friend_start_inds": start_inds_all}
-
-        self.stretch_friends_args_in = tuple([tmp.copy() for tmp in self.all_coords_sorted.T])
-        et = time.perf_counter()
-        self.mempool.free_all_blocks()
-
-        self.has_setup_group = True
-        # print("SETUP:", et - st)
-        # start_inds_freq_out = np.zeros((ntemps, nwalkers, nleaves_max), dtype=int)
-        # freqs_sorted_here = self.freqs_sorted.get()
-        # freqs_remaining_here = all_remaining_freqs
-
-        # start_ind_best = np.zeros_like(freqs_remaining_here, dtype=int)
-
-        # best_index = (
-        #     np.searchsorted(freqs_sorted_here, freqs_remaining_here, side="right") - 1
-        # )
-        # best_index[best_index < self.nfriends] = self.nfriends
-        # best_index[best_index >= len(freqs_sorted_here) - self.nfriends] = (
-        #     len(freqs_sorted_here) - self.nfriends
-        # )
-        # check_inds = (
-        #     best_index[:, None]
-        #     + np.tile(np.arange(2 * self.nfriends), (best_index.shape[0], 1))
-        #     - self.nfriends
-        # )
-
-        # check_freqs = freqs_sorted_here[check_inds]
-        # breakpoint()
-
-        # # batch_count = 1000
-        # # split_inds = np.arange(batch_count, freqs_remaining_here.shape[0], batch_count)
-
-        # # splits_remain = np.split(freqs_remaining_here, split_inds)
-        # # splits_check = np.split(check_freqs, split_inds)
-
-        # # out = []
-        # # for i, (split_r, split_c) in enumerate(zip(splits_remain, splits_check)):
-        # #     out.append(np.abs(split_r[:, None] - split_c))
-        # #     print(i)
-
-        # # freq_distance = np.asarray(out)
-
-        # freq_distance = np.abs(freqs_remaining_here[:, None] - check_freqs)
-        # breakpoint()
-
-        # keep_min_inds = np.argsort(freq_distance, axis=-1)[:, : self.nfriends].min(
-        #     axis=-1
-        # )
-        # start_inds_freq = check_inds[(np.arange(len(check_inds)), keep_min_inds)]
-
-        # start_inds_freq_out[inds] = start_inds_freq
-
-        # start_inds_freq_out[~inds] = -1
-
-        # if "friend_start_inds" not in supps:
-        #     supps.add_objects({"friend_start_inds": start_inds_freq_out})
-        # else:
-        #     supps[:] = {"friend_start_inds": start_inds_freq_out}
-
-        # self.all_friends_start_inds_sorted = self.xp.asarray(
-        #     start_inds_freq_out[inds][self.inds_freqs_sorted.get()]
-        # )
-
-    def find_friends(self, name, gb_points_to_move, s_inds=None, branch_supps=None):
-        if s_inds is None or branch_supps is None:
-            raise ValueError
-
-        inds_points_to_move = self.xp.asarray(s_inds.flatten())
-
-        half_friends = int(self.nfriends / 2)
-
-        gb_points_for_move = gb_points_to_move.reshape(-1, 8).copy()
-
-        if not hasattr(self, "ntemps"):
-            self.ntemps = 1
-
-        inds_start_freq_to_move = self.xp.asarray(branch_supps[:]["friend_start_inds"].flatten())
-
-        deviation = self.xp.random.randint(0, self.nfriends, size=len(inds_start_freq_to_move))
-
-        inds_keep_friends = inds_start_freq_to_move + deviation
-
-        inds_keep_friends[inds_keep_friends < 0] = 0
-        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (len(self.all_coords_sorted) - 1)
-
-        gb_points_for_move[inds_points_to_move] = self.all_coords_sorted[inds_keep_friends]
-        return gb_points_for_move[None, :, None, :]
-
-    def new_find_friends(self, name, inds_in):
-        inds_start_freq_to_move = self.current_friends_start_inds[tuple(inds_in)]
-
-        deviation = self.xp.random.randint(
-            0, self.nfriends, size=len(inds_start_freq_to_move)
-        )
-
-        inds_keep_friends = inds_start_freq_to_move + deviation
-
-        inds_keep_friends[inds_keep_friends < 0] = 0
-        inds_keep_friends[inds_keep_friends >= len(self.all_coords_sorted)] = (
-            len(self.all_coords_sorted) - 1
-        )
-
-        gb_points_for_move = self.all_coords_sorted[
-            inds_keep_friends
-        ]
-
-        return gb_points_for_move
-
+    
     def setup(self, model, branches):
         for i, (name, branch) in enumerate(branches.items()):
             if name != "gb":
@@ -2252,12 +2520,24 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         return gb_search_func
 
     def setup(self, model, branches):
+        # FOR FAST TESTING/DEBUGGING
+        # import pickle
+        # with open("gmm_tmp.pickle", "rb") as fp:
+        #     full_gmm = pickle.load(fp)
 
+        # rj_dist = ProbDistContainer(
+        #     {
+        #         (0, 1, 2, 4, 6, 7): full_gmm, 
+        #         3: uniform_dist(0.0, 2 * np.pi),
+        #         5: uniform_dist(0.0, np.pi),
+        #     },
+        #     use_cupy=True
+        # )
+        # self.rj_proposal_distribution = {"gb": rj_dist}
+        # return
         # run paraensemble MCMC. 
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
         self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
-        from eryn.paraensemble import ParaEnsembleSampler
-        from eryn.prior import uniform_dist
         ndim = branches["gb"].ndim
         nwalkers = 40  # TODO: adjustable
         ntemps = 10  # TODO: adjustable
@@ -2422,6 +2702,10 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[:, :, np.array([0, 1, 2, 4, 6, 7])]
         full_gmm = vec_fit_gmm_min_bic(samples_2_tmp, min_comp=1, max_comp=30, n_samp_bic_test=5000, use_gpu=True, verbose=False)
+        # import pickle
+        # with open("gmm_tmp.pickle", "wb") as fp:
+        #     pickle.dump(full_gmm, fp, pickle.HIGHEST_PROTOCOL)
+        
         et = time.perf_counter()
         print(f"GPU GMM FIT: {et - st}")
   

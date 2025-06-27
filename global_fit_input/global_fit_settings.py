@@ -148,7 +148,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     # )
     # ll_source_2 = acs.likelihood(source_only=True)
     # ll_all_2 = acs.likelihood()
-    # breakpoint()
+
     if state.branches["gb"].inds[0].sum() > 0:
         
         coords_out_gb = state.branches["gb"].coords[0,
@@ -346,7 +346,7 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         use_gpu=True,
         rj_proposal_distribution=gpu_priors,
         name="rj_fstat_mcmc_search",
-        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
+        use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         nfriends=nwalkers,
         phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
         ranks_needed=ranks_needed_here,
@@ -405,10 +405,11 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
 
     rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
 
-    moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
+    # moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
+    moves = GFCombineMove([rj_serial_search_move, rj_move_prior])
     return SetupInfoTransfer(
         name="gb",
-        in_model_moves=[], #[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
+        in_model_moves=[moves],  # ], #[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
         # rj_moves=rj_moves,
     )
 
@@ -576,7 +577,7 @@ def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     
     return SetupInfoTransfer(
         name="emri",
-        in_model_moves=[emri_move],
+        in_model_moves=[],  # emri_move],
     )
 
 
@@ -688,9 +689,11 @@ def get_global_fit_settings(copy_settings_file=False):
     data_length = len(A_inj)
     fd = (np.arange(data_length) + start_freq_ind) * df
     
+    # TODO: connect LISA to SSB for MBHs to numerical orbits
+
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [4]
+    gpus = [7]
     cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 24
@@ -884,7 +887,7 @@ def get_global_fit_settings(copy_settings_file=False):
             n_iter_update=1,
             live_dangerously=True,
             a=1.75,
-            num_repeat_proposals=100
+            num_repeat_proposals=200
         ),
         other_tempering_kwargs=dict(
             adaptation_time=2,
@@ -1043,7 +1046,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # sampler treats periodic variables by wrapping them properly
     periodic_mbh = {
-        "mbh": {5: 2 * np.pi, 7: np.pi, 8: np.pi}
+        "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
     }
 
     # waveform kwargs
@@ -1254,7 +1257,7 @@ def get_global_fit_settings(copy_settings_file=False):
     gf_branch_information = (
         # GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
         GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
+        # + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )
@@ -1265,7 +1268,7 @@ def get_global_fit_settings(copy_settings_file=False):
             "gb": all_gb_info,
             # "mbh": all_mbh_info,
             "psd": all_psd_info,
-            "emri": all_emri_info,
+            # "emri": all_emri_info,
         },
         "general": all_general_info,
         "rank_info": rank_info,

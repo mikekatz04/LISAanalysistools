@@ -144,9 +144,12 @@ def inner_product(
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
         ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
-        y = (
-            func(temp1[ind_start:].conj() * temp2[ind_start:]) * inv_psd_tmp[ind_start:]
-        )  # assumes right summation rule
+        try:
+            y = (
+                func(temp1[ind_start:].conj() * temp2[ind_start:]) * inv_psd_tmp[ind_start:]
+            )  # assumes right summation rule
+        except TypeError:
+            breakpoint()
         # df is sunk into trapz
         if sum_instead_of_trapz:
             df = x[1] - x[0]
