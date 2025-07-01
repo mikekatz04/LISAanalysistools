@@ -11,6 +11,8 @@ from eryn.moves import RedBlueMove, StretchMove
 from ..moves import GlobalFitMove
 from ..utils import new_sens_mat
 from ...cutils.psd_gpu import psd_likelihood
+from tqdm import tqdm
+import time
 
 def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     if supps is None:
@@ -35,7 +37,7 @@ def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs)
     sl2_all = cp.asarray(galfor_pars[:, 4])
     num_data = 1
     num_psds = psd_pars.shape[0]
-
+    
     psd_likelihood(ll, freqs, data, data_index_all,  A_Soms_d_in_all,  A_Sa_a_in_all,  E_Soms_d_in_all,  E_Sa_a_in_all, 
                      Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, df, data_length, num_data, num_psds)
     
@@ -56,16 +58,20 @@ def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs)
     return ll.get()
 
 class PSDMove(GlobalFitMove, StretchMove):
-    def __init__(self, gb, acs, priors, *args, psd_kwargs={}, **kwargs):
-        super(PSDMove, self).__init__(*args, **kwargs)
+    def __init__(self, gb, acs, priors, *args, num_repeats=1, max_logl_mode=False, psd_kwargs={}, **kwargs):
+        GlobalFitMove.__init__(self, *args, **kwargs)
+        StretchMove.__init__(self, *args, **kwargs)
         self.acs = acs
         self.gb = gb
         self.psd_kwargs = psd_kwargs
         self.priors = priors
+        self.num_repeats = num_repeats
+        self.max_logl_mode = max_logl_mode
+        self.starting_now = True
         
     def compute_log_like(
         self, coords, inds=None, logp=None, supps=None, branch_supps=None
-    ):
+    ):  
         assert logp is not None
         logl = np.full_like(logp, -1e300)
 
@@ -122,16 +128,58 @@ class PSDMove(GlobalFitMove, StretchMove):
             logp[:] += self.priors[key].logpdf(branches_coords[key].reshape(-1, ndims[key])).reshape(ntemps, nwalkers)
         return logp
 
+    def run_move(self, model, state):
+        new_state, accepted = super(PSDMove, self).propose(model, state)
+        return new_state, accepted
+    
+    def run_move_for_loop(self, model, state, num_repeats):
+        for i in tqdm(range(num_repeats)):
+            state, accepted = self.run_move(model, state)
+        return state, accepted
+
+    def run_move_max_likelihood(self, model, state):
+
+        num_checks = 5
+        num_so_far = 0
+        max_logl = -np.inf
+        changed_once = False
+        while num_so_far < num_checks:
+            state, accepted = self.run_move_for_loop(model, state, self.num_repeats)
+
+            if state.log_like[0].max() != max_logl and not np.isinf(max_logl):
+                changed_once = True
+                
+            if state.log_like[0].max() > max_logl:
+                max_logl = state.log_like[0].max()
+                num_so_far = 0
+            else:
+                if changed_once:
+                    num_so_far += 1
+
+            print(max_logl, num_so_far, num_checks)
+            # breakpoint()
+
+        return state, accepted
+
     def propose(self, model, state):
         # setup model framework for passing necessary 
         # self.priors["all_models_together"].full_state = state
 
-        # ensuring it is up to date. Should not change anything.
-        eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplemental=state.supplemental, branch_supplemental=state.branches_supplemental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
-        before_vals = model.analysis_container_arr.likelihood(sum_instead_of_trapz=True).copy()
+        tmp_branches_coords = {key: state.branches_coords[key] for key in ["psd", "galfor"]}
         
-        if np.any(np.abs(before_vals - state.log_like[0]) > 1e-4) :
-            breakpoint()
+        tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=state.supplemental)
+        
+        # ensuring it is up to date. Should not change anything.
+        # eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplemental=state.supplemental, branch_supplemental=state.branches_supplemental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
+        before_vals = model.analysis_container_arr.likelihood().copy()
+        
+        # TODO: check this
+        # if self.starting_now:
+        tmp_state.log_prior = self.compute_log_prior(tmp_branches_coords)
+        tmp_state.log_like = self.compute_log_like(tmp_branches_coords, logp=tmp_state.log_prior, supps=tmp_state.supplemental)[0]
+        self.starting_now = False
+        # if np.any(np.abs(before_vals - tmp_state.log_like[0]) > 1e-4) :
+        #     breakpoint()
 
         # breakpoint()
         # logp = model.compute_log_prior_fn(state.branches_coords, inds=state.branches_inds, supps=state.supplemental)
@@ -152,26 +200,34 @@ class PSDMove(GlobalFitMove, StretchMove):
         #     foreground_params=state.branches["galfor"].coords[0, :, 0]
         # )
         # avs_vals = state.acs.get_ll(include_psd_info=True).copy()
-        tmp_state, accepted = super(PSDMove, self).propose(tmp_model, state)
+        if self.max_logl_mode:
+            tmp_state, accepted = self.run_move_max_likelihood(tmp_model, tmp_state)
+        
+        else:
+            tmp_state, accepted = self.run_move_for_loop(tmp_model, tmp_state, self.num_repeats)
+        
         # CHECK THIS STATE SETUP
         new_state = GFState(
-            tmp_state,
+            state,
             copy=True
         )
-        new_state.sub_states = state.sub_states
-        new_state.sub_state_bases = state.sub_state_bases
 
+        for key in ["psd", "galfor"]:
+            new_state.branches[key].coords[:] = tmp_state.branches[key].coords[:]
+
+        new_state.log_like[:] = tmp_state.log_like[:]
+        new_state.log_prior[:] = tmp_state.log_prior[:]
+        
         nwalkers = len(self.acs)
         for w in range(nwalkers):
-            psd_params = state.branches_coords["psd"][0, w, 0]
-            galfor_params = state.branches_coords["galfor"][0, w, 0]
+            psd_params = new_state.branches_coords["psd"][0, w, 0]
+            galfor_params = new_state.branches_coords["galfor"][0, w, 0]
             sens_AE = new_sens_mat(f"walker_{w}", psd_params, galfor_params, self.acs.f_arr)
             self.acs[w].sens_mat = sens_AE
 
         self.acs.reset_linear_psd_arr()
-        after_vals = self.acs.likelihood(sum_instead_of_trapz=True)
+        after_vals = self.acs.likelihood()
         
         new_state.log_like[0] = after_vals
-                   
         return new_state, accepted
 

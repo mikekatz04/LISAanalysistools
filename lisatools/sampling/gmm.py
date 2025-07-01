@@ -998,9 +998,16 @@ class GaussianMixtureModel:
         warm_start=False,
         verbose=0,
         verbose_interval=10,
-        use_gpu=False,
+        gpu=None,
     ):
-        self.use_gpu = use_gpu
+        self.gpu = gpu
+        if gpu is not None:
+            self.use_gpu = True
+            self.xp.cuda.runtime.setDevice(gpu)
+
+        else:
+            self.use_gpu = False
+
         self.n_components = n_components
         self.tol = tol
         self.reg_covar=reg_covar
@@ -1019,6 +1026,7 @@ class GaussianMixtureModel:
         self.weights_init = weights_init
         self.means_init = means_init
         self.precisions_init = precisions_init
+        
 
     @property
     def xp(self):
@@ -1761,9 +1769,16 @@ class GMMFit:
         else:
             return np
 
-    def __init__(self, samples_in=None, n_components=30, use_gpu=False):
+    def __init__(self, samples_in=None, n_components=30, gpu=None):
 
-        self.use_gpu = use_gpu
+        self.gpu = gpu
+        if gpu is not None:
+            self.use_gpu = True
+            self.xp.cuda.runtime.setDevice(gpu)
+
+        else:
+            self.use_gpu = False
+            
         self.fitted = False
         run = True
         min_bic = self.xp.inf
@@ -1783,7 +1798,7 @@ class GMMFit:
             warm_start=False,
             verbose=0,
             verbose_interval=10,
-            use_gpu=use_gpu
+            gpu=self.gpu,
         )
         self.gmm = GaussianMixtureModel(**self.gmm_init_kwargs)
 
@@ -1917,11 +1932,14 @@ class GMMFit:
     #     return new_gmm
 
 
-def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, use_gpu=False, verbose=False):
+def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, gpu=None, verbose=False):
 
-    if use_gpu:
+    if gpu is not None:
+        use_gpu = True
         xp = cp
+        xp.cuda.runtime.setDevice(gpu)
     else:
+        use_gpu = False
         xp = np
     
     n_groups, n_samples, ndim = samples.shape
@@ -1945,7 +1963,7 @@ def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, 
 
         inds_here = xp.arange(n_groups)[~converged]
         samples_here = samples[inds_here]
-        gmm = GMMFit(samples_here, n_components=comp_i, use_gpu=use_gpu)
+        gmm = GMMFit(samples_here, n_components=comp_i, gpu=gpu)
         samp = gmm.rvs(n_samp_bic_test)
         bic = gmm.bic(samp)
 

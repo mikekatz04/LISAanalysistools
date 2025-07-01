@@ -1159,7 +1159,7 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 
 def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
 
-    gb = GBGPU(use_gpu=True)
+    gb = GBGPU(use_gpu=True, gpus=[gpu])
     xp.cuda.runtime.setDevice(gpu)
    
     fake_data = [xp.zeros_like(current_info.general_info["fd"], dtype=complex), xp.zeros_like(current_info.general_info["fd"], dtype=complex)]

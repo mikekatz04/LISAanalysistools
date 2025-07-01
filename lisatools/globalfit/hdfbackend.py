@@ -69,7 +69,8 @@ class GFHDFBackend(eryn_HDFBackend):
             self.sub_backend = {key: self.sub_backend[key](*args, **kwargs) for key in self.sub_backend if self.sub_backend[key] is not None}
     
         self.sub_state_bases = sub_state_bases
-        
+        self.recipe_added = False
+
     def reset(self, *args, **kwargs):
         # regular reset
         super().reset(*args, **kwargs)
@@ -83,6 +84,8 @@ class GFHDFBackend(eryn_HDFBackend):
             for sub_backend_tmp in self.sub_backend.values():
                 sub_backend_tmp.reset(*args, **kwargs)
 
+        with self.open("a") as f:
+            f[self.name].attrs["has_recipe"] = False
 
     def grow(self, ngrow, *args):
         super().grow(ngrow, *args)
@@ -200,6 +203,46 @@ class GFHDFBackend(eryn_HDFBackend):
         state.sub_states = sub_states
         state.sub_state_bases = sub_state_bases
         return state
+
+    @property
+    def has_recipe(self):
+        with self.open() as f:
+            return f[self.name].attrs["has_recipe"]
+
+    @property
+    def recipe(self):
+        assert self.has_recipe
+        with self.open() as f:
+            return f[self.name].attrs["recipe"]
+
+    def add_recipe(self, recipe):
+        if self.has_recipe:
+            with self.open() as f:
+                recipe_group = f[self.name]["recipe"]
+                for i, recipe_step in enumerate(recipe.recipe):
+                    key = recipe_step["name"]
+                    assert key in recipe_group
+                    recipe_step_group = recipe_group[key]
+                    recipe.recipe[i]["status"] = recipe_step_group.attrs["status"]
+                    order_i_in_file = recipe_step_group.attrs["order num"]
+                    assert order_i_in_file == i + 1
+                 
+        else:
+            _tmp = recipe.to_file()
+            with self.open("a") as f:
+                recipe_group = f[self.name].create_group("recipe")
+                for i, (key, val) in enumerate(_tmp.items()):
+                    recipe_step_group = recipe_group.create_group(key)
+                    recipe_step_group.attrs["status"] = val
+                    recipe_step_group.attrs["order num"] = i + 1
+
+                f[self.name].attrs["has_recipe"] = True
+
+    def completed_recipe_step(self, step_name):
+        with self.open("a") as f:
+            recipe_group = f[self.name]["recipe"]
+            recipe_step_group = recipe_group[step_name]
+            recipe_step_group.attrs["status"] = True
 
 class GBHDFBackend(eryn_HDFBackend):
 

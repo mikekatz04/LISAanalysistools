@@ -251,10 +251,10 @@ class GFState(eryn_State):
 
         else:
             self.sub_state_bases = sub_state_bases
+            
             for name in self.branches:
-                sub_state_base = sub_state_bases.get(name, None)
-                if sub_state_base is not None:
-                    self.sub_states[name] = sub_state_base(
+                if sub_state_bases is not None and sub_state_bases[name] is not None:
+                    self.sub_states[name] = sub_state_bases[name](
                         possible_state, # this is just coords in the first input
                         *args,
                         **kwargs

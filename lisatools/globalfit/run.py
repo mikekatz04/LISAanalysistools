@@ -88,7 +88,7 @@ class CurrentInfoGlobalFit:
         self.current_info = deepcopy(settings)
 
         print("generalize the backend stuff")
-        self.backend = GFHDFBackend("test_new_gb_17.h5")
+        self.backend = GFHDFBackend("test_new_gb_19.h5")
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         
@@ -190,6 +190,7 @@ class GlobalFit:
         self.gf_branch_information = gf_branch_information
         self.comm = comm
         self.curr = curr
+        self.recipe = curr.current_info["recipe"]
         self.rank = comm.Get_rank()
         self.nwalkers = self.curr.general_info["nwalkers"]
         self.ntemps = self.curr.general_info["ntemps"]
@@ -215,32 +216,29 @@ class GlobalFit:
         name = "GlobalFit"
         self.logger = init_logger(filename="global_fit.log", level=level, name=name)
 
-    def load_info(self):
+    def load_info(self, priors):
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_gb_17.h5"):
-            state = GFHDFBackend("test_new_gb_17.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+        if os.path.exists("test_new_gb_19.h5"):
+            state = GFHDFBackend("test_new_gb_19.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
 
         else:
             self.logger.debug("update this somehow")
             # print("update this somehow")
             # # breakpoint()
-            coords = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key], self.gf_branch_information.ndims[key])) for key in self.gf_branch_information.branch_names}
-            inds = {key: np.ones((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
-            inds["gb"][:] = False
+            # start from priors by default
+            coords = {key: priors[key].rvs(size=(self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key])) for key in self.gf_branch_information.branch_names}
+            inds = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
+            # TODO: make this more generic to anything
+            inds["psd"][:] = True
+            inds["galfor"][:] = True
             state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            
             band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
             state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
-            import pickle
-            with open("pickle_state.pickle", "rb") as fp:
-                tmp_state = pickle.load(fp)
-            print("pickle state load success")
-            for key in ["psd", "galfor"]:
-                state.branches[key] = deepcopy(tmp_state.branches[key])
-            # # state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
-            self.logger.debug("pickle state load success")
+            # self.logger.debug("pickle state load success")
         return state
 
     def setup_acs(self, state):
@@ -294,7 +292,7 @@ class GlobalFit:
 
     def run_global_fit(self):
         
-        backend = GFHDFBackend("test_new_gb_17.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
+        backend = GFHDFBackend("test_new_gb_19.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
@@ -305,8 +303,21 @@ class GlobalFit:
             nleaves_min = self.gf_branch_information.nleaves_min
             nwalkers = general_info["nwalkers"]
             ntemps = general_info["ntemps"]
+
+            priors = {}
+            periodic = {}
+            for name in branch_names:
+                if name not in self.curr.source_info:
+                    continue
+                for key, value in self.curr.source_info[name]["priors"].items():
+                    priors[key] = value
+                
+                if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
+                    for key, value in self.curr.source_info[name]["periodic"].items():
+                        periodic[key] = value
+                # breakpoint()
            
-            state = self.load_info()
+            state = self.load_info(priors)
             self.logger.debug("state loaded")
 
             supps_base_shape = (ntemps, nwalkers)
@@ -377,23 +388,10 @@ class GlobalFit:
 
             state.log_like[:] = acs.likelihood()
 
-            priors = {}
-            periodic = {}
-            for name in branch_names:
-                if name not in self.curr.source_info:
-                    continue
-                for key, value in self.curr.source_info[name]["priors"].items():
-                    priors[key] = value
-                
-                if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
-                    for key, value in self.curr.source_info[name]["periodic"].items():
-                        periodic[key] = value
-                # breakpoint()
-            
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_gb_17.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_new_gb_19.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
@@ -482,6 +480,9 @@ class GlobalFit:
             for rank, tmp in rank_instructions.items():
                 self.comm.send({"rank": rank, **tmp}, dest=rank)
             
+            self.recipe.backend = backend
+            backend.add_recipe(self.recipe)
+
             # permute False is there for the PSD sampling for now
             sampler_mix = GlobalFitEngine(
                 acs,
@@ -500,18 +501,18 @@ class GlobalFit:
                 vectorize=True,
                 periodic=periodic,
                 branch_names=branch_names,
-                # update_fn=update,  # stop_converge_mix,
-                # update_iterations=gb_info["pe_info"]["update_iterations"],
+                # update_fn=recipe,  # stop_converge_mix,
+                # update_iterations=1,  # TODO: change this?
                 provide_groups=True,
                 provide_supplemental=True,
                 track_moves=False,
-                # stopping_fn=stopping_fn,
-                # stopping_iterations=stopping_iterations,
+                stopping_fn=self.recipe,
+                stopping_iterations=1,
             )
 
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
             state.log_prior = np.zeros_like(state.log_like)  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
-            
+            self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
             sampler_mix.run_mcmc(state, 100, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

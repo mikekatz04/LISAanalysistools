@@ -4,6 +4,10 @@ from eryn.moves import CombineMove
 class GlobalFitMove:
     ranks_initialized = False
 
+    def __init__(self, *args, name=None, **kwargs):
+        assert name is not None
+        self.name = name
+        
     @property
     def comm(self):
         return self._comm

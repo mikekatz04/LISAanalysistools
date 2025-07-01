@@ -549,6 +549,16 @@ class AnalysisContainerArray:
         self.reset_linear_data_arr()
         self.reset_linear_psd_arr()
 
+    def zero_out_data_arr(self):
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+        
+        for gpu_i, gpu in enumerate(self.gpus):
+            with self.xp.cuda.device.Device(gpu):
+                self.linear_data_arr[gpu_i][:] = 0.0
+
+        self.xp.cuda.runtime.setDevice(main_gpu)
+
     def reset_linear_data_arr(self):
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
