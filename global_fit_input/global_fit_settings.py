@@ -82,7 +82,7 @@ class GBSearchStep(RecipeStep):
         sampler.moves = self.moves
         sampler.weights = self.weights
         for move in sampler.moves:
-            move.periodic = sampler.periodic
+            move.periodic = sampler.moves[0].periodic
             move.ntemps = sampler.ntemps 
             move.temperature_control = sampler.temperature_control
 
@@ -814,10 +814,10 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [0]
+    gpus = [7]
     cp.cuda.runtime.setDevice(gpus[0])
-    nwalkers = 20
-    ntemps = 2
+    nwalkers = 36
+    ntemps = 24
 
     orbits = EqualArmlengthOrbits()
     gpu_orbits = EqualArmlengthOrbits(use_gpu=True)
@@ -1007,7 +1007,7 @@ def get_global_fit_settings(copy_settings_file=False):
     priors_gb_fin = {"gb": ProbDistContainer(priors_gb)}
 
     snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
-    ntemps_pe = 2  # len(snrs_ladder)
+    ntemps_pe = 24  # len(snrs_ladder)
     # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
     betas = 1 / 1.2 ** np.arange(ntemps_pe)
     if ntemps_pe > 1:
@@ -1416,8 +1416,8 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
         #GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        #GFBranchInfo("gb", 8, 15000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
+        GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        #GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )

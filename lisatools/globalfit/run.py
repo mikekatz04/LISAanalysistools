@@ -88,7 +88,7 @@ class CurrentInfoGlobalFit:
         self.current_info = deepcopy(settings)
 
         print("generalize the backend stuff")
-        self.backend = GFHDFBackend("emri_noise_galfor_tight.h5")
+        self.backend = GFHDFBackend("test_gb_recipe.h5")
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         
@@ -219,50 +219,41 @@ class GlobalFit:
     def load_info(self, priors):
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("emri_noise_galfor_tight.h5"):
-            state = GFHDFBackend("emri_noise_galfor_tight.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+        if os.path.exists("test_gb_recipe.h5"):
+            state = GFHDFBackend("test_gb_recipe.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
             print(state.log_like[0])
         else:
             self.logger.debug("update this somehow")
             # print("update this somehow")
             # # breakpoint()
-            coords = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key], self.gf_branch_information.ndims[key])) for key in self.gf_branch_information.branch_names}
+            # coords = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key], self.gf_branch_information.ndims[key])) for key in self.gf_branch_information.branch_names}
             
-            import pickle
-            with open("psd_state.pickle", "rb") as fp:
-                tmp_state = pickle.load(fp)
-
-            for key in ["psd", "galfor"]:
-                coords_tmp = tmp_state.branches_coords[key].copy()
-                coords[key] = coords_tmp[:self.ntemps, :self.nwalkers]
-
-            # self.logger.debug("coords loaded from pickle, galfor currently from priors")
-            #coords["galfor"] = self.curr.source_info['psd']['priors']['galfor'].rvs(size=(self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max["galfor"]))
-            
-            # breakpoint()
-
-            inds = {key: np.ones((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
-            
-            if "gb" in self.gf_branch_information.branch_names:
-                inds["gb"][:] = False
-                state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
-                band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
-                state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
-            else:
-                state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
-
             # import pickle
             # with open("psd_state.pickle", "rb") as fp:
             #     tmp_state = pickle.load(fp)
-            # print("pickle state load success")
-            # #breakpoint()
-            # for key in ["psd", "galfor"]:
-            #     #state.branches[key] = deepcopy(tmp_state.branches[key])
-            #     state.branches_coords[key] = tmp_state.branches_coords[key].copy()
 
-            #     breakpoint()
-            if 'emri' in state.sub_states.keys():
-                state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
+            # for key in ["psd", "galfor"]:
+            #     coords_tmp = tmp_state.branches_coords[key].copy()
+            #     coords[key] = coords_tmp[:self.ntemps, :self.nwalkers]
+
+            # # self.logger.debug("coords loaded from pickle, galfor currently from priors")
+            # #coords["galfor"] = self.curr.source_info['psd']['priors']['galfor'].rvs(size=(self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max["galfor"]))
+            
+            # # breakpoint()
+
+            # inds = {key: np.ones((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
+            
+            # if "gb" in self.gf_branch_information.branch_names:
+            #     inds["gb"][:] = False
+            #     state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            #     band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
+            #     state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
+            # else:
+            #     state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+
+            # if 'emri' in state.sub_states.keys():
+            #     state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
+            
             # start from priors by default
             coords = {key: priors[key].rvs(size=(self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key])) for key in self.gf_branch_information.branch_names}
             inds = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
@@ -330,7 +321,7 @@ class GlobalFit:
 
     def run_global_fit(self):
         
-        backend = GFHDFBackend("emri_noise_galfor_tight.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
+        backend = GFHDFBackend("test_gb_recipe.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
@@ -429,7 +420,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "emri_noise_galfor_tight.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                "test_gb_recipe.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
