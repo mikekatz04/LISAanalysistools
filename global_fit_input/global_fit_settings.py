@@ -81,10 +81,14 @@ class GBSearchStep(RecipeStep):
     def setup_run(self, iteration, last_sample, sampler):
         sampler.moves = self.moves
         sampler.weights = self.weights
+        for move in sampler.moves:
+            move.periodic = sampler.periodic
+            move.ntemps = sampler.ntemps 
+            move.temperature_control = sampler.temperature_control
 
     def stopping_function(self, iteration, last_sample, sampler):
         # this will already be converged to max logl
-        return True
+        return False
     
 
 def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
@@ -748,7 +752,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [7]
+    gpus = [2]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36

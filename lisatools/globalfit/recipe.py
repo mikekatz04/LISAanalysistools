@@ -1,5 +1,5 @@
 
-class Recipe(Update):
+class Recipe:
     def __init__(self):
         self.recipe = []
         self.backend_added = False

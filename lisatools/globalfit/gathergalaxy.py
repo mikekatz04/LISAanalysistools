@@ -1157,47 +1157,27 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 
 
 
-def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
+def gather_gb_samples(current_info, reader, sens_mat, gpu, samples_keep=1, thin_by=1, snr_lim_first_cut=6.0, snr_lim_second_cut=5.0, overlap_lim=0.5):
 
     gb = GBGPU(use_gpu=True, gpus=[gpu])
     xp.cuda.runtime.setDevice(gpu)
-   
-    fake_data = [xp.zeros_like(current_info.general_info["fd"], dtype=complex), xp.zeros_like(current_info.general_info["fd"], dtype=complex)]
+    fd = current_info.general_info["fd"]
+    fake_data = [xp.zeros((2, fd.shape[0]), dtype=complex)]
+    psd_in = [xp.asarray(sens_mat.invC.copy())]
     
-    step_index = slice(gb_reader.iteration - samples_keep, gb_reader.iteration, 1)
-    temp_index = [0]
-    slice_vals = (step_index, temp_index)
-    discard_val = gb_reader.iteration - samples_keep if gb_reader.iteration - samples_keep >= 0 else 0
-    
-    gb_file = gb_reader.filename
-    read_in_success = False
-    max_tries = 100
-    current_try = 0
-    while not read_in_success:
-        try:
-            with h5py.File(gb_file, "r") as fp:
-                iteration = fp["mcmc"].attrs["iteration"]
-                gb_samples = fp["mcmc"]["chain"]["gb"][iteration - samples_keep:iteration, 0, :, :, :]
-                gb_inds = fp["mcmc"]["inds"]["gb"][iteration - samples_keep:iteration, 0, :, :]
-            read_in_success = True
-        except BlockingIOError:
-            print("Failed open")
-            time.sleep(10.0)
-            current_try += 1
-            if current_try > max_tries:
-                raise BlockingIOError("Tried to read in data file many times, but to no avail.")
-
-
+    gb_samples = reader.get_chain(branch_names=["gb"], temp_index=0, discard=reader.iteration - samples_keep, thin=thin_by)["gb"]
+    gb_inds = reader.get_inds(branch_names=["gb"], temp_index=0, discard=reader.iteration - samples_keep, thin=thin_by)["gb"]
+                
     gb_samples = gb_samples.reshape(-1, gb_samples.shape[-2], gb_samples.shape[-1])
     gb_inds = gb_inds.reshape(-1, gb_inds.shape[-1])
 
     test_bins_for_snr = gb_samples[gb_inds]
 
-    transform_fn = current_info.gb_info["transform"]
+    transform_fn = current_info.source_info['gb']["transform"]
     test_bins_for_snr_in = transform_fn.both_transforms(test_bins_for_snr)
     gb.d_d = 0.0
 
-    waveform_kwargs = current_info.gb_info["waveform_kwargs"].copy()
+    waveform_kwargs = current_info.source_info['gb']["waveform_kwargs"].copy()
     if "N" in waveform_kwargs:
         waveform_kwargs.pop("N")
 
@@ -1207,127 +1187,118 @@ def gather_gb_samples(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin
 
     gb_snrs = np.full(gb_inds.shape, -1e10)
     gb_snrs[gb_inds] = optimal_snr.get()
-
-    gb_keep = gb_snrs > 8.0
-    gb_inds_left = gb_inds.copy()
-
-    first_sample = gb_samples[0].reshape(-1, 8)
-    first_sample_snrs = gb_snrs[0].flatten()
-
-    keep_map = []
-    binaries_in_not_transformed = []
-    binaries_for_test_not_transformed = []
-    binaries_in = []
-    binaries_for_test = []
-    num_so_far = 0
-    keep_going_in = []
-    base_snrs_going_in = []
-    test_snrs_going_in = []
-    for i, bin in enumerate(first_sample):
-        #if i > 100:
-        #    continue
-        if first_sample_snrs[i] < 7.0:
-            continue
-        freq_dist = np.abs(bin[1] - gb_samples[1:, :, 1])
-        snr_dist = np.abs(first_sample_snrs[i] - gb_snrs[1:])
-
-        keep_going_in.append(i)
-        keep_i = np.where((freq_dist < 1e-4) & (snr_dist < 20.0))
-
-        base_snrs_going_in.append(np.repeat(first_sample_snrs[i], len(keep_i[0])))
-        test_snrs_going_in.append(gb_snrs[1:][keep_i])
-        keep_map.append([num_so_far + np.arange(len(keep_i[0])), keep_i])
-        binaries_for_test_not_transformed.append(gb_samples[1:][keep_i])
-        binaries_in_not_transformed.append(np.tile(bin, (len(keep_i[0]), 1)))
-        binaries_for_test.append(transform_fn.both_transforms(gb_samples[1:][keep_i]))
-        binaries_in.append(transform_fn.both_transforms(np.tile(bin, (len(keep_i[0]), 1))))
-
-        num_so_far += len(keep_i[0])
-        
-
-    bins_fin_test_in = np.concatenate(binaries_for_test)
-    bins_fin_base_in = np.concatenate(binaries_in)
-    bins_fin_test_in_not_transformed = np.concatenate(binaries_for_test_not_transformed)
-    bins_fin_base_in_not_transformed = np.concatenate(binaries_in_not_transformed)
-    snrs_fin_test_in = np.concatenate(test_snrs_going_in)
-    snrs_fin_base_in = np.concatenate(base_snrs_going_in)
-
-    N_vals = get_N(bins_fin_test_in[:, 0], bins_fin_test_in[:, 1], YEAR, oversample=4)
-    fake_data_swap = [[fake_data[0]], [fake_data[1]]]
-    psd_in_swap = [[psd_in[0]], [psd_in[1]]]
-    gb.gpus = [gpu]
-    
-    ll_diff = np.zeros(bins_fin_base_in.shape[0])
-    batch_size = int(1e3)
-
-    inds_split = np.arange(0, bins_fin_base_in.shape[0] + batch_size, batch_size)
-
-    for jjj, (start_ind, end_ind) in enumerate(zip(inds_split[:-1], inds_split[1:])):
-        waveform_kwargs["N"] = xp.asarray(N_vals[start_ind:end_ind])
-    
-        _ = gb.swap_likelihood_difference(bins_fin_base_in[start_ind:end_ind],bins_fin_test_in[start_ind:end_ind],fake_data_swap,psd_in_swap,start_freq_ind=0,data_length=len(fake_data[0]),data_splits=[np.array([0])],**waveform_kwargs,)
-
-        # ll_diff[start_ind:end_ind] = (-1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real).get()
-        ll_diff[start_ind:end_ind] = (gb.add_remove.real / np.sqrt(gb.add_add * gb.remove_remove)).get()
-        print(start_ind, len(inds_split) - 1)
+    gb_inds_tmp = gb_inds.copy()
 
     keep_groups = []
-    keep_group_number = []
-    keep_group_samples = []
-    keep_group_snrs = []
-    keep_group_sample_id = []
-    max_number = 0
-    num_so_far_gather = 0
-
-    for i, keep_map_i in enumerate(keep_map):
-        # TODO: check this?
-        (keep_inds, keep_map_back) = keep_map_i
-        if len(keep_inds) == 0:
-            continue
-        ll_diff_i = ll_diff[keep_inds]
-        group_test = (ll_diff_i > 0.5)  # .get()
-        num_grouping = group_test.sum()
+    random_samples = np.random.choice(np.arange(len(gb_samples)), len(gb_samples) - 1, replace=False)
+    for samp_i in range(len(gb_samples) - 1):
         
-        in_here = keep_going_in[i]
-        sample_map = np.concatenate([np.array([0]), keep_map_back[0][group_test] + 1])
-        binary_map = np.concatenate([np.array([in_here]), keep_map_back[1][group_test]])
-        try:
-            binary_samples = np.concatenate([np.array([bins_fin_base_in_not_transformed[keep_inds[0]]]), bins_fin_test_in_not_transformed[keep_inds][group_test]])
-        except IndexError:
-            breakpoint()
-
-        binary_snrs = np.concatenate([np.array([snrs_fin_base_in[keep_inds[0]]]), snrs_fin_test_in[keep_inds][group_test]])
+        first_sample = gb_samples[random_samples[samp_i]].reshape(-1, 8)
+        first_sample_snrs = gb_snrs[random_samples[samp_i]].flatten()
+        inds_keep_i = np.delete(np.arange(gb_samples.shape[0]), random_samples[:samp_i+1])
+        gb_samples_in = gb_samples[inds_keep_i]
+        # gb_inds_tmp not gb_inds because we adjust that overtime 
+        # to reflect binaries already taken
+        gb_inds_in = gb_inds_tmp[inds_keep_i]
+        gb_snrs_in = gb_snrs[inds_keep_i]
         
-        if not np.all(gb_inds_left[sample_map, binary_map]):
-            # TODO: fix this
-            ind_fix = np.where(~gb_inds_left[sample_map, binary_map])
-            sample_map = np.delete(sample_map, ind_fix)
-            binary_map = np.delete(binary_map, ind_fix)
+        keep_map = []
+        binaries_for_test = []
+        binaries_base_sample = []
+        num_so_far = 0
+        keep_going_in = []
 
-        if (num_grouping + 1) > 2:
-            # remove them from possible future grouping
-            gb_inds_left[sample_map, binary_map] = False
+        for i, binary in enumerate(first_sample):
+            if first_sample_snrs[i] < snr_lim_first_cut:
+                continue
+            freq_dist = np.abs(binary[1] - gb_samples_in[:, :, 1])
+            # snr_dist covers binaries that have inds False
+            snr_dist = np.abs(first_sample_snrs[i] - gb_snrs_in)
+
+            keep_going_in.append(i)
+            keep_i = np.where((freq_dist < 1e-4) & (snr_dist < 20.0) & (gb_snrs_in >= snr_lim_second_cut) & gb_inds_in)
+
+            keep_map.append([num_so_far + np.arange(len(keep_i[0])), keep_i])
+            binaries_for_test.append(gb_samples_in[keep_i])
+            binaries_base_sample.append(np.tile(binary, (len(keep_i[0]), 1)))
+            num_so_far += len(keep_i[0])
+            
+        binaries_for_test = np.concatenate(binaries_for_test, axis=0)
+        binaries_base_sample = np.concatenate(binaries_base_sample, axis=0)
+        band_inds = np.searchsorted(current_info.source_info["gb"]["band_edges"], binaries_for_test[:, 1] / 1e3, side="right") - 1
+
+        N_vals = current_info.source_info["gb"]["band_N_vals"][band_inds]
         
-            keep_group_number.append(num_grouping + 1)
-            if num_grouping + 1 > max_number:
-                max_number = num_grouping + 1
+        batch_size = int(1e7)
 
+        # reset data and psd
+        fake_data = [xp.zeros((2, fd.shape[0]), dtype=complex)]
+        psd_in = [xp.asarray(sens_mat.invC.copy())]
+        
+        inds_split = np.arange(0, binaries_for_test.shape[0] + batch_size, batch_size)
+        ll_diff = np.zeros(binaries_for_test.shape[0])
+        for jjj, (start_ind, end_ind) in enumerate(zip(inds_split[:-1], inds_split[1:])):
+            waveform_kwargs["N"] = xp.asarray(N_vals[start_ind:end_ind])
 
-            keep_group_samples.append(binary_samples)
-            keep_group_snrs.append(binary_snrs)
-            keep_groups.append((num_grouping, sample_map, binary_map))
+            binaries_for_test_batch_in = transform_fn.both_transforms(binaries_for_test[start_ind:end_ind])
+            binaries_base_sample_batch_in = transform_fn.both_transforms(binaries_base_sample[start_ind:end_ind])
+            if fd[0] != 0.0:
+                raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
-            num_so_far_gather += 1
+            _ = gb.swap_likelihood_difference(binaries_for_test_batch_in, binaries_base_sample_batch_in, fake_data, psd_in, phase_marginalize=True, start_freq_ind=0, **waveform_kwargs)
 
-            keep_group_sample_id.append(np.asarray([np.full(binary_samples.shape[0], num_so_far_gather), np.full(binary_samples.shape[0], (num_grouping + 1) / gb_samples.shape[0])]))
+            # ll_diff[start_ind:end_ind] = (-1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real).get()
+            ll_diff[start_ind:end_ind] = (gb.add_remove.real / np.sqrt(gb.add_add.real * gb.remove_remove.real)).get()
+            print(start_ind, len(inds_split) - 1)
 
-    output_information = []
-    for i in range(len(keep_group_sample_id)):
-        output_information.append(np.concatenate([keep_group_sample_id[i].T, keep_group_snrs[i][:, None], keep_group_samples[i]], axis=1))
-    
-    if len(output_information) > 0:
-        output_information = np.concatenate(output_information, axis=0)
-    return output_information
+        for i, keep_map_i in enumerate(keep_map):
+            # TODO: check this?
+            (keep_inds, keep_map_back) = keep_map_i
+            if len(keep_inds) == 0:
+                continue
+            
+            ll_diff_i = ll_diff[keep_inds]
+            group_test = (ll_diff_i > overlap_lim)  # .get()
+            num_grouping = group_test.sum()
+            if num_grouping == 0:
+                continue
+
+            in_here = keep_going_in[i]
+
+            # gb_inds_in[keep_map_back][group_test] = 
+            ind1 = inds_keep_i[keep_map_back[0][group_test]]
+            ind2 = keep_map_back[1][group_test]
+
+            if np.any(~gb_inds_tmp[ind1, ind2]):
+                _remove_here = np.arange(group_test.shape[0])[group_test][~gb_inds_tmp[ind1, ind2]]
+                group_test[_remove_here] = False
+                num_grouping = group_test.sum()
+                if num_grouping == 0:
+                    continue
+
+                ind1 = inds_keep_i[keep_map_back[0][group_test]]
+                ind2 = keep_map_back[1][group_test]
+
+            if not np.all(gb_inds_tmp[ind1, ind2]):
+                breakpoint()
+            gb_inds_tmp[ind1, ind2] = False
+            
+            group = np.concatenate([first_sample[in_here][None, :], gb_samples_in[keep_map_back][group_test]], axis=0)
+            if len(group) == 1:
+                breakpoint()
+            if not np.any(np.all(((gb_snrs_in > snr_lim_second_cut) & gb_inds_in)[keep_map_back][group_test])):
+                breakpoint()
+            
+            if (num_grouping + 1) > gb_samples.shape[0]:
+                # remove them from possible future grouping
+                breakpoint()
+
+            keep_groups.append(group)
+        print(f"samp_i: {samp_i + 1}, num: {gb_inds_tmp.sum()}")
+    num_in_group = [len(group_i) for group_i in keep_groups]
+    # need to consolidate
+    breakpoint()
+    return keep_groups
 
 
 # np.savetxt("output_samples_from_gbs_grouped.txt", output_information, header="id, confidence, amp, f0, fdot, phi0, inc, psi, lam, beta", delimiter=",")

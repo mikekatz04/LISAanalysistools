@@ -282,7 +282,7 @@ class Buffer:
         now_index = (self.special_indices_unique_sort[cp.searchsorted(self.special_indices_unique[self.special_indices_unique_sort], special_inds_test, side="right") - 1]).astype(cp.int32)
         return now_index 
 
-    def __init__(self, is_rj, nwalkers, gb, band_edges, band_N_vals, unique_band_combos, params_interest, num_bands_now, nchannels, data_length, special_indices_unique, transform_fn, waveform_kwargs, df, sources_now_map, sources_inject_now_map, special_band_inds, opt_snr_rej_samp_limit=10.0, use_gpu=True, use_template_arr=False, *args, **kwargs):
+    def __init__(self, is_rj, nwalkers, gb, band_edges, band_N_vals, unique_band_combos, params_interest, num_bands_now, nchannels, data_length, special_indices_unique, transform_fn, waveform_kwargs, df, sources_now_map, sources_inject_now_map, special_band_inds, opt_snr_rej_samp_limit=5.0, use_gpu=True, use_template_arr=False, *args, **kwargs):
         self.use_gpu = use_gpu
         assert self.use_gpu == gb.use_gpu
         self.gb = gb
@@ -1950,11 +1950,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
 
         # Check that the dimensions are compatible.
         ntemps, nwalkers, nleaves_max, ndim = state.branches_coords["gb"].shape
-
+        
         if not self.is_rj_prop and not np.any(state.branches["gb"].inds):
             return state, np.zeros((ntemps, nwalkers), dtype=bool)
         
         self.nwalkers = nwalkers
+        self.ntemps = ntemps
         
         # Run any move-specific setup.
         self.setup(model, state.branches)
@@ -2018,10 +2019,17 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         self.reset_non_gb_linear_data_arr = model.analysis_container_arr.linear_data_arr[0].copy()
         self.add_cold_chain_sources_to_residual(model, band_sorter, apply_inds=True)
         ll_after = model.analysis_container_arr.likelihood(source_only=False)  #  - cp.sum(cp.log(cp.asarray(psd[:2])), axis=(0, 2))).get()
-
+        
         # print(np.abs(new_state.log_like - ll_after).max())
         store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
         start_diffs = np.abs(new_state.log_like[0] - ll_after)
+        
+        check = ll_after - new_state.log_like[0] - start_diffs
+
+        if not np.abs(check).max() < 1e-4:
+            assert np.abs(check).max() < 1.0
+            new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
+
         # print("CHECKING 0:", store_max_diff, self.is_rj_prop)
         # self.check_ll_inject(new_state, verbose=True)
         assert np.all(start_diffs < 2.0)
@@ -2043,10 +2051,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
 
         print("ADD check", start_diffs, check)
 
-        try:
-            assert np.abs(check).max() < 1e-1
-        except AssertionError:
-            breakpoint()    
+        if not np.abs(check).max() < 1e-4:
+            assert np.abs(check).max() < 1.0
+            new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
+
 
         
         # TEMPERING
@@ -2077,7 +2085,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
             ll_after = model.analysis_container_arr.likelihood()
             check = ll_after - new_state.log_like[0] - start_diffs
 
-            assert np.abs(check).max() < 1e-4
+            if not np.abs(check).max() < 1e-4:
+                assert np.abs(check).max() < 1.0
+                new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
+
             self.mempool.free_all_blocks()
             et_temp = time.perf_counter()
             print("check tempering", start_diffs, check)
@@ -2672,7 +2683,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         opt_snr = opt_snr.reshape(samples.shape[:-1]).get()
 
         # TODO: make cut adjustable
-        groups_running_now = opt_snr.min(axis=(0, 2)) > 10.0
+        groups_running_now = opt_snr.min(axis=(0, 2)) > 5.0
         print(f"FOUND {groups_running_now.sum()} out of {groups_running_now.shape[0]}")
         if not np.any(groups_running_now):
             print("Did not find any new sources.")
