@@ -87,8 +87,8 @@ class CurrentInfoGlobalFit:
         self.settings_dict = settings
         self.current_info = deepcopy(settings)
 
-        print("generalize the backend stuff")
-        self.backend = GFHDFBackend("test_new_gb_19.h5")
+        backend_path = self.general_info["file_information"]["fp_main"]
+        self.backend = GFHDFBackend(backend_path)
 
         mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         
@@ -184,13 +184,13 @@ from eryn.moves import CombineMove
 from .moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove
 from .galaxyglobal import make_gmm
 from .utils import new_sens_mat, BasicResidualacsLikelihood
+from .recipe import Recipe
 
 class GlobalFit:
     def __init__(self, gf_branch_information, curr, comm):
         self.gf_branch_information = gf_branch_information
         self.comm = comm
         self.curr = curr
-        self.recipe = curr.current_info["recipe"]
         self.rank = comm.Get_rank()
         self.nwalkers = self.curr.general_info["nwalkers"]
         self.ntemps = self.curr.general_info["ntemps"]
@@ -219,8 +219,9 @@ class GlobalFit:
     def load_info(self, priors):
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        if os.path.exists("test_new_gb_19.h5"):
-            state = GFHDFBackend("test_new_gb_19.h5", sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+        backend_path = self.curr.general_info["file_information"]["fp_main"]
+        if os.path.exists(backend_path):
+            state = GFHDFBackend(backend_path, sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
 
         else:
             self.logger.debug("update this somehow")
@@ -292,7 +293,9 @@ class GlobalFit:
 
     def run_global_fit(self):
         
-        backend = GFHDFBackend("test_new_gb_19.h5", sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
+        backend_path = self.curr.general_info["file_information"]["fp_main"]
+        
+        backend = GFHDFBackend(backend_path, sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
@@ -391,7 +394,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                "test_new_gb_19.h5",   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                backend_path,   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
@@ -419,20 +422,24 @@ class GlobalFit:
                     **extra_reset_kwargs
                 )
 
-            setup_info_all = None
-            for name in branch_names:
-                if name not in self.curr.source_info:
-                    setup_info = SetupInfoTransfer(name=name)
+            # setup_info_all = None
+            # for name in branch_names:
+            #     if name not in self.curr.source_info:
+            #         setup_info = SetupInfoTransfer(name=name)
                     
-                elif "setup_func" in self.curr.source_info[name]:
-                    setup_info = self.curr.source_info[name]["setup_func"](self.gf_branch_information, self.curr, acs, priors, state)
-                else:
-                    setup_info = SetupInfoTransfer(name=name)
+            #     elif "setup_func" in self.curr.source_info[name]:
+            #         setup_info = self.curr.source_info[name]["setup_func"](self.gf_branch_information, self.curr, acs, priors, state)
+            #     else:
+            #         setup_info = SetupInfoTransfer(name=name)
 
-                if setup_info_all is None:
-                    setup_info_all = setup_info
-                else:
-                    setup_info_all += setup_info
+            #     if setup_info_all is None:
+            #         setup_info_all = setup_info
+            #     else:
+            #         setup_info_all += setup_info
+
+            self.recipe = Recipe()
+            setup_info_all = self.curr.settings_dict["setup_function"](self.recipe, self.gf_branch_information, self.curr, acs, priors, state)
+            print("need to setup moves that use parallel resources")
 
             # backend.grow(1, None)
             # accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
@@ -441,7 +448,8 @@ class GlobalFit:
             # exit()
 
             rank_instructions = {}
-            for move_tmp in setup_info_all.in_model_moves + setup_info_all.rj_moves:  
+            print("NEED TO FIX")
+            for move_tmp in []:  # setup_info_all.in_model_moves + setup_info_all.rj_moves:  
                 if isinstance(move_tmp, tuple) or isinstance(move_tmp, list):
                     move_tmp = move_tmp[0]
 
@@ -483,6 +491,8 @@ class GlobalFit:
             self.recipe.backend = backend
             backend.add_recipe(self.recipe)
 
+            from eryn.moves import StretchMove
+            _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
             sampler_mix = GlobalFitEngine(
                 acs,
@@ -494,8 +504,8 @@ class GlobalFit:
                 nbranches=len(branch_names),
                 nleaves_max=nleaves_max,
                 nleaves_min=nleaves_min,
-                moves=setup_info_all.in_model_moves_input,
-                rj_moves=setup_info_all.rj_moves_input,
+                moves=_tmp_move,  # setup_info_all.in_model_moves_input,
+                rj_moves=None,  # setup_info_all.rj_moves_input,
                 kwargs=None,
                 backend=backend,
                 vectorize=True,
@@ -509,7 +519,8 @@ class GlobalFit:
                 stopping_fn=self.recipe,
                 stopping_iterations=1,
             )
-
+            _tmp_move.temperature_control.swaps_accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
+            
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
             state.log_prior = np.zeros_like(state.log_like)  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)

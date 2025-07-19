@@ -13,6 +13,7 @@ from .globalfitmove import GlobalFitMove, GFCombineMove
 from ..galaxyglobal import run_gb_bulk_search, fit_each_leaf, make_gmm
 from eryn.state import BranchSupplemental
 from typing import Optional      
+import os
 
 try:
     import cupy as cp
@@ -1960,6 +1961,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         # Run any move-specific setup.
         self.setup(model, state.branches)
 
+        # after setup is still no dist, return
+        if self.rj_proposal_distribution is None:
+            return state, np.zeros((ntemps, nwalkers), dtype=bool)
+
         new_state = GFState(state, copy=True)
         band_temps = cp.asarray(state.sub_states["gb"].band_info["band_temps"].copy())
 
@@ -2112,7 +2117,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         # turn on all the ones that are there
         new_state.branches["gb"].inds[inds_new] = True
 
-        new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
+        # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
         et_all = time.perf_counter()
         print(self.name, et_all - st_all)
 
@@ -2824,10 +2829,117 @@ class GBSpecialRJSearchMove(GBSpecialBase):
 
         print("CHECK INSIDE PROP")
 
-class GBSpecialRJRefitMove(GBSpecialBase):
-    def setup(self, model, branches):
-        return
-        
+from ..gathergalaxy import gather_gb_samples
+from ..hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
+from ..state import GBState
 
-    def get_rank_function(self):
-        return gb_refit_func
+class GBSpecialRJRefitMove(GBSpecialBase):
+    def __init__(self, *args, fp=None, **kwargs):
+        assert fp is not None and isinstance(fp, str)
+        assert os.path.exists(fp)
+        self.fp = fp
+        GBSpecialBase.__init__(self, *args, **kwargs)
+
+    def setup(self, model, branches):
+        # FOR FAST TESTING/DEBUGGING
+        # import pickle
+        # with open("gmm_tmp.pickle", "rb") as fp:
+        #     full_gmm = pickle.load(fp)
+
+        # rj_dist = ProbDistContainer(
+        #     {
+        #         (0, 1, 2, 4, 6, 7): full_gmm, 
+        #         3: uniform_dist(0.0, 2 * np.pi),
+        #         5: uniform_dist(0.0, np.pi),
+        #     },
+        #     use_cupy=True
+        # )
+        # self.rj_proposal_distribution = {"gb": rj_dist}
+        # return
+        # run paraensemble MCMC. 
+        
+        max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
+        self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
+        reader = GFHDFBackend(self.fp, sub_state_bases={"gb": GBState}, sub_backend={"gb": GBHDFBackend})
+
+        st = time.perf_counter()
+        sens_mat = model.analysis_container_arr[max_logl_walker].sens_mat
+        samples_keep = 5
+        if reader.iteration < 2 * samples_keep:
+            return
+
+        num_compare_samples = 1
+        nwalkers = 36
+        gpu = self.xp.cuda.runtime.getDevice()
+        groups = gather_gb_samples(self.fd, self.parameter_transforms, self.waveform_kwargs.copy(), self.band_edges, self.band_N_vals, reader, sens_mat, gpu, num_compare_samples=num_compare_samples, samples_keep=samples_keep, thin_by=1)
+        
+        num_in_groups = np.asarray([len(tmp) for tmp in groups])
+        keep = num_in_groups > nwalkers * samples_keep / 2
+
+        max_num_source = max([tmp.shape[0] for tmp in groups])
+        samples = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
+        for i, group in enumerate(groups):
+            samples[i, :len(group)] = group
+        
+        samples_fin = samples[keep]
+        num_in_groups_fin = num_in_groups[keep]
+        cp.cuda.runtime.setDevice(gpu)
+        output_info = []
+        step = 5
+        steps = np.arange(num_in_groups_fin.min(), num_in_groups_fin.max(), step)
+        if steps[-1] < num_in_groups_fin.max().item():
+            steps = np.concatenate([steps, np.array([num_in_groups_fin.max().item()])])
+        
+        weights_all = []
+        means_all = []
+        covs_all = []
+        invcovs_all = []
+        dets_all = []
+        mins_all = []
+        maxs_all = []
+        for start, end in zip(steps[:-1], steps[1:]):
+            here = (num_in_groups_fin >= start) & (num_in_groups_fin < end)
+            # this randomly throughs away ~step amount of samples to make gmm work
+            samples_here = samples_fin[here][:, :start, np.array([0, 1, 2, 4, 6, 7])].copy()
+            weights, means, covs, invcovs, dets, mins, maxs = vec_fit_gmm_min_bic(cp.asarray(samples_here), min_comp=1, max_comp=30, n_samp_bic_test=5000, gpu=gpu, verbose=False, return_components=True)
+            weights_all += weights
+            means_all += means
+            covs_all += covs
+            invcovs_all += invcovs
+            dets_all += dets
+            mins_all += mins
+            maxs_all += maxs
+            print(start, end)
+    
+        full_gmm = FullGaussianMixtureModel(weights_all, means_all, covs_all, invcovs_all, dets_all, mins_all, maxs_all, use_cupy=True)
+        
+        print("time:", time.perf_counter() - st)
+        rj_dist = ProbDistContainer(
+            {
+                (0, 1, 2, 4, 6, 7): full_gmm, 
+                3: uniform_dist(0.0, 2 * np.pi),
+                5: uniform_dist(0.0, np.pi),
+            },
+            use_cupy=True
+        )
+        # if self.ranks_needed == 0:
+        #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
+        #     gmm_info = gather_gmms(gmms)
+
+        # else:
+        #     if self.comm_info is None:
+        #         # this only happens the first time through
+        #         self.comm_info = self.comm.recv(tag=232342)
+                
+        #     gmm_info = fit_gmm(samples_2.get(), self.comm, self.comm_info)
+        
+        # full_gmm = FullGaussianMixtureModel(*gmm_info, use_cupy=self.use_gpu)
+        # breakpoint()
+
+        gen_samp = self.xp.asarray(rj_dist.rvs(1000))
+        # gen_ll, gen_opt_snr = para_log_like(gen_samp, *ll_args, fstat=False, return_snr=True)
+        # print(gen_ll, self.gb.d_h / gen_opt_snr, gen_opt_snr)
+        # breakpoint()
+        
+        self.rj_proposal_distribution = {"gb": rj_dist}
+

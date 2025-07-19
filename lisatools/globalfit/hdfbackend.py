@@ -213,7 +213,20 @@ class GFHDFBackend(eryn_HDFBackend):
     def recipe(self):
         assert self.has_recipe
         with self.open() as f:
-            return f[self.name].attrs["recipe"]
+            _recipe = {}
+            order = []
+            keys = []
+            for key in f[self.name]["recipe"]:
+                _recipe[key] = {key: val for key, val in f["mcmc"]["recipe"][key].attrs.items()}
+                order.append(_recipe[key]["order num"])
+                keys.append(key)
+
+            new_order = np.argsort(np.asarray(order))
+            recipe = {}
+            for i in new_order:
+                recipe[keys[i]] = _recipe[keys[i]]
+
+        return recipe
 
     def add_recipe(self, recipe):
         if self.has_recipe:

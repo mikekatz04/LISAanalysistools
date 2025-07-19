@@ -63,12 +63,12 @@ def mbh_dist_trans(x):
 from eryn.utils.updates import Update
 
 from lisatools.globalfit.recipe import Recipe, RecipeStep
+import time
+
 
 class PSDSearchRecipeStep(RecipeStep):
-
     def setup_run(self, iteration, last_sample, sampler):
         # making sure
-        self.moves[0].max_logl_mode = True
         sampler.moves = self.moves
         sampler.weights = self.weights
 
@@ -77,32 +77,124 @@ class PSDSearchRecipeStep(RecipeStep):
         return True
 
 
-class GBSearchStep(RecipeStep):
+class GBRunStep(RecipeStep):
+
+    def __init__(self, *args, convergence_iter=5, thin_by=1, verbose=False, **kwargs):
+        self.convergence_iter = convergence_iter
+        self.verbose = verbose
+        RecipeStep.__init__(self, *args, **kwargs)
+        self.thin_by = thin_by
+
+    def stopping_function(self, i, sample, sampler):
+
+        if not hasattr(self, "st"):
+            self.st = time.perf_counter()
+
+        current_iter = sampler.backend.iteration
+
+        stop = False
+        if current_iter > self.convergence_iter:
+
+            nleaves_cc = sampler.backend.get_nleaves(branch_names=["gb"], temp_index=0)["gb"]
+
+            # do not include most recent
+            nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
+            nleaves_cc_max_new = nleaves_cc[-self.convergence_iter:].max()
+
+            if nleaves_cc_max_old >= nleaves_cc_max_new:
+                stop = True
+
+            else:
+                stop = False
+
+            if self.verbose:
+                dur = (time.perf_counter() - self.st) / 3600.0  # hours
+                print(
+                    "\nnleaves max old:\n",
+                    nleaves_cc_max_old,
+                    "\nnleaves max new:\n",
+                    nleaves_cc_max_new,
+                    f"\nTIME TO NOW: {dur} hours"
+                )
+
+        return stop
+        
     def setup_run(self, iteration, last_sample, sampler):
+        # TODO: maybe make this the defaul setup
         sampler.moves = self.moves
         sampler.weights = self.weights
+        sampler.override_thin_by = self.thin_by
+        sampler.yield_step = self.thin_by
+        sampler.checkpoint_step = self.thin_by
         for move in sampler.moves:
             move.periodic = sampler.periodic
             move.ntemps = sampler.ntemps 
             move.temperature_control = sampler.temperature_control
 
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return False
-    
 
-def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
+def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
+    # _ = setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
+    # _ = setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     gb_info = curr.source_info["gb"]
     # TODO: adjust this indide current info
-    recipe = curr.current_info["recipe"]
     general_info = curr.general_info
-    band_edges = gb_info["band_edges"]
-    band_N_vals = gb_info["band_N_vals"]
-    betas = gb_info["pe_info"]["betas"]
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+
+    gpus = curr.general_info["gpus"]
+    cp.cuda.runtime.setDevice(gpus[0])
+    from gbgpu.gbgpu import GBGPU
+    
+    gb = GBGPU(gpus=gpus)
+    gb.gpus = gpus
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
     
-    band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
+    # setup psd search move
+    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
+    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    psd_move_args = (gb, acs, priors)
+
+    psd_move_kwargs = dict(
+        num_repeats=500,
+        live_dangerously=True,
+        gibbs_sampling_setup=[{
+            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
+            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
+        }],
+        temperature_control=temperature_control
+    )
+    
+    psd_search_move = PSDMove(
+        *psd_move_args, 
+        max_logl_mode=True,
+        name="psd search move",
+        **psd_move_kwargs,
+    )
+
+    psd_pe_move = PSDMove(
+        *psd_move_args, 
+        max_logl_mode=False,
+        name="psd pe move",
+        **psd_move_kwargs,
+    )
+    # TODO: put this under the hood
+    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+
+    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    
+    # return SetupInfoTransfer(
+    #     name="psd",
+    #     in_model_moves=[],  # (psd_move, 1.0)],
+    # )
+    band_edges = gb_info["band_edges"]
+    band_N_vals = gb_info["band_N_vals"]
+    gb_betas = gb_info["pe_info"]["betas"]
+    
+    # TODO: make sure all temperatures are read in from file including psd
+    band_temps = np.tile(np.asarray(gb_betas), (len(band_edges) - 1, 1))
 
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for key, item in gpu_priors_in.items():
@@ -111,8 +203,6 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     from eryn.prior import ProbDistContainer
     gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
 
-
-    from gbgpu.gbgpu import GBGPU
     gb = GBGPU(use_gpu=True)
     gpus = curr.general_info["gpus"]
     cp.cuda.runtime.setDevice(gpus[0])
@@ -190,15 +280,15 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
             state.branches["gb"].inds[0]
         ]
 
+        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
+        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
+        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
+        
         check = priors["gb"].logpdf(coords_out_gb)
 
         if np.any(np.isinf(check)):
             raise ValueError("Starting priors are inf.")
 
-        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
-        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
-        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
-        
         coords_in_in = gb_info["transform"].both_transforms(coords_out_gb)
 
         band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
@@ -216,8 +306,6 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         # goes in as -h
         factors = -cp.ones_like(data_index, dtype=cp.float64)
 
-
-        band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
         from gbgpu.utils.utility import get_N
 
         N_vals = band_N_vals[band_inds]
@@ -254,7 +342,6 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
     # plt.xlim(band_edges.min(), band_edges.max())
     # plt.savefig("check1.png")
     # plt.close()
-    # breakpoint()
 
     band_edges = gb_info["band_edges"]
     num_sub_bands = len(band_edges)
@@ -274,39 +361,21 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
 
     band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
     N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
-    band_mean_f = (band_edges[1:] + band_edges[:-1]) / 2
-    from gbgpu.utils.utility import get_N
 
     if state.branches["gb"].inds.sum() > 0:
         f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
         band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
         N_vals_in[state.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state.branches["gb"].inds]]
 
-    branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
-    state.branches["gb"].branch_supplemental = BranchSupplemental(
-        {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
-    )
+    # branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
+    # state.branches["gb"].branch_supplemental = BranchSupplemental(
+    #     {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
+    # )
 
     ########### GB
-
-    gb_kwargs = dict(
-        waveform_kwargs=waveform_kwargs,
-        parameter_transforms=gb_info["transform"],
-        provide_betas=True,
-        skip_supp_names_update=["group_move_points"],
-        random_seed=general_info["random_seed"],
-        use_gpu=True,
-        nfriends=nwalkers,
-        phase_maximize=gb_info["pe_info"]["in_model_phase_maximize"],
-        ranks_needed=0,
-        gpus=[],
-        name="group_prop",
-        **gb_info["pe_info"]["group_proposal_kwargs"]
-    )
-
     fd = general_info["fd"].copy()
 
-    gb_args = (
+    gb_move_args = (
         gb,
         priors,
         general_info["start_freq_ind"],
@@ -318,158 +387,98 @@ def setup_gb_functionality(gf_branch_info, curr, acs, priors, state):
         gpu_priors,
     )
 
-    # gb_move = GBSpecialStretchMove(
-    #     *gb_args,
-    #     **gb_kwargs,
-    # )
-
-    # add the other
-    # gb_move.gb.gpus = gpus
-
-    rj_moves_in = []
-    rj_moves_in_frac = []
-
-    gb_kwargs_rj = dict(
+    gb_move_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=gb_info["transform"],
-        search=False,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=general_info["random_seed"],
         use_gpu=True,
-        rj_proposal_distribution=gpu_priors,
-        name="rj_prior",
-        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
         nfriends=nwalkers,
+        **gb_info["pe_info"]["group_proposal_kwargs"]
+    )
+
+    gb_search_prune_move = GBSpecialRJPriorMove(
+        *gb_move_args, 
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior_search",
+        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
         ranks_needed=0,
         run_swaps=True, 
         gpus=[],
-        **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
-    )
-    print("using prior removal and combine move")
-
-    gb_args_rj = (
-        gb,
-        priors,
-        general_info["start_freq_ind"],
-        acs.data_length,
-        acs,
-        np.asarray(fd),
-        band_edges,
-        band_N_vals,
-        gpu_priors,
+        **gb_move_kwargs
     )
 
-    rj_move_prior = GBSpecialRJPriorMove(
-        *gb_args_rj,
-        **gb_kwargs_rj,
-    )
-
-    # rj_moves_in.append(rj_move_prior)
-    # rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
-
-    ranks_needed_here = 0
-    gb_kwargs_rj2 = dict(
-        waveform_kwargs=waveform_kwargs,
-        parameter_transforms=gb_info["transform"],
-        search=False,
-        provide_betas=True,
-        skip_supp_names_update=["group_move_points"],
-        random_seed=general_info["random_seed"],
-        use_gpu=True,
-        rj_proposal_distribution=gpu_priors,
+    gb_search_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
         run_swaps=False, 
         name="rj_fstat_mcmc_search",
-        use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
-        nfriends=nwalkers,
-        phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
-        ranks_needed=ranks_needed_here,
+        phase_maximize=True, 
+        ranks_needed=0,
         gpus=[],
-        **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
+        **gb_move_kwargs
     )
 
-    rj_serial_search_move = GBSpecialRJSerialSearchMCMC(
-        *gb_args_rj,
-        **gb_kwargs_rj2,
+    backend_name = general_info["file_information"]["fp_main"]
+    gb_search_refit_move = GBSpecialRJRefitMove(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        run_swaps=False, 
+        name="rj_refit_search",
+        fp=backend_name,
+        phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
     )
-    rj_serial_search_move.rj_proposal_distribution = None
 
-    rj_moves_in.append(rj_serial_search_move)
-    rj_moves_in_frac.append(gb_info["pe_info"]["rj_prior_fraction"])
-
-    # gb_kwargs_rj_search = dict(
-    #     waveform_kwargs=waveform_kwargs,
-    #     parameter_transforms=gb_info["transform"],
-    #     search=False,
-    #     provide_betas=True,
-    #     skip_supp_names_update=["group_move_points"],
-    #     random_seed=general_info["random_seed"],
-    #     use_gpu=True,
-    #     rj_proposal_distribution={"gb": make_gmm(gb, curr.gb_info["search_gmm_info"])},
-    #     name="rj_search",
-    #     use_prior_removal=gb_info["pe_info"]["use_prior_removal"],
-    #     nfriends=nwalkers,
-    #     phase_maximize=gb_info["pe_info"]["rj_phase_maximize"],
-    #     ranks_needed=5,
-    #     gpus=[6],
-    #     **gb_info["pe_info"]["group_proposal_kwargs"]  # needed for it to work
-    # )
-
-    # gb_args_rj_search = (
-    #     gb,
-    #     priors,
-    #     general_info["start_freq_ind"],
-    #     acs.data_length,
-    #     acs,
-    #     np.asarray(fd),
-    #     band_edges,
-        # band_N_vals,
-    #     gpu_priors,
-    # )
-
-    # rj_move_search = GBSpecialRJSearchMove(
-    #     *gb_args_rj_search,
-    #     psd_like=psd_move.compute_log_like,  # cleanup
-    #     **gb_kwargs_rj_search,
-    # )
-
-    # rj_moves_in.append(rj_move_search)
-    # rj_moves_in_frac.append(gb_info["pe_info"]["rj_search_fraction"])
+    gb_search_moves = GFCombineMove([psd_search_move, gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, psd_search_move])
+    gb_search_moves.accepted = np.zeros((ntemps, nwalkers))
     
-    total_frac = sum(rj_moves_in_frac)
-
-    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
-    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
-    # need permute to be False
-    psd_move = PSDMove(
-        gb, acs, priors, num_repeats=500, max_logl_mode=True,
-        live_dangerously=True, 
-        name="psd move",
-        gibbs_sampling_setup=[{
-            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
-            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
-        }],
-        temperature_control=temperature_control
-    )
-    rj_moves = [(rj_move_i, rj_move_frac_i / total_frac) for rj_move_i, rj_move_frac_i in zip(rj_moves_in, rj_moves_in_frac)]
-
-    # moves = GFCombineMove([rj_serial_search_move, gb_move, rj_move_prior])
-    moves = GFCombineMove([psd_move, rj_serial_search_move, rj_move_prior, psd_move])
-    moves.accepted = np.zeros((ntemps, nwalkers))
+    recipe.add_recipe_component(GBRunStep(moves=[gb_search_moves], convergence_iter=5, verbose=True), name="gb search")
     
-    tmp = recipe.recipe[1]
-    assert tmp["name"] == "gb search"
-    tmp["adjust"].moves = [moves]
-    
-    return SetupInfoTransfer(
-        name="gb",
-        in_model_moves=[psd_move],  # moves],  # ], #[moves],  # [gb_move] + rj_moves,  # [gb_move] + rj_moves, # probably better to run them all together
-        # rj_moves=rj_moves,
+    gb_pe_prior_move = GBSpecialRJPriorMove(
+        *gb_move_args, 
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior",
+        use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
+        phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        run_swaps=True, 
+        gpus=[],
+        **gb_move_kwargs
     )
 
+    gb_pe_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        run_swaps=True, 
+        name="rj_fstat_mcmc",
+        phase_maximize=False, 
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
+    )
+
+    gb_pe_refit_move = GBSpecialRJRefitMove(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        run_swaps=True, 
+        name="rj_refit",
+        fp=backend_name,
+        phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
+    )
+    full_pe_moves = [psd_pe_move, gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
+    full_pe_weights = [0.3, 0.6, 0.08, 0.02]
+    recipe.add_recipe_component(GBRunStep(moves=full_pe_moves, weights=full_pe_weights, thin_by=5, convergence_iter=100, verbose=True), name="gb pe")
+    
             
-def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
+def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
@@ -518,37 +527,6 @@ def setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
     )
 
 
-def setup_psd_functionality(gf_branch_info, curr, acs, priors, state):
-    gpus = curr.general_info["gpus"]
-    cp.cuda.runtime.setDevice(gpus[0])
-    gb = GBGPU(use_gpu=True)
-    gb.gpus = gpus
-    nwalkers = curr.general_info["nwalkers"]
-    ntemps = curr.general_info["ntemps"]
-    recipe = curr.current_info["recipe"]
-    
-    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
-    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
-    psd_move = PSDMove(
-        gb, acs, priors, num_repeats=500, max_logl_mode=False,
-        live_dangerously=True,
-        name="psd move 2", 
-        gibbs_sampling_setup=[{
-            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
-            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
-        }],
-        temperature_control=temperature_control
-    )
-    psd_move.accepted = np.zeros((ntemps, nwalkers))
-    tmp = recipe.recipe[0]
-    assert tmp["name"] == "psd search"
-    tmp["adjust"].moves = [psd_move]
-
-    return SetupInfoTransfer(
-        name="psd",
-        in_model_moves=[],  # (psd_move, 1.0)],
-    )
-
 class WrapEMRI:
     def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind, dt):
         self.waveform_gen_td = waveform_gen_td
@@ -565,7 +543,7 @@ class WrapEMRI:
         return AET_f
 
 
-def setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
     from lisatools.sources.emri import EMRITDIWaveform  
 
@@ -653,7 +631,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_2nd_run_through"
+    base_file_name = "rework_4th_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -752,7 +730,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [2]
+    gpus = [7]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36
@@ -782,7 +760,7 @@ def get_global_fit_settings(copy_settings_file=False):
         random_seed=1024,
         begin_new_likelihood=False,
         plot_iter=4,
-        backup_iter=10,
+        backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
         tukey_alpha=tukey_alpha,
@@ -1018,7 +996,6 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     all_gb_info = dict(
-        setup_func=setup_gb_functionality,
         band_edges=band_edges,
         band_N_vals=band_N_vals,
         periodic=gb_periodic,
@@ -1081,7 +1058,6 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     all_psd_info = dict(
-        setup_func=setup_psd_functionality,
         periodic=None,
         priors={"psd": ProbDistContainer(priors_psd), "galfor": ProbDistContainer(priors_galfor)},
         psd_kwargs=psd_kwargs,
@@ -1353,10 +1329,6 @@ def get_global_fit_settings(copy_settings_file=False):
         + GFBranchInfo("psd", 4, 1, 1)
     )
 
-    recipe = Recipe()
-    recipe.add_recipe_component(PSDSearchRecipeStep(), name="psd search")
-    recipe.add_recipe_component(GBSearchStep(), name="gb search")
-    
     return {
         "gf_branch_information": gf_branch_information,
         "source_info":{
@@ -1367,8 +1339,8 @@ def get_global_fit_settings(copy_settings_file=False):
         },
         "general": all_general_info,
         "rank_info": rank_info,
+        "setup_function": setup_recipe,
         "gpu_assignments": gpu_assignments,
-        "recipe": recipe,
     }
 
 
