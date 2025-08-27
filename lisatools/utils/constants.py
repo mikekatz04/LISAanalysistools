@@ -38,3 +38,17 @@ lisaLT = lisaL / C_SI  # LISA's armn in sec
 Sloc = (1.7e-12) ** 2  # m^2/Hz
 Ssci = (8.9e-12) ** 2  # m^2/Hz
 Soth = (2.0e-12) ** 2  # m^2/Hz
+
+######################
+# Physical constants #
+######################
+
+# Mass of Jupiter
+Mjup = 1.898e27
+
+#################
+# LISA constant #
+#################
+
+# Transfer frequency
+fstar = C_SI / (lisaL * 2 * PI)
