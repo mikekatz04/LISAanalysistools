@@ -1,27 +1,25 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="../../">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.analysiscontainer &mdash; lisaanalysistools 1.0.12 documentation</title>
-      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
-      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=61a4c737" />
+  <title>lisatools.analysiscontainer &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
 
   
-  <!--[if lt IE 9]>
-    <script src="../../_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="../../_static/jquery.js?v=5d32c60e"></script>
-        <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=a4fe78c3"></script>
-        <script src="../../_static/doctools.js?v=888ff710"></script>
-        <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=588f6264"></script>
+      <script src="../../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" /> 
@@ -65,6 +63,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Diagnostics">Diagnostics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Data-/-Residual-/-Signal-Container">Data / Residual / Signal Container</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Analysis-Container">Analysis Container</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorial/lisatools_tutorial.html#Comparing-XYZ-and-AET">Comparing XYZ and AET</a></li>
 </ul>
 
         </div>
@@ -92,38 +91,38 @@
            <div itemprop="articleBody">
              
   <h1>Source code for lisatools.analysiscontainer</h1><div class="highlight"><pre>
-<span></span><span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">annotations</span>
+<span></span><span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
 
-<span class="kn">import</span> <span class="nn">warnings</span>
-<span class="kn">from</span> <span class="nn">abc</span> <span class="kn">import</span> <span class="n">ABC</span>
-<span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">List</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">ABC</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">List</span>
 
-<span class="kn">import</span> <span class="nn">math</span>
-<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 
-<span class="kn">from</span> <span class="nn">scipy</span> <span class="kn">import</span> <span class="n">interpolate</span>
-<span class="kn">import</span> <span class="nn">matplotlib.pyplot</span> <span class="k">as</span> <span class="nn">plt</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">scipy</span><span class="w"> </span><span class="kn">import</span> <span class="n">interpolate</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
 
-<span class="kn">from</span> <span class="nn">eryn.utils</span> <span class="kn">import</span> <span class="n">TransformContainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">eryn.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">TransformContainer</span>
 
 
 <span class="k">try</span><span class="p">:</span>
-    <span class="kn">import</span> <span class="nn">cupy</span> <span class="k">as</span> <span class="nn">cp</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
 
 <span class="k">except</span> <span class="p">(</span><span class="ne">ModuleNotFoundError</span><span class="p">,</span> <span class="ne">ImportError</span><span class="p">):</span>
-    <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">cp</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
 
-<span class="kn">from</span> <span class="nn">.</span> <span class="kn">import</span> <span class="n">detector</span> <span class="k">as</span> <span class="n">lisa_models</span>
-<span class="kn">from</span> <span class="nn">.utils.utility</span> <span class="kn">import</span> <span class="n">AET</span><span class="p">,</span> <span class="n">get_array_module</span>
-<span class="kn">from</span> <span class="nn">.utils.constants</span> <span class="kn">import</span> <span class="o">*</span>
-<span class="kn">from</span> <span class="nn">.stochastic</span> <span class="kn">import</span> <span class="p">(</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">detector</span> <span class="k">as</span> <span class="n">lisa_models</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.utils.utility</span><span class="w"> </span><span class="kn">import</span> <span class="n">AET</span><span class="p">,</span> <span class="n">get_array_module</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.utils.constants</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.stochastic</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">StochasticContribution</span><span class="p">,</span>
     <span class="n">FittedHyperbolicTangentGalacticForeground</span><span class="p">,</span>
 <span class="p">)</span>
-<span class="kn">from</span> <span class="nn">.datacontainer</span> <span class="kn">import</span> <span class="n">DataResidualArray</span>
-<span class="kn">from</span> <span class="nn">.sensitivity</span> <span class="kn">import</span> <span class="n">SensitivityMatrix</span>
-<span class="kn">from</span> <span class="nn">.diagnostic</span> <span class="kn">import</span> <span class="p">(</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.datacontainer</span><span class="w"> </span><span class="kn">import</span> <span class="n">DataResidualArray</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.sensitivity</span><span class="w"> </span><span class="kn">import</span> <span class="n">SensitivityMatrix</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.diagnostic</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">noise_likelihood_term</span><span class="p">,</span>
     <span class="n">residual_full_source_and_noise_likelihood</span><span class="p">,</span>
     <span class="n">residual_source_likelihood_term</span><span class="p">,</span>
@@ -135,7 +134,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer">[docs]</a>
-<span class="k">class</span> <span class="nc">AnalysisContainer</span><span class="p">:</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">AnalysisContainer</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Combinatorial container that combines sensitivity and data information.</span>
 
 <span class="sd">    Args:</span>
@@ -146,7 +145,7 @@
 
 <span class="sd">    &quot;&quot;&quot;</span>
 
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="n">data_res_arr</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">,</span>
         <span class="n">sens_mat</span><span class="p">:</span> <span class="n">SensitivityMatrix</span><span class="p">,</span>
@@ -159,29 +158,29 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">signal_gen</span> <span class="o">=</span> <span class="n">signal_gen</span>
 
     <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DataResidualArray</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DataResidualArray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Data information.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr</span>
 
     <span class="nd">@data_res_arr</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data_res_arr</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">data_res_arr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data_res_arr</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Set data.&quot;&quot;&quot;</span>
         <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">data_res_arr</span><span class="p">,</span> <span class="n">DataResidualArray</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_data_res_arr</span> <span class="o">=</span> <span class="n">data_res_arr</span>
 
     <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SensitivityMatrix</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">SensitivityMatrix</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Sensitivity information.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span>
 
     <span class="nd">@sens_mat</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">:</span> <span class="n">SensitivityMatrix</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">sens_mat</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">:</span> <span class="n">SensitivityMatrix</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="s2">&quot;Set sensitivity information.&quot;</span>
         <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">sens_mat</span><span class="p">,</span> <span class="n">SensitivityMatrix</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_sens_mat</span> <span class="o">=</span> <span class="n">sens_mat</span>
 
     <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">signal_gen</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">callable</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">signal_gen</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">callable</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Signal generator.&quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_signal_gen&quot;</span><span class="p">):</span>
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
@@ -190,14 +189,14 @@
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_signal_gen</span>
 
     <span class="nd">@signal_gen</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">signal_gen</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">signal_gen</span><span class="p">:</span> <span class="nb">callable</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">signal_gen</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">signal_gen</span><span class="p">:</span> <span class="nb">callable</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Set signal generator.&quot;&quot;&quot;</span>
         <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">signal_gen</span><span class="p">,</span> <span class="s2">&quot;__call__&quot;</span><span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_signal_gen</span> <span class="o">=</span> <span class="n">signal_gen</span>
 
 <div class="viewcode-block" id="AnalysisContainer.loglog">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.loglog">[docs]</a>
-    <span class="k">def</span> <span class="nf">loglog</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">plt</span><span class="o">.</span><span class="n">Figure</span><span class="p">,</span> <span class="n">plt</span><span class="o">.</span><span class="n">Axes</span><span class="p">]:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">loglog</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">plt</span><span class="o">.</span><span class="n">Figure</span><span class="p">,</span> <span class="n">plt</span><span class="o">.</span><span class="n">Axes</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Produce loglog plot of both source and sensitivity information.</span>
 
 <span class="sd">        Returns:</span>
@@ -229,7 +228,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.inner_product">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.inner_product">[docs]</a>
-    <span class="k">def</span> <span class="nf">inner_product</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">inner_product</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the inner product of the current set of information</span>
 
 <span class="sd">        Args:</span>
@@ -247,7 +246,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.snr">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.snr">[docs]</a>
-    <span class="k">def</span> <span class="nf">snr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">snr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the SNR of the current set of information</span>
 
 <span class="sd">        Args:</span>
@@ -262,7 +261,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.template_inner_product">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.template_inner_product">[docs]</a>
-    <span class="k">def</span> <span class="nf">template_inner_product</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">template_inner_product</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">template</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate the inner product of a template with the data.</span>
@@ -287,7 +286,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.template_snr">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.template_snr">[docs]</a>
-    <span class="k">def</span> <span class="nf">template_snr</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">template_snr</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">template</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">,</span> <span class="n">phase_maximize</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate the SNR of a template, both optimal and detected.</span>
@@ -323,7 +322,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.template_likelihood">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.template_likelihood">[docs]</a>
-    <span class="k">def</span> <span class="nf">template_likelihood</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">template_likelihood</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="n">template</span><span class="p">:</span> <span class="n">DataResidualArray</span><span class="p">,</span>
         <span class="n">include_psd_info</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
@@ -370,7 +369,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.likelihood">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.likelihood">[docs]</a>
-    <span class="k">def</span> <span class="nf">likelihood</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">likelihood</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="n">noise_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="nb">dict</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="nb">complex</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the likelihood of the current arangement.</span>
@@ -398,7 +397,7 @@
             <span class="p">)</span></div>
 
 
-    <span class="k">def</span> <span class="nf">_calculate_signal_operation</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_calculate_signal_operation</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="n">calc</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
         <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
@@ -458,7 +457,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.calculate_signal_likelihood">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_likelihood">[docs]</a>
-    <span class="k">def</span> <span class="nf">calculate_signal_likelihood</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">calculate_signal_likelihood</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
@@ -493,7 +492,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.calculate_signal_inner_product">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_inner_product">[docs]</a>
-    <span class="k">def</span> <span class="nf">calculate_signal_inner_product</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">calculate_signal_inner_product</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
@@ -528,7 +527,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.calculate_signal_snr">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.calculate_signal_snr">[docs]</a>
-    <span class="k">def</span> <span class="nf">calculate_signal_snr</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">calculate_signal_snr</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
         <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
         <span class="n">source_only</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
@@ -563,7 +562,7 @@
 
 <div class="viewcode-block" id="AnalysisContainer.eryn_likelihood_function">
 <a class="viewcode-back" href="../../user/datacontainer.html#lisatools.analysiscontainer.AnalysisContainer.eryn_likelihood_function">[docs]</a>
-    <span class="k">def</span> <span class="nf">eryn_likelihood_function</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">eryn_likelihood_function</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="nb">list</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="nb">float</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Likelihood function for Eryn sampler.</span>

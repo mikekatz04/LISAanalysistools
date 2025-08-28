@@ -1,12 +1,14 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="../">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Introduction &mdash; lisaanalysistools 1.0.14 documentation</title>
-      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+  <title>Introduction &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-dataframe.css?v=2082cf3c" />
@@ -14,18 +16,14 @@
       <link rel="stylesheet" type="text/css" href="../_static/nbsphinx-code-cells.css?v=2aa19091" />
 
   
-  <!--[if lt IE 9]>
-    <script src="../_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="../_static/jquery.js?v=5d32c60e"></script>
-        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=cb0f6c17"></script>
-        <script src="../_static/doctools.js?v=9bcbadda"></script>
-        <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
-        <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
-        <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=588f6264"></script>
+      <script src="../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+      <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -131,18 +129,18 @@
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[1]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">matplotlib.pyplot</span> <span class="k">as</span> <span class="nn">plt</span>
-<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">matplotlib.pyplot</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">plt</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 
-<span class="kn">from</span> <span class="nn">eryn.utils</span> <span class="kn">import</span> <span class="n">TransformContainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">eryn.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">TransformContainer</span>
 
-<span class="kn">from</span> <span class="nn">lisatools.sensitivity</span> <span class="kn">import</span> <span class="o">*</span>
-<span class="kn">from</span> <span class="nn">lisatools.utils.constants</span> <span class="kn">import</span> <span class="o">*</span>
-<span class="kn">from</span> <span class="nn">lisatools.diagnostic</span> <span class="kn">import</span> <span class="o">*</span>
-<span class="kn">from</span> <span class="nn">lisatools.detector</span> <span class="kn">import</span> <span class="n">EqualArmlengthOrbits</span><span class="p">,</span> <span class="n">ESAOrbits</span>
-<span class="kn">from</span> <span class="nn">lisatools.detector</span> <span class="kn">import</span> <span class="n">LISAModel</span>
-<span class="kn">from</span> <span class="nn">lisatools.detector</span> <span class="kn">import</span> <span class="n">get_available_default_lisa_models</span>
-<span class="kn">from</span> <span class="nn">lisatools.detector</span> <span class="kn">import</span> <span class="n">scirdv1</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.sensitivity</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.utils.constants</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.diagnostic</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.detector</span><span class="w"> </span><span class="kn">import</span> <span class="n">EqualArmlengthOrbits</span><span class="p">,</span> <span class="n">ESAOrbits</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.detector</span><span class="w"> </span><span class="kn">import</span> <span class="n">LISAModel</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.detector</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_available_default_lisa_models</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.detector</span><span class="w"> </span><span class="kn">import</span> <span class="n">scirdv1</span>
 <br/></pre></div>
 </div>
 </div>
@@ -187,7 +185,7 @@ Text(0, 0.5, &#39;Characteristic Strain&#39;)
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[3]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">lisatools.sensitivity</span> <span class="kn">import</span> <span class="n">get_stock_sensitivity_options</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.sensitivity</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_stock_sensitivity_options</span>
 </pre></div>
 </div>
 </div>
@@ -320,7 +318,7 @@ Text(0, 0.5, &#39;PSD&#39;)
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[8]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">lisatools.sensitivity</span> <span class="kn">import</span> <span class="n">get_stock_sensitivity_matrix_options</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.sensitivity</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_stock_sensitivity_matrix_options</span>
 </pre></div>
 </div>
 </div>
@@ -759,7 +757,7 @@ Text(0.5, 0, &#39;Time (s)&#39;)
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[19]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">sine_waveform</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">):</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">sine_waveform</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">):</span>
     <span class="k">return</span> <span class="n">A</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="n">f0</span> <span class="o">*</span> <span class="n">t_arr</span> <span class="o">+</span> <span class="n">phi0</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -1212,7 +1210,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[31]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">sine_waveform_approx</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">):</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">sine_waveform_approx</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">):</span>
     <span class="k">return</span> <span class="n">A</span> <span class="o">*</span> <span class="mf">1.03</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="p">(</span><span class="n">f0</span> <span class="o">*</span> <span class="mf">0.98</span><span class="p">)</span> <span class="o">*</span> <span class="n">t_arr</span> <span class="o">+</span> <span class="n">phi0</span><span class="p">)</span>
 <br/></pre></div>
 </div>
@@ -1256,7 +1254,7 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[33]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">lisatools.datacontainer</span> <span class="kn">import</span> <span class="n">DataResidualArray</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.datacontainer</span><span class="w"> </span><span class="kn">import</span> <span class="n">DataResidualArray</span>
 </pre></div>
 </div>
 </div>
@@ -1303,8 +1301,8 @@ Detected SNR against data h1 &lt;h1|h2&gt; / &lt;h1|h1&gt;^(1/2): 44.06637073762
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[36]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">lisatools.analysiscontainer</span> <span class="kn">import</span> <span class="n">AnalysisContainer</span>
-<span class="kn">from</span> <span class="nn">lisatools.sensitivity</span> <span class="kn">import</span> <span class="n">LISASens</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.analysiscontainer</span><span class="w"> </span><span class="kn">import</span> <span class="n">AnalysisContainer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lisatools.sensitivity</span><span class="w"> </span><span class="kn">import</span> <span class="n">LISASens</span>
 
 <span class="n">sens_mat</span> <span class="o">=</span> <span class="n">SensitivityMatrix</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">f_arr</span><span class="p">,</span> <span class="p">[</span><span class="n">LISASens</span><span class="p">,</span> <span class="n">LISASens</span><span class="p">],</span> <span class="n">stochastic_params</span><span class="o">=</span><span class="p">(</span><span class="n">YRSID_SI</span><span class="p">,))</span>
 <span class="n">analysis</span> <span class="o">=</span> <span class="n">AnalysisContainer</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">sens_mat</span><span class="p">)</span>
@@ -1468,7 +1466,7 @@ Template Likelihood: -2.0611573257758664
 <div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[44]:
 </pre></div>
 </div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">signal_model_sine</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">):</span>
+<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="k">def</span><span class="w"> </span><span class="nf">signal_model_sine</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">):</span>
     <span class="n">template</span> <span class="o">=</span> <span class="n">DataResidualArray</span><span class="p">([</span>
         <span class="n">sine_waveform</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">),</span>
         <span class="n">sine_waveform</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">f0</span><span class="p">,</span> <span class="n">phi0</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mf">2.</span><span class="p">,</span> <span class="n">t_arr</span><span class="p">)</span>
@@ -1559,7 +1557,7 @@ With parameters inner product: 1695.545121577205
 <span class="p">)</span>
 
 <span class="c1"># build waveforms</span>
-<span class="kn">from</span> <span class="nn">gbgpu.gbgpu</span> <span class="kn">import</span> <span class="n">GBGPU</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">gbgpu.gbgpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">GBGPU</span>
 <span class="n">gb</span> <span class="o">=</span> <span class="n">GBGPU</span><span class="p">()</span>
 <span class="n">gb</span><span class="o">.</span><span class="n">run_wave</span><span class="p">(</span>
     <span class="mf">1e-23</span><span class="p">,</span> <span class="mf">0.003</span><span class="p">,</span> <span class="mf">1e-17</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.4</span><span class="p">,</span> <span class="mf">0.8</span><span class="p">,</span> <span class="mf">0.9</span><span class="p">,</span> <span class="mf">0.3</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="n">T</span><span class="o">=</span><span class="n">Tobs</span><span class="p">,</span> <span class="n">dt</span><span class="o">=</span><span class="n">dt</span><span class="p">,</span> <span class="n">oversample</span><span class="o">=</span><span class="mi">4</span>

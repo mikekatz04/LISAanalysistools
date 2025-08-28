@@ -1,30 +1,28 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="./">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LISA Analysis Tools (lisatools) &mdash; lisaanalysistools 1.0.14 documentation</title>
-      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=19f00094" />
+  <title>LISA Analysis Tools (lisatools) &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
       <link rel="stylesheet" type="text/css" href="_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="_static/sg_gallery-rendered-html.css?v=1277b6f3" />
 
   
-  <!--[if lt IE 9]>
-    <script src="_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="_static/jquery.js?v=5d32c60e"></script>
-        <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="_static/documentation_options.js?v=cb0f6c17"></script>
-        <script src="_static/doctools.js?v=9bcbadda"></script>
-        <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
-        <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
-        <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=588f6264"></script>
+      <script src="_static/doctools.js?v=9a2dae69"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+      <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
@@ -222,7 +220,9 @@
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="user/stochastic.html">Stochastic Signals</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#lisatools.sensitivity.check_stochastic"><code class="docutils literal notranslate"><span class="pre">check_stochastic()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.get_stock_gb_stochastic_options"><code class="docutils literal notranslate"><span class="pre">get_stock_gb_stochastic_options()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.get_default_stochastic_from_str"><code class="docutils literal notranslate"><span class="pre">get_default_stochastic_from_str()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.check_stochastic"><code class="docutils literal notranslate"><span class="pre">check_stochastic()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="user/stochastic.html#stochastic-base-class">Stochastic Base Class</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.StochasticContribution"><code class="docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="user/stochastic.html#lisatools.stochastic.StochasticContribution.ndim"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.ndim</span></code></a></li>
@@ -340,14 +340,7 @@
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="user/sources.html#bbhs">BBHs</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="user/sources.html#lisatools.sources.bbh.BBHSNRWaveform"><code class="docutils literal notranslate"><span class="pre">BBHSNRWaveform</span></code></a><ul>
-<li class="toctree-l4"><a class="reference internal" href="user/sources.html#lisatools.sources.bbh.BBHSNRWaveform.f_arr"><code class="docutils literal notranslate"><span class="pre">BBHSNRWaveform.f_arr</span></code></a></li>
-<li class="toctree-l4"><a class="reference internal" href="user/sources.html#lisatools.sources.bbh.BBHSNRWaveform.__call__"><code class="docutils literal notranslate"><span class="pre">BBHSNRWaveform.__call__()</span></code></a></li>
-</ul>
-</li>
-</ul>
-</li>
+<li class="toctree-l2"><a class="reference internal" href="user/sources.html#bbhs">BBHs</a></li>
 <li class="toctree-l2"><a class="reference internal" href="user/sources.html#gbs">GBs</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="user/sources.html#lisatools.sources.gb.GBAETWaveform"><code class="docutils literal notranslate"><span class="pre">GBAETWaveform</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="user/sources.html#lisatools.sources.gb.GBAETWaveform.f_arr"><code class="docutils literal notranslate"><span class="pre">GBAETWaveform.f_arr</span></code></a></li>

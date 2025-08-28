@@ -1,11 +1,11 @@
 Stochastic Signals
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. autofunction:: lisatools.sensitivity.get_stock_gb_stochastic_options
+.. autofunction:: lisatools.stochastic.get_stock_gb_stochastic_options
 
-.. autofunction:: lisatools.sensitivity.get_default_stochastic_from_str
+.. autofunction:: lisatools.stochastic.get_default_stochastic_from_str
 
-.. autofunction:: lisatools.sensitivity.check_stochastic
+.. autofunction:: lisatools.stochastic.check_stochastic
 
 
 Stochastic Base Class

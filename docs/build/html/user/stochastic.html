@@ -1,30 +1,28 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="../">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stochastic Signals &mdash; lisaanalysistools 1.0.14 documentation</title>
-      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+  <title>Stochastic Signals &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
 
   
-  <!--[if lt IE 9]>
-    <script src="../_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="../_static/jquery.js?v=5d32c60e"></script>
-        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=cb0f6c17"></script>
-        <script src="../_static/doctools.js?v=9bcbadda"></script>
-        <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
-        <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
-        <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=588f6264"></script>
+      <script src="../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script>window.MathJax = {"tex": {"inlineMath": [["$", "$"], ["\\(", "\\)"]], "processEscapes": true}, "options": {"ignoreHtmlClass": "tex2jax_ignore|mathjax_ignore|document", "processHtmlClass": "tex2jax_process|mathjax_process|math|output_area"}}</script>
+      <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -56,7 +54,9 @@
 <li class="toctree-l1"><a class="reference internal" href="sensitivity.html">Sensitivity Information</a></li>
 <li class="toctree-l1"><a class="reference internal" href="detector.html">Detector Information</a></li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Stochastic Signals</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#lisatools.sensitivity.check_stochastic"><code class="docutils literal notranslate"><span class="pre">check_stochastic()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#lisatools.stochastic.get_stock_gb_stochastic_options"><code class="docutils literal notranslate"><span class="pre">get_stock_gb_stochastic_options()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#lisatools.stochastic.get_default_stochastic_from_str"><code class="docutils literal notranslate"><span class="pre">get_default_stochastic_from_str()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#lisatools.stochastic.check_stochastic"><code class="docutils literal notranslate"><span class="pre">check_stochastic()</span></code></a></li>
 <li class="toctree-l2"><a class="reference internal" href="#stochastic-base-class">Stochastic Base Class</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution"><code class="docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a><ul>
 <li class="toctree-l4"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution.ndim"><code class="docutils literal notranslate"><span class="pre">StochasticContribution.ndim</span></code></a></li>
@@ -144,8 +144,39 @@
   <section id="stochastic-signals">
 <h1>Stochastic Signals<a class="headerlink" href="#stochastic-signals" title="Link to this heading"></a></h1>
 <dl class="py function">
-<dt class="sig sig-object py" id="lisatools.sensitivity.check_stochastic">
-<span class="sig-prename descclassname"><span class="pre">lisatools.sensitivity.</span></span><span class="sig-name descname"><span class="pre">check_stochastic</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stochastic</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#check_stochastic"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.sensitivity.check_stochastic" title="Link to this definition"></a></dt>
+<dt class="sig sig-object py" id="lisatools.stochastic.get_stock_gb_stochastic_options">
+<span class="sig-prename descclassname"><span class="pre">lisatools.stochastic.</span></span><span class="sig-name descname"><span class="pre">get_stock_gb_stochastic_options</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#get_stock_gb_stochastic_options"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.get_stock_gb_stochastic_options" title="Link to this definition"></a></dt>
+<dd><p>Get stock options for stochastic contributions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a>]</span></p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of stock stochastic options.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.stochastic.get_default_stochastic_from_str">
+<span class="sig-prename descclassname"><span class="pre">lisatools.stochastic.</span></span><span class="sig-name descname"><span class="pre">get_default_stochastic_from_str</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stochastic</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#get_default_stochastic_from_str"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.get_default_stochastic_from_str" title="Link to this definition"></a></dt>
+<dd><p>Return a LISA stochastic from a <code class="docutils literal notranslate"><span class="pre">str</span></code> input.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>stochastic</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a></span>) – Stochastic contribution indicated with a <code class="docutils literal notranslate"><span class="pre">str</span></code>.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference internal" href="#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a></span></p>
+</dd>
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Stochastic contribution associated to that <code class="docutils literal notranslate"><span class="pre">str</span></code>.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lisatools.stochastic.check_stochastic">
+<span class="sig-prename descclassname"><span class="pre">lisatools.stochastic.</span></span><span class="sig-name descname"><span class="pre">check_stochastic</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stochastic</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lisatools/stochastic.html#check_stochastic"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lisatools.stochastic.check_stochastic" title="Link to this definition"></a></dt>
 <dd><p>Check input stochastic contribution.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -184,13 +215,13 @@
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>*params</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code> | <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">list</span></code></a></span>) – Parameters for the stochastic model.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – Keyword arguments for the stochastic model.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>*params</strong> (<span class="sphinx_autodoc_typehints-type">np.ndarray | list</span>) – Parameters for the stochastic model.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">Any</span>) – Keyword arguments for the stochastic model.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 </dl>
 </dd></dl>
@@ -202,13 +233,13 @@
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – Any arguments for the function.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Any" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Any</span></code></a></span>) – Any keyword arguments for the function.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type">Any</span>) – Any arguments for the function.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">Any</span>) – Any keyword arguments for the function.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Power spectral density contained in stochastic signal.</p>
@@ -245,15 +276,15 @@ Keys are the names and values are of type <a class="reference internal" href="#l
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>params_dict</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>]</span>) – Dictionary with keys equivalent to <code class="docutils literal notranslate"><span class="pre">self.stochastic_contribution_dict.keys()</span></code>.
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>params_dict</strong> (<span class="sphinx_autodoc_typehints-type">dict[tuple]</span>) – Dictionary with keys equivalent to <code class="docutils literal notranslate"><span class="pre">self.stochastic_contribution_dict.keys()</span></code>.
 Values are the parameters for each associated model.</p></li>
-<li><p><strong>kwargs_dict</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>]</span>) – Dictionary with keys equivalent to <code class="docutils literal notranslate"><span class="pre">self.stochastic_contribution_dict.keys()</span></code>.
+<li><p><strong>kwargs_dict</strong> (<span class="sphinx_autodoc_typehints-type">dict[dict]</span>) – Dictionary with keys equivalent to <code class="docutils literal notranslate"><span class="pre">self.stochastic_contribution_dict.keys()</span></code>.
 Values are the keyword argument dicts for each associated model.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Stochastic contribution.</p>
@@ -289,16 +320,16 @@ and <span class="math notranslate nohighlight">\(s_2\)</span> is a slope paramet
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>amp</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>) – Amplitude parameter for the Galaxy.</p></li>
-<li><p><strong>fk</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>) – Knee frequency in Hz.</p></li>
-<li><p><strong>alpha</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>) – Power law parameter.</p></li>
-<li><p><strong>s1</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>) – Slope parameter below knee.</p></li>
-<li><p><strong>s2</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>) – Slope parameter above knee.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>amp</strong> (<span class="sphinx_autodoc_typehints-type">float</span>) – Amplitude parameter for the Galaxy.</p></li>
+<li><p><strong>fk</strong> (<span class="sphinx_autodoc_typehints-type">float</span>) – Knee frequency in Hz.</p></li>
+<li><p><strong>alpha</strong> (<span class="sphinx_autodoc_typehints-type">float</span>) – Power law parameter.</p></li>
+<li><p><strong>s1</strong> (<span class="sphinx_autodoc_typehints-type">float</span>) – Slope parameter below knee.</p></li>
+<li><p><strong>s2</strong> (<span class="sphinx_autodoc_typehints-type">float</span>) – Slope parameter above knee.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>PSD of the Galaxy foreground noise</p>
@@ -382,12 +413,12 @@ inputs <code class="docutils literal notranslate"><span class="pre">Tobs</span><
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Tobs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>) – Observation time in seconds.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Tobs</strong> (<span class="sphinx_autodoc_typehints-type">float</span>) – Observation time in seconds.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>PSD of the Galaxy foreground noise</p>

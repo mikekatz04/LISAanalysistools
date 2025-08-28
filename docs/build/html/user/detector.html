@@ -1,28 +1,26 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="../">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Detector Information &mdash; lisaanalysistools 1.0.14 documentation</title>
-      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+  <title>Detector Information &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
 
   
-  <!--[if lt IE 9]>
-    <script src="../_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="../_static/jquery.js?v=5d32c60e"></script>
-        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=cb0f6c17"></script>
-        <script src="../_static/doctools.js?v=9bcbadda"></script>
-        <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=588f6264"></script>
+      <script src="../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -422,7 +420,7 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 
 <dl class="py property">
 <dt class="sig sig-object py" id="lisatools.detector.Orbits.pycppdetector">
-<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pycppdetector</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">pycppDetector</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.13)"><span class="pre">None</span></a></em><a class="headerlink" href="#lisatools.detector.Orbits.pycppdetector" title="Link to this definition"></a></dt>
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pycppdetector</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">pycppDetector_cpu</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">pycppDetector_gpu</span></em><a class="headerlink" href="#lisatools.detector.Orbits.pycppdetector" title="Link to this definition"></a></dt>
 <dd><p>C++ class</p>
 </dd></dl>
 
@@ -446,12 +444,12 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
-<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
+<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Time array in seconds.</p></li>
+<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type">int | np.ndarray</span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Light travel times.</p>
@@ -467,12 +465,12 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
-<li><p><strong>sc</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – which spacecraft. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.SC</span></code>.</p></li>
+<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Time array in seconds.</p></li>
+<li><p><strong>sc</strong> (<span class="sphinx_autodoc_typehints-type">int | np.ndarray</span>) – which spacecraft. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.SC</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Position of spacecraft.</p>
@@ -488,12 +486,12 @@ The higherarchy of consideration to each keyword argument if multiple are given:
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Time array in seconds.</p></li>
-<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
+<li><p><strong>t</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Time array in seconds.</p></li>
+<li><p><strong>link</strong> (<span class="sphinx_autodoc_typehints-type">int | np.ndarray</span>) – which link. Must be <code class="docutils literal notranslate"><span class="pre">in</span> <span class="pre">self.LINKS</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Link normal vectors.</p>

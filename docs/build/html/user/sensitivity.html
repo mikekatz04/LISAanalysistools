@@ -1,28 +1,26 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="../">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sensitivity Information &mdash; lisaanalysistools 1.0.14 documentation</title>
-      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=19f00094" />
+  <title>Sensitivity Information &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
 
   
-  <!--[if lt IE 9]>
-    <script src="../_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="../_static/jquery.js?v=5d32c60e"></script>
-        <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../_static/documentation_options.js?v=cb0f6c17"></script>
-        <script src="../_static/doctools.js?v=9bcbadda"></script>
-        <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=588f6264"></script>
+      <script src="../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -174,18 +172,18 @@
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a></span>) – Any additional arguments for the sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
-<li><p><strong>sens_fn</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.13)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">&lt;class</span> <span class="pre">'lisatools.sensitivity.LISASens'&gt;</span></code>) – String or class that represents the name of the desired PSD function.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>*args</strong> (<span class="sphinx_autodoc_typehints-type">tuple</span>) – Any additional arguments for the sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
+<li><p><strong>sens_fn</strong> (<span class="sphinx_autodoc_typehints-type">Optional[Sensitivity | str]</span>, default: <code class="docutils literal notranslate"><span class="pre">&lt;class</span> <span class="pre">'lisatools.sensitivity.LISASens'&gt;</span></code>) – String or class that represents the name of the desired PSD function.</p></li>
 <li><p><strong>return_type</strong> (default: <code class="docutils literal notranslate"><span class="pre">'PSD'</span></code>) – Described the desired output. Choices are ASD,
 PSD, or char_strain (characteristic strain). Default is ASD.</p></li>
-<li><p><strong>fill_nans</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">10000000000.0</span></code>) – Value to fill nans in sensitivity (at 0 frequency).
+<li><p><strong>fill_nans</strong> (<span class="sphinx_autodoc_typehints-type">float</span>, default: <code class="docutils literal notranslate"><span class="pre">10000000000.0</span></code>) – Value to fill nans in sensitivity (at 0 frequency).
 If <code class="docutils literal notranslate"><span class="pre">None</span></code>, thens nans will be left in the array.</p></li>
 <li><p><strong>**kwargs</strong> – Keyword arguments to pass to sensitivity function <code class="docutils literal notranslate"><span class="pre">get_Sn</span></code> method.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Sensitivity values.</p>
@@ -270,11 +268,11 @@ The user does not have to do anything special for this change to work. It happen
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>sens_mat</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code> | <a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>]], <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code></a>[<code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code> | <a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>], <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code>, <a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>]</span>) – Input sensitivity list. The shape of the nested lists should represent the shape of the
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>sens_mat</strong> (<span class="sphinx_autodoc_typehints-type">List[List[np.ndarray | Sensitivity]] | List[np.ndarray | Sensitivity] | np.ndarray | Sensitivity</span>) – Input sensitivity list. The shape of the nested lists should represent the shape of the
 desired matrix. Each entry in the list must be an array, <a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a>-derived object,
 or a string corresponding to the <a class="reference internal" href="#lisatools.sensitivity.Sensitivity" title="lisatools.sensitivity.Sensitivity"><code class="xref py py-class docutils literal notranslate"><span class="pre">Sensitivity</span></code></a> object.</p></li>
-<li><p><strong>**sens_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <a class="reference internal" href="#lisatools.sensitivity.Sensitivity.get_Sn" title="lisatools.sensitivity.Sensitivity.get_Sn"><code class="xref py py-func docutils literal notranslate"><span class="pre">Sensitivity.get_Sn()</span></code></a>.</p></li>
+<li><p><strong>**sens_kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – Keyword arguments to pass to <a class="reference internal" href="#lisatools.sensitivity.Sensitivity.get_Sn" title="lisatools.sensitivity.Sensitivity.get_Sn"><code class="xref py py-func docutils literal notranslate"><span class="pre">Sensitivity.get_Sn()</span></code></a>.</p></li>
 </ul>
 </dd>
 </dl>
@@ -364,17 +362,17 @@ that is not updated will remain in place.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>ax</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.10.0)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.</p></li>
-<li><p><strong>fig</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.html#matplotlib.figure.Figure" title="(in Matplotlib v3.10.0)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib figure object.</p></li>
-<li><p><strong>inds</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.13)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Integer index to select out which data to add to a single access.
+<li><p><strong>ax</strong> (<span class="sphinx_autodoc_typehints-type">Optional[plt.Axes]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib Axes objects to add plots. Either a list of Axes objects or a single Axes object.</p></li>
+<li><p><strong>fig</strong> (<span class="sphinx_autodoc_typehints-type">Optional[plt.Figure]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Matplotlib figure object.</p></li>
+<li><p><strong>inds</strong> (<span class="sphinx_autodoc_typehints-type">Optional[int | tuple]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Integer index to select out which data to add to a single access.
 A list can be provided if ax is a list. They must be the same length.</p></li>
-<li><p><strong>char_strain</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, plot in characteristic strain representation. <strong>Note</strong>: assumes the sensitivity
+<li><p><strong>char_strain</strong> (<span class="sphinx_autodoc_typehints-type">Optional[bool]</span>, default: <code class="docutils literal notranslate"><span class="pre">False</span></code>) – If <code class="docutils literal notranslate"><span class="pre">True</span></code>, plot in characteristic strain representation. <strong>Note</strong>: assumes the sensitivity
 is input as power spectral density.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to be passed to <code class="docutils literal notranslate"><span class="pre">loglog</span></code> function in matplotlib.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – Keyword arguments to be passed to <code class="docutils literal notranslate"><span class="pre">loglog</span></code> function in matplotlib.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Tuple</span></code></a>[<a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.html#matplotlib.figure.Figure" title="(in Matplotlib v3.10.0)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Figure</span></code></a>, <a class="reference external" href="https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes" title="(in Matplotlib v3.10.0)"><code class="xref py py-class docutils literal notranslate"><span class="pre">Axes</span></code></a>]</span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">Tuple[plt.Figure, plt.Axes]</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Matplotlib figure and axes objects in a 2-tuple.</p>
@@ -482,14 +480,14 @@ is input as power spectral density.</p></li>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Acceleration term.</p></li>
-<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – OMS term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Acceleration term.</p></li>
+<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – OMS term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -504,8 +502,8 @@ is input as power spectral density.</p></li>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>model</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="detector.html#lisatools.detector.LISAModel" title="lisatools.detector.LISAModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISAModel</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.13)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">LISAModel(Soms_d=2.25e-22,</span> <span class="pre">Sa_a=9e-30,</span> <span class="pre">orbits=&lt;lisatools.detector.DefaultOrbits</span> <span class="pre">object</span> <span class="pre">at</span> <span class="pre">0x1270012b0&gt;,</span> <span class="pre">name='scirdv1')</span></code>) – <p>Noise model. Object of type <code class="xref py py-class docutils literal notranslate"><span class="pre">lisa_models.LISAModel</span></code>.
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>model</strong> (<span class="sphinx_autodoc_typehints-type">Optional[lisa_models.LISAModel | str]</span>, default: <code class="docutils literal notranslate"><span class="pre">LISAModel(Soms_d=2.25e-22,</span> <span class="pre">Sa_a=9e-30,</span> <span class="pre">orbits=&lt;lisatools.detector.DefaultOrbits</span> <span class="pre">object</span> <span class="pre">at</span> <span class="pre">0x16bf23d30&gt;,</span> <span class="pre">name='scirdv1')</span></code>) – <p>Noise model. Object of type <code class="xref py py-class docutils literal notranslate"><span class="pre">lisa_models.LISAModel</span></code>.
 It can also be a string corresponding to one of the stock models.
 The model object must include attributes for <code class="docutils literal notranslate"><span class="pre">Soms_d</span></code> (shot noise)
 and <code class="docutils literal notranslate"><span class="pre">Sa_a</span></code> (acceleration noise) or a spline as attribute <code class="docutils literal notranslate"><span class="pre">Sn_spl</span></code>.
@@ -521,11 +519,11 @@ noise_model.Sn_spl = {</p>
 “T”: CubicSpline(f, Sn_T))</p>
 </div></blockquote>
 </p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>PSD values.</p>
@@ -544,15 +542,15 @@ output to the correct TDI contribution.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>stochastic_params</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">tuple</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">()</span></code>) – Parameters (arguments) to feed to <code class="docutils literal notranslate"><span class="pre">stochastic_function</span></code>.</p></li>
-<li><p><strong>stochastic_kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Optional" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code></a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">{}</span></code>) – Keyword arguments to feeed to <code class="docutils literal notranslate"><span class="pre">stochastic_function</span></code>.</p></li>
-<li><p><strong>stochastic_function</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="stochastic.html#lisatools.stochastic.StochasticContribution" title="lisatools.stochastic.StochasticContribution"><code class="xref py py-class docutils literal notranslate"><span class="pre">StochasticContribution</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.13)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Stochastic class or string name of stochastic class. Takes <code class="docutils literal notranslate"><span class="pre">stochastic_args</span></code> and <code class="docutils literal notranslate"><span class="pre">stochastic_kwargs</span></code>.
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>stochastic_params</strong> (<span class="sphinx_autodoc_typehints-type">Optional[tuple]</span>, default: <code class="docutils literal notranslate"><span class="pre">()</span></code>) – Parameters (arguments) to feed to <code class="docutils literal notranslate"><span class="pre">stochastic_function</span></code>.</p></li>
+<li><p><strong>stochastic_kwargs</strong> (<span class="sphinx_autodoc_typehints-type">Optional[dict]</span>, default: <code class="docutils literal notranslate"><span class="pre">{}</span></code>) – Keyword arguments to feeed to <code class="docutils literal notranslate"><span class="pre">stochastic_function</span></code>.</p></li>
+<li><p><strong>stochastic_function</strong> (<span class="sphinx_autodoc_typehints-type">Optional[StochasticContribution | str]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Stochastic class or string name of stochastic class. Takes <code class="docutils literal notranslate"><span class="pre">stochastic_args</span></code> and <code class="docutils literal notranslate"><span class="pre">stochastic_kwargs</span></code>.
 If <code class="docutils literal notranslate"><span class="pre">None</span></code>, it uses <code class="xref py py-class docutils literal notranslate"><span class="pre">FittedHyperbolicTangentGalacticForeground</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Contribution from stochastic signal.</p>
@@ -568,13 +566,13 @@ If <code class="docutils literal notranslate"><span class="pre">None</span></cod
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Power spectral density in stochastic term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Power spectral density in stochastic term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -597,16 +595,16 @@ If <code class="docutils literal notranslate"><span class="pre">None</span></cod
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>model</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Union" title="(in Python v3.13)"><code class="xref py py-data docutils literal notranslate"><span class="pre">Union</span></code></a>[<a class="reference internal" href="detector.html#lisatools.detector.LISAModel" title="lisatools.detector.LISAModel"><code class="xref py py-class docutils literal notranslate"><span class="pre">LISAModel</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></a>, <a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.13)"><code class="xref py py-obj docutils literal notranslate"><span class="pre">None</span></code></a>]</span>, default: <code class="docutils literal notranslate"><span class="pre">LISAModel(Soms_d=2.25e-22,</span> <span class="pre">Sa_a=9e-30,</span> <span class="pre">orbits=&lt;lisatools.detector.DefaultOrbits</span> <span class="pre">object</span> <span class="pre">at</span> <span class="pre">0x1270012b0&gt;,</span> <span class="pre">name='scirdv1')</span></code>) – Noise model. Object of type <code class="xref py py-class docutils literal notranslate"><span class="pre">lisa_models.LISAModel</span></code>. It can also be a string corresponding to one of the stock models.</p></li>
-<li><p><strong>average</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">True</span></code>) – Whether to apply averaging factors to sensitivity curve.
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>model</strong> (<span class="sphinx_autodoc_typehints-type">Optional[lisa_models.LISAModel | str]</span>, default: <code class="docutils literal notranslate"><span class="pre">LISAModel(Soms_d=2.25e-22,</span> <span class="pre">Sa_a=9e-30,</span> <span class="pre">orbits=&lt;lisatools.detector.DefaultOrbits</span> <span class="pre">object</span> <span class="pre">at</span> <span class="pre">0x16bf23d30&gt;,</span> <span class="pre">name='scirdv1')</span></code>) – Noise model. Object of type <code class="xref py py-class docutils literal notranslate"><span class="pre">lisa_models.LISAModel</span></code>. It can also be a string corresponding to one of the stock models.</p></li>
+<li><p><strong>average</strong> (<span class="sphinx_autodoc_typehints-type">bool</span>, default: <code class="docutils literal notranslate"><span class="pre">True</span></code>) – Whether to apply averaging factors to sensitivity curve.
 Antenna response: <code class="docutils literal notranslate"><span class="pre">av_resp</span> <span class="pre">=</span> <span class="pre">np.sqrt(5)</span> <span class="pre">if</span> <span class="pre">average</span> <span class="pre">else</span> <span class="pre">1.0</span></code>
 Projection effect: <code class="docutils literal notranslate"><span class="pre">Proj</span> <span class="pre">=</span> <span class="pre">2.0</span> <span class="pre">/</span> <span class="pre">np.sqrt(3)</span> <span class="pre">if</span> <span class="pre">average</span> <span class="pre">else</span> <span class="pre">1.0</span></code></p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <code class="xref py py-func docutils literal notranslate"><span class="pre">get_stochastic_contribution()</span></code>. # TODO: fix</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – Keyword arguments to pass to <code class="xref py py-func docutils literal notranslate"><span class="pre">get_stochastic_contribution()</span></code>. # TODO: fix</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Sensitivity array.</p>
@@ -632,16 +630,16 @@ I found an analytic version in one of Niel Cornish’s paper which he submitted 
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
 <li><p><strong>model</strong> – Noise model. Object of type <code class="xref py py-class docutils literal notranslate"><span class="pre">lisa_models.LISAModel</span></code>. It can also be a string corresponding to one of the stock models.</p></li>
-<li><p><strong>average</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">bool</span></code></a></span>, default: <code class="docutils literal notranslate"><span class="pre">True</span></code>) – Whether to apply averaging factors to sensitivity curve.
+<li><p><strong>average</strong> (<span class="sphinx_autodoc_typehints-type">bool</span>, default: <code class="docutils literal notranslate"><span class="pre">True</span></code>) – Whether to apply averaging factors to sensitivity curve.
 Antenna response: <code class="docutils literal notranslate"><span class="pre">av_resp</span> <span class="pre">=</span> <span class="pre">np.sqrt(5)</span> <span class="pre">if</span> <span class="pre">average</span> <span class="pre">else</span> <span class="pre">1.0</span></code>
 Projection effect: <code class="docutils literal notranslate"><span class="pre">Proj</span> <span class="pre">=</span> <span class="pre">2.0</span> <span class="pre">/</span> <span class="pre">np.sqrt(3)</span> <span class="pre">if</span> <span class="pre">average</span> <span class="pre">else</span> <span class="pre">1.0</span></code></p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <code class="xref py py-func docutils literal notranslate"><span class="pre">get_stochastic_contribution()</span></code>. # TODO: fix</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – Keyword arguments to pass to <code class="xref py py-func docutils literal notranslate"><span class="pre">get_stochastic_contribution()</span></code>. # TODO: fix</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Sensitivity array.</p>
@@ -663,16 +661,16 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
 <li><p><strong>model</strong> – Noise model. Object of type <code class="xref py py-class docutils literal notranslate"><span class="pre">lisa_models.LISAModel</span></code>. It can also be a string corresponding to one of the stock models.</p></li>
 <li><p><strong>average</strong> – Whether to apply averaging factors to sensitivity curve.
 Antenna response: <code class="docutils literal notranslate"><span class="pre">av_resp</span> <span class="pre">=</span> <span class="pre">np.sqrt(5)</span> <span class="pre">if</span> <span class="pre">average</span> <span class="pre">else</span> <span class="pre">1.0</span></code>
 Projection effect: <code class="docutils literal notranslate"><span class="pre">Proj</span> <span class="pre">=</span> <span class="pre">2.0</span> <span class="pre">/</span> <span class="pre">np.sqrt(3)</span> <span class="pre">if</span> <span class="pre">average</span> <span class="pre">else</span> <span class="pre">1.0</span></code></p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – Keyword arguments to pass to <code class="xref py py-func docutils literal notranslate"><span class="pre">get_stochastic_contribution()</span></code>. # TODO: fix</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – Keyword arguments to pass to <code class="xref py py-func docutils literal notranslate"><span class="pre">get_stochastic_contribution()</span></code>. # TODO: fix</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Sensitivity array.</p>
@@ -698,14 +696,14 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Acceleration term.</p></li>
-<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – OMS term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Acceleration term.</p></li>
+<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – OMS term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -721,13 +719,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Power spectral density in stochastic term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Power spectral density in stochastic term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -775,14 +773,14 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Acceleration term.</p></li>
-<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – OMS term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Acceleration term.</p></li>
+<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – OMS term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -798,13 +796,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Power spectral density in stochastic term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Power spectral density in stochastic term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -852,14 +850,14 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Acceleration term.</p></li>
-<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – OMS term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Acceleration term.</p></li>
+<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – OMS term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -875,13 +873,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Power spectral density in stochastic term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Power spectral density in stochastic term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -918,14 +916,14 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Acceleration term.</p></li>
-<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – OMS term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Acceleration term.</p></li>
+<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – OMS term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -941,13 +939,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Power spectral density in stochastic term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Power spectral density in stochastic term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -973,14 +971,14 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Acceleration term.</p></li>
-<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – OMS term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Spm</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Acceleration term.</p></li>
+<li><p><strong>Sop</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – OMS term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>
@@ -996,13 +994,13 @@ Projection effect: <code class="docutils literal notranslate"><span class="pre">
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Frequency array.</p></li>
-<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Power spectral density in stochastic term.</p></li>
-<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">dict</span></code></a></span>) – For interoperability.</p></li>
+<li><p><strong>f</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Frequency array.</p></li>
+<li><p><strong>Sh</strong> (<span class="sphinx_autodoc_typehints-type">float | np.ndarray</span>) – Power spectral density in stochastic term.</p></li>
+<li><p><strong>**kwargs</strong> (<span class="sphinx_autodoc_typehints-type">dict</span>) – For interoperability.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.13)"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></a> | <code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
+<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type">float | np.ndarray</span></p>
 </dd>
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
 <dd class="field-odd"><p>Transformed TDI PSD values.</p>

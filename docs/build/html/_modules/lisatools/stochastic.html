@@ -1,27 +1,25 @@
+
+
 <!DOCTYPE html>
 <html class="writer-html5" lang="en" data-content_root="../../">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>lisatools.stochastic &mdash; lisaanalysistools 1.0.13 documentation</title>
-      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=80d5e7a1" />
-      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=19f00094" />
+  <title>lisatools.stochastic &mdash; lisaanalysistools 1.0.16 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery.css?v=d2d258e8" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-binder.css?v=f4aeca0c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-dataframe.css?v=2082cf3c" />
       <link rel="stylesheet" type="text/css" href="../../_static/sg_gallery-rendered-html.css?v=1277b6f3" />
 
   
-  <!--[if lt IE 9]>
-    <script src="../../_static/js/html5shiv.min.js"></script>
-  <![endif]-->
-  
-        <script src="../../_static/jquery.js?v=5d32c60e"></script>
-        <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-        <script src="../../_static/documentation_options.js?v=0086fcda"></script>
-        <script src="../../_static/doctools.js?v=9bcbadda"></script>
-        <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
-        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=588f6264"></script>
+      <script src="../../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script src="../../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" /> 
@@ -93,36 +91,36 @@
            <div itemprop="articleBody">
              
   <h1>Source code for lisatools.stochastic</h1><div class="highlight"><pre>
-<span></span><span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">annotations</span>
-<span class="kn">import</span> <span class="nn">warnings</span>
-<span class="kn">from</span> <span class="nn">abc</span> <span class="kn">import</span> <span class="n">ABC</span>
-<span class="kn">from</span> <span class="nn">typing</span> <span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Dict</span>
+<span></span><span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">warnings</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">ABC</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Tuple</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">List</span><span class="p">,</span> <span class="n">Dict</span>
 
-<span class="kn">import</span> <span class="nn">math</span>
-<span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
-<span class="kn">from</span> <span class="nn">scipy</span> <span class="kn">import</span> <span class="n">interpolate</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">scipy</span><span class="w"> </span><span class="kn">import</span> <span class="n">interpolate</span>
 
 <span class="k">try</span><span class="p">:</span>
-    <span class="kn">import</span> <span class="nn">cupy</span> <span class="k">as</span> <span class="nn">cp</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
 
 <span class="k">except</span> <span class="p">(</span><span class="ne">ModuleNotFoundError</span><span class="p">,</span> <span class="ne">ImportError</span><span class="p">):</span>
-    <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">cp</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
 
-<span class="kn">from</span> <span class="nn">.</span> <span class="kn">import</span> <span class="n">detector</span> <span class="k">as</span> <span class="n">lisa_models</span>
-<span class="kn">from</span> <span class="nn">.utils.utility</span> <span class="kn">import</span> <span class="n">AET</span>
-<span class="kn">from</span> <span class="nn">.utils.constants</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.</span><span class="w"> </span><span class="kn">import</span> <span class="n">detector</span> <span class="k">as</span> <span class="n">lisa_models</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.utils.utility</span><span class="w"> </span><span class="kn">import</span> <span class="n">AET</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.utils.constants</span><span class="w"> </span><span class="kn">import</span> <span class="o">*</span>
 
 
 <div class="viewcode-block" id="StochasticContribution">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.StochasticContribution">[docs]</a>
-<span class="k">class</span> <span class="nc">StochasticContribution</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.StochasticContribution">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">StochasticContribution</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Base Class for Stochastic Contributions to the PSD.&quot;&quot;&quot;</span>
 
     <span class="n">ndim</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="n">added_stochastic_list</span> <span class="o">=</span> <span class="p">[]</span>
 
     <span class="nd">@classmethod</span>
-    <span class="k">def</span> <span class="nf">_check_ndim</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">params</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="nb">list</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_check_ndim</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">params</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="nb">list</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Check the dimensionality of the parameters matches the model.</span>
 
 <span class="sd">        Args:</span>
@@ -138,9 +136,9 @@
             <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;length of parameters is not equivalent to class ndim.&quot;</span><span class="p">)</span>
 
 <div class="viewcode-block" id="StochasticContribution.get_Sh">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.StochasticContribution.get_Sh">[docs]</a>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.StochasticContribution.get_Sh">[docs]</a>
     <span class="nd">@classmethod</span>
-    <span class="k">def</span> <span class="nf">get_Sh</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_Sh</span><span class="p">(</span>
         <span class="bp">cls</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="o">*</span><span class="n">params</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span> <span class="o">|</span> <span class="nb">list</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate the power spectral density of the stochastic contribution.</span>
@@ -157,9 +155,9 @@
 
 
 <div class="viewcode-block" id="StochasticContribution.specific_Sh_function">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.StochasticContribution.specific_Sh_function">[docs]</a>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.StochasticContribution.specific_Sh_function">[docs]</a>
     <span class="nd">@staticmethod</span>
-    <span class="k">def</span> <span class="nf">specific_Sh_function</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">specific_Sh_function</span><span class="p">(</span>
         <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">:</span> <span class="n">Any</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate the power spectral density contained in a stochastic signal contribution.</span>
@@ -179,8 +177,8 @@
 
 
 <div class="viewcode-block" id="StochasticContributionContainer">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.StochasticContributionContainer">[docs]</a>
-<span class="k">class</span> <span class="nc">StochasticContributionContainer</span><span class="p">:</span>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.StochasticContributionContainer">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">StochasticContributionContainer</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Container for multiple Stochastic Contributions</span>
 
 <span class="sd">    Args:</span>
@@ -189,18 +187,18 @@
 
 <span class="sd">    &quot;&quot;&quot;</span>
 
-    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">stochastic_contribution_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span> <span class="o">=</span> <span class="n">stochastic_contribution_dict</span>
 
     <span class="nd">@property</span>
-    <span class="k">def</span> <span class="nf">stochastic_contribution_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">stochastic_contribution_dict</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Stochastic contribution storage.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_stochastic_contribution_dict</span>
 
     <span class="nd">@stochastic_contribution_dict</span><span class="o">.</span><span class="n">setter</span>
-    <span class="k">def</span> <span class="nf">stochastic_contribution_dict</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">stochastic_contribution_dict</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">stochastic_contribution_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Set stochastic_contribution_dict.&quot;&quot;&quot;</span>
@@ -213,8 +211,8 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_stochastic_contribution_dict</span> <span class="o">=</span> <span class="n">stochastic_contribution_dict</span>
 
 <div class="viewcode-block" id="StochasticContributionContainer.get_Sh">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.StochasticContributionContainer.get_Sh">[docs]</a>
-    <span class="k">def</span> <span class="nf">get_Sh</span><span class="p">(</span>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.StochasticContributionContainer.get_Sh">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get_Sh</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">params_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">tuple</span><span class="p">],</span> <span class="n">kwargs_dict</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Calculate Sh for stochastic contribution.</span>
@@ -239,27 +237,27 @@
         <span class="k">return</span> <span class="n">Sh_out</span></div>
 
 
-    <span class="k">def</span> <span class="fm">__setitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">,</span> <span class="n">val</span><span class="p">:</span> <span class="n">StochasticContribution</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__setitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">,</span> <span class="n">val</span><span class="p">:</span> <span class="n">StochasticContribution</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Set an item by directly indexing the class object.&quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">val</span>
 
-    <span class="k">def</span> <span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">int</span> <span class="o">|</span> <span class="nb">tuple</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Get item directly from dictionary.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">stochastic_contribution_dict</span><span class="p">[</span><span class="n">key</span><span class="p">]</span></div>
 
 
 
 <div class="viewcode-block" id="HyperbolicTangentGalacticForeground">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.HyperbolicTangentGalacticForeground">[docs]</a>
-<span class="k">class</span> <span class="nc">HyperbolicTangentGalacticForeground</span><span class="p">(</span><span class="n">StochasticContribution</span><span class="p">):</span>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.HyperbolicTangentGalacticForeground">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">HyperbolicTangentGalacticForeground</span><span class="p">(</span><span class="n">StochasticContribution</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Hyperbolic Tangent-based foreground fitting function.&quot;&quot;&quot;</span>
 
     <span class="n">ndim</span> <span class="o">=</span> <span class="mi">5</span>
 
 <div class="viewcode-block" id="HyperbolicTangentGalacticForeground.specific_Sh_function">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.HyperbolicTangentGalacticForeground.specific_Sh_function">[docs]</a>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.HyperbolicTangentGalacticForeground.specific_Sh_function">[docs]</a>
     <span class="nd">@staticmethod</span>
-    <span class="k">def</span> <span class="nf">specific_Sh_function</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">specific_Sh_function</span><span class="p">(</span>
         <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">amp</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">fk</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">alpha</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">s1</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span> <span class="n">s2</span><span class="p">:</span> <span class="nb">float</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Hyperbolic tangent model 1 for the Galaxy foreground noise</span>
@@ -300,8 +298,8 @@
 
 
 <div class="viewcode-block" id="FittedHyperbolicTangentGalacticForeground">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground">[docs]</a>
-<span class="k">class</span> <span class="nc">FittedHyperbolicTangentGalacticForeground</span><span class="p">(</span><span class="n">HyperbolicTangentGalacticForeground</span><span class="p">):</span>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.FittedHyperbolicTangentGalacticForeground">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">FittedHyperbolicTangentGalacticForeground</span><span class="p">(</span><span class="n">HyperbolicTangentGalacticForeground</span><span class="p">):</span>
     <span class="c1"># TODO: need to verify this is still working</span>
     <span class="n">ndim</span> <span class="o">=</span> <span class="mi">1</span>
     <span class="n">amp</span> <span class="o">=</span> <span class="mf">3.26651613e-44</span>
@@ -351,9 +349,9 @@
     <span class="n">Tmax</span> <span class="o">=</span> <span class="mi">10</span> <span class="o">*</span> <span class="n">YRSID_SI</span>
 
 <div class="viewcode-block" id="FittedHyperbolicTangentGalacticForeground.specific_Sh_function">
-<a class="viewcode-back" href="../../user/stochastic.html#lisatools.stochastic.FittedHyperbolicTangentGalacticForeground.specific_Sh_function">[docs]</a>
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.FittedHyperbolicTangentGalacticForeground.specific_Sh_function">[docs]</a>
     <span class="nd">@classmethod</span>
-    <span class="k">def</span> <span class="nf">specific_Sh_function</span><span class="p">(</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">specific_Sh_function</span><span class="p">(</span>
         <span class="bp">cls</span><span class="p">,</span> <span class="n">f</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">,</span> <span class="n">Tobs</span><span class="p">:</span> <span class="nb">float</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span> <span class="o">|</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Fitted hyperbolic tangent model 1 for the Galaxy foreground noise.</span>
@@ -403,7 +401,7 @@
 <span class="p">]</span>
 
 
-<span class="k">def</span> <span class="nf">get_stock_gb_stochastic_options</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]:</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_stock_gb_stochastic_options</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">StochasticContribution</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Get stock options for stochastic contributions.</span>
 
 <span class="sd">    Returns:</span>
@@ -413,7 +411,7 @@
     <span class="k">return</span> <span class="n">__stock_gb_stochastic_options__</span>
 
 
-<span class="k">def</span> <span class="nf">get_default_stochastic_from_str</span><span class="p">(</span><span class="n">stochastic</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_default_stochastic_from_str</span><span class="p">(</span><span class="n">stochastic</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a LISA stochastic from a ``str`` input.</span>
 
 <span class="sd">    Args:</span>
@@ -430,7 +428,9 @@
     <span class="k">return</span> <span class="nb">globals</span><span class="p">()[</span><span class="n">stochastic</span><span class="p">]</span>
 
 
-<span class="k">def</span> <span class="nf">check_stochastic</span><span class="p">(</span><span class="n">stochastic</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
+<div class="viewcode-block" id="check_stochastic">
+<a class="viewcode-back" href="../../user/stochastic.html#lisatools.sensitivity.check_stochastic">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">check_stochastic</span><span class="p">(</span><span class="n">stochastic</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StochasticContribution</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Check input stochastic contribution.</span>
 
 <span class="sd">    Args:</span>
@@ -446,7 +446,8 @@
     <span class="k">if</span> <span class="ow">not</span> <span class="nb">issubclass</span><span class="p">(</span><span class="n">stochastic</span><span class="p">,</span> <span class="n">StochasticContribution</span><span class="p">):</span>
         <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;stochastic argument not given correctly.&quot;</span><span class="p">)</span>
 
-    <span class="k">return</span> <span class="n">stochastic</span>
+    <span class="k">return</span> <span class="n">stochastic</span></div>
+
 </pre></div>
 
            </div>
