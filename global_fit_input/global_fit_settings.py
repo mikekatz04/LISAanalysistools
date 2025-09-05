@@ -413,6 +413,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     gb_search_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
         *gb_move_args, 
         rj_proposal_distribution=None,
+        is_rj_prop=True,
         run_swaps=False, 
         name="rj_fstat_mcmc_search",
         phase_maximize=True, 
@@ -425,6 +426,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     gb_search_refit_move = GBSpecialRJRefitMove(
         *gb_move_args, 
         rj_proposal_distribution=None,
+        is_rj_prop=True,
         run_swaps=False, 
         name="rj_refit_search",
         fp=backend_name,
@@ -715,7 +717,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: check this. 
     # This is here because of data storage size 
     # and an issue I think with a zero in the response psd
-    end_freq_ind = int(0.030 / df)  # len(A_inj) - 1
+    end_freq_ind = int(0.030 / df)  # len(A_inj)  # ADD THIS BACK TO ALLOW FOR FULL FFT
     # end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
     
     A_inj, E_inj = (
@@ -730,7 +732,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [7]
+    gpus = [1]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36

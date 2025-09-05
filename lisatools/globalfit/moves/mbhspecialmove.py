@@ -4,12 +4,20 @@ from copy import deepcopy
 
 from eryn.moves import RedBlueMove, StretchMove
 # from eryn.state import State
-from lisatools.globalfit.state import GFState
-from lisatools.sampling.moves.skymodehop import SkyMove
+from ..state import GFState
+from ...sampling.moves.skymodehop import SkyMove
 from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 from .addremovemove import ResidualAddOneRemoveOneMove
+from ...utils.utility import tukey
+from ...sampling.stopping import SearchConvergeStopping
+
+def update_fn(i, last_sample, sampler):
+    print("max logl:", last_sample.log_like.max()) 
+    last_sample.branches_coords["mbh"][-1] = last_sample.branches_coords["mbh"][0]
+    last_sample.log_like[-1] = last_sample.log_like[0]
+    last_sample.log_prior[-1] = last_sample.log_prior[0]
 
 class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
     def __init__(self, *args, **kwargs):
@@ -33,9 +41,220 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
 
         ntemps = 10
         nwalkers = 50
+
+        if np.any(state.branches["mbh"].nleaves[0] > 0):
+            breakpoint()
+            # TODO: subtract using inverse FFT
+            # NEED TO MAKE IT FULL FFT basis
+
+            # mbh_params_best = reader.get_chain()["mbh"][best].squeeze()
+            # mbh_params_best[5] = 4.961183137438699
+            # mbh_params_best_in = transform_fn_mbh.both_transforms(mbh_params_best[None, :])
+            
+            # AET_found = wave_gen(*mbh_params_best_in.T, t_obs_start=0.0, t_obs_end=Tobs / YRSID_SI, **tmp_kwargs)
+            # _Af, _Ef, _Tf = np.fft.rfft(A) * dt, np.fft.rfft(E) * dt, np.fft.rfft(T) * dt
+            # _Af -= AET_found[0, 0].get()
+            # _Ef -= AET_found[0, 1].get()
+            # _Tf -= AET_found[0, 2].get()
+            # A_old = A.copy()
+            # A, E, T = np.fft.irfft(_Af / dt), np.fft.irfft(_Ef / dt), np.fft.irfft(_Tf / dt)
+
+        # take inverse FFT 
+        At, Et = np.fft.irfft(data[0] / dt), np.fft.irfft(data[1] / dt)
+
         start_params = self.priors["mbh"].rvs(size=(ntemps, nwalkers, 1))
-        ll = wave_gen.get_direct_ll(fd, data, psd, df, *x_in.T, **self.waveform_like_kwargs).real.get()
+        # ll = wave_gen.get_direct_ll(fd, data, psd, df, *x_in.T, **self.waveform_like_kwargs).real.get()
+        breakpoint()
+
+        _Tobs = 3.0 * YRSID_SI / 12.0  # 1 month
+        Nobs = int(_Tobs / dt)  # len(t)
+        Tobs = Nobs * dt
+
+        t1 = np.arange(Nobs) * dt
+        At = At[:Nobs]
+        Et = Et[:Nobs]
+
+        data = []
+        acs_tmp = []
+        initial_t_vals = []
+        # assert ind_start > 0
+        # omits first day and last day
+        delta = int(12.0 * 3600.0 / dt)  # int(15 * 24 * 3600.0 / dt)  # 
+        # TODO: need to fill in days on edges of windows
+        t_start_ind = int((1.5 * YRSID_SI / 12.0 - 24.0 * 3600.0) / dt)  # 0
+        if t_start_ind > len(At) - 2:
+            breakpoint()
+            raise ValueError
+
+        t_lims = np.arange(t_start_ind, (t1.shape[0] - 1), delta) * dt
+        # t_lims = np.array([0.0, 3600.0, Tobs - 3600.0, Tobs])
+        print(f"Not searching for {t_lims[-1]} to {t1[-1]}")
+
+        t_ref_lims = t_lims[1:-1]
+        num_t_ref_bins = len(t_ref_lims) - 1
         
+        end_t_vals = []
+        for i, t_i in enumerate(range(0, t_lims.shape[0] - 3)):
+            start_t = t_lims[t_i]
+            end_t = t_lims[t_i + 3]
+            # start_t = 0.0
+            keep_t = (t1 >= start_t) & (t1 < end_t)
+            print(i, keep_t.sum().item())
+            if keep_t.sum().item() == 0:
+                continue
+            tukey_alpha = 0.03
+            tukey_here = tukey(keep_t.sum().item(), tukey_alpha)
+            t_here = t1[keep_t]
+            A_here = At[keep_t] * tukey_here
+            E_here = Et[keep_t] * tukey_here
+
+            # plt.plot(X_here)
+            # plt.savefig("check0.png")
+            # plt.close()
+            # fucking dt
+        
+            Af, Ef, Tf = (
+                np.fft.rfft(A_here) * dt,
+                np.fft.rfft(E_here) * dt,
+                np.fft.rfft(T_here) * dt,
+            )
+            
+            initial_t_vals.append(start_t)
+            end_t_vals.append(end_t)
+            if i == 0:
+                length_check = len(Af)
+                fd_short = np.fft.rfftfreq(len(A_here), dt)
+                df_short = fd_short[1] - fd_short[0]
+                Tobs_short = dt * len(t_here)
+            else:
+                assert length_check == len(Af)  
+
+            data_res_arr = DataResidualArray([Af, Ef], f_arr=fd_short)
+            sens_mat = AET1SensitivityMatrix(fd_short, model=sangria)  # , stochastic_params=(YRSID_SI,))
+            analysis = AnalysisContainer(data_res_arr, sens_mat)  # , signal_gen=MBHWrap(wave_gen))
+            acs_tmp.append(analysis)
+            print(start_t, t_ref_lims[i], end_t, t_ref_lims[i + 1], analysis.inner_product())
+        
+        fd_short = cp.asarray(fd_short)
+        # all_data_cpu = np.asarray(data).transpose(1, 0, 2)
+        # data_length = len(fd_short)
+        initial_t_vals = np.asarray(initial_t_vals)
+        end_t_vals = np.asarray(end_t_vals)
+
+        from lisatools.analysiscontainer import AnalysisContainerArray
+        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+        fd_short = cp.asarray(fd_short)
+        data_length_short = len(fd_short)
+        initial_t_vals = np.asarray(initial_t_vals)
+        end_t_vals = np.asarray(end_t_vals)
+        
+        # check = analysis.calculate_signal_likelihood(*inj_params_in, source_only=True, waveform_kwargs=tmp_kwargs)
+        
+        from bbhx.likelihood import HeterodynedLikelihood, NewHeterodynedLikelihood, Likelihood
+        
+        # priors
+        from eryn.prior import ProbDistContainer
+        priors_mbh = {"mbh": ProbDistContainer({
+            0: uniform_dist(np.log(1e4), np.log(1e8)),  # 
+            1: uniform_dist(0.01, 0.999999999),
+            2: uniform_dist(-0.99999999, +0.99999999),
+            3: uniform_dist(-0.99999999, +0.99999999),
+            4: uniform_dist(0.01, 1000.0),
+            5: uniform_dist(0.0, 2 * np.pi),
+            6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+            7: uniform_dist(0.0, 2 * np.pi),
+            8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+            9: uniform_dist(0.0, np.pi),
+            10: uniform_dist(t_ref_lims[0], t_ref_lims[-1]), #0.0, t_ref_L + 48 * 3600.0),
+        })}
+
+        # ll_het = NewHeterodynedLikelihood(
+        #     wave_gen,
+        #     fd,
+        #     AET[None, :],
+        #     sens_mat[:][None, :],
+        #     inj_params_in[None, :],
+        #     256,
+        #     # data_index=data_index,
+        #     # noise_index=noise_index,
+        #     gpu=cp.cuda.runtime.getDevice(),  # self.use_gpu,
+        # )
+
+        # sampler treats periodic variables by wrapping them properly
+        periodic_mbh = PeriodicContainer({
+            "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
+        })
+
+        inner_moves = [
+            (SkyMove(which="both"), 0.02),
+            (SkyMove(which="long"), 0.05),
+            (SkyMove(which="lat"), 0.05),
+            (StretchMove(), 0.88)
+        ]
+
+        nwalkers = 100
+        ntemps = 12
+        temp_kwargs = dict(ntemps=ntemps, Tmax=np.inf)
+
+        # psd_cpu = np.asarray([np.tile(A_psd, (all_data_cpu.shape[1], 1)), np.tile(E_psd, (all_data_cpu.shape[1], 1)), np.tile(np.full_like(A_psd, 1e10), (all_data_cpu.shape[1], 1))])
+
+        d_d_vals = np.zeros(len(acs))  # 4 * df * np.sum(np.asarray([(all_data_cpu[i].conj() * all_data_cpu[i]) / psd_cpu[i] for i in range(all_data_cpu.shape[0])]), axis=(0, 2))
+
+        # d_d_vals[:] = acs.inner_product()
+        
+        full_kwargs = waveform_kwargs_mbh.copy()
+        full_kwargs["phase_marginalize"] = True
+        full_kwargs["length"] = 1024
+
+        like_args = (wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, transform_fn_mbh, (cp.asarray(fd), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df), full_kwargs)
+        # # check3 = search_likelihood_wrap(start_points, *like_args)
+        
+        stop_fn = SearchConvergeStopping(n_iters=30, diff=1.0, verbose=True, start_iteration=0)
+        sampler = EnsembleSampler(
+            nwalkers,
+            {"mbh": 11}, 
+            search_likelihood_wrap,  ## ll_wrap, #
+            priors_mbh,
+            tempering_kwargs=temp_kwargs,
+            args=like_args,  # (ll_het, transform_fn_mbh), # 
+            vectorize=True,
+            periodic=periodic_mbh, 
+            backend=fp,
+            moves=inner_moves,
+            branch_names=["mbh"],
+            update_fn=update_fn,
+            update_iterations=200, 
+            stopping_fn=stop_fn,
+            stopping_iterations=1
+        )
+
+        start_points = priors_mbh["mbh"].rvs(size=(ntemps * nwalkers,))
+        # start_like4 = search_likelihood_wrap(start_points, *like_args)
+        # wave_gen.amp_phase_gen.initial_t_val = 0.0
+        # check2 = analysis.calculate_signal_likelihood(*start_points[0], phase_maximize=True, transform_fn=transform_fn_mbh, source_only=True, waveform_kwargs=tmp_kwargs, sum_instead_of_trapz=True)
+        # # check_inner = analysis.calculate_signal_inner_product(*start_points[0], transform_fn=transform_fn_mbh, source_only=True, waveform_kwargs=tmp_kwargs, sum_instead_of_trapz=False)
+        # check_snr = analysis.calculate_signal_snr(*start_points[0], transform_fn=transform_fn_mbh, source_only=True, waveform_kwargs=tmp_kwargs, sum_instead_of_trapz=True)
+        # breakpoint()
+        # from eryn.backends import HDFBackend
+        # reader = HDFBackend("check_bbhx_search_het.h5")
+        # samples = reader.get_chain(temp_index=0)["mbh"][5000:, :, 0].reshape(-1, 11)
+        # # fig = corner.corner(chain, plot_datapoints=False, plot_density=False, levels=(1 - np.exp(-0.5 * np.array([1, 2, 3]) ** 2)))
+        # # fig.savefig("check1.png")
+        
+        # checkit = ll_wrap(samples[-10:], ll_het, transform_fn_mbh)
+        # breakpoint()
+        start_points = start_points.reshape(ntemps, nwalkers, 1, 11)
+        # start_points = priors_mbh["mbh"].rvs(size=(ntemps, nwalkers, 1))
+        from eryn.state import State
+        start_state = State({"mbh": start_points})
+
+        nsteps = 500
+        print("start like", acs.likelihood(source_only=True).max())
+        # check_params = np.load("check_params.npy")[None, :]
+        # start_like4 = search_likelihood_wrap(mbh_params_best[None, :], *like_args)
+        # breakpoint()
+        sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=True)
+        print("End like:", sampler.get_log_like().max())
         breakpoint()
 
     def setup_likelihood_here(self, coords):
