@@ -19,7 +19,7 @@ import shutil
 
 shutil.copy(
     dir_path + "examples/lisatools_tutorial.ipynb",
-    dir_path + "docs/source/tutorial/lisatools_tutorial.ipynb",
+    dir_path + "docs/source/lisatools_tutorial.ipynb",
 )
 
 sys.path.insert(0, os.path.abspath("../../"))
@@ -42,22 +42,25 @@ release = about["__version__"]
 
 
 # -- General configuration ---------------------------------------------------
-
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
+html_theme = "sphinx_rtd_theme"
 extensions = [
+    "myst_parser",
     "sphinx.ext.autodoc",
-    "sphinx_gallery.gen_gallery",
-    "sphinx.ext.viewcode",
-    "sphinx.ext.napoleon",
+    "sphinx.ext.doctest",
     "sphinx.ext.intersphinx",
-    "sphinx.ext.githubpages",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.autosummary",
+    "sphinx_rtd_theme",
+    "sphinx_tippy",
     "nbsphinx",
-    "sphinx_autodoc_typehints",
+    "sphinx.ext.mathjax",
+    "IPython.sphinxext.ipython_console_highlighting",
 ]
 
-source_suffix = [".rst", ".md"]
+source_suffix = [".rst"]
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -66,6 +69,20 @@ templates_path = ["_templates"]
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+
+import sphinx_rtd_theme
+
+autodoc_member_order = "bysource"
+
+
+def skip(app, what, name, obj, would_skip, options):
+    if name == "__call__":
+        return False
+    return would_skip
+
+
+def setup(app):
+    app.connect("autodoc-skip-member", skip)
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -80,35 +97,13 @@ html_theme = "sphinx_rtd_theme"
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
 
-# sphinx-gallery configuration
-sphinx_gallery_conf = {
-    # path to your example scripts
-    "examples_dirs": ["../examples_ucb"],  # , "../examples_smbh"],
-    # path to where to save gallery generated output
-    "gallery_dirs": ["examples_ucb"],  # , "examples_smbh"],
+html_theme_options = {
+    "display_version": True,
+    "prev_next_buttons_location": "both",
+    "style_nav_header_background": "coral",
+    # Toc options
+    "collapse_navigation": True,
+    "sticky_navigation": True,
+    "navigation_depth": 4,
 }
 
-autodoc_type_aliases = {
-    "Iterable": "Iterable",
-    "ArrayLike": "ArrayLike",
-}
-
-autodoc_default_options = {
-    "member-order": "bysource",
-    "undoc-members": True,
-    "special-members": "__call__",
-}
-
-typehints_defaults = "comma"
-
-# configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {
-    "python": (
-        "https://docs.python.org/{.major}".format(sys.version_info),
-        None,
-    ),
-    "matplotlib": ("https://matplotlib.org/", None),
-    "pandas": ("https://pandas.pydata.org/", None),
-}
-
-latex_engine = "xelatex"
