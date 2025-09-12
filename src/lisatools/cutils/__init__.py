@@ -12,13 +12,23 @@ from gpubackendtools.utils.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
-    get_ll: typing.Callable[(...), None]
-    fill_global: typing.Callable[(...), None]
+    pycppDetector: typing.ClassVar
+
+
+# import for cpu/gpu
+from lisatools.cutils.detector_cpu import pycppDetector as pycppDetector_cpu
+
+try:
+    import cupy as cp
+    from lisatools.cutils.detector_gpu import pycppDetector as pycppDetector_gpu
+
+except (ImportError, ModuleNotFoundError) as e:
+    pycppDetector_gpu = None  # for doc string purposes
 
 
 class LISAToolsBackend:
-    get_ll: typing.Callable[(...), None]
-    fill_global: typing.Callable[(...), None]
+    # TODO: not ClassVar?
+    pycppDetector: typing.ClassVar
 
     def __init__(self, lisatools_backend_methods):
 
@@ -26,9 +36,8 @@ class LISAToolsBackend:
         # pass rest to general backend
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
 
-        self.get_ll = lisatools_backend_methods.get_ll
-        self.fill_global = lisatools_backend_methods.fill_global
-
+        self.pycppDetector = lisatools_backend_methods.pycppDetector
+    
 
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     """Implementation of the CPU backend"""
@@ -42,7 +51,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     @staticmethod
     def cpu_methods_loader() -> LISAToolsBackendMethods:
         try:
-            import lisatools_backend_cpu.utils
+            import lisatools_backend_cpu.cutils
             
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
@@ -52,8 +61,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         numpy = LISAToolsCpuBackend.check_numpy()
 
         return LISAToolsBackendMethods(
-            get_ll=lisatools_backend_cpu.utils.get_ll,
-            fill_global=lisatools_backend_cpu.utils.fill_global,
+            pycppDetector=lisatools_backend_cpu.cutils.pycppDetector,
             xp=numpy,
         )
 
@@ -86,8 +94,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            get_ll=lisatools_backend_cuda11x.utils.get_ll,
-            fill_global=lisatools_backend_cuda11x.utils.fill_global,
+            pycppDetector=lisatools_backend_cuda11x.cutils.pycppDetector,
             xp=cupy,
         )
 
@@ -118,8 +125,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            get_ll=lisatools_backend_cuda12x.utils.get_ll,
-            fill_global=lisatools_backend_cuda12x.utils.fill_global,
+            pycppDetector=lisatools_backend_cuda12x.cutils.pycppDetector,
             xp=cupy,
         )
 

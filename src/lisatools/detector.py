@@ -13,16 +13,6 @@ from .utils.utility import get_array_module
 
 import numpy as np
 
-# import for cpu/gpu
-from lisatools.cutils.detector_cpu import pycppDetector as pycppDetector_cpu
-
-try:
-    import cupy as cp
-    from lisatools.cutils.detector_gpu import pycppDetector as pycppDetector_gpu
-
-except (ImportError, ModuleNotFoundError) as e:
-    pycppDetector_gpu = None  # for doc string purposes
-
 
 SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
