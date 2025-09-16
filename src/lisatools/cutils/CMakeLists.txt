@@ -7,8 +7,8 @@
 # In the project root CMakeLists.txt, we defined a "lisaanalysistools" interface
 # target with properties WITH_CPU and WITH_GPU defining whether the CPU and a
 # GPU backend need to be compiled. Let's retrieve these information here:
-get_target_property(GBGPU_WITH_CPU lisaanalysistools WITH_CPU)
-get_target_property(GBGPU_WITH_GPU lisaanalysistools WITH_GPU)
+get_target_property(LISATOOLS_WITH_CPU lisaanalysistools WITH_CPU)
+get_target_property(LISATOOLS_WITH_GPU lisaanalysistools WITH_GPU)
 
 # Adapter to let inplace editable install work: the compiled backend will be
 # placed into the source-tree in the 'src' directory:
@@ -53,7 +53,7 @@ function(apply_gpu_backend_common_options libname)
   target_link_libraries(${target_name} PUBLIC CUDA::cudart CUDA::cublas
                                               CUDA::cusparse)
   set_property(TARGET ${target_name} PROPERTY CUDA_ARCHITECTURES
-                                              ${GBGPU_CUDA_ARCH})
+                                              ${LISATOOLS_CUDA_ARCH})
 endfunction()
 
 function(apply_cpu_backend_common_options libname)
@@ -66,9 +66,9 @@ function(apply_cpu_backend_common_options libname)
 
   install(TARGETS ${target_name} DESTINATION lisatools_backend_cpu)
 
-  get_target_property(GBGPU_CXX_MARCH_OPT lisaanalysistools CXX_MARCH)
-  if(GBGPU_CXX_MARCH_OPT)
-    target_compile_options(${target_name} PRIVATE "${GBGPU_CXX_MARCH_OPT}")
+  get_target_property(LISATOOLS_CXX_MARCH_OPT lisaanalysistools CXX_MARCH)
+  if(LISATOOLS_CXX_MARCH_OPT)
+    target_compile_options(${target_name} PRIVATE "${LISATOOLS_CXX_MARCH_OPT}")
   endif()
 
   target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
@@ -100,7 +100,7 @@ add_custom_command(
   VERBATIM)
 
 # II. Declare the CPU backend
-if(GBGPU_WITH_CPU)
+if(LISATOOLS_WITH_CPU)
   add_custom_command(
     OUTPUT "Detector.cxx"
     COMMENT "Copy Detector.cu to Detector.cxx"
@@ -117,7 +117,7 @@ if(GBGPU_WITH_CPU)
 endif()
 
 # III. Declare the GPU backend
-if(GBGPU_WITH_GPU)
+if(LISATOOLS_WITH_GPU)
   python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
   apply_gpu_backend_common_options(pycppdetector)
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
