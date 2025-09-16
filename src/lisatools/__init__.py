@@ -31,7 +31,8 @@ except (ModuleNotFoundError, ImportError):
 from . import cutils, utils
 from .cutils import KNOWN_BACKENDS
 
-from gpubackendtools.utils.globals import Globals
+from gpubackendtools import get_backend, has_backend, get_first_backend
+from gpubackendtools import Globals
 from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend
 
 
@@ -48,13 +49,6 @@ __all__ = [
     "__version__",
     "__version_tuple__",
     "_is_editable",
-    # "amplitude",
-    # "cutils",
-    # "files",
-    # "summation",
-    # "trajectory",
-    # "utils",
-    # "waveform",
     "get_logger",
     "get_config",
     "get_config_setter",

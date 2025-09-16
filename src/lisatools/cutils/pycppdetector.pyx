@@ -2,8 +2,9 @@ import numpy as np
 cimport numpy as np
 from libcpp.string cimport string
 from libcpp cimport bool
-from lisatools.utils.pointeradjust import wrapper
 from libc.stdint cimport uintptr_t
+
+from gpubackendtools import wrapper
 
 
 cdef extern from "../include/Detector.hpp":
