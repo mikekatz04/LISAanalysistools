@@ -37,7 +37,7 @@ dependencies = [
   "tqdm",
   "wrapt",
   #@DEPS_CUPYCUDA@,
-  #@DEPS_GBGPUCORE@,
+  #@DEPS_LISATOOLSCORE@,
 ]
 
 

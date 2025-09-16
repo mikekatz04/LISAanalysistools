@@ -46,7 +46,7 @@ set_property(
 set(
   LISATOOLS_CUDA_ARCH "native"
   CACHE STRING "CUDA Architecture targetted for LISATOOLS compilation (see doc of \
-          LISATOOLS_CUDA_ARCHA_ARCHITECTURES)."
+          CMAKE_CUDA_ARCHITECTURES)."
 )
 
 set(
@@ -78,10 +78,10 @@ endif()
 if(LISATOOLS_WITH_GPU STREQUAL "AUTO")
   include(CheckLanguage)
   check_language(CUDA)
-  if(LISATOOLS_CUDA_ARCHA_COMPILER)
+  if(LISATOOLS_CUDA_ARCH_COMPILER)
     find_package(CUDAToolkit)
   endif()
-  if(LISATOOLS_CUDA_ARCHA_COMPILER AND CUDAToolkit_FOUND)
+  if(LISATOOLS_CUDA_ARCH_COMPILER AND CUDAToolkit_FOUND)
     message(
       STATUS
       "LISATOOLS GPU support was set to AUTO and will be turned ON as CUDA and \
@@ -92,7 +92,7 @@ ${CUDAToolkit_VERSION_MAJOR}.")
     message(
       STATUS
       "LISATOOLS GPU support was set to AUTO and will be turned OFF as CUDA and \
-CUDA Toolkit are not found (LISATOOLS_CUDA_ARCHA_COMPILER:${LISATOOLS_CUDA_ARCHA_COMPILER} \
+CUDA Toolkit are not found (LISATOOLS_CUDA_:${LISATOOLS_CUDA_ARCH_COMPILER} \
 CUDAToolkit_FOUND:${CUDAToolkit_FOUND}).")
     set_target_properties(lisaanalysistools PROPERTIES WITH_GPU OFF)
   endif()

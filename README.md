@@ -76,7 +76,7 @@ This project is licensed under the Apache License - see the [LICENSE.md](LICENSE
   month        = apr,
   year         = 2024,
   publisher    = {Zenodo},
-  version      = {v1.0.3},
+  version      = {v1.0.17},
   doi          = {10.5281/zenodo.10930980},
   url          = {https://doi.org/10.5281/zenodo.10930980}
 }
