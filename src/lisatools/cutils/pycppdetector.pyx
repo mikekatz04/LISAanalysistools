@@ -7,7 +7,7 @@ from libc.stdint cimport uintptr_t
 from gpubackendtools import wrapper
 
 
-cdef extern from "../include/Detector.hpp":
+cdef extern from "Detector.hpp":
     cdef cppclass VecWrap "Vec":
         double x
         double y

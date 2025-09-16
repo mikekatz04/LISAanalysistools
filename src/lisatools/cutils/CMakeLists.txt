@@ -109,18 +109,18 @@ if(GBGPU_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM)
 
-  python_add_library(lisaanalysistools_cpu_utils MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
+  python_add_library(lisaanalysistools_cpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
   apply_cpu_backend_common_options(pycppdetector)
 
-  target_sources(lisaanalysistools_cpu_utils PUBLIC FILE_SET HEADERS FILES
+  target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
                                          global.hpp Detector.hpp)
 endif()
 
 # III. Declare the GPU backend
 if(GBGPU_WITH_GPU)
-  python_add_library(lisaanalysistools_gpu_utils MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
+  python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
   apply_gpu_backend_common_options(pycppdetector)
-  target_sources(lisaanalysistools_gpu_utils PUBLIC FILE_SET HEADERS FILES
+  target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
                                          global.hpp Detector.hpp)
 endif()
 
