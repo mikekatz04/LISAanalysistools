@@ -1551,7 +1551,7 @@ class GaussianMixtureModel:
                     "Try different init parameters, or increase max_iter, "
                     "tol, or check for degenerate data."
                 ),
-                ConvergenceWarning,
+                # ConvergenceWarning,
             )
 
         self._set_parameters(best_params, store_all=True)
@@ -1932,7 +1932,7 @@ class GMMFit:
     #     return new_gmm
 
 
-def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, gpu=None, verbose=False):
+def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, gpu=None, verbose=False, return_components=False):
 
     if gpu is not None:
         use_gpu = True
@@ -2021,6 +2021,9 @@ def vec_fit_gmm_min_bic(samples, min_comp=1, max_comp=30, n_samp_bic_test=5000, 
     mins = [tmp[5] for tmp in final_gmm_info]
     maxs = [tmp[6] for tmp in final_gmm_info]
 
+    if return_components:
+        return [weights, means, covs, invcovs, dets, mins, maxs]
+        
     # import pickle
     # with open("gmm_tmp_2.pickle", "wb") as fp:
     #     pickle.dump((weights, means, covs, invcovs, dets, mins, maxs), fp, pickle.HIGHEST_PROTOCOL)

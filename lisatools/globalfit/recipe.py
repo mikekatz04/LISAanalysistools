@@ -58,14 +58,20 @@ class Recipe:
             self._current_recipe_step["status"] = True
             next(self)
             
-        if self._current_iter >= len(self.recipe):
-            return True
-        else:
+            if self._current_iter >= len(self.recipe):
+                return True
             self._current_recipe_step["adjust"].setup_run(iteration, last_sample, sampler)
-            return False
+        
+        return False
 
 
 class RecipeStep:
+
+    def __init__(self, moves=None, weights=None):
+        if moves is not None:
+            self.moves = moves
+            if weights is not None:
+                self.weights = weights
 
     @property
     def moves(self):

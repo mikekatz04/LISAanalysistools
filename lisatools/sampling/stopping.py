@@ -60,7 +60,7 @@ class NLeavesSearchStopping:
             nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
             nleaves_cc_max_new = nleaves_cc[-self.convergence_iter:].max()
 
-            if nleaves_cc_max_old > nleaves_cc_max_new:
+            if nleaves_cc_max_old >= nleaves_cc_max_new:
                 stop = True
 
             else:

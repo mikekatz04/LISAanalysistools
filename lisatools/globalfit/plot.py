@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import corner
 
-from bbhx.utils.transform import LISA_to_SSB
+# from bbhx.utils.transform import LISA_to_SSB
 
 def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=None):
 
