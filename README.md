@@ -1,7 +1,7 @@
 # LISA Analysis Tools
 
 [![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://mikekatz04.github.io/LISAanalysistools)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10930980.svg)](https://doi.org/10.5281/zenodo.10930980)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17138723.svg)](https://doi.org/10.5281/zenodo.17138723)
 
 LISA Analysis Tools is a package for performing LISA Data Analysis tasks, including building the LISA Global Fit.  
 
