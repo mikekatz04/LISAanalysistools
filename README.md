@@ -167,7 +167,7 @@ pip install .
 ```
 
 If the installation does not work, first check the [detailed installation
-documentation](https://lisaanalysistools.readthedocs.io/en/stable/user/install.html). If
+documentation](https://mikekatz04.github.io/LISAanalysistools). If
 it still does not work, please open an issue on the
 [GitHub repository](https://github.com/mikekatz04/LISAanalysistools/issues)
 or contact the developers through other means.

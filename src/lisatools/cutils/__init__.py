@@ -12,19 +12,17 @@ from gpubackendtools.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
-    pycppDetector: typing.ClassVar
-
+    pycppDetector: object
 
 class LISAToolsBackend:
     # TODO: not ClassVar?
-    pycppDetector: typing.ClassVar
+    pycppDetector: object
 
     def __init__(self, lisatools_backend_methods):
 
         # set direct lisatools methods
         # pass rest to general backend
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
-
         self.pycppDetector = lisatools_backend_methods.pycppDetector
     
 
@@ -40,8 +38,8 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     @staticmethod
     def cpu_methods_loader() -> LISAToolsBackendMethods:
         try:
-            import lisatools_backend_cpu.cutils
-            
+            import lisatools_backend_cpu.pycppdetector
+
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
                 "'cpu' backend could not be imported."
@@ -50,7 +48,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         numpy = LISAToolsCpuBackend.check_numpy()
 
         return LISAToolsBackendMethods(
-            pycppDetector=lisatools_backend_cpu.cutils.pycppDetector,
+            pycppDetector=lisatools_backend_cpu.pycppdetector.pycppDetector,
             xp=numpy,
         )
 
@@ -83,7 +81,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            pycppDetector=lisatools_backend_cuda11x.cutils.pycppDetector,
+            pycppDetector=lisatools_backend_cuda11x.pycppdetector.pycppDetector,
             xp=cupy,
         )
 
@@ -114,7 +112,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            pycppDetector=lisatools_backend_cuda12x.cutils.pycppDetector,
+            pycppDetector=lisatools_backend_cuda12x.pycppdetector.pycppDetector,
             xp=cupy,
         )
 
