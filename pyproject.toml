@@ -86,7 +86,6 @@ optional-dependencies.testing = [
 version_scheme = "no-guess-dev"
 local_scheme = "node-and-date"
 version_file = "src/lisatools/_version.py"
-#@FALLBACK_VERSION@
 
 [tool.scikit-build]
 wheel.packages = ["src/lisatools"]
