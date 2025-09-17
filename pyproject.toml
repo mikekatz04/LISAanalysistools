@@ -22,6 +22,7 @@ dependencies = [
   "exceptiongroup; python_version<'3.11'", # To access ExceptionGroup with Python 3.9 and 3.10
   "h5py",
   "matplotlib",
+  "gpubackendtools",
   "jsonschema",                            # To validate content of file registry
   "lisaconstants",
   "multispline",
@@ -36,7 +37,6 @@ dependencies = [
   "scipy",
   "tqdm",
   "wrapt",
-  "eryn",
   #@DEPS_CUPYCUDA@,
   #@DEPS_LISATOOLSCORE@,
 ]
@@ -79,6 +79,7 @@ optional-dependencies.sampling = [
 
 optional-dependencies.testing = [
   "matplotlib",
+  "eryn"
 ]
 
 [tool.setuptools_scm]
