@@ -1,4 +1,5 @@
-.. include:: README.rst
+.. include:: readme.md
+   :parser: myst_parser.sphinx_
 
 .. toctree::
    :maxdepth: 4
@@ -15,4 +16,4 @@
    :maxdepth: 4
    :caption: Tutorial:
 
-   tutorial/lisatools_tutorial
+   lisatools_tutorial
