@@ -66,6 +66,7 @@ jobs:
         id: setuptools_scm
         run: |
           VERSION="$(python -m setuptools_scm)"
+          echo "RUNNING CHECK $(python -m setuptools_scm)"
           echo "notice:: Detected version: ${VERSION}"
           echo "value=${VERSION}" >> $GITHUB_OUTPUT
           echo "version: ${VERSION}" >> $GITHUB_STEP_SUMMARY

@@ -26,20 +26,6 @@ sys.path.insert(0, os.path.abspath("../../"))
 
 here = os.path.abspath(os.path.dirname(__file__))
 
-about = {}
-with open(os.path.join(here, "../../lisatools", "_version.py"), encoding="utf-8") as f:
-    exec(f.read(), about)
-# from sphinx_gallery.sorting import FileNameSortKey
-
-# -- Project information -----------------------------------------------------
-
-project = about["__name__"]
-copyright = about["__copyright__"]
-author = about["__author__"]
-
-# The full version, including alpha/beta/rc tags
-release = about["__version__"]
-
 
 # -- General configuration ---------------------------------------------------
 # Add any Sphinx extension module names here, as strings. They can be

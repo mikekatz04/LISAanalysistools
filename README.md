@@ -1,7 +1,7 @@
 # LISA Analysis Tools
 
 [![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://mikekatz04.github.io/LISAanalysistools)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.10930980.svg)](https://doi.org/10.5281/zenodo.10930980)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17138723.svg)](https://doi.org/10.5281/zenodo.17138723)
 
 LISA Analysis Tools is a package for performing LISA Data Analysis tasks, including building the LISA Global Fit.  
 
@@ -103,12 +103,6 @@ To install this software from source, you will need:
 - A C++ compiler (g++, clang++, ...)
 - A Python version supported by [scikit-build-core](https://github.com/scikit-build/scikit-build-core) (>=3.7 as of Jan. 2025)
 
-Some installation steps require the external library `LAPACK` along with its C-bindings provided by `LAPACKE`.
-If these libraries and their header files (in particular `lapacke.h`) are available on your system, they will be detected
-and used automatically. If they are available on a non-standard location, see below for some options to help detecting them.
-Note that by default, if `LAPACKE` is not available on your system, the installation step will attempt to download its sources
-and add them to the compilation tree. This makes the installation a bit longer but a lot easier.
-
 If you want to enable GPU support in LISA Analysis Tools, you will also need the NVIDIA CUDA Compiler `nvcc` in your path as well as
 the [CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html) (with, in particular, the
 libraries `CUDA Runtime Library`, `cuBLAS` and `cuSPARSE`).
@@ -126,7 +120,7 @@ cd LISAanalysistools
 
 Now create an environment (these instructions work for all platforms but some
 adjustements can be needed, refer to the
-[detailed installation documentation](https://lisaanalysistools.readthedocs.io/en/stable/user/install.html) for more information):
+[detailed installation documentation](https://mikekatz04.github.io/LISAanalysistools/build/html/index.html) for more information):
 
 ```
 conda create -n lisatools_env -y -c conda-forge --override-channels |
@@ -173,7 +167,7 @@ pip install .
 ```
 
 If the installation does not work, first check the [detailed installation
-documentation](https://lisaanalysistools.readthedocs.io/en/stable/user/install.html). If
+documentation](https://mikekatz04.github.io/LISAanalysistools). If
 it still does not work, please open an issue on the
 [GitHub repository](https://github.com/mikekatz04/LISAanalysistools/issues)
 or contact the developers through other means.
@@ -240,6 +234,6 @@ This project is licensed under the Apache License - see the [LICENSE](LICENSE) f
 
 ## Citation
 
-Please make sure to cite LISA Analysis Tools papers and the LISA Analysis Tools software on [Zenodo](https://zenodo.org/records/3969004).
+Please make sure to cite LISA Analysis Tools papers and the LISA Analysis Tools software on [Zenodo](https://zenodo.org/records/17138723).
 We provide a set of prepared references in [PAPERS.bib](PAPERS.bib). There are other papers that require citation based on the classes used. For most classes this applies to, you can find these by checking the `citation` attribute for that class.  All references are detailed in the [CITATION.cff](CITATION.cff) file.
 

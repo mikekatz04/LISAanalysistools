@@ -13,6 +13,8 @@ from .utils.utility import get_array_module
 
 import numpy as np
 
+from .utils.parallelbase import LISAToolsParallelModule
+
 
 SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
@@ -20,7 +22,7 @@ LINKS = [12, 23, 31, 13, 32, 21]
 LINEAR_INTERP_TIMESTEP = 600.00  # sec (0.25 hr)
 
 
-class Orbits(ABC):
+class Orbits(LISAToolsParallelModule, ABC):
     """LISA Orbit Base Class
 
     Args:
@@ -35,18 +37,19 @@ class Orbits(ABC):
         filename: str,
         use_gpu: bool = False,
         armlength: Optional[float] = 2.5e9,
+        **kwargs
     ) -> None:
         self.use_gpu = use_gpu
         self.filename = filename
         self.armlength = armlength
         self._setup()
         self.configured = False
+        LISAToolsParallelModule.__init__(self, **kwargs)
 
     @property
     def xp(self):
         """numpy or cupy based on self.use_gpu"""
-        xp = np if not self.use_gpu else cp
-        return xp
+        return self.backend.xp
 
     @property
     def armlength(self) -> float:
@@ -115,7 +118,7 @@ class Orbits(ABC):
 
             if not os.path.exists(path_to_this_file + filename):
                 # download files from github if they are not there
-                github_file = f"https://github.com/mikekatz04/LISAanalysistools/raw/main/lisatools/orbit_files/{filename}"
+                github_file = f"https://github.com/mikekatz04/LISAanalysistools/blob/main/src/lisatools/orbit_files/{filename}"
                 r = requests.get(github_file)
 
                 # if not success
@@ -339,14 +342,13 @@ class Orbits(ABC):
         self._dt = dt
 
     @property
-    def pycppdetector(self) -> pycppDetector_cpu | pycppDetector_gpu:
+    def pycppdetector(self) -> object:
         """C++ class"""
         if self._pycppdetector_args is None:
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
-        pycppDetector = pycppDetector_cpu if not self.use_gpu else pycppDetector_gpu
-        self._pycppdetector = pycppDetector(*self._pycppdetector_args)
+        self._pycppdetector = self.backend.pycppDetector(*self._pycppdetector_args)
         return self._pycppdetector
 
     @property
@@ -541,6 +543,10 @@ class EqualArmlengthOrbits(Orbits):
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__("equalarmlength-orbits.h5", *args, **kwargs)
+
+    @classmethod
+    def supported_backends(cls):
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
 
 class ESAOrbits(Orbits):
