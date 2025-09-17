@@ -528,6 +528,12 @@ class Orbits(LISAToolsParallelModule, ABC):
     def ptr(self) -> int:
         """pointer to c++ class"""
         return self.pycppdetector.ptr
+    
+    
+    @classmethod
+    def supported_backends(cls):
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+
 
 
 class EqualArmlengthOrbits(Orbits):
@@ -543,10 +549,6 @@ class EqualArmlengthOrbits(Orbits):
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__("equalarmlength-orbits.h5", *args, **kwargs)
-
-    @classmethod
-    def supported_backends(cls):
-        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
 
 class ESAOrbits(Orbits):
