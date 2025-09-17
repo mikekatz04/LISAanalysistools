@@ -36,6 +36,7 @@ dependencies = [
   "scipy",
   "tqdm",
   "wrapt",
+  "eryn",
   #@DEPS_CUPYCUDA@,
   #@DEPS_LISATOOLSCORE@,
 ]
