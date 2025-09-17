@@ -8,22 +8,11 @@ from typing import Optional, Sequence, TypeVar, Union
 from ..utils.exceptions import *
 
 from gpubackendtools.gpubackendtools import BackendMethods, CpuBackend, Cuda11xBackend, Cuda12xBackend
-from gpubackendtools.utils.exceptions import *
+from gpubackendtools.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
     pycppDetector: typing.ClassVar
-
-
-# import for cpu/gpu
-from lisatools.cutils.detector_cpu import pycppDetector as pycppDetector_cpu
-
-try:
-    import cupy as cp
-    from lisatools.cutils.detector_gpu import pycppDetector as pycppDetector_gpu
-
-except (ImportError, ModuleNotFoundError) as e:
-    pycppDetector_gpu = None  # for doc string purposes
 
 
 class LISAToolsBackend:
