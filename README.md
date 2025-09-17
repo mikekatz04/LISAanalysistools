@@ -103,12 +103,6 @@ To install this software from source, you will need:
 - A C++ compiler (g++, clang++, ...)
 - A Python version supported by [scikit-build-core](https://github.com/scikit-build/scikit-build-core) (>=3.7 as of Jan. 2025)
 
-Some installation steps require the external library `LAPACK` along with its C-bindings provided by `LAPACKE`.
-If these libraries and their header files (in particular `lapacke.h`) are available on your system, they will be detected
-and used automatically. If they are available on a non-standard location, see below for some options to help detecting them.
-Note that by default, if `LAPACKE` is not available on your system, the installation step will attempt to download its sources
-and add them to the compilation tree. This makes the installation a bit longer but a lot easier.
-
 If you want to enable GPU support in LISA Analysis Tools, you will also need the NVIDIA CUDA Compiler `nvcc` in your path as well as
 the [CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html) (with, in particular, the
 libraries `CUDA Runtime Library`, `cuBLAS` and `cuSPARSE`).
@@ -240,6 +234,6 @@ This project is licensed under the Apache License - see the [LICENSE](LICENSE) f
 
 ## Citation
 
-Please make sure to cite LISA Analysis Tools papers and the LISA Analysis Tools software on [Zenodo](https://zenodo.org/records/3969004).
+Please make sure to cite LISA Analysis Tools papers and the LISA Analysis Tools software on [Zenodo](https://zenodo.org/records/17138723).
 We provide a set of prepared references in [PAPERS.bib](PAPERS.bib). There are other papers that require citation based on the classes used. For most classes this applies to, you can find these by checking the `citation` attribute for that class.  All references are detailed in the [CITATION.cff](CITATION.cff) file.
 
