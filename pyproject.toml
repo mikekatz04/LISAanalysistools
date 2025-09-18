@@ -79,7 +79,8 @@ optional-dependencies.sampling = [
 
 optional-dependencies.testing = [
   "matplotlib",
-  "eryn"
+  "eryn",
+  "gbgpu"
 ]
 
 [tool.setuptools_scm]
