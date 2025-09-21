@@ -1259,7 +1259,19 @@ def gather_gb_samples(fd, transform_fn, waveform_kwargs, band_edges, band_N_vals
                 continue
             
             ll_diff_i = ll_diff[keep_inds]
-            group_test = (ll_diff_i > overlap_lim)  # .get()
+            mismatch = np.abs(1.0 - ll_diff_i)
+            indicator = keep_map_back[0] * 1e6 + mismatch
+            group_sort = np.argsort(indicator)
+            indicator[:] = indicator[group_sort]
+            keep_inds[:] = keep_inds[group_sort]
+            keep_map_back[0][:] = keep_map_back[0][group_sort]
+            keep_map_back[1][:] = keep_map_back[1][group_sort]
+            ll_diff_i[:] = ll_diff_i[group_sort]
+            mismatch[:] = mismatch[group_sort]
+
+            uni_sample_i, uni_sample_index, uni_sample_count = np.unique(keep_map_back[0][:], return_counts=True, return_index=True)
+            group_test = (mismatch[uni_sample_index] < np.abs(1.0 - overlap_lim))  # .get()
+            keep_group_test = uni_sample_index[group_test]
             num_grouping = group_test.sum()
             if num_grouping == 0:
                 continue
@@ -1267,27 +1279,26 @@ def gather_gb_samples(fd, transform_fn, waveform_kwargs, band_edges, band_N_vals
             in_here = keep_going_in[i]
 
             # gb_inds_in[keep_map_back][group_test] = 
-            ind1 = inds_keep_i[keep_map_back[0][group_test]]
-            ind2 = keep_map_back[1][group_test]
+            ind1 = inds_keep_i[keep_map_back[0][keep_group_test]]
+            ind2 = keep_map_back[1][keep_group_test]
 
             if np.any(~gb_inds_tmp[ind1, ind2]):
-                _remove_here = np.arange(group_test.shape[0])[group_test][~gb_inds_tmp[ind1, ind2]]
-                group_test[_remove_here] = False
-                num_grouping = group_test.sum()
-                if num_grouping == 0:
+                # _remove_here = keep_group_test[~gb_inds_tmp[ind1, ind2]]
+                keep_group_test = keep_group_test[gb_inds_tmp[ind1, ind2]]  # np.delete(keep_group_test, _remove_here)
+                if len(keep_group_test) == 0:
                     continue
 
-                ind1 = inds_keep_i[keep_map_back[0][group_test]]
-                ind2 = keep_map_back[1][group_test]
+                ind1 = inds_keep_i[keep_map_back[0][keep_group_test]]
+                ind2 = keep_map_back[1][keep_group_test]
 
             if not np.all(gb_inds_tmp[ind1, ind2]):
                 breakpoint()
             gb_inds_tmp[ind1, ind2] = False
-            
-            group = np.concatenate([first_sample[in_here][None, :], gb_samples_in[keep_map_back][group_test]], axis=0)
+
+            group = np.concatenate([first_sample[in_here][None, :], gb_samples_in[keep_map_back][keep_group_test]], axis=0)
             if len(group) == 1:
                 breakpoint()
-            if not np.any(np.all(((gb_snrs_in > snr_lim_second_cut) & gb_inds_in)[keep_map_back][group_test])):
+            if not np.any(np.all(((gb_snrs_in > snr_lim_second_cut) & gb_inds_in)[keep_map_back][keep_group_test])):
                 breakpoint()
             
             if (num_grouping + 1) > gb_samples.shape[0]:

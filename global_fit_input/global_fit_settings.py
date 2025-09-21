@@ -77,6 +77,25 @@ class PSDSearchRecipeStep(RecipeStep):
         return True
 
 
+from lisatools.sampling.stopping import SearchConvergeStopping
+
+
+class MBHSearchStep(RecipeStep):
+
+    def __init__(self, *args, moves=None, weights=None, **kwargs):
+        self.stopper = SearchConvergeStopping(*args, **kwargs)
+        super().__init__(moves=moves, weights=weights)
+
+    def setup_run(self, iteration, last_sample, sampler):
+        # making sure
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+        
+    def stopping_function(self, *args, **kwargs):
+        # this will already be converged to max logl
+        return self.stopper(*args, **kwargs)
+
+
 class GBRunStep(RecipeStep):
 
     def __init__(self, *args, convergence_iter=5, thin_by=1, verbose=False, **kwargs):
@@ -136,6 +155,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     # _ = setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
     # _ = setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
     gb_info = curr.source_info["gb"]
+    mbh_info = curr.source_info["mbh"]
     # TODO: adjust this indide current info
     general_info = curr.general_info
     nwalkers = curr.general_info["nwalkers"]
@@ -371,6 +391,51 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     # state.branches["gb"].branch_supplemental = BranchSupplemental(
     #     {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
     # )
+
+    mbh_info = curr.source_info["mbh"]
+    from bbhx.waveformbuild import BBHWaveformFD
+
+    wave_gen = BBHWaveformFD(
+        **mbh_info["initialize_kwargs"]
+    )
+
+    if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
+            betas_all = state.sub_states["mbh"].betas_all
+    else:
+        print("remove the False above")
+        betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps), (mbh_info["pe_info"]["nleaves_max"], 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["mbh"].betas_all = betas_all
+
+    inner_moves = mbh_info["pe_info"]["inner_moves"]
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    coords_shape = (ntemps, nwalkers, mbh_info["pe_info"]["nleaves_max"], mbh_info["pe_info"]["ndim"])
+
+    mbh_move_args = (
+        "mbh",  # branch_name,
+        coords_shape,
+        wave_gen,
+        tempering_kwargs,
+        mbh_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
+        mbh_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        acs,
+        mbh_info["pe_info"]["num_prop_repeats"],
+        mbh_info["transform"],
+        priors,
+        inner_moves,
+        acs.df
+    )
+    
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, run_search=True, use_gpu=True,)
+
+    mbh_search_moves = GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
+    mbh_search_moves.accepted = np.zeros((ntemps, nwalkers))
+    
+    recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_moves], n_iters=5, verbose=True), name="mbh search")
+    
 
     ########### GB
     fd = general_info["fd"].copy()
@@ -633,7 +698,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_4th_run_through"
+    base_file_name = "rework_5th_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -717,8 +782,9 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: check this. 
     # This is here because of data storage size 
     # and an issue I think with a zero in the response psd
-    end_freq_ind = int(0.030 / df)  # len(A_inj)  # ADD THIS BACK TO ALLOW FOR FULL FFT
+    # end_freq_ind = int(0.030 / df)  # len(A_inj)  # ADD THIS BACK TO ALLOW FOR FULL FFT
     # end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
+    end_freq_ind = len(Af)  # ALLOW FOR FULL FFT
     
     A_inj, E_inj = (
         Af[start_freq_ind:end_freq_ind],
@@ -1324,8 +1390,8 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
-        # GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
+        + GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
         # + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
@@ -1335,7 +1401,7 @@ def get_global_fit_settings(copy_settings_file=False):
         "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": all_gb_info,
-            # "mbh": all_mbh_info,
+            "mbh": all_mbh_info,
             "psd": all_psd_info,
             # "emri": all_emri_info,
         },
