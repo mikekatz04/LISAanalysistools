@@ -1,6 +1,7 @@
 import numpy as np
-import cupy as xp
+import cupy as cp
 from copy import deepcopy
+import os
 
 from eryn.moves import RedBlueMove, StretchMove
 # from eryn.state import State
@@ -12,6 +13,14 @@ from .globalfitmove import GlobalFitMove
 from .addremovemove import ResidualAddOneRemoveOneMove
 from ...utils.utility import tukey
 from ...sampling.stopping import SearchConvergeStopping
+from ...utils.constants import *
+
+from eryn.ensemble import EnsembleSampler
+from ...sensitivity import AET1SensitivityMatrix
+from ...detector import sangria
+from ...datacontainer import DataResidualArray
+from ...analysiscontainer import AnalysisContainer
+
 
 def update_fn(i, last_sample, sampler):
     print("max logl:", last_sample.log_like.max()) 
@@ -19,15 +28,35 @@ def update_fn(i, last_sample, sampler):
     last_sample.log_like[-1] = last_sample.log_like[0]
     last_sample.log_prior[-1] = last_sample.log_prior[0]
 
+
+def search_likelihood_wrap(x, wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, transform_fn, like_args, mbh_kwargs):
+    x_in = transform_fn.both_transforms(x)
+
+    data_index = noise_index = (np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1).astype(np.int32)
+    # wave_gen.amp
+    
+    wave_gen.amp_phase_gen.initial_t_val = initial_t_vals[data_index][:, None]
+    t_obs_start = initial_t_vals[data_index] / YRSID_SI
+    t_obs_end = end_t_vals[data_index] / YRSID_SI
+    wave_gen.d_d = cp.asarray(d_d_vals[data_index])
+    fd, all_data, psd, df = like_args
+
+    ll = wave_gen.get_direct_ll(fd, all_data, psd, df, *x_in.T, noise_index=noise_index, data_index=data_index, t_obs_start=t_obs_start, t_obs_end=t_obs_end, **mbh_kwargs).real.get()
+    
+    return ll
+
+
 class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, run_search=False, **kwargs):
         
         RedBlueMove.__init__(self, **kwargs)
-        
         ResidualAddOneRemoveOneMove.__init__(self, *args, **kwargs)
-
+        self.run_search = run_search
+        
     def setup(self, model, state):
-        from eryn.ensemble import EnsembleSampler
+
+        if not self.run_search:
+            return 
 
         # TODO: adjust these moves?
         _moves = [(move_i, weight_i) for move_i, weight_i in zip(self.moves, self.move_weights)]
@@ -38,6 +67,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
 
         fd = cp.asarray(model.analysis_container_arr.f_arr)
         df = model.analysis_container_arr.df
+        dt = model.analysis_container_arr[0].data_res_arr.dt
 
         ntemps = 10
         nwalkers = 50
@@ -60,13 +90,15 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             # A, E, T = np.fft.irfft(_Af / dt), np.fft.irfft(_Ef / dt), np.fft.irfft(_Tf / dt)
 
         # take inverse FFT 
-        At, Et = np.fft.irfft(data[0] / dt), np.fft.irfft(data[1] / dt)
+        At, Et = np.fft.irfft(data[0].get() / dt), np.fft.irfft(data[1].get() / dt)
+
+        # TODO: do anything with incoming tukey window?
+        
 
         start_params = self.priors["mbh"].rvs(size=(ntemps, nwalkers, 1))
         # ll = wave_gen.get_direct_ll(fd, data, psd, df, *x_in.T, **self.waveform_like_kwargs).real.get()
-        breakpoint()
 
-        _Tobs = 3.0 * YRSID_SI / 12.0  # 1 month
+        _Tobs = At.shape[0] * dt  # 1 month
         Nobs = int(_Tobs / dt)  # len(t)
         Tobs = Nobs * dt
 
@@ -81,7 +113,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         # omits first day and last day
         delta = int(12.0 * 3600.0 / dt)  # int(15 * 24 * 3600.0 / dt)  # 
         # TODO: need to fill in days on edges of windows
-        t_start_ind = int((1.5 * YRSID_SI / 12.0 - 24.0 * 3600.0) / dt)  # 0
+        t_start_ind = int((0.25 * YRSID_SI / 12.0 - 24.0 * 3600.0) / dt)  # 0
         if t_start_ind > len(At) - 2:
             breakpoint()
             raise ValueError
@@ -92,7 +124,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
 
         t_ref_lims = t_lims[1:-1]
         num_t_ref_bins = len(t_ref_lims) - 1
-        
+
         end_t_vals = []
         for i, t_i in enumerate(range(0, t_lims.shape[0] - 3)):
             start_t = t_lims[t_i]
@@ -113,10 +145,15 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             # plt.close()
             # fucking dt
         
-            Af, Ef, Tf = (
+            # Af, Ef, Tf = (
+            #     np.fft.rfft(A_here) * dt,
+            #     np.fft.rfft(E_here) * dt,
+            #     np.fft.rfft(T_here) * dt,
+            # )
+
+            Af, Ef = (
                 np.fft.rfft(A_here) * dt,
                 np.fft.rfft(E_here) * dt,
-                np.fft.rfft(T_here) * dt,
             )
             
             initial_t_vals.append(start_t)
@@ -129,8 +166,9 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             else:
                 assert length_check == len(Af)  
 
-            data_res_arr = DataResidualArray([Af, Ef], f_arr=fd_short)
+            data_res_arr = DataResidualArray([Af, Ef, np.zeros_like(Af)], f_arr=fd_short)
             sens_mat = AET1SensitivityMatrix(fd_short, model=sangria)  # , stochastic_params=(YRSID_SI,))
+            sens_mat[2] = 1e10
             analysis = AnalysisContainer(data_res_arr, sens_mat)  # , signal_gen=MBHWrap(wave_gen))
             acs_tmp.append(analysis)
             print(start_t, t_ref_lims[i], end_t, t_ref_lims[i + 1], analysis.inner_product())
@@ -142,7 +180,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         end_t_vals = np.asarray(end_t_vals)
 
         from lisatools.analysiscontainer import AnalysisContainerArray
-        acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
+        acs = AnalysisContainerArray(acs_tmp, gpus=[cp.cuda.runtime.getDevice()])
         fd_short = cp.asarray(fd_short)
         data_length_short = len(fd_short)
         initial_t_vals = np.asarray(initial_t_vals)
@@ -153,7 +191,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         from bbhx.likelihood import HeterodynedLikelihood, NewHeterodynedLikelihood, Likelihood
         
         # priors
-        from eryn.prior import ProbDistContainer
+        from eryn.prior import ProbDistContainer, uniform_dist
         priors_mbh = {"mbh": ProbDistContainer({
             0: uniform_dist(np.log(1e4), np.log(1e8)),  # 
             1: uniform_dist(0.01, 0.999999999),
@@ -180,6 +218,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         #     gpu=cp.cuda.runtime.getDevice(),  # self.use_gpu,
         # )
 
+        from eryn.utils import PeriodicContainer
         # sampler treats periodic variables by wrapping them properly
         periodic_mbh = PeriodicContainer({
             "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
@@ -201,14 +240,17 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         d_d_vals = np.zeros(len(acs))  # 4 * df * np.sum(np.asarray([(all_data_cpu[i].conj() * all_data_cpu[i]) / psd_cpu[i] for i in range(all_data_cpu.shape[0])]), axis=(0, 2))
 
         # d_d_vals[:] = acs.inner_product()
-        
-        full_kwargs = waveform_kwargs_mbh.copy()
+        full_kwargs = self.waveform_like_kwargs.copy()
         full_kwargs["phase_marginalize"] = True
         full_kwargs["length"] = 1024
 
-        like_args = (wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, transform_fn_mbh, (cp.asarray(fd), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df), full_kwargs)
+        like_args = (self.waveform_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, self.transform_fn, (cp.asarray(fd_short), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df), full_kwargs)
         # # check3 = search_likelihood_wrap(start_points, *like_args)
         
+        _fp = "mbh_search_tmp_file.h5"
+        fp = "global_fit_output/" + _fp
+        if os.path.exists(fp):
+            os.remove(fp)
         stop_fn = SearchConvergeStopping(n_iters=30, diff=1.0, verbose=True, start_iteration=0)
         sampler = EnsembleSampler(
             nwalkers,
@@ -262,8 +304,8 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         start_likelihood = self.acs.likelihood()
         keep_het = start_likelihood.argmax()
 
-        data_index = xp.arange(self.nwalkers, dtype=np.int32)
-        noise_index = xp.arange(self.nwalkers, dtype=np.int32)
+        data_index = cp.arange(self.nwalkers, dtype=np.int32)
+        noise_index = cp.arange(self.nwalkers, dtype=np.int32)
         het_coords = np.tile(coords[keep_het], (self.nwalkers, 1))
 
         # self.waveform_like_kwargs = dict(
@@ -280,7 +322,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             256,
             data_index=data_index,
             noise_index=noise_index,
-            gpu=xp.cuda.runtime.getDevice(),  # self.use_gpu,
+            gpu=cp.cuda.runtime.getDevice(),  # self.use_gpu,
         )
         data_index = walker_inds_base.astype(np.int32)
         noise_index = walker_inds_base.astype(np.int32)
@@ -291,7 +333,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             **self.waveform_like_kwargs
         ) + self.acs.likelihood(noise_only=True)[data_index]
 
-        xp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_memory_pool().free_all_blocks()
         
     def compute_like(self, new_points_in, data_index):
         assert data_index is not None
@@ -303,8 +345,8 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         return logl
 
     def get_waveform_here(self, coords):
-        xp.get_default_memory_pool().free_all_blocks()
-        waveforms = xp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
+        cp.get_default_memory_pool().free_all_blocks()
+        waveforms = cp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
         
         for i in range(coords.shape[0]):
             waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
@@ -312,7 +354,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         return waveforms
 
     def replace_residuals(self, old_state, new_state):
-        fd = xp.asarray(self.acs.fd)
+        fd = cp.asarray(self.acs.fd)
         old_contrib = [None, None]
         new_contrib = [None, None]
         for leaf in range(old_state.branches["mbh"].shape[-2]):
@@ -336,5 +378,5 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
                 new_contrib[1] += add_waveforms[1]
             
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
-        xp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_memory_pool().free_all_blocks()
 

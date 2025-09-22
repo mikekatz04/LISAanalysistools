@@ -77,6 +77,25 @@ class PSDSearchRecipeStep(RecipeStep):
         return True
 
 
+from lisatools.sampling.stopping import SearchConvergeStopping
+
+
+class MBHSearchStep(RecipeStep):
+
+    def __init__(self, *args, moves=None, weights=None, **kwargs):
+        self.stopper = SearchConvergeStopping(*args, **kwargs)
+        super().__init__(moves=moves, weights=weights)
+
+    def setup_run(self, iteration, last_sample, sampler):
+        # making sure
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+        
+    def stopping_function(self, *args, **kwargs):
+        # this will already be converged to max logl
+        return self.stopper(*args, **kwargs)
+
+
 class GBRunStep(RecipeStep):
 
     def __init__(self, *args, convergence_iter=5, thin_by=1, verbose=False, **kwargs):
@@ -178,6 +197,65 @@ def setup_gb_recipe(recipe, curr, acs, priors, state, psd_search_move, psd_pe_mo
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
 
+
+def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
+    # _ = setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
+    # _ = setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+    gb_info = curr.source_info["gb"]
+    mbh_info = curr.source_info["mbh"]
+    # TODO: adjust this indide current info
+    general_info = curr.general_info
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+
+    gpus = curr.general_info["gpus"]
+    cp.cuda.runtime.setDevice(gpus[0])
+    from gbgpu.gbgpu import GBGPU
+    
+    gb = GBGPU(gpus=gpus)
+    gb.gpus = gpus
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    
+    # setup psd search move
+    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
+    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    psd_move_args = (gb, acs, priors)
+
+    psd_move_kwargs = dict(
+        num_repeats=500,
+        live_dangerously=True,
+        gibbs_sampling_setup=[{
+            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
+            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
+        }],
+        temperature_control=temperature_control
+    )
+    
+    psd_search_move = PSDMove(
+        *psd_move_args, 
+        max_logl_mode=True,
+        name="psd search move",
+        **psd_move_kwargs,
+    )
+
+    psd_pe_move = PSDMove(
+        *psd_move_args, 
+        max_logl_mode=False,
+        name="psd pe move",
+        **psd_move_kwargs,
+    )
+    # TODO: put this under the hood
+    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+
+    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    
+    # return SetupInfoTransfer(
+    #     name="psd",
+    #     in_model_moves=[],  # (psd_move, 1.0)],
+    # )
     band_edges = gb_info["band_edges"]
     band_N_vals = gb_info["band_N_vals"]
     gb_betas = gb_info["pe_info"]["betas"]
@@ -360,6 +438,51 @@ def setup_gb_recipe(recipe, curr, acs, priors, state, psd_search_move, psd_pe_mo
     # state.branches["gb"].branch_supplemental = BranchSupplemental(
     #     {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
     # )
+
+    mbh_info = curr.source_info["mbh"]
+    from bbhx.waveformbuild import BBHWaveformFD
+
+    wave_gen = BBHWaveformFD(
+        **mbh_info["initialize_kwargs"]
+    )
+
+    if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
+            betas_all = state.sub_states["mbh"].betas_all
+    else:
+        print("remove the False above")
+        betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps), (mbh_info["pe_info"]["nleaves_max"], 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["mbh"].betas_all = betas_all
+
+    inner_moves = mbh_info["pe_info"]["inner_moves"]
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    coords_shape = (ntemps, nwalkers, mbh_info["pe_info"]["nleaves_max"], mbh_info["pe_info"]["ndim"])
+
+    mbh_move_args = (
+        "mbh",  # branch_name,
+        coords_shape,
+        wave_gen,
+        tempering_kwargs,
+        mbh_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
+        mbh_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        acs,
+        mbh_info["pe_info"]["num_prop_repeats"],
+        mbh_info["transform"],
+        priors,
+        inner_moves,
+        acs.df
+    )
+    
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, run_search=True, use_gpu=True,)
+
+    mbh_search_moves = GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
+    mbh_search_moves.accepted = np.zeros((ntemps, nwalkers))
+    
+    recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_moves], n_iters=5, verbose=True), name="mbh search")
+    
 
     ########### GB
     fd = general_info["fd"].copy()
@@ -827,7 +950,7 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_4th_run_through"
+    base_file_name = "rework_5th_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -913,8 +1036,9 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: check this. 
     # This is here because of data storage size 
     # and an issue I think with a zero in the response psd
-    end_freq_ind = int(0.030 / df)  # len(A_inj)  # ADD THIS BACK TO ALLOW FOR FULL FFT
+    # end_freq_ind = int(0.030 / df)  # len(A_inj)  # ADD THIS BACK TO ALLOW FOR FULL FFT
     # end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
+    end_freq_ind = len(Af)  # ALLOW FOR FULL FFT
     
     A_inj, E_inj = (
         Af[start_freq_ind:end_freq_ind],

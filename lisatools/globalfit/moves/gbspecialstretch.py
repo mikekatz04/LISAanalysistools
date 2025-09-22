@@ -716,6 +716,8 @@ class BandSorter:
                         set_value = dc(value[inds_subset])
 
                     else:
+                        if len(inds_subset) == 0:
+                            breakpoint()
                         set_value = dc(value)
 
                     setattr(self, key, set_value)
@@ -788,6 +790,7 @@ class BandSorter:
             self.factors = self.xp.ones_like(self.inds)
             tmp_inds_shaped = self.orig_inds.copy()
 
+        self.has_run_rj = self.xp.zeros_like(self.inds)
         self.num_sources = self.coords.shape[0]
         self.set_main_band_sorter_info(main_band_sorter, inds_main_band_sorter)
         
@@ -1483,14 +1486,27 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                 special_band_inds_now = band_sorter.special_band_inds[source_map_now]
                 
                 # randomly permute rj order
+                # randomly orders every time
+                # some have been run already because 
+                # either need to trick this to order those that have been run to the beginning
+                # cannot remove them because need them for in model moves 
                 permute_inds = self.xp.random.permutation(self.xp.arange(special_band_inds_now.shape[0]))
                 special_band_inds_now = special_band_inds_now[permute_inds]
                 coords_now[:] = coords_now[permute_inds]
                 source_map_now[:] = source_map_now[permute_inds]
-                sort2 = self.xp.argsort(special_band_inds_now)
+
+                # TO FAKE THE ORDERING
+                # we subtract 1/2 for any with inds==False to trick the ordering
+                _special_band_inds_now = special_band_inds_now.copy().astype(float)
+                _has_run_from_sorter = band_sorter.has_run_rj[source_map_now]
+                _special_band_inds_now[_has_run_from_sorter] -= 1. / 2.
+
+                sort2 = self.xp.argsort(_special_band_inds_now)
                 special_band_inds_now[:] = special_band_inds_now[sort2]
                 coords_now[:] = coords_now[sort2]
                 source_map_now[:] = source_map_now[sort2]
+                _special_band_inds_now[:] = _special_band_inds_now[sort2]
+                _has_run_from_sorter[:] = _has_run_from_sorter[sort2] 
 
                 sort3 = self.xp.argsort(currently_running_special_inds[run_it])
                 
@@ -1506,6 +1522,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                 uni_special_index[inds_fill_uni_special] = _uni_special_index[self.xp.argsort(sort3)]
                 uni_special_counts[inds_fill_uni_special] = _uni_special_counts[self.xp.argsort(sort3)]
                 
+                # TODO: CHECK BAND TEMPS IN ACCEPT
+                if self.use_prior_removal:
+                    if self.xp.any((~band_sorter.inds[source_map_now]) & ~_has_run_from_sorter):
+                        breakpoint()
                 try:
                     assert (currently_running_special_inds == uni_special)[run_it].all()
                 except AssertionError:
@@ -1529,6 +1549,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                 inds_map_chol = self.xp.zeros((0,), dtype=int)
                 chol_store = self.xp.zeros((0, 8, 8))
                 chol_params_fixed = self.xp.zeros((0, 8))
+
+                been_picked_for_rj_update = self.xp.zeros_like(source_map_now, dtype=bool)
 
                 # trick parameters that are there 
                 # by fixing parameters at which info mat is calculated
@@ -1580,8 +1602,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                             # TODO: check this 
                             _tmp_waveform_kwargs = self.waveform_kwargs.copy()
                             _tmp_waveform_kwargs.pop("start_freq_ind")
-
-                            info_mat = self.gb.information_matrix(info_mat_params.T, eps=1e-9, parameter_transforms=info_mat_transforms, inds=_test_inds, N=1024, psd_func=sensitivity.A1TDISens.get_Sn, psd_kwargs=dict(model="sangria", stochastic_params=(1.0 * YRSID_SI,)), easy_central_difference=False, return_gpu=True, **_tmp_waveform_kwargs)
+                            info_mat = self.xp.zeros((info_mat_params.shape[0], 8, 8))
+                            batch_size = 1000
+                            batches = np.arange(batch_size, len(info_mat_params), batch_size)
+                            for start_batch, end_batch in zip(batches[:-1], batches[1:]):
+                                info_mat[start_batch:end_batch] = self.gb.information_matrix(info_mat_params[start_batch:end_batch].T, eps=1e-9, parameter_transforms=info_mat_transforms, inds=_test_inds, N=1024, psd_func=sensitivity.A1TDISens.get_Sn, psd_kwargs=dict(model="sangria", stochastic_params=(1.0 * YRSID_SI,)), easy_central_difference=False, return_gpu=True, **_tmp_waveform_kwargs)
+                            
                             self.mempool.free_all_blocks()
 
                             # chol(cov) -> chol(inv(info_mat))
@@ -1638,6 +1664,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
                         
                     inds_to_update = source_map_now[sources_picked_for_update].copy()
                          
+                    if is_rj_now:
+                        band_sorter.has_run_rj[inds_to_update] = True
+
                     if not is_rj_now:  # self.is_rj_prop:
                         assert self.xp.all(band_sorter.inds[inds_to_update])
 
