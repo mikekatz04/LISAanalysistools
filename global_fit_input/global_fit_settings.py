@@ -118,7 +118,7 @@ class GBRunStep(RecipeStep):
                 )
 
         return stop
-        
+    
     def setup_run(self, iteration, last_sample, sampler):
         # TODO: maybe make this the defaul setup
         sampler.moves = self.moves
@@ -131,64 +131,53 @@ class GBRunStep(RecipeStep):
             move.ntemps = sampler.ntemps 
             move.temperature_control = sampler.temperature_control
 
+class EMRIRunStep(RecipeStep):
+    def __init__(self, *args, convergence_iter=50, thin_by=1, verbose=False, **kwargs):
+        self.convergence_iter = convergence_iter
+        self.verbose = verbose
+        RecipeStep.__init__(self, *args, **kwargs)
+        self.thin_by = thin_by
 
-def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
-    # _ = setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
-    # _ = setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+    def stopping_function(self, i, sample, sampler):
+
+        if not hasattr(self, "st"):
+            self.st = time.perf_counter()
+
+        current_iter = sampler.backend.iteration
+
+        stop = False
+        if current_iter > self.convergence_iter:
+            
+            stop = True
+            if self.verbose:
+                dur = (time.perf_counter() - self.st) / 3600.0  # hours
+                print(
+    
+                    f"\nTIME TO NOW: {dur} hours"
+                )
+
+        return stop
+        
+    def setup_run(self, iteration, last_sample, sampler):
+        # TODO: maybe make this the defaul setup
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+        sampler.override_thin_by = self.thin_by
+        sampler.yield_step = self.thin_by
+        sampler.checkpoint_step = self.thin_by
+        for move in sampler.moves:
+            move.periodic = sampler.moves[0].periodic
+            move.ntemps = sampler.ntemps 
+            move.temperature_control = sampler.temperature_control
+            
+
+def setup_gb_recipe(recipe, curr, acs, priors, state, psd_search_move, psd_pe_move):
     gb_info = curr.source_info["gb"]
     # TODO: adjust this indide current info
     general_info = curr.general_info
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
 
-    gpus = curr.general_info["gpus"]
-    cp.cuda.runtime.setDevice(gpus[0])
-    from gbgpu.gbgpu import GBGPU
-    
-    gb = GBGPU(gpus=gpus)
-    gb.gpus = gpus
-    nwalkers = curr.general_info["nwalkers"]
-    ntemps = curr.general_info["ntemps"]
-    
-    # setup psd search move
-    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
-    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
-    
-    psd_move_args = (gb, acs, priors)
-
-    psd_move_kwargs = dict(
-        num_repeats=500,
-        live_dangerously=True,
-        gibbs_sampling_setup=[{
-            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
-            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
-        }],
-        temperature_control=temperature_control
-    )
-    
-    psd_search_move = PSDMove(
-        *psd_move_args, 
-        max_logl_mode=True,
-        name="psd search move",
-        **psd_move_kwargs,
-    )
-
-    psd_pe_move = PSDMove(
-        *psd_move_args, 
-        max_logl_mode=False,
-        name="psd pe move",
-        **psd_move_kwargs,
-    )
-    # TODO: put this under the hood
-    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
-
-    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    
-    # return SetupInfoTransfer(
-    #     name="psd",
-    #     in_model_moves=[],  # (psd_move, 1.0)],
-    # )
     band_edges = gb_info["band_edges"]
     band_N_vals = gb_info["band_N_vals"]
     gb_betas = gb_info["pe_info"]["betas"]
@@ -479,6 +468,154 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     full_pe_weights = [0.3, 0.6, 0.08, 0.02]
     recipe.add_recipe_component(GBRunStep(moves=full_pe_moves, weights=full_pe_weights, thin_by=5, convergence_iter=100, verbose=True), name="gb pe")
     
+def setup_emri_recipe(recipe, curr, acs, priors, state, psd_search_move, psd_pe_move):
+    from lisatools.sources.emri import EMRITDIWaveform  
+
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    emri_info = curr.source_info["emri"]
+
+    # TODO: mix this with the actual generatefuncs.py 
+    emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info["tukey_alpha"], curr.general_info["start_freq_ind"], curr.general_info["end_freq_ind"], curr.general_info["dt"])
+
+    num_emris = emri_info["pe_info"]["nleaves_max"]
+    ndim = emri_info["pe_info"]["ndim"]
+    # need to inject emris since they are not in the data set yet. 
+    # emri_inj_params = priors["emri"].rvs(size=(num_emris,))
+    # emri_inj_params_in = emri_info["transform"].both_transforms(emri_inj_params)   
+
+    emri_inj_params = get_emri_injection_parameters()
+
+    start = curr.general_info["start_freq_ind"]
+    end = curr.general_info["end_freq_ind"]
+
+    # for inj in emri_inj_params_in:
+    #     AET_f = emri_gen(*inj)
+    #     # this will go into every residual because it is the data
+    #     for i in range(nwalkers):
+    #         # TODO: let's chat about how to work all the "remove from" / "add from" etc.
+    #         acs.remove_signal_from_residual(AET_f, data_index=np.array([i]))
+    
+    emri_start_params = emri_inj_params[None, None] * (1 + 1e-6 * np.random.randn(ntemps, nwalkers, num_emris, ndim))
+    emri_start_params_in = emri_info["transform"].both_transforms(emri_start_params.reshape(-1, ndim)).reshape(emri_start_params.shape[:-1] + (-1,))   
+    
+    # now we need to actually subtract cold-chain from their specific residuals
+    for i in range(nwalkers):
+        for leaf in range(num_emris):
+            temp = emri_start_params_in[0, i, leaf]
+            AET_f = emri_gen(*temp)
+            acs.add_signal_to_residual(AET_f, data_index=np.array([i]))
+  
+    cp.get_default_memory_pool().free_all_blocks()
+    from eryn.state import Branch
+    state.branches["emri"] = Branch(emri_start_params)
+
+    if hasattr(state, "betas_all") and state.betas_all is not None:
+        betas_all = state.sub_states["emri"].betas_all
+    else:
+        print("remove the False above")
+        betas_all = np.tile(make_ladder(emri_info["pe_info"]["ndim"], ntemps=ntemps), (emri_info["pe_info"]["nleaves_max"], 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["emri"].betas_all = betas_all
+
+    inner_moves = emri_info["pe_info"]["inner_moves"]
+    # should do skip_swap_branches in the add one / remove one move
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    coords_shape = (ntemps, nwalkers, emri_info["pe_info"]["nleaves_max"], emri_info["pe_info"]["ndim"])
+
+    emri_move_args = (
+        "emri",  # branch_name,
+        coords_shape,
+        emri_gen,
+        tempering_kwargs,
+        emri_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
+        emri_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        acs,
+        emri_info["pe_info"]["num_prop_repeats"],
+        emri_info["transform"],
+        priors,
+        inner_moves,
+        acs.df
+    )
+    
+    emri_move = ResidualAddOneRemoveOneMove(*emri_move_args, use_gpu=True,)
+    
+    emri_search_moves = GFCombineMove([psd_search_move, emri_move])
+    emri_search_moves.accepted = np.zeros((ntemps, nwalkers))
+    recipe.add_recipe_component(EMRIRunStep(moves=[emri_search_moves], convergence_iter=10, verbose=True), name="emri search")
+
+    full_pe_moves = [psd_pe_move, emri_move]
+    full_pe_weights = [0.3, 0.7]
+
+    recipe.add_recipe_component(EMRIRunStep(moves=full_pe_moves, weights=full_pe_weights, thin_by=5, convergence_iter=100, verbose=True), name="emri pe")
+
+
+def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
+    # _ = setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
+    # _ = setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+    gb_info = curr.source_info["gb"]
+    # TODO: adjust this indide current info
+    general_info = curr.general_info
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+
+    gpus = curr.general_info["gpus"]
+    cp.cuda.runtime.setDevice(gpus[0])
+    from gbgpu.gbgpu import GBGPU
+    
+    gb = GBGPU(gpus=gpus)
+    gb.gpus = gpus
+    nwalkers = curr.general_info["nwalkers"]
+    ntemps = curr.general_info["ntemps"]
+    
+    # setup psd search move
+    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
+    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    psd_move_args = (gb, acs, priors)
+
+    psd_move_kwargs = dict(
+        num_repeats=500,
+        live_dangerously=True,
+        gibbs_sampling_setup=[{
+            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
+            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
+        }],
+        temperature_control=temperature_control
+    )
+    
+    psd_search_move = PSDMove(
+        *psd_move_args, 
+        max_logl_mode=True,
+        name="psd search move",
+        **psd_move_kwargs,
+    )
+
+    psd_pe_move = PSDMove(
+        *psd_move_args, 
+        max_logl_mode=False,
+        name="psd pe move",
+        **psd_move_kwargs,
+    )
+    # TODO: put this under the hood
+    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
+    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
+
+    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    
+    # return SetupInfoTransfer(
+    #     name="psd",
+    #     in_model_moves=[],  # (psd_move, 1.0)],
+    # )
+
+    if 'gb' in state.branches.keys():
+        setup_gb_recipe(recipe, curr, acs, priors, state, psd_search_move, psd_pe_move)
+    
+    if 'emri' in state.branches.keys():
+        setup_emri_recipe(recipe, curr, acs, priors, state, psd_search_move, psd_pe_move)
             
 def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
@@ -543,6 +680,59 @@ class WrapEMRI:
         # TODO: adjust this if it needs 3rd axis?
         AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[:self.nchannels, self.start_freq_ind: self.end_freq_ind]
         return AET_f
+    
+
+def get_emri_injection_parameters(filename='emri_out/true_params.npz'):
+    # # optimal snr 50
+    # M = 1e6; mu = 10; a = 0.99; p0 = 6.435; e0 = 0.73; x_I0 = 1.0
+    # dl = 2.25997; 
+    # qS = 0.8 ; phiS = 2.2; qK = 1.6; phiK = 1.2; 
+    # Phi_phi0 = 2.0; Phi_theta0 = 0.0; Phi_r0 = 3.0
+
+    # params = [M, mu, a, p0, e0, x_I0, dl, qS, phiS, qK, phiK, Phi_phi0, Phi_theta0, Phi_r0]
+    params = np.load(filename)['arr_0']
+    
+    injection_params = np.asarray(params)
+
+    injection_params[0] = np.log(injection_params[0])
+    injection_params[7] = np.cos(injection_params[7])
+    injection_params[9] = np.cos(injection_params[9])
+
+    # now remove params 5 and 12
+    injection_params = np.delete(injection_params, [5, 12])
+
+    return injection_params
+
+def get_emri_priors(delta=None):
+    inj = get_emri_injection_parameters()
+
+    priors_emri = {
+        5: uniform_dist(0.01, 100.0),  # dist in Gpc
+        6: uniform_dist(-0.99999, 0.99999),  # qS
+        7: uniform_dist(0.0, 2 * np.pi),  # phiS
+        8: uniform_dist(-0.99999, 0.99999),  # qK
+        9: uniform_dist(0.0, 2 * np.pi),  # phiK
+        10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+        11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+    }
+
+    if delta is not None:
+        print('use narrow emri priors')
+        amax = min(0.99999, inj[2] * ( 1 + delta)) # ensure prior is compatible with FEW
+        priors_emri[0] = uniform_dist( (1 - delta) * inj[0], (1 + delta) * inj[0])  # M total mass
+        priors_emri[1] = uniform_dist( (1 - delta) * inj[1], (1 + delta) * inj[1])  # mu
+        priors_emri[2] = uniform_dist( (1 - delta) * inj[2], amax)  # a
+        priors_emri[3] = uniform_dist( (1 - delta) * inj[3], (1 + delta) * inj[3])  # p0
+        priors_emri[4] = uniform_dist( (1 - delta) * inj[4], (1 + delta) * inj[4])  # e0
+    
+    else:
+        print('use wide emri priors')
+        priors_emri[0] = uniform_dist(np.log(5e5), np.log(5e6)) # M total mass
+        priors_emri[1] = uniform_dist(1.0, 100.0)  # mu
+        priors_emri[2] = uniform_dist(0.01, 0.999)  # a
+        priors_emri[3] = uniform_dist(5.0, 16.0) # p0
+        priors_emri[4] = uniform_dist(0.001, 0.8) # e0
+    return ProbDistContainer(priors_emri)
 
 
 def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
@@ -740,7 +930,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [1]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 24
@@ -1340,8 +1530,8 @@ def get_global_fit_settings(copy_settings_file=False):
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
         #GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        #GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
+        #GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
     )
@@ -1352,7 +1542,7 @@ def get_global_fit_settings(copy_settings_file=False):
             "gb": all_gb_info,
             "mbh": all_mbh_info,
             "psd": all_psd_info,
-            # "emri": all_emri_info,
+            "emri": all_emri_info,
         },
         "general": all_general_info,
         "rank_info": rank_info,

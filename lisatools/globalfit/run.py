@@ -263,8 +263,13 @@ class GlobalFit:
             inds["galfor"][:] = True
             state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
             
-            band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
-            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
+            if "gb" in self.gf_branch_information.branch_names:
+                band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
+                state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
+
+            if 'emri' in state.sub_states.keys():
+                state.sub_states["emri"].betas_all = np.zeros((self.gf_branch_information.nleaves_max["emri"], self.ntemps))
+            
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             # self.logger.debug("pickle state load success")

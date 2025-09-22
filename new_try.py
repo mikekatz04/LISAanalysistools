@@ -7,8 +7,8 @@ from copy import deepcopy
 
 # import cupy as cp
 # cp.cuda.runtime.setDevice(7)
-# import few
-# few.get_backend("cuda12x")
+import few
+few.get_backend("cuda12x")
 # print("Process ID:", os.getpid())
 
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
