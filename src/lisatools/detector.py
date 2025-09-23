@@ -27,7 +27,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     Args:
         filename: File name. File should be in the style of LISAOrbits
-        use_gpu: If ``True``, use a gpu.
+        force_backend: If ``gpu`` or ``cuda``, use a gpu.
         armlength: Armlength of detector.
 
     """
@@ -35,16 +35,15 @@ class Orbits(LISAToolsParallelModule, ABC):
     def __init__(
         self,
         filename: str,
-        use_gpu: bool = False,
         armlength: Optional[float] = 2.5e9,
+        force_backend: Optional[str] = None,
         **kwargs
     ) -> None:
-        self.use_gpu = use_gpu
         self.filename = filename
         self.armlength = armlength
         self._setup()
         self.configured = False
-        LISAToolsParallelModule.__init__(self, **kwargs)
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @property
     def xp(self):
