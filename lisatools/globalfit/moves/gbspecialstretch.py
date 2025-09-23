@@ -2453,7 +2453,7 @@ class GBSpecialRJPriorMove(GBSpecialBase):
     pass
 
 def para_log_like(x, gb, acs, walker_max, transform_fn, phase_maximize, waveform_kwargs, fstat=True, return_snr=False):
-    xp = cp if gb.use_gpu else np
+    xp = gb.backend.xp
     
     x_tmp = transform_fn.both_transforms(x, xp=xp)
     # need to get just f, fdot, fddot, lam, beta

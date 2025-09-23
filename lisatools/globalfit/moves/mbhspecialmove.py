@@ -60,7 +60,8 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             return 
 
         acs_all = model.analysis_container_arr 
-        while True:
+        # TODO: do we want to rerun search after much of the fitting?
+        while not self.finished_search:  # will not enter once search has finished for this run
             # TODO: adjust these moves?
             _moves = [(move_i, weight_i) for move_i, weight_i in zip(self.moves, self.move_weights)]
             max_logl_walker = np.argmax(acs_all.likelihood()).item()
@@ -299,7 +300,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
             # TODO: make option
             self.snr_det_lim = 20.0
             keep_it = np.any((opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim))
-            if True:  # keep_it:
+            if keep_it:
                 # get current highest leaf in MBH store
                 # this will return first False value for leaves
                 next_leaf = state.branches["mbh"].inds[0, 0].argmin()
@@ -324,7 +325,7 @@ class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
         if self.finished_search and state.branches["mbh"].nleaves[0,0] == 0:
             print("No MBHs in sampler. Skipping proposal.")
             ntemps, nwalkers = state.branches["mbh"].shape[:2]
-            _accepted = np.zeros((ntemps, nwalkers), dtype=int)
+            _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             return state, _accepted
         
         return ResidualAddOneRemoveOneMove.propose(self, model, state)

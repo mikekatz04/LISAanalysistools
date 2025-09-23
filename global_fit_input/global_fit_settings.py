@@ -165,7 +165,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     cp.cuda.runtime.setDevice(gpus[0])
     from gbgpu.gbgpu import GBGPU
     import gbgpu 
-    breakpoint()
+
     _gb_backend = gbgpu.get_backend("cuda12x")
     _gb_backend.set_cuda_device(gpus[0])
     gb = GBGPU()

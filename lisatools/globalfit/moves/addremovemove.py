@@ -124,6 +124,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.setup(model, state)
         tic = time.time()   
 
+        if not np.any(state.branches[self.branch_name].inds):
+            ntemps, nwalkers = state.branches[self.branch_name].shape[:2]
+            _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+            return state, _accepted
+        
         new_state = deepcopy(state)
 
         self.acs = model.analysis_container_arr
@@ -134,12 +139,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         walker_inds_base = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
 
         # randomize order
-        start_leaf = np.random.randint(0, self.nleaves_max)
-        for base_leaf in range(self.nleaves_max):
-            # second step of randomizing order (making sure it does not run over)
-            leaf = (base_leaf + start_leaf) % self.nleaves_max
+        leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
+        for leaf in leaves_random_order:
             print(f"Processing leaf {leaf}")
 
+            # guard against leaves with False
+            assert np.all(state.branches[self.branch_name].inds[0, 0, leaf] == state.branches[self.branch_name].inds[:, :, leaf])
+            if not state.branches[self.branch_name].inds[0, 0, leaf]:
+                continue
+            # second step of randomizing order (making sure it does not run over)
+            
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
 
