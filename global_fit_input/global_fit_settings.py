@@ -164,8 +164,11 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     gpus = curr.general_info["gpus"]
     cp.cuda.runtime.setDevice(gpus[0])
     from gbgpu.gbgpu import GBGPU
-    
-    gb = GBGPU(gpus=gpus)
+    import gbgpu 
+    breakpoint()
+    _gb_backend = gbgpu.get_backend("cuda12x")
+    _gb_backend.set_cuda_device(gpus[0])
+    gb = GBGPU()
     gb.gpus = gpus
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
@@ -223,7 +226,6 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     from eryn.prior import ProbDistContainer
     gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
 
-    gb = GBGPU(use_gpu=True)
     gpus = curr.general_info["gpus"]
     cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
@@ -798,7 +800,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [1]
+    gpus = [7]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36
