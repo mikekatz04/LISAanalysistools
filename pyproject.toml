@@ -81,7 +81,7 @@ optional-dependencies.sampling = [
 optional-dependencies.testing = [
   "matplotlib",
   "eryn",
-  "gbgpu"
+  "gbgpu",
   "corner",
 ]
 
