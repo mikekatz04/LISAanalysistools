@@ -15,6 +15,9 @@ project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX)
 # ---- Find required dependencies ----
 find_package(Python COMPONENTS Interpreter Development.Module NumPy REQUIRED)
 
+# This line defines the install directory variables
+include(GNUInstallDirs)
+
 # ---- Import project-specific CMake functions ----
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -78,10 +81,10 @@ endif()
 if(LISATOOLS_WITH_GPU STREQUAL "AUTO")
   include(CheckLanguage)
   check_language(CUDA)
-  if(LISATOOLS_CUDA_ARCH_COMPILER)
+  if(CMAKE_CUDA_COMPILER)
     find_package(CUDAToolkit)
   endif()
-  if(LISATOOLS_CUDA_ARCH_COMPILER AND CUDAToolkit_FOUND)
+  if(CMAKE_CUDA_COMPILER AND CUDAToolkit_FOUND)
     message(
       STATUS
       "LISATOOLS GPU support was set to AUTO and will be turned ON as CUDA and \
@@ -92,7 +95,7 @@ ${CUDAToolkit_VERSION_MAJOR}.")
     message(
       STATUS
       "LISATOOLS GPU support was set to AUTO and will be turned OFF as CUDA and \
-CUDA Toolkit are not found (LISATOOLS_CUDA_:${LISATOOLS_CUDA_ARCH_COMPILER} \
+CUDA Toolkit are not found (CMAKE_CUDA_COMPILER:${CMAKE_CUDA_COMPILER} \
 CUDAToolkit_FOUND:${CUDAToolkit_FOUND}).")
     set_target_properties(lisaanalysistools PROPERTIES WITH_GPU OFF)
   endif()

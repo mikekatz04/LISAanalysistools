@@ -66,7 +66,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
     @staticmethod
     def cuda11x_module_loader():
         try:
-            import lisatools_backend_cuda11x.utils
+            import lisatools_backend_cuda11x.pycppdetector
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
@@ -97,7 +97,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
     @staticmethod
     def cuda12x_module_loader():
         try:
-            import lisatools_backend_cuda12x.utils
+            import lisatools_backend_cuda12x.pycppdetector
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
