@@ -15,6 +15,10 @@ References for noise models:
 
 .. autofunction:: lisatools.sensitivity.get_stock_sensitivity_matrix_options
 
+.. autofunction:: lisatools.sensitivity.get_stock_sensitivity_from_str
+
+.. autofunction:: lisatools.sensitivity.check_sensitivity
+
 Sensitivity Matrix
 ---------------------
 The sensitivity matrix is designed to house sensitivity information that will enter into the Likelihood function. 
