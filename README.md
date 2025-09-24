@@ -120,7 +120,7 @@ cd LISAanalysistools
 
 Now create an environment (these instructions work for all platforms but some
 adjustements can be needed, refer to the
-[detailed installation documentation](https://mikekatz04.github.io/LISAanalysistools/build/html/index.html) for more information):
+[detailed installation documentation](https://mikekatz04.github.io/LISAanalysistools) for more information):
 
 ```
 conda create -n lisatools_env -y -c conda-forge --override-channels |
