@@ -42,7 +42,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     def cpu_methods_loader() -> LISAToolsBackendMethods:
         try:
             import lisatools_backend_cpu.pycppdetector
-            import lisatools_backend_cpu.psd
+            # import lisatools_backend_cpu.psd
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
