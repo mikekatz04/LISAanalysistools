@@ -10,10 +10,14 @@ typedef gcmplx::complex<double> cmplx;
 #ifdef __CUDACC__
 #define CUDA_KERNEL __global__
 #define CUDA_DEVICE __device__
+#define CUDA_SYNCTHREADS __syncthreads()
+#define CUDA_SHARED __shared__
 
 #else // __CUDACC__
 #define CUDA_KERNEL 
 #define CUDA_DEVICE  
+#define CUDA_SYNCTHREADS
+#define CUDA_SHARED
 
 #endif // __CUDACC__
 

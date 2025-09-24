@@ -84,9 +84,9 @@ endfunction()
 # * * Definition of compiled backends * *
 # * * * * * * * * * * * * * * * * * * * *
 
-# ----------------
-# --- utils ---
-# ----------------
+# ----------------------
+# --- pycppdetector ----
+# ----------------------
 
 # I. Process pycppdetector.pyx into a C++ file
 add_custom_command(
@@ -122,5 +122,47 @@ if(LISATOOLS_WITH_GPU)
   apply_gpu_backend_common_options(pycppdetector)
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
                                          global.hpp Detector.hpp)
+endif()
+
+
+
+# ----------------------
+# --- psd ----
+# ----------------------
+
+# I. Process pycppdetector.pyx into a C++ file
+add_custom_command(
+  OUTPUT "psdgen.cxx"
+  COMMENT "Cythonize psdgen.pyx into psdgen.cxx"
+  COMMAND
+    Python::Interpreter -m cython "${CMAKE_CURRENT_SOURCE_DIR}/psdgen.pyx"
+    --output-file "${CMAKE_CURRENT_BINARY_DIR}/psdgen.cxx" -3 -+ --module-name
+    "psd" -I "${CMAKE_CURRENT_SOURCE_DIR}"
+  DEPENDS "psdgen.pyx"
+  VERBATIM)
+
+# II. Declare the CPU backend
+if(LISATOOLS_WITH_CPU)
+  add_custom_command(
+    OUTPUT "PSD.cxx"
+    COMMENT "Copy PSD.cu to PSD.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/PSD.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/PSD.cxx"
+    DEPENDS "PSD.cu"
+    VERBATIM)
+
+  python_add_library(lisaanalysistools_cpu_psd MODULE WITH_SOABI psdgen.cxx PSD.cxx)
+  apply_cpu_backend_common_options(psd)
+
+  target_sources(lisaanalysistools_cpu_psd PUBLIC FILE_SET HEADERS FILES
+                                         global.hpp PSD.hpp)
+endif()
+
+# III. Declare the GPU backend
+if(LISATOOLS_WITH_GPU)
+  python_add_library(lisaanalysistools_gpu_psd MODULE WITH_SOABI psdgen.cxx PSD.cu)
+  apply_gpu_backend_common_options(psd)
+  target_sources(lisaanalysistools_gpu_psd PUBLIC FILE_SET HEADERS FILES
+                                         global.hpp PSD.hpp)
 endif()
 

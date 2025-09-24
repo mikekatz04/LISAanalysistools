@@ -2,15 +2,18 @@
 #include <iostream>
 #include <vector>
 
+#ifdef __CUDACC__
 #include <cuda_runtime_api.h>
+#endif
 #include "global.hpp"
 #include "cuda_complex.hpp"
+#include <algorithm>
 
 
 const double lisaL = 2.5e9;           // LISA's arm meters
 const double lisaLT = lisaL / Clight; // LISA's armn in sec
 
-__device__ void lisanoises(double *Spm, double *Sop, double f, double Soms_d_in, double Sa_a_in, bool return_relative_frequency)
+CUDA_CALLABLE_MEMBER void lisanoises(double *Spm, double *Sop, double f, double Soms_d_in, double Sa_a_in, bool return_relative_frequency)
 {
     double frq = f;
     // Acceleration noise
@@ -50,19 +53,19 @@ __device__ void lisanoises(double *Spm, double *Sop, double f, double Soms_d_in,
     //     printf("%.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e \n", frq, Sa_a_in, Soms_d_in, Sa_a, Sa_d, Sa_nu, *Spm, Soms_d, Soms_nu, *Sop);
 }
 
-__device__ double SGal(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double SGal(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double Sgal_out = (Amp * exp(-(pow(fr, alpha)) * sl1) * (pow(fr, (-7.0 / 3.0))) * 0.5 * (1.0 + tanh(-(fr - kn) * sl2)));
     return Sgal_out;
 }
 
-__device__ double GalConf(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double GalConf(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double Sgal_int = SGal(fr, Amp, alpha, sl1, kn, sl2);
     return Sgal_int;
 }
 
-__device__ double WDconfusionX(double f, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double WDconfusionX(double f, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double t = 4.0 * pow(x, 2) * pow(sin(x), 2);
@@ -73,13 +76,13 @@ __device__ double WDconfusionX(double f, double Amp, double alpha, double sl1, d
     return t * Sg_sens;
 }
 
-__device__ double WDconfusionAE(double f, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double WDconfusionAE(double f, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double SgX = WDconfusionX(f, Amp, alpha, sl1, kn, sl2);
     return 1.5 * SgX;
 }
 
-__device__ double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
+CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double Sa_d, Sop;
@@ -105,7 +108,7 @@ __device__ double lisasens(const double f, const double Soms_d_in, const double 
     return Sens;
 }
 
-__device__ double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
+CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double Spm, Sop;
@@ -123,12 +126,27 @@ __device__ double noisepsd_AE(const double f, const double Soms_d_in, const doub
     //,
 }
 
+CUDA_CALLABLE_MEMBER
+double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in, double Amp, double alpha, double sl1, double kn, double sl2)
+{
+    double A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
+    double A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
+    double E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
+    double E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
+    double Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+    double Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+
+    double inner_product = (4.0 * ((gcmplx::conj(d_A) * d_A / Sn_A) + (gcmplx::conj(d_E) * d_E / Sn_E)).real() * df);
+    return -1.0 / 2.0 * inner_product - (log(Sn_A) + log(Sn_E));
+}
+
+#ifdef __CUDACC__
 
 #define NUM_THREADS_LIKE 256
-__global__ void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
                                double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, double df, int data_length, int num_data, int num_psds)
 {
-    __shared__ double like_vals[NUM_THREADS_LIKE];
+    CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
     int tid = threadIdx.x;
     int bid = blockIdx.x;
     int num_blocks = gridDim.x;
@@ -156,7 +174,7 @@ __global__ void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data,
         {
             like_vals[i] = 0.0;
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
 
         for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < data_length; i += blockDim.x * gridDim.x)
         {
@@ -168,18 +186,9 @@ __global__ void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data,
                 f = df; // TODO switch this?
             }
 
-            A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
-            A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
-            E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
-            E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
-            Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-            Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-
-            inner_product = (4.0 * ((gcmplx::conj(d_A) * d_A / Sn_A) + (gcmplx::conj(d_E) * d_E / Sn_E)).real() * df);
-            like_vals[tid] += -1.0 / 2.0 * inner_product - (log(Sn_A) + log(Sn_E));
-            // if ((psd_i == 0) && (i > 400000) && (i < 400020)) printf("%d %.12e %.12e %.12e %.12e %.12e %.12e \n", i, d_A.real(), d_A.imag(), d_E.real(), d_E.imag(), Sn_A, Sn_E);
+            like_vals[tid] += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2);
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
 
         for (unsigned int s = 1; s < blockDim.x; s *= 2)
         {
@@ -188,22 +197,22 @@ __global__ void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data,
                 like_vals[tid] += like_vals[tid + s];
                 // if ((bin_i == 1) && (blockIdx.x == 0) && (channel_i == 0) && (s == 1))
             }
-            __syncthreads();
+            CUDA_SYNCTHREADS;
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
 
         if (tid == 0)
         {
             like_contrib[psd_i * num_blocks + bid] = like_vals[0];
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
     }
 }
 
 #define NUM_THREADS_LIKE 256
-__global__ void like_sum_from_contrib(double *like_contrib_final, double *like_contrib, int num_blocks_orig, int num_psds)
+CUDA_KERNEL void like_sum_from_contrib(double *like_contrib_final, double *like_contrib, int num_blocks_orig, int num_psds)
 {
-    __shared__ double like_vals[NUM_THREADS_LIKE];
+    CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
     int tid = threadIdx.x;
 
     for (int psd_i = blockIdx.y; psd_i < num_psds; psd_i += gridDim.y)
@@ -212,12 +221,12 @@ __global__ void like_sum_from_contrib(double *like_contrib_final, double *like_c
         {
             like_vals[i] = 0.0;
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
         for (int i = threadIdx.x; i < num_blocks_orig; i += blockDim.x)
         {
             like_vals[tid] += like_contrib[psd_i * num_blocks_orig + i];
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
 
         for (unsigned int s = 1; s < blockDim.x; s *= 2)
         {
@@ -226,21 +235,64 @@ __global__ void like_sum_from_contrib(double *like_contrib_final, double *like_c
                 like_vals[tid] += like_vals[tid + s];
                 // if ((bin_i == 1) && (blockIdx.x == 0) && (channel_i == 0) && (s == 1))
             }
-            __syncthreads();
+            CUDA_SYNCTHREADS;
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
 
         if (tid == 0)
         {
             like_contrib_final[psd_i] = like_vals[0];
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
     }
 }
+#endif
+
+void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, double df, int data_length, int num_data, int num_psds)
+{
+    int data_index;
+    double _tmp_like_val = 0.0;
+    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2;
+    cmplx d_A, d_E;
+    double f, Sn_A, Sn_E;
+    double inner_product;
+    double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
+    for (int psd_i = 0; psd_i < num_psds; psd_i += 1)
+    {
+        _tmp_like_val = 0.0;
+        data_index = data_index_all[psd_i];
+        A_Soms_d_in = A_Soms_d_in_all[psd_i];
+        A_Sa_a_in = A_Sa_a_in_all[psd_i];
+        E_Soms_d_in = E_Soms_d_in_all[psd_i];
+        E_Sa_a_in = E_Sa_a_in_all[psd_i];
+        Amp = Amp_all[psd_i];
+        alpha = alpha_all[psd_i];
+        sl1 = sl1_all[psd_i];
+        kn = kn_all[psd_i];
+        sl2 = sl2_all[psd_i];
+
+        for (int i = 0; i < data_length; i += 1)
+        {
+            d_A = data[(data_index * 2 + 0) * data_length + i];
+            d_E = data[(data_index * 2 + 1) * data_length + i];
+            f = f_arr[i];
+            if (f == 0.0)
+            {
+                f = df; // TODO switch this?
+            }
+
+            _tmp_like_val += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2);
+        }
+        like_vals[psd_i] = _tmp_like_val;
+    }
+}
+
 
 void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
                          double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, double df, int data_length, int num_data, int num_psds)
 {
+    #ifdef __CUDACC__
     double *like_contrib;
 
     int num_blocks = std::ceil((data_length + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
@@ -261,24 +313,33 @@ void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data,
     CUDA_CHECK_AND_EXIT(cudaGetLastError());
 
     CUDA_CHECK_AND_EXIT(cudaFree(like_contrib));
+    #else
+    psd_likelihood_cpu(like_contrib_final, f_arr, data, data_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
+                                               Amp_all, alpha_all, sl1_all, kn_all, sl2_all, df, data_length, num_data, num_psds);
+
+    #endif
 }
 
+#ifdef __CUDACC__
 #define PDF_NUM_THREADS 32
+#else
+#define PDF_NUM_THREADS 1
+#endif
 #define PDF_NDIM 6
 
-__global__
+CUDA_KERNEL
 void compute_logpdf(double *logpdf_out, int *component_index, double *points,
                     double *weights, double *mins, double *maxs, double *means, double *invcovs, double *dets, double *log_Js,
                     int num_points, int *start_index, int num_components)
 {
     int start_index_here, end_index_here, component_here, j;
-    __shared__ double point_here[PDF_NDIM];
-    __shared__ double log_sum_arr[PDF_NUM_THREADS];
-    __shared__ double max_log_sum_arr[PDF_NUM_THREADS];
-    __shared__ double max_log_all;
-    __shared__ double max_tmp;
-    __shared__ double total_log_sum;
-    __shared__ double current_log_sum;
+    CUDA_SHARED double point_here[PDF_NDIM];
+    CUDA_SHARED double log_sum_arr[PDF_NUM_THREADS];
+    CUDA_SHARED double max_log_sum_arr[PDF_NUM_THREADS];
+    CUDA_SHARED double max_log_all;
+    CUDA_SHARED double max_tmp;
+    CUDA_SHARED double total_log_sum;
+    CUDA_SHARED double current_log_sum;
     double mean_here[PDF_NDIM];
     double invcov_here[PDF_NDIM][PDF_NDIM];
     double mins_here[PDF_NDIM];
@@ -288,30 +349,45 @@ void compute_logpdf(double *logpdf_out, int *component_index, double *points,
     double log_main_part, log_norm_factor, log_weighted_pdf;
     double det_here, log_J_here, weight_here, tmp;
     double kernel_sum = 0.0;
+
+double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
+#ifdef __CUDACC__
+    int start = blockIdx.x;
+    int incr = gridDim.x;
     int tid = threadIdx.x;
+    int start2 = threadIdx.x;
+    int incr2 = blockDim.x;
+#else   
+    int start = 0;
+    int incr = 1;
+    int tid = 0;
+    int start2 = 0;
+    int incr2 = 1;
+#endif
+
     
-    for (int i = blockIdx.x; i < num_points; i += gridDim.x)
+    for (int i = start; i < num_points; i += incr)
     {   
         if (tid == 0){total_log_sum = -1e300;}
-        __syncthreads();
-        for (int k = threadIdx.x; k < PDF_NDIM; k += blockDim.x)
+        CUDA_SYNCTHREADS;
+        for (int k = start2; k < PDF_NDIM; k += incr2)
         {
             point_here[k] = points[i * PDF_NDIM + k];
         }
-        __syncthreads();
+        CUDA_SYNCTHREADS;
 
         start_index_here = start_index[i];
         end_index_here = start_index[i + 1];
 
         while (start_index_here < end_index_here)
         {
-            __syncthreads();
+            CUDA_SYNCTHREADS;
             log_sum_arr[tid] = -1e300;
             max_log_sum_arr[tid] = -1e300;
-            __syncthreads();
+            CUDA_SYNCTHREADS;
 
             j = start_index_here + tid;
-            __syncthreads();
+            CUDA_SYNCTHREADS;
             if (j < end_index_here)
             {
                 // make sure if threads are not used that they do not affect the sum
@@ -355,33 +431,38 @@ void compute_logpdf(double *logpdf_out, int *component_index, double *points,
                 // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %.10e %.10e %.10e %.10e\n", component_here, log(weight_here), log(det_here), kernel_sum, -(double(PDF_NDIM) / 2.) * log(2 * M_PI));
                 
             }
-            __syncthreads();
+#ifdef __CUDACC__
+            CUDA_SYNCTHREADS;
             for (unsigned int s = 1; s < blockDim.x; s *= 2)
             {
                 if (tid % (2 * s) == 0)
                 {
                     max_log_sum_arr[tid] = max(max_log_sum_arr[tid], max_log_sum_arr[tid + s]);
                 }
-                __syncthreads();
+                CUDA_SYNCTHREADS;
             }
-            __syncthreads();
+            CUDA_SYNCTHREADS;
+#endif
             // store max in shared value
             if (tid == 0){max_log_all = max_log_sum_arr[tid];}
-            __syncthreads();
+#ifdef __CUDACC__
+            CUDA_SYNCTHREADS;
             // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %.10e\n", component_here, max_log_all);
             
             // subtract max from every value and take exp
             log_sum_arr[tid] = exp(log_sum_arr[tid] - max_log_all);
-            __syncthreads();
+            CUDA_SYNCTHREADS;
             for (unsigned int s = 1; s < blockDim.x; s *= 2)
             {
                 if (tid % (2 * s) == 0)
                 {
                     log_sum_arr[tid] += log_sum_arr[tid + s];
                 }
-                __syncthreads();
+                CUDA_SYNCTHREADS;
             }
-            __syncthreads();
+            CUDA_SYNCTHREADS;         
+
+#endif
             // do it again to add next round if there
             if (tid == 0)
             {
@@ -391,7 +472,12 @@ void compute_logpdf(double *logpdf_out, int *component_index, double *points,
 
                 // start new computation
                 // get max
+// TODO: make this better?
+#ifdef __CUDACC__
                 max_tmp = max(current_log_sum, total_log_sum);
+#else
+                max_tmp = std::max(current_log_sum, total_log_sum);
+#endif
                 // subtract max from all values and take exp
                 current_log_sum = exp(current_log_sum - max_tmp);
                 total_log_sum = exp(total_log_sum - max_tmp);
@@ -399,9 +485,10 @@ void compute_logpdf(double *logpdf_out, int *component_index, double *points,
                 total_log_sum = max_tmp + log(current_log_sum + total_log_sum);
                 // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %.10e\n", component_here, total_log_sum);
             }             
-            start_index_here += PDF_NUM_THREADS;
+            
             // if ((blockIdx.x == 0) && (tid == 0)) printf("%d, %d\n", start_index_here, end_index_here);
-            __syncthreads();
+            CUDA_SYNCTHREADS;
+            start_index_here += PDF_NUM_THREADS;
         }
         logpdf_out[i] = total_log_sum;
     }
@@ -413,38 +500,36 @@ void compute_logpdf_wrap(double *logpdf_out, int *component_index, double *point
 {
     if (ndim != PDF_NDIM){throw std::invalid_argument("ndim in does not equal NDIM_PDF in GPU code.");}
 
+#ifdef __CUDACC__
     compute_logpdf<<<num_points, PDF_NUM_THREADS>>>(logpdf_out, component_index, points,
                     weights, mins, maxs, means, invcovs, dets, log_Js,
                     num_points, start_index, num_components);
     cudaDeviceSynchronize();
     CUDA_CHECK_AND_EXIT(cudaGetLastError());
+#else
+    compute_logpdf(logpdf_out, component_index, points,
+                    weights, mins, maxs, means, invcovs, dets, log_Js,
+                    num_points, start_index, num_components);
+#endif
 }
 
 
 #define NUM_THREADS_LIKE 256
-__global__ void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f)
+CUDA_KERNEL void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
+                               double Amp, double alpha, double sl1, double kn, double sl2, int num_f)
 {
-    int tid = threadIdx.x;
-    int bid = blockIdx.x;
-    int num_blocks = gridDim.x;
     int noise_index;
-    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2;
     double f, Sn_A, Sn_E;
     double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
-    for (int f_i = blockIdx.x * blockDim.x + threadIdx.x; f_i < num_f; f_i += gridDim.x * blockDim.x)
+#ifdef __CUDACC__
+    int start = blockIdx.x * blockDim.x + threadIdx.x;
+    int incr = gridDim.x * blockDim.x;
+#else   
+    int start = 0;
+    int incr = 1;
+#endif
+    for (int f_i = start; f_i < num_f; f_i += incr)
     {
-        noise_index = noise_index_all[f_i];
-
-        A_Soms_d_in = A_Soms_d_in_all[noise_index];
-        A_Sa_a_in = A_Sa_a_in_all[noise_index];
-        E_Soms_d_in = E_Soms_d_in_all[noise_index];
-        E_Sa_a_in = E_Sa_a_in_all[noise_index];
-        Amp = Amp_all[noise_index];
-        alpha = alpha_all[noise_index];
-        sl1 = sl1_all[noise_index];
-        kn = kn_all[noise_index];
-        sl2 = sl2_all[noise_index];
         f = f_arr[f_i];
         
         A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
@@ -464,82 +549,87 @@ __global__ void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, i
     }
 }
 
-void get_psd_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f)
+void get_psd_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
+                               double Amp, double alpha, double sl1, double kn, double sl2, int num_f)
 {
-
+    #ifdef __CUDACC__
     int num_blocks = std::ceil((num_f + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
 
-    get_psd_val<<<num_blocks, NUM_THREADS_LIKE>>>(Sn_A_out, Sn_E_out, f_arr, noise_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
-                                               Amp_all, alpha_all, sl1_all, kn_all, sl2_all, num_f);
+    get_psd_val<<<num_blocks, NUM_THREADS_LIKE>>>(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
+                                               Amp, alpha, sl1, kn, sl2, num_f);
 
     cudaDeviceSynchronize();
     CUDA_CHECK_AND_EXIT(cudaGetLastError());
+    #else
+     get_psd_val(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
+                                               Amp, alpha, sl1, kn, sl2, num_f);
+
+    #endif
 }
 
 
 
 
-#define NUM_THREADS_LIKE 256
-__global__ void get_lisasens_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f)
-{
-    int tid = threadIdx.x;
-    int bid = blockIdx.x;
-    int num_blocks = gridDim.x;
-    int noise_index;
-    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2;
-    double f, Sn_A, Sn_E;
-    double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
-    for (int f_i = blockIdx.x * blockDim.x + threadIdx.x; f_i < num_f; f_i += gridDim.x * blockDim.x)
-    {
-        noise_index = noise_index_all[f_i];
+// #define NUM_THREADS_LIKE 256
+// __global__ void get_lisasens_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+//                                double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f)
+// {
+//     int tid = threadIdx.x;
+//     int bid = blockIdx.x;
+//     int num_blocks = gridDim.x;
+//     int noise_index;
+//     double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2;
+//     double f, Sn_A, Sn_E;
+//     double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
+//     for (int f_i = blockIdx.x * blockDim.x + threadIdx.x; f_i < num_f; f_i += gridDim.x * blockDim.x)
+//     {
+//         noise_index = noise_index_all[f_i];
 
-        A_Soms_d_in = A_Soms_d_in_all[noise_index];
-        A_Sa_a_in = A_Sa_a_in_all[noise_index];
-        E_Soms_d_in = E_Soms_d_in_all[noise_index];
-        E_Sa_a_in = E_Sa_a_in_all[noise_index];
-        Amp = Amp_all[noise_index];
-        alpha = alpha_all[noise_index];
-        sl1 = sl1_all[noise_index];
-        kn = kn_all[noise_index];
-        sl2 = sl2_all[noise_index];
-        f = f_arr[f_i];
+//         A_Soms_d_in = A_Soms_d_in_all[noise_index];
+//         A_Sa_a_in = A_Sa_a_in_all[noise_index];
+//         E_Soms_d_in = E_Soms_d_in_all[noise_index];
+//         E_Sa_a_in = E_Sa_a_in_all[noise_index];
+//         Amp = Amp_all[noise_index];
+//         alpha = alpha_all[noise_index];
+//         sl1 = sl1_all[noise_index];
+//         kn = kn_all[noise_index];
+//         sl2 = sl2_all[noise_index];
+//         f = f_arr[f_i];
         
-        A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
-        A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
-        E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
-        E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
-        Sn_A = lisasens(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-        Sn_E = lisasens(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+//         A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
+//         A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
+//         E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
+//         E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
+//         Sn_A = lisasens(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+//         Sn_E = lisasens(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
 
-        // if (Sn_A != Sn_A)
-        // {
-        //     printf("BADDDDD: %d %e %e %e %e %e %e %e %e\n", f_i, f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-        // }
+//         // if (Sn_A != Sn_A)
+//         // {
+//         //     printf("BADDDDD: %d %e %e %e %e %e %e %e %e\n", f_i, f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+//         // }
 
-        Sn_A_out[f_i] = Sn_A;
-        Sn_E_out[f_i] = Sn_E;
-    }
-}
+//         Sn_A_out[f_i] = Sn_A;
+//         Sn_E_out[f_i] = Sn_E;
+//     }
+// }
 
-void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f)
-{
+// void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, int *noise_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+//                                double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, int num_f)
+// {
 
-    int num_blocks = std::ceil((num_f + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
+//     int num_blocks = std::ceil((num_f + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
 
-    get_lisasens_val<<<num_blocks, NUM_THREADS_LIKE>>>(Sn_A_out, Sn_E_out, f_arr, noise_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
-                                               Amp_all, alpha_all, sl1_all, kn_all, sl2_all, num_f);
+//     get_lisasens_val<<<num_blocks, NUM_THREADS_LIKE>>>(Sn_A_out, Sn_E_out, f_arr, noise_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
+//                                                Amp_all, alpha_all, sl1_all, kn_all, sl2_all, num_f);
 
-    cudaDeviceSynchronize();
-    CUDA_CHECK_AND_EXIT(cudaGetLastError());
-}
-
-
+//     cudaDeviceSynchronize();
+//     CUDA_CHECK_AND_EXIT(cudaGetLastError());
+// }
 
 
-#define NUM_THREADS_LIKE 64
+
+
+// #define NUM_THREADS_LIKE 64
 
 // __global__ void specialty_piece_wise_likelihoods(
 //     double *lnL,
@@ -560,7 +650,7 @@ void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, in
 //     using complex_type = cmplx;
 
 //     int tid = threadIdx.x;
-//     __shared__ double lnL_tmp_for_sum[NUM_THREADS_LIKE];
+//     CUDA_SHARED double lnL_tmp_for_sum[NUM_THREADS_LIKE];
 
 //     int nchannels = 3;
 //     if (tdi_channel_setup == TDI_CHANNEL_SETUP_AE) nchannels = 2;
@@ -568,7 +658,7 @@ void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, in
 //     {
 //         lnL_tmp_for_sum[i] = 0.0;
 //     }
-//     __syncthreads();
+//     CUDA_SYNCTHREADS;
 
 //     cmplx tmp1;
 //     int data_ind, noise_ind, start_ind, length;
@@ -612,31 +702,31 @@ void get_lisasens_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, in
 //             // }
 //             // tmp1 += (gcmplx::conj(d_A) * d_A / n_A + gcmplx::conj(d_E) * d_E / n_E).real();
 //         }
-//         __syncthreads();
+//         CUDA_SYNCTHREADS;
 //         lnL_tmp_for_sum[tid] = tmp1.real();
 
-//         __syncthreads();
+//         CUDA_SYNCTHREADS;
 //         if (tid == 0)
 //         {
 //             lnL[part_i] = -1. / 2. * (4.0 * df * lnL_tmp_for_sum[0]);
 //         }
 
-//         __syncthreads();
+//         CUDA_SYNCTHREADS;
 //         for (unsigned int s = 1; s < blockDim.x; s *= 2)
 //         {
 //             if (tid % (2 * s) == 0)
 //             {
 //                 lnL_tmp_for_sum[tid] += lnL_tmp_for_sum[tid + s];
 //             }
-//             __syncthreads();
+//             CUDA_SYNCTHREADS;
 //         }
-//         __syncthreads();
+//         CUDA_SYNCTHREADS;
 
 //         if (tid == 0)
 //         {
 //             lnL[part_i] = -1. / 2. * (4.0 * df * lnL_tmp_for_sum[0]);
 //         }
-//         __syncthreads();
+//         CUDA_SYNCTHREADS;
 
 //         // example::io<FFT>::store_from_smem(shared_mem, this_block_data);
 //     }
