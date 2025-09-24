@@ -29,7 +29,6 @@ except (ModuleNotFoundError, ImportError):
     _is_editable = False
 
 from . import cutils, utils
-from .cutils import KNOWN_BACKENDS
 
 from gpubackendtools import get_backend, has_backend, get_first_backend
 from gpubackendtools import Globals

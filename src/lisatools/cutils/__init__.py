@@ -13,10 +13,12 @@ from gpubackendtools.exceptions import *
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
     pycppDetector: object
+    # psd_likelihood: typing.Callable[(...), None]
 
 class LISAToolsBackend:
     # TODO: not ClassVar?
     pycppDetector: object
+    # psd_likelihood: typing.Callable[(...), None]
 
     def __init__(self, lisatools_backend_methods):
 
@@ -24,6 +26,7 @@ class LISAToolsBackend:
         # pass rest to general backend
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
         self.pycppDetector = lisatools_backend_methods.pycppDetector
+        # self.psd_likelihood = lisatools_backend_methods.psd_likelihood
     
 
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
@@ -39,6 +42,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     def cpu_methods_loader() -> LISAToolsBackendMethods:
         try:
             import lisatools_backend_cpu.pycppdetector
+            # import lisatools_backend_cpu.psd
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
@@ -49,6 +53,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
 
         return LISAToolsBackendMethods(
             pycppDetector=lisatools_backend_cpu.pycppdetector.pycppDetector,
+            # psd_likelihood=lisatools_backend_cpu.psd.psd_likelihood,
             xp=numpy,
         )
 
@@ -82,6 +87,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
 
         return LISAToolsBackendMethods(
             pycppDetector=lisatools_backend_cuda11x.pycppdetector.pycppDetector,
+            # psd_likelihood=lisatools_backend_cuda11x.psd.psd_likelihood,
             xp=cupy,
         )
 
@@ -113,14 +119,9 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
 
         return LISAToolsBackendMethods(
             pycppDetector=lisatools_backend_cuda12x.pycppdetector.pycppDetector,
+            # psd_likelihood=lisatools_backend_cuda12x.psd.psd_likelihood,
             xp=cupy,
         )
 
-
-KNOWN_BACKENDS = {
-    "cuda12x": LISAToolsCuda12xBackend,
-    "cuda11x": LISAToolsCuda11xBackend,
-    "cpu": LISAToolsCpuBackend,
-}
 
 """List of existing backends, per default order of preference."""
