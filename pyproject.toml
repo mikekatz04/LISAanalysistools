@@ -68,6 +68,7 @@ optional-dependencies.doc = [
   "sphinx",
   "sphinx-rtd-theme",
   "sphinx-tippy",
+  "corner",
 ]
 
 optional-dependencies.sampling = [
@@ -80,7 +81,8 @@ optional-dependencies.sampling = [
 optional-dependencies.testing = [
   "matplotlib",
   "eryn",
-  "gbgpu"
+  "gbgpu",
+  "corner",
 ]
 
 [tool.setuptools_scm]
