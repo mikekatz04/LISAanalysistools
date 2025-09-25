@@ -20,7 +20,7 @@ from ...sensitivity import AET1SensitivityMatrix
 from ...detector import sangria
 from ...datacontainer import DataResidualArray
 from ...analysiscontainer import AnalysisContainer
-
+from ...utils.parallelbase import LISAToolsParallelModule
 
 def update_fn(i, last_sample, sampler):
     print("max logl:", last_sample.log_like.max()) 
@@ -46,11 +46,12 @@ def search_likelihood_wrap(x, wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_
     return ll
 
 
-class MBHSpecialMove(ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
+class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
     def __init__(self, *args, run_search=False, **kwargs):
         
         RedBlueMove.__init__(self, **kwargs)
         ResidualAddOneRemoveOneMove.__init__(self, *args, **kwargs)
+        LISAToolsParallelModule.__init__(self, *args, **kwargs)
         self.run_search = run_search
         self.finished_search = False
         

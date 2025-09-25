@@ -1158,9 +1158,11 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 
 
 def gather_gb_samples(fd, transform_fn, waveform_kwargs, band_edges, band_N_vals, reader, sens_mat, gpu, num_compare_samples=1, samples_keep=1, thin_by=1, snr_lim_first_cut=6.0, snr_lim_second_cut=5.0, overlap_lim=0.5, snr_diff_lim=20.0):
+    
+    gb = GBGPU(force_backend="gpu")
 
-    gb = GBGPU(use_gpu=True, gpus=[gpu])
-    xp.cuda.runtime.setDevice(gpu)
+    gb.backend.set_cuda_device(gpu)
+    gb.gpus = [gpu]
     fake_data = [xp.zeros((2, fd.shape[0]), dtype=complex)]
     psd_in = [xp.asarray(sens_mat.invC.copy())]
     

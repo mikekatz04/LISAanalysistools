@@ -47,7 +47,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @property
     def xp(self):
-        """numpy or cupy based on self.use_gpu"""
+        """numpy or cupy based on backend."""
         return self.backend.xp
 
     @property
