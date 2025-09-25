@@ -412,7 +412,7 @@ def h_var_p_eps(
         params: Source parameters that are over derivatives (not in fill dict of parameter transforms)
         step: Absolute step size for variable of interest.
         index: Index to parameter of interest.
-        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/html/user/utils.html#eryn.utils.TransformContainer>`_ object to transform from the derivative parameter basis
+        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/user/utils.html#eryn.utils.TransformContainer>`_ object to transform from the derivative parameter basis
             to the waveform parameter basis. This class can also fill in fixed parameters where the derivatives are not being taken.
         waveform_args: args (beyond parameters) for the waveform generator.
         waveform_kwargs: kwargs for the waveform generation.
