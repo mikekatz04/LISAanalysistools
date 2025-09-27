@@ -12,11 +12,97 @@ public:
     double z;
 
     CUDA_DEVICE
+    Vec()
+    {
+        x = 0.0;
+        y = 0.0;
+        z = 0.0;
+    }
+
+    CUDA_DEVICE
     Vec(double x_, double y_, double z_)
     {
         x = x_;
         y = y_;
         z = z_;
+    }
+
+    CUDA_DEVICE
+    Vec add(Vec a, Vec b) {
+        Vec c(0., 0., 0.);
+        c.x = a.x + b.x;
+        c.y = a.y + b.y;
+        c.z = a.z + b.z;
+        return c;
+    }
+
+    CUDA_DEVICE
+    Vec minus(Vec a, Vec b) {
+        Vec c(0., 0., 0.);
+        c.x = a.x + b.x;
+        c.y = a.y + b.y;
+        c.z = a.z + b.z;
+        return c;
+    }
+
+    CUDA_DEVICE
+    Vec operator-(const Vec& other) const {
+        Vec out(0., 0., 0.);
+        out.x = this->x - other.x;
+        out.y = this->y - other.y;
+        out.z = this->z - other.z;
+        return out;
+    }
+
+    CUDA_DEVICE
+    Vec operator+(const Vec& other) const {
+        Vec out(0., 0., 0.);
+        out.x = this->x + other.x;
+        out.y = this->y + other.y;
+        out.z = this->z + other.z;
+        return out;
+    }
+
+    CUDA_DEVICE
+    // Non-const version: Allows modification of elements
+    double& operator[](int index) {
+        if (index < 0 || index >= 3)
+        {
+            printf("BAD INDEX");
+        }
+        if (index == 0) return this->x;
+        if (index == 1) return this->y;
+        return this->z;  // (index == 2) 
+    }
+
+    CUDA_DEVICE
+    // Non-const version: Allows modification of elements
+    Vec& operator/(double val) {
+        Vec out(0., 0., 0.);
+        out.x = this->x / val;
+        out.y = this->y / val;
+        out.z = this->z / val;
+        return out;
+    }
+
+    CUDA_DEVICE
+    // Non-const version: Allows modification of elements
+    Vec& operator*(double val) {
+        Vec out(0., 0., 0.);
+        out.x = this->x * val;
+        out.y = this->y * val;
+        out.z = this->z * val;
+        return out;
+    }
+
+    CUDA_DEVICE
+    double dot(Vec other)
+    {
+        double _dot = 0.0;
+        _dot += this->x * other.x;
+        _dot += this->y * other.y;
+        _dot += this->z * other.z;
+        return _dot;
     }
 };
 
