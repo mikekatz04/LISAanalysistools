@@ -764,7 +764,7 @@ def full_setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         acs.df
     )
     
-    mbh_search_move = MBHSpecialMove(*mbh_move_args, run_search=True, use_gpu=True,)
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, run_search=True, force_backend="cuda12x")
 
     mbh_search_moves = GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
     mbh_search_moves.accepted = np.zeros((ntemps, nwalkers))
@@ -793,7 +793,7 @@ def full_setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=general_info["random_seed"],
-        use_gpu=True,
+        force_backend="cuda12x",
         nfriends=nwalkers,
         **gb_info["pe_info"]["group_proposal_kwargs"]
     )
@@ -1073,7 +1073,7 @@ def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
         acs.df
     )
     
-    mbh_move = MBHSpecialMove(*mbh_move_args, use_gpu=True,)
+    mbh_move = MBHSpecialMove(*mbh_move_args, force_backend="cuda12x",)
 
     return SetupInfoTransfer(
         name="mbh",
@@ -1224,7 +1224,7 @@ def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
         acs.df
     )
     
-    emri_move = ResidualAddOneRemoveOneMove(*emri_move_args, use_gpu=True,)
+    emri_move = ResidualAddOneRemoveOneMove(*emri_move_args, force_backend="cuda12x")
     
     return SetupInfoTransfer(
         name="emri",
@@ -1346,13 +1346,13 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [7]
+    gpus = [1]
     cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 24
 
     orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(use_gpu=True)
+    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
     all_general_info = dict(
         file_information=file_information,
         fd=fd,
@@ -1499,7 +1499,7 @@ def get_global_fit_settings(copy_settings_file=False):
         dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample, start_freq_ind=start_freq_ind
     )
 
-    gb_initialize_kwargs = dict(use_gpu=True, gpus=gpus)
+    gb_initialize_kwargs = dict(force_backend="cuda12x")
 
     gb_transform_fn_in = {
         0: np.exp,
@@ -1640,7 +1640,7 @@ def get_global_fit_settings(copy_settings_file=False):
         3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
     }
 
-    psd_kwargs = dict(sens_fn="A1TDISens")  # , use_gpu=False)
+    psd_kwargs = dict(sens_fn="A1TDISens")
     psd_initialize_kwargs = {}
 
     ### Galactic Foreground Settings #
@@ -1738,7 +1738,7 @@ def get_global_fit_settings(copy_settings_file=False):
     initialize_kwargs_mbh = dict(
         amp_phase_kwargs=dict(run_phenomd=True),
         response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
-        use_gpu=True
+        force_backend="cuda12x",
     )
 
     # for MBH waveform class initialization
@@ -1882,7 +1882,7 @@ def get_global_fit_settings(copy_settings_file=False):
         tdi="1st generation",
         tdi_chan="AE",
         orbits=gpu_orbits,
-        use_gpu=True,
+        force_backend="cuda12x",
     )
 
     # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
@@ -1892,7 +1892,7 @@ def get_global_fit_settings(copy_settings_file=False):
         T=Tobs / YRSID_SI, # TODO: check these conversions all align
         dt=dt,
         emri_waveform_args=("FastKerrEccentricEquatorialFlux",),
-        emri_waveform_kwargs=dict(use_gpu=True),
+        emri_waveform_kwargs=dict(force_backend="cuda12x"),
         response_kwargs=response_kwargs,
     )
     

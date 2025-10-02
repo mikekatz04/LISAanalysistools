@@ -10,13 +10,17 @@ import warnings
 from eryn.moves import RedBlueMove, StretchMove
 from ..moves import GlobalFitMove
 from ..utils import new_sens_mat
-from ...cutils.psd_gpu import psd_likelihood
 from tqdm import tqdm
 import time
+
+from ... import get_backend
 
 def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     if supps is None:
         raise ValueError("Must provide supps to identify the data streams.")
+
+    # TODO: get right backend inside the function
+    psd_likelihood = get_backend("gpu").psd_likelihood
 
     wi = supps["walker_inds"]
     psd_pars = x[0]

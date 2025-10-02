@@ -14,8 +14,9 @@ from ..galaxyglobal import run_gb_bulk_search, fit_each_leaf, make_gmm
 from eryn.state import BranchSupplemental
 from typing import Optional      
 import os
-from lisatools import sensitivity
-from lisatools.utils.constants import *
+from ... import sensitivity
+from ...utils.constants import *
+from ...utils.parallelbase import LISAToolsParallelModule
 try:
     import cupy as cp
 
@@ -39,8 +40,8 @@ from eryn.moves import GroupStretchMove, Move
 from eryn.moves.multipletry import logsumexp, get_mt_computations
 from ...utils.utility import get_array_module
 from ...diagnostic import inner_product
-from lisatools.globalfit.state import GFState
-from lisatools.sampling.prior import GBPriorWrap
+from ..state import GFState
+from ...sampling.prior import GBPriorWrap
 
 
 __all__ = ["GBSpecialStretchMove"]
@@ -271,22 +272,20 @@ from dataclasses import dataclass
     
 from eryn.utils import TransformContainer
 
-class Buffer:
+class Buffer(LISAToolsParallelModule):
 
     @property
     def xp(self) -> object:
-        if self.use_gpu:
-            return cp
-        else:
-            return np
+        return self.backend.xp
     
     def get_index(self, special_inds_test):
         now_index = (self.special_indices_unique_sort[cp.searchsorted(self.special_indices_unique[self.special_indices_unique_sort], special_inds_test, side="right") - 1]).astype(cp.int32)
         return now_index 
 
-    def __init__(self, is_rj, nwalkers, gb, band_edges, band_N_vals, unique_band_combos, params_interest, num_bands_now, nchannels, data_length, special_indices_unique, transform_fn, waveform_kwargs, df, sources_now_map, sources_inject_now_map, special_band_inds, opt_snr_rej_samp_limit=5.0, use_gpu=True, use_template_arr=False, *args, **kwargs):
-        self.use_gpu = use_gpu
-        assert self.use_gpu == gb.use_gpu
+    def __init__(self, is_rj, nwalkers, gb, band_edges, band_N_vals, unique_band_combos, params_interest, num_bands_now, nchannels, data_length, special_indices_unique, transform_fn, waveform_kwargs, df, sources_now_map, sources_inject_now_map, special_band_inds, opt_snr_rej_samp_limit=5.0, force_backend="gpu", use_template_arr=False, *args, **kwargs):
+        self.force_backend = force_backend
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        assert self.backend.name.split("_")[-1] == gb.backend.name.split("_")[-1]
         self.gb = gb
         self.df = df
         self.nwalkers = nwalkers
@@ -671,21 +670,18 @@ class Buffer:
 def return_x(x):
     return x
 
-class BandSorter:
+class BandSorter(LISAToolsParallelModule):
 
     @property
     def xp(self) -> object:
-        if self.use_gpu:
-            return cp
-        else:
-            return np
+        return self.backend.xp
 
     def __init__(
         self, 
         gb_branch: Branch, 
         band_edges: Optional[np.ndarray] = None, 
         band_N_vals: Optional[np.ndarray] = None, 
-        use_gpu: bool=False, 
+        force_backend: bool=None, 
         transform_fn: Optional[TransformContainer] = None, 
         copy:bool = True,
         inds_subset: Optional[np.ndarray] = None,
@@ -701,7 +697,7 @@ class BandSorter:
         dc = deepcopy if copy else return_x
         if hasattr(gb_branch, "num_sources"):
             _band_sorter = gb_branch
-            self.use_gpu = _band_sorter.use_gpu
+            self.force_backend = _band_sorter.force_backend
             for key, value in _band_sorter.__dict__.items():
                 if key[:2] != "__":
                     if key in ["main_band_sorter", "inds_main_band_sorter", "gb", "rj_prop"]:
@@ -729,7 +725,7 @@ class BandSorter:
             return
 
         assert band_edges is not None and band_N_vals is not None
-        self.use_gpu = use_gpu
+        self.force_backend = force_backend
         self.gb = gb
         self.waveform_kwargs = waveform_kwargs
         self.gb_branch_orig = gb_branch
@@ -1003,7 +999,7 @@ class BandSorter:
 
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
-class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
+class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModule):
     """Generate Revesible-Jump proposals for GBs with try-force rejection
 
     Will use gpu if template generator uses GPU.
@@ -1046,6 +1042,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         # return_gpu is a kwarg for the stretch move
         GlobalFitMove.__init__(self, name=name)
         GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
+        LISAToolsParallelModule.__init__(self, )
         self.ranks_needed = ranks_needed
         self.gpus = gpus
         self.gpu_priors = gpu_priors
@@ -1054,6 +1051,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         self.band_preload_size = self.max_data_store_size = max_data_store_size
         self.use_prior_removal = use_prior_removal
         self.has_setup_group = False
+        
         # for key in priors:
         #     if not isinstance(priors[key], ProbDistContainer) and not isinstance(priors[key], GBPriorWrap):
         #         raise ValueError(
@@ -1074,8 +1072,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         # self.gpu_cuda_wrap = self.gb.pyPeriodicPackage(2 * np.pi, np.pi, 2 * np.pi)
 
         # use gpu from template generator
-        # self.use_gpu = gb.use_gpu
-        if self.use_gpu:
+        # self.force_backend = gb.force_backend
+        if self.backend.uses_cupy:
             self.mempool = self.xp.get_default_memory_pool()
 
         self.band_edges = band_edges
@@ -2175,7 +2173,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         else:
             keep_all_inds = True
 
-        band_sorter = BandSorter(new_state.branches["gb"], self.band_edges, self.band_N_vals, use_gpu=self.use_gpu, transform_fn=self.parameter_transforms, max_data_store_size=self.max_data_store_size, gb=self.gb, waveform_kwargs=self.waveform_kwargs, rj_prop=rj_prop, keep_all_inds=keep_all_inds)
+        band_sorter = BandSorter(new_state.branches["gb"], self.band_edges, self.band_N_vals, force_backend=self.force_backend, transform_fn=self.parameter_transforms, max_data_store_size=self.max_data_store_size, gb=self.gb, waveform_kwargs=self.waveform_kwargs, rj_prop=rj_prop, keep_all_inds=keep_all_inds)
         
         do_synchronize = False
         device = self.xp.cuda.runtime.getDevice()
@@ -2338,7 +2336,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move):
         new_inds = cp.asarray(new_state.branches_inds["gb"])
         del band_sorter
         self.mempool.free_all_blocks()
-        new_band_sorter = BandSorter(new_state.branches["gb"], self.band_edges, self.band_N_vals, use_gpu=self.use_gpu, transform_fn=self.parameter_transforms, max_data_store_size=self.max_data_store_size, gb=self.gb, waveform_kwargs=self.waveform_kwargs)
+        new_band_sorter = BandSorter(new_state.branches["gb"], self.band_edges, self.band_N_vals, force_backend=self.force_backend, transform_fn=self.parameter_transforms, max_data_store_size=self.max_data_store_size, gb=self.gb, waveform_kwargs=self.waveform_kwargs)
         
         # in-model inds will not change
         tmp_freqs_find_bands = cp.asarray(new_state.branches_coords["gb"][:, :, :, 1])
@@ -2750,7 +2748,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         nwalkers = 40  # TODO: adjustable
         ntemps = 10  # TODO: adjustable
         ngroups = self.num_bands - 2  # TODO: is this always ok?
-        priors = self.priors if not self.use_gpu else self.gpu_priors
+        priors = self.priors if not self.backend.uses_cuda else self.gpu_priors
         
         # TODO: make this adjustable to match settings
         m_chirp_lims = [0.001, 1.2]
@@ -2766,9 +2764,9 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         fdot_min = -fdot_max
     
         priors_in = priors["gb"].priors_in
-        priors_in[1] = uniform_dist(0.0, 1.0, use_cupy=self.use_gpu)
-        priors_in[2] = uniform_dist(0.0, 1.0, use_cupy=self.use_gpu)
-        priors = {"gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.use_gpu)}
+        priors_in[1] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors_in[2] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors = {"gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)}
         
         prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
         
