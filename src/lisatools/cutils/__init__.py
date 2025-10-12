@@ -14,11 +14,13 @@ from gpubackendtools.exceptions import *
 class LISAToolsBackendMethods(BackendMethods):
     pycppDetector: object
     psd_likelihood: typing.Callable[(...), None]
+    compute_logpdf: typing.Callable[(...), None]
 
 class LISAToolsBackend:
     # TODO: not ClassVar?
     pycppDetector: object
     psd_likelihood: typing.Callable[(...), None]
+    compute_logpdf: typing.Callable[(...), None]
 
     def __init__(self, lisatools_backend_methods):
 
@@ -27,7 +29,7 @@ class LISAToolsBackend:
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
         self.pycppDetector = lisatools_backend_methods.pycppDetector
         self.psd_likelihood = lisatools_backend_methods.psd_likelihood
-    
+        self.compute_logpdf = lisatools_backend_methods.compute_logpdf
 
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     """Implementation of the CPU backend"""
@@ -54,6 +56,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             pycppDetector=lisatools_backend_cpu.pycppdetector.pycppDetector,
             psd_likelihood=lisatools_backend_cpu.psd.psd_likelihood,
+            compute_logpdf=lisatools_backend_cpu.psd.compute_logpdf,
             xp=numpy,
         )
 
@@ -89,6 +92,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             pycppDetector=lisatools_backend_cuda11x.pycppdetector.pycppDetector,
             psd_likelihood=lisatools_backend_cuda11x.psd.psd_likelihood,
+            compute_logpdf=lisatools_backend_cuda11x.psd.compute_logpdf,
             xp=cupy,
         )
 
@@ -122,6 +126,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
         return LISAToolsBackendMethods(
             pycppDetector=lisatools_backend_cuda12x.pycppdetector.pycppDetector,
             psd_likelihood=lisatools_backend_cuda12x.psd.psd_likelihood,
+            compute_logpdf=lisatools_backend_cuda12x.psd.compute_logpdf,
             xp=cupy,
         )
 

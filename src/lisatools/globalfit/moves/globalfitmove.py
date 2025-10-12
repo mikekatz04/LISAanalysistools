@@ -4,9 +4,32 @@ from eryn.moves import CombineMove
 class GlobalFitMove:
     ranks_initialized = False
 
-    def __init__(self, *args, name=None, **kwargs):
+    def __init__(self, *args, name=None, iters_compare_likelihood=-1, iters_reset_buffers=-1, **kwargs):
         assert name is not None
         self.name = name
+
+        # should be inside moves so you know where it fails
+        # rather than in the engine
+        self.iters_compare_likelihood = iters_compare_likelihood
+        self.iters_reset_buffers = iters_reset_buffers
+
+    @property
+    def iters_reset_buffers(self) -> int:
+        return self._iters_reset_buffers
+
+    @iters_reset_buffers.setter
+    def iters_reset_buffers(self, iters_reset_buffers: int):
+        assert isinstance(iters_reset_buffers, int)
+        self._iters_reset_buffers = iters_reset_buffers
+
+    @property
+    def iters_compare_likelihood(self) -> int:
+        return self._iters_compare_likelihood
+
+    @iters_compare_likelihood.setter
+    def iters_compare_likelihood(self, iters_compare_likelihood: int):
+        assert isinstance(iters_compare_likelihood, int)
+        self._iters_compare_likelihood = iters_compare_likelihood
         
     @property
     def comm(self):

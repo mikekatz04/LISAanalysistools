@@ -168,7 +168,9 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
 
     _gb_backend = gbgpu.get_backend("cuda12x")
     _gb_backend.set_cuda_device(gpus[0])
-    gb = GBGPU()
+
+    gb = GBGPU(force_backend="cuda12x")
+   
     gb.gpus = gpus
     nwalkers = curr.general_info["nwalkers"]
     ntemps = curr.general_info["ntemps"]
@@ -800,7 +802,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [1]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36
@@ -835,6 +837,7 @@ def get_global_fit_settings(copy_settings_file=False):
         ntemps=ntemps,
         tukey_alpha=tukey_alpha,
         gpus=gpus
+
     )
 
 
@@ -1399,7 +1402,7 @@ def get_global_fit_settings(copy_settings_file=False):
         + GFBranchInfo("psd", 4, 1, 1)
     )
 
-    return {
+    curr_info = CurrentInfoGlobalFit({
         "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": all_gb_info,
@@ -1411,7 +1414,9 @@ def get_global_fit_settings(copy_settings_file=False):
         "rank_info": rank_info,
         "setup_function": setup_recipe,
         "gpu_assignments": gpu_assignments,
-    }
+    })
+
+    return curr_info
 
 
 

@@ -404,7 +404,10 @@ class GBPriorWrap:
         return arr
 
 
-class FullGaussianMixtureModel:
+from ..utils.parallelbase import LISAToolsParallelModule
+
+
+class FullGaussianMixtureModel(LISAToolsParallelModule):
     def __init__(
         self,
         weights,
@@ -418,6 +421,8 @@ class FullGaussianMixtureModel:
         use_cupy=False,
     ):
 
+        force_backend = "gpu" if use_cupy else "cpu"
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         self.use_cupy = use_cupy
         if use_cupy:
             xp = cp
@@ -470,6 +475,10 @@ class FullGaussianMixtureModel:
         self.sorted_max_limit_f = self.max_limit_f[self.inds_sort_max_limit_f]
         """
 
+    @property
+    def compute_logpdf(self) -> callable:
+        return self.backend.compute_logpdf
+
     def logpdf(self, x):
 
         if self.use_cupy:
@@ -517,7 +526,7 @@ class FullGaussianMixtureModel:
 
         logpdf_out_tmp = xp.zeros(points_sorted_in.shape[0])
 
-        compute_logpdf(
+        self.compute_logpdf(
             logpdf_out_tmp,
             components_keep_in.astype(xp.int32),
             points_sorted_in,

@@ -277,6 +277,10 @@ class Buffer(LISAToolsParallelModule):
     @property
     def xp(self) -> object:
         return self.backend.xp
+
+    @classmethod
+    def supported_backends(cls):
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
     
     def get_index(self, special_inds_test):
         now_index = (self.special_indices_unique_sort[cp.searchsorted(self.special_indices_unique[self.special_indices_unique_sort], special_inds_test, side="right") - 1]).astype(cp.int32)
@@ -676,6 +680,10 @@ class BandSorter(LISAToolsParallelModule):
     def xp(self) -> object:
         return self.backend.xp
 
+    @classmethod
+    def supported_backends(cls):
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+
     def __init__(
         self, 
         gb_branch: Branch, 
@@ -693,6 +701,9 @@ class BandSorter(LISAToolsParallelModule):
         rj_prop = None,
         keep_all_inds=True,
     ):
+
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        self.force_backend = force_backend
         
         dc = deepcopy if copy else return_x
         if hasattr(gb_branch, "num_sources"):
@@ -1009,6 +1020,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             and ``rvs`` methods.
 
     """
+    @property
+    def xp(self) -> object:
+        return self.backend.xp
 
     def __init__(
         self,
@@ -1037,12 +1051,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         run_swaps = True, 
         # TODO: make this adjustable?
         max_data_store_size = 6000,
+        force_backend=None,
         **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         GlobalFitMove.__init__(self, name=name)
         GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
-        LISAToolsParallelModule.__init__(self, )
+
+        self.force_backend = force_backend
         self.ranks_needed = ranks_needed
         self.gpus = gpus
         self.gpu_priors = gpu_priors
@@ -1105,6 +1122,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
     def setup(self, model, branches):
         return
+
+    @classmethod
+    def supported_backends(cls):
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def setup_gb_friends(self, band_sorter):
         st = time.perf_counter()

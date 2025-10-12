@@ -54,7 +54,11 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         LISAToolsParallelModule.__init__(self, *args, **kwargs)
         self.run_search = run_search
         self.finished_search = False
-        
+
+    @classmethod
+    def supported_backends(cls):
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+ 
     def setup(self, model, state):
 
         if not self.run_search:
