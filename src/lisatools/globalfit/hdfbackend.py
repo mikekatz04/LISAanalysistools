@@ -479,7 +479,7 @@ class GBHDFBackend(eryn_HDFBackend):
         *args, 
         **kwargs
     ):
- 
+
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]

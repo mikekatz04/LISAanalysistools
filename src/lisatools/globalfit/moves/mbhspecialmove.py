@@ -223,6 +223,8 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 (StretchMove(), 0.88)
             ]
 
+            # TODO: random generators to gpu backend tools? 
+
             nwalkers = 100
             ntemps = 12
             temp_kwargs = dict(ntemps=ntemps, Tmax=np.inf)
@@ -236,14 +238,14 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             full_kwargs["phase_marginalize"] = True
             full_kwargs["length"] = 1024
 
-            like_args = (self.waveform_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, self.transform_fn, (cp.asarray(fd_short), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df), full_kwargs)
+            like_args = (self.waveform_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, self.transform_fn, (cp.asarray(fd_short), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df_short), full_kwargs)
             # # check3 = search_likelihood_wrap(start_points, *like_args)
             
             _fp = "mbh_search_tmp_file.h5"
             fp = "global_fit_output/" + _fp
             if os.path.exists(fp):
                 os.remove(fp)
-            stop_fn = SearchConvergeStopping(n_iters=1, diff=1.0, verbose=True, start_iteration=0)
+            stop_fn = SearchConvergeStopping(n_iters=30, diff=1.0, verbose=True, start_iteration=0)
             sampler = EnsembleSampler(
                 nwalkers,
                 {"mbh": 11}, 
@@ -286,7 +288,6 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             print("start like", acs.likelihood(source_only=True).max())
             # check_params = np.load("check_params.npy")[None, :]
             # start_like4 = search_likelihood_wrap(mbh_params_best[None, :], *like_args)
-            # breakpoint()
             final_state = sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=True)
             print("End like:", sampler.get_log_like().max())
 
@@ -304,6 +305,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             _ll_check = search_likelihood_wrap(_coords_check, *like_args)
             # TODO: make option
             self.snr_det_lim = 20.0
+            breakpoint()
             keep_it = np.any((opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim))
             if keep_it:
                 # get current highest leaf in MBH store

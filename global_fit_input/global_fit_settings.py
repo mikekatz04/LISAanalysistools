@@ -93,7 +93,9 @@ class MBHSearchStep(RecipeStep):
         
     def stopping_function(self, *args, **kwargs):
         # this will already be converged to max logl
-        return self.stopper(*args, **kwargs)
+        # I think it should be just True becuase 
+        # the inner proposal is taking care of this. 
+        return True  # self.stopper(*args, **kwargs)
 
 
 class GBRunStep(RecipeStep):
@@ -435,7 +437,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     
     mbh_search_move = MBHSpecialMove(*mbh_move_args, run_search=True, force_backend="cuda12x")
 
-    mbh_search_moves = GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
+    mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move])  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
     mbh_search_moves.accepted = np.zeros((ntemps, nwalkers))
     
     recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_moves], n_iters=5, verbose=True), name="mbh search")
@@ -547,8 +549,8 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     full_pe_moves = [psd_pe_move, gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
     full_pe_weights = [0.3, 0.6, 0.08, 0.02]
     recipe.add_recipe_component(GBRunStep(moves=full_pe_moves, weights=full_pe_weights, thin_by=5, convergence_iter=100, verbose=True), name="gb pe")
-    
             
+
 def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
     nwalkers = curr.general_info["nwalkers"]
@@ -591,7 +593,7 @@ def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
     )
     
     mbh_move = MBHSpecialMove(*mbh_move_args, force_backend="cuda12x",)
-
+    breakpoint()
     return SetupInfoTransfer(
         name="mbh",
         in_model_moves=[], #mbh_move],
@@ -702,19 +704,12 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information = {}
     file_store_dir = "global_fit_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_5th_run_through"
+    base_file_name = "rework_7th_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
-    file_information["fp_psd_search_initial"] = file_store_dir + base_file_name + "_initial_search_psd.h5"
-    file_information["fp_psd_search"] = file_store_dir + base_file_name + "_search_psd.h5"
-    file_information["fp_mbh_search_base"] = file_store_dir + base_file_name + "_search_mbh"
-
     file_information["fp_main"] = file_store_dir + base_file_name + "_parameter_estimation_main.h5"
-    file_information["fp_gb_pe"] = file_store_dir + base_file_name + "_parameter_estimation_gb.h5"
-    file_information["fp_psd_pe"] = file_store_dir + base_file_name + "_parameter_estimation_psd.h5"
-    file_information["fp_mbh_pe"] = file_store_dir + base_file_name + "_parameter_estimation_mbh.h5"
-
+    
     file_information["fp_gb_gmm_info"] = file_store_dir + base_file_name + "_gmm_info.pickle"
 
     file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
@@ -722,8 +717,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
 
-    file_information["status_file"] = file_store_dir + base_file_name + "_status_file.txt"
-
+    file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
     if copy_settings_file:
         shutil.copy(__file__, file_store_dir + base_file_name + "_" + __file__.split("/")[-1])
     
@@ -738,10 +732,10 @@ def get_global_fit_settings(copy_settings_file=False):
         tXYZ = f["obs"]["tdi"][:]
 
         # remove sources
-        for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
-            change_arr = f["sky"][source]["tdi"][:]
-            for change in ["X", "Y", "Z"]:
-                tXYZ[change] -= change_arr[change]
+        # for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
+        #     change_arr = f["sky"][source]["tdi"][:]
+        #     for change in ["X", "Y", "Z"]:
+        #         tXYZ[change] -= change_arr[change]
 
         # tXYZ = f["sky"]["dgb"]["tdi"][:]
         # tXYZ["X"] += f["sky"]["dgb"]["tdi"][:]["X"]
@@ -756,7 +750,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     dt = t[1] - t[0]
-    _Tobs = YEAR / 12.0
+    _Tobs = 2.0 * YEAR / 12.0
     Nobs = int(_Tobs / dt)  # len(t)
     t = t[:Nobs]
     X = X[:Nobs]
@@ -781,6 +775,8 @@ def get_global_fit_settings(copy_settings_file=False):
     # Ef[:] = 0.0
     # Tf[:] = 0.0
 
+    # TODO: MAKE DEFAULT SETUP CLASSES FOR EACH PIECE
+
     start_freq_ind = 0
     # start_freq_ind = int(0.004 / df)
     # TODO: check this. 
@@ -802,7 +798,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [5]
+    gpus = [7]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36

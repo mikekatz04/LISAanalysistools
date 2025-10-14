@@ -90,14 +90,12 @@ class CurrentInfoGlobalFit:
         backend_path = self.general_info["file_information"]["fp_main"]
         self.backend = GFHDFBackend(backend_path)
 
-        mbh_search_file = settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
-        
-        if os.path.exists(mbh_search_file):
-            with open(mbh_search_file, "rb") as fp:
-                mbh_output_point_info = pickle.load(fp)
+        # if os.path.exists(mbh_search_file):
+        #     with open(mbh_search_file, "rb") as fp:
+        #         mbh_output_point_info = pickle.load(fp)
 
-            if "output_points_pruned" in mbh_output_point_info:
-                self.initialize_mbh_state_from_search(mbh_output_point_info)
+        #     if "output_points_pruned" in mbh_output_point_info:
+        #         self.initialize_mbh_state_from_search(mbh_output_point_info)
               
         # gmm info
         if os.path.exists(settings["general"]["file_information"]["fp_gb_gmm_info"]):
@@ -222,6 +220,19 @@ class GlobalFit:
         backend_path = self.curr.general_info["file_information"]["fp_main"]
         if os.path.exists(backend_path):
             state = GFHDFBackend(backend_path, sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+
+        elif "past_file_for_start" in self.curr.general_info["file_information"]:
+            # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
+            if not os.path.exists((file_for_restart := self.curr.general_info["file_information"]["past_file_for_start"])):
+                raise ValueError(f"past_file_for_start ({file_for_restart}) was added but it does not exist.")
+
+            # TODO: make this adjust to more leaves if needed
+            state = GFHDFBackend(file_for_restart, sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+            
+            # TODO: adjust this so it is automated
+            state.sub_states["gb"].initialized = False
+            band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
+            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
 
         else:
             self.logger.debug("update this somehow")
