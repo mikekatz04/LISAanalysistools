@@ -435,7 +435,8 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         acs.df
     )
     
-    mbh_search_move = MBHSpecialMove(*mbh_move_args, run_search=True, force_backend="cuda12x")
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x")
+    mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
 
     mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move])  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
     mbh_search_moves.accepted = np.zeros((ntemps, nwalkers))
@@ -507,7 +508,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         **gb_move_kwargs
     )
 
-    gb_search_moves = GFCombineMove([psd_search_move, gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, psd_search_move])
+    gb_search_moves = GFCombineMove([psd_search_move, mbh_pe_move, gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, mbh_pe_move, psd_search_move])
     gb_search_moves.accepted = np.zeros((ntemps, nwalkers))
     
     recipe.add_recipe_component(GBRunStep(moves=[gb_search_moves], convergence_iter=5, verbose=True), name="gb search")
@@ -546,7 +547,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         gpus=[],
         **gb_move_kwargs
     )
-    full_pe_moves = [psd_pe_move, gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
+    full_pe_moves = [psd_pe_move, mbh_pe_move, gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
     full_pe_weights = [0.3, 0.6, 0.08, 0.02]
     recipe.add_recipe_component(GBRunStep(moves=full_pe_moves, weights=full_pe_weights, thin_by=5, convergence_iter=100, verbose=True), name="gb pe")
             
@@ -798,7 +799,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [7]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36

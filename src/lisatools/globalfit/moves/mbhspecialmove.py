@@ -303,16 +303,28 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             # adjust phase due to phase marginalizations
             _coords_check[:, 5] = _coords_check[:, 5] + 1./2. * phase_change.get()
             _ll_check = search_likelihood_wrap(_coords_check, *like_args)
-            # TODO: make option
-            self.snr_det_lim = 20.0
-            breakpoint()
+            # TODO: make option / DECIDE ABOUT THIS
+            self.snr_det_lim = 50.0
+
             keep_it = np.any((opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim))
             if keep_it:
                 # get current highest leaf in MBH store
                 # this will return first False value for leaves
                 next_leaf = state.branches["mbh"].inds[0, 0].argmin()
+                new_coords = coords_post_like[:state.branches['mbh'].coords.shape[1]]
+
+                old_tmrg = state.branches['mbh'].coords[state.branches['mbh'].inds][:, -1]
+                
+                new_tmrg = new_coords[:, -1]
+
+                # within 3600 seconds (1 hr) ?
+                self.time_diff = 3600.0
+                merger_diff = np.abs(old_tmrg[:, None] - new_tmrg[None, :])
+                any_same = np.any(merger_diff < self.time_diff)
+                if any_same:
+                    breakpoint()
                 state.branches['mbh'].inds[:, :, next_leaf] = True
-                state.branches['mbh'].coords[:, :, next_leaf] = coords_post_like[:state.branches['mbh'].coords.shape[1]][None, :, :]
+                state.branches['mbh'].coords[:, :, next_leaf] = new_coords[None, :, :]
                 
                 # remove the cold chain parameters from their respective residual. 
                 AET_remove_params = state.branches['mbh'].coords[0, :, next_leaf].copy()
