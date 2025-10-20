@@ -98,19 +98,7 @@ class CurrentInfoGlobalFit:
         #         self.initialize_mbh_state_from_search(mbh_output_point_info)
               
         # gmm info
-        if os.path.exists(settings["general"]["file_information"]["fp_gb_gmm_info"]):
-            with open(settings["general"]["file_information"]["fp_gb_gmm_info"], "rb") as fp_gmm:
-                gmm_info_dict = pickle.load(fp_gmm)
-                gb_search_proposal_gmm_info = gmm_info_dict["search"]
-                gb_refit_proposal_gmm_info = gmm_info_dict["refit"]
-        else:
-            gb_search_proposal_gmm_info = None
-            gb_refit_proposal_gmm_info = None
-
-        # TODO: remove this?
-        if "gb" in self.source_info:
-            self.source_info["gb"]["search_gmm_info"] = gb_search_proposal_gmm_info
-            self.source_info["gb"]["refit_gmm_info"] = gb_refit_proposal_gmm_info
+        # TODO: save GMM distributions
 
     def initialize_mbh_state_from_search(self, mbh_output_point_info):
         output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
@@ -323,12 +311,24 @@ class GlobalFit:
             for name in branch_names:
                 if name not in self.curr.source_info:
                     continue
-                for key, value in self.curr.source_info[name]["priors"].items():
-                    priors[key] = value
-                
-                if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
-                    for key, value in self.curr.source_info[name]["periodic"].items():
-                        periodic[key] = value
+
+                if isinstance(self.curr.source_info[name], dict):
+                    for key, value in self.curr.source_info[name]["priors"].items():
+                        priors[key] = value
+
+                    if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
+                        for key, value in self.curr.source_info[name]["periodic"].items():
+                            periodic[key] = value
+
+                from .stock.erebor import Settings
+                # TODO: clean up
+                if isinstance(self.curr.source_info[name], Settings):
+                    for key, value in self.curr.source_info[name].priors.items():
+                        priors[key] = value
+
+                    if hasattr(self.curr.source_info[name], "periodic") and self.curr.source_info[name].periodic is not None:
+                        for key, value in self.curr.source_info[name].periodic.items():
+                            periodic[key] = value
                 # breakpoint()
            
             state = self.load_info(priors)

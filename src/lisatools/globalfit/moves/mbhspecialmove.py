@@ -47,12 +47,17 @@ def search_likelihood_wrap(x, wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_
 
 
 class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
-    def __init__(self, *args, run_search=False, **kwargs):
+    def __init__(self, *args, file_backend=None, force_backend=None, run_search=False, **kwargs):
         
+        LISAToolsParallelModule.__init__(self, *args, force_backend=force_backend, **kwargs)
         RedBlueMove.__init__(self, **kwargs)
         ResidualAddOneRemoveOneMove.__init__(self, *args, **kwargs)
-        LISAToolsParallelModule.__init__(self, *args, **kwargs)
+        self.force_backend_base = self.backend.name.split("_")[-1]
         self.run_search = run_search
+        if self.run_search:
+            assert file_backend is not None
+            self.file_backend = file_backend
+            
         self.finished_search = False
 
     @classmethod
@@ -61,6 +66,9 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
  
     def setup(self, model, state):
 
+        ntemps, nwalkers, _, _ = state.branches["mbh"].shape
+        _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
+        
         if not self.run_search:
             return 
 
@@ -326,12 +334,15 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 state.branches['mbh'].inds[:, :, next_leaf] = True
                 state.branches['mbh'].coords[:, :, next_leaf] = new_coords[None, :, :]
                 
+                self.file_backend.save_step(state, _accepted)
+        
                 # remove the cold chain parameters from their respective residual. 
                 AET_remove_params = state.branches['mbh'].coords[0, :, next_leaf].copy()
                 AET_remove_params_in = self.transform_fn.both_transforms(AET_remove_params)
                 self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
                 AET_remove = self.waveform_gen(*AET_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
                 AE_remove = AET_remove[:, :2]
+                
                 acs_all.add_signal_to_residual(AE_remove)
 
             else:
@@ -372,22 +383,23 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             256,
             data_index=data_index,
             noise_index=noise_index,
-            gpu=cp.cuda.runtime.getDevice(),  # self.use_gpu,
+            force_backend=self.force_backend_base,  # self.use_gpu,
         )
-        data_index = walker_inds_base.astype(np.int32)
-        noise_index = walker_inds_base.astype(np.int32)
-
+        
         # set d_d term in the likelihood
-        self.like_fn.d_d = self.like_fn(
-            removal_coords_in, 
+        self.like_fn.d_d = -2. * self.like_fn.get_ll(
+            het_coords, 
+            constants_index=data_index,
             **self.waveform_like_kwargs
-        ) + self.acs.likelihood(noise_only=True)[data_index]
+        )  
+        # I do not think we want this here
+        #  + self.acs.likelihood(noise_only=True)[data_index]
 
         cp.get_default_memory_pool().free_all_blocks()
         
     def compute_like(self, new_points_in, data_index):
         assert data_index is not None
-        logl = like_het.get_ll(
+        logl = self.like_fn.get_ll(
             new_points_in, 
             constants_index=data_index,
         )
@@ -399,7 +411,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         waveforms = cp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
         
         for i in range(coords.shape[0]):
-            waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+            waveforms[i] = self.waveform_gen(*coords[i], fill=True, freqs=cp.asarray(self.acs.f_arr), **self.waveform_gen_kwargs)[:, :self.acs[0].data_res_arr.shape[0]]
         
         return waveforms
 

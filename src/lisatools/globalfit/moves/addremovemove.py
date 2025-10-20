@@ -252,7 +252,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         #constants_index=data_index,
                     )
 
-                    print(f"new logl: {logl}. elapsed: {time.time() - tic}")
+                    # print(f"new logl: {logl}. elapsed: {time.time() - tic}")
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
                     
@@ -321,9 +321,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # udpate at the end
         # new_state.log_like[(temp_inds_update, walker_inds_update)] = logl.flatten()
         # new_state.log_prior[(temp_inds_update, walker_inds_update)] = logp.flatten()
-        print("before computing current likelihood. elapsed: ", time.time() - tic)
+        # print("before computing current likelihood. elapsed: ", time.time() - tic)
         current_ll = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        print("after computing current likelihood. elapsed: ", time.time() - tic)
+        # print("after computing current likelihood. elapsed: ", time.time() - tic)
         xp.get_default_memory_pool().free_all_blocks()
         # TODO: add check with last used logl
 
@@ -340,6 +340,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.best_last_ll = current_ll.max()
         self.low_last_ll = current_ll.min()
 
+        if self.temperature_control is None:
+            # this really does not matter
+            self.temperature_control = self.temperature_controls[0]
+
         self.temperature_control.swaps_accepted = self.temperature_controls[0].swaps_accepted
         
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
@@ -350,6 +354,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
+        raise NotImplementedError
         fd = xp.asarray(self.acs.fd)
         old_contrib = [None, None]
         new_contrib = [None, None]

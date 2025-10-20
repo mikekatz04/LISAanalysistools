@@ -43,6 +43,8 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
+from lisatools.globalfit.stock.erebor import get_gb_erebor_settings
+
 import few
 
 def dtrend(t, y):
@@ -216,9 +218,9 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     #     name="psd",
     #     in_model_moves=[],  # (psd_move, 1.0)],
     # )
-    band_edges = gb_info["band_edges"]
-    band_N_vals = gb_info["band_N_vals"]
-    gb_betas = gb_info["pe_info"]["betas"]
+    band_edges = gb_info.band_edges
+    band_N_vals = gb_info.band_N_vals
+    gb_betas = gb_info.betas
     
     # TODO: make sure all temperatures are read in from file including psd
     band_temps = np.tile(np.asarray(gb_betas), (len(band_edges) - 1, 1))
@@ -234,7 +236,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
     nleaves_max_gb = state.branches["gb"].shape[-2]
-    waveform_kwargs = gb_info["pe_info"]["pe_waveform_kwargs"].copy()
+    waveform_kwargs = gb_info.waveform_kwargs
     if "N" in waveform_kwargs:
         waveform_kwargs.pop("N")
 
@@ -311,11 +313,10 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
         
         check = priors["gb"].logpdf(coords_out_gb)
-
         if np.any(np.isinf(check)):
             raise ValueError("Starting priors are inf.")
 
-        coords_in_in = gb_info["transform"].both_transforms(coords_out_gb)
+        coords_in_in = gb_info.transform.both_transforms(coords_out_gb)
 
         band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
 
@@ -369,9 +370,9 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     # plt.savefig("check1.png")
     # plt.close()
 
-    band_edges = gb_info["band_edges"]
+    band_edges = gb_info.band_edges
     num_sub_bands = len(band_edges)
-    betas_gb = gb_info["pe_info"]["betas"]
+    betas_gb = gb_info.betas
 
     adjust_temps = False
 
@@ -391,7 +392,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     if state.branches["gb"].inds.sum() > 0:
         f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
         band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
-        N_vals_in[state.branches["gb"].inds] = band_N_vals.get()[band_inds_in[state.branches["gb"].inds]]
+        N_vals_in[state.branches["gb"].inds] = band_N_vals[band_inds_in[state.branches["gb"].inds]]
 
     # branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
     # state.branches["gb"].branch_supplemental = BranchSupplemental(
@@ -404,6 +405,16 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     wave_gen = BBHWaveformFD(
         **mbh_info["initialize_kwargs"]
     )
+
+    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
+        for leaf in range(mbh_inds.shape[-1]):
+            if mbh_inds[0, leaf]:
+                assert np.all(mbh_inds[:, leaf])
+                inj_coords = state.branches_coords["mbh"][0, :, leaf]
+                inj_coords_in = mbh_info["transform"].both_transforms(inj_coords)
+                # TODO: fix freqs input with backend
+                AET = wave_gen(*inj_coords_in.T, fill=True, freqs=cp.asarray(acs.f_arr),**mbh_info["waveform_kwargs"])
+                acs.add_signal_to_residual(AET[:, :2])
 
     if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
             betas_all = state.sub_states["mbh"].betas_all
@@ -435,7 +446,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         acs.df
     )
     
-    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x")
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend)
     mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
 
     mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move])  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
@@ -461,21 +472,21 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
 
     gb_move_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
-        parameter_transforms=gb_info["transform"],
+        parameter_transforms=gb_info.transform,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=general_info["random_seed"],
         force_backend="cuda12x",
         nfriends=nwalkers,
-        **gb_info["pe_info"]["group_proposal_kwargs"]
+        **gb_info.group_proposal_kwargs
     )
 
     gb_search_prune_move = GBSpecialRJPriorMove(
         *gb_move_args, 
         rj_proposal_distribution=gpu_priors,
         name="rj_prior_search",
-        use_prior_removal=True,  # gb_info["pe_info"]["use_prior_removal"],
-        phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
+        use_prior_removal=True,  
+        phase_maximize=False,  
         ranks_needed=0,
         run_swaps=True, 
         gpus=[],
@@ -799,7 +810,7 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [5]
+    gpus = [6]
     cp.cuda.runtime.setDevice(gpus[0])
     few.get_backend('cuda12x')
     nwalkers = 36
@@ -870,215 +881,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
     # limits on parameters
-    delta_safe = 1e-5
-    A_lims = [7e-26, 1e-19]
-    f0_lims = [0.05e-3, 2.5e-2]  # TODO: this upper limit leads to an issue at 23 mHz where there is no source?
-    m_chirp_lims = [0.001, 1.0]
-    # now with negative fdots
-    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
-    fdot_lims = [-fdot_max_val, fdot_max_val]
-    phi0_lims = [0.0, 2 * np.pi]
-    iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
-    psi_lims = [0.0, np.pi]
-    lam_lims = [0.0, 2 * np.pi]
-    beta_sky_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
-
-    # band separation setup
-    max_start_ind_gb = (f0_lims[0]  / df).astype(int)
-    min_end_ind_gb = (f0_lims[1]  / df).astype(int)
-
-    from gbgpu.utils.utility import get_N
-    test_freq_low = 0.0008
-    test_freq_mid = 0.002
-    test_freq_high = 0.012
-
-    if Tobs < YEAR / 2.0:
-        oversample = 2
-    else:
-        oversample = 4
-
-    low_N = get_N(1e-30, test_freq_low, Tobs=Tobs, oversample=oversample)[0]
-    mid_N = get_N(1e-30, test_freq_mid, Tobs=Tobs, oversample=oversample)[0]
-    high_N = get_N(1e-30, test_freq_high, Tobs=Tobs, oversample=oversample)[0]
-    
-    first_barrier = (0.001 / df).astype(int) - mid_N
-    second_barrier = (0.01 / df).astype(int) - high_N
-
-    buffer = 10
-    min_width_low = 2 * low_N + buffer
-    min_width_mid = 2 * mid_N + buffer
-    min_width_high = 2 * high_N + buffer
-
-    # setup low band
-    num_bands_low = ((first_barrier - max_start_ind_gb) // min_width_low) + 1
-    assert first_barrier - num_bands_low * min_width_low > 0
-    _start_ind = first_barrier - num_bands_low * min_width_low
-    low_fs_inds_propose = np.arange(_start_ind, first_barrier, min_width_low)
-    low_Ns = np.full_like(low_fs_inds_propose, low_N, dtype=int)
-
-    # setup mid band
-    num_bands_mid = ((second_barrier - first_barrier) // min_width_mid)
-    mid_fs_inds_propose = np.arange(first_barrier, second_barrier, min_width_mid)
-    second_barrier_final = mid_fs_inds_propose[-1]
-    # remove this last one, it will be added by the upper bands
-    mid_fs_inds_propose = mid_fs_inds_propose[:-1]
-    mid_Ns = np.full_like(mid_fs_inds_propose, mid_N, dtype=int)
-    
-    # setup high band
-    num_bands_high = ((min_end_ind_gb - second_barrier_final) // min_width_high) + 1
-    assert second_barrier_final + num_bands_high * min_width_high < end_freq_ind
-    _end_ind = second_barrier_final + num_bands_high * min_width_high
-    high_fs_inds_propose = np.arange(second_barrier_final, _end_ind + min_width_high, min_width_high)
-    high_Ns = np.full_like(high_fs_inds_propose, high_N, dtype=int)
-    band_edge_inds = np.concatenate([low_fs_inds_propose, mid_fs_inds_propose, high_fs_inds_propose])   
-    band_edges = band_edge_inds * df 
-    band_N_vals = cp.asarray(np.concatenate([low_Ns, mid_Ns, high_Ns]))
-    # band_edges = band_edges[395:]
-
-    print("NEED TO THINK ABOUT mCHIRP prior")
-    f0_lims = [band_edges[1].min(), band_edges[-2].max()]
-
-    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
-
-    fdot_lims = [-fdot_max_val, fdot_max_val]
-    
-    num_sub_bands = len(band_edges)
-
-    # waveform settings
-    # TODO: check beta versus theta
-    gb_waveform_kwargs = dict(
-        dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample
-    )
-
-    pe_gb_waveform_kwargs = dict(
-        dt=dt, T=Tobs, use_c_implementation=True, oversample=oversample, start_freq_ind=start_freq_ind
-    )
-
-    gb_initialize_kwargs = dict(force_backend="cuda12x")
-
-    gb_transform_fn_in = {
-        0: np.exp,
-        1: f_ms_to_s,
-        5: np.arccos,
-        8: np.arcsin,
-    }
-
-    gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
-
-    gb_transform_fn = TransformContainer(
-        parameter_transforms=gb_transform_fn_in, fill_dict=gb_fill_dict
-    )
-
-    gb_periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}}
-
-    # prior setup
-    rho_star = 5.0
-    # snr_prior = SNRPrior(rho_star)
-
-    # frequency_prior = uniform_dist(*(np.asarray(f0_lims) * 1e3))
-    print("Decide how to treat fdot prior")
-    priors_gb = {
-        0: uniform_dist(*(np.log(np.asarray(A_lims)))),
-        1: uniform_dist(*(np.asarray(f0_lims) * 1e3)), # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
-        2: uniform_dist(*fdot_lims),
-        3: uniform_dist(*phi0_lims),
-        4: uniform_dist(*np.cos(iota_lims)),
-        5: uniform_dist(*psi_lims),
-        6: uniform_dist(*lam_lims),
-        7: uniform_dist(*np.sin(beta_sky_lims)),
-    }
-
-    # TODO: orbits check against sangria/sangria_hm
-
-    # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
-    priors_gb_fin = {"gb": ProbDistContainer(priors_gb)}
-
-    snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
-    ntemps_pe = 24  # len(snrs_ladder)
-    # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
-    betas = 1 / 1.2 ** np.arange(ntemps_pe)
-    betas[-1] = 0.0001
-
-    stopping_kwargs = dict(
-        n_iters=1000,
-        diff=1.0,
-        verbose=True
-    )
-
-    stop_search_kwargs = dict(
-        convergence_iter=5,  # really * thin_by
-        verbose=True
-    )
-
-    # mcmc info for main run
-    gb_main_run_mcmc_info = dict(
-        branch_names=["gb"],
-        nleaves_max=15000,
-        ndim=8,
-        ntemps=len(betas),
-        betas=betas,
-        nwalkers=nwalkers,
-        start_resample_iter=-1,  # -1 so that it starts right at the start of PE
-        iter_count_per_resample=10,
-        pe_waveform_kwargs=pe_gb_waveform_kwargs,
-        group_proposal_kwargs=dict(
-            n_iter_update=1,
-            live_dangerously=True,
-            a=1.75,
-            num_repeat_proposals=200
-        ),
-        other_tempering_kwargs=dict(
-            adaptation_time=2,
-            permute=True
-        ),
-        use_prior_removal=False,
-        rj_refit_fraction=0.2,
-        rj_search_fraction=0.2,
-        rj_prior_fraction=0.6,
-        nsteps=10000,
-        update_iterations=1,
-        thin_by=3,
-        progress=True,
-        rho_star=rho_star,
-        stop_kwargs=stopping_kwargs,
-        stop_search_kwargs=dict(convergence_iter=5, verbose=True),  # really 5 * thin_by
-        stopping_iterations=1,
-        in_model_phase_maximize=False,
-        rj_phase_maximize=False,
-    )
-
-    # mcmc info for search runs
-    gb_search_run_mcmc_info = dict(
-        ndim=8,
-        ntemps=10,
-        nwalkers=100,
-        pe_waveform_kwargs=pe_gb_waveform_kwargs,
-        m_chirp_lims=[0.001, 1.2],
-        snr_lim=5.0,
-        # stop_kwargs=dict(newly_added_limit=1, verbose=True),
-        stopping_iterations=1,
-    )
-
-    # template generator
-    get_gb_templates = GetGBTemplates(
-        gb_initialize_kwargs,
-        gb_waveform_kwargs
-    )
-
-    all_gb_info = dict(
-        band_edges=band_edges,
-        band_N_vals=band_N_vals,
-        periodic=gb_periodic,
-        priors=priors_gb_fin,
-        transform=gb_transform_fn,
-        waveform_kwargs=gb_waveform_kwargs,
-        initialize_kwargs=gb_initialize_kwargs,
-        pe_info=gb_main_run_mcmc_info,
-        search_info=gb_search_run_mcmc_info,
-        get_templates=get_gb_templates,
-    )
-
-
+    gb_setup = get_gb_erebor_settings()
 
     ##################################
     ##################################
@@ -1402,7 +1205,7 @@ def get_global_fit_settings(copy_settings_file=False):
     curr_info = CurrentInfoGlobalFit({
         "gf_branch_information": gf_branch_information,
         "source_info":{
-            "gb": all_gb_info,
+            "gb": gb_setup,
             "mbh": all_mbh_info,
             "psd": all_psd_info,
             # "emri": all_emri_info,
