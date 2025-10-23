@@ -43,7 +43,7 @@ class GBSettings(Settings):
     iter_count_per_resample: Optional[int] = 10
     other_tempering_kwargs: Optional[dict] = None
     group_proposal_kwargs: Optional[dict] = None
-    nleaves_max: Optional[int] = 15000
+    nleaves_max: Optional[int] = 8000  # TODO: need to increase
     ndim: Optional[int] = 8
 
 
@@ -51,21 +51,24 @@ class GBSettings(Settings):
 def f_ms_to_s(x):
     return x * 1e-3
 
+class Setup:
+    def __init__(self, settings_holder: Settings):
+        self._settings_class = type(settings_holder)
+
+        # had a better way to do this but it stopped allowing for pickle
+        self._settings_names = [field.name for field in dataclasses.fields(self._settings_class)]
+        self._settings_args_names = [field.name for field in dataclasses.fields(self._settings_class) if field.default == dataclasses.MISSING]  # args
+        self._settings_kwargs_names = [field.name for field in dataclasses.fields(self._settings_class) if field.default != dataclasses.MISSING]  # args
+        _args = tuple([getattr(settings_holder, key) for key in self._settings_args_names])
+        _kwargs = {key: getattr(settings_holder, key) for key in self._settings_kwargs_names}
+        self._settings_class.__init__(self, *_args, **_kwargs)
 
 
-
-class GBSetup(GBSettings):
-
-
+class GBSetup(Setup, GBSettings):
     def __init__(self, gb_settings: GBSettings):
         
         # had a better way to do this but it stopped allowing for pickle
-        self._settings_names = [field.name for field in dataclasses.fields(GBSettings)]
-        self._settings_args_names = [field.name for field in dataclasses.fields(GBSettings) if field.default == dataclasses.MISSING]  # args
-        self._settings_kwargs_names = [field.name for field in dataclasses.fields(GBSettings) if field.default != dataclasses.MISSING]  # args
-        _args = tuple([getattr(gb_settings, key) for key in self._settings_args_names])
-        _kwargs = {key: getattr(gb_settings, key) for key in self._settings_kwargs_names}
-        super().__init__(*_args, **_kwargs)
+        Setup.__init__(self, gb_settings)
 
         level = logging.DEBUG
         name = "GBSetup"
@@ -247,8 +250,164 @@ def get_gb_erebor_settings() -> GBSetup:
     return gb_setup
 
 
+def mbh_dist_trans(x):
+    return x * PC_SI * 1e9  # Gpc
+
+
+from bbhx.utils.transform import *
+from eryn.moves import Move
+
+@dataclasses.dataclass
+class MBHSettings(Settings):
+    Tobs: float = None
+    dt: float = None
+    initialize_kwargs: dict = None
+    transform: Optional[TransformContainer] = None
+    priors: Optional[ProbDistContainer] = None
+    periodic: Optional[dict] = None
+    betas: Optional[np.ndarray] = None
+    other_tempering_kwargs: Optional[dict] = None
+    nleaves_max: Optional[int] = 15 # TODO: need to make higher
+    nleaves_min: Optional[int] = 0
+    ndim: Optional[int] = 11
+    inner_moves: Optional[typing.List[Move]] = None
+    num_prop_repeats: Optional[int] = 200
+
+class MBHSetup(Setup):
+    def __init__(self, mbh_settings: MBHSettings):
+        
+        # had a better way to do this but it stopped allowing for pickle
+        super().__init__(mbh_settings)
+
+        level = logging.DEBUG
+        name = "MBHSetup"
+        self.logger = init_logger(filename="mbh_setup.log", level=level, name=name)
+        
+        self.init_setup()
+        
+    def init_sampling_info(self):
+
+        if self.transform is None:
+
+            mbh_transform_fn_in = {
+                0: np.exp,
+                4: mbh_dist_trans,
+                7: np.arccos,
+                9: np.arcsin,
+                (0, 1): mT_q,
+                (11, 8, 9, 10): LISA_to_SSB,
+            }
+
+            # for transforms
+            mbh_fill_dict = {
+                "ndim_full": 12,
+                "fill_values": np.array([0.0]),
+                "fill_inds": np.array([6]),
+            }
+
+            self.transform = TransformContainer(
+                parameter_transforms=mbh_transform_fn_in, fill_dict=mbh_fill_dict
+            )
+
+        if self.periodic is None:
+            self.periodic = {"mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}}
+
+        self.logger.debug("Decide how to treat fdot prior")
+        if self.priors is None:
+            # TODO: change to scaled linear in amplitude!?!
+            priors_mbh = {
+                0: uniform_dist(np.log(1e4), np.log(1e8)),
+                1: uniform_dist(0.01, 0.999999999),
+                2: uniform_dist(-0.99999999, +0.99999999),
+                3: uniform_dist(-0.99999999, +0.99999999),
+                4: uniform_dist(0.01, 1000.0),
+                5: uniform_dist(0.0, 2 * np.pi),
+                6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                7: uniform_dist(0.0, 2 * np.pi),
+                8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                9: uniform_dist(0.0, np.pi),
+                10: uniform_dist(0.0, self.Tobs + 3600.0),
+            }
+
+            # TODO: orbits check against sangria/sangria_hm
+
+            self.priors = {"mbh": ProbDistContainer(priors_mbh)}
+
+        if self.betas is None:
+            snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
+            ntemps_pe = 24  # len(snrs_ladder)
+            # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
+            betas = 1 / 1.2 ** np.arange(ntemps_pe)
+            betas[-1] = 0.0001
+            self.betas = betas
+
+        if self.other_tempering_kwargs is None:
+            self.other_tempering_kwargs = dict(permute=False)
+
+        if self.initialize_kwargs is None:
+            self.initialize_kwargs = {}
+
+        self.waveform_kwargs = dict(
+            modes=[(2,2)],
+            length=1024,
+        )
+
+        if self.inner_moves is None:
+            from lisatools.sampling.moves.skymodehop import SkyMove
+            from eryn.moves import StretchMove
+            self.inner_moves = [
+                (SkyMove(which="both"), 0.02),
+                (SkyMove(which="long"), 0.05),
+                (SkyMove(which="lat"), 0.05),
+                (StretchMove(), 0.88)
+            ]
+
+    @property
+    def mbh_settings(self) -> MBHSettings:
+        return self._mbh_settings
+
+    @mbh_settings.setter
+    def mbh_settings(self, mbh_settings: MBHSettings):
+        assert isinstance(mbh_settings, MBHSettings)
+        self._mbh_settings = mbh_settings
+
+    def init_setup(self):
+        self.init_df()
+        self.init_sampling_info()
+
+    def init_df(self):
+        self.Tobs = int(self.Tobs / self.dt) * self.dt
+        self.df = 1. / self.Tobs
+
+
+def get_mbh_erebor_settings() -> MBHSetup:
+    
+    from lisatools.detector import EqualArmlengthOrbits
+
+    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    # waveform kwargs
+    initialize_kwargs_mbh = dict(
+        amp_phase_kwargs=dict(run_phenomd=True),
+        response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
+        force_backend="cuda12x",
+    )
+
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = YRSID_SI
+    dt = 10.0
+
+    mbh_settings = MBHSettings(
+        Tobs=Tobs,
+        dt=dt,
+        initialize_kwargs=initialize_kwargs_mbh,
+    )
+
+    return MBHSetup(mbh_settings)
+
+
 if __name__ == "__main__":
-    check = get_gb_erebor_settings()
+    # check = get_gb_erebor_settings()
+    check = get_mbh_erebor_settings()
 
  
     # # mcmc info for main run
@@ -311,6 +470,3 @@ if __name__ == "__main__":
     # )
 
 
-# class Erebor:
-
-#     def mbh_settings

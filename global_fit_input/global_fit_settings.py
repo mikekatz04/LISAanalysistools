@@ -13,7 +13,7 @@ from eryn.moves.tempering import TemperatureControl, make_ladder
 
 from lisatools.detector import EqualArmlengthOrbits
 from eryn.moves import TemperatureControl
-from gbgpu.utils.constants import *
+from lisatools.utils.constants import *
 from gbgpu.utils.utility import get_fdot
 from eryn.state import BranchSupplemental
 from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
@@ -43,9 +43,10 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
-from lisatools.globalfit.stock.erebor import get_gb_erebor_settings
+from lisatools.globalfit.stock.erebor import get_gb_erebor_settings, get_mbh_erebor_settings
 
-import few
+
+# import few
 
 def dtrend(t, y):
     # @Nikos data setup
@@ -403,7 +404,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     from bbhx.waveformbuild import BBHWaveformFD
 
     wave_gen = BBHWaveformFD(
-        **mbh_info["initialize_kwargs"]
+        **mbh_info.initialize_kwargs
     )
 
     if np.any(mbh_inds := state.branches_inds["mbh"][0]):
@@ -411,42 +412,42 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
             if mbh_inds[0, leaf]:
                 assert np.all(mbh_inds[:, leaf])
                 inj_coords = state.branches_coords["mbh"][0, :, leaf]
-                inj_coords_in = mbh_info["transform"].both_transforms(inj_coords)
+                inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
                 # TODO: fix freqs input with backend
-                AET = wave_gen(*inj_coords_in.T, fill=True, freqs=cp.asarray(acs.f_arr),**mbh_info["waveform_kwargs"])
+                AET = wave_gen(*inj_coords_in.T, fill=True, freqs=cp.asarray(acs.f_arr),**mbh_info.waveform_kwargs)
                 acs.add_signal_to_residual(AET[:, :2])
 
     if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
             betas_all = state.sub_states["mbh"].betas_all
     else:
         print("remove the False above")
-        betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps), (mbh_info["pe_info"]["nleaves_max"], 1))
+        betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
 
     # to make the states work 
     betas = betas_all[0]
     state.sub_states["mbh"].betas_all = betas_all
 
-    inner_moves = mbh_info["pe_info"]["inner_moves"]
+    inner_moves = mbh_info.inner_moves
     tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
     
-    coords_shape = (ntemps, nwalkers, mbh_info["pe_info"]["nleaves_max"], mbh_info["pe_info"]["ndim"])
+    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
 
     mbh_move_args = (
         "mbh",  # branch_name,
         coords_shape,
         wave_gen,
         tempering_kwargs,
-        mbh_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
-        mbh_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs,
+        mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs,
         acs,
-        mbh_info["pe_info"]["num_prop_repeats"],
-        mbh_info["transform"],
+        mbh_info.num_prop_repeats,
+        mbh_info.transform,
         priors,
         inner_moves,
         acs.df
     )
     
-    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend)
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend, search_fp=general_info["file_information"]["mbh_search_file"])
     mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
 
     mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move])  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
@@ -571,34 +572,34 @@ def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
     from bbhx.waveformbuild import BBHWaveformFD
 
     wave_gen = BBHWaveformFD(
-        **mbh_info["initialize_kwargs"]
+        **mbh_info.initialize_kwargs
     )
 
     if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
             betas_all = state.sub_states["mbh"].betas_all
     else:
         print("remove the False above")
-        betas_all = np.tile(make_ladder(mbh_info["pe_info"]["ndim"], ntemps=ntemps), (mbh_info["pe_info"]["nleaves_max"], 1))
+        betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
 
     # to make the states work 
     betas = betas_all[0]
     state.sub_states["mbh"].betas_all = betas_all
 
-    inner_moves = mbh_info["pe_info"]["inner_moves"]
+    inner_moves = mbh_info.inner_moves
     tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
     
-    coords_shape = (ntemps, nwalkers, mbh_info["pe_info"]["nleaves_max"], mbh_info["pe_info"]["ndim"])
+    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
 
     mbh_move_args = (
         "mbh",  # branch_name,
         coords_shape,
         wave_gen,
         tempering_kwargs,
-        mbh_info["waveform_kwargs"].copy(),  # waveform_gen_kwargs,
-        mbh_info["waveform_kwargs"].copy(),  # waveform_like_kwargs,
+        mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs,
+        mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs,
         acs,
-        mbh_info["pe_info"]["num_prop_repeats"],
-        mbh_info["transform"],
+        mbh_info.num_prop_repeats,
+        mbh_info.transform,
         priors,
         inner_moves,
         acs.df
@@ -714,9 +715,9 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
 
     file_information = {}
-    file_store_dir = "global_fit_output/"
+    file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
     file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_7th_run_through"
+    base_file_name = "rework_8th_run_through"
     file_information["base_file_name"] = base_file_name
     file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
 
@@ -728,8 +729,9 @@ def get_global_fit_settings(copy_settings_file=False):
     file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
 
     file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
-
-    file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
+    file_information["mbh_search_file"] = file_store_dir + base_file_name + "_mbh_search_tmp_file.h5"
+    
+    # file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
     if copy_settings_file:
         shutil.copy(__file__, file_store_dir + base_file_name + "_" + __file__.split("/")[-1])
     
@@ -739,7 +741,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ###############################
     ###############################
 
-    ldc_source_file = "LDC2_sangria_training_v2.h5"
+    ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
     with h5py.File(ldc_source_file, "r") as f:
         tXYZ = f["obs"]["tdi"][:]
 
@@ -762,7 +764,7 @@ def get_global_fit_settings(copy_settings_file=False):
     )
 
     dt = t[1] - t[0]
-    _Tobs = 2.0 * YEAR / 12.0
+    _Tobs = 2.0 * YRSID_SI / 12.0
     Nobs = int(_Tobs / dt)  # len(t)
     t = t[:Nobs]
     X = X[:Nobs]
@@ -810,9 +812,9 @@ def get_global_fit_settings(copy_settings_file=False):
 
     generate_current_state = GenerateCurrentState(A_inj, E_inj)
 
-    gpus = [6]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
-    few.get_backend('cuda12x')
+    # few.get_backend('cuda12x')
     nwalkers = 36
     ntemps = 24
 
@@ -947,132 +949,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    # for transforms
-    fill_dict_mbh = {
-        "ndim_full": 12,
-        "fill_values": np.array([0.0]),
-        "fill_inds": np.array([6]),
-    }
-
-    # priors
-    priors_mbh = {
-        0: uniform_dist(np.log(1e4), np.log(1e8)),
-        1: uniform_dist(0.01, 0.999999999),
-        2: uniform_dist(-0.99999999, +0.99999999),
-        3: uniform_dist(-0.99999999, +0.99999999),
-        4: uniform_dist(0.01, 1000.0),
-        5: uniform_dist(0.0, 2 * np.pi),
-        6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        7: uniform_dist(0.0, 2 * np.pi),
-        8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        9: uniform_dist(0.0, np.pi),
-        10: uniform_dist(0.0, Tobs + 3600.0),
-    }
-
-    # transforms from pe to waveform generation
-    parameter_transforms_mbh = {
-        0: np.exp,
-        4: mbh_dist_trans,
-        7: np.arccos,
-        9: np.arcsin,
-        (0, 1): mT_q,
-        (11, 8, 9, 10): LISA_to_SSB,
-    }
-
-    transform_fn_mbh = TransformContainer(
-        parameter_transforms=parameter_transforms_mbh,
-        fill_dict=fill_dict_mbh,
-    )
-
-    # sampler treats periodic variables by wrapping them properly
-    periodic_mbh = {
-        "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
-    }
-
-    # waveform kwargs
-    initialize_kwargs_mbh = dict(
-        amp_phase_kwargs=dict(run_phenomd=True),
-        response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
-        force_backend="cuda12x",
-    )
-
-    # for MBH waveform class initialization
-    waveform_kwargs_mbh = dict(
-        modes=[(2,2)],
-        length=1024,
-    )
-
-    get_mbh = GetMBHTemplates(
-        initialize_kwargs_mbh,
-        waveform_kwargs_mbh
-    )
-
-    inner_moves = [
-        (SkyMove(which="both"), 0.02),
-        (SkyMove(which="long"), 0.05),
-        (SkyMove(which="lat"), 0.05),
-        (StretchMove(), 0.88)
-    ]
-
-    mix_stopping_kwargs = dict(
-        n_iters=5,
-        diff=0.01,
-        verbose=False
-    )
-
-    # mcmc info for main run
-    mbh_main_run_mcmc_info = dict(
-        branch_names=["mbh"],
-        nleaves_max=15,
-        ndim=11,
-        ntemps=10,
-        nwalkers=50,
-        num_prop_repeats=200,
-        inner_moves=inner_moves,
-        progress=False,
-        thin_by=1,
-        stop_kwargs=mix_stopping_kwargs,
-        stopping_iterations=1
-    )
-
-    mbh_search_kwargs = {
-        "modes": [(2, 2)],
-        "length": 1024,
-        "shift_t_limits": True,
-        "phase_marginalize": True
-    }
-
-    search_stopping_kwargs = dict(
-        n_iters=50,
-        diff=0.01,
-        verbose=False
-    )
-
-    mbh_search_run_info = dict(
-        ntemps=10,
-        nwalkers=100,
-        mbh_kwargs=mbh_search_kwargs,
-        time_splits=8,
-        max_num_per_gpu=2, 
-        verbose=False,
-        snr_lim=20.0, 
-        stop_kwargs=search_stopping_kwargs,
-        stopping_iterations=4
-    )
-
-    all_mbh_info = dict(
-        setup_func=setup_mbh_functionality,
-        periodic=periodic_mbh,
-        priors={"mbh": ProbDistContainer(priors_mbh)},
-        transform=transform_fn_mbh,
-        waveform_kwargs=waveform_kwargs_mbh,
-        initialize_kwargs=initialize_kwargs_mbh,
-        pe_info=mbh_main_run_mcmc_info,
-        search_info=mbh_search_run_info,
-        get_templates=get_mbh,
-        stop_kwargs=search_stopping_kwargs,
-    )
-
+    mbh_setup = get_mbh_erebor_settings()
 
     ##################################
     ##################################
@@ -1195,8 +1072,8 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # TODO: needs to be okay if there is only one branch
     gf_branch_information = (
-        GFBranchInfo("mbh", 11, 15, 15, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        + GFBranchInfo("gb", 8, 8000, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
+        GFBranchInfo("mbh", mbh_setup.ndim, mbh_setup.nleaves_max, 0, branch_state=MBHState, branch_backend=MBHHDFBackend) 
+        + GFBranchInfo("gb", gb_setup.ndim, gb_setup.nleaves_max, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
         # + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
         + GFBranchInfo("galfor", 5, 1, 1) 
         + GFBranchInfo("psd", 4, 1, 1)
@@ -1206,7 +1083,7 @@ def get_global_fit_settings(copy_settings_file=False):
         "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": gb_setup,
-            "mbh": all_mbh_info,
+            "mbh": mbh_setup,
             "psd": all_psd_info,
             # "emri": all_emri_info,
         },

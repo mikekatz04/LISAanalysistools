@@ -467,7 +467,7 @@ class Buffer(LISAToolsParallelModule):
 
         if np.any(~keep):
             print(f"NOT KEEPING: {(~keep).sum()}")
-        
+        breakpoint()    
         ll_diff = cp.full(keep.shape[0], -1e300)
         ll_diff[keep] = cp.asarray(self.gb.swap_likelihood_difference(
             params_remove_in_keep,

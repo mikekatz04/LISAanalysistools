@@ -100,13 +100,13 @@ class CurrentInfoGlobalFit:
         # gmm info
         # TODO: save GMM distributions
 
-    def initialize_mbh_state_from_search(self, mbh_output_point_info):
-        output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
-        coords = np.zeros((self.source_info["gb"]["pe_info"]["ntemps"], self.source_info["gb"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.source_info["mbh"]["pe_info"]["ndim"]))
-        assert output_points_pruned.shape[0] >= self.source_info["mbh"]["pe_info"]["nwalkers"]
+    # def initialize_mbh_state_from_search(self, mbh_output_point_info):
+    #     output_points_pruned = np.asarray(mbh_output_point_info["output_points_pruned"]).transpose(1, 0, 2)
+    #     coords = np.zeros((self.source_info["gb"]["pe_info"]["ntemps"], self.source_info["gb"]["pe_info"]["nwalkers"], output_points_pruned.shape[1], self.source_info["mbh"]["pe_info"]["ndim"]))
+    #     assert output_points_pruned.shape[0] >= self.source_info["mbh"]["pe_info"]["nwalkers"]
         
-        coords[:] = output_points_pruned[None, :self.source_info["mbh"]["pe_info"]["nwalkers"]]
-        self.source_info["mbh"]["mbh_init_points"] = coords.copy()
+    #     coords[:] = output_points_pruned[None, :self.source_info["mbh"]["pe_info"]["nwalkers"]]
+    #     self.source_info["mbh"]["mbh_init_points"] = coords.copy()
     
     def get_data_psd(self, **kwargs):
         # self passed here to access all current info
@@ -219,8 +219,8 @@ class GlobalFit:
             
             # TODO: adjust this so it is automated
             state.sub_states["gb"].initialized = False
-            band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
-            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
+            band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
+            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"].band_edges, band_temps)
 
         else:
             self.logger.debug("update this somehow")
@@ -234,8 +234,8 @@ class GlobalFit:
             inds["galfor"][:] = True
             state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
             
-            band_temps = np.zeros((len(self.curr.source_info["gb"]["band_edges"]) - 1, self.ntemps))
-            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"]["band_edges"], band_temps)
+            band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
+            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"].band_edges, band_temps)
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             # self.logger.debug("pickle state load success")
@@ -320,9 +320,9 @@ class GlobalFit:
                         for key, value in self.curr.source_info[name]["periodic"].items():
                             periodic[key] = value
 
-                from .stock.erebor import Settings
+                from .stock.erebor import Setup
                 # TODO: clean up
-                if isinstance(self.curr.source_info[name], Settings):
+                if isinstance(self.curr.source_info[name], Setup):
                     for key, value in self.curr.source_info[name].priors.items():
                         priors[key] = value
 

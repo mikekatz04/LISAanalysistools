@@ -47,7 +47,7 @@ def search_likelihood_wrap(x, wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_
 
 
 class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
-    def __init__(self, *args, file_backend=None, force_backend=None, run_search=False, **kwargs):
+    def __init__(self, *args, file_backend=None, search_fp=None, force_backend=None, run_search=False, **kwargs):
         
         LISAToolsParallelModule.__init__(self, *args, force_backend=force_backend, **kwargs)
         RedBlueMove.__init__(self, **kwargs)
@@ -57,6 +57,9 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         if self.run_search:
             assert file_backend is not None
             self.file_backend = file_backend
+
+            assert search_fp is not None
+            self.search_fp = search_fp
             
         self.finished_search = False
 
@@ -249,8 +252,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             like_args = (self.waveform_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, self.transform_fn, (cp.asarray(fd_short), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df_short), full_kwargs)
             # # check3 = search_likelihood_wrap(start_points, *like_args)
             
-            _fp = "mbh_search_tmp_file.h5"
-            fp = "global_fit_output/" + _fp
+            fp = self.search_fp
             if os.path.exists(fp):
                 os.remove(fp)
             stop_fn = SearchConvergeStopping(n_iters=30, diff=1.0, verbose=True, start_iteration=0)

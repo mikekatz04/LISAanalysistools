@@ -3,7 +3,7 @@ import cupy as xp
 from gbgpu.utils.utility import get_N
 from gbgpu.gbgpu import GBGPU
 import numpy as np
-from gbgpu.utils.constants import *
+from lisatools.utils.constants import *
 from datetime import datetime
 import pandas as pd
 import os
@@ -15,7 +15,7 @@ import cupy as xp
 from gbgpu.utils.utility import get_N
 from gbgpu.gbgpu import GBGPU
 import numpy as np
-from gbgpu.utils.constants import *
+from lisatools.utils.constants import *
 from datetime import datetime
 import pandas as pd
 import os
