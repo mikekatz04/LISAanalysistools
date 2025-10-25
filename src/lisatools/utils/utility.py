@@ -34,6 +34,14 @@ def tukey(N, alpha, xp=None):
     return tukey_out
 
 
+def detrend(t, y):
+    # @Nikos data setup
+    m, b = np.polyfit(t, y, 1)
+    ytmp = y - (m * t + b)
+    ydetrend = ytmp - np.mean(ytmp)
+    return ydetrend
+
+
 def get_array_module(arr: np.ndarray | cp.ndarray) -> object:
     """Return array library of an array (np/cp).
 

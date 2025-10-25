@@ -87,7 +87,7 @@ class CurrentInfoGlobalFit:
         self.settings_dict = settings
         self.current_info = deepcopy(settings)
 
-        backend_path = self.general_info["file_information"]["fp_main"]
+        backend_path = self.general_info.main_file_path
         self.backend = GFHDFBackend(backend_path)
 
         # if os.path.exists(mbh_search_file):
@@ -108,9 +108,9 @@ class CurrentInfoGlobalFit:
     #     coords[:] = output_points_pruned[None, :self.source_info["mbh"]["pe_info"]["nwalkers"]]
     #     self.source_info["mbh"]["mbh_init_points"] = coords.copy()
     
-    def get_data_psd(self, **kwargs):
-        # self passed here to access all current info
-        return self.general_info["generate_current_state"](self, **kwargs) 
+    # def get_data_psd(self, **kwargs):
+    #     # self passed here to access all current info
+    #     return self.general_info["generate_current_state"](self, **kwargs) 
 
     @property
     def settings(self):
@@ -178,8 +178,8 @@ class GlobalFit:
         self.comm = comm
         self.curr = curr
         self.rank = comm.Get_rank()
-        self.nwalkers = self.curr.general_info["nwalkers"]
-        self.ntemps = self.curr.general_info["ntemps"]
+        self.nwalkers = self.curr.general_info.nwalkers
+        self.ntemps = self.curr.general_info.ntemps
         self.all_ranks = list(range(self.comm.Get_size()))
         self.used_ranks = []
         self.head_rank = self.curr.rank_info["head_rank"]
@@ -205,13 +205,13 @@ class GlobalFit:
     def load_info(self, priors):
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
-        backend_path = self.curr.general_info["file_information"]["fp_main"]
+        backend_path = self.curr.general_info.main_file_path
         if os.path.exists(backend_path):
             state = GFHDFBackend(backend_path, sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
 
-        elif "past_file_for_start" in self.curr.general_info["file_information"]:
+        elif self.curr.general_info.past_file_for_start is not None:
             # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
-            if not os.path.exists((file_for_restart := self.curr.general_info["file_information"]["past_file_for_start"])):
+            if not os.path.exists((file_for_restart := self.curr.general_info.past_file_for_start)):
                 raise ValueError(f"past_file_for_start ({file_for_restart}) was added but it does not exist.")
 
             # TODO: make this adjust to more leaves if needed
@@ -243,18 +243,18 @@ class GlobalFit:
 
     def setup_acs(self, state):
     
-        cp.cuda.runtime.setDevice(self.curr.general_info["gpus"][0])
+        cp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
 
-        df = self.curr.general_info["df"]
-        N = self.curr.general_info["A_inj"].shape[-1]
+        df = self.curr.general_info.df
+        N = self.curr.general_info.A_inj.shape[-1]
 
-        f_arr = (np.arange(N) + self.curr.general_info["start_freq_ind"]) * df
+        f_arr = (np.arange(N) + self.curr.general_info.start_freq_ind) * df
 
         acs_tmp = []
         for w in range(self.nwalkers):
             data_res_arr = DataResidualArray([
-                self.curr.general_info["A_inj"].copy(), 
-                self.curr.general_info["E_inj"].copy(), 
+                self.curr.general_info.A_inj.copy(), 
+                self.curr.general_info.E_inj.copy(), 
             ], f_arr=f_arr)
             psd_params = state.branches_coords["psd"][0, w, 0]
             galfor_params = state.branches_coords["galfor"][0, w, 0]
@@ -263,7 +263,7 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
         
-        gpus = self.curr.general_info["gpus"]
+        gpus = self.curr.general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)   
 
         for name, source_info in self.curr.source_info.items():
@@ -292,7 +292,7 @@ class GlobalFit:
 
     def run_global_fit(self):
         
-        backend_path = self.curr.general_info["file_information"]["fp_main"]
+        backend_path = self.curr.general_info.main_file_path
         
         backend = GFHDFBackend(backend_path, sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
@@ -303,8 +303,8 @@ class GlobalFit:
             ndims = self.gf_branch_information.ndims
             nleaves_max = self.gf_branch_information.nleaves_max
             nleaves_min = self.gf_branch_information.nleaves_min
-            nwalkers = general_info["nwalkers"]
-            ntemps = general_info["ntemps"]
+            nwalkers = general_info.nwalkers
+            ntemps = general_info.ntemps
 
             priors = {}
             periodic = {}
@@ -391,8 +391,8 @@ class GlobalFit:
 
             # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
 
-            A_inj = general_info["A_inj"].copy()
-            E_inj = general_info["E_inj"].copy()
+            A_inj = general_info.A_inj.copy()
+            E_inj = general_info.E_inj.copy()
 
             generate = GenerateCurrentState(A_inj, E_inj)
             self.logger.debug("generate function created")
@@ -539,7 +539,7 @@ class GlobalFit:
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
-            save_to_backend_asynchronously_and_plot(backend, self.comm, self.main_rank, self.head_rank, self.curr.general_info["plot_iter"], self.curr.general_info["backup_iter"])
+            save_to_backend_asynchronously_and_plot(backend, self.comm, self.main_rank, self.head_rank, 1, self.curr.general_info.backup_iter)  # 1 is plot_iter
 
         else:
             info = self.comm.recv(source=self.main_rank)
@@ -619,36 +619,36 @@ class MPIControlGlobalFit:
             fin = run_main_function(self.main_gpu, self.comm, self.head_rank, self.run_results_rank)
 
         elif self.run_results_update and self.rank == self.run_results_rank:
-            save_to_backend_asynchronously_and_plot(self.current_info.backend, self.comm, self.main_rank, self.head_rank, self.current_info.general_info["plot_iter"], self.current_info.general_info["backup_iter"])
+            save_to_backend_asynchronously_and_plot(self.current_info.backend, self.comm, self.main_rank, self.head_rank, 1, self.current_info.general_info.backup_iter)
             
-def run_gf_progression(global_fit_progression, comm, head_rank, status_file):
-    rank = comm.Get_rank()
+# def run_gf_progression(global_fit_progression, comm, head_rank, status_file):
+#     rank = comm.Get_rank()
     
-    for g_i, global_fit_segment in enumerate(global_fit_progression):
-        # check if this segment has completed
-        if os.path.exists(status_file):
-            with open(status_file, "r") as fp:
-                lines = fp.readlines()
-                if global_fit_segment["name"] + "\n" in lines:
-                    print(f"continue {global_fit_segment['name']}")
-                    continue
+#     for g_i, global_fit_segment in enumerate(global_fit_progression):
+#         # check if this segment has completed
+#         if os.path.exists(status_file):
+#             with open(status_file, "r") as fp:
+#                 lines = fp.readlines()
+#                 if global_fit_segment["name"] + "\n" in lines:
+#                     print(f"continue {global_fit_segment['name']}")
+#                     continue
 
-        class_name = global_fit_segment["name"]
-        if rank == head_rank:
-            print(f"\n\nStarting {class_name}\n\n")
-            st = time.perf_counter()
-        print(f"\n\nStarting {class_name}, {rank}\n\n")
+#         class_name = global_fit_segment["name"]
+#         if rank == head_rank:
+#             print(f"\n\nStarting {class_name}\n\n")
+#             st = time.perf_counter()
+#         print(f"\n\nStarting {class_name}, {rank}\n\n")
 
-        segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
+#         segment = global_fit_segment["segment"](*global_fit_segment["args"], **global_fit_segment["kwargs"]) 
         
-        print("start", g_i, rank)
-        segment.run()
-        print("finished:", rank)
-        comm.Barrier()
-        print("end", g_i, rank)
-        if rank == head_rank:
-            class_name = global_fit_segment["name"]
-            et = time.perf_counter()
-            print(f"\n\nEnding {class_name}({et - st} sec)\n\n")
-            with open(segment.current_info.general_info["file_information"]["status_file"], "a") as fp:
-                fp.write(global_fit_segment["name"] + "\n")
+#         print("start", g_i, rank)
+#         segment.run()
+#         print("finished:", rank)
+#         comm.Barrier()
+#         print("end", g_i, rank)
+#         if rank == head_rank:
+#             class_name = global_fit_segment["name"]
+#             et = time.perf_counter()
+#             print(f"\n\nEnding {class_name}({et - st} sec)\n\n")
+#             with open(segment.current_info.general_info["file_information"]["status_file"], "a") as fp:
+#                 fp.write(global_fit_segment["name"] + "\n")

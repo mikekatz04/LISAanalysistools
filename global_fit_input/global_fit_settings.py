@@ -43,17 +43,12 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
-from lisatools.globalfit.stock.erebor import get_gb_erebor_settings, get_mbh_erebor_settings
+from lisatools.globalfit.stock.erebor import get_general_erebor_settings, get_gb_erebor_settings, get_mbh_erebor_settings, get_psd_erebor_settings, get_galfor_erebor_settings
 
 
 # import few
 
-def dtrend(t, y):
-    # @Nikos data setup
-    m, b = np.polyfit(t, y, 1)
-    ytmp = y - (m * t + b)
-    ydetrend = ytmp - np.mean(ytmp)
-    return ydetrend
+
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -163,10 +158,10 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     mbh_info = curr.source_info["mbh"]
     # TODO: adjust this indide current info
     general_info = curr.general_info
-    nwalkers = curr.general_info["nwalkers"]
-    ntemps = curr.general_info["ntemps"]
+    nwalkers = curr.general_info.nwalkers
+    ntemps = curr.general_info.ntemps
 
-    gpus = curr.general_info["gpus"]
+    gpus = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
     from gbgpu.gbgpu import GBGPU
     import gbgpu 
@@ -177,8 +172,8 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     gb = GBGPU(force_backend="cuda12x")
    
     gb.gpus = gpus
-    nwalkers = curr.general_info["nwalkers"]
-    ntemps = curr.general_info["ntemps"]
+    nwalkers = curr.general_info.nwalkers
+    ntemps = curr.general_info.ntemps
     
     # setup psd search move
     effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
@@ -233,7 +228,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     from eryn.prior import ProbDistContainer
     gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
 
-    gpus = curr.general_info["gpus"]
+    gpus = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
     nleaves_max_gb = state.branches["gb"].shape[-2]
@@ -446,8 +441,9 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         inner_moves,
         acs.df
     )
-    
-    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend, search_fp=general_info["file_information"]["mbh_search_file"])
+
+    search_fp = general_info.file_store_dir + general_info.base_file_name + mbh_info.mbh_search_file_key + ".h5"
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend, search_fp=search_fp)
     mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
 
     mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move])  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
@@ -457,12 +453,12 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     
 
     ########### GB
-    fd = general_info["fd"].copy()
+    fd = general_info.fd.copy()
 
     gb_move_args = (
         gb,
         priors,
-        general_info["start_freq_ind"],
+        general_info.start_freq_ind,
         acs.data_length,
         acs,
         np.asarray(fd),
@@ -476,7 +472,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         parameter_transforms=gb_info.transform,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
-        random_seed=general_info["random_seed"],
+        random_seed=general_info.random_seed,
         force_backend="cuda12x",
         nfriends=nwalkers,
         **gb_info.group_proposal_kwargs
@@ -506,7 +502,7 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         **gb_move_kwargs
     )
 
-    backend_name = general_info["file_information"]["fp_main"]
+    backend_name = general_info.main_file_path
     gb_search_refit_move = GBSpecialRJRefitMove(
         *gb_move_args, 
         rj_proposal_distribution=None,
@@ -520,7 +516,8 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
         **gb_move_kwargs
     )
 
-    gb_search_moves = GFCombineMove([psd_search_move, mbh_pe_move, gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, mbh_pe_move, psd_search_move])
+    # gb_search_moves = GFCombineMove([psd_search_move, mbh_pe_move, gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, mbh_pe_move, psd_search_move])
+    gb_search_moves = GFCombineMove([gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, mbh_pe_move, psd_search_move])
     gb_search_moves.accepted = np.zeros((ntemps, nwalkers))
     
     recipe.add_recipe_component(GBRunStep(moves=[gb_search_moves], convergence_iter=5, verbose=True), name="gb search")
@@ -566,8 +563,8 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
 
 def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
-    nwalkers = curr.general_info["nwalkers"]
-    ntemps = curr.general_info["ntemps"]
+    nwalkers = curr.general_info.nwalkers
+    ntemps = curr.general_info.ntemps
     mbh_info = curr.source_info["mbh"]
     from bbhx.waveformbuild import BBHWaveformFD
 
@@ -633,20 +630,20 @@ def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
     from lisatools.sources.emri import EMRITDIWaveform  
 
-    nwalkers = curr.general_info["nwalkers"]
-    ntemps = curr.general_info["ntemps"]
+    nwalkers = curr.general_info.nwalkers
+    ntemps = curr.general_info.ntemps
     emri_info = curr.source_info["emri"]
 
     # TODO: mix this with the actual generatefuncs.py 
-    emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info["tukey_alpha"], curr.general_info["start_freq_ind"], curr.general_info["end_freq_ind"], curr.general_info["dt"])
+    emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
 
     num_emris = gf_branch_info.nleaves_max["emri"]
     ndim = gf_branch_info.ndims["emri"]
     # need to inject emris since they are not in the data set yet. 
     emri_inj_params = priors["emri"].rvs(size=(num_emris,))
     emri_inj_params_in = emri_info["transform"].both_transforms(emri_inj_params)   
-    start = curr.general_info["start_freq_ind"]
-    end = curr.general_info["end_freq_ind"]
+    start = curr.general_info.start_freq_ind
+    end = curr.general_info.end_freq_ind
     for inj in emri_inj_params_in:
         AET_f = emri_gen(*inj)
         # this will go into every residual because it is the data
@@ -708,148 +705,12 @@ def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
 
 
 def get_global_fit_settings(copy_settings_file=False):
-    ###############################
-    ###############################
-    ###  Global Fit File Setup  ###
-    ###############################
-    ###############################
 
-    file_information = {}
-    file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
-    file_information["file_store_dir"] = file_store_dir
-    base_file_name = "rework_8th_run_through"
-    file_information["base_file_name"] = base_file_name
-    file_information["plot_base"] = file_store_dir + base_file_name + '/output_plots.png'
+    general_setup = get_general_erebor_settings()
 
-    file_information["fp_main"] = file_store_dir + base_file_name + "_parameter_estimation_main.h5"
-    
-    file_information["fp_gb_gmm_info"] = file_store_dir + base_file_name + "_gmm_info.pickle"
-
-    file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
-    file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
-
-    file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
-    file_information["mbh_search_file"] = file_store_dir + base_file_name + "_mbh_search_tmp_file.h5"
-    
     # file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
     if copy_settings_file:
-        shutil.copy(__file__, file_store_dir + base_file_name + "_" + __file__.split("/")[-1])
-    
-    ###############################
-    ###############################
-    ###  Global Fit data Setup  ###
-    ###############################
-    ###############################
-
-    ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
-    with h5py.File(ldc_source_file, "r") as f:
-        tXYZ = f["obs"]["tdi"][:]
-
-        # remove sources
-        # for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
-        #     change_arr = f["sky"][source]["tdi"][:]
-        #     for change in ["X", "Y", "Z"]:
-        #         tXYZ[change] -= change_arr[change]
-
-        # tXYZ = f["sky"]["dgb"]["tdi"][:]
-        # tXYZ["X"] += f["sky"]["dgb"]["tdi"][:]["X"]
-        # tXYZ["Y"] += f["sky"]["dgb"]["tdi"][:]["Y"]
-        # tXYZ["Y"] += f["sky"]["dgb"]["tdi"][:]["Z"]
-
-    t, X, Y, Z = (
-        tXYZ["t"].squeeze(),
-        tXYZ["X"].squeeze(),
-        tXYZ["Y"].squeeze(),
-        tXYZ["Z"].squeeze(),
-    )
-
-    dt = t[1] - t[0]
-    _Tobs = 2.0 * YRSID_SI / 12.0
-    Nobs = int(_Tobs / dt)  # len(t)
-    t = t[:Nobs]
-    X = X[:Nobs]
-    Y = Y[:Nobs]
-    Z = Z[:Nobs]
-
-    Tobs = Nobs * dt
-    df = 1 / Tobs
-
-    # TODO: @nikos what do you think about the window needed here. For this case at 1 year, I do not think it matters. But for other stuff.
-    # the time domain waveforms like emris right now will apply this as well
-    tukey_alpha = 0.05
-    tukey_here = tukey(X.shape[0], tukey_alpha)
-    X = dtrend(t, tukey_here * X.copy())
-    Y = dtrend(t, tukey_here * Y.copy())
-    Z = dtrend(t, tukey_here * Z.copy())
-
-    # f***ing dt
-    Xf, Yf, Zf = (np.fft.rfft(X) * dt, np.fft.rfft(Y) * dt, np.fft.rfft(Z) * dt)
-    Af, Ef, Tf = AET(Xf, Yf, Zf)
-    # Af[:] = 0.0
-    # Ef[:] = 0.0
-    # Tf[:] = 0.0
-
-    # TODO: MAKE DEFAULT SETUP CLASSES FOR EACH PIECE
-
-    start_freq_ind = 0
-    # start_freq_ind = int(0.004 / df)
-    # TODO: check this. 
-    # This is here because of data storage size 
-    # and an issue I think with a zero in the response psd
-    # end_freq_ind = int(0.030 / df)  # len(A_inj)  # ADD THIS BACK TO ALLOW FOR FULL FFT
-    # end_freq_ind = int(0.007 / df)  # len(A_inj) - 1
-    end_freq_ind = len(Af)  # ALLOW FOR FULL FFT
-    
-    A_inj, E_inj = (
-        Af[start_freq_ind:end_freq_ind],
-        Ef[start_freq_ind:end_freq_ind],
-    )
-
-    data_length = len(A_inj)
-    fd = (np.arange(data_length) + start_freq_ind) * df
-    
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
-
-    generate_current_state = GenerateCurrentState(A_inj, E_inj)
-
-    gpus = [0]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
-    nwalkers = 36
-    ntemps = 24
-
-    orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
-    all_general_info = dict(
-        file_information=file_information,
-        fd=fd,
-        A_inj=A_inj,
-        E_inj=E_inj,
-        t=t, 
-        X=X,
-        Y=Y,
-        Z=Z,
-        orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        data_length=data_length,
-        start_freq_ind=start_freq_ind,
-        end_freq_ind=end_freq_ind,
-        df=df,
-        Tobs=Tobs,
-        dt=dt,
-        source_file=ldc_source_file,
-        generate_current_state=generate_current_state,
-        random_seed=1024,
-        begin_new_likelihood=False,
-        plot_iter=4,
-        backup_iter=5,
-        nwalkers=nwalkers,
-        ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
-        gpus=gpus
-
-    )
-
+        shutil.copy(__file__, general_setup.file_store_dir + general_setup.base_file_name + "_" + __file__.split("/")[-1])
 
     ###############################
     ###############################
@@ -860,20 +721,13 @@ def get_global_fit_settings(copy_settings_file=False):
     head_rank = 1
 
     main_rank = 0
-    main_gpu = gpus[0]
-    other_gpus = gpus[1:]
-
+    
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
     rank_info = dict(
         head_rank=head_rank,
         main_rank=main_rank
-    )
-
-    gpu_assignments = dict(
-        main_gpu=main_gpu,
-        other_gpus=other_gpus
     )
 
     ##################################
@@ -883,7 +737,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
     # limits on parameters
-    gb_setup = get_gb_erebor_settings()
+    gb_setup = get_gb_erebor_settings(general_setup)
 
     ##################################
     ##################################
@@ -892,54 +746,16 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    priors_psd = {
-        0: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-        1: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
-        2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-        3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
-    }
+    psd_setup = get_psd_erebor_settings(general_setup)
 
-    psd_kwargs = dict(sens_fn="A1TDISens")
-    psd_initialize_kwargs = {}
+    ##################################
+    ##################################
+    ###  Galfor Settings  ############
+    ##################################
+    ##################################
 
-    ### Galactic Foreground Settings #
- 
-    priors_galfor = {
-        0: uniform_dist(1e-45, 2e-43),  # amp
-        1: uniform_dist(1e-4, 5e-2),  # knee
-        2: uniform_dist(0.01, 3.0),  # alpha
-        3: uniform_dist(1e0, 1e7),  # Slope1
-        4: uniform_dist(5e1, 8e3),  # Slope2
-    }
 
-    search_stopping_kwargs = dict(
-        n_iters=5,
-        diff=0.01,
-        verbose=False
-    )
-
-    # mcmc info for main run
-    psd_main_run_mcmc_info = dict(
-        branch_names=["psd", "galfor"],
-        ndims={"psd": 4, "galfor": 5},
-        nleaves_max={"psd": 1, "galfor": 1},
-        ntemps=10,
-        nwalkers=50,
-        progress=False,
-        thin_by=100,
-        update_iterations=20,
-        stop_kwargs=search_stopping_kwargs,
-        stopping_iterations=1
-    )
-
-    all_psd_info = dict(
-        periodic=None,
-        priors={"psd": ProbDistContainer(priors_psd), "galfor": ProbDistContainer(priors_galfor)},
-        psd_kwargs=psd_kwargs,
-        initalize_kwargs=psd_initialize_kwargs,
-        pe_info=psd_main_run_mcmc_info,
-        stopping_iterations=1,
-    )
+    galfor_setup = get_galfor_erebor_settings(general_setup)
 
 
     ##################################
@@ -949,7 +765,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    mbh_setup = get_mbh_erebor_settings()
+    mbh_setup = get_mbh_erebor_settings(general_setup)
 
     ##################################
     ##################################
@@ -958,113 +774,113 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    # for transforms
-    # this is an example of how you would fill parameters 
-    # if you want to keep them fixed
-    # (you need to remove them from the other parts of initialization)
-    fill_dict_emri = {
-       "ndim_full": 14,
-       "fill_values": np.array([1.0, 0.0]), # inclination and Phi_theta
-       "fill_inds": np.array([5, 12]),
-    }
+    # # for transforms
+    # # this is an example of how you would fill parameters 
+    # # if you want to keep them fixed
+    # # (you need to remove them from the other parts of initialization)
+    # fill_dict_emri = {
+    #    "ndim_full": 14,
+    #    "fill_values": np.array([1.0, 0.0]), # inclination and Phi_theta
+    #    "fill_inds": np.array([5, 12]),
+    # }
 
-    # priors
-    priors_emri = {
-        0: uniform_dist(np.log(1e5), np.log(1e6)),  # M total mass
-        1: uniform_dist(1.0, 100.0),  # mu
-        2: uniform_dist(0.01, 0.98),  # a
-        3: uniform_dist(12.0, 16.0),  # p0
-        4: uniform_dist(0.001, 0.4),  # e0
-        5: uniform_dist(0.01, 100.0),  # dist in Gpc
-        6: uniform_dist(-0.99999, 0.99999),  # qS
-        7: uniform_dist(0.0, 2 * np.pi),  # phiS
-        8: uniform_dist(-0.99999, 0.99999),  # qK
-        9: uniform_dist(0.0, 2 * np.pi),  # phiK
-        10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
-        11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
-    }
+    # # priors
+    # priors_emri = {
+    #     0: uniform_dist(np.log(1e5), np.log(1e6)),  # M total mass
+    #     1: uniform_dist(1.0, 100.0),  # mu
+    #     2: uniform_dist(0.01, 0.98),  # a
+    #     3: uniform_dist(12.0, 16.0),  # p0
+    #     4: uniform_dist(0.001, 0.4),  # e0
+    #     5: uniform_dist(0.01, 100.0),  # dist in Gpc
+    #     6: uniform_dist(-0.99999, 0.99999),  # qS
+    #     7: uniform_dist(0.0, 2 * np.pi),  # phiS
+    #     8: uniform_dist(-0.99999, 0.99999),  # qK
+    #     9: uniform_dist(0.0, 2 * np.pi),  # phiK
+    #     10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+    #     11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+    # }
 
-    # transforms from pe to waveform generation
-    # after the fill happens (this is a little confusing)
-    # on my list of things to improve
-    parameter_transforms_emri = {
-        0: np.exp,  # M 
-        7: np.arccos, # qS
-        9: np.arccos,  # qK
-    }
+    # # transforms from pe to waveform generation
+    # # after the fill happens (this is a little confusing)
+    # # on my list of things to improve
+    # parameter_transforms_emri = {
+    #     0: np.exp,  # M 
+    #     7: np.arccos, # qS
+    #     9: np.arccos,  # qK
+    # }
 
-    transform_fn_emri = TransformContainer(
-        parameter_transforms=parameter_transforms_emri,
-        fill_dict=fill_dict_emri,
+    # transform_fn_emri = TransformContainer(
+    #     parameter_transforms=parameter_transforms_emri,
+    #     fill_dict=fill_dict_emri,
 
-    )
+    # )
 
-    # sampler treats periodic variables by wrapping them properly
-    # TODO: really need to create map for transform_fn with keywork names
-    periodic_emri = {
-        "emri": {7: 2 * np.pi, 9: np.pi, 10: 2 * np.pi, 11: 2 * np.pi}
-    }
+    # # sampler treats periodic variables by wrapping them properly
+    # # TODO: really need to create map for transform_fn with keywork names
+    # periodic_emri = {
+    #     "emri": {7: 2 * np.pi, 9: np.pi, 10: 2 * np.pi, 11: 2 * np.pi}
+    # }
 
-    response_kwargs = dict(
-        t0=30000.0,
-        order=25,
-        tdi="1st generation",
-        tdi_chan="AE",
-        orbits=gpu_orbits,
-        force_backend="cuda12x",
-    )
+    # response_kwargs = dict(
+    #     t0=30000.0,
+    #     order=25,
+    #     tdi="1st generation",
+    #     tdi_chan="AE",
+    #     orbits=general_setup.gpu_orbits,
+    #     force_backend="cuda12x",
+    # )
 
-    # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
-    # so spin results are currently meaningless and will lead to slower code
-    # waveform kwargs
-    initialize_kwargs_emri = dict(
-        T=Tobs / YRSID_SI, # TODO: check these conversions all align
-        dt=dt,
-        emri_waveform_args=("FastKerrEccentricEquatorialFlux",),
-        emri_waveform_kwargs=dict(force_backend="cuda12x"),
-        response_kwargs=response_kwargs,
-    )
+    # # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
+    # # so spin results are currently meaningless and will lead to slower code
+    # # waveform kwargs
+    # initialize_kwargs_emri = dict(
+    #     T=general_setupTobs / YRSID_SI, # TODO: check these conversions all align
+    #     dt=dt,
+    #     emri_waveform_args=("FastKerrEccentricEquatorialFlux",),
+    #     emri_waveform_kwargs=dict(force_backend="cuda12x"),
+    #     response_kwargs=response_kwargs,
+    # )
     
     
-    # for EMRI waveform class initialization
-    waveform_kwargs_emri = {}  #  deepcopy(initialize_kwargs_emri)
+    # # for EMRI waveform class initialization
+    # waveform_kwargs_emri = {}  #  deepcopy(initialize_kwargs_emri)
 
-    get_emri = GetEMRITemplates(
-        initialize_kwargs_emri,
-        waveform_kwargs_emri,
-        start_freq_ind,
-        end_freq_ind
-    )
+    # get_emri = GetEMRITemplates(
+    #     initialize_kwargs_emri,
+    #     waveform_kwargs_emri,
+    #     start_freq_ind,
+    #     end_freq_ind
+    # )
 
-    inner_moves_emri = [
-        (StretchMove(), 1.0)
-    ]
+    # inner_moves_emri = [
+    #     (StretchMove(), 1.0)
+    # ]
 
-    # mcmc info for main run
-    emri_main_run_mcmc_info = dict(
-        branch_names=["emri"],
-        nleaves_max=1,
-        ndim=12,
-        ntemps=ntemps,
-        nwalkers=nwalkers,
-        num_prop_repeats=1,
-        inner_moves=inner_moves_emri,
-        progress=False,
-        thin_by=1,
-       # stop_kwargs=mix_stopping_kwargs,
-        # stopping_iterations=1
-    )
+    # # mcmc info for main run
+    # emri_main_run_mcmc_info = dict(
+    #     branch_names=["emri"],
+    #     nleaves_max=1,
+    #     ndim=12,
+    #     ntemps=ntemps,
+    #     nwalkers=nwalkers,
+    #     num_prop_repeats=1,
+    #     inner_moves=inner_moves_emri,
+    #     progress=False,
+    #     thin_by=1,
+    #    # stop_kwargs=mix_stopping_kwargs,
+    #     # stopping_iterations=1
+    # )
 
-    all_emri_info = dict(
-        setup_func=setup_emri_functionality,
-        periodic=periodic_emri,
-        priors={"emri": ProbDistContainer(priors_emri)},
-        transform=transform_fn_emri,
-        waveform_kwargs=waveform_kwargs_emri,
-        initialize_kwargs=initialize_kwargs_emri,
-        pe_info=emri_main_run_mcmc_info,
-        get_templates=get_emri,
-    )
+    # all_emri_info = dict(
+    #     setup_func=setup_emri_functionality,
+    #     periodic=periodic_emri,
+    #     priors={"emri": ProbDistContainer(priors_emri)},
+    #     transform=transform_fn_emri,
+    #     waveform_kwargs=waveform_kwargs_emri,
+    #     initialize_kwargs=initialize_kwargs_emri,
+    #     pe_info=emri_main_run_mcmc_info,
+    #     get_templates=get_emri,
+    # )
 
     ##############
     ## READ OUT ##
@@ -1075,8 +891,8 @@ def get_global_fit_settings(copy_settings_file=False):
         GFBranchInfo("mbh", mbh_setup.ndim, mbh_setup.nleaves_max, 0, branch_state=MBHState, branch_backend=MBHHDFBackend) 
         + GFBranchInfo("gb", gb_setup.ndim, gb_setup.nleaves_max, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
         # + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
-        + GFBranchInfo("galfor", 5, 1, 1) 
-        + GFBranchInfo("psd", 4, 1, 1)
+        + GFBranchInfo("galfor", galfor_setup.ndim, galfor_setup.nleaves_max, 0, ) 
+        + GFBranchInfo("psd", psd_setup.ndim, psd_setup.nleaves_max, 1)
     )
 
     curr_info = CurrentInfoGlobalFit({
@@ -1084,13 +900,14 @@ def get_global_fit_settings(copy_settings_file=False):
         "source_info":{
             "gb": gb_setup,
             "mbh": mbh_setup,
-            "psd": all_psd_info,
+            "psd": psd_setup,
+            "galfor": galfor_setup,
             # "emri": all_emri_info,
         },
-        "general": all_general_info,
+        "general": general_setup,
         "rank_info": rank_info,
         "setup_function": setup_recipe,
-        "gpu_assignments": gpu_assignments,
+        "gpu_assignments": general_setup.gpus,
     })
 
     return curr_info

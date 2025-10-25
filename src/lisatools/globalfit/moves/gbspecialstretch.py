@@ -298,7 +298,7 @@ class Buffer(LISAToolsParallelModule):
         self.num_bands = len(self.band_edges) - 1
         self.params_interest = params_interest
         self.num_bands_now, self.nchannels, self.data_length = num_bands_now, nchannels, data_length
-        self.band_N_vals = band_N_vals
+        self.band_N_vals = self.xp.asarray(band_N_vals)
         # TODO: adjust this
         self.edge_buffer = 2000
         self.is_rj = is_rj
@@ -467,7 +467,7 @@ class Buffer(LISAToolsParallelModule):
 
         if np.any(~keep):
             print(f"NOT KEEPING: {(~keep).sum()}")
-        breakpoint()    
+  
         ll_diff = cp.full(keep.shape[0], -1e300)
         ll_diff[keep] = cp.asarray(self.gb.swap_likelihood_difference(
             params_remove_in_keep,
@@ -741,8 +741,8 @@ class BandSorter(LISAToolsParallelModule):
         self.waveform_kwargs = waveform_kwargs
         self.gb_branch_orig = gb_branch
         self.num_bands = len(band_edges) - 1
-        self.band_edges = band_edges
-        self.band_N_vals = band_N_vals
+        self.band_edges = self.xp.asarray(band_edges)
+        self.band_N_vals = self.xp.asarray(band_N_vals)
         self.ntemps, self.nwalkers, self.nleaves_max, self.ndim = gb_branch.shape
         self.orig_inds = self.xp.asarray(gb_branch.inds)
         self.keep_all_inds = keep_all_inds
@@ -1118,7 +1118,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         #     self.num_repeat_proposals = 1
 
         # setup N vals for bands
-        self.band_N_vals = band_N_vals
+        self.band_N_vals = self.xp.asarray(band_N_vals)
 
     def setup(self, model, branches):
         return

@@ -654,51 +654,108 @@ class SensitivityMatrix:
         """Set sensitivity matrix."""
         
         
-        if isinstance(sens_mat, np.ndarray) or isinstance(
-            sens_mat, cp.ndarray
-        ):
+        if (isinstance(sens_mat, np.ndarray) or isinstance(
+            sens_mat, cp.ndarray)
+        ) and sens_mat.dtype != object:
             self._sens_mat = sens_mat
             if not hasattr(self, "sens_mat_input"):
                 self.can_redo = False
             else:
                 self.can_redo = True
-        else:
+
+        elif isinstance(sens_mat, list) or (isinstance(sens_mat, np.ndarray) and sens_mat.dtype == object):
             self.sens_mat_input = deepcopy(sens_mat)
-            self._sens_mat = np.asarray(sens_mat, dtype=object)
+            _run = True
+            _layer = self.sens_mat_input
+            outer_shape = [len(_layer)]
+            _flattened_list = []
+            while _run:
+                _test_length = None
+                _type_1 = None
+                for tmp in _layer:
+                    # check each entry is the same type
+                    if _type_1 is None:
+                        _type_1 = type(tmp)
+                    else:
+                        if _type_1 != type(tmp):
+                            raise ValueError("List inputs must be all of the same type.")
+                        
+                    if isinstance(tmp, list):
+                        if _test_length is None:
+                            _test_length = len(tmp)
+                        else:
+                            if len(tmp) != _test_length:
+                                raise ValueError("Input list structure is not Rectangular.")
+                    elif isinstance(tmp, np.ndarray) or isinstance(tmp, cp.ndarray):
+                        if tmp.ndim > 1:
+                            raise ValueError("If entering a list of arrays, arrays must be 1D on the last dimension of the list structure.")
+                        if _test_length is None:
+                            _test_length = len(tmp)
+                        else:
+                            if len(tmp) != _test_length:
+                                raise ValueError("Input list/array structure is not Rectangular.")
+
+                if isinstance(_layer[0], list):
+                    outer_shape.append(len(_layer[0]))
+                    _layer = _layer[0]
+                    continue
+                        
+                elif isinstance(_layer[0], np.ndarray) or isinstance(_layer[0], cp.ndarray):
+                    # hit the array, must be last layer
+                    _run = False
+                    self.can_redo = False
+                    for tmp in _layer:
+                        _flattened_list.append(tmp)
+                    continue
+
+                elif isinstance(_layer[0], callable):
+                    _run = False
+                    self.can_redo = True
+                    for tmp in _layer:
+                        _flattened_list.append(tmp)
+                    continue
+
+                else:
+                    breakpoint()
+                    raise ValueError
+        
             if isinstance(self.sens_kwargs, np.ndarray) or isinstance(self.sens_kwargs, list):
                 tmp_kwargs = np.asarray(self.sens_kwargs, dtype=object)
-                assert tmp_kwargs.shape == self._sens_mat.shape
+                assert tmp_kwargs.shape == tuple(outer_shape)
 
             elif isinstance(self.sens_kwargs, dict):
-                tmp_kwargs = np.full_like(self._sens_mat, self.sens_kwargs, dtype=object)
+                tmp_kwargs = np.full(outer_shape, self.sens_kwargs, dtype=object)
             else:
                 raise ValueError("sens_kwargs Must be numpy object array, list, or dict.")
             
             # TODO: sens_kwargs property setup
             self.sens_kwargs = tmp_kwargs
-            self.can_redo = True
-            # not an
-            new_out = np.full(len(self._sens_mat.flatten()), None, dtype=object)
-            self.return_shape = self._sens_mat.shape
-            for i in range(len(self._sens_mat.flatten())):
-                current_sens = self._sens_mat.flatten()[i]
-                if hasattr(current_sens, "get_Sn") or isinstance(current_sens, str):
-                    new_out[i] = get_sensitivity(
-                        self.frequency_arr,
-                        *self.sens_args,
-                        sens_fn=current_sens,
-                        **self.sens_kwargs.flatten()[i],
-                    )
-
+            
+            num_components = np.prod(outer_shape).item()
+            xp = get_array_module(self.frequency_arr)
+            _sens_mat = xp.zeros((num_components, len(self.frequency_arr)))
+            for i, matrix_member in enumerate(_flattened_list):
+                if isinstance(matrix_member, np.ndarray) or isinstance(matrix_member, cp.ndarray):
+                    _sens_mat[i, :] = matrix_member[:]
                 else:
-                    raise ValueError
+                    # calculate it
+                    if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
+                        _sens_mat[i, :] = get_sensitivity(
+                            self.frequency_arr,
+                            *self.sens_args,
+                            sens_fn=matrix_member,
+                            **self.sens_kwargs.flatten()[i],
+                        )
+
+                    else:
+                        raise ValueError
 
             # setup in array form
-            xp = get_array_module(new_out[0])
-            self._sens_mat = xp.asarray(list(new_out), dtype=float).reshape(
-                self.return_shape + (-1,)
-            )
+            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + (len(self.frequency_arr),))
             
+        else:
+            raise ValueError("Must input array or list.")
+        
         self._setup_det_and_inv()
 
     def _setup_det_and_inv(self):
