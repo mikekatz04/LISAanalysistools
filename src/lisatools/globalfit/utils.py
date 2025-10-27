@@ -16,7 +16,7 @@ class BasicResidualacsLikelihood:
         return ll_temp[overall_inds]
 
 
-def new_sens_mat(name, psd_params, galfor_params, f_arr):
+def new_sens_mat(name, psd_params, f_arr, galfor_params=None):
     orbits = EqualArmlengthOrbits()
     A_params = psd_params[:2]
     E_params = psd_params[2:]
@@ -42,12 +42,18 @@ def new_sens_mat(name, psd_params, galfor_params, f_arr):
     # TODO: use PSD generating function from general setup
     tmp_lisa_model_A.Soms_d = A_params[0] ** 2
     tmp_lisa_model_A.Sa_a = A_params[1] ** 2
-    A_tmp1 = get_sensitivity(f_arr, model=tmp_lisa_model_A, stochastic_params=galfor_params, stochastic_function="HyperbolicTangentGalacticForeground",  sens_fn="A1TDISens")
+    if galfor_params is None:
+        galfor_params = ()
+        stochastic_function = None
+    else:
+        stochastic_function = "HyperbolicTangentGalacticForeground"
+
+    A_tmp1 = get_sensitivity(f_arr, model=tmp_lisa_model_A, stochastic_params=galfor_params, stochastic_function=stochastic_function,  sens_fn="A1TDISens")
     A_tmp1[0] = A_tmp1[1]
 
     tmp_lisa_model_E.Soms_d = E_params[0] ** 2
     tmp_lisa_model_E.Sa_a = E_params[1] ** 2
-    E_tmp1 = get_sensitivity(f_arr, model=tmp_lisa_model_E, stochastic_params=galfor_params, stochastic_function="HyperbolicTangentGalacticForeground",  sens_fn="A1TDISens")
+    E_tmp1 = get_sensitivity(f_arr, model=tmp_lisa_model_E, stochastic_params=galfor_params, stochastic_function=stochastic_function,  sens_fn="E1TDISens")
     E_tmp1[0] = E_tmp1[1]
           
     sens_AE = SensitivityMatrix(f_arr.copy(), np.asarray([A_tmp1, E_tmp1]))

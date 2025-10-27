@@ -36,7 +36,13 @@ class Settings:
     ndim: Optional[int] = None
     betas: Optional[np.ndarray] = None
     other_tempering_kwargs: Optional[dict] = None
+    branch_state: Optional[eryn_State] = None
+    branch_backend: Optional[eryn_Backend] = None
+
     
+
+from eryn.state import State as eryn_State
+from eryn.backends import HDFBackend as eryn_Backend
 
 # TODO: better way than None?
 @dataclasses.dataclass
@@ -58,6 +64,7 @@ class GBSettings(Settings):
     iter_count_per_resample: Optional[int] = 10
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
+
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -90,6 +97,11 @@ class Setup:
     def init_df(self):
         self.Tobs = int(self.Tobs / self.dt) * self.dt
         self.df = 1. / self.Tobs
+
+
+from ..state import GBState
+from ..hdfbackend import GBHDFBackend
+
 
 class GBSetup(Setup, GBSettings):
     def __init__(self, gb_settings: GBSettings):
@@ -177,6 +189,14 @@ class GBSetup(Setup, GBSettings):
     def init_setup(self):
         self.init_band_structure()
         self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        if self.branch_state is None:
+            self.branch_state = GBState
+        
+        if self.branch_backend is None:
+            self.branch_backend = GBHDFBackend
 
     def init_band_structure(self):
         # band separation setup
@@ -217,62 +237,17 @@ class GBSetup(Setup, GBSettings):
         self.num_sub_bands = len(self.band_edges)
 
 
-def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
-       # limits on parameters
-    delta_safe = 1e-5
-    # now with negative fdots
-    
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 10.0
-    A_lims = [7e-26, 1e-19]
-    f0_lims = [0.05e-3, 2.5e-2]  # TODO: this upper limit leads to an issue at 23 mHz where there is no source?
-    
-    m_chirp_lims = [0.001, 1.0]
-    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
-    
-    fdot_lims = [-fdot_max_val, fdot_max_val]
-    phi0_lims = [0.0, 2 * np.pi]
-    iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
-    psi_lims = [0.0, np.pi]
-    lam_lims = [0.0, 2 * np.pi]
-    beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
-
-    end_freq = 0.025
-    start_freq = 0.0001
-    oversample = 4
-    extra_buffer = 5
-    initialize_kwargs = dict(force_backend="cuda12x")
-
-    gb_settings = GBSettings(
-        A_lims=A_lims,
-        f0_lims=f0_lims,
-        m_chirp_lims=m_chirp_lims,
-        fdot_lims=fdot_lims,
-        phi0_lims=phi0_lims,
-        iota_lims=iota_lims,
-        psi_lims=psi_lims,
-        lam_lims=lam_lims,
-        beta_lims=beta_lims,
-        start_freq_ind=general_set.start_freq_ind,
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs,
-        nleaves_max=8000,
-        nleaves_min=0,
-        ndim=8
-    )
-
-    gb_setup = GBSetup(gb_settings)
-    return gb_setup
-
-
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
 
 
 from bbhx.utils.transform import *
 from eryn.moves import Move
+
+
+from ..hdfbackend import MBHHDFBackend
+from ..state import MBHState
+
 
 @dataclasses.dataclass
 class MBHSettings(Settings):
@@ -379,34 +354,16 @@ class MBHSetup(Setup):
 
     def init_setup(self):
         self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        if self.branch_state is None:
+            self.branch_state = MBHState
+        
+        if self.branch_backend is None:
+            self.branch_backend = MBHHDFBackend
 
 from lisatools.detector import EqualArmlengthOrbits
-
-
-def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
-    
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
-    # waveform kwargs
-    initialize_kwargs_mbh = dict(
-        amp_phase_kwargs=dict(run_phenomd=True),
-        response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
-        force_backend="cuda12x",
-    )
-
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 10.0
-
-    mbh_settings = MBHSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs_mbh,
-        nleaves_max=15,
-        nleaves_min=0,
-        ndim=11
-    )
-
-    return MBHSetup(mbh_settings)
 
 
 @dataclasses.dataclass
@@ -467,23 +424,6 @@ class PSDSetup(Setup):
     def init_setup(self):
         self.init_sampling_info()
 
-
-def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
-    
-    # waveform kwargs
-    initialize_kwargs_psd = dict()
-
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 10.0
-
-    psd_settings = PSDSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs_psd,
-    )
-
-    return PSDSetup(psd_settings)
 
 
 @dataclasses.dataclass
@@ -585,6 +525,7 @@ class GeneralSettings(Settings):
     ntemps: int = None
     tukey_alpha: float = None
     gpus: typing.List[int] = None
+    remove_from_data: typing.List[str] = None
 
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
@@ -645,19 +586,35 @@ class GeneralSetup(Setup, GeneralSettings):
 
     def init_data_information(self):
 
+        if self.remove_from_data is None:
+            self.remove_from_data = []
+
+        assert isinstance(self.remove_from_data, list)
+
+        # TODO: Generalize input. 
         with h5py.File(self.data_input_path, "r") as f:
-            tXYZ = f["obs"]["tdi"][:]
+            if "noise" not in self.remove_from_data:
+                tXYZ = f["obs"]["tdi"][:]
 
-            # remove sources
-            # for source in ["mbhb"]:  # , "dgb", "igb"]:  # "vgb" ,
-            #     change_arr = f["sky"][source]["tdi"][:]
-            #     for change in ["X", "Y", "Z"]:
-            #         tXYZ[change] -= change_arr[change]
+                # remove sources
+                for source in self.remove_from_data:  # , "dgb", "igb"]:  # "vgb" ,
+                    if source == "noise":
+                        continue
+                    change_arr = f["sky"][source]["tdi"][:]
+                    for change in ["X", "Y", "Z"]:
+                        tXYZ[change] -= change_arr[change]
 
-            # tXYZ = f["sky"]["dgb"]["tdi"][:]
-            # tXYZ["X"] += f["sky"]["dgb"]["tdi"][:]["X"]
-            # tXYZ["Y"] += f["sky"]["dgb"]["tdi"][:]["Y"]
-            # tXYZ["Y"] += f["sky"]["dgb"]["tdi"][:]["Z"]
+            else: 
+                keys = list(f["sky"])
+                for key in keys:
+                    if key in self.remove_from_data:
+                        keys.remove(key)
+                breakpoint()
+                tXYZ = f["sky"][keys[0]]["tdi"][:]
+                for key in keys[1:]:
+                    tXYZ["X"] += f["sky"][key]["tdi"][:]["X"]
+                    tXYZ["Y"] += f["sky"][key]["tdi"][:]["Y"]
+                    tXYZ["Y"] += f["sky"][key]["tdi"][:]["Z"]
 
         self.t, self.X, self.Y, self.Z = (
             tXYZ["t"].squeeze(),
@@ -710,55 +667,6 @@ class GeneralSetup(Setup, GeneralSettings):
         assert len(self.fd) == len(self.A_inj) == len(self.E_inj)
 
         assert len(self.A_inj) == self.end_freq_ind - self.start_freq_ind
-
-        
-def get_general_erebor_settings() -> GBSetup:
-       # limits on parameters
-    delta_safe = 1e-5
-    # now with negative fdots
-    
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = 2. * YRSID_SI / 12.0
-    dt = 10.0
-
-    ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
-    base_file_name = "rework_9th_run_through"
-    file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
-
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
-
-    gpus = [0]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
-    nwalkers = 36
-    ntemps = 24
-
-    tukey_alpha = 0.05
-
-    orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
-
-    general_settings = GeneralSettings(
-        Tobs=Tobs,
-        dt=dt,
-        file_store_dir=file_store_dir,
-        base_file_name=base_file_name,
-        data_input_path=ldc_source_file,
-        orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        start_freq_ind=0,
-        end_freq_ind=None,
-        random_seed=103209,
-        backup_iter=5,
-        nwalkers=nwalkers,
-        ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
-        gpus=gpus,
-    )
-
-    general_setup = GeneralSetup(general_settings)
-    return general_setup
-
 
 
 if __name__ == "__main__":

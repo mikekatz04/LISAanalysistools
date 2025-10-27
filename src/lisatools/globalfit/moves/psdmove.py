@@ -15,7 +15,8 @@ import time
 
 from ... import get_backend
 
-def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
+
+def psd_log_like(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
     if supps is None:
         raise ValueError("Must provide supps to identify the data streams.")
 
@@ -23,8 +24,14 @@ def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs)
     psd_likelihood = get_backend("gpu").psd_likelihood
 
     wi = supps["walker_inds"]
+    
+    # TODO: better way so avoid order issues?
     psd_pars = x[0]
-    galfor_pars = x[1]
+    if len(x) == 1:
+        galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
+    else:   
+        galfor_pars = x[1]
+    
     A_data = data[0]
     E_data = data[1]
     
@@ -61,12 +68,13 @@ def psd_log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs)
     # assert np.allclose(ll.get(), ll2.get())
     return ll.get()
 
+# TODO: temperature swap permutation
+
 class PSDMove(GlobalFitMove, StretchMove):
-    def __init__(self, gb, acs, priors, *args, num_repeats=1, max_logl_mode=False, psd_kwargs={}, **kwargs):
+    def __init__(self, acs, priors, *args, num_repeats=1, max_logl_mode=False, psd_kwargs={}, **kwargs):
         GlobalFitMove.__init__(self, *args, **kwargs)
         StretchMove.__init__(self, *args, **kwargs)
         self.acs = acs
-        self.gb = gb
         self.psd_kwargs = psd_kwargs
         self.priors = priors
         self.num_repeats = num_repeats
@@ -84,11 +92,15 @@ class PSDMove(GlobalFitMove, StretchMove):
             warnings.warn("All points entering likelihood have a log prior of minus inf.")
             return logl, None
         psd_coords = coords["psd"][logp_keep][:, 0]
-        galfor_coords = coords["galfor"][logp_keep][:, 0]
+        if "galfor" in coords:
+            galfor_coords = coords["galfor"][logp_keep][:, 0]
+            input_args = [psd_coords, galfor_coords]
+        else:
+            input_args = [psd_coords]
 
         supps = supps[logp_keep]
         
-        tmp_logl = psd_log_like([psd_coords, galfor_coords], cp.asarray(self.acs.f_arr), self.acs.linear_data_arr[0], self.gb, self.acs.df, self.acs.data_length, supps=supps, **self.psd_kwargs)
+        tmp_logl = psd_log_like(input_args, cp.asarray(self.acs.f_arr), self.acs.linear_data_arr[0], self.acs.df, self.acs.data_length, supps=supps, **self.psd_kwargs)
 
         logl[logp_keep] = tmp_logl
 
@@ -124,12 +136,16 @@ class PSDMove(GlobalFitMove, StretchMove):
     #     return logp
 
     def compute_log_prior(self, branches_coords, *args, **kwargs):
-        ntemps, nwalkers, _, ndim_psd = branches_coords["psd"].shape
-        ntemps, nwalkers, _, ndim_galfor = branches_coords["galfor"].shape
-        ndims = {"psd": ndim_psd, "galfor": ndim_galfor}
-        logp = np.zeros((ntemps, nwalkers))
+        # wait to get ntemps, nwalkers
+        logp = None
         for key in ["psd", "galfor"]:
-            logp[:] += self.priors[key].logpdf(branches_coords[key].reshape(-1, ndims[key])).reshape(ntemps, nwalkers)
+            if key not in branches_coords:
+                continue
+            ntemps, nwalkers, _, ndim = branches_coords[key].shape
+            if logp is None:
+                logp = np.zeros((ntemps, nwalkers))
+
+            logp[:] += self.priors[key].logpdf(branches_coords[key].reshape(-1, ndim)).reshape(ntemps, nwalkers)
         return logp
 
     def run_move(self, model, state):
@@ -169,7 +185,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         # setup model framework for passing necessary 
         # self.priors["all_models_together"].full_state = state
 
-        tmp_branches_coords = {key: state.branches_coords[key] for key in ["psd", "galfor"]}
+        tmp_branches_coords = {key: state.branches_coords[key] for key in ["psd", "galfor"] if key in state.branches_coords}
         
         tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=state.supplemental)
         
@@ -217,6 +233,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         )
 
         for key in ["psd", "galfor"]:
+            if key not in tmp_state.branches:
+                continue
             new_state.branches[key].coords[:] = tmp_state.branches[key].coords[:]
 
         new_state.log_like[:] = tmp_state.log_like[:]
@@ -225,8 +243,12 @@ class PSDMove(GlobalFitMove, StretchMove):
         nwalkers = len(self.acs)
         for w in range(nwalkers):
             psd_params = new_state.branches_coords["psd"][0, w, 0]
-            galfor_params = new_state.branches_coords["galfor"][0, w, 0]
-            sens_AE = new_sens_mat(f"walker_{w}", psd_params, galfor_params, self.acs.f_arr)
+            if "galfor" in new_state.branches_coords:
+                galfor_params = new_state.branches_coords["galfor"][0, w, 0]
+            else:
+                galfor_params = None
+
+            sens_AE = new_sens_mat(f"walker_{w}", psd_params, self.acs.f_arr, galfor_params=galfor_params)
             self.acs[w].sens_mat = sens_AE
 
         self.acs.reset_linear_psd_arr()

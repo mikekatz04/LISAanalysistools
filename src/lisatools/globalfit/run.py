@@ -81,6 +81,11 @@ def init_logger(filename=None, level=logging.DEBUG, name='GlobalFit'):
             logger.addHandler(shandler)
     return logger
 
+
+from .engine import EngineInfo
+import typing
+
+
 class CurrentInfoGlobalFit:
     def __init__(self, settings, get_last_state_info=True):
 
@@ -89,6 +94,8 @@ class CurrentInfoGlobalFit:
 
         backend_path = self.general_info.main_file_path
         self.backend = GFHDFBackend(backend_path)
+
+        check = self.engine_info
 
         # if os.path.exists(mbh_search_file):
         #     with open(mbh_search_file, "rb") as fp:
@@ -111,6 +118,49 @@ class CurrentInfoGlobalFit:
     # def get_data_psd(self, **kwargs):
     #     # self passed here to access all current info
     #     return self.general_info["generate_current_state"](self, **kwargs) 
+
+    
+    @property
+    def branch_names(self) -> typing.List[str]:
+        _names = list(self.source_info.keys())
+        return _names
+    
+    @property
+    def nleaves_max(self) -> typing.Dict[str, int]:
+        _nleaves_max = {name: self.source_info[name].nleaves_max for name in self.branch_names}
+        return _nleaves_max
+    
+    @property
+    def nleaves_min(self) -> typing.Dict[str, int]:
+        _nleaves_min = {name: self.source_info[name].nleaves_min for name in self.branch_names}
+        return _nleaves_min
+    
+    @property
+    def ndims(self) -> typing.Dict[str, int]:
+        _ndims = {name: self.source_info[name].ndim for name in self.branch_names}
+        return _ndims
+    
+    @property
+    def branch_states(self) -> typing.Dict[str, eryn_State]:
+        _branch_states = {name: self.source_info[name].branch_state for name in self.branch_names}
+        return _branch_states
+    
+    @property
+    def branch_backends(self) -> typing.Dict[str, eryn_State]:
+        _branch_backends = {name: self.source_info[name].branch_backend for name in self.branch_names}
+        return _branch_backends
+    
+    @property
+    def engine_info(self) -> EngineInfo:
+        engine_info = EngineInfo(
+            branch_names=self.branch_names,
+            ndims=self.ndims,
+            nleaves_max=self.nleaves_max,
+            nleaves_min=self.nleaves_min,
+            branch_states=self.branch_states,
+            branch_backends=self.branch_backends,
+        )
+        return engine_info
 
     @property
     def settings(self):
@@ -172,9 +222,9 @@ from .galaxyglobal import make_gmm
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .recipe import Recipe
 
+
 class GlobalFit:
-    def __init__(self, gf_branch_information, curr, comm):
-        self.gf_branch_information = gf_branch_information
+    def __init__(self, curr, comm):
         self.comm = comm
         self.curr = curr
         self.rank = comm.Get_rank()
@@ -207,7 +257,7 @@ class GlobalFit:
         # TODO: update to generalize
         backend_path = self.curr.general_info.main_file_path
         if os.path.exists(backend_path):
-            state = GFHDFBackend(backend_path, sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+            state = GFHDFBackend(backend_path, sub_state_bases=self.engine_info.branch_states, sub_backend=self.engine_info.branch_backends).get_last_sample()  # .get_a_sample(0)
 
         elif self.curr.general_info.past_file_for_start is not None:
             # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
@@ -215,7 +265,7 @@ class GlobalFit:
                 raise ValueError(f"past_file_for_start ({file_for_restart}) was added but it does not exist.")
 
             # TODO: make this adjust to more leaves if needed
-            state = GFHDFBackend(file_for_restart, sub_state_bases=self.gf_branch_information.branch_state, sub_backend=self.gf_branch_information.branch_backend).get_last_sample()  # .get_a_sample(0)
+            state = GFHDFBackend(file_for_restart, sub_state_bases=self.engine_info.branch_states, sub_backend=self.engine_info.branch_backends).get_last_sample()  # .get_a_sample(0)
             
             # TODO: adjust this so it is automated
             state.sub_states["gb"].initialized = False
@@ -227,15 +277,21 @@ class GlobalFit:
             # print("update this somehow")
             # # breakpoint()
             # start from priors by default
-            coords = {key: priors[key].rvs(size=(self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key])) for key in self.gf_branch_information.branch_names}
-            inds = {key: np.zeros((self.ntemps, self.nwalkers, self.gf_branch_information.nleaves_max[key]), dtype=bool) for key in self.gf_branch_information.branch_names}
+            coords = {key: priors[key].rvs(size=(self.ntemps, self.nwalkers, self.engine_info.nleaves_max[key])) for key in self.engine_info.branch_names}
+            inds = {key: np.zeros((self.ntemps, self.nwalkers, self.engine_info.nleaves_max[key]), dtype=bool) for key in self.engine_info.branch_names}
             # TODO: make this more generic to anything
-            inds["psd"][:] = True
-            inds["galfor"][:] = True
-            state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.gf_branch_information.branch_state)
+            if "psd" in inds:
+                inds["psd"][:] = True
+            if "galfor" in inds:
+                inds["galfor"][:] = True
+
+            state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.engine_info.branch_states)
             
-            band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
-            state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"].band_edges, band_temps)
+            # TODO: generalize all this stuff here (?)
+            if "gb" in inds:
+                band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
+                state.sub_states["gb"].initialize_band_information(self.nwalkers, self.ntemps, self.curr.source_info["gb"].band_edges, band_temps)
+            
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             # self.logger.debug("pickle state load success")
@@ -256,9 +312,16 @@ class GlobalFit:
                 self.curr.general_info.A_inj.copy(), 
                 self.curr.general_info.E_inj.copy(), 
             ], f_arr=f_arr)
+            # TODO: make an option for other runs where psd is fixed
+            assert "psd" in state.branches_coords.keys()
             psd_params = state.branches_coords["psd"][0, w, 0]
-            galfor_params = state.branches_coords["galfor"][0, w, 0]
-            sens_AE = new_sens_mat(f"walker_{w}", psd_params, galfor_params, data_res_arr.f_arr)
+            # need to generalize for other stochastic functions
+            if "galfor" in state.branches_coords.keys():
+                galfor_params = state.branches_coords["galfor"][0, w, 0]
+            else:
+                galfor_params = None
+
+            sens_AE = new_sens_mat(f"walker_{w}", psd_params, data_res_arr.f_arr, galfor_params=galfor_params)
             # sens_AE[0] = psd[0][w]
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
@@ -267,7 +330,7 @@ class GlobalFit:
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)   
 
         for name, source_info in self.curr.source_info.items():
-            if name not in self.curr.all_info["gf_branch_information"].branch_names:
+            if name not in self.curr.engine_info.branch_names:
                 continue
 
             print("want to remove this emri thing eventually")
@@ -289,20 +352,25 @@ class GlobalFit:
         # lisasens = generated_info["lisasens"]
 
         return acs 
+    
+    @property
+    def engine_info(self) -> EngineInfo:
+        __doc__ = self.curr.engine_info.__doc__
+        return self.curr.engine_info
 
     def run_global_fit(self):
         
         backend_path = self.curr.general_info.main_file_path
         
-        backend = GFHDFBackend(backend_path, sub_backend=self.gf_branch_information.branch_backend, sub_state_bases=self.gf_branch_information.branch_state)
+        backend = GFHDFBackend(backend_path, sub_backend=self.engine_info.branch_backends, sub_state_bases=self.engine_info.branch_states)
         if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
 
             general_info = self.curr.settings_dict["general"]
             
-            branch_names = self.gf_branch_information.branch_names
-            ndims = self.gf_branch_information.ndims
-            nleaves_max = self.gf_branch_information.nleaves_max
-            nleaves_min = self.gf_branch_information.nleaves_min
+            branch_names = self.engine_info.branch_names
+            ndims = self.engine_info.ndims
+            nleaves_max = self.engine_info.nleaves_max
+            nleaves_min = self.engine_info.nleaves_min
             nwalkers = general_info.nwalkers
             ntemps = general_info.ntemps
 
@@ -410,8 +478,8 @@ class GlobalFit:
                 compression_opts=9,
                 comm=self.comm,
                 save_plot_rank=self.results_rank,
-                sub_backend=self.gf_branch_information.branch_backend,
-                sub_state_bases=self.gf_branch_information.branch_state
+                sub_backend=self.engine_info.branch_backends,
+                sub_state_bases=self.engine_info.branch_states
             )
 
             extra_reset_kwargs = {}
@@ -449,7 +517,7 @@ class GlobalFit:
             #         setup_info_all += setup_info
 
             self.recipe = Recipe()
-            setup_info_all = self.curr.settings_dict["setup_function"](self.recipe, self.gf_branch_information, self.curr, acs, priors, state)
+            setup_info_all = self.curr.settings_dict["setup_function"](self.recipe, self.engine_info, self.curr, acs, priors, state)
             print("need to setup moves that use parallel resources")
 
             # backend.grow(1, None)

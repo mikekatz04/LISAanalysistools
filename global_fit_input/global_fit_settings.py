@@ -30,6 +30,11 @@ from lisatools.globalfit.generatefuncs import *
 from lisatools.utils.utility import AET
 from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
 
+from lisatools.globalfit.stock.erebor import (
+    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
+    MBHSetup, MBHSettings, GBSetup, GBSettings, GeneralSetup, GeneralSettings
+)
+
 from eryn.prior import uniform_dist
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
@@ -42,8 +47,6 @@ from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
-
-from lisatools.globalfit.stock.erebor import get_general_erebor_settings, get_gb_erebor_settings, get_mbh_erebor_settings, get_psd_erebor_settings, get_galfor_erebor_settings
 
 
 # import few
@@ -62,6 +65,13 @@ from eryn.utils.updates import Update
 
 from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
+
+
+################
+
+### DEFINE RECIPE
+
+#############
 
 
 class PSDSearchRecipeStep(RecipeStep):
@@ -151,9 +161,17 @@ class GBRunStep(RecipeStep):
             move.temperature_control = sampler.temperature_control
 
 
-def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
-    # _ = setup_mbh_functionality(gf_branch_info, curr, acs, priors, state):
-    # _ = setup_emri_functionality(gf_branch_info, curr, acs, priors, state):
+
+################
+
+### DEFINE RECIPE
+
+#############
+
+
+def setup_recipe(recipe, engine_info, curr, acs, priors, state):
+    # _ = setup_mbh_functionality(engine_info, curr, acs, priors, state):
+    # _ = setup_emri_functionality(engine_info, curr, acs, priors, state):
     gb_info = curr.source_info["gb"]
     mbh_info = curr.source_info["mbh"]
     # TODO: adjust this indide current info
@@ -176,17 +194,17 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     ntemps = curr.general_info.ntemps
     
     # setup psd search move
-    effective_ndim = gf_branch_info.ndims["psd"] + gf_branch_info.ndims["galfor"]
+    effective_ndim = engine_info.ndims["psd"] + engine_info.ndims["galfor"]
     temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
     
-    psd_move_args = (gb, acs, priors)
+    psd_move_args = (acs, priors)
 
     psd_move_kwargs = dict(
         num_repeats=500,
         live_dangerously=True,
         gibbs_sampling_setup=[{
-            "psd": np.ones((1, gf_branch_info.ndims["psd"]), dtype=bool),
-            "galfor": np.ones((1, gf_branch_info.ndims["galfor"]), dtype=bool)
+            "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
+            "galfor": np.ones((1, engine_info.ndims["galfor"]), dtype=bool)
         }],
         temperature_control=temperature_control
     )
@@ -559,55 +577,8 @@ def setup_recipe(recipe, gf_branch_info, curr, acs, priors, state):
     full_pe_moves = [psd_pe_move, mbh_pe_move, gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
     full_pe_weights = [0.3, 0.6, 0.08, 0.02]
     recipe.add_recipe_component(GBRunStep(moves=full_pe_moves, weights=full_pe_weights, thin_by=5, convergence_iter=100, verbose=True), name="gb pe")
-            
+      
 
-def setup_mbh_functionality(recipe, gf_branch_info, curr, acs, priors, state):
-
-    nwalkers = curr.general_info.nwalkers
-    ntemps = curr.general_info.ntemps
-    mbh_info = curr.source_info["mbh"]
-    from bbhx.waveformbuild import BBHWaveformFD
-
-    wave_gen = BBHWaveformFD(
-        **mbh_info.initialize_kwargs
-    )
-
-    if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
-            betas_all = state.sub_states["mbh"].betas_all
-    else:
-        print("remove the False above")
-        betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
-
-    # to make the states work 
-    betas = betas_all[0]
-    state.sub_states["mbh"].betas_all = betas_all
-
-    inner_moves = mbh_info.inner_moves
-    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
-    
-    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
-
-    mbh_move_args = (
-        "mbh",  # branch_name,
-        coords_shape,
-        wave_gen,
-        tempering_kwargs,
-        mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs,
-        mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs,
-        acs,
-        mbh_info.num_prop_repeats,
-        mbh_info.transform,
-        priors,
-        inner_moves,
-        acs.df
-    )
-    
-    mbh_move = MBHSpecialMove(*mbh_move_args, force_backend="cuda12x",)
-    breakpoint()
-    return SetupInfoTransfer(
-        name="mbh",
-        in_model_moves=[], #mbh_move],
-    )
 
 
 class WrapEMRI:
@@ -626,7 +597,7 @@ class WrapEMRI:
         return AET_f
 
 
-def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
+def setup_emri_functionality(recipe, engine_info, curr, acs, priors, state):
 
     from lisatools.sources.emri import EMRITDIWaveform  
 
@@ -637,8 +608,8 @@ def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
     # TODO: mix this with the actual generatefuncs.py 
     emri_gen = WrapEMRI(EMRITDIWaveform(**emri_info["initialize_kwargs"]), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
 
-    num_emris = gf_branch_info.nleaves_max["emri"]
-    ndim = gf_branch_info.ndims["emri"]
+    num_emris = engine_info.nleaves_max["emri"]
+    ndim = engine_info.ndims["emri"]
     # need to inject emris since they are not in the data set yet. 
     emri_inj_params = priors["emri"].rvs(size=(num_emris,))
     emri_inj_params_in = emri_info["transform"].both_transforms(emri_inj_params)   
@@ -702,6 +673,174 @@ def setup_emri_functionality(recipe, gf_branch_info, curr, acs, priors, state):
         name="emri",
         in_model_moves=[],  # emri_move],
     )
+
+#######################
+##### SETTINGS ###########
+###############
+
+
+def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
+       # limits on parameters
+    delta_safe = 1e-5
+    # now with negative fdots
+    
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = YRSID_SI
+    dt = 10.0
+    A_lims = [7e-26, 1e-19]
+    f0_lims = [0.05e-3, 2.5e-2]  # TODO: this upper limit leads to an issue at 23 mHz where there is no source?
+    
+    m_chirp_lims = [0.001, 1.0]
+    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
+    
+    fdot_lims = [-fdot_max_val, fdot_max_val]
+    phi0_lims = [0.0, 2 * np.pi]
+    iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
+    psi_lims = [0.0, np.pi]
+    lam_lims = [0.0, 2 * np.pi]
+    beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
+
+    end_freq = 0.025
+    start_freq = 0.0001
+    oversample = 4
+    extra_buffer = 5
+    initialize_kwargs = dict(force_backend="cuda12x")
+
+    gb_settings = GBSettings(
+        A_lims=A_lims,
+        f0_lims=f0_lims,
+        m_chirp_lims=m_chirp_lims,
+        fdot_lims=fdot_lims,
+        phi0_lims=phi0_lims,
+        iota_lims=iota_lims,
+        psi_lims=psi_lims,
+        lam_lims=lam_lims,
+        beta_lims=beta_lims,
+        start_freq_ind=general_set.start_freq_ind,
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs,
+        nleaves_max=8000,
+        nleaves_min=0,
+        ndim=8
+    )
+
+    gb_setup = GBSetup(gb_settings)
+    return gb_setup
+
+
+
+
+def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
+    
+    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    # waveform kwargs
+    initialize_kwargs_mbh = dict(
+        amp_phase_kwargs=dict(run_phenomd=True),
+        response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
+        force_backend="cuda12x",
+    )
+
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = YRSID_SI
+    dt = 10.0
+
+    mbh_settings = MBHSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs_mbh,
+        nleaves_max=15,
+        nleaves_min=0,
+        ndim=11
+    )
+
+    return MBHSetup(mbh_settings)
+
+
+
+def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
+    
+    # waveform kwargs
+    initialize_kwargs_psd = dict()
+
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = YRSID_SI
+    dt = 10.0
+
+    psd_settings = PSDSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs_psd,
+    )
+
+    return PSDSetup(psd_settings)
+
+
+
+def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
+    
+    from lisatools.detector import EqualArmlengthOrbits
+
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = YRSID_SI
+    dt = 10.0
+
+    galfor_settings = GalForSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs={},
+    )
+
+    return GalForSetup(galfor_settings)
+
+
+
+def get_general_erebor_settings() -> GeneralSetup:
+       # limits on parameters
+    delta_safe = 1e-5
+    # now with negative fdots
+    
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = 2. * YRSID_SI / 12.0
+    dt = 10.0
+
+    ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
+    base_file_name = "rework_9th_run_through"
+    file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
+
+    # TODO: connect LISA to SSB for MBHs to numerical orbits
+
+    gpus = [0]
+    cp.cuda.runtime.setDevice(gpus[0])
+    # few.get_backend('cuda12x')
+    nwalkers = 36
+    ntemps = 24
+
+    tukey_alpha = 0.05
+
+    orbits = EqualArmlengthOrbits()
+    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+
+    general_settings = GeneralSettings(
+        Tobs=Tobs,
+        dt=dt,
+        file_store_dir=file_store_dir,
+        base_file_name=base_file_name,
+        data_input_path=ldc_source_file,
+        orbits=orbits,
+        gpu_orbits=gpu_orbits, 
+        start_freq_ind=0,
+        end_freq_ind=None,
+        random_seed=103209,
+        backup_iter=5,
+        nwalkers=nwalkers,
+        ntemps=ntemps,
+        tukey_alpha=tukey_alpha,
+        gpus=gpus,
+    )
+
+    general_setup = GeneralSetup(general_settings)
+    return general_setup
 
 
 def get_global_fit_settings(copy_settings_file=False):
@@ -886,17 +1025,8 @@ def get_global_fit_settings(copy_settings_file=False):
     ## READ OUT ##
     ##############
 
-    # TODO: needs to be okay if there is only one branch
-    gf_branch_information = (
-        GFBranchInfo("mbh", mbh_setup.ndim, mbh_setup.nleaves_max, 0, branch_state=MBHState, branch_backend=MBHHDFBackend) 
-        + GFBranchInfo("gb", gb_setup.ndim, gb_setup.nleaves_max, 0, branch_state=GBState, branch_backend=GBHDFBackend) 
-        # + GFBranchInfo("emri", 12, 1, 1, branch_state=EMRIState, branch_backend=EMRIHDFBackend)  # TODO: generalize this class?
-        + GFBranchInfo("galfor", galfor_setup.ndim, galfor_setup.nleaves_max, 0, ) 
-        + GFBranchInfo("psd", psd_setup.ndim, psd_setup.nleaves_max, 1)
-    )
 
     curr_info = CurrentInfoGlobalFit({
-        "gf_branch_information": gf_branch_information,
         "source_info":{
             "gb": gb_setup,
             "mbh": mbh_setup,

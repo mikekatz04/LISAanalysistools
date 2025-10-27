@@ -47,7 +47,6 @@ if __name__ == "__main__":
     
     curr_info = settings_function()
 
-    gf_branch_information = curr_info.current_info["gf_branch_information"]
-    gf = GlobalFit(gf_branch_information, curr_info, MPI.COMM_WORLD)
+    gf = GlobalFit(curr_info, MPI.COMM_WORLD)
     gf.run_global_fit()
     breakpoint()

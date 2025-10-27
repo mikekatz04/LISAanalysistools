@@ -6,6 +6,23 @@ from typing import Optional
 __all__ = ["GlobalFitInfo", "GlobalFitEngine"]
 
 
+import typing 
+
+
+from eryn.backends import backend as eryn_Backend
+from eryn.state import State as eryn_State
+
+import dataclasses
+@dataclasses.dataclass
+class EngineInfo:
+    branch_names: typing.List[str]
+    ndims: typing.Dict[str, int]
+    nleaves_max: typing.Dict[str, int]
+    nleaves_min: typing.Dict[str, int]
+    branch_states: typing.Dict[str, eryn_State] = None
+    branch_backends: typing.Dict[str, eryn_Backend] = None
+
+
 GlobalFitInfo = namedtuple(
     "GlobalFitInfo",
     (
