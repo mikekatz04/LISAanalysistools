@@ -526,6 +526,7 @@ class GeneralSettings(Settings):
     tukey_alpha: float = None
     gpus: typing.List[int] = None
     remove_from_data: typing.List[str] = None
+    fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
 
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
@@ -533,6 +534,8 @@ class GeneralSettings(Settings):
     # file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
     # file_information["mbh_search_file"] = file_store_dir + base_file_name + "_mbh_search_tmp_file.h5"
     
+    
+from ...detector import sangria
 
 
 class GeneralSetup(Setup, GeneralSettings):
@@ -586,6 +589,10 @@ class GeneralSetup(Setup, GeneralSettings):
 
     def init_data_information(self):
 
+        if self.fixed_psd_kwargs is None:
+            self.fixed_psd_kwargs = dict(
+                model=sangria, 
+            )
         if self.remove_from_data is None:
             self.remove_from_data = []
 

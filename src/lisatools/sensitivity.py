@@ -708,7 +708,8 @@ class SensitivityMatrix:
                         _flattened_list.append(tmp)
                     continue
 
-                elif isinstance(_layer[0], callable):
+                # TODO: better way to do this?
+                elif hasattr(_layer[0], "get_Sn"):
                     _run = False
                     self.can_redo = True
                     for tmp in _layer:

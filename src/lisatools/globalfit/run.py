@@ -313,15 +313,19 @@ class GlobalFit:
                 self.curr.general_info.E_inj.copy(), 
             ], f_arr=f_arr)
             # TODO: make an option for other runs where psd is fixed
-            assert "psd" in state.branches_coords.keys()
-            psd_params = state.branches_coords["psd"][0, w, 0]
-            # need to generalize for other stochastic functions
-            if "galfor" in state.branches_coords.keys():
-                galfor_params = state.branches_coords["galfor"][0, w, 0]
-            else:
-                galfor_params = None
+            if "psd" in state.branches_coords.keys():
+                psd_params = state.branches_coords["psd"][0, w, 0]
+                # need to generalize for other stochastic functions
+                if "galfor" in state.branches_coords.keys():
+                    galfor_params = state.branches_coords["galfor"][0, w, 0]
+                else:
+                    galfor_params = None
 
-            sens_AE = new_sens_mat(f"walker_{w}", psd_params, data_res_arr.f_arr, galfor_params=galfor_params)
+                sens_AE = new_sens_mat(f"walker_{w}", psd_params, data_res_arr.f_arr, galfor_params=galfor_params)
+            else:
+                # TODO: update this
+                sens_AE = AE1SensitivityMatrix(data_res_arr.f_arr, **self.curr.general_info.fixed_psd_kwargs)
+
             # sens_AE[0] = psd[0][w]
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))

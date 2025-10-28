@@ -3,6 +3,10 @@ import cupy as cp
 from copy import deepcopy
 import os
 
+from lisatools.stochastic import HyperbolicTangentGalacticForeground
+from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
+                
+
 from eryn.moves import RedBlueMove, StretchMove
 # from eryn.state import State
 from ..state import GFState
@@ -61,7 +65,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             assert search_fp is not None
             self.search_fp = search_fp
             
-        self.finished_search = True  # False
+        self.finished_search = False
 
     @classmethod
     def supported_backends(cls):
@@ -85,15 +89,24 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         data = acs_all.data_shaped[0][max_logl_walker].copy()
         psd = acs_all.psd_shaped[0][max_logl_walker].copy()
 
-        psd_best = state.branches["psd"].coords[0, max_logl_walker, 0]
-        galfor_best = state.branches["galfor"].coords[0, max_logl_walker, 0]
-
+        # TODO: connect this general_info.fixed_psd_kwargs
         model_A = deepcopy(sangria)
         model_E = deepcopy(sangria)
-        model_A.Soms_d = psd_best[0] ** 2
-        model_A.Sa_a = psd_best[1] ** 2
-        model_E.Soms_d = psd_best[2] ** 2
-        model_E.Sa_a = psd_best[3] ** 2
+        
+        if "psd" in state.branches:
+            psd_best = state.branches["psd"].coords[0, max_logl_walker, 0]
+            galfor_best = state.branches["galfor"].coords[0, max_logl_walker, 0]
+
+            model_A.Soms_d = psd_best[0] ** 2
+            model_A.Sa_a = psd_best[1] ** 2
+            model_E.Soms_d = psd_best[2] ** 2
+            model_E.Sa_a = psd_best[3] ** 2
+            stochastic_kwargs = dict(
+                stochastic_function=HyperbolicTangentGalacticForeground, 
+                stochastic_params=galfor_best
+            )
+        else:
+            stochastic_kwargs = dict()
 
         bool_leaves_not_filled_yet = (~state.branches['mbh'].inds[0, 0, :])
 
@@ -185,10 +198,8 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                     assert length_check == len(Af)  
 
                 data_res_arr = DataResidualArray([Af, Ef, np.zeros_like(Ef)], f_arr=fd_short)
-                from lisatools.stochastic import HyperbolicTangentGalacticForeground
-                from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
-                _psd_A = A1TDISens.get_Sn(fd_short, model=model_A, stochastic_function=HyperbolicTangentGalacticForeground, stochastic_params=galfor_best)
-                _psd_E = E1TDISens.get_Sn(fd_short, model=model_E, stochastic_function=HyperbolicTangentGalacticForeground, stochastic_params=galfor_best)
+                _psd_A = A1TDISens.get_Sn(fd_short, model=model_A, **stochastic_kwargs)
+                _psd_E = E1TDISens.get_Sn(fd_short, model=model_E, **stochastic_kwargs)
                 _psd_T = np.full_like(_psd_A, 1e10)
 
                 if np.isnan(_psd_A[0]):
@@ -409,7 +420,6 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                         AET_remove = self.waveform_gen(*AET_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
                         AE_remove = AET_remove[:, :2]
                         # check_like = acs_all[max_logl_walker].template_likelihood(DataResidualArray(AE_remove[max_logl_walker], f_arr=acs_all.f_arr), complex=True)
-                        breakpoint()
                         acs_all.add_signal_to_residual(AE_remove)
 
                 self.finished_search = True
