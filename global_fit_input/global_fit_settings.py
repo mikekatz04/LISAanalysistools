@@ -32,7 +32,7 @@ from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFreque
 
 from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings, GeneralSetup, GeneralSettings
+    MBHSetup, MBHSettings, GBSetup, GBSettings
 )
 
 from eryn.prior import uniform_dist
@@ -48,7 +48,9 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 
+from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
 
+import logging
 # import few
 
 
@@ -794,7 +796,6 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
     return GalForSetup(galfor_settings)
 
 
-
 def get_general_erebor_settings() -> GeneralSetup:
        # limits on parameters
     delta_safe = 1e-5
@@ -843,6 +844,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     return general_setup
 
 
+from lisatools.globalfit.engine import RankInfo
+
+
 def get_global_fit_settings(copy_settings_file=False):
 
     general_setup = get_general_erebor_settings()
@@ -864,7 +868,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
-    rank_info = dict(
+    rank_info = RankInfo(
         head_rank=head_rank,
         main_rank=main_rank
     )
@@ -1025,20 +1029,19 @@ def get_global_fit_settings(copy_settings_file=False):
     ## READ OUT ##
     ##############
 
-
-    curr_info = CurrentInfoGlobalFit({
-        "source_info":{
+    gf_settings = GlobalFitSettings(
+        source_info={
             "gb": gb_setup,
             "mbh": mbh_setup,
             "psd": psd_setup,
             "galfor": galfor_setup,
             # "emri": all_emri_info,
         },
-        "general": general_setup,
-        "rank_info": rank_info,
-        "setup_function": setup_recipe,
-        "gpu_assignments": general_setup.gpus,
-    })
+        general_info=general_setup,
+        rank_info=rank_info,
+        setup_function=setup_recipe,
+    )
+    curr_info = CurrentInfoGlobalFit(gf_settings)
 
     return curr_info
 

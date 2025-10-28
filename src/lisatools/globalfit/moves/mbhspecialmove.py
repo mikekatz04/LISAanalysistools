@@ -435,7 +435,10 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             return state, _accepted
         
-        return ResidualAddOneRemoveOneMove.propose(self, model, state)
+        # TODO: fix so it is generic. 
+        self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
+        output = ResidualAddOneRemoveOneMove.propose(self, model, state)
+        return output
 
     def setup_likelihood_here(self, coords):
         # TODO: should we try to pick specifically based on max ll for MBHs rather than data as a whole

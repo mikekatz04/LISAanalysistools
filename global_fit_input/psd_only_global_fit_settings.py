@@ -50,6 +50,7 @@ from lisatools.utils.utility import tukey
 
 
 # import few
+from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
 
 
 from eryn.utils.updates import Update
@@ -235,6 +236,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     return general_setup
 
 
+from lisatools.globalfit.engine import RankInfo
+
+
 def get_global_fit_settings(copy_settings_file=False):
 
     general_setup = get_general_erebor_settings()
@@ -256,7 +260,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
-    rank_info = dict(
+    rank_info = RankInfo(
         head_rank=head_rank,
         main_rank=main_rank
     )
@@ -275,16 +279,15 @@ def get_global_fit_settings(copy_settings_file=False):
     ##############
 
 
-    curr_info = CurrentInfoGlobalFit({
-        "source_info":{
+    curr_info = GlobalFitSettings(
+        source_info={
             "psd": psd_setup,
             # "emri": all_emri_info,
         },
-        "general": general_setup,
-        "rank_info": rank_info,
-        "setup_function": setup_recipe,
-        "gpu_assignments": general_setup.gpus,
-    })
+        general_info=general_setup,
+        rank_info=rank_info,
+        setup_function=setup_recipe,
+    )
 
     return curr_info
 

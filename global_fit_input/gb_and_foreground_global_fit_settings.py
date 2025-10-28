@@ -62,6 +62,7 @@ from eryn.utils.updates import Update
 from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
+from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
 
 ################
 
@@ -599,7 +600,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 10.0
 
     ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
-    base_file_name = "gb_and_foreground_separate_1st_try_parameter_estimation_main.h5"
+    base_file_name = "gb_and_foreground_separate_1st_try"
     file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
@@ -631,11 +632,14 @@ def get_general_erebor_settings() -> GeneralSetup:
         ntemps=ntemps,
         tukey_alpha=tukey_alpha,
         gpus=gpus,
+        remove_from_data=["mbhb"],
     )
 
     general_setup = GeneralSetup(general_settings)
     return general_setup
 
+
+from lisatools.globalfit.engine import RankInfo
 
 def get_global_fit_settings(copy_settings_file=False):
 
@@ -658,7 +662,7 @@ def get_global_fit_settings(copy_settings_file=False):
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
-    rank_info = dict(
+    rank_info = RankInfo(
         head_rank=head_rank,
         main_rank=main_rank
     )
@@ -810,18 +814,17 @@ def get_global_fit_settings(copy_settings_file=False):
     ##############
 
 
-    curr_info = CurrentInfoGlobalFit({
-        "source_info":{
+    curr_info = GlobalFitSettings(
+        source_info={
             "gb": gb_setup,
             "psd": psd_setup,
             "galfor": galfor_setup,
             # "emri": all_emri_info,
         },
-        "general": general_setup,
-        "rank_info": rank_info,
-        "setup_function": setup_recipe,
-        "gpu_assignments": general_setup.gpus,
-    })
+        general_info=general_setup,
+        rank_info=rank_info,
+        setup_function=setup_recipe,
+    )
 
     return curr_info
 

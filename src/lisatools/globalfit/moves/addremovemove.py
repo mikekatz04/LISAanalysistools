@@ -56,13 +56,21 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
 
     def check_add_skip_swap_info(self, state):
+
+        if self.temperature_controls[0].skip_swap_branches is not None:
+            return
+        
         if len(state.branches) > 1:
-            if self.temperature_controls[0].skip_swap_branches is None:
-                skip_swap_branches = [key for key in state.branches.keys()]
-                skip_swap_branches.remove(self.branch_name)
-                for i in range(self.nleaves_max):
-                    self.temperature_controls[i].skip_swap_branches = skip_swap_branches
+            skip_swap_branches = [key for key in state.branches.keys()]
+            skip_swap_branches.remove(self.branch_name)
+                
+        else:
+            skip_swap_branches = []
+
+        for i in range(self.nleaves_max):
+            self.temperature_controls[i].skip_swap_branches = skip_swap_branches
     
+            
     def add_back_in_cold_chain_sources(self, coords):
 
         # TODO: fix T channel 

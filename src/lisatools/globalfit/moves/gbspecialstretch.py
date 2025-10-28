@@ -1424,7 +1424,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # TODO: check issue at ~23.5 mHz, removing for now. Really just removing high edge band
 
             apply_inds = (not self.is_rj_prop)
-            subset_of_interest = band_sorter.get_subset(units=units, remainder=remainder, apply_inds=apply_inds, extra_bool=((band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0)))
+            subset_of_interest = band_sorter.get_subset(units=units, remainder=remainder, apply_inds=apply_inds, extra_bool=((band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0) & ((band_sorter.band_inds == 10) | (band_sorter.band_inds == 11))))
             if subset_of_interest is None:
                 continue
             
@@ -1623,7 +1623,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             _tmp_waveform_kwargs.pop("start_freq_ind")
                             info_mat = self.xp.zeros((info_mat_params.shape[0], 8, 8))
                             batch_size = 1000
-                            batches = np.arange(batch_size, len(info_mat_params), batch_size)
+                            assert len(info_mat_params) > 1
+                            batches = np.arange(0, len(info_mat_params), batch_size, dtype=int)
+                            
+                            if batches[-1] < len(info_mat_params):
+                                batches = np.concatenate([batches, np.array([len(info_mat_params)], dtype=int)], dtype=int)
+
                             for start_batch, end_batch in zip(batches[:-1], batches[1:]):
                                 info_mat[start_batch:end_batch] = self.gb.information_matrix(info_mat_params[start_batch:end_batch].T, eps=1e-9, parameter_transforms=info_mat_transforms, inds=_test_inds, N=1024, psd_func=sensitivity.A1TDISens.get_Sn, psd_kwargs=dict(model="sangria", stochastic_params=(1.0 * YRSID_SI,)), easy_central_difference=False, return_gpu=True, **_tmp_waveform_kwargs)
                             
@@ -1631,7 +1636,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                             # chol(cov) -> chol(inv(info_mat))
                             new_chol_store = self.xp.linalg.cholesky(self.xp.linalg.inv(info_mat))
-                            
+                            breakpoint()
                             _chol_store = self.xp.concatenate([chol_store.copy(), new_chol_store], axis=0)
                             _chol_params_fixed = self.xp.concatenate([chol_params_fixed.copy(), new_chol_params_fixed], axis=0)
                             _inds_map_chol = self.xp.concatenate([inds_map_chol.copy(), new_inds_map_chol])
@@ -1721,10 +1726,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             # TODO: asserts/checks
                             tmp_chols_here = chol_store[mapped_chol_inds]
                             
-                            # TODO: change einsum
-                            jump_factor = 0.05
+                            # TODO: change einsum for speed?
+                            # TODO: adjusting jump_factor over time?
+                            jump_factor = 0.005
                             _rand_draw = self.xp.random.randn(mapped_chol_inds.shape[0], 8)
-                            new_coords = old_coords + jump_factor * self.xp.einsum("...ij,...i->...j", tmp_chols_here, _rand_draw)
+                            old_coords_scaled_fdot = old_coords.copy()
+                            # TODO: add this to whole thing
+                            old_coords_scaled_fdot[:, 2] /= fdot_scale
+                            new_coords = old_coords_scaled_fdot + jump_factor * self.xp.einsum("...ij,...j->...i", tmp_chols_here, _rand_draw)
                             new_coords[:, 2] *= fdot_scale
                             update_factors = self.xp.zeros(new_coords.shape[0])  # symmetric draws
 
@@ -2210,7 +2219,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         start_diffs = np.abs(new_state.log_like[0] - ll_after)
         
         check = ll_after - new_state.log_like[0] - start_diffs
-
         if not np.abs(check).max() < 1e-4:
             assert np.abs(check).max() < 1.0
             new_state.log_like[0] = self.check_ll_inject(model, band_sorter)
@@ -2233,7 +2241,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
-
+        breakpoint()
         print("ADD check", start_diffs, check)
 
         if not np.abs(check).max() < 1e-4:

@@ -53,41 +53,22 @@ from gbgpu.gbgpu import GBGPU
 
 from eryn.backends import HDFBackend
 
+from .loginfo import init_logger
+import logging
+
 import time
 import os
 import pickle
 
 from abc import ABC
-import logging
 
-# from global_fit_input.global_fit_settings import get_global_fit_settings
-
-def init_logger(filename=None, level=logging.DEBUG, name='GlobalFit'):
-    """ Initialize a logger.
-    """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    if (len(logger.handlers) < 2):
-        formatter = logging.Formatter("%(asctime)s - %(name)s - "
-                                      "%(levelname)s - %(message)s")
-        if filename:
-            rfhandler = logging.FileHandler(filename)
-            logger.addHandler(rfhandler)
-            rfhandler.setFormatter(formatter)
-        if level:
-            shandler = logging.StreamHandler(sys.stdout)
-            shandler.setLevel(level)
-            shandler.setFormatter(formatter)
-            logger.addHandler(shandler)
-    return logger
-
-
-from .engine import EngineInfo
+from .engine import EngineInfo, GlobalFitSettings, GeneralSetup
 import typing
+import dataclasses
 
 
 class CurrentInfoGlobalFit:
-    def __init__(self, settings, get_last_state_info=True):
+    def __init__(self, settings: GlobalFitSettings):
 
         self.settings_dict = settings
         self.current_info = deepcopy(settings)
@@ -171,20 +152,21 @@ class CurrentInfoGlobalFit:
         return self.current_info
 
     @property
-    def general_info(self):
-        return self.current_info["general"]
+    def general_info(self) -> GeneralSetup:
+        return self.current_info.general_info
 
     @property
     def source_info(self):
-        return self.current_info["source_info"]
+        return self.current_info.source_info
 
     @property
     def rank_info(self):
-        return self.current_info["rank_info"]
+        return self.current_info.rank_info
 
     @property
     def gpu_assignments(self):
-        return self.current_info["gpu_assignments"]
+        return self.current_info.general_info.gpu_assignments
+    
 
 import numpy as np
 from mpi4py import MPI
@@ -232,8 +214,8 @@ class GlobalFit:
         self.ntemps = self.curr.general_info.ntemps
         self.all_ranks = list(range(self.comm.Get_size()))
         self.used_ranks = []
-        self.head_rank = self.curr.rank_info["head_rank"]
-        self.main_rank = self.curr.rank_info["main_rank"]
+        self.head_rank = self.curr.rank_info.head_rank
+        self.main_rank = self.curr.rank_info.main_rank
         self.used_ranks.append(self.head_rank)
         self.used_ranks.append(self.main_rank)
 
@@ -367,9 +349,9 @@ class GlobalFit:
         backend_path = self.curr.general_info.main_file_path
         
         backend = GFHDFBackend(backend_path, sub_backend=self.engine_info.branch_backends, sub_state_bases=self.engine_info.branch_states)
-        if self.rank == self.curr.settings_dict["rank_info"]["main_rank"]: 
+        if self.rank == self.curr.settings_dict.rank_info.main_rank: 
 
-            general_info = self.curr.settings_dict["general"]
+            general_info = self.curr.general_info
             
             branch_names = self.engine_info.branch_names
             ndims = self.engine_info.ndims
@@ -477,7 +459,7 @@ class GlobalFit:
             like_mix = BasicResidualacsLikelihood(acs)
 
             backend = GFHDFBackend(
-                backend_path,   # self.curr.settings_dict["general"]["file_information"]["fp_main"],
+                backend_path,   # self.curr.general_info["file_information"]["fp_main"],
                 compression="gzip",
                 compression_opts=9,
                 comm=self.comm,
@@ -521,7 +503,7 @@ class GlobalFit:
             #         setup_info_all += setup_info
 
             self.recipe = Recipe()
-            setup_info_all = self.curr.settings_dict["setup_function"](self.recipe, self.engine_info, self.curr, acs, priors, state)
+            setup_info_all = self.curr.settings_dict.setup_function(self.recipe, self.engine_info, self.curr, acs, priors, state)
             print("need to setup moves that use parallel resources")
 
             # backend.grow(1, None)
@@ -656,8 +638,8 @@ class MPIControlGlobalFit:
         self.comm = comm
         self.gpus = gpus
 
-        self.head_rank = self.current_info.rank_info["head_rank"]
-        self.main_rank = self.current_info.rank_info["main_rank"]
+        self.head_rank = self.current_info.rank_info.head_rank
+        self.main_rank = self.current_info.rank_info.main_rank
         self.other_ranks = list(range(comm.Size()))[2:]
 
         self.main_gpu = self.current_info.gpu_assignments["main_gpu"]
