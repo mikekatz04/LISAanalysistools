@@ -32,7 +32,7 @@ from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFreque
 
 from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings, GeneralSetup, GeneralSettings
+    MBHSetup, MBHSettings, GBSetup, GBSettings
 )
 
 from eryn.prior import uniform_dist
@@ -110,7 +110,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     
     # setup psd search move
     effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
-    temperature_control = TemperatureControl(nwalkers, effective_ndim, ntemps=ntemps, Tmax=np.inf, permute=False)
+    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=np.inf, permute=False)
     
     psd_move_args = (acs, priors)
 
@@ -142,7 +142,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_pe_move]), name="psd pe")
+    recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
     
     
 #######################
@@ -279,7 +279,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##############
 
 
-    curr_info = GlobalFitSettings(
+    global_settings = GlobalFitSettings(
         source_info={
             "psd": psd_setup,
             # "emri": all_emri_info,
@@ -288,6 +288,8 @@ def get_global_fit_settings(copy_settings_file=False):
         rank_info=rank_info,
         setup_function=setup_recipe,
     )
+
+    curr_info = CurrentInfoGlobalFit(global_settings)
 
     return curr_info
 

@@ -124,6 +124,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     def setup(self, model, state):
         return
+    
+    def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
+        assert x["mbh"].ndim == 4 and x["mbh"].shape[1] == self.nwalkers
+        # shape is (nwalkers, 1 (nleaves_max), ndim)
+        ntemps = x["mbh"].shape[0]
+
+        coords = x["mbh"].reshape(-1, x["mbh"].shape[-1])
+        data_index_in = xp.tile(xp.arange(self.nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
+        
+        coords_in = self.transform_fn.both_transforms(coords)
+
+        # TODO: need to be careful here when heterodyning about if it is "close"
+        output = self.compute_like(
+            coords_in, 
+            data_index=data_index_in,
+        ).reshape((ntemps, self.nwalkers)).real
+        return output
 
     def propose(self, model, state):
         print("PROPOSING")
@@ -298,13 +315,21 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 # make swaps
                 coords_for_swap = {self.branch_name: new_state.branches_coords[self.branch_name][:, :, leaf].copy()[:, :, None]}
                 
+                # TODO: make adjustable rate of fancy swaps
+                fancy_swap = (repeat % 20 == 0)
+                
+                compute_log_like = self.log_like_for_fancy_swaping
+
                 # TODO: check permute make sure it is okay
                 coords_for_swap, prev_logP, prev_logl, prev_logp, inds, blobs, supps, branch_supps = temperature_control_here.temperature_swaps(
                     coords_for_swap,
                     prev_logP.copy(),
                     prev_logl.copy(),
                     prev_logp.copy(),
-                    branch_supps={self.branch_name: None}  # TODO: adjust this to be flexible
+                    branch_supps={self.branch_name: None},  # TODO: adjust this to be flexible
+                    fancy_swap=fancy_swap,
+                    compute_log_like=compute_log_like,
+                    permute_here=True
                 )
 
                 temperature_control_here.adapt_temps()

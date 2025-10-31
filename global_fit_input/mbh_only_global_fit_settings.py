@@ -32,7 +32,7 @@ from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFreque
 
 from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings, GeneralSetup, GeneralSettings
+    MBHSetup, MBHSettings, GBSetup, GBSettings
 )
 
 from eryn.prior import uniform_dist
@@ -429,7 +429,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##############
 
 
-    curr_info = GlobalFitSettings(
+    global_settings = GlobalFitSettings(
         source_info={
             "mbh": mbh_setup,
         },
@@ -437,6 +437,8 @@ def get_global_fit_settings(copy_settings_file=False):
         rank_info=rank_info,
         setup_function=setup_recipe,
     )
+
+    curr_info = CurrentInfoGlobalFit(global_settings)
 
     return curr_info
 

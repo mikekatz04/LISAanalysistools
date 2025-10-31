@@ -66,6 +66,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             self.search_fp = search_fp
             
         self.finished_search = False
+        self.finished_search = True
 
     @classmethod
     def supported_backends(cls):

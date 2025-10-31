@@ -174,7 +174,6 @@ import os
 import warnings
 from copy import deepcopy
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ..datacontainer import DataResidualArray
 from ..sensitivity import AE1SensitivityMatrix
 from .state import GFState
 from ..detector import EqualArmlengthOrbits
@@ -293,7 +292,7 @@ class GlobalFit:
             data_res_arr = DataResidualArray([
                 self.curr.general_info.A_inj.copy(), 
                 self.curr.general_info.E_inj.copy(), 
-            ], f_arr=f_arr)
+            ], f_arr=f_arr, df=df)
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]

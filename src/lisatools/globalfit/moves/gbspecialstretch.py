@@ -369,7 +369,7 @@ class Buffer(LISAToolsParallelModule):
             # self.buffer_start_index[self.unique_band_combos[:, 2] == self.num_bands - 1] = (self.band_edges[-1] / self.df).astype(np.int32) - self.edge_buffer
             
         self.start_freq_inds = self.buffer_start_index.copy().astype(np.int32)
-        
+
         lower_f_lim = self.band_edges[self.unique_band_combos[:, 2]]  #  - self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
         higher_f_lim = self.band_edges[self.unique_band_combos[:, 2] + 1]  #  + self.band_N_vals[self.unique_band_combos[:, 2]] * self.df / 4
         
@@ -469,6 +469,7 @@ class Buffer(LISAToolsParallelModule):
             print(f"NOT KEEPING: {(~keep).sum()}")
   
         ll_diff = cp.full(keep.shape[0], -1e300)
+        # breakpoint()
         ll_diff[keep] = cp.asarray(self.gb.swap_likelihood_difference(
             params_remove_in_keep,
             params_add_in_keep,
@@ -486,7 +487,6 @@ class Buffer(LISAToolsParallelModule):
             **wave_kwargs_tmp,
         ))
 
-        # breakpoint()
         if phase_maximize:
             params_add[keep, 3] = params_add[keep, 3] - self.gb.phase_angle
 
@@ -556,6 +556,7 @@ class Buffer(LISAToolsParallelModule):
         reject = self.xp.zeros(keep.shape[0], dtype=bool)
         reject[keep] = ((opt_snr < self.opt_snr_rej_samp_limit)& (params_add_in[keep, 0] > 1e-30))
         ll_diff[reject] = -1e300
+
         return ll_diff
 
     def reset_residual_buffers(self, inds_fill=None):
@@ -637,6 +638,7 @@ class Buffer(LISAToolsParallelModule):
         # assign N based on band
         # TODO: need to be careful about N changes across band edges?
         wave_kwargs_tmp = self.waveform_kwargs.copy()
+
         if "start_freq_ind" in wave_kwargs_tmp:
             wave_kwargs_tmp.pop("start_freq_ind")
         try:
@@ -969,7 +971,7 @@ class BandSorter(LISAToolsParallelModule):
             inds_fill = cp.arange(num_band_preload)
             assert buffer_obj is None
             buffer_obj = Buffer(self.rj_prop, self.nwalkers, self.gb, self.band_edges, self.band_N_vals, all_unique_band_combos, points_curr_tmp, num_bands_now, acs.nchannels, self.max_data_store_size, special_indices_unique, self.transform_fn, self.waveform_kwargs, acs.df, sources_now_map, sources_inject_now_map, self.main_band_sorter.special_band_inds[sources_now_map], **kwargs)
-        
+
         else:
             assert isinstance(buffer_obj, Buffer)
             assert inds_fill.max() <= buffer_obj.num_bands_now
@@ -1411,9 +1413,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
             # add back in all sources in the cold-chain 
             # residual from this group
-            # llaf1 = model.analysis_container_arr.likelihood(source_only=True)
+            # llbef1 = model.analysis_container_arr.likelihood(source_only=True)
             self.remove_cold_chain_sources_from_residual(model, band_sorter, units=units, remainder=remainder)
-            # llaf2 = model.analysis_container_arr.likelihood(source_only=True)
+            # llbef2 = model.analysis_container_arr.likelihood(source_only=True)
 
             # keep1 = (
             #     (band_indices % units == remainder) 
@@ -1424,7 +1426,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # TODO: check issue at ~23.5 mHz, removing for now. Really just removing high edge band
 
             apply_inds = (not self.is_rj_prop)
-            subset_of_interest = band_sorter.get_subset(units=units, remainder=remainder, apply_inds=apply_inds, extra_bool=((band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0) & ((band_sorter.band_inds == 10) | (band_sorter.band_inds == 11))))
+            subset_of_interest = band_sorter.get_subset(units=units, remainder=remainder, apply_inds=apply_inds, extra_bool=((band_sorter.band_inds < self.num_bands - 1) & (band_sorter.band_inds > 0)))
             if subset_of_interest is None:
                 continue
             
@@ -1623,7 +1625,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             _tmp_waveform_kwargs.pop("start_freq_ind")
                             info_mat = self.xp.zeros((info_mat_params.shape[0], 8, 8))
                             batch_size = 1000
-                            assert len(info_mat_params) > 1
+                            assert len(info_mat_params) > 0
+                            
                             batches = np.arange(0, len(info_mat_params), batch_size, dtype=int)
                             
                             if batches[-1] < len(info_mat_params):
@@ -1636,7 +1639,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                             # chol(cov) -> chol(inv(info_mat))
                             new_chol_store = self.xp.linalg.cholesky(self.xp.linalg.inv(info_mat))
-                            breakpoint()
                             _chol_store = self.xp.concatenate([chol_store.copy(), new_chol_store], axis=0)
                             _chol_params_fixed = self.xp.concatenate([chol_params_fixed.copy(), new_chol_params_fixed], axis=0)
                             _inds_map_chol = self.xp.concatenate([inds_map_chol.copy(), new_inds_map_chol])
@@ -1862,8 +1864,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             remove_fixed_coords = has_fixed_coords & (~band_sorter.inds)
                             has_fixed_coords[remove_fixed_coords] = False
 
-
-
                         temp_inds_accept = band_sorter.temp_inds[inds_update_accept]
                         walker_inds_accept = band_sorter.walker_inds[inds_update_accept]
                         band_inds_accept = band_sorter.band_inds[inds_update_accept]
@@ -1885,6 +1885,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         # ll_mid = buffer_obj.likelihood(source_only=True)
                         buffer_obj.add_sources_to_band_buffer(new_coords_for_change, new_change_index, new_change_N_vals)
                         # ll_after = buffer_obj.likelihood(source_only=True)
+                        # ll_check = np.zeros_like(ll_after)
+                        # ll_check[data_index_to_update[accept]] = ll_accept
+
+                        # if not np.allclose(ll_check, ll_after - ll_before):
+                        #     breakpoint()
                         # if move_i % 25 == 0:
                         #     try:
                         #         if 1e-4 < np.abs((ll_after - ll_before)[data_index_to_update] - ll_diff * accept).max():
@@ -1933,8 +1938,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # llaf1 = model.analysis_container_arr.likelihood()
 
             self.add_cold_chain_sources_to_residual(model, band_sorter, units=units, remainder=remainder)
-            # llaf2 = model.analysis_container_arr.likelihood()
-
+            # llaf2 = model.analysis_container_arr.likelihood(source_only=True)
+            # breakpoint()
             # ll_change_sum = ll_change_log.sum(axis=-1)
             # check_in = state.log_like[0] + ll_change_sum[0].get()
 
@@ -2241,9 +2246,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
-        breakpoint()
-        print("ADD check", start_diffs, check)
 
+        print("ADD check", start_diffs, check)
         if not np.abs(check).max() < 1e-4:
             assert np.abs(check).max() < 1.0
             new_state.log_like[0] = self.check_ll_inject(model, band_sorter)

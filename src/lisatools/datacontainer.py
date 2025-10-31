@@ -78,19 +78,10 @@ class DataResidualArray:
         f_arr: Optional[np.ndarray] = None,
         df: Optional[float] = None,
     ):
-        number_of_none = 0
-
-        number_of_none += 1 if dt is None else 0
-        number_of_none += 1 if f_arr is None else 0
-        number_of_none += 1 if df is None else 0
-
-        if number_of_none == 3:
+        
+        if dt is None and f_arr is None and df is None:
             raise ValueError("Must provide either df, dt, or f_arr.")
-
-        elif number_of_none == 1:
-            raise ValueError(
-                "Can only provide one of dt, f_arr, or df. Not more than one."
-            )
+        
         self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
 
     @property
@@ -120,19 +111,16 @@ class DataResidualArray:
             self._data_res_arr = tmp
             self.data_length = self._data_res_arr.shape[-1]
 
-        elif df is not None:
-            self._df = df
-            self._Tobs = 1 / self._df
-            self._fmax = (self.data_length - 1) * df
-            self._dt = 1 / (2 * self._fmax)
-            self._f_arr = np.arange(0.0, self._fmax, self._df)
-
+        # THIS NEEDS TO BE BEFORE df CHECK
         elif f_arr is not None:
             self._f_arr = f_arr
             self._fmax = f_arr.max()
             # constant spacing
             if np.allclose(np.diff(f_arr), np.diff(f_arr)[0]):
-                self._df = np.diff(f_arr)[0].item()
+                if df is None:
+                    raise ValueError("When providing evenly spaced f_arr, need to also provide df to avoid numerical issues.")
+                # TODO: fix this up in the docs
+                self._df = df  # np.diff(f_arr)[0].item()
 
                 if f_arr[0] == 0.0:
                     # could be fft because of constant spacing and f_arr[0] == 0.0
@@ -149,6 +137,14 @@ class DataResidualArray:
                 self._Tobs = None
                 self._dt = None
 
+        elif df is not None:
+            self._df = df
+            self._Tobs = 1 / self._df
+            self._fmax = (self.data_length - 1) * df
+            self._dt = 1 / (2 * self._fmax)
+            self._f_arr = np.arange(0.0, self._fmax, self._df)
+
+        
         if len(self.f_arr) != self.data_length:
             raise ValueError(
                 "Entered or determined f_arr does not have the same length as the data channel inputs."

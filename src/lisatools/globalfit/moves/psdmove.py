@@ -84,6 +84,9 @@ class PSDMove(GlobalFitMove, StretchMove):
     def compute_log_like(
         self, coords, inds=None, logp=None, supps=None, branch_supps=None
     ):  
+        if logp is None:
+            logp = self.compute_log_prior(coords, inds=inds, supps=supps, branch_supps=branch_supps)
+
         assert logp is not None
         logl = np.full_like(logp, -1e300)
 
@@ -148,13 +151,40 @@ class PSDMove(GlobalFitMove, StretchMove):
             logp[:] += self.priors[key].logpdf(branches_coords[key].reshape(-1, ndim)).reshape(ntemps, nwalkers)
         return logp
 
-    def run_move(self, model, state):
+    def run_move(self, move_i, model, state):
         new_state, accepted = super(PSDMove, self).propose(model, state)
+
+        # TODO: make adjustable
+        if move_i % 50 == 0:
+            x = new_state.branches_coords
+            logl = new_state.log_like
+            logp = new_state.log_prior
+            branch_supps = new_state.branches_supplemental
+            supps = new_state.supplemental
+
+            logP = self.compute_log_posterior(logl, logp)
+            self.temperature_control.temperature_swaps(
+                x, logP, logl, logp, 
+                supps=supps,
+                branch_supps=branch_supps, 
+                compute_log_like=self.compute_log_like, 
+                compute_log_prior=self.compute_log_prior, 
+                fancy_swap=True,
+                permute_here=True
+            )
+            for name in x:
+                new_state.branches[name].coords[:] = x[name][:]
+                new_state.branches[name].branch_supplemental = branch_supps[name]
+
+            new_state.log_like[:] = logl[:]
+            new_state.log_prior[:] = logp[:]
+            new_state.supplemental = supps
+
         return new_state, accepted
     
     def run_move_for_loop(self, model, state, num_repeats):
         for i in tqdm(range(num_repeats)):
-            state, accepted = self.run_move(model, state)
+            state, accepted = self.run_move(i, model, state)
         return state, accepted
 
     def run_move_max_likelihood(self, model, state):
@@ -225,7 +255,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         
         else:
             tmp_state, accepted = self.run_move_for_loop(tmp_model, tmp_state, self.num_repeats)
-        
+
         # CHECK THIS STATE SETUP
         new_state = GFState(
             state,
@@ -240,6 +270,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         new_state.log_like[:] = tmp_state.log_like[:]
         new_state.log_prior[:] = tmp_state.log_prior[:]
         
+        # TODO: check speed of this? (needed?)
         nwalkers = len(self.acs)
         for w in range(nwalkers):
             psd_params = new_state.branches_coords["psd"][0, w, 0]
