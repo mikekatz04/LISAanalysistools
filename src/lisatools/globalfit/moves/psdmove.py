@@ -172,6 +172,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 fancy_swap=True,
                 permute_here=True
             )
+
             for name in x:
                 new_state.branches[name].coords[:] = x[name][:]
                 new_state.branches[name].branch_supplemental = branch_supps[name]
@@ -214,7 +215,6 @@ class PSDMove(GlobalFitMove, StretchMove):
     def propose(self, model, state):
         # setup model framework for passing necessary 
         # self.priors["all_models_together"].full_state = state
-
         tmp_branches_coords = {key: state.branches_coords[key] for key in ["psd", "galfor"] if key in state.branches_coords}
         
         tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=state.supplemental)

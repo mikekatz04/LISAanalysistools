@@ -229,7 +229,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    
+
     # return SetupInfoTransfer(
     #     name="psd",
     #     in_model_moves=[],  # (psd_move, 1.0)],
@@ -466,7 +466,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend, search_fp=search_fp)
     mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
 
-    mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move])  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
+    mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move], share_temperature_control=False)  # GFCombineMove([psd_search_move, mbh_search_move, psd_search_move])
     mbh_search_moves.accepted = np.zeros((ntemps, nwalkers))
     
     recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_moves], n_iters=5, verbose=True), name="mbh search")
@@ -806,7 +806,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 10.0
 
     ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
-    base_file_name = "rework_9th_run_through"
+    base_file_name = "rework_11th_run_through"
     file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
