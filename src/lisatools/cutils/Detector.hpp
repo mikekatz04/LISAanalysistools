@@ -77,7 +77,7 @@ public:
 
     CUDA_DEVICE
     // Non-const version: Allows modification of elements
-    Vec& operator/(double val) {
+    Vec operator/(double val) {
         Vec out(0., 0., 0.);
         out.x = this->x / val;
         out.y = this->y / val;
@@ -87,7 +87,7 @@ public:
 
     CUDA_DEVICE
     // Non-const version: Allows modification of elements
-    Vec& operator*(double val) {
+    Vec operator*(double val) {
         Vec out(0., 0., 0.);
         out.x = this->x * val;
         out.y = this->y * val;

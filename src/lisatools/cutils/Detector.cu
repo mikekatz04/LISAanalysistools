@@ -151,7 +151,8 @@ Vec Orbits::get_pos(double t, int sc)
     double y_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 1);
     // z (pos = 2), ndim = 3
     double z_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 2);
-    return Vec(x_out, y_out, z_out);
+    Vec output(x_out, y_out, z_out);
+    return output;
 }
 
 CUDA_DEVICE
