@@ -27,7 +27,6 @@ from .stochastic import (
 
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
-
 """
 
 
@@ -341,6 +340,109 @@ class Z2TDISens(X2TDISens):
     __doc__ = X2TDISens.__doc__
     pass
 
+class XY2TDISens(Sensitivity):
+    """
+    Cross-spectral density (CSD) between X and Y channels for TDI2.
+
+    From Table II of Nam et al. (2023) for uncorrelated noises:
+    - Common factor: C_XY(ω) = -16 sin(ωL) sin³(2ωL)
+    - Acceleration contribution: 4 * C_XY * S_pm
+    - Optical path contribution (ISI/RFI): C_XY * S_op
+
+    Total CSD: C_XY * (4*S_pm + S_op)
+
+    Notes:
+        - By circular symmetry, YZ and ZX CSDs have identical transfer functions
+        - For equal armlengths, the CSD is real-valued
+        - This implements the uncorrelated noise case
+    """
+
+    channel: str = "XY"
+
+    @staticmethod
+    def transform(
+        f: float | np.ndarray,
+        Spm: float | np.ndarray,
+        Sop: float | np.ndarray,
+        **kwargs: dict,
+    ) -> float | np.ndarray:
+        """
+        Transform from base sensitivity functions (S_pm, S_op) to TDI2 XY CSD.
+
+        Args:
+            f: Frequency array [Hz].
+            Spm: Acceleration noise PSD (test-mass).
+            Sop: Optical path noise PSD (OMS).
+            **kwargs: For interoperability.
+
+        Returns:
+            Cross-spectral density between X and Y channels.
+
+        Mathematical form:
+            x = 2π(L/c)f  [dimensionless frequency]
+            C_XY = -16 sin(x) sin³(2x)
+            CSD_XY = C_XY * (4*S_pm + S_op)
+        """
+        # Dimensionless frequency variable: x = 2π * (L/c) * f = ωL/c
+        # lisaLT = L/c ≈ 8.33 seconds for LISA
+        x = 2.0 * np.pi * lisaLT * f
+
+        # Common transfer function factor for TDI2 CSD
+        # C_XY(ω) = -16 sin(ωL/c) sin³(2ωL/c)
+        C_XY = -16.0 * np.sin(x) * np.sin(2.0 * x)**3
+
+        # Total CSD: acceleration + optical path contributions
+        # From Table II: CSD = 4*C_XY*S_pm + C_XY*S_op = C_XY*(4*S_pm + S_op)
+        return C_XY * (4.0 * Spm + Sop)
+
+    @staticmethod
+    def stochastic_transform(
+        f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
+    ) -> float | np.ndarray:
+        """
+        Transform stochastic background to TDI2 XY CSD.
+
+        Note: For now, using same transform as TDI1 (placeholder).
+        TODO: Verify correct stochastic transform for TDI2 CSDs.
+
+        Args:
+            f: Frequency array [Hz].
+            Sh: Stochastic signal PSD.
+            **kwargs: For interoperability.
+
+        Returns:
+            Stochastic contribution to CSD.
+        """
+        x = 2.0 * np.pi * lisaLT * f
+        # Placeholder - using TDI1 form scaled by -0.5
+        t = -0.5 * (4.0 * x**2 * np.sin(x) ** 2)
+        return Sh * t
+
+
+class YZ2TDISens(XY2TDISens):
+    """
+    Cross-spectral density (CSD) between Y and Z channels for TDI2.
+
+    By circular symmetry of the LISA constellation (for equal armlengths),
+    this has the same transfer function as XY2TDISens.
+    """
+
+    channel: str = "YZ"
+    __doc__ = XY2TDISens.__doc__
+    pass
+
+
+class ZX2TDISens(XY2TDISens):
+    """
+    Cross-spectral density (CSD) between Z and X channels for TDI2.
+
+    By circular symmetry of the LISA constellation (for equal armlengths),
+    this has the same transfer function as XY2TDISens.
+    """
+
+    channel: str = "ZX"
+    __doc__ = XY2TDISens.__doc__
+    pass
 
 class A1TDISens(Sensitivity):
     channel: str = "A"
@@ -787,6 +889,51 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
         ]
         super().__init__(f, sens_mat, **sens_kwargs)
 
+class XYZ2SensitivityMatrix(SensitivityMatrix):
+    """
+    Default sensitivity matrix for XYZ channels using TDI2 transfer functions.
+
+    This creates a 3×3 Hermitian covariance matrix accounting for correlations
+    between the X, Y, and Z TDI channels due to shared noise sources (S_pm and S_op).
+
+    Matrix structure:
+        Σ(f) = [ Σ_XX   Σ_XY   Σ_XZ ]
+               [ Σ_YX   Σ_YY   Σ_YZ ]  at each frequency
+               [ Σ_ZX   Σ_ZY   Σ_ZZ ]
+
+    Args:
+        f: Frequency array [Hz].
+        **sens_kwargs: Keyword arguments to pass to Sensitivity.get_Sn()
+            (e.g., model=lisa_models.scirdv1).
+
+    Notes:
+        - Inherits matrix inversion and determinant computation from SensitivityMatrix
+        - The invC attribute provides Σ⁻¹(f) for likelihood computations
+        - The detC attribute provides det[Σ(f)] for normalization
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        """
+        Initialize TDI2 sensitivity matrix.
+
+        Args:
+            f: Frequency array [Hz].
+            **sens_kwargs: Keyword arguments for Sensitivity.get_Sn()
+                Common kwargs:
+                    - model: LISA noise model (e.g., scirdv1, sangria)
+                    - stochastic_params: Parameters for galactic foreground
+                    - stochastic_function: Custom stochastic function
+        """
+        # Define 3×3 matrix structure
+        # Diagonal: X2, Y2, Z2 PSDs 
+        # Off-diagonal: XY2, YZ2, ZX2 CSDs 
+        sens_mat = [
+            [X2TDISens,   XY2TDISens,  ZX2TDISens],
+            [XY2TDISens,  Y2TDISens,   YZ2TDISens],
+            [ZX2TDISens,  YZ2TDISens,  Z2TDISens],
+        ]
+
+        super().__init__(f, sens_mat, **sens_kwargs)
 
 class AET1SensitivityMatrix(SensitivityMatrix):
     """Default sensitivity matrix for AET (TDI 1)
@@ -903,6 +1050,9 @@ __stock_sens_options__ = [
     "X2TDISens",
     "Y2TDISens",
     "Z2TDISens",
+    "XY2TDISens",
+    "YZ2TDISens",   
+    "ZX2TDISens",
     "LISASens",
     "CornishLISASens",
     "FlatPSDFunction",
@@ -921,6 +1071,7 @@ def get_stock_sensitivity_options() -> List[Sensitivity]:
 
 __stock_sensitivity_mat_options__ = [
     "XYZ1SensitivityMatrix",
+    "XYZ2SensitivityMatrix",
     "AET1SensitivityMatrix",
     "AE1SensitivityMatrix",
 ]
