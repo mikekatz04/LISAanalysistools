@@ -27,9 +27,9 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     Args:
         filename: File name. File should be in the style of LISAOrbits
-        force_backend: If ``gpu`` or ``cuda``, use a gpu.
         armlength: Armlength of detector.
-
+        force_backend: If ``gpu`` or ``cuda``, use a gpu.
+        
     """
 
     def __init__(
@@ -39,6 +39,8 @@ class Orbits(LISAToolsParallelModule, ABC):
         force_backend: Optional[str] = None,
         **kwargs
     ) -> None:
+        
+        # TODO: should we make it compute armlength.
         self.filename = filename
         self.armlength = armlength
         self._setup()
@@ -570,6 +572,28 @@ class DefaultOrbits(EqualArmlengthOrbits):
 
     pass
 
+@dataclass
+class CurrentNoises:
+    """Noise values at a given frequency. 
+
+    Args:
+        isi_oms_noise: Interspacecraft OMS noise value. 
+        rfi_oms_noise: Reference interferometer OMS noise value. 
+        tmi_oms_noise: Test-mass interferometer OMS noise value. 
+        tm_noise: Test-mass acceleration noise value. 
+        rfi_backlink_noise: Reference interferometer backlink noise value.
+        tmi_backlink_noise: Test-mass interferometer backlink noise value.
+        units: Either ``"relative_frequency"`` (AKA fractional frequency deviation [ffd]) or ``"displacement"``. 
+    
+    """
+    isi_oms_noise: float
+    rfi_oms_noise: float
+    tmi_oms_noise: float
+    tm_noise: float
+    rfi_backlink_noise: float
+    tmi_backlink_noise: float
+    units: str
+
 
 @dataclass
 class LISAModelSettings:
@@ -578,6 +602,114 @@ class LISAModelSettings:
     Args:
         Soms_d: OMS displacement noise.
         Sa_a: Acceleration noise.
+        orbits: Orbital information.
+        name: Name of model.
+
+    """
+
+    Soms_d: float
+    Sa_a: float
+    orbits: Orbits
+    name: str
+
+
+class LISAModel(LISAModelSettings, ABC):
+    """Model for the LISA Constellation
+
+    This includes sensitivity information computed in
+    :py:mod:`lisatools.sensitivity` and orbital information
+    contained in an :class:`Orbits` class object.
+
+    This class is used to house high-level methods useful
+    to various needed computations.
+
+    """
+
+    def __str__(self) -> str:
+        out = "LISA Constellation Configurations Settings:\n"
+        for key, item in self.__dict__.items():
+            out += f"{key}: {item}\n"
+        return out
+
+    def lisanoises(
+        self,
+        f: float | np.ndarray,
+        unit: Optional[str] = "relative_frequency",
+    ) -> CurrentNoises:
+        """Calculate both LISA noise terms based on input model.
+        Args:
+            f: Frequency array.
+            unit: Either ``"relative_frequency"`` or ``"displacement"``.
+        Returns:
+            Current noise values at ``f``.    
+        
+        """
+
+        # TODO: fix this up
+        Soms_d_in = self.Soms_d
+        Sa_a_in = self.Sa_a
+
+        frq = f
+        ### Acceleration noise
+        ## In acceleration
+        Sa_a = Sa_a_in * (1.0 + (0.4e-3 / frq) ** 2) * (1.0 + (frq / 8e-3) ** 4)
+        ## In displacement
+        Sa_d = Sa_a * (2.0 * np.pi * frq) ** (-4.0)
+        ## In relative frequency unit
+        Sa_nu = Sa_d * (2.0 * np.pi * frq / C_SI) ** 2
+        Spm = Sa_nu
+
+        ### Optical Metrology System
+        ## In displacement
+        Soms_d = Soms_d_in * (1.0 + (2.0e-3 / f) ** 4)
+        ## In relative frequency unit
+        Soms_nu = Soms_d * (2.0 * np.pi * frq / C_SI) ** 2
+        Sop = Soms_nu
+
+        # for mapping to more detailed noise setup
+        if unit == "displacement":
+            isi_oms_noise = Soms_d
+            tm_noise = Sa_d
+            
+        elif unit == "relative_frequency":
+            isi_oms_noise = Sop
+            tm_noise = Spm
+
+        # for mapping to more detailed noise setup
+        rfi_oms_noise = 0.0
+        tmi_oms_noise = 0.0
+        rfi_backlink_noise = 0.0
+        tmi_backlink_noise = 0.0
+
+        return CurrentNoises(
+            isi_oms_noise,
+            rfi_oms_noise,
+            tmi_oms_noise,
+            tm_noise,
+            rfi_backlink_noise,
+            tmi_backlink_noise,
+            unit
+        )
+
+
+# defaults
+scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
+proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "proposal")
+mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "mrdv1")
+sangria = LISAModel((7.9e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "sangria")
+
+
+@dataclass
+class ExtendedLISAModelSettings:
+    """Required Extended LISA model settings:
+
+    Args:
+        isi_oms_noise: Interspacecraft OMS noise level. 
+        rfi_oms_noise: Reference interferometer OMS noise level. 
+        tmi_oms_noise: Test-mass interferometer OMS noise level. 
+        tm_noise: Test-mass acceleration noise level. 
+        rfi_backlink_noise: Reference interferometer backlink noise level.
+        tmi_backlink_noise: Test-mass interferometer backlink noise level.
         orbits: Orbital information.
         name: Name of model.
 
@@ -596,18 +728,8 @@ class LISAModelSettings:
 lamb = 1064.5e-9
 nu0 = C_SI / lamb
 
-@dataclass
-class CurrentNoises:
-    isi_oms_noise: float
-    rfi_oms_noise: float
-    tmi_oms_noise: float
-    tm_noise: float
-    rfi_backlink_noise: float
-    tmi_backlink_noise: float
-    units: str
 
-
-class LISAModel(LISAModelSettings, ABC):
+class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
     """Model for the LISA Constellation
 
     This includes sensitivity information computed in
@@ -635,6 +757,7 @@ class LISAModel(LISAModelSettings, ABC):
         self,
         f: float | np.ndarray,
         unit: Optional[str] = "relative_frequency",
+        method: Optional[str] ="modern",
     ) -> CurrentNoises:
         """Calculate both LISA noise terms based on input model.
         Args:
@@ -645,13 +768,23 @@ class LISAModel(LISAModelSettings, ABC):
         """
 
         # BASED on code from Olaf Hartwig
-        isi_oms_noise = self.isi_oms_level**2 * f**0
-        rfi_oms_noise = self.rfi_oms_level**2 * f**0
-        tmi_oms_noise = self.tmi_oms_level**2 * f**0
+        if method == "modern":
+            isi_oms_noise = self.isi_oms_level**2 * f**0
+            rfi_oms_noise = self.rfi_oms_level**2 * f**0
+            tmi_oms_noise = self.tmi_oms_level**2 * f**0
 
-        tm_noise = self.tm_noise_level ** 2 * (1 + (0.4e-3 / f) ** 2)
-        rfi_backlink_noise = self.rfi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
-        tmi_backlink_noise = self.tmi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
+            tm_noise = (self.tm_noise_level ** 2) * (1 + (0.4e-3 / f) ** 2)
+            rfi_backlink_noise = self.rfi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
+            tmi_backlink_noise = self.tmi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
+        
+        elif method == "old":
+            isi_oms_noise = self.isi_oms_level**2 * f**0
+            rfi_oms_noise = self.rfi_oms_level**2 * f**0
+            tmi_oms_noise = self.tmi_oms_level**2 * f**0
+
+            tm_noise = (self.tm_noise_level ** 2) * (1 + (0.4e-3 / f) ** 2)
+            rfi_backlink_noise = self.rfi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
+            tmi_backlink_noise = self.tmi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
         
         if unit == "displacement":
             return CurrentNoises(
@@ -681,11 +814,7 @@ class LISAModel(LISAModelSettings, ABC):
 # HERE we simulate the old LDC way of generating the sensitivity by pretending 
 # the rfi_backlink_noise, which has the same functionality of the OMS noise in the
 # LDC code, is the oms noise. 
-scirdv1 = LISAModel(0.0, 0.0, 0.0, 3.0e-15, 15.0e-12, 0.0, DefaultOrbits(), "scirdv1")
-proposal = LISAModel(0.0, 0.0, 0.0, 3.0e-15, 10.0e-12, 0.0, DefaultOrbits(), "proposal")
-mrdv1 = LISAModel(0.0, 0.0, 0.0, 2.4e-15, 10.0e-12, 0.0, DefaultOrbits(), "mrdv1")
-sangria = LISAModel(0.0, 0.0, 0.0, 2.4e-15, 7.9e-12, 0.0, DefaultOrbits(), "sangria")
-sangria_v2 = LISAModel(6.35e-12, 3.32e-12, 1.42e-12, 2.4e-15, 3.0E-12, 3.0E-12, DefaultOrbits(), "sangria_v2")
+sangria_v2 = ExtendedLISAModel(6.35e-12, 3.32e-12, 1.42e-12, 2.4e-15, 3.0E-12, 3.0E-12, DefaultOrbits(), "sangria_v2")
 
 
 __stock_list_models__ = [scirdv1, proposal, mrdv1, sangria, sangria_v2]
