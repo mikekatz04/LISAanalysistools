@@ -54,16 +54,14 @@ class Sensitivity(ABC):
     @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         """Transform from the base sensitivity functions to the TDI PSDs.
 
         Args:
             f: Frequency array.
-            Spm: Acceleration term.
-            Sop: OMS term.
+            noise_levels: Current noise levels at frequency ``f``.
             **kwargs: For interoperability.
 
         Returns:
@@ -76,7 +74,7 @@ class Sensitivity(ABC):
     def get_Sn(
         cls,
         f: float | np.ndarray,
-        model: Optional[lisa_models.LISAModel | str] = lisa_models.scirdv1,
+        model: Optional[lisa_models.LISAModel | str] = lisa_models.sangria,
         **kwargs: dict,
     ) -> float | np.ndarray:
         """Calculate the PSD
@@ -115,13 +113,13 @@ class Sensitivity(ABC):
 
         else:
             model = lisa_models.check_lisa_model(model)
-            assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
+            # assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
 
             # get noise values
-            Spm, Sop = model.lisanoises(f)
+            noise_levels = model.lisanoises(f)
 
             # transform as desired for TDI combination
-            Sout = cls.transform(f, Spm, Sop, **kwargs)
+            Sout = cls.transform(f, noise_levels, **kwargs)
 
         # will add zero if ignored
         stochastic_contribution = cls.stochastic_transform(
@@ -209,10 +207,13 @@ class X1TDISens(Sensitivity):
     channel: str = "X"
 
     @staticmethod
+    def Cxx(f: float | np.ndarray) -> float | np.ndarray:
+        return 16.0 * np.sin(2 * np.pi * f * L_SI / C_SI) ** 2
+                                 
+    @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         __doc__ = (
@@ -220,8 +221,26 @@ class X1TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
-        x = 2.0 * np.pi * lisaLT * f
-        return 16.0 * np.sin(x) ** 2 * (2.0 * (1.0 + np.cos(x) ** 2) * Spm + Sop)
+        assert noise_levels.units == "relative_frequency"
+        Cxx = X1TDISens.Cxx(f)
+
+        # TODO: need to check these
+        isi_rfi_readout_transfer = Cxx
+        tmi_readout_transfer = Cxx * (2.0 * (1.0 + np.cos(2 * np.pi * f * L_SI / C_SI) ** 2))
+        tm_transfer = Cxx * (2.0 * (1.0 + np.cos(2 * np.pi * f * L_SI / C_SI) ** 2))
+        rfi_backlink_transfer = Cxx
+        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + np.cos(2 * np.pi * f * L_SI / C_SI) ** 2))
+        
+        isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
+        rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
+        tmi_oms_ffd = tmi_readout_transfer * noise_levels.tmi_oms_noise
+        tm_noise_ffd = tm_transfer * noise_levels.tm_noise
+        
+        rfi_backlink_ffd = rfi_backlink_transfer * noise_levels.rfi_backlink_noise
+        tmi_backlink_ffd = tmi_backlink_transfer * noise_levels.tmi_backlink_noise
+
+        total_noise = tm_noise_ffd + isi_oms_ffd + rfi_oms_ffd + tmi_oms_ffd + rfi_backlink_ffd + tmi_backlink_ffd
+        return total_noise
 
     @staticmethod
     def stochastic_transform(
@@ -235,12 +254,10 @@ class X1TDISens(Sensitivity):
         t = 4.0 * x**2 * np.sin(x) ** 2
         return Sh * t
 
-
 class Y1TDISens(X1TDISens):
     channel: str = "Y"
     __doc__ = X1TDISens.__doc__
     pass
-
 
 class Z1TDISens(X1TDISens):
     channel: str = "Z"
@@ -252,10 +269,13 @@ class XY1TDISens(Sensitivity):
     channel: str = "XY"
 
     @staticmethod
+    def Cxy(f: float | np.ndarray) -> float | np.ndarray:
+        return -4.0 * np.sin(2 * 2 * np.pi * f * L_SI / C_SI) * np.sin(2 * np.pi * f * L_SI / C_SI)
+
+    @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         __doc__ = (
@@ -263,9 +283,27 @@ class XY1TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
-        x = 2.0 * np.pi * lisaLT * f
-        ## TODO Check the acceleration noise term
-        return -4.0 * np.sin(2 * x) * np.sin(x) * (Sop + 4.0 * Spm)
+        assert noise_levels.units == "relative_frequency"
+        Cxy = XY1TDISens.Cxy(f)
+
+        print("CHECK THESE!")
+        
+        isi_rfi_readout_transfer = Cxy
+        tmi_readout_transfer = 4 * Cxy
+        tm_transfer = 4 * Cxy
+        rfi_backlink_transfer = Cxy
+        tmi_backlink_transfer = 4 * Cxy
+
+        isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
+        rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
+        tmi_oms_ffd = tmi_readout_transfer * noise_levels.tmi_oms_noise
+        tm_noise_ffd = tm_transfer * noise_levels.tm_noise
+        
+        rfi_backlink_ffd = rfi_backlink_transfer * noise_levels.rfi_backlink_noise
+        tmi_backlink_ffd = tmi_backlink_transfer * noise_levels.tmi_backlink_noise
+
+        total_noise = tm_noise_ffd + isi_oms_ffd + rfi_oms_ffd + tmi_oms_ffd + rfi_backlink_ffd + tmi_backlink_ffd
+        return total_noise
 
     @staticmethod
     def stochastic_transform(
@@ -298,10 +336,13 @@ class X2TDISens(Sensitivity):
     channel: str = "X"
 
     @staticmethod
+    def Cxx(f: float | np.ndarray) -> float | np.ndarray:
+        return 16. * np.sin((2 * np.pi * f) * L_SI / C_SI) ** 2 * np.sin(2 * (2 * np.pi * f) * L_SI / C_SI) ** 2  # np.abs(1. - np.exp(-2j * np.pi * f * L_SI / C_SI) ** 2) ** 2
+
+    @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         __doc__ = (
@@ -309,11 +350,25 @@ class X2TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
-        x = 2.0 * np.pi * lisaLT * f
-        ## TODO Check the acceleration noise term
-        return (64.0 * np.sin(x) ** 2 * np.sin(2 * x) ** 2 * Sop) + (
-            256.0 * (3 + np.cos(2 * x)) * np.cos(x) ** 2 * np.sin(x) ** 4 * Spm
-        )
+        assert noise_levels.units == "relative_frequency"
+        Cxx = X2TDISens.Cxx(f)
+
+        isi_rfi_readout_transfer = 4. * Cxx
+        tmi_readout_transfer = Cxx * (3 + np.cos(4 * np.pi * f * L_SI / C_SI)) 
+        tm_transfer = 4 * Cxx * (3 + np.cos(4 * np.pi * f * L_SI / C_SI)) 
+        rfi_backlink_transfer = 4 * Cxx
+        tmi_backlink_transfer = Cxx * (3 + np.cos(4 * np.pi * f * L_SI / C_SI)) 
+ 
+        isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
+        rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
+        tmi_oms_ffd = tmi_readout_transfer * noise_levels.tmi_oms_noise
+        tm_noise_ffd = tm_transfer * noise_levels.tm_noise
+        
+        rfi_backlink_ffd = rfi_backlink_transfer * noise_levels.rfi_backlink_noise
+        tmi_backlink_ffd = tmi_backlink_transfer * noise_levels.tmi_backlink_noise
+
+        total_noise = tm_noise_ffd + isi_oms_ffd + rfi_oms_ffd + tmi_oms_ffd + rfi_backlink_ffd + tmi_backlink_ffd
+        return total_noise
 
     @staticmethod
     def stochastic_transform(
@@ -360,10 +415,13 @@ class XY2TDISens(Sensitivity):
     channel: str = "XY"
 
     @staticmethod
+    def Cxy(f: float | np.ndarray) -> float | np.ndarray:
+        return -16.0 * np.sin(2 * np.pi * f * L_SI / C_SI) * np.sin(2.0 * 2 * np.pi * f * L_SI / C_SI) ** 3
+
+    @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         """
@@ -371,8 +429,7 @@ class XY2TDISens(Sensitivity):
 
         Args:
             f: Frequency array [Hz].
-            Spm: Acceleration noise PSD (test-mass).
-            Sop: Optical path noise PSD (OMS).
+            noise_levels: Current noise levels at frequency ``f``.
             **kwargs: For interoperability.
 
         Returns:
@@ -383,17 +440,25 @@ class XY2TDISens(Sensitivity):
             C_XY = -16 sin(x) sin³(2x)
             CSD_XY = C_XY * (4*S_pm + S_op)
         """
-        # Dimensionless frequency variable: x = 2π * (L/c) * f = ωL/c
-        # lisaLT = L/c ≈ 8.33 seconds for LISA
-        x = 2.0 * np.pi * lisaLT * f
+        assert noise_levels.units == "relative_frequency"
+        Cxy = XY2TDISens.Cxy(f)
 
-        # Common transfer function factor for TDI2 CSD
-        # C_XY(ω) = -16 sin(ωL/c) sin³(2ωL/c)
-        C_XY = -16.0 * np.sin(x) * np.sin(2.0 * x)**3
+        isi_rfi_readout_transfer = Cxy
+        tmi_readout_transfer = Cxy
+        tm_transfer = 4 * Cxy
+        rfi_backlink_transfer = Cxy
+        tmi_backlink_transfer = Cxy
+ 
+        isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
+        rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
+        tmi_oms_ffd = tmi_readout_transfer * noise_levels.tmi_oms_noise
+        tm_noise_ffd = tm_transfer * noise_levels.tm_noise
+        
+        rfi_backlink_ffd = rfi_backlink_transfer * noise_levels.rfi_backlink_noise
+        tmi_backlink_ffd = tmi_backlink_transfer * noise_levels.tmi_backlink_noise
 
-        # Total CSD: acceleration + optical path contributions
-        # From Table II: CSD = 4*C_XY*S_pm + C_XY*S_op = C_XY*(4*S_pm + S_op)
-        return C_XY * (4.0 * Spm + Sop)
+        total_noise = tm_noise_ffd + isi_oms_ffd + rfi_oms_ffd + tmi_oms_ffd + rfi_backlink_ffd + tmi_backlink_ffd
+        return total_noise
 
     @staticmethod
     def stochastic_transform(
@@ -450,8 +515,7 @@ class A1TDISens(Sensitivity):
     @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         __doc__ = (
@@ -496,8 +560,7 @@ class T1TDISens(Sensitivity):
     @staticmethod
     def transform(
         f: float | np.ndarray,
-        Spm: float | np.ndarray,
-        Sop: float | np.ndarray,
+        noise_levels: lisa_models.CurrentNoises,
         **kwargs: dict,
     ) -> float | np.ndarray:
         __doc__ = (
@@ -529,7 +592,7 @@ class LISASens(Sensitivity):
     def get_Sn(
         cls,
         f: float | np.ndarray,
-        model: Optional[lisa_models.LISAModel | str] = lisa_models.scirdv1,
+        model: Optional[lisa_models.LISAModel | str] = lisa_models.sangria,
         average: bool = True,
         **kwargs: dict,
     ) -> float | np.ndarray:
@@ -904,7 +967,7 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
     Args:
         f: Frequency array [Hz].
         **sens_kwargs: Keyword arguments to pass to Sensitivity.get_Sn()
-            (e.g., model=lisa_models.scirdv1).
+            (e.g., model=lisa_models.sangria).
 
     Notes:
         - Inherits matrix inversion and determinant computation from SensitivityMatrix
@@ -920,7 +983,7 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
             f: Frequency array [Hz].
             **sens_kwargs: Keyword arguments for Sensitivity.get_Sn()
                 Common kwargs:
-                    - model: LISA noise model (e.g., scirdv1, sangria)
+                    - model: LISA noise model (e.g., sangria, sangria)
                     - stochastic_params: Parameters for galactic foreground
                     - stochastic_function: Custom stochastic function
         """
