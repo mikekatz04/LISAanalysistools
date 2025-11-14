@@ -74,7 +74,6 @@ class EMRITDIWaveform(AETTDIWaveform):
             flip_hx=True,  # set to True if waveform is h+ - ihx
             remove_sky_coords=False,
             is_ecliptic_latitude=False,
-            remove_garbage=True,  # removes the beginning of the signal that has bad information
             **response_kwargs_in,
         )
 

@@ -320,6 +320,143 @@ class MBHSetup(Setup):
         if self.branch_backend is None:
             self.branch_backend = MBHHDFBackend
 
+from ..hdfbackend import EMRIHDFBackend
+from ..state import EMRIState
+@dataclasses.dataclass
+class EMRISettings(Settings):
+    fill_values: np.ndarray = dataclasses.field(default_factory=lambda: np.array([1.0, 0.0])) 
+    injection: Optional[np.ndarray] = None
+    delta_prior: Optional[float] = None
+    betas: Optional[np.ndarray] = None
+    inner_moves: Optional[typing.List[Move]] = None
+    num_prop_repeats: Optional[int] = 10
+    emri_search_file_key: Optional[str] = "_emri_search_tmp_file"
+
+class EMRISetup(Setup):
+    def __init__(self, emri_settings: EMRISettings):
+        
+        # had a better way to do this but it stopped allowing for pickle
+        super().__init__(emri_settings)
+
+        level = logging.DEBUG
+        name = "EMRISetup"
+        self.logger = init_logger(filename="emri_setup.log", level=level, name=name)
+        
+        self.init_setup()
+        
+    def init_sampling_info(self):
+
+        if self.transform is None:
+
+            # for transforms
+
+            emri_fill_dict = {
+            "ndim_full": 14,
+            "fill_values": self.fill_values, # inclination and Phi_theta
+            "fill_inds": np.array([5, 12]),
+            }
+
+            emri_transform_fn_in = {
+                0: np.exp,  # M 
+                7: np.arccos, # qS
+                9: np.arccos,  # qK
+            }
+
+            self.transform = TransformContainer(
+                parameter_transforms=emri_transform_fn_in, fill_dict=emri_fill_dict
+            )
+
+        if self.periodic is None:
+            self.periodic = {"emri": {7: 2 * np.pi, 9: 2 * np.pi, 10: 2 * np.pi, 11: 2 * np.pi}}
+
+        self.setup_priors()
+        
+        self.logger.info("Need a better way to treat EMRI betas ladder")
+
+        if self.betas is None:
+            snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
+            ntemps_pe = 1  # len(snrs_ladder)
+            # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
+            betas = 1 / 1.2 ** np.arange(ntemps_pe)
+            #betas[-1] = 0.0001
+            self.betas = betas
+
+        # TODO: maybe combine this into Setup
+        if self.other_tempering_kwargs is None:
+            self.other_tempering_kwargs = dict(permute=False)
+
+        if "permute" not in self.other_tempering_kwargs:
+            self.other_tempering_kwargs["permute"] = False
+
+        assert not self.other_tempering_kwargs["permute"]
+
+        if self.initialize_kwargs is None:
+            self.initialize_kwargs = {}
+
+        self.waveform_kwargs = dict(
+            mode_selection_threshold=0.1,
+        )
+
+        if self.inner_moves is None:
+            from eryn.moves import StretchMove
+            self.inner_moves = [
+                (StretchMove(), 1.0)
+            ]
+
+    def setup_priors(self,):
+        """
+        Get the prior distributions for the EMRI parameters.
+        If delta is provided, use narrow priors around the injection values.
+        Otherwise, use wide priors. 
+
+        Args:
+            injection (np.ndarray): Injection parameter values.
+            delta (float, optional): Fractional width for narrow priors. Defaults to None.
+        Returns:
+            ProbDistContainer: Container with prior distributions for each parameter.
+        """
+
+        priors_emri = {
+            5: uniform_dist(0.01, 100.0),  # dist in Gpc
+            6: uniform_dist(-0.99999, 0.99999),  # qS
+            7: uniform_dist(0.0, 2 * np.pi),  # phiS
+            8: uniform_dist(-0.99999, 0.99999),  # qK
+            9: uniform_dist(0.0, 2 * np.pi),  # phiK
+            10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+            11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+        }
+
+        if self.delta_prior is not None:
+            self.logger.info('use narrow emri priors')
+            amax = min(0.9999, self.injection[2] * ( 1 + self.delta_prior)) # ensure prior is compatible with FEW
+            priors_emri[0] = uniform_dist( (1 - self.delta_prior) * self.injection[0], (1 + self.delta_prior) * self.injection[0])  # logM total mass
+            priors_emri[1] = uniform_dist( (1 - self.delta_prior) * self.injection[1], (1 + self.delta_prior) * self.injection[1])  # mu
+            priors_emri[2] = uniform_dist( (1 - self.delta_prior) * self.injection[2], amax)  # a
+            priors_emri[3] = uniform_dist( (1 - self.delta_prior) * self.injection[3], (1 + self.delta_prior) * self.injection[3])  # p0
+            priors_emri[4] = uniform_dist( (1 - self.delta_prior) * self.injection[4], (1 + self.delta_prior) * self.injection[4])  # e0
+        
+        else:
+            self.logger.info('use wide emri priors')
+            priors_emri[0] = uniform_dist(np.log(5e5), np.log(5e6)) # logM total mass
+            priors_emri[1] = uniform_dist(1.0, 100.0)  # mu
+            priors_emri[2] = uniform_dist(0.01, 0.999)  # a
+            priors_emri[3] = uniform_dist(5.0, 16.0) # p0
+            priors_emri[4] = uniform_dist(0.001, 0.8) # e0
+        
+        self.priors = {"emri": ProbDistContainer(priors_emri)}
+
+    def init_setup(self):
+        self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        if self.branch_state is None:
+            self.branch_state = EMRIState
+        
+        if self.branch_backend is None:
+            self.branch_backend = EMRIHDFBackend
+
+
 from lisatools.detector import EqualArmlengthOrbits
 
 

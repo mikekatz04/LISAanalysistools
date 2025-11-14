@@ -32,7 +32,7 @@ from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFreque
 
 from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings
+    MBHSetup, MBHSettings, GBSetup, GBSettings, EMRISetup, EMRISettings,
 )
 
 from eryn.prior import uniform_dist
@@ -86,6 +86,18 @@ class PSDPERecipeStep(RecipeStep):
     def stopping_function(self, iteration, last_sample, sampler):
         # this will already be converged to max logl
         return False
+    
+class EMRIPERecipeStep(RecipeStep):
+    def __init__(self, *args, moves=None, weights=None, **kwargs):
+        super().__init__(moves=moves, weights=weights)
+    
+    def setup_run(self, iteration, last_sample, sampler):
+        # making sure
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+
+    def stopping_function(self, iteration, last_sample, sampler):
+        return False
 
 
 from lisatools.sampling.stopping import SearchConvergeStopping
@@ -99,7 +111,10 @@ from lisatools.sampling.stopping import SearchConvergeStopping
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
+
+    from lisatools.sources.emri import EMRITDIWaveform  
    
+    emri_info = curr.source_info["emri"]
     # TODO: adjust this indide current info
     general_info = curr.general_info
     nwalkers = curr.general_info.nwalkers
@@ -110,13 +125,12 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     
     # setup psd search move
     effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
-    Tmax = 1e6
-    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=True)
+    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=np.inf, permute=False)
     
     psd_move_args = (acs, priors)
 
     psd_move_kwargs = dict(
-        num_repeats=100,
+        num_repeats=500,
         live_dangerously=True,
         # gibbs_sampling_setup=[{
         #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
@@ -143,13 +157,114 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
-    
-    
-#######################
-##### SETTINGS ###########
-###############
+    #recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
 
+    wave_gen = WrapEMRI(EMRITDIWaveform(**emri_info.initialize_kwargs), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
+    
+    betas_all = np.tile(make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["emri"].betas_all = betas_all
+
+    inner_moves = emri_info.inner_moves
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
+
+    emri_move_args = (
+        "emri",
+        coords_shape,
+        wave_gen,
+        tempering_kwargs,
+        emri_info.waveform_kwargs.copy(),
+        emri_info.waveform_kwargs.copy(),
+        acs,
+        emri_info.num_prop_repeats,
+        emri_info.transform,
+        priors,
+        inner_moves,
+        acs.df
+    )
+    emri_pe_move = ResidualAddOneRemoveOneMove(*emri_move_args)
+
+    emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
+    emri_pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+
+    recipe.add_recipe_component(EMRIPERecipeStep(moves=[emri_pe_moves]), name="emri pe")
+
+
+##########################
+##### SETTINGS ###########
+##########################
+
+class WrapEMRI:
+    def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind, dt):
+        self.waveform_gen_td = waveform_gen_td
+        self.tukey_alpha = tukey_alpha
+        self.nchannels = nchannels
+        self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
+        self.dt = dt
+
+    def __call__(self, *args, **kwargs):
+        AET_t = cp.asarray(self.waveform_gen_td(*args, **kwargs))
+        fft_input = AET_t * tukey(AET_t.shape[-1], self.tukey_alpha, xp=cp)[None, :]
+        # TODO: adjust this if it needs 3rd axis?
+        AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[:self.nchannels, self.start_freq_ind: self.end_freq_ind]
+        return AET_f
+
+def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
+
+    injection_parameters_file = '/data/asantini/packages/LISAanalysistools/injection_params.npz'
+    delta_prior = 1e-2
+
+    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    # waveform kwargs
+    response_kwargs = dict(
+        t0=30000.0,
+        order=25,
+        tdi="1st generation",
+        tdi_chan="AE",
+        orbits=gpu_orbits,
+        force_backend="cuda12x",
+        remove_garbage="zero",  # removes the beginning of the signal that has bad information
+    )
+
+    # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
+    # so spin results are currently meaningless and will lead to slower code
+    # waveform kwargs
+    initialize_kwargs_emri = dict(
+        T=general_set.Tobs / YRSID_SI, # TODO: check these conversions all align
+        dt=general_set.dt,
+        emri_waveform_args=("FastKerrEccentricEquatorialFlux",),
+        emri_waveform_kwargs=dict(force_backend="cuda12x"),
+        response_kwargs=response_kwargs,
+    )
+
+    injection_params = np.load(injection_parameters_file)['injection_params']
+    fill_values = np.array([injection_params[5], injection_params[12]])
+
+    injection_sampling = deepcopy(injection_params)
+    injection_sampling[0] = np.log(injection_sampling[0])  # log mass
+    injection_sampling[7] = np.cos(injection_sampling[7])  # cos qK
+    injection_sampling[9] = np.cos(injection_sampling[9])  # cos qS
+
+    injection_sampling = np.delete(injection_sampling, [5, 12])
+    
+
+    emri_settings = EMRISettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        fill_values=fill_values,
+        injection=injection_sampling,
+        delta_prior=delta_prior,
+        initialize_kwargs=initialize_kwargs_emri,
+        nleaves_max=1,
+        nleaves_min=1,
+        ndim=12
+    )
+
+    return EMRISetup(emri_settings)
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     
@@ -194,14 +309,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
-    Tobs = 2. * YRSID_SI / 12.0
+    Tobs = YRSID_SI * 2.0 / 12.0
     dt = 10.0
 
-    head_dir = "/data/asantini/packages/LISAanalysistools/"
-    #ldc_source_file = head_dir + "emri_sangria_injection.h5"
-    ldc_source_file = head_dir + "LDC2_sangria_training_v2.h5"
-    base_file_name = "psd_separate_3rd_try"
-    file_store_dir = head_dir + "global_fit_output/"
+    emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
+    base_file_name = "emri_psd_3rd_try"
+    file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
@@ -209,7 +322,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
     nwalkers = 36
-    ntemps = 24
+    ntemps = 2
 
     tukey_alpha = 0.05
 
@@ -221,7 +334,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        data_input_path=ldc_source_file,
+        data_input_path=emri_source_file,
         orbits=orbits,
         gpu_orbits=gpu_orbits, 
         start_freq_ind=0,
@@ -232,7 +345,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         ntemps=ntemps,
         tukey_alpha=tukey_alpha,
         gpus=gpus,
-        remove_from_data=["mbhb", "dgb", "igb", "vgb"],
+        remove_from_data=[],
     )
 
     general_setup = GeneralSetup(general_settings)
@@ -270,6 +383,14 @@ def get_global_fit_settings(copy_settings_file=False):
 
     ##################################
     ##################################
+    ###  EMRI Settings  ##############
+    ##################################
+    ##################################
+
+    emri_setup = get_emri_erebor_settings(general_setup)
+
+    ##################################
+    ##################################
     ###  PSD Settings  ###############
     ##################################
     ##################################
@@ -285,7 +406,7 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "psd": psd_setup,
-            # "emri": all_emri_info,
+            "emri": emri_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,
