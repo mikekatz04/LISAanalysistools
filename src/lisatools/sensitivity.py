@@ -126,7 +126,10 @@ class Sensitivity(ABC):
             f, cls.get_stochastic_contribution(f, **kwargs), **kwargs
         )
 
-        Sout += stochastic_contribution
+        try:
+            Sout += stochastic_contribution
+        except:
+            breakpoint()
         return Sout
 
     @classmethod
@@ -571,16 +574,17 @@ class A1TDISens(X1TDISens, Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
-        assert noise_levels.units == "relative_frequency"
-        Cxx = X1TDISens.Cxx(f)
-
+        # these are WRONG
         if np.any(np.asarray([
             noise_levels.rfi_backlink_noise,
-            noise_levels.rfi_oms_noise,
             noise_levels.tmi_backlink_noise,
-            noise_levels.tmi_oms_noise,
+            noise_levels.rfi_oms_noise,
+            noise_levels.tmi_oms_noise
         ]) != 0.0):
-            raise NotImplementedError("Need to add A1/E1/T1 for extended noise model.")
+            raise NotImplementedError("ExtendedLISAModel has not been implemented yet for A1/E1/T1.")
+
+        assert noise_levels.units == "relative_frequency"
+        Cxx = X1TDISens.Cxx(f)
 
         x = 2 * np.pi * f * L_SI / C_SI
 
@@ -639,12 +643,41 @@ class T1TDISens(Sensitivity):
             + Sensitivity.transform.__doc__.split("PSDs.\n\n")[-1]
         )
 
-        x = 2.0 * np.pi * lisaLT * f
-        return (
-            16.0 * Sop * (1.0 - np.cos(x)) * np.sin(x) ** 2
-            + 128.0 * Spm * np.sin(x) ** 2 * np.sin(0.5 * x) ** 4
-        )
+        assert noise_levels.units == "relative_frequency"
+        
+        Cxx = X1TDISens.Cxx(f)
 
+        x = 2 * np.pi * f * L_SI / C_SI
+
+        # these are WRONG
+        if np.any(np.asarray([
+            noise_levels.rfi_backlink_noise,
+            noise_levels.tmi_backlink_noise,
+            noise_levels.rfi_oms_noise,
+            noise_levels.tmi_oms_noise
+        ]) != 0.0):
+            raise NotImplementedError("ExtendedLISAModel has not been implemented yet for A1/E1/T1.")
+        tmi_readout_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        rfi_backlink_transfer = Cxx
+        tmi_backlink_transfer = Cxx * (2.0 * (1.0 + np.cos(x) ** 2))
+        
+        # these are right and were changed accordingly
+        # Need to find a citation for these 1st gen stuff
+        # all that is needed for old model type
+        isi_rfi_readout_transfer = Cxx * (1 - np.cos(x))
+        tm_transfer = 8.0 * Cxx * np.sin(x / 2.) ** 4
+
+        isi_oms_ffd = isi_rfi_readout_transfer * noise_levels.isi_oms_noise
+        rfi_oms_ffd = isi_rfi_readout_transfer * noise_levels.rfi_oms_noise
+        tmi_oms_ffd = tmi_readout_transfer * noise_levels.tmi_oms_noise
+        tm_noise_ffd = tm_transfer * noise_levels.tm_noise
+        
+        rfi_backlink_ffd = rfi_backlink_transfer * noise_levels.rfi_backlink_noise
+        tmi_backlink_ffd = tmi_backlink_transfer * noise_levels.tmi_backlink_noise
+
+        total_noise = tm_noise_ffd + isi_oms_ffd + rfi_oms_ffd + tmi_oms_ffd + rfi_backlink_ffd + tmi_backlink_ffd
+        return total_noise
+    
     @staticmethod
     def stochastic_transform(
         f: float | np.ndarray, Sh: float | np.ndarray, **kwargs: dict
@@ -703,7 +736,6 @@ class A2TDISens(X2TDISens, Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
-        raise NotImplementedError("Need to add transfer functions for stochastic signals for A2/E2/T2.")
         x = 2.0 * np.pi * lisaLT * f
         # TODO: check these functions for TDI2
         t = 4.0 * x**2 * np.sin(x) ** 2
@@ -760,7 +792,6 @@ class T2TDISens(X2TDISens, Sensitivity):
             "Transform from the base stochastic functions to the XYZ stochastic TDI information.\n\n"
             + Sensitivity.stochastic_transform.__doc__.split("PSDs.\n\n")[-1]
         )
-        raise NotImplementedError("Need to add transfer functions for stochastic signals for A2/E2/T2.")
         x = 2.0 * np.pi * lisaLT * f
         # TODO: check these functions for TDI2
         t = 4.0 * x**2 * np.sin(x) ** 2
@@ -791,10 +822,15 @@ class LISASens(Sensitivity):
 
         """
         model = lisa_models.check_lisa_model(model)
-        assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
+        
+        if not isinstance(model, lisa_models.LISAModel):
+            raise NotImplementedError("This function has not been implemented for ExtendedLISAModel yet.")
 
         # get noise values
-        Sa_d, Sop = model.lisanoises(f, unit="displacement")
+        noise_values = model.lisanoises(f, unit="displacement")
+
+        Sa_d = noise_values.tm_noise
+        Sop = noise_values.isi_oms_noise
 
         all_m = np.sqrt(4.0 * Sa_d + Sop)
         ## Average the antenna response
@@ -910,12 +946,17 @@ class SensitivityMatrix:
             | Sensitivity
         ),
         *sens_args: tuple,
+        sens_kwargs_mat = None,
         **sens_kwargs: dict,
     ) -> None:
         self.frequency_arr = f
         self.data_length = len(self.frequency_arr)
         self.sens_args = sens_args
-        self.sens_kwargs = sens_kwargs
+        if sens_kwargs_mat is None:
+            self.sens_kwargs = sens_kwargs
+        else:
+            self.sens_kwargs = sens_kwargs_mat
+
         self.sens_mat = sens_mat
 
     @property
@@ -928,6 +969,10 @@ class SensitivityMatrix:
         assert frequency_arr.ndim == 1
         self._frequency_arr = frequency_arr
 
+    def check_update(self):
+        if not self.can_redo:
+            raise ValueError("Cannot update sensitivities because original input was arrays rather than functions.")
+
     def update_frequency_arr(self, frequency_arr: np.ndarray) -> None:
         """Update class with new frequency array.
 
@@ -935,17 +980,20 @@ class SensitivityMatrix:
             frequency_arr: Frequency array.
 
         """
+        self.check_update()
         self.frequency_arr = frequency_arr
         self.sens_mat = self.sens_mat_input
 
-    def update_model(self, model: lisa_models.LISAModel) -> None:
+    def update_model(self, model: lisa_models.LISAModel | list | np.ndarray) -> None:
         """Update class with new sensitivity model.
 
         Args:
             model: Noise model. Object of type :class:`lisa_models.LISAModel`. It can also be a string corresponding to one of the stock models.
 
         """
-        self.sens_kwargs["model"] = model
+        self.check_update()
+        for tmp_kwargs in self.sens_kwargs.flatten():
+            tmp_kwargs["model"] = model
         self.sens_mat = self.sens_mat_input
 
     def update_stochastic(self, **kwargs: dict) -> None:
@@ -958,7 +1006,11 @@ class SensitivityMatrix:
                 that is not updated will remain in place.
 
         """
-        self.sens_kwargs = {**self.sens_kwargs, **kwargs}
+        self.check_update()
+        tmptmp = self.sens_kwargs.flatten()
+        for i, tmp_kwargs in tmptmp:
+            tmptmp[i] = {**tmp_kwargs, **kwargs}
+        self.sens_kwargs = tmptmp.reshape(self.sens_kwargs.shape)
         self.sens_mat = self.sens_mat_input
 
     @property
@@ -977,35 +1029,130 @@ class SensitivityMatrix:
         ),
     ) -> None:
         """Set sensitivity matrix."""
-        self.sens_mat_input = deepcopy(sens_mat)
-        self._sens_mat = np.asarray(sens_mat, dtype=object)
-
-        # not an
-        new_out = np.full(len(self._sens_mat.flatten()), None, dtype=object)
-        self.return_shape = self._sens_mat.shape
-        for i in range(len(self._sens_mat.flatten())):
-            current_sens = self._sens_mat.flatten()[i]
-            if hasattr(current_sens, "get_Sn") or isinstance(current_sens, str):
-                new_out[i] = get_sensitivity(
-                    self.frequency_arr,
-                    *self.sens_args,
-                    sens_fn=current_sens,
-                    **self.sens_kwargs,
-                )
-
-            elif isinstance(current_sens, np.ndarray) or isinstance(
-                current_sens, cp.ndarray
-            ):
-                new_out[i] = current_sens
+        
+        if (isinstance(sens_mat, np.ndarray) or isinstance(
+            sens_mat, cp.ndarray)
+        ) and sens_mat.dtype != object:
+            self._sens_mat = sens_mat
+            if not hasattr(self, "sens_mat_input"):
+                self.can_redo = False
             else:
-                raise ValueError
+                self.can_redo = True
 
-        xp = get_array_module(new_out[0])
-        # setup in array form
-        self._sens_mat = xp.asarray(list(new_out), dtype=float).reshape(
-            self.return_shape + (-1,)
-        )
+        elif isinstance(sens_mat, list) or (isinstance(sens_mat, np.ndarray) and sens_mat.dtype == object):
+            self.sens_mat_input = deepcopy(sens_mat)
+            _run = True
+            _layer = self.sens_mat_input
+            outer_shape = [len(_layer)]
+            while _run:
+                _test_length = None
+                _type_1 = None
+                for tmp in _layer:
+                    # check each entry is the same type
+                    if _type_1 is None:
+                        _type_1 = type(tmp)
+                    else:
+                        if _type_1 != type(tmp):
+                            raise ValueError("List inputs must be all of the same type.")
+                        
+                    if isinstance(tmp, list):
+                        if _test_length is None:
+                            _test_length = len(tmp)
+                        else:
+                            if len(tmp) != _test_length:
+                                raise ValueError("Input list structure is not Rectangular.")
+                    elif isinstance(tmp, np.ndarray) or isinstance(tmp, cp.ndarray):
+                        if tmp.ndim > 1:
+                            raise ValueError("If entering a list of arrays, arrays must be 1D on the last dimension of the list structure.")
+                        if _test_length is None:
+                            _test_length = len(tmp)
+                        else:
+                            if len(tmp) != _test_length:
+                                raise ValueError("Input list/array structure is not Rectangular.")
 
+                if isinstance(_layer[0], list):
+                    outer_shape.append(len(_layer[0]))
+                    _layer = _layer[0]
+                    continue
+                        
+                elif isinstance(_layer[0], np.ndarray) or isinstance(_layer[0], cp.ndarray):
+                    # hit the array, must be last layer
+                    _run = False
+                    self.can_redo = False
+                    self.is_array_base = True
+                    continue
+
+                # TODO: better way to do this?
+                elif hasattr(_layer[0], "get_Sn"):
+                    _run = False
+                    self.can_redo = True
+                    self.is_array_base = False
+                    continue
+
+                else:
+                    breakpoint()
+                    raise ValueError
+                
+        
+            if isinstance(self.sens_kwargs, np.ndarray) or isinstance(self.sens_kwargs, list):
+                tmp_kwargs = np.asarray(self.sens_kwargs, dtype=object)
+                assert tmp_kwargs.shape == tuple(outer_shape)
+
+            elif isinstance(self.sens_kwargs, dict):
+                tmp_kwargs = np.full(outer_shape, self.sens_kwargs, dtype=object)
+            else:
+                raise ValueError("sens_kwargs Must be numpy object array, list, or dict.")
+            
+            # TODO: sens_kwargs property setup
+            self.sens_kwargs = tmp_kwargs
+            
+            num_components = np.prod(outer_shape).item()
+            xp = get_array_module(self.frequency_arr)
+            if self.is_array_base:
+                _sens_mat = xp.asarray(sens_mat)
+            
+            else:
+                _flattened_arr = np.asarray(sens_mat, dtype=object).flatten()
+                _sens_mat = xp.zeros((num_components, len(self.frequency_arr)))
+                for i, matrix_member in enumerate(_flattened_arr):
+                    # calculate it
+                    if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
+                        _sens_mat[i, :] = get_sensitivity(
+                            self.frequency_arr,
+                            *self.sens_args,
+                            sens_fn=matrix_member,
+                            **self.sens_kwargs.flatten()[i],
+                        )
+
+                    else:
+                        raise ValueError
+
+            # setup in array form
+            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + (len(self.frequency_arr),))
+            
+        else:
+            raise ValueError("Must input array or list.")
+        
+        self._setup_det_and_inv()
+
+    def _setup_det_and_inv(self):
+        # setup detC
+        """Determinant of TDI matrix."""
+        if self.sens_mat.ndim < 3:
+            self.detC = self.sens_mat
+            self.invC = 1/self.sens_mat
+
+        else:
+            xp = get_array_module(self.sens_mat)
+            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
+            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
+            if xp.all(self.detC == 0.0):
+                raise ValueError("All determinants are zero.")
+            
+            invC[self.detC != 0.0] = xp.linalg.inv(self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0])
+            invC[self.detC == 0.0] = 1e-100
+            self.invC = invC.transpose(1, 2, 0)
+            
         xp = get_array_module(self.sens_mat)
 
         # setup detC
@@ -1026,6 +1173,11 @@ class SensitivityMatrix:
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
         return self.sens_mat[index]
+
+    def __setitem__(self, index: Any, value: np.ndarray) -> np.ndarray:
+        """Indexing the class indexes the array."""
+        self.sens_mat[index] = value
+        self._setup_det_and_inv()
 
     @property
     def ndim(self) -> int:
@@ -1194,6 +1346,23 @@ class AET1SensitivityMatrix(SensitivityMatrix):
         super().__init__(f, sens_mat, **sens_kwargs)
 
 
+
+class AET2SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for AET (TDI 2)
+
+    This is just an array because no cross-terms.
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        sens_mat = [A2TDISens, E2TDISens, T2TDISens]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
+
 class AE1SensitivityMatrix(SensitivityMatrix):
     """Default sensitivity matrix for AE (no T) (TDI 1)
 
@@ -1205,6 +1374,20 @@ class AE1SensitivityMatrix(SensitivityMatrix):
 
     def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens]
+        super().__init__(f, sens_mat, **sens_kwargs)
+
+
+class AE2SensitivityMatrix(SensitivityMatrix):
+    """Default sensitivity matrix for AE (no T) (TDI 1)
+
+    Args:
+        f: Frequency array.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+
+    """
+
+    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+        sens_mat = [A2TDISens, E2TDISens]
         super().__init__(f, sens_mat, **sens_kwargs)
 
 

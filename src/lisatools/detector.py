@@ -861,7 +861,7 @@ def check_lisa_model(model: Any) -> LISAModel:
     if isinstance(model, str):
         model = get_default_lisa_model_from_str(model)
 
-    if not isinstance(model, LISAModel):
-        raise ValueError("model argument not given correctly.")
+    if not isinstance(model, LISAModel) and not isinstance(model, ExtendedLISAModel):
+        raise ValueError("Model argument not given correctly.")
 
     return model
