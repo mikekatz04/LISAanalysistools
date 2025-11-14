@@ -773,7 +773,6 @@ def get_eigeninfo(
     Returns:
         Tuple containing Eigenvalues and right-Eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to evals[k].
 
-
     """
 
     if high_precision:
