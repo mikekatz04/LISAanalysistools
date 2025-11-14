@@ -834,7 +834,7 @@ def cutler_vallisneri_bias(
         deriv_inds: Subset of parameters of interest. See :func:`info_matrix`.
         return_derivs: If ``True``, also returns computed numerical derivatives.
         return_cov: If ``True``, also returns computed covariance matrix.
-        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/html/user/utils.html#eryn.utils.TransformContainer>`_ object. See :func:`info_matrix`.
+        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/user/utils.html#eryn.utils.TransformContainer>`_ object. See :func:`info_matrix`.
         waveform_true_args: Arguments for the **true** waveform generator.
         waveform_true_kwargs: Keyword arguments for the **true** waveform generator.
         waveform_approx_args: Arguments for the **approximate** waveform generator.
