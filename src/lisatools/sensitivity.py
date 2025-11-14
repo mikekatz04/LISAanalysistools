@@ -1089,9 +1089,16 @@ class SensitivityMatrix:
                     self.is_array_base = False
                     continue
 
+                elif isinstance(_layer[0], str):
+                    _run = False
+                    self.can_redo = True
+                    self.is_array_base = False
+                    sensitivity = check_sensitivity(_layer[0])
+                    assert hasattr(sensitivity, "get_Sn")
+                    continue
+
                 else:
-                    breakpoint()
-                    raise ValueError
+                    raise ValueError("Matrix element must be Sensitivity object, string representing a sensitivity object, or an array with values.")
                 
         
             if isinstance(self.sens_kwargs, np.ndarray) or isinstance(self.sens_kwargs, list):
