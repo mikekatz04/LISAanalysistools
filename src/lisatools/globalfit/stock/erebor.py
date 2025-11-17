@@ -393,8 +393,10 @@ class EMRISetup(Setup):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
+        #specific_modes = [(2,2,0)]
         self.waveform_kwargs = dict(
             mode_selection_threshold=0.1,
+            #specific_modes=specific_modes,
         )
 
         if self.inner_moves is None:

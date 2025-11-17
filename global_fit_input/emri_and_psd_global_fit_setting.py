@@ -222,7 +222,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     # waveform kwargs
     response_kwargs = dict(
         t0=30000.0,
-        order=25,
+        order=30,
         tdi="1st generation",
         tdi_chan="AE",
         orbits=gpu_orbits,
@@ -258,6 +258,7 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         fill_values=fill_values,
         injection=injection_sampling,
         delta_prior=delta_prior,
+        num_prop_repeats=5,
         initialize_kwargs=initialize_kwargs_emri,
         nleaves_max=1,
         nleaves_min=1,
@@ -309,16 +310,16 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI * 2.0 / 12.0
+    Tobs = YRSID_SI * 3.5 / 12.0
     dt = 10.0
 
     emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
-    base_file_name = "emri_psd_3rd_try"
+    base_file_name = "emri_psd_6th_try"
     file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [5]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
     nwalkers = 36

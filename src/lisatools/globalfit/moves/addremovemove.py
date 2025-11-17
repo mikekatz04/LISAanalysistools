@@ -11,6 +11,8 @@ from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 
+import logging
+logger = logging.getLogger(__name__)
 
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def __init__(self, branch_name, coords_shape, waveform_gen, tempering_kwargs, waveform_gen_kwargs, waveform_like_kwargs, acs, num_repeats, transform_fn, priors, inner_moves, df, 
@@ -126,11 +128,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return
     
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
-        assert x["mbh"].ndim == 4 and x["mbh"].shape[1] == self.nwalkers
+        assert x[self.branch_name].ndim == 4 and x[self.branch_name].shape[1] == self.nwalkers
         # shape is (nwalkers, 1 (nleaves_max), ndim)
-        ntemps = x["mbh"].shape[0]
+        ntemps = x[self.branch_name].shape[0]
 
-        coords = x["mbh"].reshape(-1, x["mbh"].shape[-1])
+        coords = x[self.branch_name].reshape(-1, x[self.branch_name].shape[-1])
         data_index_in = xp.tile(xp.arange(self.nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
         
         coords_in = self.transform_fn.both_transforms(coords)
@@ -140,11 +142,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             coords_in, 
             data_index=data_index_in,
         ).reshape((ntemps, self.nwalkers)).real
-        return output
+        return output, None # AS: match psd? I'm not sure
 
     def propose(self, model, state):
-        print("PROPOSING")
-        print("------" * 20)
+        logger.debug("PROPOSING")
+        logger.debug("------" * 20)
 
         self.setup(model, state)
         tic = time.time()   
@@ -166,7 +168,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # randomize order
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
         for leaf in leaves_random_order:
-            print(f"Processing leaf {leaf}")
+            logger.debug(f"Processing leaf {leaf}")
 
             # guard against leaves with False
             assert np.all(state.branches[self.branch_name].inds[0, 0, leaf] == state.branches[self.branch_name].inds[:, :, leaf])
@@ -201,7 +203,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 data_index=data_index_in,
             ).reshape((self.ntemps, self.nwalkers)).real
             
-            print(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
+            logger.debug(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
 
             prev_logp = self.priors[self.branch_name].logpdf(old_coords).reshape((self.ntemps, self.nwalkers))
 
@@ -209,7 +211,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             
             # fix this need to compute prev_logl for all walkers
             xp.get_default_memory_pool().free_all_blocks()
-            for repeat in range(self.num_repeats):
+            for repeat in tqdm(range(self.num_repeats)):
 
                 # pick move
                 move_here = self.moves[model.random.choice(np.arange(len(self.moves)), p=self.move_weights)]

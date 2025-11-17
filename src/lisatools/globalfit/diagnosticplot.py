@@ -231,7 +231,7 @@ def produce_emri_plots(chain=None, reader=None, discard=0, save_dir='./'):
         r'$\Phi_{r_0}$'
     ]
     #todo remove hardcoded
-    truths = [np.log(1e6), 10.0, 0.9, 4.181726507479478, 0.5, 1.3714627528304648, np.cos(0.3), 0.3, np.cos(1.0471975511965976), 1.0471975511965976, 1.5707963267948966, 3.141592653589793]
+    truths = [np.log(1e6), 10.0, 0.9, 5.0838883680236435, 0.2, 1.0938570879144458, np.cos(0.3), 0.3, np.cos(1.0471975511965976), 1.0471975511965976, 1.5707963267948966, 3.141592653589793]
     
     if chain is None:
         chain = reader.get_chain(discard=discard)["emri"][:, 0]
@@ -276,8 +276,8 @@ class DiagnosticPlotter:
     
 
 if __name__ == "__main__":
-    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/psd_separate_1st_try_parameter_estimation_main.h5'
+    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/emri_psd_4th_try_parameter_estimation_main.h5'
     reader = GFHDFBackend(filepath)
     produce_psd_plots(reader=reader, discard=0, save_dir='./')
-    #produce_emri_plots(reader=reader, discard=0, save_dir='./')
+    produce_emri_plots(reader=reader, discard=0, save_dir='./')
     plot_loglikelihood(reader, discard=0, save_dir='./')
