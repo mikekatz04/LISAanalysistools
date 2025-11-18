@@ -20,6 +20,10 @@ jobs:
         if: contains(github.event.head_commit.message, '[ci:build-wheels]')
         run: |
           echo "LISATOOLSWHL_BUILD=true" >> "$GITHUB_ENV"
+      - name: publish wheels on commit message
+        if: contains(github.event.head_commit.message, '[ci:publish-wheels]')
+        run: |
+          echo "LISATOOLSWHL_PUBLISH=true" >> "$GITHUB_ENV"
       - name: build and publish on tag 'v*'
         if: startsWith(github.event.ref, 'refs/tags/v')
         run: |
@@ -124,13 +128,25 @@ jobs:
             kind: core
             reqpython: '>=3.9'
             arch: x86_64
-            macos_ver: 13.0
+            macos_ver: 14.0
+          - release: cpu
+            os: macos-13
+            kind: core
+            reqpython: '>=3.9'
+            arch: x86_64
+            macos_ver: 15.0
           - release: cpu
             os: macos-14
             kind: core
             reqpython: '>=3.9'
             arch: arm64
             macos_ver: 14.0
+          - release: cpu
+            os: macos-14
+            kind: core
+            reqpython: '>=3.9'
+            arch: arm64
+            macos_ver: 15.0
     steps:
       # =========================
       # = I - Retrieve sources  =
