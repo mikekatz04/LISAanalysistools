@@ -124,10 +124,10 @@ jobs:
             cuda_major: 12
             cuda_minor: 6
           - release: cpu
-            os: macos-15
+            os: macos-15-intel
             kind: core
             reqpython: '>=3.9'
-            arch: intel
+            arch: x86_64
             macos_ver: 15.0
           - release: cpu
             os: macos-15
