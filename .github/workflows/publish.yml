@@ -135,6 +135,12 @@ jobs:
             reqpython: '>=3.9'
             arch: arm64
             macos_ver: 15.0
+          - release: cpu
+            os: macos-14
+            kind: core
+            reqpython: '>=3.9'
+            arch: arm64
+            macos_ver: 14.0
     steps:
       # =========================
       # = I - Retrieve sources  =
