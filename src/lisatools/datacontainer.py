@@ -6,6 +6,7 @@ from typing import Any, Tuple, Optional, List
 import math
 import numpy as np
 from scipy import interpolate
+from scipy import signal
 import matplotlib.pyplot as plt
 
 try:
@@ -22,6 +23,161 @@ from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
 )
 from .sensitivity import SensitivityMatrix
+
+
+import dataclasses
+
+@dataclasses.dataclass
+class SignalSettingsBase:
+    pass
+
+class SignalBase:
+
+    def __init__(self, arr):
+        self.arr = arr
+
+    @property
+    def arr(self) -> np.ndarray:
+        return self._arr
+    
+    @arr.setter
+    def arr(self, arr: np.ndarray):
+        self._arr = arr
+
+    def __getitem__(self, index):
+        return self.arr[index]
+    def __setitem__(self, index, value):
+        self.arr[index] = value
+
+    def transform(self, new_domain, window=None):
+        raise NotImplementedError("Transform needs to be implemented for this signal type.")
+
+@dataclasses.dataclass
+class TDSettings(SignalSettingsBase):
+    dt: float
+
+    @staticmethod
+    def get_associated_class():
+        return TDSignal
+    
+    @property
+    def associated_class(self):
+        return self.get_associated_class()
+
+
+class TDSignal(SignalBase, TDSettings):
+    def __init__(self, arr, settings: TDSettings):
+        TDSettings.__init__(self, settings.dt)
+        SignalBase.__init__(self, arr)
+
+    @property
+    def settings(self) -> TDSettings:
+        return TDSettings(self.dt)
+
+    @property
+    def arr(self) -> np.ndarray:
+        return self._arr
+    
+    @arr.setter
+    def arr(self, arr: np.ndarray):
+        self._arr = arr
+
+    def fft(self, settings=None, window=None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        N = self.arr.shape[0]
+        df = 1 / (N * self.dt)
+        
+        if settings is not None:
+            assert isinstance(settings, FDSettings)
+            assert settings.df == df
+
+        fd_arr = np.fft.rfft(self.arr * window)
+        fd_settings = FDSettings(df)
+        return FDSignal(fd_arr, fd_settings)
+
+    def stft(self, settings=None, window=None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        if settings is not None:
+            raise ValueError("Must provide STFTSettings for stft transform.")
+        assert isinstance(settings, STFTSettings)
+        big_dt = settings.dt
+
+        assert float(int(big_dt / self.dt)) == big_dt / self.dt
+        big_df = settings.df
+        nperseg = int(big_dt / self.dt)
+
+        stft_arr = signal.stft(self.arr * window, fs=(1/self.dt), nperseg=nperseg)
+        return STFTSignal(stft_arr, settings)
+
+    def transform(self, new_domain, window=None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        if isinstance(new_domain, TDSettings):
+            return self.settings.associated_class(self.arr * window, self.settings)
+        
+        elif isinstance(new_domain, FDSettings):
+            return self.fft(settings=new_domain, window=window)
+        
+        elif isinstance(new_domain, STFTSettings):
+            return self.stft()
+
+
+@dataclasses.dataclass
+class FDSettings(SignalSettingsBase):
+    df: float 
+
+    @staticmethod
+    def get_associated_class():
+        return FDSignal
+    
+    @property
+    def associated_class(self):
+        return self.get_associated_class()
+
+class FDSignal(FDSettings, SignalBase):
+    def __init__(self, arr, settings: FDSettings):
+        FDSettings.__init__(self, settings.df)
+        SignalBase.__init__(self, arr)
+
+    @property
+    def settings(self) -> FDSettings:
+        return FDSettings(self.df)
+
+    @property
+    def arr(self) -> np.ndarray:
+        return self._arr
+    
+    @arr.setter
+    def arr(self, arr: np.ndarray):
+        self._arr = arr
+
+
+@dataclasses.dataclass
+class STFTSettings(SignalSettingsBase):
+    dt: float
+    df: float 
+    
+    @staticmethod
+    def get_associated_class():
+        return STFTSignal
+    
+    @property
+    def associated_class(self):
+        return self.get_associated_class()
+
+class STFTSignal(STFTSettings, SignalBase):
+    def __init__(self, arr, settings: STFTSettings):
+        STFTSettings.__init__(self, settings.dt, settings.df)
+        SignalBase.__init__(self, arr)
+
+    @property
+    def settings(self) -> STFTSettings:
+        return STFTSettings(self.dt, self.df)
 
 
 class DataResidualArray:
@@ -48,20 +204,31 @@ class DataResidualArray:
     def __init__(
         self,
         data_res_in: List[np.ndarray] | np.ndarray | DataResidualArray,
-        dt: Optional[float] = None,
-        f_arr: Optional[np.ndarray] = None,
-        df: Optional[float] = None,
+        signal_domain: Optional[SignalSettingsBase] = None,
+        input_signal_domain: Optional[SignalSettingsBase] = None,
         **kwargs: dict,
     ) -> None:
+        
+        self.data_res_in_orig_input = data_res_in
         if isinstance(data_res_in, DataResidualArray):
             for key, item in data_res_in.__dict__.items():
                 setattr(self, key, item)
 
         else:
-            self._check_inputs(dt=dt, f_arr=f_arr, df=df)
-            self.data_res_arr = data_res_in
-            self._store_time_and_frequency_information(dt=dt, f_arr=f_arr, df=df)
+            if not isinstance(data_res_in, SignalBase):
+                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
+                if input_signal_domain is None:
+                    raise ValueError("If inputing a basic array, must put in the input_signal_domain argument.")
+                assert isinstance(input_signal_domain, SignalSettingsBase)
+                data_res_in = input_signal_domain.associated_class(data_res_in, input_signal_domain)
+            
+            input_signal_domain = data_res_in.settings
 
+            if signal_domain == input_signal_domain:
+                self.data_res_arr = data_res_in
+            else:
+                self.data_res_arr = data_res_in.transform(signal_domain)
+            
     @property
     def init_kwargs(self) -> dict:
         """Initial dt, df, f_arr"""
