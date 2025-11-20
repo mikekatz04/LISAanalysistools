@@ -49,9 +49,13 @@ class SignalBase:
     def __setitem__(self, index, value):
         self.arr[index] = value
 
-    def transform(self, new_domain, window=None):
+    def transform(self, new_domain: SignalSettingsBase, window: np.ndarray = None):
         raise NotImplementedError("Transform needs to be implemented for this signal type.")
 
+    @property
+    def shape(self) -> tuple:
+        return self.arr.shape
+    
 @dataclasses.dataclass
 class TDSettings(SignalSettingsBase):
     dt: float
@@ -101,7 +105,7 @@ class TDSignal(SignalBase, TDSettings):
         if window is None:
             window = np.ones(self.arr.shape, dtype=float)
 
-        if settings is not None:
+        if settings is None:
             raise ValueError("Must provide STFTSettings for stft transform.")
         assert isinstance(settings, STFTSettings)
         big_dt = settings.dt
@@ -112,8 +116,18 @@ class TDSignal(SignalBase, TDSettings):
 
         stft_arr = signal.stft(self.arr * window, fs=(1/self.dt), nperseg=nperseg)
         return STFTSignal(stft_arr, settings)
+    
+    def wdmtransform(self, settings=None, window=None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
 
-    def transform(self, new_domain, window=None):
+        if settings is None:
+            raise ValueError("Must provide WDMSettings for WDM transform.")
+        assert isinstance(settings, WDMSettings)
+
+        breakpoint()
+
+    def transform(self, new_domain: SignalSettingsBase, window: np.ndarray = None):
         if window is None:
             window = np.ones(self.arr.shape, dtype=float)
 
@@ -124,7 +138,12 @@ class TDSignal(SignalBase, TDSettings):
             return self.fft(settings=new_domain, window=window)
         
         elif isinstance(new_domain, STFTSettings):
-            return self.stft()
+            return self.stft(settings=new_domain, window=window)
+        
+        elif isinstance(new_domain, WDMSettings):
+            return self.wdmtransform(settings=new_domain, window=window)
+        else:
+            raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
 
 @dataclasses.dataclass
@@ -156,6 +175,52 @@ class FDSignal(FDSettings, SignalBase):
     def arr(self, arr: np.ndarray):
         self._arr = arr
 
+    def ifft(self, settings=None, window=None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        Tobs = 1 / self.df
+        td_arr = np.fft.irfft(self.arr * window)
+        N = td_arr.shape[-1]
+        dt = Tobs / N
+        assert N == int(Tobs / dt)
+        if settings is not None:
+            assert isinstance(settings, TDSettings)
+            assert settings.dt == dt
+
+        td_settings = TDSettings(dt)
+        return TDSignal(td_arr, td_settings)
+    
+    def wdmtransform(self, settings=None, window=None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        if settings is None:
+            raise ValueError("Must provide WDMSettings for WDM transform.")
+        assert isinstance(settings, WDMSettings)
+
+        breakpoint()
+
+    def transform(self, new_domain: SignalSettingsBase, window: np.ndarray = None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        if isinstance(new_domain, FDSettings):
+            return self.settings.associated_class(self.arr * window, self.settings)
+        
+        elif isinstance(new_domain, TDSettings):
+            return self.ifft(settings=new_domain, window=window)
+        
+        elif isinstance(new_domain, STFTSettings):
+            raise NotImplementedError
+            return self.stft()
+
+        elif isinstance(new_domain, WDMSettings):
+            return self.wdmtransform(settings=new_domain, window=window)
+        else:
+            raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
+
+
 
 @dataclasses.dataclass
 class STFTSettings(SignalSettingsBase):
@@ -178,6 +243,31 @@ class STFTSignal(STFTSettings, SignalBase):
     @property
     def settings(self) -> STFTSettings:
         return STFTSettings(self.dt, self.df)
+
+
+
+@dataclasses.dataclass
+class WDMSettings(SignalSettingsBase):
+    dt: float
+    df: float 
+    
+    @staticmethod
+    def get_associated_class():
+        return WDMSignal
+    
+    @property
+    def associated_class(self):
+        return self.get_associated_class()
+
+
+class WDMSignal(WDMSettings, SignalBase):
+    def __init__(self, arr, settings: WDMSettings):
+        WDMSettings.__init__(self, settings.dt, settings.df)
+        SignalBase.__init__(self, arr)
+
+    @property
+    def settings(self) -> WDMSettings:
+        return WDMSettings(self.dt, self.df)
 
 
 class DataResidualArray:
