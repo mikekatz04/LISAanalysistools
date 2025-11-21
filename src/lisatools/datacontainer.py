@@ -27,248 +27,7 @@ from .sensitivity import SensitivityMatrix
 
 import dataclasses
 
-@dataclasses.dataclass
-class SignalSettingsBase:
-    pass
-
-class SignalBase:
-
-    def __init__(self, arr):
-        self.arr = arr
-
-    @property
-    def arr(self) -> np.ndarray:
-        return self._arr
-    
-    @arr.setter
-    def arr(self, arr: np.ndarray):
-        self._arr = arr
-
-    def __getitem__(self, index):
-        return self.arr[index]
-    def __setitem__(self, index, value):
-        self.arr[index] = value
-
-    def transform(self, new_domain: SignalSettingsBase, window: np.ndarray = None):
-        raise NotImplementedError("Transform needs to be implemented for this signal type.")
-
-    @property
-    def shape(self) -> tuple:
-        return self.arr.shape
-    
-@dataclasses.dataclass
-class TDSettings(SignalSettingsBase):
-    dt: float
-
-    @staticmethod
-    def get_associated_class():
-        return TDSignal
-    
-    @property
-    def associated_class(self):
-        return self.get_associated_class()
-
-
-class TDSignal(SignalBase, TDSettings):
-    def __init__(self, arr, settings: TDSettings):
-        TDSettings.__init__(self, settings.dt)
-        SignalBase.__init__(self, arr)
-
-    @property
-    def settings(self) -> TDSettings:
-        return TDSettings(self.dt)
-
-    @property
-    def arr(self) -> np.ndarray:
-        return self._arr
-    
-    @arr.setter
-    def arr(self, arr: np.ndarray):
-        self._arr = arr
-
-    def fft(self, settings=None, window=None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        N = self.arr.shape[0]
-        df = 1 / (N * self.dt)
-        
-        if settings is not None:
-            assert isinstance(settings, FDSettings)
-            assert settings.df == df
-
-        fd_arr = np.fft.rfft(self.arr * window)
-        fd_settings = FDSettings(df)
-        return FDSignal(fd_arr, fd_settings)
-
-    def stft(self, settings=None, window=None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        if settings is None:
-            raise ValueError("Must provide STFTSettings for stft transform.")
-        assert isinstance(settings, STFTSettings)
-        big_dt = settings.dt
-
-        assert float(int(big_dt / self.dt)) == big_dt / self.dt
-        big_df = settings.df
-        nperseg = int(big_dt / self.dt)
-
-        stft_arr = signal.stft(self.arr * window, fs=(1/self.dt), nperseg=nperseg)
-        return STFTSignal(stft_arr, settings)
-    
-    def wdmtransform(self, settings=None, window=None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        if settings is None:
-            raise ValueError("Must provide WDMSettings for WDM transform.")
-        assert isinstance(settings, WDMSettings)
-
-        breakpoint()
-
-    def transform(self, new_domain: SignalSettingsBase, window: np.ndarray = None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        if isinstance(new_domain, TDSettings):
-            return self.settings.associated_class(self.arr * window, self.settings)
-        
-        elif isinstance(new_domain, FDSettings):
-            return self.fft(settings=new_domain, window=window)
-        
-        elif isinstance(new_domain, STFTSettings):
-            return self.stft(settings=new_domain, window=window)
-        
-        elif isinstance(new_domain, WDMSettings):
-            return self.wdmtransform(settings=new_domain, window=window)
-        else:
-            raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
-
-
-@dataclasses.dataclass
-class FDSettings(SignalSettingsBase):
-    df: float 
-
-    @staticmethod
-    def get_associated_class():
-        return FDSignal
-    
-    @property
-    def associated_class(self):
-        return self.get_associated_class()
-
-class FDSignal(FDSettings, SignalBase):
-    def __init__(self, arr, settings: FDSettings):
-        FDSettings.__init__(self, settings.df)
-        SignalBase.__init__(self, arr)
-
-    @property
-    def settings(self) -> FDSettings:
-        return FDSettings(self.df)
-
-    @property
-    def arr(self) -> np.ndarray:
-        return self._arr
-    
-    @arr.setter
-    def arr(self, arr: np.ndarray):
-        self._arr = arr
-
-    def ifft(self, settings=None, window=None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        Tobs = 1 / self.df
-        td_arr = np.fft.irfft(self.arr * window)
-        N = td_arr.shape[-1]
-        dt = Tobs / N
-        assert N == int(Tobs / dt)
-        if settings is not None:
-            assert isinstance(settings, TDSettings)
-            assert settings.dt == dt
-
-        td_settings = TDSettings(dt)
-        return TDSignal(td_arr, td_settings)
-    
-    def wdmtransform(self, settings=None, window=None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        if settings is None:
-            raise ValueError("Must provide WDMSettings for WDM transform.")
-        assert isinstance(settings, WDMSettings)
-
-        breakpoint()
-
-    def transform(self, new_domain: SignalSettingsBase, window: np.ndarray = None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
-        if isinstance(new_domain, FDSettings):
-            return self.settings.associated_class(self.arr * window, self.settings)
-        
-        elif isinstance(new_domain, TDSettings):
-            return self.ifft(settings=new_domain, window=window)
-        
-        elif isinstance(new_domain, STFTSettings):
-            raise NotImplementedError
-            return self.stft()
-
-        elif isinstance(new_domain, WDMSettings):
-            return self.wdmtransform(settings=new_domain, window=window)
-        else:
-            raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
-
-
-
-@dataclasses.dataclass
-class STFTSettings(SignalSettingsBase):
-    dt: float
-    df: float 
-    
-    @staticmethod
-    def get_associated_class():
-        return STFTSignal
-    
-    @property
-    def associated_class(self):
-        return self.get_associated_class()
-
-class STFTSignal(STFTSettings, SignalBase):
-    def __init__(self, arr, settings: STFTSettings):
-        STFTSettings.__init__(self, settings.dt, settings.df)
-        SignalBase.__init__(self, arr)
-
-    @property
-    def settings(self) -> STFTSettings:
-        return STFTSettings(self.dt, self.df)
-
-
-
-@dataclasses.dataclass
-class WDMSettings(SignalSettingsBase):
-    dt: float
-    df: float 
-    
-    @staticmethod
-    def get_associated_class():
-        return WDMSignal
-    
-    @property
-    def associated_class(self):
-        return self.get_associated_class()
-
-
-class WDMSignal(WDMSettings, SignalBase):
-    def __init__(self, arr, settings: WDMSettings):
-        WDMSettings.__init__(self, settings.dt, settings.df)
-        SignalBase.__init__(self, arr)
-
-    @property
-    def settings(self) -> WDMSettings:
-        return WDMSettings(self.dt, self.df)
-
+from .domains import *
 
 class DataResidualArray:
     pass
@@ -305,19 +64,36 @@ class DataResidualArray:
                 setattr(self, key, item)
 
         else:
-            if not isinstance(data_res_in, SignalBase):
+            if not isinstance(data_res_in, DomainBase):
                 assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
+
+                xp = get_array_module(data_res_in)
+                data_res_in = xp.atleast_2d(data_res_in)
                 if input_signal_domain is None:
                     raise ValueError("If inputing a basic array, must put in the input_signal_domain argument.")
-                assert isinstance(input_signal_domain, SignalSettingsBase)
+                assert isinstance(input_signal_domain, DomainSettingsBase)
                 data_res_in = input_signal_domain.associated_class(data_res_in, input_signal_domain)
             
             input_signal_domain = data_res_in.settings
 
+            if signal_domain is None:
+                if isinstance(input_signal_domain, TDSettings):
+                    # default for TD for now is in FD
+                    Nf = np.fft.rfft(np.ones(input_signal_domain.N))
+                    df = 1. / (input_signal_domain.N * input_signal_domain.dt)
+                    signal_domain = FDSettings(Nf, df)
+
+                else:
+                    # default is same domain
+                    signal_domain = input_signal_domain
+        
             if signal_domain == input_signal_domain:
                 self.data_res_arr = data_res_in
             else:
                 self.data_res_arr = data_res_in.transform(signal_domain)
+
+            self.nchannels = self.data_res_arr.nchannels
+            self.data_shape = self.data_res_arr.settings.basis_shape
             
     @property
     def init_kwargs(self) -> dict:
@@ -451,37 +227,7 @@ class DataResidualArray:
     @data_res_arr.setter
     def data_res_arr(self, data_res_arr: List[np.ndarray] | np.ndarray) -> None:
         """Set ``data_res_arr``."""
-        self._data_res_arr_input = data_res_arr
-
-        if (
-            isinstance(data_res_arr, np.ndarray) or isinstance(data_res_arr, cp.ndarray)
-        ) and data_res_arr.ndim == 1:
-            data_res_arr = [data_res_arr]
-
-        elif (
-            isinstance(data_res_arr, np.ndarray) or isinstance(data_res_arr, cp.ndarray)
-        ) and data_res_arr.ndim == 2:
-            data_res_arr = list(data_res_arr)
-
-        new_out = np.full(len(data_res_arr), None, dtype=object)
-        self.data_length = None
-        for i in range(len(data_res_arr)):
-            current_data = data_res_arr[i]
-            if isinstance(current_data, np.ndarray) or isinstance(
-                current_data, cp.ndarray
-            ):
-                if self.data_length is None:
-                    self.data_length = len(current_data)
-                else:
-                    assert len(current_data) == self.data_length
-
-                new_out[i] = current_data
-            else:
-                raise ValueError
-
-        self.nchannels = len(new_out)
-        xp = get_array_module(new_out[0])
-        self._data_res_arr = xp.asarray(list(new_out), dtype=new_out[0].dtype)
+        self._data_res_arr = data_res_arr
 
     def __getitem__(self, index: tuple) -> np.ndarray:
         """Index this class directly in ``self.data_res_arr``."""
