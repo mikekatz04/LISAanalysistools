@@ -110,27 +110,18 @@ class TDSignal(DomainBase, TDSettings):
     def settings(self) -> TDSettings:
         return TDSettings(*self.args, **self.kwargs)
 
-    @property
-    def arr(self) -> np.ndarray:
-        return self._arr
-    
-    @arr.setter
-    def arr(self, arr: np.ndarray):
-        self._arr = arr
-
     def fft(self, settings=None, window=None):
         if window is None:
             window = np.ones(self.arr.shape, dtype=float)
 
-        N = self.arr.shape[0]
-        df = 1 / (N * self.dt)
+        df = 1 / (self.N * self.dt)
         
         if settings is not None:
             assert isinstance(settings, FDSettings)
             assert settings.df == df
 
         fd_arr = np.fft.rfft(self.arr * window)
-        fd_settings = FDSettings(df)
+        fd_settings = FDSettings(fd_arr.shape[-1], df)
         return FDSignal(fd_arr, fd_settings)
 
     def stft(self, settings=None, window=None):
@@ -157,44 +148,8 @@ class TDSignal(DomainBase, TDSettings):
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
 
-        # windowed data packets
-        wdata = np.zeros((self.arr.shape[0], settings.N,)) # , double_vector(wdm->N)
-        
-        # wavelet wavepacket transform of the signal
-        wave = np.zeros((self.arr.shape[0], settings.NT, settings.NF), dtype=complex)
-            
-        # normalization factor
-        fac = np.sqrt(2) * np.sqrt(settings.cadence)/settings.norm
-
-        # normalization fudge factor
-        fac *= np.sqrt(settings.cadence) / 2.
-        
-        ND = settings.NT * settings.NF
-
-        wdm_window = settings.window # 
-        
-        # np.apply_along_axis(lambda m: np.convolve(m, filt, mode='full'), axis=0, arr=a)
-        for i in range(settings.NT):
-            for j in range(settings.N):
-                n = i*settings.NF - int(settings.N/2) + j
-                if n < 0:
-                    n += ND  # periodically wrap the data
-                if n >= ND:
-                    n -= ND  # periodically wrap the data
-                wdata[:, j] = self.arr[:, n] * wdm_window[j]  # apply the window
-                
-            tmp = np.fft.rfft(wdata, axis=-1)
-            wave[:, i, 0] = tmp[:, 0]
-            for j in range(settings.NF):  #(int j=1 j<wdm->NF j++)
-                n = j*settings.oversample
-                wave[:, i, j] = wdata[:, n].conj()
-                # if((i+j)%2 ==0):
-                #     wave[i][j] = wdata[2*n]
-                # else:
-                #     wave[i][j] = -wdata[2*n+1]
-
-        wave *= fac
-        return WDMSignal(wave, settings)
+        # go to frequency domain then wavelets
+        return self.fft(settings=None, window=window).transform(settings)
 
 # static void wavelet_window_time(struct Wavelets *wdm)
 # {
@@ -357,6 +312,15 @@ class FDSettings(DomainSettingsBase):
         return self.N
     
 
+from pywavelet.transforms.phi_computer import phitilde_vec_norm
+from pywavelet.transforms.numpy.forward.from_freq import (
+    transform_wavelet_freq_helper
+)
+
+from pywavelet.transforms.numpy.inverse.to_freq import (
+    inverse_wavelet_freq_helper_fast as inverse_wavelet_freq_helper,
+)
+
 class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
         FDSettings.__init__(self, *settings.args, **settings.kwargs)
@@ -365,14 +329,6 @@ class FDSignal(FDSettings, DomainBase):
     @property
     def settings(self) -> FDSettings:
         return FDSettings(*self.args, **self.kwargs)
-
-    @property
-    def arr(self) -> np.ndarray:
-        return self._arr
-    
-    @arr.setter
-    def arr(self, arr: np.ndarray):
-        self._arr = np.atleast_2d(arr)
 
     def ifft(self, settings=None, window=None):
         if window is None:
@@ -390,6 +346,35 @@ class FDSignal(FDSettings, DomainBase):
         td_settings = TDSettings(dt)
         return TDSignal(td_arr, td_settings)
     
+    def get_fd_window_for_wdm(self, settings):
+
+        N = self.settings.N
+
+        # solve for window
+        N = (settings.NF+1)
+
+        # mini wavelet structure for basis covering just N layers
+        T = settings.dt*settings.NT
+        domega = 2 * np.pi / T
+
+        window = np.zeros(self.N, dtype=complex)
+
+        # wdm window function
+        for i in range(0, int(settings.NT / 2)):  # (i=0; i<=wdm->NT/2; i++)
+            omega = i*domega
+            window[i] = settings.phitilde(omega)
+    
+        raise NotImplementedError
+    
+        # normalize
+        # for(i=-wdm->NT/2; i<= wdm->NT/2; i++) norm += window[abs(i)]*window[abs(i)];
+        # norm = sqrt(norm/wdm_temp->cadence);
+        
+        # for(i=0; i<=wdm->NT/2; i++) window[i] /= norm;
+        
+        # free(wdm_temp);
+        
+
     def wdmtransform(self, settings=None, window=None):
         if window is None:
             window = np.ones(self.arr.shape, dtype=float)
@@ -398,7 +383,15 @@ class FDSignal(FDSettings, DomainBase):
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
 
-        breakpoint()
+        phif = phitilde_vec_norm(settings.NF, settings.NT, 4.0)
+
+        new_arr = np.zeros((self.nchannels, settings.NT, settings.NF), dtype=complex)
+
+        for i in range(self.nchannels):
+            new_arr[i] = transform_wavelet_freq_helper(self.arr[i], settings.NF, settings.NT, phif).T
+
+        # will resetup waveform basis
+        return WDMSignal(new_arr, settings=settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
         if window is None:
@@ -601,6 +594,55 @@ class WDMSignal(WDMSettings, DomainBase):
     @property
     def settings(self) -> WDMSettings:
         return WDMSettings(*self.args, **self.kwargs)
+    
+    def wdm_to_fd(self, settings=None, window=None):
+        
+        phif = phitilde_vec_norm(self.NF, self.NT, 4.0)
+
+        # determine FD parameters
+        total_pixels = self.NT * self.NF
+        Tobs = total_pixels * self.data_dt
+        df = 1 / Tobs
+        N = int((total_pixels / 2 + 1) if total_pixels % 2 == 0 else ((total_pixels + 1) / 2))
+        check_settings = FDSettings(N, df)
+        
+        if settings is not None:
+            if check_settings != settings:
+                breakpoint()
+                raise ValueError("Entered FD settings do not correspond to valid transform. Better to leave them blank if possible.")
+        else:
+            settings = check_settings
+            
+        # Perform the inverse transform
+        new_arr = np.zeros((self.nchannels, settings.N), dtype=complex)
+
+        for i in range(self.nchannels):
+            new_arr[i] = inverse_wavelet_freq_helper(self.arr[i], phif, self.NF, self.NT)
+
+        return FDSignal(new_arr, settings)
+
+    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
+        if window is None:
+            window = np.ones(self.arr.shape, dtype=float)
+
+        if isinstance(new_domain, TDSettings):
+            return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window)
+        
+        elif isinstance(new_domain, FDSettings):
+            return self.wdm_to_fd(settings=new_domain, window=window)
+        
+        elif isinstance(new_domain, STFTSettings):
+            return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None).stft(settings=new_domain, window=window)
+        
+        elif isinstance(new_domain, WDMSettings):
+            if new_domain == self.settings:
+                return self
+            else:
+                return self.wdm_to_fd(settings=None, window=None).wdmtransform(settings=new_domain, window=window)
+        else:
+            raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
+
+    
 
 
 __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]
