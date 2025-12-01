@@ -121,7 +121,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         ll = np.full_like(data_index.get(), -1e300, dtype=float)
 
         for i, (coords_in_now, data_index_now) in enumerate(zip(old_coords_in, data_index.get())):
-            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(*coords_in_now, signal_gen=self.waveform_gen)
+            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(*coords_in_now, waveform_kwargs=self.waveform_like_kwargs, signal_gen=self.waveform_gen)
+
         return ll
 
     def setup(self, model, state):
@@ -318,8 +319,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 coords_for_swap = {self.branch_name: new_state.branches_coords[self.branch_name][:, :, leaf].copy()[:, :, None]}
                 
                 # TODO: make adjustable rate of fancy swaps
-                fancy_swap = (repeat % 20 == 0)
-                
+                #fancy_swap = (repeat % 20 == 0)
+                fancy_swap = False
+                 
                 compute_log_like = self.log_like_for_fancy_swaping
 
                 # TODO: check permute make sure it is okay

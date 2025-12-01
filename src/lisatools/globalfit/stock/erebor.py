@@ -1,7 +1,7 @@
 from __future__ import annotations
 import dataclasses
 import typing
-from typing import Optional
+from typing import Any, Optional
 import numpy as np
 import h5py
 
@@ -324,9 +324,15 @@ from ..hdfbackend import EMRIHDFBackend
 from ..state import EMRIState
 @dataclasses.dataclass
 class EMRISettings(Settings):
+    logm1_lims: typing.List[float, float] = None
+    m2_lims: typing.List[float, float] = None
+    a_lims: typing.List[float, float] = None
+    p0_lims: typing.List[float, float] = None
+    e0_lims: typing.List[float, float] = None
+    waveform_kwargs: Optional[dict] = None
+    injection: Optional[np.ndarray] = None # AS here only for the starting state 
+    info_matrix_gen: Optional[Any] = None #todo change name to info matrix or smth
     fill_values: np.ndarray = dataclasses.field(default_factory=lambda: np.array([1.0, 0.0])) 
-    injection: Optional[np.ndarray] = None
-    delta_prior: Optional[float] = None
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 10
@@ -369,6 +375,7 @@ class EMRISetup(Setup):
         if self.periodic is None:
             self.periodic = {"emri": {7: 2 * np.pi, 9: 2 * np.pi, 10: 2 * np.pi, 11: 2 * np.pi}}
 
+
         self.setup_priors()
         
         self.logger.info("Need a better way to treat EMRI betas ladder")
@@ -393,12 +400,6 @@ class EMRISetup(Setup):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
-        #specific_modes = [(2,2,0)]
-        self.waveform_kwargs = dict(
-            mode_selection_threshold=0.1,
-            #specific_modes=specific_modes,
-        )
-
         if self.inner_moves is None:
             from eryn.moves import StretchMove
             self.inner_moves = [
@@ -408,17 +409,20 @@ class EMRISetup(Setup):
     def setup_priors(self,):
         """
         Get the prior distributions for the EMRI parameters.
-        If delta is provided, use narrow priors around the injection values.
-        Otherwise, use wide priors. 
+        override the default priors with custom boundaries for the intrinsic parameters. 
 
         Args:
-            injection (np.ndarray): Injection parameter values.
-            delta (float, optional): Fractional width for narrow priors. Defaults to None.
+
         Returns:
             ProbDistContainer: Container with prior distributions for each parameter.
         """
 
         priors_emri = {
+            0: uniform_dist(np.log(5e5), np.log(5e6)), #log m1
+            1: uniform_dist(1, 100), # m2
+            2: uniform_dist(0.01, 0.999),  # a
+            3: uniform_dist(5.0, 100.0), # p0
+            4: uniform_dist(0.001, 0.8), # e0
             5: uniform_dist(0.01, 100.0),  # dist in Gpc
             6: uniform_dist(-0.99999, 0.99999),  # qS
             7: uniform_dist(0.0, 2 * np.pi),  # phiS
@@ -428,23 +432,12 @@ class EMRISetup(Setup):
             11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
         }
 
-        if self.delta_prior is not None:
-            self.logger.info('use narrow emri priors')
-            amax = min(0.9999, self.injection[2] * ( 1 + self.delta_prior)) # ensure prior is compatible with FEW
-            priors_emri[0] = uniform_dist( (1 - self.delta_prior) * self.injection[0], (1 + self.delta_prior) * self.injection[0])  # logM total mass
-            priors_emri[1] = uniform_dist( (1 - self.delta_prior) * self.injection[1], (1 + self.delta_prior) * self.injection[1])  # mu
-            priors_emri[2] = uniform_dist( (1 - self.delta_prior) * self.injection[2], amax)  # a
-            priors_emri[3] = uniform_dist( (1 - self.delta_prior) * self.injection[3], (1 + self.delta_prior) * self.injection[3])  # p0
-            priors_emri[4] = uniform_dist( (1 - self.delta_prior) * self.injection[4], (1 + self.delta_prior) * self.injection[4])  # e0
-        
-        else:
-            self.logger.info('use wide emri priors')
-            priors_emri[0] = uniform_dist(np.log(5e5), np.log(5e6)) # logM total mass
-            priors_emri[1] = uniform_dist(1.0, 100.0)  # mu
-            priors_emri[2] = uniform_dist(0.01, 0.999)  # a
-            priors_emri[3] = uniform_dist(5.0, 16.0) # p0
-            priors_emri[4] = uniform_dist(0.001, 0.8) # e0
-        
+        limits = ['logm1_lims', 'm2_lims', 'a_lims', 'p0_lims', 'e0_lims']
+        for i, lims in enumerate(limits):
+            if getattr(self, lims) is not None:
+                self.logger.info(f'Setting prior for parameter {i} using limits {getattr(self, lims)}')
+                priors_emri[i] = uniform_dist(*getattr(self, lims))
+
         self.priors = {"emri": ProbDistContainer(priors_emri)}
 
     def init_setup(self):

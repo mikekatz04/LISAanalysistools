@@ -49,4 +49,4 @@ if __name__ == "__main__":
 
     gf = GlobalFit(curr_info, MPI.COMM_WORLD)
     gf.run_global_fit()
-    breakpoint()
+    #breakpoint()

@@ -170,7 +170,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 compute_log_like=self.compute_log_like, 
                 compute_log_prior=self.compute_log_prior, 
                 fancy_swap=True,
-                permute_here=True
+                permute_here=False #todo AS: playing with this
             )
 
             for name in x:

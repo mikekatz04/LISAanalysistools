@@ -98,6 +98,7 @@ class EMRISearchRecipeStep(RecipeStep):
 
     def stopping_function(self, iteration, last_sample, sampler):
         # this will already be converged to max logl
+        print('Starting points drawn from Information Matrix')
         return True
     
 class EMRIPERecipeStep(RecipeStep):
@@ -135,42 +136,6 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     gpus = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
-    
-    # setup psd search move
-    effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
-    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=np.inf, permute=False)
-    
-    psd_move_args = (acs, priors)
-
-    psd_move_kwargs = dict(
-        num_repeats=500,
-        live_dangerously=True,
-        # gibbs_sampling_setup=[{
-        #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
-        #     "galfor": np.ones((1, engine_info.ndims["galfor"]), dtype=bool)
-        # }],
-        temperature_control=temperature_control
-    )
-    
-    psd_search_move = PSDMove(
-        *psd_move_args, 
-        max_logl_mode=True,
-        name="psd search move",
-        **psd_move_kwargs,
-    )
-
-    psd_pe_move = PSDMove(
-        *psd_move_args, 
-        max_logl_mode=False,
-        name="psd pe move",
-        **psd_move_kwargs,
-    )
-    # TODO: put this under the hood
-    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
-
-    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    #recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
 
     wave_gen = WrapEMRI(EMRITDIWaveform(**emri_info.initialize_kwargs), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
     if np.any(emri_inds := state.branches_inds["emri"][0]):
@@ -186,17 +151,17 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
                 acs.add_signal_to_residual(AET[:, :2])
     
     print('need to fix emri betas_all setup')
-
     betas_all = np.tile(make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1))
 
     # to make the states work 
     betas = betas_all[0]
     state.sub_states["emri"].betas_all = betas_all
 
-    inner_moves = emri_info.inner_moves.copy()
     tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
     
     coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
+
+    inner_moves = emri_info.inner_moves.copy()
 
     info_matrix_move = (deepcopy(emri_info.inner_moves[-1][0]), 1)  # assuming last is info_matrix move
 
@@ -208,7 +173,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         emri_info.waveform_kwargs.copy(),
         emri_info.waveform_kwargs.copy(),
         acs,
-        emri_info.num_prop_repeats,
+        1,
         emri_info.transform,
         priors,
         [info_matrix_move],  # skip stretch for search
@@ -218,8 +183,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     emri_search_move = ResidualAddOneRemoveOneMove(*emri_search_move_args)
 
     emri_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    print("skipping emri search for now")    
-    #recipe.add_recipe_component(EMRISearchRecipeStep(moves=[emri_search_move]), name="emri search")
+    recipe.add_recipe_component(EMRISearchRecipeStep(moves=[emri_search_move]), name="emri FIM search")
 
     emri_move_args = (
         "emri",
@@ -237,10 +201,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     )
     emri_pe_move = ResidualAddOneRemoveOneMove(*emri_move_args)
 
-    emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    emri_pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    emri_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
 
-    recipe.add_recipe_component(EMRIPERecipeStep(moves=[emri_pe_moves]), name="emri pe")
+    recipe.add_recipe_component(EMRIPERecipeStep(moves=[emri_pe_move]), name="emri pe")
 
 
 ########################## 
@@ -410,25 +373,6 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
     return EMRISetup(emri_settings)
 
-def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
-    
-    # waveform kwargs
-    initialize_kwargs_psd = dict()
-
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 5.0
-
-    psd_settings = PSDSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs_psd,
-    )
-
-    return PSDSetup(psd_settings)
-
-
-
 # def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
     
 #     from lisatools.detector import EqualArmlengthOrbits
@@ -457,15 +401,15 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 5.0
 
     emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
-    base_file_name = "emri_psd_10th_try"
+    base_file_name = "emri_only_5th_try"
     file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [0]
+    gpus = [1]
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
-    nwalkers = 36
+    nwalkers = 24
     ntemps = 1
 
     tukey_alpha = 0.05
@@ -489,7 +433,8 @@ def get_general_erebor_settings() -> GeneralSetup:
         ntemps=ntemps,
         tukey_alpha=tukey_alpha,
         gpus=gpus,
-        remove_from_data=["dgb", "igb", "vgb", "mbhb"],
+        remove_from_data=["noise", "dgb", "igb", "vgb", "mbhb"],
+        fixed_psd_kwargs=dict(model=sangria)
     )
 
     general_setup = GeneralSetup(general_settings)
@@ -533,15 +478,6 @@ def get_global_fit_settings(copy_settings_file=False):
 
     emri_setup = get_emri_erebor_settings(general_setup)
 
-    ##################################
-    ##################################
-    ###  PSD Settings  ###############
-    ##################################
-    ##################################
-
-
-    psd_setup = get_psd_erebor_settings(general_setup)
-
     ##############
     ## READ OUT ##
     ##############
@@ -549,7 +485,6 @@ def get_global_fit_settings(copy_settings_file=False):
 
     global_settings = GlobalFitSettings(
         source_info={
-            "psd": psd_setup,
             "emri": emri_setup,
         },
         general_info=general_setup,

@@ -272,7 +272,8 @@ class GlobalFit:
                 self.logger.debug("initializing emri inds to true")
                 
                 self.logger.debug("override emri starting coords to be close to the injection") 
-                factor = 1e-4
+                factor = 1e-5
+
                 coords["emri"] = self.curr.source_info['emri'].injection + factor * np.random.randn(self.ntemps, self.nwalkers, self.engine_info.nleaves_max["emri"])
                
 

@@ -208,14 +208,31 @@ def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_c
         fig.savefig(savename)
         plt.close()
 
-def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir='./'):
-    pass
+def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir='./', truths=None):
+    labels = [
+        r'$\log (m_1 / M_\odot)$',
+        r'$q$',
+        r'$a_1$',
+        r'$a_2$',
+        r'$d_L$',
+        r'$\Phi_{0}$',
+        r'$\cos(\iota)$',
+        r'$\beta$',
+        r'$\sin(\lambda)$',
+        r'$\psi$',   
+        r'$t_c$',     
+    ]
+
+    if chain is None:
+        chain = reader.get_chain(discard=discard)["mbh"][:, 0]
+    
+    base_branch_plots(chain, key="mbh", labels=labels, save_dir=save_dir, truths=truths)
 
 def produce_gb_plots(chain=None, reader=None, discard=0, save_dir='./'):
     pass
 
 
-def produce_emri_plots(chain=None, reader=None, discard=0, save_dir='./'):
+def produce_emri_plots(chain=None, reader=None, discard=0, save_dir='./', truths=None):
     labels = [
         r'$\log (m_1 / M_\odot)$',
         r'$m_2 / M_\odot$',
@@ -230,17 +247,15 @@ def produce_emri_plots(chain=None, reader=None, discard=0, save_dir='./'):
         r'$\Phi_{\phi_0}$',
         r'$\Phi_{r_0}$'
     ]
-    #todo remove hardcoded
-    truths = [np.log(1e6), 10.0, 0.9, 5.0838883680236435, 0.2, 1.0938570879144458, np.cos(0.3), 0.3, np.cos(1.0471975511965976), 1.0471975511965976, 1.5707963267948966, 3.141592653589793]
     
     if chain is None:
         chain = reader.get_chain(discard=discard)["emri"][:, 0]
     
     base_branch_plots(chain, key="emri", labels=labels, save_dir=save_dir, truths=truths)
 
-def produce_psd_plots(chain=None, reader=None, discard=0, save_dir='./'):
+def produce_psd_plots(chain=None, reader=None, discard=0, save_dir='./', truths=None):
     labels = [r"$S_{\mathrm{oms}_A}$", r"$S_{\mathrm{acc}_A}$", r"$S_{\mathrm{oms}_E}$", r"$S_{\mathrm{acc}_E}$"]
-    truths = [7.9e-12, 2.4e-15, 7.9e-12, 2.4e-15]
+    
     if chain is None:
         chain = reader.get_chain(discard=discard)["psd"][:, 0]
 
@@ -260,24 +275,39 @@ class DiagnosticPlotter:
         if not os.path.exists(savedir):
             os.makedirs(savedir)
         self.savedir = savedir
+
+        self.emri_truths = self.curr.source_info["emri"].injection if hasattr(self.curr.source_info["emri"], "injection") else None
         
         print("Saving diagnostic plots to ", self.savedir)
 
     def __call__(self, iteration, last_sample, sampler):
         if iteration > 0 and iteration % self.plot_every == 0:
+
+            for move in sampler.moves:
+                print(f"{move.__class__.__name__} acceptance fraction: {np.mean(move.acceptance_fraction[0]):.4f}")
             discard = int(0.1 * sampler.iteration)
 
             for branch in sampler.branch_names:
                 if branch in all_branches:
-                    all_branches_functions[branch](reader=sampler, discard=discard, save_dir=self.savedir)
+                    if branch == "emri":
+                        truths_here = self.emri_truths
+                    elif branch == "psd":
+                        truths_here = [7.9e-12, 2.4e-15, 7.9e-12, 2.4e-15]
+                    else:
+                        truths_here = None
+                    try:
+                        all_branches_functions[branch](reader=sampler, discard=discard, save_dir=self.savedir, truths=truths_here)
+                    except Exception as e:
+                        print(f"Error producing plots for branch {branch}: {e}")
 
             plot_loglikelihood(sampler, discard=discard, save_dir=self.savedir)
 
     
 
 if __name__ == "__main__":
-    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/emri_psd_4th_try_parameter_estimation_main.h5'
+    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/emri_psd_9th_try_parameter_estimation_main.h5'
     reader = GFHDFBackend(filepath)
+    breakpoint()
     produce_psd_plots(reader=reader, discard=0, save_dir='./')
     produce_emri_plots(reader=reader, discard=0, save_dir='./')
     plot_loglikelihood(reader, discard=0, save_dir='./')

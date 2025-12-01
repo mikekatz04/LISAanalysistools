@@ -100,7 +100,23 @@ class EMRISearchRecipeStep(RecipeStep):
         # this will already be converged to max logl
         return True
     
-class EMRIPERecipeStep(RecipeStep):
+class MBHSearchStep(RecipeStep):
+
+    def __init__(self, *args, moves=None, weights=None, **kwargs):
+        super().__init__(moves=moves, weights=weights)
+
+    def setup_run(self, iteration, last_sample, sampler):
+        # making sure
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+        
+    def stopping_function(self, *args, **kwargs):
+        # this will already be converged to max logl
+        # I think it should be just True becuase 
+        # the inner proposal is taking care of this. 
+        return True  # self.stopper(*args, **kwargs)
+    
+class FullPERecipeStep(RecipeStep):
     def __init__(self, *args, moves=None, weights=None, **kwargs):
         super().__init__(moves=moves, weights=weights)
     
@@ -128,6 +144,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     from lisatools.sources.emri import EMRITDIWaveform  
    
     emri_info = curr.source_info["emri"]
+    mbh_info = curr.source_info["mbh"]
     # TODO: adjust this indide current info
     general_info = curr.general_info
     nwalkers = curr.general_info.nwalkers
@@ -171,6 +188,61 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
     #recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
+
+    # MBH setup
+    mbh_info = curr.source_info["mbh"]
+    from bbhx.waveformbuild import BBHWaveformFD
+
+    wave_gen = BBHWaveformFD(
+        **mbh_info.initialize_kwargs
+    )
+
+    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
+        for leaf in range(mbh_inds.shape[-1]):
+            if mbh_inds[0, leaf]:
+                assert np.all(mbh_inds[:, leaf])
+                inj_coords = state.branches_coords["mbh"][0, :, leaf]
+                inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
+                # TODO: fix freqs input with backend
+                AET = wave_gen(*inj_coords_in.T, fill=True, freqs=cp.asarray(acs.f_arr),**mbh_info.waveform_kwargs)
+                acs.add_signal_to_residual(AET[:, :2])
+
+    if False:  # hasattr(state, "betas_all") and state.betas_all is not None:
+            betas_all = state.sub_states["mbh"].betas_all
+    else:
+        print("remove the False above")
+        betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
+
+    # to make the states work 
+    betas = betas_all[0]
+    state.sub_states["mbh"].betas_all = betas_all
+
+    inner_moves = mbh_info.inner_moves
+    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    
+    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
+
+    mbh_move_args = (
+        "mbh",  # branch_name,
+        coords_shape,
+        wave_gen,
+        tempering_kwargs,
+        mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs,
+        mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs,
+        acs,
+        mbh_info.num_prop_repeats,
+        mbh_info.transform,
+        priors,
+        inner_moves,
+        acs.df
+    )
+
+    search_fp = general_info.file_store_dir + general_info.base_file_name + mbh_info.mbh_search_file_key + ".h5"
+    mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend, search_fp=search_fp)
+    mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
+    mbh_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    mbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_move], n_iters=5, verbose=True), name="mbh search")
 
     wave_gen = WrapEMRI(EMRITDIWaveform(**emri_info.initialize_kwargs), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
     if np.any(emri_inds := state.branches_inds["emri"][0]):
@@ -237,11 +309,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     )
     emri_pe_move = ResidualAddOneRemoveOneMove(*emri_move_args)
 
-    emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    emri_pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    pe_moves = GFCombineMove(moves=[mbh_pe_move, emri_pe_move, psd_pe_move], share_temperature_control=False)
+    pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
 
-    recipe.add_recipe_component(EMRIPERecipeStep(moves=[emri_pe_moves]), name="emri pe")
-
+    recipe.add_recipe_component(FullPERecipeStep(moves=[pe_moves]), name="full pe")
 
 ########################## 
 ##### SETTINGS ###########
@@ -261,6 +332,31 @@ class WrapEMRI:
         # TODO: adjust this if it needs 3rd axis?
         AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[:self.nchannels, self.start_freq_ind: self.end_freq_ind]
         return AET_f
+    
+def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
+    
+    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    # waveform kwargs
+    initialize_kwargs_mbh = dict(
+        amp_phase_kwargs=dict(run_phenomd=True),
+        response_kwargs=dict(TDItag="AET", orbits=gpu_orbits),
+        force_backend="cuda12x",
+    )
+
+    from lisatools.utils.constants import YRSID_SI
+    Tobs = YRSID_SI
+    dt = 5.0
+
+    mbh_settings = MBHSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs_mbh,
+        nleaves_max=15,
+        nleaves_min=0,
+        ndim=11
+    )
+
+    return MBHSetup(mbh_settings)
 
 def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
@@ -457,7 +553,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 5.0
 
     emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
-    base_file_name = "emri_psd_10th_try"
+    base_file_name = "emri_mbh_psd_1st_try"
     file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
@@ -489,7 +585,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         ntemps=ntemps,
         tukey_alpha=tukey_alpha,
         gpus=gpus,
-        remove_from_data=["dgb", "igb", "vgb", "mbhb"],
+        remove_from_data=["dgb", "igb", "vgb"],
     )
 
     general_setup = GeneralSetup(general_settings)
@@ -527,6 +623,14 @@ def get_global_fit_settings(copy_settings_file=False):
 
     ##################################
     ##################################
+    ###  MBH Settings  ##############
+    ##################################
+    ##################################
+
+    mbh_setup = get_mbh_erebor_settings(general_setup)
+
+    ##################################
+    ##################################
     ###  EMRI Settings  ##############
     ##################################
     ##################################
@@ -550,6 +654,7 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "psd": psd_setup,
+            "mbh": mbh_setup,
             "emri": emri_setup,
         },
         general_info=general_setup,

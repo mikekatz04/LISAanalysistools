@@ -116,7 +116,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_move_args = (acs, priors)
 
     psd_move_kwargs = dict(
-        num_repeats=100,
+        num_repeats=10,
         live_dangerously=True,
         # gibbs_sampling_setup=[{
         #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
@@ -200,12 +200,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     ldc_source_file = head_dir + "LDC2_sangria_training_v2.h5"
-    base_file_name = "psd_separate_3rd_try"
+    base_file_name = "psd_separate_6th_try"
     file_store_dir = head_dir + "global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [5]
+    gpus = [1]
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
     nwalkers = 36
