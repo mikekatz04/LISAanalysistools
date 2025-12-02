@@ -311,8 +311,6 @@ class XY1TDISens(Sensitivity):
         assert noise_levels.units == "relative_frequency"
         Cxy = XY1TDISens.Cxy(f)
 
-        print("CHECK THESE!")
-        
         isi_rfi_readout_transfer = Cxy
         tmi_readout_transfer = 4 * Cxy
         tm_transfer = 4 * Cxy
