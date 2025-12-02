@@ -384,26 +384,34 @@ class FDSignal(FDSettings, DomainBase):
 
 
         # removed zero frequency and mirrored
-        m = np.repeat(np.arange(1, settings.NF - 1)[:, None], settings.NT, axis=-1)
-        n = np.tile(np.arange(settings.NT), (settings.NF - 2, 1))
+        m = np.repeat(np.arange(0, settings.NF)[:, None], settings.NT, axis=-1)
+        n = np.tile(np.arange(settings.NT), (settings.NF, 1))
         k = (m - 1) * int(settings.NT / 2) + np.arange(settings.NT)[None, :]
         
+        
         base_window = settings.window[:-1]  # TODO: compared to Tyson's code he does i=-N/2; i<N/2; i++
+        dc_window = settings.dc_layer_window
+        # TODO: check if this is right?!?!
+        max_freq_window = settings.max_freq_layer_window
 
-        tmp = self.arr[:, k] * base_window[None, None, :]
+        k[0] += int(settings.NT / 2)
+        # k[-1] -= int(settings.NT / 2)
+        # it is 2 because the max frequency would be at 1, but it removes that (?)
+        assert k.max().item() == self.N - 2
+        tmp = self.arr[:, k]
+        
+        tmp[:, 1:-1] *= base_window[None, None, :]
+        tmp[0] *= dc_window
+        tmp[-1] *= max_freq_window
 
         after_ifft = np.fft.ifft(tmp, axis=-1)
         
         is_m_plus_n_even = ((m + n) % 2 == 0)
-        _new_arr = np.zeros((self.nchannels, settings.NF - 2, settings.NT), dtype=float)
+        _new_arr = np.zeros((self.nchannels, settings.NF, settings.NT), dtype=float)
         _new_arr[:, is_m_plus_n_even] = np.sqrt(2) * np.real(after_ifft)[:, is_m_plus_n_even]
         _new_arr[:, (~is_m_plus_n_even)] = (-1) ** ((m * n)[(~is_m_plus_n_even)] + 1) * np.sqrt(2) * np.imag(after_ifft)[:, (~is_m_plus_n_even)]
-        # will resetup waveform basis
-        
-        new_arr = np.zeros((self.nchannels, settings.NF, settings.NT), dtype=float)
-        new_arr[:, 1:-1] = _new_arr
 
-        return WDMSignal(new_arr, settings=settings)
+        return WDMSignal(_new_arr.transpose(0, 2, 1).copy(), settings=settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
         if window is None:
@@ -544,10 +552,18 @@ class WDMSettings(DomainSettingsBase):
         # IMAG(DX,0) =  0.0
         T = self.dt * self.NT
         domega = 2 * np.pi / T
-        omega = (np.arange(self.NT + 1) - int(self.NT / 2)) * domega
+        self.omega = omega = (np.arange(self.NT + 1) - int(self.NT / 2)) * domega
         window = self.phitilde(omega)
         self.norm = np.sqrt(self.N * self.cadence / self.dOmega)
         self.window = window / self.norm
+        assert 0.0 in omega
+
+        self.ind_middle = np.argwhere(omega == 0.0).squeeze().item()
+
+        omega_for_edge_layers = np.concatenate([omega[self.ind_middle:], domega * (self.ind_middle + np.arange(1, omega[:self.ind_middle].shape[0]))])
+        assert (np.diff(omega_for_edge_layers).min() > 0.0) and np.allclose(np.diff(omega_for_edge_layers).max(), domega)
+        self.dc_layer_window = np.sqrt(2) * self.phitilde(omega_for_edge_layers)
+        self.max_freq_layer_window = self.dc_layer_window[::-1]
         
     @staticmethod
     def get_associated_class():
