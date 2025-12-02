@@ -163,14 +163,14 @@ class PSDMove(GlobalFitMove, StretchMove):
             supps = new_state.supplemental
 
             logP = self.compute_log_posterior(logl, logp)
-            self.temperature_control.temperature_swaps(
+            (x, logP, logl, logp, inds, blobs, supps, branch_supps) = self.temperature_control.temperature_swaps(
                 x, logP, logl, logp, 
                 supps=supps,
                 branch_supps=branch_supps, 
                 compute_log_like=self.compute_log_like, 
                 compute_log_prior=self.compute_log_prior, 
                 fancy_swap=True,
-                permute_here=False #todo AS: playing with this
+                permute_here=True
             )
 
             for name in x:
