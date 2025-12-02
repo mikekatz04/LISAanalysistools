@@ -1,8 +1,9 @@
 from __future__ import annotations
 from typing import Tuple
+import typing
 import numpy as np
 
-# from ..sensitivity import get_sensitivity
+from ..sensitivity import get_sensitivity
 
 try:
     import cupy as cp
@@ -28,17 +29,40 @@ def get_array_module(arr: np.ndarray | cp.ndarray) -> object:
         raise ValueError("arr must be a numpy or cupy array.")
 
 
-def generate_noise_fd(freqs, df, *sensitivity_args, func=None, **sensitivity_kwargs):
+def generate_noise_fd(N: int, df: float, *sensitivity_args: typing.Any, func: typing.Optional[typing.Callable]=None, **sensitivity_kwargs: typing.Any) -> np.ndarray[float]:
+    """Generate noise directly in the Frequency Domain. 
+    
+    Args:
+        N: Number of points in frequency domain waveform assuming frequencies greater than
+            or equal to zero.
+        df: Frequency domain bin size (``1 / (N * dt)``). 
+        sensitivity_args: Arguments for ``func``.
+        func: Function for generating the sensitivity curve as a function of frequency. (default: :func:`lisatools.sensitivity.get_sensivity`)
+        sensitivity_kwargs: Keyword arguments for ``func``. 
+
+    Returns:
+        An instance of generated noise in the frequency domain. 
+
+
+    """
+    if not isinstance(N, int):
+        raise ValueError(f"N must be an integer. See documentation for more information.")
+
+    if not isinstance(df, float):
+        raise ValueError(f"N must be an integer. See documentation for more information.")
+
     if func is None:
         func = get_sensitivity
 
+    freqs = np.arange(N) * df
+
     norm = 0.5 * (1.0 / df) ** 0.5
     psd = func(freqs, *sensitivity_args, **sensitivity_kwargs)
-    noise_to_add = psd ** (1 / 2) * (
+    noise_realization = psd ** (1 / 2) * (
         np.random.normal(0, norm, len(freqs))
         + 1j * np.random.normal(0, norm, len(freqs))
     )
-    return noise_to_add
+    return noise_realization
 
 
 def AET(
@@ -74,172 +98,25 @@ def AET(
     )
 
 
-def searchsorted2d_vec(a, b, xp=None, gpu=None, **kwargs):
-    if xp is None:
-        xp = np
-    else:
-        try:
-            xp.cuda.runtime.setDevice(gpu)
-        except AttributeError:
-            pass
+# def searchsorted2d_vec(a, b, xp=None, gpu=None, **kwargs):
+#     if xp is None:
+#         xp = np
+#     else:
+#         try:
+#             xp.cuda.runtime.setDevice(gpu)
+#         except AttributeError:
+#             pass
 
-    m, n = a.shape
-    max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
-    r = max_num * xp.arange(a.shape[0])[:, None]
-    p = xp.searchsorted((a + r).ravel(), (b + r).ravel(), **kwargs).reshape(m, -1)
+#     m, n = a.shape
+#     max_num = xp.maximum(a.max() - a.min(), b.max() - b.min()) + 1
+#     r = max_num * xp.arange(a.shape[0])[:, None]
+#     p = xp.searchsorted((a + r).ravel(), (b + r).ravel(), **kwargs).reshape(m, -1)
 
-    out = p - n * (xp.arange(m)[:, None])
-    try:
-        xp.cuda.runtime.deviceSynchronize()
-    except AttributeError:
-        pass
+#     out = p - n * (xp.arange(m)[:, None])
+#     try:
+#         xp.cuda.runtime.deviceSynchronize()
+#     except AttributeError:
+#         pass
 
-    return out
+#     return out
 
-
-def get_groups_from_band_structure(
-    f0, band_edges, f0_2=None, xp=None, num_groups_base=3, fix_f_test=None, inds=None
-):
-    if num_groups_base not in [2, 3, 4]:
-        raise ValueError("num_groups_base must be 2 or 3 or 4.")
-    if xp is None:
-        xp = np
-
-    else:
-        try:
-            xp.cuda.runtime.setDevice(xp.cuda.runtime.getDevice())
-
-        except AttributeError:
-            # it is numpy
-            pass
-
-    if not isinstance(f0, xp.ndarray) or not isinstance(band_edges, xp.ndarray):
-        raise TypeError(
-            "f0 and band_edges must be xp.ndarray with xp as numpy or cupy as given by the xp kwarg."
-        )
-
-    shape = f0.shape
-
-    # remove any above or below bands
-    bad = (f0 < band_edges.min()) | (f0 > band_edges.max())
-
-    band_indices = xp.searchsorted(band_edges, f0.flatten()).reshape(shape) - 1
-
-    # sort the bands in, but keep places with inds_band_indices
-    band_indices_sorted = xp.sort(band_indices, axis=-1)
-    inds_band_indices = xp.argsort(band_indices, axis=-1)
-
-    if f0_2 is not None:
-        assert f0_2.shape == f0.shape
-        band_indices_2 = xp.searchsorted(band_edges, f0_2.flatten()).reshape(shape) - 1
-        band_indices_2_sorted = xp.take_along_axis(
-            band_indices_2, inds_band_indices, axis=-1
-        )
-
-        # very important: ensures the proposed new point is not further than 1 band away.
-        diff = 1 if num_groups_base > 2 else 0
-        keep = (
-            np.abs(band_indices_2_sorted.flatten() - band_indices_sorted.flatten())
-            <= diff
-        )
-        if fix_f_test is not None:
-            keep[fix_f_test.flatten()] = False
-        remove = ~keep
-
-    else:
-        keep = np.ones(np.prod(band_indices_sorted.shape), dtype=bool)
-
-    # temperature index associated with each band
-    temp_inds = xp.repeat(
-        xp.arange(band_indices_sorted.shape[0]), np.prod(band_indices_sorted.shape[1:])
-    )[
-        keep
-    ]  # .reshape(shape)
-
-    # walker index associated with each band
-    walker_inds = (
-        xp.tile(
-            xp.arange(band_indices_sorted.shape[1]),
-            (band_indices_sorted.shape[0], band_indices_sorted.shape[2], 1),
-        )
-        .transpose((0, 2, 1))
-        .flatten()[keep]
-    )
-
-    if f0_2 is not None:
-        temp_inds_remove = xp.repeat(
-            xp.arange(band_indices_sorted.shape[0]),
-            np.prod(band_indices_sorted.shape[1:]),
-        )[
-            remove
-        ]  # .reshape(shape)
-
-        # walker index associated with each band
-        walker_inds_remove = (
-            xp.tile(
-                xp.arange(band_indices_sorted.shape[1]),
-                (band_indices_sorted.shape[0], band_indices_sorted.shape[2], 1),
-            )
-            .transpose((0, 2, 1))
-            .flatten()[remove]
-        )
-        inds_band_indices_remove = inds_band_indices.flatten()[remove]
-
-    # special indexing method
-    band_indices_sorted_special = (
-        band_indices_sorted.flatten()[keep]
-        + int(1e12) * temp_inds
-        + int(1e6) * walker_inds
-    )
-
-    # get the unique special indicators
-    (
-        unique_special,
-        unique_special_start_inds,
-        unique_special_reverse,
-        unique_special_counts,
-    ) = np.unique(
-        band_indices_sorted_special,
-        return_index=True,
-        return_inverse=True,
-        return_counts=True,
-    )
-
-    # this basically makes mini arange setups for each band
-    # the added_contribution for the first unique band index is removed
-    added_contribution = xp.arange(band_indices_sorted_special.shape[0])
-
-    # gets the groups
-    combined = band_indices_sorted_special + added_contribution
-    groups = (
-        combined - (combined[unique_special_start_inds])[unique_special_reverse]
-    )  # .reshape(shape)
-
-    groups_even_odd_tmp = xp.asarray(
-        [
-            (num_groups_base * groups + i)
-            * (band_indices_sorted.flatten()[keep] % num_groups_base == i)
-            for i in range(num_groups_base)
-        ]
-    )
-    groups_even_odd = xp.sum(groups_even_odd_tmp, axis=0)
-
-    groups_out = -2 * xp.ones_like(f0, dtype=int)
-    groups_out[(temp_inds, walker_inds, inds_band_indices.flatten()[keep])] = (
-        groups_even_odd
-    )
-
-    groups_out[bad] = -1
-
-    """if f0_2 is not None and not np.all(keep):
-        fix = (temp_inds_remove, walker_inds_remove, inds_band_indices_remove)
-        fix_2 = band_indices_2[fix]
-        fix_1 = band_indices[fix]"""
-
-    return groups_out
-
-
-autodoc_type_aliases = {
-    "Iterable": "Iterable",
-    "ArrayLike": "ArrayLike",
-}
