@@ -376,21 +376,33 @@ class FDSignal(FDSettings, DomainBase):
         
 
     def wdmtransform(self, settings=None, window=None):
-        if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
-
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
 
-        phif = phitilde_vec_norm(settings.NF, settings.NT, 4.0)
+        # phif = phitilde_vec_norm(settings.NF, settings.NT, 4.0)
 
-        new_arr = np.zeros((self.nchannels, settings.NT, settings.NF), dtype=complex)
 
-        for i in range(self.nchannels):
-            new_arr[i] = transform_wavelet_freq_helper(self.arr[i], settings.NF, settings.NT, phif).T
+        # removed zero frequency and mirrored
+        m = np.repeat(np.arange(1, settings.NF - 1)[:, None], settings.NT, axis=-1)
+        n = np.tile(np.arange(settings.NT), (settings.NF - 2, 1))
+        k = (m - 1) * int(settings.NT / 2) + np.arange(settings.NT)[None, :]
+        
+        base_window = settings.window[:-1]  # TODO: compared to Tyson's code he does i=-N/2; i<N/2; i++
 
+        tmp = self.arr[:, k] * base_window[None, None, :]
+
+        after_ifft = np.fft.ifft(tmp, axis=-1)
+        
+        is_m_plus_n_even = ((m + n) % 2 == 0)
+        _new_arr = np.zeros((self.nchannels, settings.NF - 2, settings.NT), dtype=float)
+        _new_arr[:, is_m_plus_n_even] = np.sqrt(2) * np.real(after_ifft)[:, is_m_plus_n_even]
+        _new_arr[:, (~is_m_plus_n_even)] = (-1) ** ((m * n)[(~is_m_plus_n_even)] + 1) * np.sqrt(2) * np.imag(after_ifft)[:, (~is_m_plus_n_even)]
         # will resetup waveform basis
+        
+        new_arr = np.zeros((self.nchannels, settings.NF, settings.NT), dtype=float)
+        new_arr[:, 1:-1] = _new_arr
+
         return WDMSignal(new_arr, settings=settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
@@ -408,7 +420,7 @@ class FDSignal(FDSettings, DomainBase):
             return self.stft()
 
         elif isinstance(new_domain, WDMSettings):
-            return self.wdmtransform(settings=new_domain, window=window)
+            return self.wdmtransform(settings=new_domain, window=new_domain.window)
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
@@ -488,13 +500,14 @@ class WDMSettings(DomainSettingsBase):
         self.inv_root_dOmega = 1.0/np.sqrt(self.dOmega)
         self.B = self.dOmega
         self.A = (self.dOmega-self.B)/2.0
+        
         self.BW = (self.A+self.B)/np.pi
 
         self.N = self.oversample * 2 * self.NF
         if window is None:
             self.setup_window()
         else:
-            assert len(window) == self.N
+            assert len(window) == self.NT + 1
             self.window = window
 
     @property
@@ -514,52 +527,28 @@ class WDMSettings(DomainSettingsBase):
         A = self.A
         B = self.B
         
-        z = 0.0
-        
-        if np.abs(omega) >= A and np.abs(omega) < A+B:
-            x = (np.abs(omega)-A)/B
-            y = special.betainc(WAVELET_FILTER_CONSTANT, WAVELET_FILTER_CONSTANT, x)
-            z = insDOM*np.cos(y*np.pi/2.0)
-        
-        elif np.abs(omega) < A:
-            z = insDOM
+        z = np.zeros(omega.shape[0])
+        beta_inc_calc = (np.abs(omega) >= A) & (np.abs(omega) <= A+B)
+        x = (np.abs(omega[beta_inc_calc])-A)/B
+        y = special.betainc(WAVELET_FILTER_CONSTANT, WAVELET_FILTER_CONSTANT, x)
+        z[beta_inc_calc] = insDOM*np.cos(y*np.pi/2.0)
+        z[(np.abs(omega) < A)] = insDOM
         
         return z
 
     def setup_window(self):
 
         # double *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
-        DX = np.zeros(self.N, dtype=complex)
-        
         # zero frequency
         # REAL(DX,0) =  wdm->inv_root_dOmega
         # IMAG(DX,0) =  0.0
-        DX[0] = self.inv_root_dOmega
-    
-        for i in range(1, int(self.N / 2) + 1):  # (int i=1 i<= wdm->N/2 i++)
-            j = self.N - i 
-            omega = i*self.dOmega
-            
-            # // postive frequencies
-            # REAL(DX,i) = phitilde(wdm,omega)
-            # IMAG(DX,i) =  0.0
-            DX[i] = self.phitilde(omega)
-            # // negative frequencies
-            # REAL(DX,j) =  phitilde(wdm,-omega)
-            # IMAG(DX,j) =  0.0
-            DX[j] = self.phitilde(-omega)
-        
-        dx_copy = DX.copy()
-        DX[:] = np.fft.ifft(DX)
-
-        window = np.zeros(self.N)
-        for i in range(int(self.N / 2)):
-            window[i] = DX[int(self.N/2)+i].real
-            window[int(self.N/2) + i] = DX[i].real
-    
-        self.window = window
+        T = self.dt * self.NT
+        domega = 2 * np.pi / T
+        omega = (np.arange(self.NT + 1) - int(self.NT / 2)) * domega
+        window = self.phitilde(omega)
         self.norm = np.sqrt(self.N * self.cadence / self.dOmega)
-
+        self.window = window / self.norm
+        
     @staticmethod
     def get_associated_class():
         return WDMSignal
