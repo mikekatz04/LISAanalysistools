@@ -3,8 +3,6 @@ from typing import Tuple
 import typing
 import numpy as np
 
-from ..sensitivity import get_sensitivity
-
 try:
     import cupy as cp
 
@@ -52,6 +50,8 @@ def generate_noise_fd(N: int, df: float, *sensitivity_args: typing.Any, func: ty
         raise ValueError(f"N must be an integer. See documentation for more information.")
 
     if func is None:
+        # TODO: make this better
+        from lisatools.sensitivity import get_sensitivity
         func = get_sensitivity
 
     freqs = np.arange(N) * df
