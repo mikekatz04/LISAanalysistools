@@ -32,11 +32,16 @@ int Orbits::get_link_ind(int link)
     else if (link == 21)
         return 5;
     else
+    {
 #ifdef __CUDACC__
-        printf("BAD link ind. Must be 12, 23, 31, 13, 32, 21.");
+    printf("BAD link ind. Must be 12, 23, 31, 13, 32, 21. Link ind entered is %d.\n", link);
 #else
-        throw std::invalid_argument("Bad link ind. Must be 12, 23, 31, 13, 32, 21.");
+    std::ostringstream oss;
+    oss << "BAD link ind. Must be 12, 23, 31, 13, 32, 21. Link ind entered is (" << link << ")." << std::endl;
+    std::string var = oss.str();
+    throw std::invalid_argument(var);
 #endif // __CUDACC__
+    }
     return -1;
 }
 
