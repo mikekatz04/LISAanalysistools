@@ -223,9 +223,11 @@ class GeneralSetup(Setup, GeneralSettings):
         Z = detrend(self.t, tukey_here * self.Z.copy())
 
         import matplotlib.pyplot as plt
-        from emritools.plotting.waveforms import plot_sft
-
-        _ = plot_sft(X, 24*3600, self.dt, fmin=1e-3); plt.yscale('log'); plt.savefig(f'{self.file_store_dir}/Xchannel_sft.png'); plt.close()
+        try: #AS: emritools is a package I put together for EMRI work on the ESA gitlab, I am using it here just for a quick SFT plot of the data channel
+            from emritools.plotting.waveforms import plot_sft
+            _ = plot_sft(X, 24*3600, self.dt, fmin=1e-3); plt.yscale('log'); plt.savefig(f'{self.file_store_dir}/Xchannel_sft.png'); plt.close()
+        except:
+            pass
 
         # f***ing dt
         Xf, Yf, Zf = (np.fft.rfft(X) * self.dt, np.fft.rfft(Y) * self.dt, np.fft.rfft(Z) * self.dt)
