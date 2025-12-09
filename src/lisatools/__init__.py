@@ -43,6 +43,9 @@ add_backends = {
 
 Globals().backends_manager.add_backends(add_backends)
 
+Globals().backends_manager.add_backends(add_backends)
+
+
 from gpubackendtools import get_backend as _get_backend
 from gpubackendtools import has_backend as _has_backend
 from gpubackendtools import get_first_backend as _get_first_backend

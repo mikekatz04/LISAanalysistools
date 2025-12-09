@@ -11,6 +11,7 @@
    user/datacontainer
    user/diagnostic
    user/sources
+   user/utility
    
 .. toctree::
    :maxdepth: 4

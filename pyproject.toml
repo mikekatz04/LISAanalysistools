@@ -20,7 +20,7 @@ requires-python = ">= 3.9"
 
 dependencies = [
   "exceptiongroup; python_version<'3.11'", # To access ExceptionGroup with Python 3.9 and 3.10
-  "h5py",
+  "h5py<3.15",
   "matplotlib",
   "gpubackendtools",
   "jsonschema",                            # To validate content of file registry
@@ -98,7 +98,10 @@ sdist.include = [
   "src/lisatools/git_version.py",                 #@SKIP_PLUGIN@
   "src/lisatools_backend_cuda11x/git_version.py",
   "src/lisatools_backend_cuda12x/git_version.py",
-  "tests/"
+  "tests/",
+  "src/lisatools/cutils/Detector.cu",
+  "src/lisatools/cutils/Detector.hpp",
+  "src/lisatools/cutils/global.hpp",
 ]
 sdist.exclude = [
   ".devcontainer/",
@@ -115,11 +118,11 @@ sdist.exclude = [
 
 wheel.exclude = [
   "**.pyx",
-  "**.cu",
-  "**.cxx",
-  "**.hh",
-  "**.h",
-  "**.hpp",
+  # "**.cu",
+  # "**.cxx",
+  # "**.hh",
+  #"**.h",
+  # "**.hpp",
   "**/CMakeLists.txt",
   "lib/pkgconfig",
   "lib/cmake",

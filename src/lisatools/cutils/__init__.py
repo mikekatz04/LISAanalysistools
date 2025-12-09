@@ -76,6 +76,8 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
         try:
             import lisatools_backend_cuda11x.pycppdetector
             import lisatools_backend_cuda11x.psd
+            import lisatools_backend_cuda11x.pycppdetector
+            import lisatools_backend_cuda11x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
@@ -130,11 +132,5 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             xp=cupy,
         )
 
-
-KNOWN_BACKENDS = {
-    "cuda12x": LISAToolsCuda12xBackend,
-    "cuda11x": LISAToolsCuda11xBackend,
-    "cpu": LISAToolsCpuBackend,
-}
 
 """List of existing backends, per default order of preference."""

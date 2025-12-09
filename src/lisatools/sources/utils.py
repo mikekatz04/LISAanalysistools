@@ -314,7 +314,7 @@ class GBCalculationController(CalculationController):
             )
 
         params[5] = np.cos(params[5])
-        params[8] = np.cos(params[5])
+        params[8] = np.sin(params[8])
 
         if deriv_inds is None:
             deriv_inds = np.delete(np.arange(9), 3)

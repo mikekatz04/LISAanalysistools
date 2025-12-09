@@ -257,9 +257,10 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
     """
     fix = np.isnan(psd[:]) | np.isinf(psd[:])
     assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
-    # TODO: check on this
+    # TODO: check on this / add warning
     detC = psd.detC
-    nl_val = -np.sum(np.log(np.abs(detC[detC != 0.0])))
+    keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
+    nl_val = -np.sum(np.log(np.abs(detC[keep])))
     return nl_val
 
 
@@ -421,7 +422,7 @@ def h_var_p_eps(
         params: Source parameters that are over derivatives (not in fill dict of parameter transforms)
         step: Absolute step size for variable of interest.
         index: Index to parameter of interest.
-        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/html/user/utils.html#eryn.utils.TransformContainer>`_ object to transform from the derivative parameter basis
+        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/user/utils.html#eryn.utils.TransformContainer>`_ object to transform from the derivative parameter basis
             to the waveform parameter basis. This class can also fill in fixed parameters where the derivatives are not being taken.
         waveform_args: args (beyond parameters) for the waveform generator.
         waveform_kwargs: kwargs for the waveform generation.
@@ -781,7 +782,6 @@ def get_eigeninfo(
     Returns:
         Tuple containing Eigenvalues and right-Eigenvectors for the supplied array, constructed such that evects[:,k] corresponds to evals[k].
 
-
     """
 
     if high_precision:
@@ -842,7 +842,7 @@ def cutler_vallisneri_bias(
         deriv_inds: Subset of parameters of interest. See :func:`info_matrix`.
         return_derivs: If ``True``, also returns computed numerical derivatives.
         return_cov: If ``True``, also returns computed covariance matrix.
-        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/html/user/utils.html#eryn.utils.TransformContainer>`_ object. See :func:`info_matrix`.
+        parameter_transforms: `TransformContainer <https://mikekatz04.github.io/Eryn/user/utils.html#eryn.utils.TransformContainer>`_ object. See :func:`info_matrix`.
         waveform_true_args: Arguments for the **true** waveform generator.
         waveform_true_kwargs: Keyword arguments for the **true** waveform generator.
         waveform_approx_args: Arguments for the **approximate** waveform generator.
