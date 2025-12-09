@@ -66,7 +66,6 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             self.search_fp = search_fp
             
         self.finished_search = False
-        self.finished_search = True
 
     @classmethod
     def supported_backends(cls):
@@ -96,12 +95,14 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         
         if "psd" in state.branches:
             psd_best = state.branches["psd"].coords[0, max_logl_walker, 0]
-            galfor_best = state.branches["galfor"].coords[0, max_logl_walker, 0]
 
             model_A.Soms_d = psd_best[0] ** 2
             model_A.Sa_a = psd_best[1] ** 2
             model_E.Soms_d = psd_best[2] ** 2
             model_E.Sa_a = psd_best[3] ** 2
+
+        if "galfor" in state.branches:
+            galfor_best = state.branches["galfor"].coords[0, max_logl_walker, 0]
             stochastic_kwargs = dict(
                 stochastic_function=HyperbolicTangentGalacticForeground, 
                 stochastic_params=galfor_best
@@ -198,7 +199,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 else:
                     assert length_check == len(Af)  
 
-                data_res_arr = DataResidualArray([Af, Ef, np.zeros_like(Ef)], f_arr=fd_short)
+                data_res_arr = DataResidualArray([Af, Ef, np.zeros_like(Ef)], f_arr=fd_short, df=df_short, )
                 _psd_A = A1TDISens.get_Sn(fd_short, model=model_A, **stochastic_kwargs)
                 _psd_E = E1TDISens.get_Sn(fd_short, model=model_E, **stochastic_kwargs)
                 _psd_T = np.full_like(_psd_A, 1e10)
@@ -387,7 +388,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 AET_remove = self.waveform_gen(*AET_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
                 AE_remove = AET_remove[0, :2]
 
-                analyze_here = AnalysisContainer(DataResidualArray(AE_remove, f_arr=acs_all.f_arr), sens_mat=acs_all[max_logl_walker].sens_mat)
+                #analyze_here = AnalysisContainer(DataResidualArray(AE_remove, f_arr=acs_all.f_arr), sens_mat=acs_all[max_logl_walker].sens_mat)
 
                 # within 3600 seconds (1 hr) ?
                 self.time_diff = 3600.0

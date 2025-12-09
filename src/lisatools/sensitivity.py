@@ -426,6 +426,7 @@ class T1TDISens(Sensitivity):
         return 0.0 * (Sh * t)
 
 
+
 class LISASens(Sensitivity):
     @classmethod
     def get_Sn(

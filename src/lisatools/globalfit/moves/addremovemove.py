@@ -11,6 +11,8 @@ from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 
+import logging
+logger = logging.getLogger(__name__)
 
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def __init__(self, branch_name, coords_shape, waveform_gen, tempering_kwargs, waveform_gen_kwargs, waveform_like_kwargs, acs, num_repeats, transform_fn, priors, inner_moves, df, 
@@ -119,18 +121,19 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         ll = np.full_like(data_index.get(), -1e300, dtype=float)
 
         for i, (coords_in_now, data_index_now) in enumerate(zip(old_coords_in, data_index.get())):
-            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(*coords_in_now, signal_gen=self.waveform_gen)
+            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(*coords_in_now, waveform_kwargs=self.waveform_like_kwargs, signal_gen=self.waveform_gen)
+
         return ll
 
     def setup(self, model, state):
         return
     
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
-        assert x["mbh"].ndim == 4 and x["mbh"].shape[1] == self.nwalkers
+        assert x[self.branch_name].ndim == 4 and x[self.branch_name].shape[1] == self.nwalkers
         # shape is (nwalkers, 1 (nleaves_max), ndim)
-        ntemps = x["mbh"].shape[0]
+        ntemps = x[self.branch_name].shape[0]
 
-        coords = x["mbh"].reshape(-1, x["mbh"].shape[-1])
+        coords = x[self.branch_name].reshape(-1, x[self.branch_name].shape[-1])
         data_index_in = xp.tile(xp.arange(self.nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
         
         coords_in = self.transform_fn.both_transforms(coords)
@@ -140,11 +143,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             coords_in, 
             data_index=data_index_in,
         ).reshape((ntemps, self.nwalkers)).real
-        return output
+        return output, None # AS: match psd? I'm not sure
 
     def propose(self, model, state):
-        print("PROPOSING")
-        print("------" * 20)
+        logger.debug("PROPOSING")
+        logger.debug("------" * 20)
 
         self.setup(model, state)
         tic = time.time()   
@@ -166,7 +169,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # randomize order
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
         for leaf in leaves_random_order:
-            print(f"Processing leaf {leaf}")
+            logger.debug(f"Processing leaf {leaf}")
 
             # guard against leaves with False
             assert np.all(state.branches[self.branch_name].inds[0, 0, leaf] == state.branches[self.branch_name].inds[:, :, leaf])
@@ -177,7 +180,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
 
-            temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[leaf]
+            temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[leaf][:self.ntemps] #as: make sure only local ntemps are used
+            ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
 
             ndim = new_state.branches[self.branch_name].coords.shape[-1]
 
@@ -188,7 +192,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
            
             self.setup_likelihood_here(removal_coords_in)
 
-            old_coords = new_state.branches[self.branch_name].coords[:, :, leaf].reshape(-1, ndim)
+            old_coords = new_state.branches[self.branch_name].coords[:self.ntemps, :, leaf].reshape(-1, ndim)
             old_coords_in = self.transform_fn.both_transforms(old_coords)
             
             data_index_in = xp.tile(xp.arange(self.nwalkers), (self.ntemps, 1)).flatten().astype(xp.int32)
@@ -201,7 +205,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 data_index=data_index_in,
             ).reshape((self.ntemps, self.nwalkers)).real
             
-            print(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
+            logger.debug(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
 
             prev_logp = self.priors[self.branch_name].logpdf(old_coords).reshape((self.ntemps, self.nwalkers))
 
@@ -209,20 +213,20 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             
             # fix this need to compute prev_logl for all walkers
             xp.get_default_memory_pool().free_all_blocks()
-            for repeat in range(self.num_repeats):
+            for repeat in tqdm(range(self.num_repeats)):
 
                 # pick move
                 move_here = self.moves[model.random.choice(np.arange(len(self.moves)), p=self.move_weights)]
 
                 # Split the ensemble in half and iterate over these two halves.
-                accepted = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
+                accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
                 all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
                 inds = all_inds % self.nsplits
                 if self.randomize_split:
                     [np.random.shuffle(x) for x in inds]
 
                 # prepare accepted fraction
-                accepted_here = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
+                #accepted_here = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
                 for split in range(self.nsplits):
                     # get split information
                     S1 = inds == split
@@ -235,7 +239,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     # prepare the sets for each model
                     # goes into the proposal as (ntemps * (nwalkers / subset size), nleaves_max, ndim)
                     sets = [
-                        new_state.branches[self.branch_name].coords[inds == j][:, leaf].reshape(self.ntemps, -1, 1, ndim)
+                        new_state.branches[self.branch_name].coords[:self.ntemps][inds == j][:, leaf].reshape(self.ntemps, -1, 1, ndim)
                         for j in range(self.nsplits)
                     ]
 
@@ -296,7 +300,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     temp_inds_update = temp_inds_here[keep.flatten()]
                     walker_inds_update = walker_inds_here[keep.flatten()]
 
-                    accepted[(temp_inds_update, walker_inds_update)] = True
+                    accepted[:self.ntemps][(temp_inds_update, walker_inds_update)] = True
 
                     # update state informatoin
                     new_state.branches[self.branch_name].coords[(temp_inds_update, walker_inds_update, np.full_like(walker_inds_update, leaf))] = new_points[keep].reshape(len(temp_inds_update), ndim)
@@ -316,8 +320,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 coords_for_swap = {self.branch_name: new_state.branches_coords[self.branch_name][:, :, leaf].copy()[:, :, None]}
                 
                 # TODO: make adjustable rate of fancy swaps
-                fancy_swap = (repeat % 20 == 0)
-                
+                #fancy_swap = (repeat % 20 == 0)
+                fancy_swap = False
+                 
                 compute_log_like = self.log_like_for_fancy_swaping
 
                 # TODO: check permute make sure it is okay
@@ -346,7 +351,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.remove_cold_chain_sources(add_coords_in)
             
             # read out all betas from temperature controls
-            new_state.sub_states[self.branch_name].betas_all[leaf] = temperature_control_here.betas[:]
+            new_state.sub_states[self.branch_name].betas_all[leaf][:self.ntemps] = temperature_control_here.betas
             # print(leaf)
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
@@ -380,6 +385,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.temperature_control.swaps_accepted = self.temperature_controls[0].swaps_accepted
         
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
+        #breakpoint()
         new_state.log_like[:] = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
             
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4

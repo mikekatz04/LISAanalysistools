@@ -177,16 +177,20 @@ class GeneralSetup(Setup, GeneralSettings):
                 for source in self.remove_from_data:  # , "dgb", "igb"]:  # "vgb" ,
                     if source == "noise":
                         continue
+                    print(f"Removing {source} from data injection.")
                     change_arr = f["sky"][source]["tdi"][:]
                     for change in ["X", "Y", "Z"]:
                         tXYZ[change] -= change_arr[change]
 
             else: 
                 keys = list(f["sky"])
-                for key in keys:
+                print("Initial keys in data injection: ", keys) 
+                tmp_keys = keys.copy()
+                for key in tmp_keys:
+                    print(key)
                     if key in self.remove_from_data:
                         keys.remove(key)
-                breakpoint()
+                        print(f"Removing {key} from data injection.")
                 tXYZ = f["sky"][keys[0]]["tdi"][:]
                 for key in keys[1:]:
                     tXYZ["X"] += f["sky"][key]["tdi"][:]["X"]
@@ -217,6 +221,13 @@ class GeneralSetup(Setup, GeneralSettings):
         X = detrend(self.t, tukey_here * self.X.copy())
         Y = detrend(self.t, tukey_here * self.Y.copy())
         Z = detrend(self.t, tukey_here * self.Z.copy())
+
+        import matplotlib.pyplot as plt
+        try: #AS: emritools is a package I put together for EMRI work on the ESA gitlab, I am using it here just for a quick SFT plot of the data channel
+            from emritools.plotting.waveforms import plot_sft
+            _ = plot_sft(X, 24*3600, self.dt, fmin=1e-3); plt.yscale('log'); plt.savefig(f'{self.file_store_dir}/Xchannel_sft.png'); plt.close()
+        except:
+            pass
 
         # f***ing dt
         Xf, Yf, Zf = (np.fft.rfft(X) * self.dt, np.fft.rfft(Y) * self.dt, np.fft.rfft(Z) * self.dt)

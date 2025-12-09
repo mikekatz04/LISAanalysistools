@@ -227,7 +227,7 @@ class EMRIState(eryn_State):
     def reset_kwargs(self):
         # TODO: this okay for future?
         return dict(
-            num_emris=self.betas_all.shape[0]
+            num_emris=1 #self.betas_all.shape[0]
         )
 
 class GFState(eryn_State):
