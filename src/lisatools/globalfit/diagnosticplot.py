@@ -171,13 +171,13 @@ def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_c
 
     nsteps, nwalkers, nleaves, ndim = chain.shape
 
-    chain = chain.reshape((nsteps, nwalkers, ndim)) 
+    #chain = chain.reshape((nsteps, nwalkers, ndim)) 
 
     if plot_trace:
         fig, axes = plt.subplots(ndim, 1, figsize=(8, 2 * ndim), sharex=True)
         for i in range(ndim):
             for j in range(nwalkers):
-                axes[i].plot(chain[:, j, i], color=f"C{j % 10}", alpha=0.3)
+                axes[i].plot(chain[:, j, :, i], color=f"C{j % 10}", alpha=0.3)
             if truths is not None:
                 axes[i].axhline(truths[i], color='red', linestyle='--')
             axes[i].set_ylabel(labels[i])
@@ -189,6 +189,7 @@ def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_c
     if plot_corner:
         savename = save_dir + f"{key}_corner.png"
         chain = chain.reshape((-1, ndim))
+        chain = chain[np.isfinite(chain).all(axis=1)]  # remove rows with NaNs or infs
         #fig = corner.corner(chain, labels=labels, truths=truths)
         df = pd.DataFrame(chain, columns=labels)
         C = chainconsumer.ChainConsumer()
@@ -276,7 +277,9 @@ class DiagnosticPlotter:
             os.makedirs(savedir)
         self.savedir = savedir
 
-        self.emri_truths = self.curr.source_info["emri"].injection if hasattr(self.curr.source_info["emri"], "injection") else None
+        self.truths = {}
+        for source in self.curr.source_info.keys():
+            self.truths[source] = self.curr.source_info[source].injection if hasattr(self.curr.source_info[source], "injection") else None
         
         print("Saving diagnostic plots to ", self.savedir)
 
@@ -290,7 +293,7 @@ class DiagnosticPlotter:
             for branch in sampler.branch_names:
                 if branch in all_branches:
                     if branch == "emri":
-                        truths_here = self.emri_truths
+                        truths_here = self.truths['emri']
                     elif branch == "psd":
                         truths_here = [7.9e-12, 2.4e-15, 7.9e-12, 2.4e-15]
                     else:
@@ -305,9 +308,19 @@ class DiagnosticPlotter:
     
 
 if __name__ == "__main__":
-    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/emri_psd_9th_try_parameter_estimation_main.h5'
+    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/emri_psd_10th_try_parameter_estimation_main.h5'
     reader = GFHDFBackend(filepath)
+    discard = 10
+
+    logl = reader.get_log_like(discard=discard)[:, 0]
     breakpoint()
-    produce_psd_plots(reader=reader, discard=0, save_dir='./')
-    produce_emri_plots(reader=reader, discard=0, save_dir='./')
-    plot_loglikelihood(reader, discard=0, save_dir='./')
+    walkers_keep = np.where((logl > 0.999999 * np.max(logl)).all(axis=0))[0]
+    print(f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut.")
+    
+    # produce_mbh_plots(reader=reader, discard=0, save_dir='./')
+    chain = reader.get_chain(discard=discard)["psd"][:, 0, walkers_keep]
+    produce_psd_plots(chain=chain, reader=reader, discard=discard, save_dir='./')
+
+    chain = reader.get_chain(discard=discard)["emri"][:, 0, walkers_keep]
+    produce_emri_plots(chain=chain, reader=reader, discard=discard, save_dir='./')
+    plot_loglikelihood(reader, discard=discard, save_dir='./')

@@ -111,12 +111,12 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     # setup psd search move
     effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
     Tmax = 1e6
-    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=True)
+    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False)
     
     psd_move_args = (acs, priors)
 
     psd_move_kwargs = dict(
-        num_repeats=10,
+        num_repeats=60,
         live_dangerously=True,
         # gibbs_sampling_setup=[{
         #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
@@ -195,17 +195,17 @@ def get_general_erebor_settings() -> GeneralSetup:
     
     from lisatools.utils.constants import YRSID_SI
     Tobs = 2. * YRSID_SI / 12.0
-    dt = 10.0
+    dt = 5.0
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     ldc_source_file = head_dir + "LDC2_sangria_training_v2.h5"
-    base_file_name = "psd_separate_6th_try"
+    base_file_name = "psd_separate_7th_try"
     file_store_dir = head_dir + "global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [1]
+    gpus = [2]
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
     nwalkers = 36

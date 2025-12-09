@@ -180,7 +180,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
 
-            temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[leaf]
+            temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[leaf][:self.ntemps] #as: make sure only local ntemps are used
+            ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
 
             ndim = new_state.branches[self.branch_name].coords.shape[-1]
 
@@ -191,7 +192,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
            
             self.setup_likelihood_here(removal_coords_in)
 
-            old_coords = new_state.branches[self.branch_name].coords[:, :, leaf].reshape(-1, ndim)
+            old_coords = new_state.branches[self.branch_name].coords[:self.ntemps, :, leaf].reshape(-1, ndim)
             old_coords_in = self.transform_fn.both_transforms(old_coords)
             
             data_index_in = xp.tile(xp.arange(self.nwalkers), (self.ntemps, 1)).flatten().astype(xp.int32)
@@ -218,14 +219,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 move_here = self.moves[model.random.choice(np.arange(len(self.moves)), p=self.move_weights)]
 
                 # Split the ensemble in half and iterate over these two halves.
-                accepted = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
+                accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
                 all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
                 inds = all_inds % self.nsplits
                 if self.randomize_split:
                     [np.random.shuffle(x) for x in inds]
 
                 # prepare accepted fraction
-                accepted_here = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
+                #accepted_here = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
                 for split in range(self.nsplits):
                     # get split information
                     S1 = inds == split
@@ -238,7 +239,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     # prepare the sets for each model
                     # goes into the proposal as (ntemps * (nwalkers / subset size), nleaves_max, ndim)
                     sets = [
-                        new_state.branches[self.branch_name].coords[inds == j][:, leaf].reshape(self.ntemps, -1, 1, ndim)
+                        new_state.branches[self.branch_name].coords[:self.ntemps][inds == j][:, leaf].reshape(self.ntemps, -1, 1, ndim)
                         for j in range(self.nsplits)
                     ]
 
@@ -299,7 +300,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     temp_inds_update = temp_inds_here[keep.flatten()]
                     walker_inds_update = walker_inds_here[keep.flatten()]
 
-                    accepted[(temp_inds_update, walker_inds_update)] = True
+                    accepted[:self.ntemps][(temp_inds_update, walker_inds_update)] = True
 
                     # update state informatoin
                     new_state.branches[self.branch_name].coords[(temp_inds_update, walker_inds_update, np.full_like(walker_inds_update, leaf))] = new_points[keep].reshape(len(temp_inds_update), ndim)
@@ -350,7 +351,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.remove_cold_chain_sources(add_coords_in)
             
             # read out all betas from temperature controls
-            new_state.sub_states[self.branch_name].betas_all[leaf] = temperature_control_here.betas[:]
+            new_state.sub_states[self.branch_name].betas_all[leaf][:self.ntemps] = temperature_control_here.betas
             # print(leaf)
 
             # ll_tmp2 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
@@ -384,6 +385,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.temperature_control.swaps_accepted = self.temperature_controls[0].swaps_accepted
         
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
+        #breakpoint()
         new_state.log_like[:] = self.acs.likelihood()  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
             
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4

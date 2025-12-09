@@ -403,6 +403,7 @@ class GlobalFit:
             walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
+            #breakpoint()    
 
             # backend.reset(
             #     nwalkers,
@@ -570,7 +571,7 @@ class GlobalFit:
             from eryn.moves import StretchMove
             _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
-            update_fn = DiagnosticPlotter(curr=self.curr, plot_every=10)
+            update_fn = DiagnosticPlotter(curr=self.curr, plot_every=5)
             sampler_mix = GlobalFitEngine(
                 acs,
                 self.nwalkers,

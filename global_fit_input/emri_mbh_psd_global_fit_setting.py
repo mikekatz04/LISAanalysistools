@@ -240,9 +240,11 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     search_fp = general_info.file_store_dir + general_info.base_file_name + mbh_info.mbh_search_file_key + ".h5"
     mbh_search_move = MBHSpecialMove(*mbh_move_args, name="mbh_search", run_search=True, force_backend="cuda12x", file_backend=curr.backend, search_fp=search_fp)
     mbh_pe_move = MBHSpecialMove(*mbh_move_args, name="mbh_pe", run_search=False, force_backend="cuda12x")
+    mbh_search_moves = GFCombineMove([mbh_search_move, psd_search_move], share_temperature_control=False)
     mbh_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     mbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_move], n_iters=5, verbose=True), name="mbh search")
+    mbh_search_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_moves], n_iters=5, verbose=True), name="mbh search")
 
     wave_gen = WrapEMRI(EMRITDIWaveform(**emri_info.initialize_kwargs), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
     if np.any(emri_inds := state.branches_inds["emri"][0]):

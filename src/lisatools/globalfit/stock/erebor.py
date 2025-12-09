@@ -378,15 +378,15 @@ class EMRISetup(Setup):
 
         self.setup_priors()
         
-        self.logger.info("Need a better way to treat EMRI betas ladder")
-
         if self.betas is None:
             snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
-            ntemps_pe = 1  # len(snrs_ladder)
+            ntemps_pe = 24  # len(snrs_ladder)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
             #betas[-1] = 0.0001
             self.betas = betas
+
+        self.logger.info(f"Using betas: {self.betas} in EMRI branch")
 
         # TODO: maybe combine this into Setup
         if self.other_tempering_kwargs is None:

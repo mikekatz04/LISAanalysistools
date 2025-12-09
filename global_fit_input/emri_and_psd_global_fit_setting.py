@@ -143,7 +143,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_move_args = (acs, priors)
 
     psd_move_kwargs = dict(
-        num_repeats=500,
+        num_repeats=100,
         live_dangerously=True,
         # gibbs_sampling_setup=[{
         #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
@@ -187,6 +187,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     
     print('need to fix emri betas_all setup')
 
+    emri_ntemps = len(emri_info.betas)
     betas_all = np.tile(make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1))
 
     # to make the states work 
@@ -194,9 +195,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     state.sub_states["emri"].betas_all = betas_all
 
     inner_moves = emri_info.inner_moves.copy()
-    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
+    tempering_kwargs = dict(ntemps=emri_ntemps, Tmax=np.inf, permute=False)
     
-    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
+    coords_shape = (emri_ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
 
     info_matrix_move = (deepcopy(emri_info.inner_moves[-1][0]), 1)  # assuming last is info_matrix move
 
@@ -217,7 +218,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     emri_search_move = ResidualAddOneRemoveOneMove(*emri_search_move_args)
 
-    emri_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    emri_search_move.accepted = np.zeros((emri_ntemps, nwalkers), dtype=int)
     print("skipping emri search for now")    
     #recipe.add_recipe_component(EMRISearchRecipeStep(moves=[emri_search_move]), name="emri search")
 
@@ -236,12 +237,12 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         acs.df
     )
     emri_pe_move = ResidualAddOneRemoveOneMove(*emri_move_args)
+    emri_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
 
     emri_pe_moves = GFCombineMove(moves=[emri_pe_move, psd_pe_move], share_temperature_control=False)
-    emri_pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    #emri_pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
 
     recipe.add_recipe_component(EMRIPERecipeStep(moves=[emri_pe_moves]), name="emri pe")
-
 
 ########################## 
 ##### SETTINGS ###########
@@ -271,6 +272,9 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     injection_parameters_file = '/data/asantini/packages/LISAanalysistools/injection_params.npz'
     info_matrix_covariance_file = '/data/asantini/packages/LISAanalysistools/fim_covariance.npz'
     delta_prior = 1e-2
+
+    ntemps_pe = 3
+    betas = 1 / 1.2 ** np.arange(ntemps_pe)
 
     gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
     # waveform kwargs
@@ -398,11 +402,12 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         p0_lims=p0_lims,
         e0_lims=e0_lims,
         injection=injection_sampling,
-        num_prop_repeats=5,
+        num_prop_repeats=10,
         initialize_kwargs=initialize_kwargs_emri,
         waveform_kwargs=waveform_kwargs_pe,
         info_matrix_gen=info_matrix_generator,
         inner_moves=inner_moves,
+        betas=betas,
         nleaves_max=1,
         nleaves_min=1,
         ndim=12
@@ -457,16 +462,16 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 5.0
 
     emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
-    base_file_name = "emri_psd_10th_try"
+    base_file_name = "emri_psd_11th_try"
     file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [0]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
-    nwalkers = 36
-    ntemps = 1
+    nwalkers = 24
+    ntemps = 10
 
     tukey_alpha = 0.05
 
