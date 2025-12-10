@@ -6,6 +6,7 @@ from typing import Any, Tuple, Optional, List
 import math
 import numpy as np
 from scipy import interpolate
+from scipy import signal
 import matplotlib.pyplot as plt
 
 try:
@@ -23,6 +24,10 @@ from .stochastic import (
 )
 from .sensitivity import SensitivityMatrix
 
+
+import dataclasses
+
+from .domains import *
 
 class DataResidualArray:
     pass
@@ -48,20 +53,48 @@ class DataResidualArray:
     def __init__(
         self,
         data_res_in: List[np.ndarray] | np.ndarray | DataResidualArray,
-        dt: Optional[float] = None,
-        f_arr: Optional[np.ndarray] = None,
-        df: Optional[float] = None,
+        signal_domain: Optional[SignalSettingsBase] = None,
+        input_signal_domain: Optional[SignalSettingsBase] = None,
         **kwargs: dict,
     ) -> None:
+        
+        self.data_res_in_orig_input = data_res_in
         if isinstance(data_res_in, DataResidualArray):
             for key, item in data_res_in.__dict__.items():
                 setattr(self, key, item)
 
         else:
-            self._check_inputs(dt=dt, f_arr=f_arr, df=df)
-            self.data_res_arr = data_res_in
-            self._store_time_and_frequency_information(dt=dt, f_arr=f_arr, df=df)
+            if not isinstance(data_res_in, DomainBase):
+                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
 
+                xp = get_array_module(data_res_in)
+                data_res_in = xp.atleast_2d(data_res_in)
+                if input_signal_domain is None:
+                    raise ValueError("If inputing a basic array, must put in the input_signal_domain argument.")
+                assert isinstance(input_signal_domain, DomainSettingsBase)
+                data_res_in = input_signal_domain.associated_class(data_res_in, input_signal_domain)
+            
+            input_signal_domain = data_res_in.settings
+
+            if signal_domain is None:
+                if isinstance(input_signal_domain, TDSettings):
+                    # default for TD for now is in FD
+                    Nf = np.fft.rfft(np.ones(input_signal_domain.N))
+                    df = 1. / (input_signal_domain.N * input_signal_domain.dt)
+                    signal_domain = FDSettings(Nf, df)
+
+                else:
+                    # default is same domain
+                    signal_domain = input_signal_domain
+        
+            if signal_domain == input_signal_domain:
+                self.data_res_arr = data_res_in
+            else:
+                self.data_res_arr = data_res_in.transform(signal_domain)
+
+            self.nchannels = self.data_res_arr.nchannels
+            self.data_shape = self.data_res_arr.settings.basis_shape
+            
     @property
     def init_kwargs(self) -> dict:
         """Initial dt, df, f_arr"""
@@ -194,37 +227,7 @@ class DataResidualArray:
     @data_res_arr.setter
     def data_res_arr(self, data_res_arr: List[np.ndarray] | np.ndarray) -> None:
         """Set ``data_res_arr``."""
-        self._data_res_arr_input = data_res_arr
-
-        if (
-            isinstance(data_res_arr, np.ndarray) or isinstance(data_res_arr, cp.ndarray)
-        ) and data_res_arr.ndim == 1:
-            data_res_arr = [data_res_arr]
-
-        elif (
-            isinstance(data_res_arr, np.ndarray) or isinstance(data_res_arr, cp.ndarray)
-        ) and data_res_arr.ndim == 2:
-            data_res_arr = list(data_res_arr)
-
-        new_out = np.full(len(data_res_arr), None, dtype=object)
-        self.data_length = None
-        for i in range(len(data_res_arr)):
-            current_data = data_res_arr[i]
-            if isinstance(current_data, np.ndarray) or isinstance(
-                current_data, cp.ndarray
-            ):
-                if self.data_length is None:
-                    self.data_length = len(current_data)
-                else:
-                    assert len(current_data) == self.data_length
-
-                new_out[i] = current_data
-            else:
-                raise ValueError
-
-        self.nchannels = len(new_out)
-        xp = get_array_module(new_out[0])
-        self._data_res_arr = xp.asarray(list(new_out), dtype=new_out[0].dtype)
+        self._data_res_arr = data_res_arr
 
     def __getitem__(self, index: tuple) -> np.ndarray:
         """Index this class directly in ``self.data_res_arr``."""
