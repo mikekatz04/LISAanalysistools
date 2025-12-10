@@ -95,6 +95,8 @@ class DataResidualArray:
             self.nchannels = self.data_res_arr.nchannels
             self.data_shape = self.data_res_arr.settings.basis_shape
             
+        self.init_kwargs = dict(signal_domain=signal_domain, input_signal_domain=input_signal_domain, **kwargs)
+    
     @property
     def init_kwargs(self) -> dict:
         """Initial dt, df, f_arr"""
@@ -105,26 +107,26 @@ class DataResidualArray:
         """Set initial kwargs."""
         self._init_kwargs = init_kwargs
 
-    def _check_inputs(
-        self,
-        dt: Optional[float] = None,
-        f_arr: Optional[np.ndarray] = None,
-        df: Optional[float] = None,
-    ):
-        number_of_none = 0
+    # def _check_inputs(
+    #     self,
+    #     dt: Optional[float] = None,
+    #     f_arr: Optional[np.ndarray] = None,
+    #     df: Optional[float] = None,
+    # ):
+    #     number_of_none = 0
 
-        number_of_none += 1 if dt is None else 0
-        number_of_none += 1 if f_arr is None else 0
-        number_of_none += 1 if df is None else 0
+    #     number_of_none += 1 if dt is None else 0
+    #     number_of_none += 1 if f_arr is None else 0
+    #     number_of_none += 1 if df is None else 0
 
-        if number_of_none == 3:
-            raise ValueError("Must provide either df, dt, or f_arr.")
+    #     if number_of_none == 3:
+    #         raise ValueError("Must provide either df, dt, or f_arr.")
 
-        elif number_of_none == 1:
-            raise ValueError(
-                "Can only provide one of dt, f_arr, or df. Not more than one."
-            )
-        self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
+    #     elif number_of_none == 1:
+    #         raise ValueError(
+    #             "Can only provide one of dt, f_arr, or df. Not more than one."
+    #         )
+    #     self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
 
     def _store_time_and_frequency_information(
         self,

@@ -491,19 +491,22 @@ class ChebyshevXYZ(ChebyshevWave):
         self.fd_gen = FDTDIonTheFly
         self.fs = fs
 
-    def __call__(self, inc, psi, lam, beta, t_start, *alpha, return_spline: bool =False, **cheb_kwargs):
+    def __call__(self, amp0, inc, psi, lam, beta, t_start, *alpha, return_spline: bool =False, **cheb_kwargs):
         
         t_intrinsic, _f = ChebyshevWave.__call__(self, *alpha, **cheb_kwargs)
-        num_bin = inc.shape[0]
+        
         squeeze = (t_intrinsic.ndim == 1)
         t_intrinsic = np.atleast_2d(t_intrinsic)
-        f = np.tile(_f, (num_bin, 1))
-
+        
+        amp0 = np.atleast_1d(amp0)
         inc = np.atleast_1d(inc)
         psi = np.atleast_1d(psi)
         lam = np.atleast_1d(lam)
         beta = np.atleast_1d(beta)
         t_start = np.atleast_1d(t_start)
+
+        num_bin = inc.shape[0]
+        f = np.tile(_f, (num_bin, 1))
 
         assert t_start.ndim == 1 and t_start.shape[0] == inc.shape[0] and t_start.shape[0] == t_intrinsic.shape[0]
         t = t_intrinsic - (t_intrinsic[:, 0] - t_start)[:, None]
@@ -528,6 +531,11 @@ class ChebyshevXYZ(ChebyshevWave):
         # needs to be 4? need to check that
         fd_wave_gen = self.fd_gen(t_tdi, A_of_t, f_of_t, phase_ref, self.fs, nsources, n_params=4, spline_type=CUBIC_SPLINE_GENERAL_SPACING)
         wave_output = fd_wave_gen(inc, psi, lam, beta, return_spline=return_spline)
+        
+        # will reset splines if splines are desired
+        # TODO: remove this for speed?
+        if np.any(amp0 != 1.0):
+            wave_output.tdi_amp = wave_output.tdi_amp * amp0[:, None, None]
         return wave_output
 
 if __name__ == "__main__":
