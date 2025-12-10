@@ -439,14 +439,13 @@ class ChebyshevWave:
 
     def __call__(self, *alpha_in: np.ndarray | list) -> typing.Tuple[np.ndarray, np.ndarray]:
         
-        alpha = np.asarray(alpha_in)
+        alpha = np.asarray(alpha_in).T
         squeeze = (alpha.ndim == 1)
         alpha = np.atleast_2d(alpha)
         
         assert alpha.ndim < 3
 
         nsource, nterms = alpha.shape
-
         basis_funcs = np.zeros([nsource, self.npts, nterms])  #these are the Chebyshev polys (of 2nd kind)
         y0 = (self.y + 2.0)**0.0
         basis_funcs[:, :,0] = y0[None, :]
@@ -494,11 +493,12 @@ class ChebyshevXYZ(ChebyshevWave):
 
     def __call__(self, inc, psi, lam, beta, t_start, *alpha, return_spline: bool =False, **cheb_kwargs):
         
-        t_intrinsic, f = ChebyshevWave.__call__(self, *alpha, **cheb_kwargs)
-
+        t_intrinsic, _f = ChebyshevWave.__call__(self, *alpha, **cheb_kwargs)
+        num_bin = inc.shape[0]
         squeeze = (t_intrinsic.ndim == 1)
         t_intrinsic = np.atleast_2d(t_intrinsic)
-        f = np.atleast_2d(f)
+        f = np.tile(_f, (num_bin, 1))
+
         inc = np.atleast_1d(inc)
         psi = np.atleast_1d(psi)
         lam = np.atleast_1d(lam)
@@ -506,14 +506,13 @@ class ChebyshevXYZ(ChebyshevWave):
         t_start = np.atleast_1d(t_start)
 
         assert t_start.ndim == 1 and t_start.shape[0] == inc.shape[0] and t_start.shape[0] == t_intrinsic.shape[0]
-        t = t_intrinsic - t_intrinsic[:, 0] + t_start
+        t = t_intrinsic - (t_intrinsic[:, 0] - t_start)[:, None]
 
         t_max = t.max(axis=-1)
         buffer = 500.0
         t_tdi = np.linspace(t_start + buffer, t_max - buffer, self.npts, axis=-1)
         # print("NEED TO FIX t so that it fits orbits window")
         assert t.ndim == 2 and f.ndim == 2
-
         f_of_t = CubicSplineInterpolant(t, f)
         A_of_t = CubicSplineInterpolant(t, np.ones_like(t))
 
@@ -535,6 +534,7 @@ if __name__ == "__main__":
 
     alpha = [13.0,-0.80,3.e-1,-1.e-3,2.e-4] #just any old alpha
     npts = 32001  #first do on fine grid
+
     fmin = 0.003 #3mHz
     fmax = 0.008
     f,t = alpha_to_tf(alpha,npts,fmin,fmax)
