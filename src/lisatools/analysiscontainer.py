@@ -141,7 +141,7 @@ class AnalysisContainer:
         if "psd" in kwargs:
             kwargs.pop("psd")
 
-        return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat)
+        return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs)
 
     def snr(self, **kwargs: dict) -> float:
         """Return the SNR of the current set of information
@@ -215,6 +215,7 @@ class AnalysisContainer:
         template: DataResidualArray,
         include_psd_info: bool = False,
         phase_maximize: bool = False,
+        amp_maximize: bool = False,
         **kwargs: dict,
     ) -> float:
         """Calculate the Likelihood of a template against the data.
@@ -223,6 +224,7 @@ class AnalysisContainer:
             template: Template signal.
             include_psd_info: If ``True``, add the PSD term to the Likelihood value.
             phase_maximize: If ``True``, maximize over an overall phase.
+            amp_maximize: If ``True``, maximize over an overall amplitude.
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
@@ -246,8 +248,14 @@ class AnalysisContainer:
         )
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
-        like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
 
+        if amp_maximize:
+            amp_factor = d_h.real / h_h.real
+            d_h *= amp_factor
+            h_h *= amp_factor ** 2
+        # breakpoint()
+        like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
+        
         if include_psd_info:
             # add noise term if requested
             like_out += self.likelihood(noise_only=True)
@@ -469,6 +477,7 @@ class AnalysisContainer:
                 likelihood_out[i] = self.calculate_signal_likelihood(
                     *input_vals, **kwargs
                 )
+            return likelihood_out
 
         else:
             raise ValueError("x must be a 1D or 2D array.")

@@ -116,8 +116,14 @@ def inner_product(
 
         # this avoids 9 inner products for 6 (with symmetry)
         for i in range(psd.shape[0]):
-            for j in range(i, psd.shape[1]):
-                factor = 1.0 if i == j else 2.0
+            # for j in range(i, psd.shape[1]):
+            #     factor = 1.0 if i == j else 2.0
+            #     operational_sets.append(
+            #         dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
+            #     )
+            # TODO: this could be faster?
+            for j in range(psd.shape[1]):
+                factor = 1.0
                 operational_sets.append(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )
@@ -139,6 +145,7 @@ def inner_product(
     out = 0.0
     # x = freqs
 
+    tmp = []
     # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
         factor = op_set["factor"]
@@ -169,8 +176,17 @@ def inner_product(
         )  # assumes right summation rule
         # switching to summation for comp to other domains
         tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
+        # y = (
+        #     func((sig_component_1.conj() * sig_component_2) + (sig_component_2.conj() * sig_component_1)) * inv_psd_component
+        # )  # assumes right summation rule
+        # # switching to summation for comp to other domains
+        # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
+        # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
+        tmp.append(tmp_out)
+        
         out += tmp_out
 
+    tmp = np.asarray(tmp)
     # normalize the inner produce
     normalization_value = 1.0
     if normalize is True:

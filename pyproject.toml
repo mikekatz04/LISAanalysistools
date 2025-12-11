@@ -3,6 +3,7 @@ requires = [
   "Cython",
   "numpy",
   "scikit_build_core",
+  "eryn"
 ]
 build-backend = "scikit_build_core.build"
 
@@ -72,7 +73,7 @@ optional-dependencies.doc = [
 ]
 
 optional-dependencies.sampling = [
-  "eryn",
+  # "eryn",
   "fastlisaresponse",
   "corner",
   "chainconsumer",
@@ -80,7 +81,7 @@ optional-dependencies.sampling = [
 
 optional-dependencies.testing = [
   "matplotlib",
-  "eryn",
+  # "eryn",
   "gbgpu",
   "corner",
 ]

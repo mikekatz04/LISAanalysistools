@@ -274,12 +274,26 @@ class TDSignal(DomainBase, TDSettings):
 @dataclasses.dataclass
 class FDSettings(DomainSettingsBase):
     N: int
-    df: float 
+    df: float
+    ind_min : Optional[int] = None 
+    ind_max : Optional[int] = None 
 
     @property
     def differential_component(self) -> float:
         return self.df
-
+    
+    @property
+    def ind_min_actual(self) -> int:
+        if self.ind_min is None:
+            return 0
+        return self.ind_min
+    
+    @property
+    def ind_max_actual(self) -> int:
+        if self.ind_max is None:
+            return self.N - 1
+        return self.ind_max
+    
     @staticmethod
     def get_associated_class():
         return FDSignal
@@ -290,7 +304,7 @@ class FDSettings(DomainSettingsBase):
     
     @property
     def kwargs(self) -> dict:
-        return dict()
+        return dict(ind_min=self.ind_min_actual, ind_max=self.ind_max_actual)
     
     @property
     def args(self) -> tuple:
@@ -302,7 +316,7 @@ class FDSettings(DomainSettingsBase):
     
     @property
     def f_arr(self) -> np.ndarray:
-        return np.arange(self.N) * self.df
+        return np.arange(self.N)[self.ind_min_actual:self.ind_max_actual + 1] * self.df
     
     def __eq__(self, value):
         return (value.N == self.N) and (value.df == self.df)
@@ -312,14 +326,14 @@ class FDSettings(DomainSettingsBase):
         return self.N
     
 
-from pywavelet.transforms.phi_computer import phitilde_vec_norm
-from pywavelet.transforms.numpy.forward.from_freq import (
-    transform_wavelet_freq_helper
-)
+# from pywavelet.transforms.phi_computer import phitilde_vec_norm
+# from pywavelet.transforms.numpy.forward.from_freq import (
+#     transform_wavelet_freq_helper
+# )
 
-from pywavelet.transforms.numpy.inverse.to_freq import (
-    inverse_wavelet_freq_helper_fast as inverse_wavelet_freq_helper,
-)
+# from pywavelet.transforms.numpy.inverse.to_freq import (
+#     inverse_wavelet_freq_helper_fast as inverse_wavelet_freq_helper,
+# )
 
 class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):

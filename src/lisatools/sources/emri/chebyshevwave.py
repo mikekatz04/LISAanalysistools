@@ -491,7 +491,7 @@ class ChebyshevXYZ(ChebyshevWave):
         self.fd_gen = FDTDIonTheFly
         self.fs = fs
 
-    def __call__(self, amp0, inc, psi, lam, beta, t_start, *alpha, return_spline: bool =False, **cheb_kwargs):
+    def __call__(self, amp0, phi0, inc, psi, lam, beta, t_start, *alpha, return_spline: bool =False, **cheb_kwargs):
         
         t_intrinsic, _f = ChebyshevWave.__call__(self, *alpha, **cheb_kwargs)
         
@@ -499,6 +499,7 @@ class ChebyshevXYZ(ChebyshevWave):
         t_intrinsic = np.atleast_2d(t_intrinsic)
         
         amp0 = np.atleast_1d(amp0)
+        phi0 = np.atleast_1d(phi0)
         inc = np.atleast_1d(inc)
         psi = np.atleast_1d(psi)
         lam = np.atleast_1d(lam)
@@ -536,6 +537,8 @@ class ChebyshevXYZ(ChebyshevWave):
         # TODO: remove this for speed?
         if np.any(amp0 != 1.0):
             wave_output.tdi_amp = wave_output.tdi_amp * amp0[:, None, None]
+        if np.any(phi0 != 0.0):
+            wave_output.phase_ref = wave_output.phase_ref + phi0[:, None]
         return wave_output
 
 if __name__ == "__main__":

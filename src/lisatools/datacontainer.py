@@ -79,7 +79,7 @@ class DataResidualArray:
             if signal_domain is None:
                 if isinstance(input_signal_domain, TDSettings):
                     # default for TD for now is in FD
-                    Nf = np.fft.rfft(np.ones(input_signal_domain.N))
+                    Nf = np.fft.rfft(np.ones(input_signal_domain.N)).shape[0]
                     df = 1. / (input_signal_domain.N * input_signal_domain.dt)
                     signal_domain = FDSettings(Nf, df)
 
