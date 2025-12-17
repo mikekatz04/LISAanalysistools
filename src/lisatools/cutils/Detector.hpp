@@ -167,4 +167,21 @@ public:
     void dealloc() {};
 };
 
+
+class AddOrbits{
+  public:
+    Orbits *orbits;
+    
+    void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
+    {
+        if (orbits != NULL)
+        {
+            delete orbits;
+        }
+        orbits = new Orbits(dt_, N_, n_arr_, L_arr_, x_arr_, links_, sc_r_, sc_e_, armlength_);
+    };
+    void dealloc(){delete orbits;};
+};
+
+
 #endif // __DETECTOR_HPP__

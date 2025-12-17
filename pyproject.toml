@@ -101,6 +101,8 @@ sdist.include = [
   "src/lisatools_backend_cuda12x/git_version.py",
   "tests/",
   "src/lisatools/cutils/Detector.cu",
+  "src/lisatools/cutils/pycppdetector.pyx",
+  # "src/lisatools/cutils/pycppdetector.pxd",
   "src/lisatools/cutils/Detector.hpp",
   "src/lisatools/cutils/global.hpp",
 ]
@@ -118,7 +120,7 @@ sdist.exclude = [
 ]
 
 wheel.exclude = [
-  "**.pyx",
+  # "**.pyx",
   # "**.cu",
   # "**.cxx",
   # "**.hh",
