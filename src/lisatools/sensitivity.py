@@ -713,9 +713,12 @@ class A2TDISens(X2TDISens, Sensitivity):
 
         x = 2 * np.pi * f * L_SI / C_SI
         
-        isi_rfi_readout_transfer = 2. * Cxx * (2 * np.cos(x))
+        #isi_rfi_readout_transfer = 2. * Cxx * (2 * np.cos(x))
+        isi_rfi_readout_transfer = 2. * Cxx * (2 + np.cos(x)) #AS correct TF for oms
+
         tmi_readout_transfer = Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
         tm_transfer = 4 * Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
+        
         rfi_backlink_transfer = 2 * Cxx * (2 * np.cos(x))
         tmi_backlink_transfer = Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
  
@@ -728,7 +731,7 @@ class A2TDISens(X2TDISens, Sensitivity):
         tmi_backlink_ffd = tmi_backlink_transfer * noise_levels.tmi_backlink_noise
 
         total_noise = tm_noise_ffd + isi_oms_ffd + rfi_oms_ffd + tmi_oms_ffd + rfi_backlink_ffd + tmi_backlink_ffd
-        return total_noise
+        return total_noise 
 
     @staticmethod
     def stochastic_transform(
@@ -1163,22 +1166,6 @@ class SensitivityMatrix:
             invC[self.detC == 0.0] = 1e-100
             self.invC = invC.transpose(1, 2, 0)
             
-        xp = get_array_module(self.sens_mat)
-
-        # setup detC
-        """Determinant and inverse of TDI matrix."""
-        if self.sens_mat.ndim < 3:
-            self.detC = xp.prod(self.sens_mat, axis=0)
-            self.invC = 1 / self.sens_mat
-
-        else:
-            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
-            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
-            invC[self.detC != 0.0] = xp.linalg.inv(
-                self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0]
-            )
-            invC[self.detC == 0.0] = 1e-100
-            self.invC = invC.transpose(1, 2, 0)
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""

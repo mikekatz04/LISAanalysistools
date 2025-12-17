@@ -494,6 +494,9 @@ class PSDSetup(Setup):
             # TODO: orbits check against sangria/sangria_hm
             self.priors = {"psd": ProbDistContainer(priors_psd)}
 
+        else: 
+            self.logger.info("Using custom priors for PSD branch")
+
         if self.betas is None:
             # TODO: fix this to be generic
             ntemps_pe = 24  # len(snrs_ladder)

@@ -416,13 +416,13 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                         (state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet)
                     ]
                     for leaf_remove in inds_remove:
-                        AET_remove_params = state.branches['mbh'].coords[0, :, leaf_remove].copy()  # new_coords  # 
-                        AET_remove_params_in = self.transform_fn.both_transforms(AET_remove_params)
+                        CHANNELS_remove_params = state.branches['mbh'].coords[0, :, leaf_remove].copy()  # new_coords  # 
+                        CHANNELS_remove_params_in = self.transform_fn.both_transforms(CHANNELS_remove_params)
                         self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
-                        AET_remove = self.waveform_gen(*AET_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
-                        AE_remove = AET_remove[:, :2]
+                        CHANNELS_remove = self.waveform_gen(*CHANNELS_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
+                        TDI_remove = CHANNELS_remove[:, :acs_all.nchannels]
                         # check_like = acs_all[max_logl_walker].template_likelihood(DataResidualArray(AE_remove[max_logl_walker], f_arr=acs_all.f_arr), complex=True)
-                        acs_all.add_signal_to_residual(AE_remove)
+                        acs_all.add_signal_to_residual(TDI_remove)
 
                 self.finished_search = True
                 os.remove(fp)

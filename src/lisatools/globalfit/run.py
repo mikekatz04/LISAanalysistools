@@ -295,16 +295,13 @@ class GlobalFit:
         cp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
 
         df = self.curr.general_info.df
-        N = self.curr.general_info.A_inj.shape[-1]
+        N = self.curr.general_info.injection[0].shape[-1]
 
         f_arr = (np.arange(N) + self.curr.general_info.start_freq_ind) * df
 
         acs_tmp = []
         for w in range(self.nwalkers):
-            data_res_arr = DataResidualArray([
-                self.curr.general_info.A_inj.copy(), 
-                self.curr.general_info.E_inj.copy(), 
-            ], f_arr=f_arr, df=df)
+            data_res_arr = DataResidualArray(deepcopy(self.curr.general_info.injection), f_arr=f_arr, df=df)
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
@@ -314,17 +311,19 @@ class GlobalFit:
                 else:
                     galfor_params = None
 
-                sens_AE = new_sens_mat(f"walker_{w}", psd_params, data_res_arr.f_arr, galfor_params=galfor_params)
+                sens_here = self.curr.general_info.new_sens_mat(f"walker_{w}", psd_params, data_res_arr.f_arr, galfor_params=galfor_params)
             else:
                 # TODO: update this
-                sens_AE = AE1SensitivityMatrix(data_res_arr.f_arr, **self.curr.general_info.fixed_psd_kwargs)
+                sens_here = self.curr.general_info.sensitivity_matrix(data_res_arr.f_arr, **self.curr.general_info.fixed_psd_kwargs)
 
             # sens_AE[0] = psd[0][w]
             # sens_AE[1] = psd[1][w]
-            acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_AE)))
+            acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here)))
         
         gpus = self.curr.general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)   
+
+        # breakpoint()
 
         for name, source_info in self.curr.source_info.items():
             if name not in self.curr.engine_info.branch_names:
@@ -457,11 +456,11 @@ class GlobalFit:
 
             # backend.save_step(state, accepted, rj_accepted=accepted, swaps_accepted=swaps_accepted)
 
-            A_inj = general_info.A_inj.copy()
-            E_inj = general_info.E_inj.copy()
+            # A_inj = general_info.A_inj.copy() 
+            # E_inj = general_info.E_inj.copy()
 
-            generate = GenerateCurrentState(A_inj, E_inj)
-            self.logger.debug("generate function created")
+            # generate = GenerateCurrentState(A_inj, E_inj)
+            # self.logger.debug("generate function created")
 
             acs = self.setup_acs(state)
             self.logger.debug("acs setup done")

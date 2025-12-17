@@ -169,6 +169,7 @@ def plot_loglikelihood(reader, discard=0, save_dir='./'):
 @with_custom_plotting_style
 def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_corner=True, truths=None):
 
+
     nsteps, nwalkers, nleaves, ndim = chain.shape
 
     #chain = chain.reshape((nsteps, nwalkers, ndim)) 
@@ -260,7 +261,7 @@ def produce_psd_plots(chain=None, reader=None, discard=0, save_dir='./', truths=
     if chain is None:
         chain = reader.get_chain(discard=discard)["psd"][:, 0]
 
-    base_branch_plots(chain, key="psd", labels=labels, save_dir=save_dir, truths=truths)
+    base_branch_plots(chain, key="psd", labels=labels[:chain.shape[-1]], save_dir=save_dir, truths=truths)
 
 def produce_galfor_plots(chain=None, reader=None, discard=0, save_dir='./'):
     pass
@@ -308,19 +309,19 @@ class DiagnosticPlotter:
     
 
 if __name__ == "__main__":
-    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/emri_psd_10th_try_parameter_estimation_main.h5'
+    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/psd_separate_9th_try_parameter_estimation_main.h5'
     reader = GFHDFBackend(filepath)
-    discard = 10
+    discard = 0
 
     logl = reader.get_log_like(discard=discard)[:, 0]
     breakpoint()
-    walkers_keep = np.where((logl > 0.999999 * np.max(logl)).all(axis=0))[0]
+    walkers_keep = np.where((logl > 0.9 * np.max(logl)).all(axis=0))[0]
     print(f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut.")
     
     # produce_mbh_plots(reader=reader, discard=0, save_dir='./')
     chain = reader.get_chain(discard=discard)["psd"][:, 0, walkers_keep]
     produce_psd_plots(chain=chain, reader=reader, discard=discard, save_dir='./')
 
-    chain = reader.get_chain(discard=discard)["emri"][:, 0, walkers_keep]
-    produce_emri_plots(chain=chain, reader=reader, discard=discard, save_dir='./')
-    plot_loglikelihood(reader, discard=discard, save_dir='./')
+    # chain = reader.get_chain(discard=discard)["emri"][:, 0, walkers_keep]
+    # produce_emri_plots(chain=chain, reader=reader, discard=discard, save_dir='./')
+    # plot_loglikelihood(reader, discard=discard, save_dir='./')p axs

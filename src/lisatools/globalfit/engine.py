@@ -19,8 +19,10 @@ from eryn.backends import backend as eryn_Backend
 from eryn.state import State as eryn_State
 
 
-
+from .utils import NewSensitivityMatrix
 from lisatools.detector import Orbits
+from ..detector import sangria, mojito, LISAModel
+from ..sensitivity import XYZ1SensitivityMatrix, XYZ2SensitivityMatrix, AE1SensitivityMatrix, AE2SensitivityMatrix, AET2SensitivityMatrix
 
 
 @dataclasses.dataclass
@@ -87,8 +89,8 @@ class GeneralSettings(Settings):
     past_file_for_start: Optional[str] = None
     orbits: Orbits = None
     gpu_orbits: Orbits = None
-    start_freq_ind: int = None
-    end_freq_ind: int = None
+    start_freq: float = None
+    end_freq: float = None
     random_seed: int = None
     backup_iter: int = None
     nwalkers: int = None
@@ -97,7 +99,8 @@ class GeneralSettings(Settings):
     gpus: typing.List[int] = None
     remove_from_data: typing.List[str] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
-
+    channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
+    noise_model: Optional[LISAModel] = None
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
 
@@ -105,7 +108,6 @@ class GeneralSettings(Settings):
     # file_information["mbh_search_file"] = file_store_dir + base_file_name + "_mbh_search_tmp_file.h5"
     
     
-from ..detector import sangria
 from .loginfo import init_logger
 
 class GeneralSetup(Setup, GeneralSettings):
@@ -161,7 +163,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if self.fixed_psd_kwargs is None:
             self.fixed_psd_kwargs = dict(
-                model=sangria, 
+                model=self.noise_model, 
             )
         if self.remove_from_data is None:
             self.remove_from_data = []
@@ -236,25 +238,75 @@ class GeneralSetup(Setup, GeneralSettings):
         # Ef[:] = 0.0
         # Tf[:] = 0.0
 
-        if self.start_freq_ind is None:
+        if self.start_freq is None:
             self.start_freq_ind = 0
-        if self.end_freq_ind is None:
-            self.end_freq_ind = len(Af) + self.start_freq_ind
+        else:
+            self.start_freq_ind = int(self.start_freq / self.df)
+        
+        if self.end_freq is None:
+            self.end_freq_ind = len(Xf) # + self.start_freq_ind
+        else:
+            self.end_freq_ind = int(self.end_freq / self.df)
 
-
-        self.A_inj, self.E_inj = (
-            Af[self.start_freq_ind:self.end_freq_ind],
-            Ef[self.start_freq_ind:self.end_freq_ind],
+        # setup injection data channels
+        channels_dict = dict(
+            X=Xf,
+            Y=Yf,
+            Z=Zf,
+            A=Af,
+            E=Ef,
+            T=Tf,
         )
 
-        self.fd = (np.arange(len(self.A_inj)) + self.start_freq_ind) * self.df
+        #breakpoint()
+
+        self.injection = [channels_dict[ch][self.start_freq_ind:self.end_freq_ind] for ch in self.channels]
+
+        # self.A_inj, self.E_inj = (
+        #     Af[self.start_freq_ind:self.end_freq_ind],
+        #     Ef[self.start_freq_ind:self.end_freq_ind],
+        # )
+
+        self.fd = (np.arange(len(self.injection[0])) + self.start_freq_ind) * self.df
 
         
         # TODO: clean this up
         assert len(self.t) == len(self.X) == len(self.Y) == len(self.Z)
-        assert len(self.fd) == len(self.A_inj) == len(self.E_inj)
+        assert len(self.fd) == len(self.injection[0]) == len(self.injection[1])
+        for i in range(len(self.channels)):
+            assert len(self.injection[i]) == self.end_freq_ind - self.start_freq_ind
+        
+        if self.noise_model.name == 'sangria':
+            if "A" in self.channels:
+                sens_fns = [
+                    'A1TDISens',
+                    'E1TDISens',
+                ]
+                self.sensitivity_matrix = AE1SensitivityMatrix
+            elif "X" in self.channels:
+                sens_fns = XYZ1SensitivityMatrix
+                self.sensitivity_matrix = XYZ1SensitivityMatrix
 
-        assert len(self.A_inj) == self.end_freq_ind - self.start_freq_ind
+        elif self.noise_model.name == 'mojito':
+            
+            if "A" in self.channels:
+                sens_fns = [
+                    'A2TDISens',
+                    'E2TDISens',
+                    'T2TDISens',
+                ][:len(self.channels)]
+                self.sensitivity_matrix = AET2SensitivityMatrix if len(self.channels) == 3 else AE2SensitivityMatrix
+            else:
+                
+                sens_fns = XYZ2SensitivityMatrix
+                self.sensitivity_matrix = XYZ2SensitivityMatrix
+
+        self.new_sens_mat = NewSensitivityMatrix(
+                orbits=self.orbits,
+                noise_model=self.noise_model,
+                sens_fns=sens_fns,
+        )
+
 
 
 @dataclasses.dataclass
