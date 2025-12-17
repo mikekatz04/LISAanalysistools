@@ -101,7 +101,7 @@ sdist.include = [
   "tests/",
   "src/lisatools/cutils/Detector.cu",
   "src/lisatools/cutils/pycppdetector.pyx",
-  "src/lisatools/cutils/pycppdetector.pxd",
+  # "src/lisatools/cutils/pycppdetector.pxd",
   "src/lisatools/cutils/Detector.hpp",
   "src/lisatools/cutils/global.hpp",
 ]
