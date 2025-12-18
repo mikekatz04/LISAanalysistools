@@ -125,6 +125,8 @@ public:
     {
         dt = dt_;
         N = N_;
+        armlength = armlength_;
+        
         n_arr = n_arr_;
         ltt_arr = ltt_arr_;
         x_arr = x_arr_;
@@ -135,6 +137,8 @@ public:
         sc_e = sc_e_;
         links = links_;
         armlength = armlength_;
+
+        // printf("in orbits 11 %e %d \n", n_arr[0], N);
     };
 
     int get_sc_r_from_arr(int i)
@@ -171,16 +175,9 @@ public:
 class AddOrbits{
   public:
     Orbits *orbits;
-    
-    void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
-    {
-        if (orbits != NULL)
-        {
-            delete orbits;
-        }
-        orbits = new Orbits(dt_, N_, n_arr_, L_arr_, x_arr_, links_, sc_r_, sc_e_, armlength_);
-    };
-    void dealloc(){delete orbits;};
+
+    void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_);
+    void dealloc();
 };
 
 

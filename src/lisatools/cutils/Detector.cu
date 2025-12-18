@@ -7,6 +7,28 @@
 #include <sstream>
 
 CUDA_DEVICE
+void AddOrbits::add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
+{    
+    printf("new orbits 45454454\n");
+    if (orbits != NULL)
+    {
+        throw std::invalid_argument("Need to allocate orbits before passing into to AddOrbits class method.");
+    }
+    printf("new orbits2\n");
+    orbits = new Orbits(dt_, N_, n_arr_, L_arr_, x_arr_, links_, sc_r_, sc_e_, armlength_);
+    printf("new orbits3\n");
+    printf("orbits: %e\n", orbits->armlength);
+};
+
+void AddOrbits::dealloc()
+{
+    printf("dealloc orbits\n");
+    if (orbits != NULL) 
+        delete orbits;
+}
+
+
+CUDA_DEVICE
 int Orbits::get_window(double t)
 {
     int out = int(t / dt);
