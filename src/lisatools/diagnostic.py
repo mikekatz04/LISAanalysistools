@@ -107,8 +107,8 @@ def inner_product(
         assert psd.shape[0] == psd.shape[1] == sig1.shape[0] == sig2.shape[0]
 
         for i in range(psd.shape[0]):
-            for j in range(i, psd.shape[1]):
-                factor = 1.0 if i == j else 2.0
+            for j in range(psd.shape[0]):  # i, psd.shape[1]):
+                factor = 1.0  # if i == j else 2.0
                 operational_sets.append(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )

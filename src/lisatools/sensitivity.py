@@ -709,7 +709,7 @@ class A2TDISens(X2TDISens, Sensitivity):
 
         x = 2 * np.pi * f * L_SI / C_SI
         
-        isi_rfi_readout_transfer = 2. * Cxx * (2 * np.cos(x))
+        isi_rfi_readout_transfer = 2. * Cxx * (2 + np.cos(x))
         tmi_readout_transfer = Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
         tm_transfer = 4 * Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
         rfi_backlink_transfer = 2 * Cxx * (2 * np.cos(x))
