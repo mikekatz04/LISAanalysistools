@@ -349,7 +349,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
-        self._pycppdetector = self.backend.pycppDetector(*self._pycppdetector_args)
+        self._pycppdetector = self.backend.Orbits(*self._pycppdetector_args)
         return self._pycppdetector
 
     @property
@@ -410,7 +410,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
         # buffer array and c computation
         ltt_out = self.xp.zeros_like(t)
-        self.pycppdetector.get_light_travel_time_arr_wrap(
+        self.pycppdetector.get_light_travel_time_wrap(
             ltt_out, t, link, len(ltt_out)
         )
 
@@ -459,7 +459,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         pos_z = self.xp.zeros_like(t)
 
         # c code computation
-        self.pycppdetector.get_pos_arr_wrap(pos_x, pos_y, pos_z, t, sc, len(pos_x))
+        self.pycppdetector.get_pos_wrap(pos_x, pos_y, pos_z, t, sc, len(pos_x))
 
         # prepare output
         output = self.xp.array([pos_x, pos_y, pos_z]).T
@@ -508,7 +508,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         normal_unit_vec_z = self.xp.zeros_like(t)
 
         # c code
-        self.pycppdetector.get_normal_unit_vec_arr_wrap(
+        self.pycppdetector.get_normal_unit_vec_wrap(
             normal_unit_vec_x,
             normal_unit_vec_y,
             normal_unit_vec_z,

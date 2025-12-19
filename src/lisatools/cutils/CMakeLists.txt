@@ -89,15 +89,6 @@ endfunction()
 # ----------------
 
 # I. Process pycppdetector.pyx into a C++ file
-add_custom_command(
-  OUTPUT "pycppdetector.cxx"
-  COMMENT "Cythonize pycppdetector.pyx into pycppdetector.cxx"
-  COMMAND
-    Python::Interpreter -m cython "${CMAKE_CURRENT_SOURCE_DIR}/pycppdetector.pyx"
-    --output-file "${CMAKE_CURRENT_BINARY_DIR}/pycppdetector.cxx" -3 -+ --module-name
-    "pycppdetector" -I "${CMAKE_CURRENT_SOURCE_DIR}"
-  DEPENDS "pycppdetector.pyx"
-  VERBATIM)
 
 # II. Declare the CPU backend
 if(LISATOOLS_WITH_CPU)
@@ -109,7 +100,8 @@ if(LISATOOLS_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM)
 
-  python_add_library(lisaanalysistools_cpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
+  pybind11_add_module(lisaanalysistools_cpu_pycppdetector Detector.cxx)
+  # python_add_library(lisaanalysistools_cpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
   apply_cpu_backend_common_options(pycppdetector)
 
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES

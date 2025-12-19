@@ -1,6 +1,11 @@
 #ifndef __DETECTOR_HPP__
 #define __DETECTOR_HPP__
 
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+
+namespace py = pybind11;
+
 #include "global.hpp"
 #include <iostream>
 
@@ -35,20 +40,36 @@ public:
     int *sc_r;
     int *sc_e;
 
-    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
+    Orbits(double dt_, int N_, py::array_t<double> n_arr_, py::array_t<double> ltt_arr_, py::array_t<double> x_arr_, py::array_t<int> links_, py::array_t<int> sc_r_, py::array_t<int> sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
-        n_arr = n_arr_;
-        ltt_arr = ltt_arr_;
-        x_arr = x_arr_;
+
+        n_arr = return_pointer_and_check_length(n_arr_, "n_arr", N, 6 * 3);
+        ltt_arr = return_pointer_and_check_length(ltt_arr_, "ltt_arr", N, 6);
+        x_arr = return_pointer_and_check_length(x_arr_, "x_arr", N, 3 * 3);
         nlinks = 6;
         nspacecraft = 3;
 
-        sc_r = sc_r_;
-        sc_e = sc_e_;
-        links = links_;
+        sc_r = return_pointer_and_check_length(sc_r_, "sc_r", nlinks, 1);
+        sc_e = return_pointer_and_check_length(sc_e_, "sc_e", nlinks, 1);
+        links = return_pointer_and_check_length(links_, "links", nlinks, 1);
         armlength = armlength_;
+    };
+
+    template<typename T>
+    T* return_pointer_and_check_length(py::array_t<T> input1, std::string name, int N, int multiplier)
+    {
+        py::buffer_info buf1 = input1.request();
+
+        if (buf1.size != N * multiplier)
+        {
+            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
+            throw std::invalid_argument(err_out);
+        }
+        
+        T *ptr1 = static_cast<T *>(buf1.ptr);
+        return ptr1;
     };
 
     int get_sc_r_from_arr(int i)
@@ -60,7 +81,7 @@ public:
     {
         return sc_e[i];
     };
-
+    void get_normal_unit_vec_wrap(py::array_t<double>normal_unit_vec_x, py::array_t<double>normal_unit_vec_y, py::array_t<double>normal_unit_vec_z, py::array_t<double>t, py::array_t<int>link, int num);
     int get_link_from_arr(int i)
     {
         return links[i];
@@ -82,20 +103,20 @@ public:
 };
 
 
-class AddOrbits{
-  public:
-    Orbits *orbits;
+// class AddOrbits{
+//   public:
+//     Orbits *orbits;
     
-    void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
-    {
-        if (orbits != NULL)
-        {
-            delete orbits;
-        }
-        orbits = new Orbits(dt_, N_, n_arr_, L_arr_, x_arr_, links_, sc_r_, sc_e_, armlength_);
-    };
-    void dealloc(){delete orbits;};
-};
+//     void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
+//     {
+//         if (orbits != NULL)
+//         {
+//             delete orbits;
+//         }
+//         orbits = new Orbits(dt_, N_, n_arr_, L_arr_, x_arr_, links_, sc_r_, sc_e_, armlength_);
+//     };
+//     void dealloc(){delete orbits;};
+// };
 
 
 #endif // __DETECTOR_HPP__

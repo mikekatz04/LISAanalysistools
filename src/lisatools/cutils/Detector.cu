@@ -5,6 +5,11 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+
+namespace py = pybind11;
+
 
 CUDA_DEVICE
 int Orbits::get_window(double t)
@@ -303,5 +308,51 @@ void Orbits::get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_u
     get_normal_unit_vec_kernel(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *this);
 
 #endif // __CUDACC__
+}
+
+void Orbits::get_normal_unit_vec_wrap(py::array_t<double>normal_unit_vec_x, py::array_t<double>normal_unit_vec_y, py::array_t<double>normal_unit_vec_z, py::array_t<double>t, py::array_t<int>link, int num)
+{
+    py::buffer_info normal_unit_vec_x_buf = normal_unit_vec_x.request();
+    py::buffer_info normal_unit_vec_y_buf = normal_unit_vec_y.request();
+    py::buffer_info normal_unit_vec_z_buf = normal_unit_vec_z.request();
+    py::buffer_info t_buf = t.request();
+    py::buffer_info link_buf = link.request();
+    
+    if 
+    (
+        (normal_unit_vec_x_buf.size < num)
+        || (normal_unit_vec_y_buf.size < num)
+        || (normal_unit_vec_z_buf.size < num)
+        || (t_buf.size < num)
+        || (link_buf.size < num)
+    )
+    {
+        throw std::invalid_argument("Normal vector computation buffer arrays are not the correct size.");
+    }
+    get_normal_unit_vec_arr(
+        (double*)normal_unit_vec_x_buf.ptr,
+        (double*)normal_unit_vec_y_buf.ptr,
+        (double*)normal_unit_vec_z_buf.ptr,
+        (double*)t_buf.ptr,
+        (int*)link_buf.ptr,
+        num
+    );
+}
+
+// PYBIND11_MODULE creates the entry point for the Python module
+// The module name here must match the one used in CMakeLists.txt
+PYBIND11_MODULE(pycppdetector, m) {
+    m.doc() = "Orbits/Detector C++ plug-in"; // Optional module docstring
+
+    py::class_<Orbits>(m, "Orbits")
+    // Bind the constructor
+    .def(py::init<double, int, py::array_t<double>, py::array_t<double>, py::array_t<double>, py::array_t<int>, py::array_t<int>, py::array_t<int>, double>(), 
+         py::arg("dt"), py::arg("N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
+    // Bind member functions
+    .def("get_light_travel_time_arr", &Orbits::get_light_travel_time_arr, "Get the light travel time.")
+    .def("get_pos_arr", &Orbits::get_pos_arr, "Get spacecraft position.")
+    .def("get_normal_unit_vec_wrap", &Orbits::get_normal_unit_vec_wrap, "Get link normal vector.")
+    // You can also expose public data members directly using def_readwrite
+    ;
 }
 
