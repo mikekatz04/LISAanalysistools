@@ -1,13 +1,21 @@
 #ifndef __DETECTOR_HPP__
 #define __DETECTOR_HPP__
 
+#include "global.hpp"
+#include <iostream>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 
 namespace py = pybind11;
 
-#include "global.hpp"
-#include <iostream>
+#ifdef __CUDACC__
+#include "pybind11_cuda_array_interface.hpp"
+template<typename T>
+using array_type = cai::cuda_array_t<T>;
+#else
+template<typename T>
+using array_type = py::array_t<T>;
+#endif
 
 class Vec
 {
@@ -40,7 +48,7 @@ public:
     int *sc_r;
     int *sc_e;
 
-    Orbits(double dt_, int N_, py::array_t<double> n_arr_, py::array_t<double> ltt_arr_, py::array_t<double> x_arr_, py::array_t<int> links_, py::array_t<int> sc_r_, py::array_t<int> sc_e_, double armlength_)
+    Orbits(double dt_, int N_, array_type<double> n_arr_, array_type<double> ltt_arr_, array_type<double> x_arr_, array_type<int> links_, array_type<int> sc_r_, array_type<int> sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
@@ -58,8 +66,12 @@ public:
     };
 
     template<typename T>
-    T* return_pointer_and_check_length(py::array_t<T> input1, std::string name, int N, int multiplier)
+    T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
     {
+        #ifdef __CUDACC__
+        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        
+        #else
         py::buffer_info buf1 = input1.request();
 
         if (buf1.size != N * multiplier)
@@ -67,8 +79,8 @@ public:
             std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
             throw std::invalid_argument(err_out);
         }
-        
-        T *ptr1 = static_cast<T *>(buf1.ptr);
+        T* ptr1 = static_cast<T *>(buf1.ptr);
+        #endif
         return ptr1;
     };
 
@@ -81,7 +93,6 @@ public:
     {
         return sc_e[i];
     };
-    void get_normal_unit_vec_wrap(py::array_t<double>normal_unit_vec_x, py::array_t<double>normal_unit_vec_y, py::array_t<double>normal_unit_vec_z, py::array_t<double>t, py::array_t<int>link, int num);
     int get_link_from_arr(int i)
     {
         return links[i];
@@ -99,6 +110,9 @@ public:
     void get_light_travel_time_arr(double *ltt, double *t, int *link, int num);
     void get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num);
     void get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num);
+    void get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num);
+    void get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, array_type<double>normal_unit_vec_y, array_type<double>normal_unit_vec_z, array_type<double>t, array_type<int>link, int num);
+    void get_pos_wrap(array_type<double> pos_x, array_type<double> pos_y, array_type<double> pos_z, array_type<double> t, array_type<int> sc, int num);
     void dealloc() {};
 };
 

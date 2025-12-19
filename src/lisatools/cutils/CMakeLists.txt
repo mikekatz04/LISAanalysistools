@@ -110,9 +110,10 @@ endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
+  pybind11_add_module(lisaanalysistools_gpu_pycppdetector Detector.cu)
+  # python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
   apply_gpu_backend_common_options(pycppdetector)
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp Detector.hpp)
+                                         global.hpp Detector.hpp pybind11_cuda_array_interface.hpp)
 endif()
 

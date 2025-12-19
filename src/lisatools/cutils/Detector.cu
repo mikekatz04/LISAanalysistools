@@ -8,6 +8,10 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 
+#ifdef __CUDACC__
+#include "pybind11_cuda_array_interface.hpp"
+#endif
+
 namespace py = pybind11;
 
 
@@ -38,7 +42,7 @@ int Orbits::get_link_ind(int link)
         return 5;
     else
 #ifdef __CUDACC__
-        printf("BAD link ind. Must be 12, 23, 31, 13, 32, 21.");
+        // printf("BAD link ind. Must be 12, 23, 31, 13, 32, 21.");
 #else
         throw std::invalid_argument("Bad link ind. Must be 12, 23, 31, 13, 32, 21.");
 #endif // __CUDACC__
@@ -57,7 +61,7 @@ int Orbits::get_sc_ind(int sc)
     else
     {
 #ifdef __CUDACC__
-        printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
+        // printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
 #else
         std::ostringstream oss;
         oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << std::endl;
@@ -127,8 +131,6 @@ double Orbits::get_light_travel_time(double t, int link)
     }
 
     int link_ind = get_link_ind(link);
-    if ((link_ind < 0) || (link_ind >= 6))
-        printf("BAD %d\n", link_ind);
     int up_ind = (window + 1) * (nlinks + link_ind);
     int down_ind = window * (nlinks + link_ind);
 
@@ -191,6 +193,17 @@ void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Or
     }
 }
 
+
+void Orbits::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
+{
+    get_light_travel_time_arr(
+        return_pointer_and_check_length(ltt, "ltt", num, 1),
+        return_pointer_and_check_length(t, "t", num, 1),
+        return_pointer_and_check_length(link, "sc", num, 1),
+        num
+    );
+}
+
 void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int num)
 {
 #ifdef __CUDACC__
@@ -237,6 +250,19 @@ void get_pos_kernel(double *pos_x, double *pos_y, double *pos_z, double *t, int 
         pos_y[i] = _tmp.y;
         pos_z[i] = _tmp.z;
     }
+}
+
+
+void Orbits::get_pos_wrap(array_type<double> pos_x, array_type<double> pos_y, array_type<double> pos_z, array_type<double> t, array_type<int> sc, int num)
+{
+    get_pos_arr(
+        return_pointer_and_check_length(pos_x, "pos_x", num, 1),
+        return_pointer_and_check_length(pos_y, "pos_y", num, 1),
+        return_pointer_and_check_length(pos_z, "pos_z", num, 1),
+        return_pointer_and_check_length(t, "t", num, 1),
+        return_pointer_and_check_length(sc, "sc", num, 1),
+        num
+    );
 }
 
 void Orbits::get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num)
@@ -310,31 +336,16 @@ void Orbits::get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_u
 #endif // __CUDACC__
 }
 
-void Orbits::get_normal_unit_vec_wrap(py::array_t<double>normal_unit_vec_x, py::array_t<double>normal_unit_vec_y, py::array_t<double>normal_unit_vec_z, py::array_t<double>t, py::array_t<int>link, int num)
+void Orbits::get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, array_type<double>normal_unit_vec_y, array_type<double>normal_unit_vec_z, array_type<double>t, array_type<int>link, int num)
 {
-    py::buffer_info normal_unit_vec_x_buf = normal_unit_vec_x.request();
-    py::buffer_info normal_unit_vec_y_buf = normal_unit_vec_y.request();
-    py::buffer_info normal_unit_vec_z_buf = normal_unit_vec_z.request();
-    py::buffer_info t_buf = t.request();
-    py::buffer_info link_buf = link.request();
     
-    if 
-    (
-        (normal_unit_vec_x_buf.size < num)
-        || (normal_unit_vec_y_buf.size < num)
-        || (normal_unit_vec_z_buf.size < num)
-        || (t_buf.size < num)
-        || (link_buf.size < num)
-    )
-    {
-        throw std::invalid_argument("Normal vector computation buffer arrays are not the correct size.");
-    }
+// #ifdef __CUDACC__
     get_normal_unit_vec_arr(
-        (double*)normal_unit_vec_x_buf.ptr,
-        (double*)normal_unit_vec_y_buf.ptr,
-        (double*)normal_unit_vec_z_buf.ptr,
-        (double*)t_buf.ptr,
-        (int*)link_buf.ptr,
+        return_pointer_and_check_length(normal_unit_vec_x, "n_arr_x", num, 1),
+        return_pointer_and_check_length(normal_unit_vec_y, "n_arr_y", num, 1),
+        return_pointer_and_check_length(normal_unit_vec_z, "n_arr_z", num, 1),
+        return_pointer_and_check_length(t, "t", num, 1),
+        return_pointer_and_check_length(link, "link", num, 1),
         num
     );
 }
@@ -346,11 +357,11 @@ PYBIND11_MODULE(pycppdetector, m) {
 
     py::class_<Orbits>(m, "Orbits")
     // Bind the constructor
-    .def(py::init<double, int, py::array_t<double>, py::array_t<double>, py::array_t<double>, py::array_t<int>, py::array_t<int>, py::array_t<int>, double>(), 
+    .def(py::init<double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
          py::arg("dt"), py::arg("N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
     // Bind member functions
-    .def("get_light_travel_time_arr", &Orbits::get_light_travel_time_arr, "Get the light travel time.")
-    .def("get_pos_arr", &Orbits::get_pos_arr, "Get spacecraft position.")
+    .def("get_light_travel_time_wrap", &Orbits::get_light_travel_time_wrap, "Get the light travel time.")
+    .def("get_pos_wrap", &Orbits::get_pos_wrap, "Get spacecraft position.")
     .def("get_normal_unit_vec_wrap", &Orbits::get_normal_unit_vec_wrap, "Get link normal vector.")
     // You can also expose public data members directly using def_readwrite
     ;
