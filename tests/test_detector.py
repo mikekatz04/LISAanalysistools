@@ -12,53 +12,28 @@ except (ImportError, ModuleNotFoundError) as e:
 
     gpu_available = False
 
-from lisatools.sensitivity import (
-    get_sensitivity, 
-    AET1SensitivityMatrix, 
-    XYZ1SensitivityMatrix, 
-    AET2SensitivityMatrix, 
-    XYZ2SensitivityMatrix,
-    AE1SensitivityMatrix, 
-    AE2SensitivityMatrix,
-)
 from lisatools.utils.constants import *
 from lisatools import detector as lisa
 
 import sys
 
-class SensitivityTest(unittest.TestCase):
-    def test_get_sen(self):
+class DetectorTest(unittest.TestCase):
+    def test_orbits(self):
         xp = cp if gpu_available else np
-        
-        frqs = xp.logspace(-5., 0., 1000)
-        Sn = get_sensitivity(frqs, sens_fn="X1TDISens", model=lisa.sangria)
+        force_backend = "cpu" if not gpu_available else "cuda12x"
+        orbits = lisa.DefaultOrbits(force_backend=force_backend)
+        orbits.configure(linear_interp_setup=True)
+        dt = 100.0
+        _t = xp.arange(0.0, YRSID_SI, dt)
+        t_arr_links = xp.tile(_t, (len(orbits.LINKS), 1)).flatten()
+        links = xp.repeat(xp.asarray(orbits.LINKS), len(_t))
+        normal_vec = orbits.get_normal_unit_vec(t_arr_links, links)
+        ltt = orbits.get_light_travel_times(t_arr_links, links)
 
-        self.assertFalse(xp.any(xp.isnan(Sn)))
+        t_arr_sc = xp.tile(_t, (3, 1)).flatten()
+        sc = xp.repeat(xp.array([1, 2, 3]), len(_t))
+        pos = orbits.get_pos(t_arr_sc, sc)
 
-    def _test_sens_mat(self, sens_mat_class, model):
-
-        xp = cp if gpu_available else np
-        
-        # TODO: improve this
-        force_backend = "gpu" if gpu_available else "cpu"
-        frqs = xp.logspace(-5., 0., 1000)
-        Sn = sens_mat_class(frqs, model=model)
-
-    def test_sensitivity_matrix_AET1(self):
-        self._test_sens_mat(AET1SensitivityMatrix, lisa.sangria)
-
-    def test_sensitivity_matrix_AET2(self):
-        self._test_sens_mat(AET2SensitivityMatrix, lisa.sangria_v2)
-
-    def test_sensitivity_matrix_XYZ1(self):
-        self._test_sens_mat(XYZ1SensitivityMatrix, lisa.sangria_v2)
-
-    def test_sensitivity_matrix_XYZ2(self):
-        self._test_sens_mat(XYZ2SensitivityMatrix, lisa.sangria_v2)
-
-    def test_sensitivity_matrix_AE1(self):
-        self._test_sens_mat(AE1SensitivityMatrix, lisa.sangria)
-
-    def test_sensitivity_matrix_AE2(self):
-        self._test_sens_mat(AE2SensitivityMatrix, lisa.sangria_v2)
-
+        self.assertFalse(xp.any(xp.isnan(normal_vec)))
+        self.assertFalse(xp.any(xp.isnan(ltt)))
+        self.assertFalse(xp.any(xp.isnan(pos)))
