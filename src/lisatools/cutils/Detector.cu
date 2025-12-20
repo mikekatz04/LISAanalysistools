@@ -15,6 +15,10 @@
 namespace py = pybind11;
 
 
+
+// TODO WHEN BACK FROM BREAK:
+// SEPARATE OUT ANY FUNCTION THAT INCLUDES ANYTHING PYBIND RELATED INTO BINDING. INHERIT THE ORBITS CLASS INTO A WRAPPER CLASS THAT ADDS THE FUNCTIONS THAT SPECIFICALLY TAKE IN NUMPY AND CUPY ARRAYS 
+
 CUDA_DEVICE
 int Orbits::get_window(double t)
 {
@@ -352,9 +356,7 @@ void Orbits::get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, array
 
 // PYBIND11_MODULE creates the entry point for the Python module
 // The module name here must match the one used in CMakeLists.txt
-PYBIND11_MODULE(pycppdetector, m) {
-    m.doc() = "Orbits/Detector C++ plug-in"; // Optional module docstring
-
+void detector_part(py::module &m) {
     py::class_<Orbits>(m, "Orbits")
     // Bind the constructor
     .def(py::init<double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
@@ -364,6 +366,7 @@ PYBIND11_MODULE(pycppdetector, m) {
     .def("get_pos_wrap", &Orbits::get_pos_wrap, "Get spacecraft position.")
     .def("get_normal_unit_vec_wrap", &Orbits::get_normal_unit_vec_wrap, "Get link normal vector.")
     // You can also expose public data members directly using def_readwrite
+    .def("get_link_ind", &Orbits::get_link_ind, "Get link index.")
     ;
 }
 

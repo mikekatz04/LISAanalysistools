@@ -116,7 +116,7 @@ public:
     void dealloc() {};
 };
 
-
+void detector_part(py::module &m);
 // class AddOrbits{
 //   public:
 //     Orbits *orbits;

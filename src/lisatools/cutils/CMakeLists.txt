@@ -76,6 +76,27 @@ function(apply_cpu_backend_common_options libname)
                              PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
 endfunction()
 
+function(apply_cpu_backend_common_options_static libname)
+  set(target_name "lisaanalysistools_cpu_${libname}_static")
+  set_property(
+    TARGET ${target_name}
+    PROPERTY LIBRARY_OUTPUT_DIRECTORY
+             "${BACKEND_BASE_OUTPUT_DIRECTORY}/lisatools_backend_cpu")
+  set_property(TARGET ${target_name} PROPERTY OUTPUT_NAME ${libname})
+
+  install(TARGETS ${target_name} DESTINATION lisatools_backend_cpu)
+
+  get_target_property(LISATOOLS_CXX_MARCH_OPT lisaanalysistools CXX_MARCH)
+  if(LISATOOLS_CXX_MARCH_OPT)
+    target_compile_options(${target_name} PRIVATE "${LISATOOLS_CXX_MARCH_OPT}")
+  endif()
+
+  target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
+  target_compile_definitions(${target_name}
+                             PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
+endfunction()
+
+
 # * * * * * * * * * * * * * * * * * * * *
 # * * Definition of compiled backends * *
 # * * * * * * * * * * * * * * * * * * * *
@@ -98,9 +119,14 @@ if(LISATOOLS_WITH_CPU)
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/Detector.cu"
             "${CMAKE_CURRENT_BINARY_DIR}/Detector.cxx"
     DEPENDS "Detector.cu"
-    VERBATIM)
+    VERBATIM
+    )
+  add_library(lisaanalysistools_cpu_pycppdetector_static STATIC Detector.cxx)
+  apply_cpu_backend_common_options_static(pycppdetector)
+  target_sources(lisaanalysistools_cpu_pycppdetector_static PUBLIC FILE_SET HEADERS FILES
+                                         global.hpp Detector.hpp)
 
-  pybind11_add_module(lisaanalysistools_cpu_pycppdetector Detector.cxx)
+  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx Detector.cxx)
   # python_add_library(lisaanalysistools_cpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
   apply_cpu_backend_common_options(pycppdetector)
 
@@ -110,7 +136,7 @@ endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  pybind11_add_module(lisaanalysistools_gpu_pycppdetector Detector.cu)
+  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx Detector.cu)
   # python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
   apply_gpu_backend_common_options(pycppdetector)
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
