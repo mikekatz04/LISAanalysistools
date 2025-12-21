@@ -3,19 +3,7 @@
 
 #include "global.hpp"
 #include <iostream>
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
 
-namespace py = pybind11;
-
-#ifdef __CUDACC__
-#include "pybind11_cuda_array_interface.hpp"
-template<typename T>
-using array_type = cai::cuda_array_t<T>;
-#else
-template<typename T>
-using array_type = py::array_t<T>;
-#endif
 
 class Vec
 {
@@ -47,54 +35,56 @@ public:
     int *links;
     int *sc_r;
     int *sc_e;
+    bool have_info;
+    
+    Orbits(){have_info = false;};
+    
 
-    Orbits(double dt_, int N_, array_type<double> n_arr_, array_type<double> ltt_arr_, array_type<double> x_arr_, array_type<int> links_, array_type<int> sc_r_, array_type<int> sc_e_, double armlength_)
+    void fill_orbits_info(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
 
-        n_arr = return_pointer_and_check_length(n_arr_, "n_arr", N, 6 * 3);
-        ltt_arr = return_pointer_and_check_length(ltt_arr_, "ltt_arr", N, 6);
-        x_arr = return_pointer_and_check_length(x_arr_, "x_arr", N, 3 * 3);
+        n_arr = n_arr_;
+        ltt_arr = ltt_arr_;
+        x_arr = x_arr_;
         nlinks = 6;
         nspacecraft = 3;
 
-        sc_r = return_pointer_and_check_length(sc_r_, "sc_r", nlinks, 1);
-        sc_e = return_pointer_and_check_length(sc_e_, "sc_e", nlinks, 1);
-        links = return_pointer_and_check_length(links_, "links", nlinks, 1);
+        sc_r = sc_r_;
+        sc_e = sc_e_;
+        links = links_;
         armlength = armlength_;
+
+        have_info = true;
     };
 
-    template<typename T>
-    T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
-    {
-        #ifdef __CUDACC__
-        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
-        
-        #else
-        py::buffer_info buf1 = input1.request();
-
-        if (buf1.size != N * multiplier)
+    CUDA_CALLABLE_MEMBER
+    void check_have_info(){
+        if (!have_info)
         {
-            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
-            throw std::invalid_argument(err_out);
+#ifdef __CUDACC__
+            
+#else
+            throw std::invalid_argument("Need to add orbit info before evaluting orbital quantities. Use fill_orbits_info method.");
+#endif
         }
-        T* ptr1 = static_cast<T *>(buf1.ptr);
-        #endif
-        return ptr1;
     };
 
     int get_sc_r_from_arr(int i)
     {
+        check_have_info();
         return sc_r[i];
     };
 
     int get_sc_e_from_arr(int i)
     {
+        check_have_info();
         return sc_e[i];
     };
     int get_link_from_arr(int i)
     {
+        check_have_info();
         return links[i];
     };
 
@@ -110,13 +100,9 @@ public:
     void get_light_travel_time_arr(double *ltt, double *t, int *link, int num);
     void get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num);
     void get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num);
-    void get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num);
-    void get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, array_type<double>normal_unit_vec_y, array_type<double>normal_unit_vec_z, array_type<double>t, array_type<int>link, int num);
-    void get_pos_wrap(array_type<double> pos_x, array_type<double> pos_y, array_type<double> pos_z, array_type<double> t, array_type<int> sc, int num);
     void dealloc() {};
 };
 
-void detector_part(py::module &m);
 // class AddOrbits{
 //   public:
 //     Orbits *orbits;

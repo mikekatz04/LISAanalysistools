@@ -349,7 +349,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
-        self._pycppdetector = self.backend.Orbits(*self._pycppdetector_args)
+        self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
         return self._pycppdetector
 
     @property

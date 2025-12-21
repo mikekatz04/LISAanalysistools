@@ -12,12 +12,12 @@ from gpubackendtools.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
-    Orbits: object
+    OrbitsWrap: object
     # psd_likelihood: typing.Callable[(...), None]
 
 class LISAToolsBackend:
     # TODO: not ClassVar?
-    Orbits: object
+    OrbitsWrap: object
     # psd_likelihood: typing.Callable[(...), None]
 
     def __init__(self, lisatools_backend_methods):
@@ -25,7 +25,7 @@ class LISAToolsBackend:
         # set direct lisatools methods
         # pass rest to general backend
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
-        self.Orbits = lisatools_backend_methods.Orbits
+        self.OrbitsWrap = lisatools_backend_methods.OrbitsWrap
         # self.psd_likelihood = lisatools_backend_methods.psd_likelihood
     
 
@@ -52,7 +52,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         numpy = LISAToolsCpuBackend.check_numpy()
 
         return LISAToolsBackendMethods(
-            Orbits=lisatools_backend_cpu.pycppdetector.Orbits,
+            OrbitsWrap=lisatools_backend_cpu.pycppdetector.OrbitsWrap,
             # psd_likelihood=lisatools_backend_cpu.psd.psd_likelihood,
             xp=numpy,
         )
@@ -87,7 +87,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            Orbits=lisatools_backend_cuda11x.pycppdetector.Orbits,
+            OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.OrbitsWrap,
             # psd_likelihood=lisatools_backend_cuda11x.psd.psd_likelihood,
             xp=cupy,
         )
@@ -120,7 +120,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            Orbits=lisatools_backend_cuda12x.pycppdetector.Orbits,
+            OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.OrbitsWrap,
             # psd_likelihood=lisatools_backend_cuda12x.psd.psd_likelihood,
             xp=cupy,
         )

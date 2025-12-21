@@ -5,15 +5,6 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
-
-#ifdef __CUDACC__
-#include "pybind11_cuda_array_interface.hpp"
-#endif
-
-namespace py = pybind11;
-
 
 
 // TODO WHEN BACK FROM BREAK:
@@ -102,6 +93,7 @@ void Orbits::get_normal_unit_vec_ptr(Vec *vec, double t, int link)
 CUDA_DEVICE
 Vec Orbits::get_normal_unit_vec(double t, int link)
 {
+    check_have_info();
     int window = get_window(t);
     if (window == -1)
     {
@@ -127,6 +119,7 @@ Vec Orbits::get_normal_unit_vec(double t, int link)
 CUDA_DEVICE
 double Orbits::get_light_travel_time(double t, int link)
 {
+    check_have_info();
     int window = get_window(t);
     if (window == -1)
     {
@@ -147,6 +140,7 @@ double Orbits::get_light_travel_time(double t, int link)
 CUDA_DEVICE
 Vec Orbits::get_pos(double t, int sc)
 {
+    check_have_info();
     int window = get_window(t);
     if (window == -1)
     {
@@ -198,16 +192,6 @@ void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Or
 }
 
 
-void Orbits::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
-{
-    get_light_travel_time_arr(
-        return_pointer_and_check_length(ltt, "ltt", num, 1),
-        return_pointer_and_check_length(t, "t", num, 1),
-        return_pointer_and_check_length(link, "sc", num, 1),
-        num
-    );
-}
-
 void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int num)
 {
 #ifdef __CUDACC__
@@ -256,18 +240,6 @@ void get_pos_kernel(double *pos_x, double *pos_y, double *pos_z, double *t, int 
     }
 }
 
-
-void Orbits::get_pos_wrap(array_type<double> pos_x, array_type<double> pos_y, array_type<double> pos_z, array_type<double> t, array_type<int> sc, int num)
-{
-    get_pos_arr(
-        return_pointer_and_check_length(pos_x, "pos_x", num, 1),
-        return_pointer_and_check_length(pos_y, "pos_y", num, 1),
-        return_pointer_and_check_length(pos_z, "pos_z", num, 1),
-        return_pointer_and_check_length(t, "t", num, 1),
-        return_pointer_and_check_length(sc, "sc", num, 1),
-        num
-    );
-}
 
 void Orbits::get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num)
 {
@@ -338,35 +310,5 @@ void Orbits::get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_u
     get_normal_unit_vec_kernel(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *this);
 
 #endif // __CUDACC__
-}
-
-void Orbits::get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, array_type<double>normal_unit_vec_y, array_type<double>normal_unit_vec_z, array_type<double>t, array_type<int>link, int num)
-{
-    
-// #ifdef __CUDACC__
-    get_normal_unit_vec_arr(
-        return_pointer_and_check_length(normal_unit_vec_x, "n_arr_x", num, 1),
-        return_pointer_and_check_length(normal_unit_vec_y, "n_arr_y", num, 1),
-        return_pointer_and_check_length(normal_unit_vec_z, "n_arr_z", num, 1),
-        return_pointer_and_check_length(t, "t", num, 1),
-        return_pointer_and_check_length(link, "link", num, 1),
-        num
-    );
-}
-
-// PYBIND11_MODULE creates the entry point for the Python module
-// The module name here must match the one used in CMakeLists.txt
-void detector_part(py::module &m) {
-    py::class_<Orbits>(m, "Orbits")
-    // Bind the constructor
-    .def(py::init<double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
-         py::arg("dt"), py::arg("N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
-    // Bind member functions
-    .def("get_light_travel_time_wrap", &Orbits::get_light_travel_time_wrap, "Get the light travel time.")
-    .def("get_pos_wrap", &Orbits::get_pos_wrap, "Get spacecraft position.")
-    .def("get_normal_unit_vec_wrap", &Orbits::get_normal_unit_vec_wrap, "Get link normal vector.")
-    // You can also expose public data members directly using def_readwrite
-    .def("get_link_ind", &Orbits::get_link_ind, "Get link index.")
-    ;
 }
 

@@ -49,11 +49,18 @@ function(apply_gpu_backend_common_options libname)
 
   target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
   target_compile_definitions(${target_name}
-                             PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
+                             PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION
+                             CUDA_COMPILIATION)
   target_link_libraries(${target_name} PUBLIC CUDA::cudart CUDA::cublas
                                               CUDA::cusparse)
   set_property(TARGET ${target_name} PROPERTY CUDA_ARCHITECTURES
                                               ${LISATOOLS_CUDA_ARCH})
+
+  set_property(TARGET ${target_name} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+  set_property(TARGET ${target_name} PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  set_property(TARGET ${target_name} PROPERTY POSITION_INDEPENDENT_CODE ON)  # -fPic
+  
+  
 endfunction()
 
 function(apply_cpu_backend_common_options libname)
@@ -68,12 +75,37 @@ function(apply_cpu_backend_common_options libname)
 
   get_target_property(LISATOOLS_CXX_MARCH_OPT lisaanalysistools CXX_MARCH)
   if(LISATOOLS_CXX_MARCH_OPT)
-    target_compile_options(${target_name} PRIVATE "${LISATOOLS_CXX_MARCH_OPT}")
+    target_compile_options(${target_name} PRIVATE "${LISATOOLS_CXX_MARCH_OPT}" )
   endif()
 
   target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
   target_compile_definitions(${target_name}
                              PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
+  set_property(TARGET ${target_name} PROPERTY POSITION_INDEPENDENT_CODE ON)
+endfunction()
+
+function(apply_gpu_backend_common_options_static libname)
+  set(target_name "lisaanalysistools_gpu_${libname}_static")
+  set(backend_name "lisatools_backend_cuda${CUDAToolkit_VERSION_MAJOR}x")
+  set_property(
+    TARGET ${target_name}
+    PROPERTY LIBRARY_OUTPUT_DIRECTORY
+             "${BACKEND_BASE_OUTPUT_DIRECTORY}/${backend_name}")
+  set_property(TARGET ${target_name} PROPERTY OUTPUT_NAME ${libname})
+
+  install(TARGETS ${target_name} DESTINATION ${backend_name})
+
+  target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
+  target_compile_definitions(${target_name}
+                             PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION
+                             CUDA_COMPILIATION)
+  target_link_libraries(${target_name} PUBLIC CUDA::cudart CUDA::cublas
+                                              CUDA::cusparse)
+  set_property(TARGET ${target_name} PROPERTY CUDA_ARCHITECTURES
+                                              ${LISATOOLS_CUDA_ARCH})
+  set_property(TARGET ${target_name} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+  set_property(TARGET ${target_name} PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  set_property(TARGET ${target_name} PROPERTY POSITION_INDEPENDENT_CODE ON)  # -fPic
 endfunction()
 
 function(apply_cpu_backend_common_options_static libname)
@@ -94,6 +126,7 @@ function(apply_cpu_backend_common_options_static libname)
   target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
   target_compile_definitions(${target_name}
                              PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
+  set_property(TARGET ${target_name} PROPERTY POSITION_INDEPENDENT_CODE ON)
 endfunction()
 
 
@@ -121,25 +154,37 @@ if(LISATOOLS_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM
     )
-  add_library(lisaanalysistools_cpu_pycppdetector_static STATIC Detector.cxx)
-  apply_cpu_backend_common_options_static(pycppdetector)
-  target_sources(lisaanalysistools_cpu_pycppdetector_static PUBLIC FILE_SET HEADERS FILES
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx)
+  apply_cpu_backend_common_options_static(detector)
+  target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
                                          global.hpp Detector.hpp)
 
-  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx Detector.cxx)
-  # python_add_library(lisaanalysistools_cpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
+  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
   apply_cpu_backend_common_options(pycppdetector)
-
+  target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp Detector.hpp)
+                                         global.hpp Detector.hpp binding.hpp)
 endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx Detector.cu)
-  # python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu)
+  apply_gpu_backend_common_options_static(detector_gpu)
+  target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
+                                         global.hpp Detector.hpp)
+
+  target_link_libraries(lisaanalysistools_gpu_detector_gpu_static PUBLIC CUDA::cudart CUDA::cublas
+                                              CUDA::cusparse)
+
+  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
   apply_gpu_backend_common_options(pycppdetector)
+  target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
+  
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp Detector.hpp pybind11_cuda_array_interface.hpp)
+                                         global.hpp Detector.hpp binding.hpp pybind11_cuda_array_interface.hpp)
+
+  target_compile_options(lisaanalysistools_gpu_pycppdetector PRIVATE -D__CUDA_COMPILATION__)
+  
+
 endif()
 

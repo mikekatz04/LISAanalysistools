@@ -27,6 +27,7 @@ class DetectorTest(unittest.TestCase):
         _t = xp.arange(0.0, YRSID_SI, dt)
         t_arr_links = xp.tile(_t, (len(orbits.LINKS), 1)).flatten()
         links = xp.repeat(xp.asarray(orbits.LINKS), len(_t))
+        breakpoint()
         normal_vec = orbits.get_normal_unit_vec(t_arr_links, links)
         ltt = orbits.get_light_travel_times(t_arr_links, links)
 

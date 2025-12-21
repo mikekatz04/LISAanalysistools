@@ -4,10 +4,12 @@
 #ifdef __CUDACC__
 #define CUDA_KERNEL __global__
 #define CUDA_DEVICE __device__
+#define CUDA_CALLABLE_MEMBER __device__ __host__
 
 #else // __CUDACC__
 #define CUDA_KERNEL 
 #define CUDA_DEVICE  
+#define CUDA_CALLABLE_MEMBER
 
 #endif // __CUDACC__
 
