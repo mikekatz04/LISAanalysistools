@@ -35,12 +35,8 @@ public:
     int *links;
     int *sc_r;
     int *sc_e;
-    bool have_info;
     
-    Orbits(){have_info = false;};
-    
-
-    void fill_orbits_info(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
+    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
@@ -56,35 +52,22 @@ public:
         links = links_;
         armlength = armlength_;
 
-        have_info = true;
-    };
-
-    CUDA_CALLABLE_MEMBER
-    void check_have_info(){
-        if (!have_info)
-        {
-#ifdef __CUDACC__
-            
-#else
-            throw std::invalid_argument("Need to add orbit info before evaluting orbital quantities. Use fill_orbits_info method.");
-#endif
-        }
     };
 
     int get_sc_r_from_arr(int i)
     {
-        check_have_info();
+        
         return sc_r[i];
     };
 
     int get_sc_e_from_arr(int i)
     {
-        check_have_info();
+        
         return sc_e[i];
     };
     int get_link_from_arr(int i)
     {
-        check_have_info();
+        
         return links[i];
     };
 

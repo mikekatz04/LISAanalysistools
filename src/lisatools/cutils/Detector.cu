@@ -93,7 +93,6 @@ void Orbits::get_normal_unit_vec_ptr(Vec *vec, double t, int link)
 CUDA_DEVICE
 Vec Orbits::get_normal_unit_vec(double t, int link)
 {
-    check_have_info();
     int window = get_window(t);
     if (window == -1)
     {
@@ -119,7 +118,6 @@ Vec Orbits::get_normal_unit_vec(double t, int link)
 CUDA_DEVICE
 double Orbits::get_light_travel_time(double t, int link)
 {
-    check_have_info();
     int window = get_window(t);
     if (window == -1)
     {
@@ -140,7 +138,6 @@ double Orbits::get_light_travel_time(double t, int link)
 CUDA_DEVICE
 Vec Orbits::get_pos(double t, int sc)
 {
-    check_have_info();
     int window = get_window(t);
     if (window == -1)
     {

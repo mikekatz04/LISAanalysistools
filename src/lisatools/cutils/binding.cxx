@@ -11,9 +11,10 @@
 
 namespace py = pybind11;
 
+
 void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
 {
-    get_light_travel_time_arr(
+    orbits->get_light_travel_time_arr(
         return_pointer_and_check_length(ltt, "ltt", num, 1),
         return_pointer_and_check_length(t, "t", num, 1),
         return_pointer_and_check_length(link, "sc", num, 1),
@@ -22,10 +23,9 @@ void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<d
 }
 
 
-
 void OrbitsWrap::get_pos_wrap(array_type<double> pos_x, array_type<double> pos_y, array_type<double> pos_z, array_type<double> t, array_type<int> sc, int num)
 {
-    get_pos_arr(
+    orbits->get_pos_arr(
         return_pointer_and_check_length(pos_x, "pos_x", num, 1),
         return_pointer_and_check_length(pos_y, "pos_y", num, 1),
         return_pointer_and_check_length(pos_z, "pos_z", num, 1),
@@ -40,7 +40,7 @@ void OrbitsWrap::get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, a
 {
     
 // #ifdef __CUDACC__
-    get_normal_unit_vec_arr(
+    orbits->get_normal_unit_vec_arr(
         return_pointer_and_check_length(normal_unit_vec_x, "n_arr_x", num, 1),
         return_pointer_and_check_length(normal_unit_vec_y, "n_arr_y", num, 1),
         return_pointer_and_check_length(normal_unit_vec_z, "n_arr_z", num, 1),
@@ -78,7 +78,13 @@ std::string get_module_path() {
 // PYBIND11_MODULE creates the entry point for the Python module
 // The module name here must match the one used in CMakeLists.txt
 void detector_part(py::module &m) {
-    py::class_<OrbitsWrap>(m, "OrbitsWrap")
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<OrbitsWrap>(m, "OrbitsWrapGPU")
+#else
+    py::class_<OrbitsWrap>(m, "OrbitsWrapCPU")
+#endif 
+
     // Bind the constructor
     .def(py::init<double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
          py::arg("dt"), py::arg("N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
@@ -87,7 +93,20 @@ void detector_part(py::module &m) {
     .def("get_pos_wrap", &OrbitsWrap::get_pos_wrap, "Get spacecraft position.")
     .def("get_normal_unit_vec_wrap", &OrbitsWrap::get_normal_unit_vec_wrap, "Get link normal vector.")
     // You can also expose public data members directly using def_readwrite
+    .def_readwrite("orbits", &OrbitsWrap::orbits)
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
+    ;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<Orbits>(m, "OrbitsBaseGPU")
+#else
+    py::class_<Orbits>(m, "OrbitsBaseCPU")
+#endif 
+
+    // Bind the constructor
+    .def(py::init<double, int, double *, double *, double *, int *, int *, int *, double>(), 
+         py::arg("dt"), py::arg("N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
+
     ;
 }
 

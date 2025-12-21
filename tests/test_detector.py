@@ -4,6 +4,7 @@ import time
 import unittest
 
 try:
+    raise ImportError
     import cupy as cp
     gpu_available = True
 
@@ -27,10 +28,11 @@ class DetectorTest(unittest.TestCase):
         _t = xp.arange(0.0, YRSID_SI, dt)
         t_arr_links = xp.tile(_t, (len(orbits.LINKS), 1)).flatten()
         links = xp.repeat(xp.asarray(orbits.LINKS), len(_t))
-        breakpoint()
         normal_vec = orbits.get_normal_unit_vec(t_arr_links, links)
         ltt = orbits.get_light_travel_times(t_arr_links, links)
-
+        import lisatools
+        _backend = lisatools.get_backend(force_backend)
+        breakpoint()
         t_arr_sc = xp.tile(_t, (3, 1)).flatten()
         sc = xp.repeat(xp.array([1, 2, 3]), len(_t))
         pos = orbits.get_pos(t_arr_sc, sc)

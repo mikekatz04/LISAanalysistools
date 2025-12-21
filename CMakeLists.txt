@@ -10,11 +10,14 @@
 cmake_minimum_required(VERSION 3.23...3.31)
 
 # ---- Main project definition ----
-project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX)
+project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX CUDA)
 
 # ---- Find required dependencies ----
 find_package(Python COMPONENTS Interpreter Development.Module NumPy REQUIRED)
 find_package(pybind11 CONFIG)
+
+set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # This line defines the install directory variables
 include(GNUInstallDirs)
