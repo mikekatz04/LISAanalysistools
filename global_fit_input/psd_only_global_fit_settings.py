@@ -200,16 +200,16 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     ldc_source_file = head_dir + "LDC2_sangria_training_v2.h5"
-    base_file_name = "psd_separate_7th_try"
+    base_file_name = "psd_separate_8th_try"
     file_store_dir = head_dir + "global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [2]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # few.get_backend('cuda12x')
     nwalkers = 36
-    ntemps = 24
+    ntemps = 4
 
     tukey_alpha = 0.05
 
@@ -233,6 +233,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         tukey_alpha=tukey_alpha,
         gpus=gpus,
         remove_from_data=["mbhb", "dgb", "igb", "vgb"],
+        channels=["A", "E"],  # , "T"
     )
 
     general_setup = GeneralSetup(general_settings)
