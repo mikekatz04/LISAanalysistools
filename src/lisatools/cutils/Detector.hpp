@@ -4,7 +4,11 @@
 #include "global.hpp"
 #include <iostream>
 
-
+#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+#define Orbits OrbitsGPU
+#else
+#define Orbits OrbitsCPU
+#endif
 class Vec
 {
 public:

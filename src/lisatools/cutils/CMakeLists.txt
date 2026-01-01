@@ -175,6 +175,8 @@ if(LISATOOLS_WITH_GPU)
 
   target_link_libraries(lisaanalysistools_gpu_detector_gpu_static PUBLIC CUDA::cudart CUDA::cublas
                                               CUDA::cusparse)
+  target_compile_definitions(lisaanalysistools_gpu_detector_gpu_static PUBLIC __CUDA_COMPILATION__)
+
 
   pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
   apply_gpu_backend_common_options(pycppdetector)
@@ -183,7 +185,8 @@ if(LISATOOLS_WITH_GPU)
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
                                          global.hpp Detector.hpp binding.hpp pybind11_cuda_array_interface.hpp)
 
-  target_compile_options(lisaanalysistools_gpu_pycppdetector PRIVATE -D__CUDA_COMPILATION__)
+				 #target_compile_options(lisaanalysistools_gpu_pycppdetector PRIVATE -D__CUDA_COMPILATION__)
+  target_compile_definitions(lisaanalysistools_gpu_pycppdetector PUBLIC __CUDA_COMPILATION__)  
   
 
 endif()

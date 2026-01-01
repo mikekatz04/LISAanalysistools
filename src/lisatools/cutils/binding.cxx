@@ -50,6 +50,15 @@ void OrbitsWrap::get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, a
     );
 }
 
+void check_12()
+{
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    printf("CHECK 12 GOOD\n");
+#else
+    printf("CHECK 12 BAD\n");
+#endif 
+}
+
 void check_orbits(Orbits *orbits)
 {
     printf("%e\n", orbits->x_arr[0]);
@@ -97,14 +106,15 @@ void detector_part(py::module &m) {
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
     ;
 
+
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<Orbits>(m, "OrbitsBaseGPU")
+    py::class_<Orbits>(m, "OrbitsGPU")
 #else
-    py::class_<Orbits>(m, "OrbitsBaseCPU")
-#endif 
+    py::class_<Orbits>(m, "OrbitsCPU")
+#endif
 
     // Bind the constructor
-    .def(py::init<double, int, double *, double *, double *, int *, int *, int *, double>(), 
+    .def(py::init<double, int, double *, double *, double *, int *, int *, int *, double>(),
          py::arg("dt"), py::arg("N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
 
     ;
@@ -120,7 +130,7 @@ PYBIND11_MODULE(pycppdetector, m) {
     m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 
     m.def("get_module_path_cpp", &get_module_path, "Returns the file path of the module");
-
+    m.def("check_12", &check_12, "Check12");
     // Optionally, get the path during module initialization and store it
     // This can cause an AttributeError if not handled carefully, as m.attr("__file__")
     // might not be fully set during the initial call if the module is loaded in
