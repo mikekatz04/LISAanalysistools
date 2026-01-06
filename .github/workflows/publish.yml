@@ -152,7 +152,7 @@ jobs:
       - name: Install HDF5 C library (Linux/Ubuntu example)
         if: runner.os == 'Linux'
         run: |
-          apt-get update && apt-get install -y pkg-config libhdf5-dev
+          sudo apt-get update && sudo apt-get install -y libhdf5-dev 
       - name: Add release suffix to project name
         if: matrix.kind != 'core'
         run: |
