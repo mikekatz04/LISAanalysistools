@@ -3,6 +3,7 @@ requires = [
   "Cython",
   "numpy",
   "scikit_build_core",
+  "pybind11",
   "gpubackendtools>=0.0.17",  # @ file:///home/mlkatz/GPUBackendTools",  
 ]
 build-backend = "scikit_build_core.build"
