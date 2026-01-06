@@ -1,5 +1,5 @@
 #include "stdio.h"
-#include "global.hpp"
+#include "gbt_global.h"
 #include "Detector.hpp"
 #include <iostream>
 #include <stdexcept>

@@ -1,7 +1,7 @@
 #ifndef __DETECTOR_HPP__
 #define __DETECTOR_HPP__
 
-#include "global.hpp"
+#include "gbt_global.h"
 #include <iostream>
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)

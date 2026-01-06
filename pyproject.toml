@@ -3,6 +3,7 @@ requires = [
   "Cython",
   "numpy",
   "scikit_build_core",
+  "gpubackendtools>=0.0.17",  # @ file:///home/mlkatz/GPUBackendTools",  
 ]
 build-backend = "scikit_build_core.build"
 
@@ -22,7 +23,6 @@ dependencies = [
   "exceptiongroup; python_version<'3.11'", # To access ExceptionGroup with Python 3.9 and 3.10
   "h5py<3.15",
   "matplotlib",
-  "gpubackendtools",
   "jsonschema",                            # To validate content of file registry
   "lisaconstants",
   "multispline",
