@@ -204,7 +204,7 @@ jobs:
       - name: Install HDF5 C library (Linux/Ubuntu example)
         if: runner.os == 'Linux'
         run: |
-          python -m pip install --upgrade h5py -y
+          python -m pip install h5py
       - name: Build core wheels (macOS)
         if: runner.os == 'macOS' && matrix.kind == 'core'
         uses: pypa/cibuildwheel@v2.22.0
