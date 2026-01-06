@@ -39,7 +39,7 @@ class OrbitsWrap {
         int *_sc_e = return_pointer_and_check_length(sc_e_, "sc_e", 6, 1);
         int *_links = return_pointer_and_check_length(links_, "links", 6, 1);
         
-        orbits = new Orbits(dt_, N_, _n_arr, _ltt_arr, _x_arr, _sc_r, _sc_e, _links, armlength_);
+        orbits = new Orbits(dt_, N_, _n_arr, _ltt_arr, _x_arr, _links,  _sc_r, _sc_e, armlength_);
     };
     ~OrbitsWrap(){
         delete orbits;
