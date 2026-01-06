@@ -23,6 +23,7 @@ requires-python = ">= 3.10"
 dependencies = [
   "exceptiongroup; python_version<'3.11'", # To access ExceptionGroup with Python 3.9 and 3.10
   "h5py",
+  "hdf5",
   "matplotlib",
   "jsonschema",                            # To validate content of file registry
   "lisaconstants",
