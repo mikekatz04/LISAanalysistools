@@ -99,6 +99,9 @@ sdist.include = [
   "src/lisatools/git_version.py",                 #@SKIP_PLUGIN@
   "src/lisatools_backend_cuda11x/git_version.py",
   "src/lisatools_backend_cuda12x/git_version.py",
+  "src/lisatools_backend_cpu/libdetector.a",
+  "src/lisatools_backend_cuda11x/libdetector_gpu.a",
+  "src/lisatools_backend_cuda12x/libdetector_gpu.a",
   "tests/",
   "src/lisatools/cutils/Detector.cu",
   "src/lisatools/cutils/pycppdetector.pyx",
