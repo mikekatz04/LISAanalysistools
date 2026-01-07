@@ -107,6 +107,8 @@ sdist.include = [
   # "src/lisatools/cutils/pycppdetector.pxd",
   "src/lisatools/cutils/Detector.hpp",
   "src/lisatools/cutils/global.hpp",
+  "src/lisatools/cutils/binding.cxx",
+  "src/lisatools/cutils/binding.hpp",
 ]
 sdist.exclude = [
   ".devcontainer/",
