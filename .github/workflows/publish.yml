@@ -243,7 +243,7 @@ jobs:
             dnf -y install cuda-toolkit &&
             ls -al /usr/local &&
             export PATH=$PATH:/usr/local/cuda/bin &&
-            nvcc --version &&
+            nvcc --version
             #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
             #source /opt/rh/gcc-toolset-11/enable
             #nvcc --version &&
