@@ -241,7 +241,6 @@ jobs:
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf clean all &&
             dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} gcc-toolset-11
-            source /opt/rh/gcc-toolset-11/enable
             nvcc --version
             gcc --version
 
