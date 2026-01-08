@@ -237,6 +237,7 @@ jobs:
             cmake.define.LISATOOLS_CUDA_ARCH=all
           # Use dnf to install cuda-toolkit and gcc inside the manylinux container
           CIBW_BEFORE_ALL: >
+            scl enable gcc-toolset-11 bash -c &&
             dnf -y install epel-release &&
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf clean all &&
