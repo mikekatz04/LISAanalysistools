@@ -238,7 +238,7 @@ jobs:
           # Use dnf to install cuda-toolkit and gcc inside the manylinux container
           CIBW_BEFORE_ALL: >
             dnf -y install epel-release &&
-            dnf config-manager --add-repo developer.download.nvidia.com &&
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf clean all &&
             dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} gcc
           # CIBW_BEFORE_BUILD: source /opt/rh/devtoolset-11/enable
