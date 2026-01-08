@@ -240,12 +240,15 @@ jobs:
             dnf -y install epel-release &&
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf clean all &&
-            dnf -y install gcc-toolset-11 &&
-            dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
-            source /opt/rh/gcc-toolset-11/enable
+            dnf -y install cuda-toolkit &&
+            ls -al /usr/local &&
+            export PATH=$PATH:/usr/local/cuda/bin &&
             nvcc --version &&
-            gcc --version
-          CIBW_BEFORE_BUILD: source /opt/rh/gcc-toolset-11/enable
+            #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
+            #source /opt/rh/gcc-toolset-11/enable
+            #nvcc --version &&
+            #gcc --version
+            #CIBW_BEFORE_BUILD: source /opt/rh/gcc-toolset-11/enable
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
             LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
