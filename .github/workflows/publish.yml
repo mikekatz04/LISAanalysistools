@@ -256,8 +256,8 @@ jobs:
             CUDA_ROOT=/usr/local/cuda
             CUDA_PATH=/usr/local/cuda
             CUDADIR=/usr/local/cuda
-            CC=gcc
-            CXX=g++
+            CC=gcc-12
+            CXX=g++-12
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel} --exclude "libcudart.so.${{ matrix.cuda_major }}" --exclude "libcusparse.so.${{ matrix.cuda_major }}" --exclude "libcublas.so.${{ matrix.cuda_major }}" --exclude "libnvJitLink.so.${{ matrix.cuda_major }}" --exclude "libcublasLt.so.${{ matrix.cuda_major }}"
       # =====================
