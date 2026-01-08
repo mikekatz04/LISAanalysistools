@@ -239,7 +239,7 @@ jobs:
           CIBW_BEFORE_ALL: >
             dnf install -y scl-utils
             dnf install -y gcc-toolset-11-toolchain
-            scl enable gcc-toolset-11 bash -c &&
+            scl enable gcc-toolset-11 bash &&
             dnf -y install epel-release &&
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf clean all &&
@@ -251,7 +251,7 @@ jobs:
             #source /opt/rh/gcc-toolset-11/enable
             #nvcc --version &&
             #gcc --version
-          CIBW_BEFORE_BUILD: scl enable gcc-toolset-11 bash -c
+          CIBW_BEFORE_BUILD: scl enable gcc-toolset-11 bash
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
             LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
