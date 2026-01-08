@@ -238,7 +238,7 @@ jobs:
           CIBW_BEFORE_ALL: >
             dnf config-manager --set-enabled powertools || true &&
             dnf install -y gcc-toolset-13 &&
-            echo "source /opt/rh/gcc-toolset-13/enable" >> $GITHUB_ENV &&
+            echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV" &&
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf install -y cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}
           # CIBW_BEFORE_BUILD: source /opt/rh/devtoolset-11/enable
