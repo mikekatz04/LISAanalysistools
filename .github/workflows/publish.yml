@@ -226,11 +226,14 @@ jobs:
       - name: Installs when building cuda plugins
         if: runner.os == 'Linux' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
         run: |
-          dnf config-manager --set-enabled powertools || true
-          dnf install -y gcc-toolset-13
-          echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV"
-          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
-          dnf install -y cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}
+          # These commands are executed inside the manylinux_2_28 container by cibuildwheel
+          if [ "$CIBW_PLATFORM" == "linux" ]; then
+            dnf config-manager --set-enabled powertools || true
+            dnf install -y gcc-toolset-13
+            echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV"
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+            dnf install -y cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}
+          fi
       - name: Build cuda plugin wheels (Linux)
         if: runner.os == 'Linux' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
         uses: pypa/cibuildwheel@v2.22.0
