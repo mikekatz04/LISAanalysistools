@@ -216,7 +216,8 @@ jobs:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
           CIBW_SKIP: pp* *musllinux*
-          CIBW_MANYLINUX_IMAGES: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=OFF
           CIBW_ENVIRONMENT: >
@@ -229,7 +230,8 @@ jobs:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
           CIBW_SKIP: pp* *musllinux*
-          CIBW_MANYLINUX_IMAGES: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=ONLY
             cmake.define.LISATOOLS_CUDA_ARCH=all
