@@ -223,6 +223,14 @@ jobs:
           CIBW_ENVIRONMENT: >
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           # CIBW_TEST_COMMAND: python -m lisatools.tests --disable testfile
+      - name: Installs when building cuda plugins
+        if: runner.os == 'Linux' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
+        run: |
+          dnf config-manager --set-enabled powertools || true
+          dnf install -y gcc-toolset-13
+          echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV"
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+          dnf install -y cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}
       - name: Build cuda plugin wheels (Linux)
         if: runner.os == 'Linux' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
         uses: pypa/cibuildwheel@v2.22.0
@@ -235,12 +243,12 @@ jobs:
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=ONLY
             cmake.define.LISATOOLS_CUDA_ARCH=all
-          CIBW_BEFORE_ALL: >
-            dnf config-manager --set-enabled powertools || true &&
-            dnf install -y gcc-toolset-13 &&
-            echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV" &&
-            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
-            dnf install -y cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}
+          # CIBW_BEFORE_ALL: >
+          #  dnf config-manager --set-enabled powertools || true &&
+          #  dnf install -y gcc-toolset-13 &&
+          #  echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV" &&
+          #  dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
+          #  dnf install -y cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}
           # CIBW_BEFORE_BUILD: source /opt/rh/devtoolset-11/enable
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
