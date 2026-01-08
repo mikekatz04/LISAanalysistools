@@ -235,7 +235,7 @@ jobs:
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=ONLY
             cmake.define.LISATOOLS_CUDA_ARCH=all
-          # CIBW_BEFORE_ALL: >
+          CIBW_BEFORE_ALL: >
             dnf config-manager --set-enabled powertools || true &&
             dnf install -y gcc-toolset-13 &&
             echo "source /opt/rh/gcc-toolset-13/enable" >> "$GITHUB_ENV" &&
