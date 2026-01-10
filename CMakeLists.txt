@@ -51,7 +51,7 @@ set_property(
 # backend if it is compiled. See the documentation of CUDA_ARCHITECTURES:
 # https://cmake.org/cmake/help/latest/prop_tgt/CUDA_ARCHITECTURES.html
 set(
-  LISATOOLS_CUDA_ARCH "native"
+  LISATOOLS_CUDA_ARCH "70;75;80;86;90"
   CACHE STRING "CUDA Architecture targetted for LISATOOLS compilation (see doc of \
           CMAKE_CUDA_ARCHITECTURES)."
 )
