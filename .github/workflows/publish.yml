@@ -231,7 +231,7 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=ONLY
-            cmake.define.LISATOOLS_CUDA_ARCH=all
+            cmake.define.LISATOOLS_CUDA_ARCH=70;75;80;86;90
           # Use dnf to install cuda-toolkit and gcc inside the manylinux container
           CIBW_BEFORE_ALL: >
             dnf install -y scl-utils &&
