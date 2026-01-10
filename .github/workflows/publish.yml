@@ -238,6 +238,7 @@ jobs:
             dnf install -y gcc-toolset-11-toolchain &&
             echo "CHECK1" &&
             source scl_source enable gcc-toolset-11 &&
+            gcc --version
             echo "CHECK2" &&
             dnf -y install epel-release &&
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
@@ -245,6 +246,7 @@ jobs:
             dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
             ls -al /usr/local &&
             export PATH=$PATH:/usr/local/cuda/bin &&
+            gcc --version
             nvcc --version
             #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
             #source /opt/rh/gcc-toolset-11/enable
