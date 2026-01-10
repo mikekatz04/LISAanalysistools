@@ -247,7 +247,8 @@ jobs:
             dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
             ls -al /usr/local &&
             export PATH=$PATH:/usr/local/cuda/bin &&
-            gcc --version
+            gcc --version && 
+            echo "CHECKCHECKCHECK" &&
             nvcc --version
             #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
             #source /opt/rh/gcc-toolset-11/enable
