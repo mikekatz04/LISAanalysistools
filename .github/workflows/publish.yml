@@ -206,7 +206,7 @@ jobs:
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_ver }}
       - name: Build core wheels (Linux)
-        if: runner.os == 'ubuntu-latest' && matrix.kind == 'core'
+        if: runner.os == 'Linux' && matrix.kind == 'core'
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
@@ -220,7 +220,7 @@ jobs:
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           # CIBW_TEST_COMMAND: python -m lisatools.tests --disable testfile
       - name: Build cuda plugin wheels (Linux)
-        if: runner.os == 'ubuntu-latest' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
+        if: runner.os == 'Linux' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
         uses: pypa/cibuildwheel@v2.23.2
         env:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
