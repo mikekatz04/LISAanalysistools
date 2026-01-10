@@ -252,7 +252,9 @@ jobs:
             #source /opt/rh/gcc-toolset-11/enable
             #nvcc --version &&
             #gcc --version
-          CIBW_BEFORE_BUILD: source scl_source enable gcc-toolset-11
+          CIBW_BEFORE_BUILD: |
+            source scl_source enable gcc-toolset-11 &&
+            gcc --version
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
             LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
