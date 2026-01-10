@@ -238,7 +238,7 @@ jobs:
             dnf install -y gcc-toolset-11-toolchain &&
             echo "CHECK1" &&
             source scl_source enable gcc-toolset-11 &&
-            gcc --version
+            gcc --version &&
             echo "CHECK2" &&
             which gcc &&
             dnf -y install epel-release &&
