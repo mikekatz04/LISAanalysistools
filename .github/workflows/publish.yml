@@ -242,7 +242,7 @@ jobs:
             echo "CHECK2" &&
             which gcc &&
             dnf -y install epel-release &&
-            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo &&
             dnf clean all &&
             dnf -y install cuda-toolkit-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} &&
             ls -al /usr/local &&
