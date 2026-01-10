@@ -160,7 +160,7 @@ jobs:
         if: matrix.kind == 'cuda_plugin'
         run: |
           sed -i'' -e 's|#@DEPS_CUPYCUDA@|"cupy-cuda${{ matrix.cuda_major }}x"|g' pyproject.toml
-          sed -i'' -e 's|") #@ADDCUDAHERE@| CUDA)"|g' CMakeLists.txt
+          sed -i 's/) #@ADDCUDAHERE@/ CUDA)/g' CMakeLists.txt
       # Add Core project dependency
       - name: Add core project dependency on plugin
         if: matrix.kind != 'core' && needs.select.outputs.core-suffix == 'true'
