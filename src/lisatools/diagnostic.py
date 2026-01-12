@@ -19,14 +19,12 @@ except (ModuleNotFoundError, ImportError):
 from .sensitivity import get_sensitivity, SensitivityMatrix
 from .datacontainer import DataResidualArray
 from .utils.utility import get_array_module
-
+from . import domains
 
 def inner_product(
     sig1: np.ndarray | list | DataResidualArray,
     sig2: np.ndarray | list | DataResidualArray,
-    dt: Optional[float] = None,
-    df: Optional[float] = None,
-    f_arr: Optional[float] = None,
+    basis_settings: domains.DomainSettingsBase = None,
     psd: Optional[str | None | np.ndarray | SensitivityMatrix] = "LISASens",
     psd_args: Optional[tuple] = (),
     psd_kwargs: Optional[dict] = {},
@@ -73,13 +71,15 @@ def inner_product(
 
     """
     # initial input checks and setup
-    sig1 = DataResidualArray(sig1, dt=dt, f_arr=f_arr, df=df)
-    sig2 = DataResidualArray(sig2, dt=dt, f_arr=f_arr, df=df)
+    sig1 = DataResidualArray(sig1, input_signal_domain=basis_settings)
+    sig2 = DataResidualArray(sig2, input_signal_domain=basis_settings)
 
     if sig1.nchannels != sig2.nchannels:
         raise ValueError(
             f"Signal 1 has {sig1.nchannels} channels. Signal 2 has {sig2.nchannels} channels. Must be the same."
         )
+    
+    nchannels = sig1.nchannels
 
     xp = get_array_module(sig1[0])
 
@@ -90,22 +90,31 @@ def inner_product(
                 "Array in sig1, index 0 sets array module. Not all arrays match that module type (Numpy or Cupy)"
             )
 
-    if sig1.data_length != sig2.data_length:
+    if sig1.data_shape != sig2.data_shape:
         raise ValueError(
             "The two signals are two different lengths. Must be the same length."
         )
 
-    freqs = xp.asarray(sig1.f_arr)
+    basis = sig1.data_res_arr.settings
 
     # get psd weighting
     if not isinstance(psd, SensitivityMatrix):
-        psd = SensitivityMatrix(freqs, [psd], *psd_args, **psd_kwargs)
+        psd = SensitivityMatrix(basis, [psd], *psd_args, **psd_kwargs)
+
+    else:
+        if psd.basis_settings != basis:
+            raise ValueError("PSD basis is not equivalent to signal basis.")
+        
+        for i in list(psd.channel_shape):
+            if i != nchannels:
+                raise ValueError("Number of channels in PSD not equal to number of channels in signal.")
 
     operational_sets = []
 
-    if psd.ndim == 3:
+    if len(psd.channel_shape) == 2:
         assert psd.shape[0] == psd.shape[1] == sig1.shape[0] == sig2.shape[0]
 
+        # this avoids 9 inner products for 6 (with symmetry)
         for i in range(psd.shape[0]):
             for j in range(psd.shape[0]):  # i, psd.shape[1]):
                 factor = 1.0  # if i == j else 2.0
@@ -113,14 +122,10 @@ def inner_product(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )
 
-    elif psd.ndim == 2 and psd.shape[0] > 1:
+    elif len(psd.channel_shape) == 1:
         assert psd.shape[0] == sig1.shape[0] == sig2.shape[0]
         for i in range(psd.shape[0]):
             operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=i))
-
-    elif psd.ndim == 2 and psd.shape[0] == 1:
-        for i in range(sig1.shape[0]):
-            operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=0))
 
     else:
         raise ValueError("# TODO")
@@ -132,7 +137,7 @@ def inner_product(
 
     # initialize
     out = 0.0
-    x = freqs
+    # x = freqs
 
     # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
@@ -142,13 +147,28 @@ def inner_product(
         temp2 = sig2[op_set["sig2_ind"]]
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
-        ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
+        # fix nan in first spot if it is there
+        if inv_psd_tmp.ndim == 1:
+            ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
+            inv_psd_tmp = inv_psd_tmp[ind_start:]
+            sig_component_1 = temp1[ind_start:]
+            sig_component_2 = temp2[ind_start:]
+            inv_psd_component = inv_psd_tmp[ind_start:]
+
+        elif inv_psd_tmp.ndim == 2:
+            ind_start = 1 if np.isnan(inv_psd_tmp[0, 0]) else 0
+            sig_component_1 = temp1[:, ind_start:]
+            sig_component_2 = temp2[:, ind_start:]
+            inv_psd_component = inv_psd_tmp[:, ind_start:]
+
+        else:
+            raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")
 
         y = (
-            func(temp1[ind_start:].conj() * temp2[ind_start:]) * inv_psd_tmp[ind_start:]
+            func(sig_component_1.conj() * sig_component_2) * inv_psd_component
         )  # assumes right summation rule
-        # df is sunk into trapz
-        tmp_out = factor * 4 * xp.trapz(y, x=x[ind_start:])
+        # switching to summation for comp to other domains
+        tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
         out += tmp_out
 
     # normalize the inner produce
@@ -251,6 +271,7 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
     # TODO: check on this / add warning
     detC = psd.detC
     keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
+    
     nl_val = -np.sum(np.log(np.abs(detC[keep])))
     return nl_val
 

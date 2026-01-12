@@ -9,6 +9,7 @@ import math
 import numpy as np
 from scipy import interpolate
 import matplotlib.pyplot as plt
+from . import domains
 
 try:
     import cupy as cp
@@ -926,7 +927,7 @@ class SensitivityMatrix:
     """Container to hold sensitivity information.
 
     Args:
-        f: Frequency array.
+        basis_x: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
         sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
             desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
             or a string corresponding to the :class:`Sensitivity` object.
@@ -936,7 +937,7 @@ class SensitivityMatrix:
 
     def __init__(
         self,
-        f: np.ndarray,
+        settings: domains.DomainSettingsBase,
         sens_mat: (
             List[List[np.ndarray | Sensitivity]]
             | List[np.ndarray | Sensitivity]
@@ -947,8 +948,8 @@ class SensitivityMatrix:
         sens_kwargs_mat = None,
         **sens_kwargs: dict,
     ) -> None:
-        self.frequency_arr = f
-        self.data_length = len(self.frequency_arr)
+        self.basis_settings = settings
+        self.data_shape = self.basis_settings.basis_shape
         self.sens_args = sens_args
         if sens_kwargs_mat is None:
             self.sens_kwargs = sens_kwargs
@@ -958,28 +959,27 @@ class SensitivityMatrix:
         self.sens_mat = sens_mat
 
     @property
-    def frequency_arr(self) -> np.ndarray:
-        return self._frequency_arr
+    def basis_settings(self) -> np.ndarray:
+        return self._basis_settings
 
-    @frequency_arr.setter
-    def frequency_arr(self, frequency_arr: np.ndarray) -> None:
-        assert frequency_arr.dtype == np.float64 or frequency_arr.dtype == float
-        assert frequency_arr.ndim == 1
-        self._frequency_arr = frequency_arr
+    @basis_settings.setter
+    def basis_settings(self, basis_settings: np.ndarray) -> None:
+        assert isinstance(basis_settings, domains.DomainSettingsBase)
+        self._basis_settings = basis_settings
 
     def check_update(self):
         if not self.can_redo:
             raise ValueError("Cannot update sensitivities because original input was arrays rather than functions.")
 
-    def update_frequency_arr(self, frequency_arr: np.ndarray) -> None:
+    def update_basis_settings(self, basis_settings: domains.DomainSettingsBase) -> None:
         """Update class with new frequency array.
 
         Args:
-            frequency_arr: Frequency array.
+            basis_settings: Domain information.
 
         """
         self.check_update()
-        self.frequency_arr = frequency_arr
+        self.basis_settings = basis_settings
         self.sens_mat = self.sens_mat_input
 
     def update_model(self, model: lisa_models.LISAModel | list | np.ndarray) -> None:
@@ -1031,6 +1031,8 @@ class SensitivityMatrix:
         if (isinstance(sens_mat, np.ndarray) or isinstance(
             sens_mat, cp.ndarray)
         ) and sens_mat.dtype != object:
+            assert sens_mat.shape[-len(self.data_shape):] == self.data_shape
+            
             self._sens_mat = sens_mat
             if not hasattr(self, "sens_mat_input"):
                 self.can_redo = False
@@ -1112,18 +1114,19 @@ class SensitivityMatrix:
             self.sens_kwargs = tmp_kwargs
             
             num_components = np.prod(outer_shape).item()
-            xp = get_array_module(self.frequency_arr)
+            # xp = get_array_module(self.frequency_arr)
+            xp = np
             if self.is_array_base:
                 _sens_mat = xp.asarray(sens_mat)
             
             else:
                 _flattened_arr = np.asarray(sens_mat, dtype=object).flatten()
-                _sens_mat = xp.zeros((num_components, len(self.frequency_arr)))
+                _sens_mat = xp.zeros((num_components,) + self.basis_settings.basis_shape)
                 for i, matrix_member in enumerate(_flattened_arr):
                     # calculate it
                     if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
                         _sens_mat[i, :] = get_sensitivity(
-                            self.frequency_arr,
+                            self.basis_settings,
                             *self.sens_args,
                             sens_fn=matrix_member,
                             **self.sens_kwargs.flatten()[i],
@@ -1133,47 +1136,49 @@ class SensitivityMatrix:
                         raise ValueError
 
             # setup in array form
-            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + (len(self.frequency_arr),))
+            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + self.basis_settings.basis_shape)
             
         else:
             raise ValueError("Must input array or list.")
         
+        self.channel_shape = self._sens_mat.shape[:-len(self.data_shape)]
         self._setup_det_and_inv()
 
-    def _setup_det_and_inv(self):
-        # setup detC
-        """Determinant of TDI matrix."""
-        if self.sens_mat.ndim < 3:
-            self.detC = self.sens_mat
-            self.invC = 1/self.sens_mat
+    @property
+    def differential_component(self) -> float:
+        return self.basis_settings.differential_component
 
-        else:
-            xp = get_array_module(self.sens_mat)
-            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
-            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
-            if xp.all(self.detC == 0.0):
-                raise ValueError("All determinants are zero.")
-            
-            invC[self.detC != 0.0] = xp.linalg.inv(self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0])
-            invC[self.detC == 0.0] = 1e-100
-            self.invC = invC.transpose(1, 2, 0)
-            
+    def _setup_det_and_inv(self):
+        """Determinant and inverse of TDI matrix."""
+
+        # setup detC
         xp = get_array_module(self.sens_mat)
 
         # setup detC
-        """Determinant and inverse of TDI matrix."""
+       
         if self.sens_mat.ndim < 3:
             self.detC = xp.prod(self.sens_mat, axis=0)
             self.invC = 1 / self.sens_mat
 
         else:
-            self.detC = xp.linalg.det(self.sens_mat.transpose(2, 0, 1))
-            invC = xp.zeros_like(self.sens_mat.transpose(2, 0, 1))
+            full_shape = tuple(range(len(self.sens_mat.shape)))
+
+            basis_axes = full_shape[-len(self.data_shape):]
+            mat_axes = full_shape[:-len(self.data_shape)]
+            transpose_shape = basis_axes + mat_axes
+            self.detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
+            invC = xp.zeros_like(self.sens_mat.transpose(transpose_shape))
             invC[self.detC != 0.0] = xp.linalg.inv(
-                self.sens_mat.transpose(2, 0, 1)[self.detC != 0.0]
+                self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
             )
             invC[self.detC == 0.0] = 1e-100
-            self.invC = invC.transpose(1, 2, 0)
+
+            # switch them after they were effectively switched above
+            _mat_axes = mat_axes
+            mat_axes = basis_axes
+            basis_axes = _mat_axes
+            back_transpose_shape = mat_axes + basis_axes
+            self.invC = invC.transpose(back_transpose_shape)
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
@@ -1412,11 +1417,13 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
 
 
 def get_sensitivity(
-    f: float | np.ndarray,
+    basis_settings: domains.DomainSettingsBase,
     *args: tuple,
     sens_fn: Optional[Sensitivity | str] = LISASens,
     return_type="PSD",
     fill_nans: float = 1e10,
+    args_list: Optional[List[tuple]] = None,
+    kwargs_list: Optional[List[dict]] = None,
     **kwargs,
 ) -> float | np.ndarray:
     """Generic sensitivity generator
@@ -1449,8 +1456,39 @@ def get_sensitivity(
             "sens_fn must be a string for a stock option or a class with a get_Sn method."
         )
 
-    PSD = sensitivity.get_Sn(f, *args, **kwargs)
+    if isinstance(basis_settings, domains.FDSettings):
+        PSD = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
 
+    elif isinstance(basis_settings, domains.TDSettings):
+        raise NotImplementedError
+    elif isinstance(basis_settings, domains.STFTSettings):
+        raise NotImplementedError
+        PSD = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
+    elif isinstance(basis_settings, domains.WDMSettings):
+        if kwargs_list is None:
+            kwargs_list = [kwargs for _ in range(basis_settings.NT)]
+        else:
+            assert isinstance(kwargs_list, list)
+            assert len(kwargs_list) == basis_settings.NT
+            for tmp in kwargs_list:
+                if not isinstance(tmp, dict):
+                    raise ValueError("Value in kwargs_list is not a dictionary. Must be a dictionary.")
+            
+        if args_list is None:
+            args_list = [args for _ in range(basis_settings.NT)]
+        else:
+            assert isinstance(args_list, list)
+            assert len(args_list) == basis_settings.NT
+            for tmp in args_list:
+                if not isinstance(tmp, tuple) and not isinstance(tmp, list):
+                    raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
+            
+        # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
+        PSD = np.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)])
+
+    else:
+        raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")
+    
     if fill_nans is not None:
         assert isinstance(fill_nans, float)
         PSD[np.isnan(PSD)] = fill_nans
