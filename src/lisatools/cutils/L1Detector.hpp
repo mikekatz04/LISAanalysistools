@@ -3,13 +3,18 @@
 
 #include "gbt_global.h"
 #include "Detector.hpp"
+#include "cuda_complex.hpp"
 #include <iostream>
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define L1Orbits L1OrbitsGPU
+#define XYZSensitivityMatrix XYZSensitivityMatrixGPU
 #else
 #define L1Orbits L1OrbitsCPU
+#define XYZSensitivityMatrix XYZSensitivityMatrixCPU
 #endif
+
+#define Clight 299792458.
 
 class L1Orbits
 {
@@ -85,20 +90,59 @@ public:
     void dealloc() {};
 };
 
-// class AddOrbits{
-//   public:
-//     Orbits *orbits;
-    
-//     void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
-//     {
-//         if (orbits != NULL)
-//         {
-//             delete orbits;
-//         }
-//         orbits = new Orbits(dt_, N_, n_arr_, L_arr_, x_arr_, links_, sc_r_, sc_e_, armlength_);
-//     };
-//     void dealloc(){delete orbits;};
-// };
+class XYZSensitivityMatrix {
+    public:
+    double *averaged_ltts_arr;
+    double *delta_ltts_arr;
+    double armlength;
+    int n_links;
+    int n_times;
+    int left_mosas[3];
+    int generation;
 
+    XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_, int n_times_, double armlength_, int generation_){
+        averaged_ltts_arr = averaged_ltts_arr_; // flattened array of size Ntimes * 6
+        delta_ltts_arr = delta_ltts_arr_; // flattened array of size Ntimes * 6
+        armlength = armlength_;
+        generation = generation_;
+        n_links = 6;
+        n_times = n_times_;
+        // Initialize array manually or via loop
+        left_mosas[0] = 12; 
+        left_mosas[1] = 23; 
+        left_mosas[2] = 31;
+    };
+    CUDA_DEVICE int get_adjacent_mosa(int mosa);
+    //
+    CUDA_DEVICE gcmplx::complex<double> oms_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
+    CUDA_DEVICE gcmplx::complex<double> oms_xy_unequal_armlength(double f, double avg_d_ij, double avg_d_ik, double avg_d_jk, double delta_d_ij);
+    CUDA_DEVICE gcmplx::complex<double> tm_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
+    CUDA_DEVICE gcmplx::complex<double> tm_xy_unequal_armlength(double f, double avg_d_ij, double avg_d_ik, double avg_d_jk, double delta_d_ij);
+    CUDA_DEVICE gcmplx::complex<double> build_noise_matrix_element(double S_tm, double S_isi_oms, gcmplx::complex<double> oms_tf, gcmplx::complex<double> tm_tf);
+    
+    CUDA_DEVICE void get_noise_tfs(double f, 
+                                  gcmplx::complex<double> *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, gcmplx::complex<double> *oms_yy, gcmplx::complex<double> *oms_yz, gcmplx::complex<double> *oms_zz,
+                                  gcmplx::complex<double> *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, gcmplx::complex<double> *tm_yy, gcmplx::complex<double> *tm_yz, gcmplx::complex<double> *tm_zz,
+                                  int time_index); 
+                
+    void get_noise_tfs_arr(double *freqs, 
+                          gcmplx::complex<double> *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, gcmplx::complex<double> *oms_yy, gcmplx::complex<double> *oms_yz, gcmplx::complex<double> *oms_zz,
+                          gcmplx::complex<double> *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, gcmplx::complex<double> *tm_yy, gcmplx::complex<double> *tm_yz, gcmplx::complex<double> *tm_zz,
+                          int num,
+                          int *time_indices);
+
+    void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, gcmplx::complex<double> *data, 
+                             int *data_index_all, int *time_index_all,
+                             double *Soms_d_in_all, double *Sa_a_in_all, 
+                             double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, 
+                             double df, int data_length, int num_psds);
+
+    void dealloc() {};
+
+};
+
+CUDA_DEVICE void lisanoises(double *S_tm, double *S_isi_oms, double f, double Soms_d_in, double Sa_a_in, bool return_relative_frequency);
+CUDA_DEVICE double Sgal(double f, double Amp, double alpha, double sl1, double kn, double sl2);
 
 #endif // __L1DETECTOR_HPP__
+    

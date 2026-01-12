@@ -111,6 +111,54 @@ void check_L1orbits(L1Orbits *orbits)
     printf("%e\n", orbits->x_arr[0]);
 }
 
+void XYZSensitivityMatrixWrap::get_noise_tfs_wrap(array_type<double> freqs, 
+                          array_type<std::complex<double>> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<std::complex<double>> oms_yy, array_type<std::complex<double>> oms_yz, array_type<std::complex<double>> oms_zz,
+                          array_type<std::complex<double>> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<std::complex<double>> tm_yy, array_type<std::complex<double>> tm_yz, array_type<std::complex<double>> tm_zz,
+                          int num,
+                          array_type<int> time_indices)
+{
+    sensitivity_matrix->get_noise_tfs_arr(
+        return_pointer_and_check_length(freqs, "freqs", num, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xx, "oms_xx", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xy, "oms_xy", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xz, "oms_xz", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yy, "oms_yy", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yz, "oms_yz", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_zz, "oms_zz", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xx, "tm_xx", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xy, "tm_xy", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xz, "tm_xz", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yy, "tm_yy", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yz, "tm_yz", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_zz, "tm_zz", num, 1)),
+        num,
+        return_pointer_and_check_length(time_indices, "time_indices", num, 1)
+    );
+}
+
+void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+                          array_type<int> data_index_all, array_type<int> time_index_all,
+                          array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
+                          array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, 
+                          double df, int data_length, int num_psds)
+{
+    sensitivity_matrix->psd_likelihood_wrap(
+        return_pointer_and_check_length(like_contrib_final, "like_contrib_final", num_psds, 1),
+        return_pointer_and_check_length(f_arr, "f_arr", data_length, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(data, "data", num_psds * 3 * data_length, 1)), // Should match data size check logic
+        return_pointer_and_check_length(data_index_all, "data_index_all", num_psds, 1),
+        return_pointer_and_check_length(time_index_all, "time_index_all", num_psds, 1),
+        return_pointer_and_check_length(Soms_d_in_all, "Soms_d_in_all", num_psds, 1),
+        return_pointer_and_check_length(Sa_a_in_all, "Sa_a_in_all", num_psds, 1),
+        return_pointer_and_check_length(Amp_all, "Amp_all", num_psds, 1),
+        return_pointer_and_check_length(alpha_all, "alpha_all", num_psds, 1),
+        return_pointer_and_check_length(sl1_all, "sl1_all", num_psds, 1),
+        return_pointer_and_check_length(kn_all, "kn_all", num_psds, 1),
+        return_pointer_and_check_length(sl2_all, "sl2_all", num_psds, 1),
+        df, data_length, num_psds
+    );
+}
+
 
 std::string get_module_path() {
     // Acquire the GIL if it's not already held (safe to call multiple times)
@@ -198,6 +246,27 @@ void L1detector_part(py::module &m) {
     .def(py::init<double, double, int, double, double, int, double *, double *, double *, int *, int *, int *, double>(),
          py::arg("sc_t0"), py::arg("sc_dt"), py::arg("sc_N"), py::arg("ltt_t0"), py::arg("ltt_dt"), py::arg("ltt_N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
 
+    ;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapGPU")
+#else
+    py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapCPU")
+#endif
+    .def(py::init<array_type<double>, array_type<double>, int, double, int>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"))
+    .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
+    .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
+    .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
+    ;
+    
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixGPU")
+#else
+    py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixCPU")
+#endif
+    .def(py::init<double *, double *, int, double, int>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"))
     ;
 }
 

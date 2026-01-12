@@ -119,4 +119,60 @@ class L1OrbitsWrap {
 
 };
 
+// XYZ Sensitivity Matrix Wrap
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+#define XYZSensitivityMatrixWrap XYZSensitivityMatrixWrapGPU
+#else
+#define XYZSensitivityMatrixWrap XYZSensitivityMatrixWrapCPU
+#endif
+
+class XYZSensitivityMatrixWrap {
+public:
+    XYZSensitivityMatrix *sensitivity_matrix;
+
+    XYZSensitivityMatrixWrap(array_type<double> averaged_ltts_arr_, array_type<double> delta_ltts_arr_, int n_times_, double armlength_, int generation_)
+    {
+        double *_averaged_ltts_arr = return_pointer_and_check_length(averaged_ltts_arr_, "averaged_ltts_arr", n_times_, 6);
+        double *_delta_ltts_arr = return_pointer_and_check_length(delta_ltts_arr_, "delta_ltts_arr", n_times_, 6);
+        
+        sensitivity_matrix = new XYZSensitivityMatrix(_averaged_ltts_arr, _delta_ltts_arr, n_times_, armlength_, generation_);
+    }
+
+    ~XYZSensitivityMatrixWrap() {
+        delete sensitivity_matrix;
+    };
+
+    void get_noise_tfs_wrap(array_type<double> freqs, 
+                          array_type<std::complex<double>> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<std::complex<double>> oms_yy, array_type<std::complex<double>> oms_yz, array_type<std::complex<double>> oms_zz,
+                          array_type<std::complex<double>> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<std::complex<double>> tm_yy, array_type<std::complex<double>> tm_yz, array_type<std::complex<double>> tm_zz,
+                          int num,
+                          array_type<int> time_indices);
+                          
+    void psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+                             array_type<int> data_index_all, array_type<int> time_index_all,
+                             array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
+                             array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, 
+                             double df, int data_length, int num_psds);
+
+    template<typename T>
+    T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
+    {
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        
+#else
+        py::buffer_info buf1 = input1.request();
+
+        if (buf1.size != N * multiplier)
+        {
+            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
+            throw std::invalid_argument(err_out);
+        }
+        T* ptr1 = static_cast<T *>(buf1.ptr);
+#endif
+        return ptr1;
+    };
+};
+
+
 #endif // __BINDING_HPP__
