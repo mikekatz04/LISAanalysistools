@@ -1,10 +1,19 @@
 #include "stdio.h"
-#include "global.hpp"
+#include "gbt_global.h"
 #include "Detector.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <sstream>
+
+
+#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+#define Orbits OrbitsGPU
+#else
+#define Orbits OrbitsCPU
+#endif
+// TODO WHEN BACK FROM BREAK:
+// SEPARATE OUT ANY FUNCTION THAT INCLUDES ANYTHING PYBIND RELATED INTO BINDING. INHERIT THE ORBITS CLASS INTO A WRAPPER CLASS THAT ADDS THE FUNCTIONS THAT SPECIFICALLY TAKE IN NUMPY AND CUPY ARRAYS 
 
 CUDA_DEVICE
 void AddOrbits::add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
@@ -56,7 +65,7 @@ int Orbits::get_link_ind(int link)
     else
     {
 #ifdef __CUDACC__
-    printf("BAD link ind. Must be 12, 23, 31, 13, 32, 21. Link ind entered is %d.\n", link);
+        // printf("BAD link ind. Must be 12, 23, 31, 13, 32, 21.");
 #else
     std::ostringstream oss;
     oss << "BAD link ind. Must be 12, 23, 31, 13, 32, 21. Link ind entered is (" << link << ")." << std::endl;
@@ -79,7 +88,7 @@ int Orbits::get_sc_ind(int sc)
     else
     {
 #ifdef __CUDACC__
-        printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
+        // printf("BAD sc ind. Must be 1,2,3. %d\n", sc);
 #else
         std::ostringstream oss;
         oss << "Bad sc ind. Must be 1,2,3. Input sc is " << sc << " " << std::endl;
@@ -149,8 +158,6 @@ double Orbits::get_light_travel_time(double t, int link)
     }
 
     int link_ind = get_link_ind(link);
-    if ((link_ind < 0) || (link_ind >= 6))
-        printf("BAD %d\n", link_ind);
     int up_ind = (window + 1) * (nlinks + link_ind);
     int down_ind = window * (nlinks + link_ind);
 
@@ -214,6 +221,7 @@ void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Or
     }
 }
 
+
 void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int num)
 {
 #ifdef __CUDACC__
@@ -261,6 +269,7 @@ void get_pos_kernel(double *pos_x, double *pos_y, double *pos_z, double *t, int 
         pos_z[i] = _tmp.z;
     }
 }
+
 
 void Orbits::get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num)
 {

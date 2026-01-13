@@ -1,9 +1,14 @@
 #ifndef __DETECTOR_HPP__
 #define __DETECTOR_HPP__
 
-#include "global.hpp"
+#include "gbt_global.h"
 #include <iostream>
 
+#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+#define Orbits OrbitsGPU
+#else
+#define Orbits OrbitsCPU
+#endif
 class Vec
 {
 public:
@@ -120,13 +125,11 @@ public:
     int *links;
     int *sc_r;
     int *sc_e;
-
+    
     Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
         dt = dt_;
         N = N_;
-        armlength = armlength_;
-        
         n_arr = n_arr_;
         ltt_arr = ltt_arr_;
         x_arr = x_arr_;
@@ -138,21 +141,22 @@ public:
         links = links_;
         armlength = armlength_;
 
-        // printf("in orbits 11 %e %d \n", n_arr[0], N);
     };
 
     int get_sc_r_from_arr(int i)
     {
+        
         return sc_r[i];
     };
 
     int get_sc_e_from_arr(int i)
     {
+        
         return sc_e[i];
     };
-
     int get_link_from_arr(int i)
     {
+        
         return links[i];
     };
 
@@ -170,15 +174,5 @@ public:
     void get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num);
     void dealloc() {};
 };
-
-
-class AddOrbits{
-  public:
-    Orbits *orbits;
-
-    void add_orbit_information(double dt_, int N_, double *n_arr_, double *L_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_);
-    void dealloc();
-};
-
 
 #endif // __DETECTOR_HPP__

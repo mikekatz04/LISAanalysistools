@@ -122,8 +122,8 @@ def inner_product(
             #         dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
             #     )
             # TODO: this could be faster?
-            for j in range(psd.shape[1]):
-                factor = 1.0
+            for j in range(psd.shape[1]):  # i, psd.shape[1]):
+                factor = 1.0  # if i == j else 2.0
                 operational_sets.append(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )

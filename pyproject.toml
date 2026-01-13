@@ -4,6 +4,8 @@ requires = [
   "numpy",
   "scikit_build_core",
   "eryn"
+  "pybind11",
+  "gpubackendtools==0.0.15 @ file:///home/mlkatz/GPUBackendTools",  
 ]
 build-backend = "scikit_build_core.build"
 
@@ -17,13 +19,12 @@ authors = [
 ]
 readme = "README.md"
 
-requires-python = ">= 3.9"
+requires-python = ">= 3.10"
 
 dependencies = [
   "exceptiongroup; python_version<'3.11'", # To access ExceptionGroup with Python 3.9 and 3.10
-  "h5py<3.15",
+  "h5py",
   "matplotlib",
-  "gpubackendtools",
   "jsonschema",                            # To validate content of file registry
   "lisaconstants",
   "multispline",
@@ -50,7 +51,6 @@ classifiers = [
   "Programming Language :: C++",
   "Programming Language :: Cython",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -99,12 +99,17 @@ sdist.include = [
   "src/lisatools/git_version.py",                 #@SKIP_PLUGIN@
   "src/lisatools_backend_cuda11x/git_version.py",
   "src/lisatools_backend_cuda12x/git_version.py",
+  "src/lisatools_backend_cpu/libdetector.a",
+  "src/lisatools_backend_cuda11x/libdetector_gpu.a",
+  "src/lisatools_backend_cuda12x/libdetector_gpu.a",
   "tests/",
   "src/lisatools/cutils/Detector.cu",
   "src/lisatools/cutils/pycppdetector.pyx",
   # "src/lisatools/cutils/pycppdetector.pxd",
   "src/lisatools/cutils/Detector.hpp",
   "src/lisatools/cutils/global.hpp",
+  "src/lisatools/cutils/binding.cxx",
+  "src/lisatools/cutils/binding.hpp",
 ]
 sdist.exclude = [
   ".devcontainer/",
