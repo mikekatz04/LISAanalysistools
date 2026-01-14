@@ -3,9 +3,9 @@ requires = [
   "Cython",
   "numpy",
   "scikit_build_core",
-  "eryn"
+  "eryn",
   "pybind11",
-  "gpubackendtools==0.0.15 @ file:///home/mlkatz/GPUBackendTools",  
+  "gpubackendtools @ file:///Users/mlkatz/Research/GPUBackendTools",  # ==0.0.15 
 ]
 build-backend = "scikit_build_core.build"
 
@@ -87,8 +87,8 @@ optional-dependencies.testing = [
 ]
 
 [tool.setuptools_scm]
-version_scheme = "no-guess-dev"
-local_scheme = "node-and-date"
+version_scheme = "only-version"  # "no-guess-dev"
+local_scheme = "no-local-version" #  "node-and-date"
 version_file = "src/lisatools/_version.py"
 
 [tool.scikit-build]
