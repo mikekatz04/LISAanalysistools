@@ -117,8 +117,8 @@ def inner_product(
 
         # this avoids 9 inner products for 6 (with symmetry)
         for i in range(psd.shape[0]):
-            for j in range(i, psd.shape[1]):
-                factor = 1.0 if i == j else 2.0
+            for j in range(psd.shape[0]):  # i, psd.shape[1]):
+                factor = 1.0  # if i == j else 2.0
                 operational_sets.append(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )

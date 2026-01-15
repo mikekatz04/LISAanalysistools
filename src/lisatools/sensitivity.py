@@ -714,9 +714,13 @@ class A2TDISens(X2TDISens, Sensitivity):
 
         x = 2 * np.pi * f * L_SI / C_SI
         
+<<<<<<< HEAD
         #isi_rfi_readout_transfer = 2. * Cxx * (2 * np.cos(x))
         isi_rfi_readout_transfer = 2. * Cxx * (2 + np.cos(x)) #AS correct TF for oms
 
+=======
+        isi_rfi_readout_transfer = 2. * Cxx * (2 + np.cos(x))
+>>>>>>> tf_orbits
         tmi_readout_transfer = Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
         tm_transfer = 4 * Cxx * (3 + 2 * np.cos(x) + np.cos(2 * x)) 
         
@@ -930,41 +934,21 @@ class FlatPSDFunction(LISASens):
             out = out.item()
         return out
 
-
-class SensitivityMatrix:
-    """Container to hold sensitivity information.
+class SensitivityMatrixBase:
+    """Base Container to hold sensitivity information.
 
     Args:
         basis_x: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
-        sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
-            desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
-            or a string corresponding to the :class:`Sensitivity` object.
-        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
 
     """
 
     def __init__(
         self,
         settings: domains.DomainSettingsBase,
-        sens_mat: (
-            List[List[np.ndarray | Sensitivity]]
-            | List[np.ndarray | Sensitivity]
-            | np.ndarray
-            | Sensitivity
-        ),
-        *sens_args: tuple,
-        sens_kwargs_mat = None,
-        **sens_kwargs: dict,
+        
     ) -> None:
         self.basis_settings = settings
         self.data_shape = self.basis_settings.basis_shape
-        self.sens_args = sens_args
-        if sens_kwargs_mat is None:
-            self.sens_kwargs = sens_kwargs
-        else:
-            self.sens_kwargs = sens_kwargs_mat
-
-        self.sens_mat = sens_mat
 
     @property
     def basis_settings(self) -> np.ndarray:
@@ -1282,6 +1266,39 @@ class SensitivityMatrix:
 
         return (fig, ax)
 
+class SensitivityMatrix(SensitivityMatrixBase):
+    """Container to hold sensitivity information.
+
+    Args:
+        basis_x: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
+        sens_mat: Input sensitivity list. The shape of the nested lists should represent the shape of the
+            desired matrix. Each entry in the list must be an array, :class:`Sensitivity`-derived object,
+            or a string corresponding to the :class:`Sensitivity` object.
+        **sens_kwargs: Keyword arguments to pass to :func:`Sensitivity.get_Sn`.
+
+    """
+
+    def __init__(
+        self,
+        settings: domains.DomainSettingsBase,
+        sens_mat: (
+            List[List[np.ndarray | Sensitivity]]
+            | List[np.ndarray | Sensitivity]
+            | np.ndarray
+            | Sensitivity
+        ),
+        *sens_args: tuple,
+        sens_kwargs_mat = None,
+        **sens_kwargs: dict,
+    ) -> None:
+        super().__init__(settings)
+        self.sens_args = sens_args
+        if sens_kwargs_mat is None:
+            self.sens_kwargs = sens_kwargs
+        else:
+            self.sens_kwargs = sens_kwargs_mat
+
+        self.sens_mat = sens_mat
 
 class XYZ1SensitivityMatrix(SensitivityMatrix):
     """Default sensitivity matrix for XYZ (TDI 1)
@@ -1294,13 +1311,13 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [
             [X1TDISens, XY1TDISens, ZX1TDISens],
             [XY1TDISens, Y1TDISens, YZ1TDISens],
             [ZX1TDISens, YZ1TDISens, Z1TDISens],
         ]
-        super().__init__(f, sens_mat, **sens_kwargs)
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 class XYZ2SensitivityMatrix(SensitivityMatrix):
     """
@@ -1325,12 +1342,12 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
         - The detC attribute provides det[Σ(f)] for normalization
     """
 
-    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         """
         Initialize TDI2 sensitivity matrix.
 
         Args:
-            f: Frequency array [Hz].
+            settings: Domain settings containing frequency array and other parameters.
             **sens_kwargs: Keyword arguments for Sensitivity.get_Sn()
                 Common kwargs:
                     - model: LISA noise model (e.g., sangria, sangria)
@@ -1346,7 +1363,7 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
             [ZX2TDISens,  YZ2TDISens,  Z2TDISens],
         ]
 
-        super().__init__(f, sens_mat, **sens_kwargs)
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 class AET1SensitivityMatrix(SensitivityMatrix):
     """Default sensitivity matrix for AET (TDI 1)
@@ -1359,10 +1376,9 @@ class AET1SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens, T1TDISens]
-        super().__init__(f, sens_mat, **sens_kwargs)
-
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 
 class AET2SensitivityMatrix(SensitivityMatrix):
@@ -1376,9 +1392,9 @@ class AET2SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A2TDISens, E2TDISens, T2TDISens]
-        super().__init__(f, sens_mat, **sens_kwargs)
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 
 class AE1SensitivityMatrix(SensitivityMatrix):
@@ -1390,9 +1406,9 @@ class AE1SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens]
-        super().__init__(f, sens_mat, **sens_kwargs)
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 
 class AE2SensitivityMatrix(SensitivityMatrix):

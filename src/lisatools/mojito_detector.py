@@ -1,0 +1,824 @@
+"""Mojito-specific Orbits implementation with JAX."""
+
+import numpy as np
+from scipy import interpolate
+from typing import Optional
+import jax 
+import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
+#import lisaconstants
+from .detector import Orbits, LINEAR_INTERP_TIMESTEP
+from .utils.parallelbase import LISAToolsParallelModule
+from .domains import DomainSettingsBase
+from .sensitivity import SensitivityMatrixBase
+
+@jax.jit
+def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
+    """
+    Interpolate spacecraft position using JAX.
+    
+    Args:
+        query_t: shape (N,)
+        sc_idx: shape (N,) or (1,) - 0-based index (0, 1, 2)
+        t_grid: shape (T_dense,)
+        pos_grid: shape (T_dense, 3_sc, 3_coords)
+    """
+
+    def _single_point(t, sc):
+        # t: scalar float
+        # sc: scalar int (0, 1, 2)
+        
+        # pos_grid is (Times, SC, 3)
+        # We want to interpolate along axis 0.
+        
+        # Helper for 1D interp
+        def interp_1d(vals):
+            return jnp.interp(t, t_grid, vals)
+            
+        # Select the trajectory for this spacecraft
+        # pos_grid[:, sc, 0] gives x(t) for spacecraft sc
+        # We use simple indexing. Since 'sc' is a tracer in JIT, simple indexing might need dynamic_slice 
+        # or just work if shape is static. JAX numpy indexing usually works fine.
+        
+        val_x = interp_1d(pos_grid[:, sc, 0])
+        val_y = interp_1d(pos_grid[:, sc, 1])
+        val_z = interp_1d(pos_grid[:, sc, 2])
+        return jnp.array([val_x, val_y, val_z])
+
+    # If inputs are arrays, we vmap. 
+    # query_t is (N,), sc_idx is (3,) or (1,)
+    return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, sc_idx)
+
+@jax.jit
+def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
+    """
+    Interpolate Light Travel Time using JAX.
+    
+    Args:
+        query_t: shape (N,)
+        link_idx: shape (N_links,) or (1,) - 0-based index
+        t_grid: shape (T_dense,)
+        ltt_grid: shape (T_dense, N_links)
+    """
+    def _single_point(t, l):
+        vals = ltt_grid[:, l]
+        return jnp.interp(t, t_grid, vals)
+    
+    return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
+
+class L1Orbits(Orbits):
+    """Base class for LISA Orbits from Mojito L1 File structure.
+    
+    This class handles orbit data from MojitoL1File where:
+    - Light travel times and positions have different time arrays
+    - Both time arrays may start at t0 != 0
+    
+    Args:
+        armlength: Armlength of detector (default 2.5e9 m)
+    """
+
+    def __init__(
+        self, 
+        mojito_file_path: str,
+        armlength: float = 2.5e9,
+        force_backend: Optional[str] = None,
+        **kwargs
+    ):
+        # Store the Mojito file path
+        self.mojito_file_path = mojito_file_path
+        
+        # Don't call super().__init__ - we need to override _setup
+        # Instead, manually initialize the minimal required attributes
+        self._armlength = armlength
+        self._filename = mojito_file_path  # For compatibility
+        self.configured = False
+        
+        # Load data from Mojito file
+        self._load_mojito_data()
+        
+        # Initialize backend
+        from .utils.parallelbase import LISAToolsParallelModule
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        
+    def open(self):
+        """Override base class open method."""
+        try:
+            from mojito import MojitoL1File
+        except ImportError:
+            raise ImportError("mojito package required for L1Orbits. Follow instructions at: https://mojito-e66317.io.esa.int/content/installation.html")
+        f = MojitoL1File(self.mojito_file_path)
+        return f
+    
+    def _load_mojito_data(self):
+        """Load orbit and LTT data from Mojito file."""
+        
+        with self.open() as f:
+            # Load light travel times and their time array
+            self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6)
+            self.ltt_t = f.ltts.time_sampling.t()  # Shape: (N_ltt_times,)
+            
+            # Load spacecraft positions and their time array  
+            self.x_base = f.orbits.positions[:]  # Shape: (N_pos_times, 3, 3)
+            self.v_base = f.orbits.velocities[:] # Shape: (N_pos_times, 3, 3)
+            self.sc_t_base = f.orbits.time_sampling.t()  # Shape: (N_pos_times,)
+            
+            # Store dt from each dataset (they may differ)
+            self.ltt_dt = f.ltts.time_sampling.dt
+            self.sc_dt = f.orbits.time_sampling.dt
+            
+            # Store t0 values
+            self.ltt_t0 = float(self.ltt_t[0])
+            self.sc_t0 = float(self.sc_t_base[0])
+    
+    @property
+    def ltt_t(self):
+        """LTT file time."""
+        return self._ltt_t
+    
+    @ltt_t.setter
+    def ltt_t(self, x):
+        self._ltt_t = x
+    
+    @property
+    def ltt(self):
+        """Light travel times from Mojito file."""
+        return self._ltt
+
+    @ltt.setter
+    def ltt(self, x):
+        self._ltt = x
+    
+    @property
+    def x_base(self):
+        """Spacecraft positions from Mojito file."""
+        return self._x_base
+    @x_base.setter
+    def x_base(self, x):
+        self._x_base = x
+
+    @property
+    def v_base(self):
+        """Velocities from Mojito file."""
+        return self._v_base
+    @v_base.setter
+    def v_base(self, x):
+        self._v_base = x
+
+    @property
+    def sc_t_base(self):
+        """Spacecraft position file time."""
+        return self._sc_t_base
+    @sc_t_base.setter
+    def sc_t_base(self, x):
+        self._sc_t_base = x
+    
+    @property
+    def ltt_dt(self):
+        """Time step of LTT data."""
+        return self._ltt_dt
+    @ltt_dt.setter
+    def ltt_dt(self, x):
+        self._ltt_dt = x
+    
+    @property
+    def sc_dt_base(self):    
+        """Time step of spacecraft position data."""
+        return self._sc_dt_base
+    @sc_dt_base.setter
+    def sc_dt_base(self, x):
+        self._sc_dt_base = x
+    
+    @property
+    def ltt_t0(self):
+        """Start time of LTT data."""
+        return self._ltt_t0
+    @ltt_t0.setter
+    def ltt_t0(self, x):
+        self._ltt_t0 = x    
+
+    @property
+    def sc_t0(self):
+        """Start time of spacecraft position data."""
+        return self._sc_t0
+    @sc_t0.setter
+    def sc_t0(self, x):
+        self._sc_t0 = x
+
+    @property
+    def sc_dt(self):    
+        """Time step of spacecraft position data."""
+        return self._sc_dt
+    @sc_dt.setter
+    def sc_dt(self, x):
+        self._sc_dt = x
+
+    @property
+    def sc_t(self):
+        """Configured spacecraft time array."""
+        return self._sc_t
+    @sc_t.setter
+    def sc_t(self, x):
+        self._sc_t = x
+    
+    @property
+    def t(self):
+        """Configured time array (spacecraft positions)."""
+        return self._sc_t
+
+    @property
+    def x(self):
+        """Configured spacecraft positions."""
+        self._check_configured()
+        return self._x
+    @x.setter
+    def x(self, x):
+        self._x = x
+    
+    @property
+    def v(self):
+        """Configured spacecraft velocities."""
+        self._check_configured()
+        return self._v
+    @v.setter
+    def v(self, x):
+        self._v = x
+    
+    @property
+    def n(self):
+        return self._n
+    @n.setter
+    def n(self, x):
+        self._n = x
+
+    # @property
+    # def LINKS(self):
+    #     """Link IDs in Mojito convention."""
+    #     return lisaconstants.indexing.LINKS
+
+    # @property
+    # def SC(self):
+    #     """Spacecraft IDs in Mojito convention."""
+    #     return lisaconstants.indexing.SPACECRAFT
+
+    
+    @property
+    def n_base(self):
+        """Normal vectors - can be computed from positions if needed."""
+        # Return zeros for now - implement if needed
+        return np.zeros((len(self._ltt_times), 18))
+    
+    @property
+    def pycppdetector(self) -> object:
+        """C++ class"""
+        if self._pycppdetector_args is None:
+            raise ValueError(
+                "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
+            )
+        self._pycppdetector = self.backend.L1OrbitsWrap(*self._pycppdetector_args)
+        return self._pycppdetector
+    
+    def configure(
+        self,
+        t_arr=None,
+        dt=None, 
+        linear_interp_setup=False
+    ):
+        """Configure orbits with interpolation to a target time grid.
+        
+        This handles the fact that ltts and positions come from different
+        time arrays in the Mojito file.
+        
+        Args:
+            t_arr: Target time array (if None, will be constructed)
+            dt: Target time step
+            linear_interp_setup: If True, create dense grid for fast linear interpolation
+        """
+        
+        # Determine target time array
+        if linear_interp_setup:
+            make_cpp = True
+            dt = dt if dt is not None else LINEAR_INTERP_TIMESTEP
+            # interpolate only the orbit quantities, the ltts are already dense enough
+            t0 = self.sc_t0
+            t_end = float(self._sc_t_base[-1])
+                        
+            t_arr = np.arange(t0, t_end + dt, dt)
+            t_arr = t_arr[t_arr <= t_end]
+            
+        elif t_arr is None:
+            if dt is not None:
+                # Use position time range as reference
+                t0 = self.t0_pos
+                t_end = float(self._pos_times[-1])
+                t_arr = np.arange(t0, t_end + dt, dt)
+                t_arr = t_arr[t_arr <= t_end]
+                make_cpp = True
+            else:
+                # Use position time array as default
+                t_arr = self._sc_t_base.copy()
+                make_cpp = False
+        else:
+            make_cpp = True
+                
+        # Interpolate positions from their native time grid to target grid
+        # _pos_data is (N_pos, 3_sc, 3_xyz)
+        pos_interp_shape = (len(t_arr), 3, 3)
+        pos_interpolated = np.zeros(pos_interp_shape)
+        vel_interpolated = np.zeros(pos_interp_shape)
+        
+        for isc in range(3):  # 3 spacecraft
+            for icoord in range(3):  # x, y, z
+                # Cubic spline interpolation
+                cs = interpolate.CubicSpline(
+                    self.sc_t_base, 
+                    self.x_base[:, isc, icoord]
+                )
+                pos_interpolated[:, isc, icoord] = cs(t_arr)
+
+                #interpolate velocities as well
+                cs = interpolate.CubicSpline(
+                    self.sc_t_base,
+                    self.v_base[:, isc, icoord]
+                )
+                vel_interpolated[:, isc, icoord] = cs(t_arr)
+        
+       
+        # Store interpolated data
+        self.sc_dt = dt
+        self.sc_t = self.xp.asarray(t_arr)
+        self.x = self.xp.asarray(pos_interpolated)
+        self.v = self.xp.asarray(vel_interpolated)
+        self.n = self.xp.zeros((len(t_arr), 18))
+
+        # make sure base spacecraft and link inormation is ready
+        lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
+        lse = np.asarray(self.link_space_craft_e).copy().astype(np.int32)
+        ll = np.asarray(self.LINKS).copy().astype(np.int32)
+                
+        # Mark as configured
+        self.configured = True
+
+        if make_cpp:
+            self.pycppdetector_args = [
+                self.sc_t0, # spacecraft time start
+                self.sc_dt,   # spacecraft time step
+                len(self.sc_t), # number of spacecraft time points
+                self.ltt_t0,    # ltt time start
+                self.ltt_dt,    # ltt time step
+                len(self.ltt_t), # number of ltt time points
+                self.xp.asarray(self.n.flatten().copy()),
+                self.xp.asarray(self.ltt.flatten().copy()),
+                self.xp.asarray(self.x.flatten().copy()),
+                self.xp.asarray(ll),
+                self.xp.asarray(lsr),
+                self.xp.asarray(lse),
+                self.armlength,
+            ]
+        else:
+            self.pycppdetector_args = None
+
+
+    def _setup(self):
+        """Override base class _setup - we load data in `_load_mojito_data` instead."""
+        pass
+    
+
+@jax.tree_util.register_pytree_node_class
+class JAXL1Orbits(L1Orbits):
+    """LISA Orbits from Mojito L1 File structure with JAX support.
+    
+    This class handles orbit data from MojitoL1File where:
+    - Light travel times and positions have different time arrays
+    - Both time arrays may start at t0 != 0
+    
+    Uses Numba CUDA kernels for fast GPU interpolation, with automatic
+    fallback to CPU if CUDA is not available.
+    
+    Args:
+        mojito_file_path: Path to Mojito L1 HDF5 file
+        armlength: Armlength of detector (default 2.5e9 m)
+        force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
+    """
+    
+    
+    def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
+        super().configure(t_arr, dt, linear_interp_setup)
+        # No C++ backend for this implementation, ovverride attribute
+        self._pycppdetector_args = None
+
+        # move arrays to JAX
+        self.sc_t = jnp.asarray(self.sc_t)
+        self.x = jnp.asarray(self.x)
+        self.v = jnp.asarray(self.v)
+        self.n = jnp.asarray(self.n)
+
+        self.ltt_t = jnp.asarray(self.ltt_t)
+        self.ltt = jnp.asarray(self.ltt)
+    
+    @property
+    def dt(self):
+        """Time step of configured grid."""
+        if not self.configured:
+            return self._dt
+        return self._dt
+    
+    @dt.setter
+    def dt(self, dt):
+        self._dt = dt
+    
+    def get_pos(self, t, sc):
+        """
+        Compute spacecraft position using Numba CUDA interpolation.
+        
+        Args:
+            t: time (scalar, array, or list)
+            sc: spacecraft index (1, 2, or 3) or array of indices
+        """
+        if not self.configured:
+            raise RuntimeError("Must call configure() before get_pos()")
+
+        squeeze_t = jnp.isscalar(t)
+        squeeze_sc = jnp.isscalar(sc)
+
+        t_arr = jnp.atleast_1d(t)
+        sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
+
+        output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.x)
+        
+        if squeeze_sc:
+            output = output.squeeze(axis=1)
+        if squeeze_t:
+            output = output.squeeze(axis=0)
+        
+        return output.block_until_ready()
+
+    
+    def get_light_travel_times(self, t, link):
+        """
+        Compute light travel times using Numba CUDA interpolation.
+        
+        Args:
+            t: time (scalar, array, or list)
+            link: link index (12, 23, 31, 13, 32, 21) or array of indices
+        """
+        if not self.configured:
+            raise RuntimeError("Must call configure() before get_light_travel_times()")
+        
+        squeeze_t = jnp.isscalar(t)
+        squeeze_link = jnp.isscalar(link)
+
+        t_arr = jnp.atleast_1d(t)
+        link_arr = jnp.atleast_1d(link)
+        
+        link_map_keys = jnp.array(self.LINKS)
+        link_map_vals = jnp.arange(len(self.LINKS))
+        
+        def map_link(l):
+            # Find index where link_map_keys == l
+            # jnp.where returns (array_of_indices,)
+            # We take the first match. 
+            # Note: This might be slow inside vmap if not optimized, but for small list constant (6) it's fine.
+            # Faster: use a direct lookup array if link IDs were small integers, but they are 12, 23 etc.
+            # We can use a boolean mask.
+            return jnp.sum(link_map_vals * (link_map_keys == l))
+
+        link_idx = jax.vmap(map_link)(link_arr)
+        
+        output = interpolate_ltt(t_arr, link_idx, self.ltt_t, self.ltt)
+
+        if squeeze_link:
+            output = output.squeeze(axis=1)
+        if squeeze_t:
+            output = output.squeeze(axis=0)
+        
+        return output.block_until_ready()
+
+    def tree_flatten(self):
+        # Collect children (JAX arrays)
+        children = (
+            self.ltt,
+            self.ltt_t,
+            self.x_base,
+            self.v_base,
+            self.sc_t_base,
+        )
+        
+        # If configured, add interpolated arrays
+        if self.configured:
+            children += (
+                self.sc_t,
+                self.x,
+                self.v,
+                self.n
+            )
+        
+        # Collect aux_data (static configuration)
+        aux_data = {
+            'mojito_file_path': self.mojito_file_path,
+            'armlength': self._armlength,
+            'configured': self.configured,
+            'ltt_dt': self.ltt_dt,
+            'sc_dt': self.sc_dt,
+            'ltt_t0': self.ltt_t0,
+            'sc_t0': self.sc_t0,
+            # Capture other potential attributes
+            '_dt': getattr(self, '_dt', None),
+            '_t0': getattr(self, '_t0', None),
+            # Preserve backend info if needed (though usually static)
+            'use_gpu': getattr(self, 'use_gpu', False)
+        }
+        
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        # Create empty instance without calling __init__
+        obj = object.__new__(cls)
+        
+        # Restore aux_data
+        obj.mojito_file_path = aux_data['mojito_file_path']
+        obj._armlength = aux_data['armlength']
+        obj.configured = aux_data['configured']
+        obj.ltt_dt = aux_data['ltt_dt']
+        obj.sc_dt = aux_data['sc_dt']
+        obj.ltt_t0 = aux_data['ltt_t0']
+        obj.sc_t0 = aux_data['sc_t0']
+        obj.use_gpu = aux_data['use_gpu']
+        obj._filename = aux_data['mojito_file_path']
+        
+        if aux_data.get('_dt') is not None:
+            obj._dt = aux_data['_dt']
+        if aux_data.get('_t0') is not None:
+            obj._t0 = aux_data['_t0']
+
+        # Restore children
+        # Base arrays always present (first 5)
+        obj.ltt = children[0]
+        obj.ltt_t = children[1]
+        obj.x_base = children[2]
+        obj.v_base = children[3]
+        obj.sc_t_base = children[4]
+        
+        if obj.configured:
+            # Configured arrays (next 4)
+            obj.sc_t = children[5]
+            obj.x = children[6]
+            obj.v = children[7]
+            obj.n = children[8]
+        
+        # Initialize other attributes needed for method calls
+        obj._pycppdetector_args = None
+        
+        return obj
+
+
+class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
+    """Helper class for sensitivity matrix with c++ backend."""
+    
+    def __init__(self, 
+                 orbits: L1Orbits,
+                 settings: DomainSettingsBase,
+                 tdi_generation: int = 2,
+                 force_backend: Optional[str] = 'cpu'):
+        
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        SensitivityMatrixBase.__init__(self, settings)
+
+        assert self.backend.xp == orbits.xp, "Orbits and Sensitivity backend mismatch."
+        self.orbits = orbits
+        self.tdi_generation = tdi_generation
+        self.channel_shape = (3, 3) 
+
+        self._setup()
+
+    @property
+    def xp(self):
+        """Array module."""
+        return self.backend.xp
+    
+    @property
+    def time_indices(self):
+        return self._time_indices
+    @time_indices.setter
+    def time_indices(self, x):
+        self._time_indices = x
+    
+    def get_averaged_ltts(self):
+        # first, compute the average ltts and their differences. 
+        # check if we need multiple time points
+        if hasattr(self.basis_settings, 't_arr'):
+            t_arr = self.xp.asarray(self.basis_settings.t_arr)
+            tiled_times = self.xp.tile(
+                t_arr[:, self.xp.newaxis], (1, 6)
+            ).flatten()  # compute ltts at these times with orbits
+
+            links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
+
+            ltts = self.orbits.get_light_travel_times(
+                tiled_times, links
+            ).reshape(len(t_arr), 6)
+
+            self.time_indices = self.xp.arange(len(t_arr), dtype=self.xp.int32)
+        
+        else:
+            ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
+            self.time_indices = self.xp.array([0], dtype=self.xp.int32)
+
+        # with orbits.LINKS order: 12, 23, 31, 13, 32, 21, we need averages between pairs
+        # pairs: (12,21), (23,32), (31,13)
+        # Use direct indexing to avoid assignment issues with shape (1, 6) arrays
+        indices = [0, 1, 2, 3, 4, 5]
+        opposite_indices = indices[::-1]
+
+        avg_ltts = 0.5 * (ltts[:, indices] + ltts[:, opposite_indices])
+        delta_ltts = ltts[:, indices] - ltts[:, opposite_indices]
+
+        return avg_ltts, delta_ltts
+
+    def _setup(self):
+        """Setup the arguments for the c++ backend."""
+
+        avg_ltts, delta_ltts = self.get_averaged_ltts()
+        
+        self.pycppsensmat_args = [
+            self.xp.asarray(avg_ltts.flatten().copy()),
+            self.xp.asarray(delta_ltts.flatten().copy()),
+            avg_ltts.shape[0],  # n_times
+            self.orbits.armlength,
+            self.tdi_generation,
+        ]
+
+        self.cpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
+
+
+    def _compute_matrix_elements(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
+        """Compute the 6 sensitivity matrix terms using the c++ backend."""
+        
+        xp = self.xp
+        total_terms = self.basis_settings.total_terms
+        
+        c00 = xp.empty(total_terms, dtype=xp.float64)
+        c11 = xp.empty(total_terms, dtype=xp.float64)
+        c22 = xp.empty(total_terms, dtype=xp.float64)
+        c01 = xp.empty(total_terms, dtype=xp.complex128)
+        c02 = xp.empty(total_terms, dtype=xp.complex128)
+        c12 = xp.empty(total_terms, dtype=xp.complex128)
+
+        self.cpp_sensitivity_matrix.get_noise_covariance_wrap(
+            xp.asarray(freqs),
+            self.time_indices,
+            float(Soms_d_in),
+            float(Sa_a_in),
+            float(Amp),
+            float(alpha),
+            float(sl1),
+            float(kn),
+            float(sl2),
+            c00, c01, c02, c11, c12, c22,
+            len(freqs),
+            len(self.time_indices)
+        )
+
+        return c00, c11, c22, c01, c02, c12
+    
+    def _fill_matrix(self, c00, c11, c22, c01, c02, c12):
+        """Fill the full 3x3 sensitivity matrix from its 6 unique elements."""
+        xp = self.xp    
+        shape = self.basis_settings.basis_shape
+
+        # Reshape views (no copy)
+        c00 = c00.reshape(shape)
+        c11 = c11.reshape(shape)
+        c22 = c22.reshape(shape)
+        c01 = c01.reshape(shape)
+        c02 = c02.reshape(shape)
+        c12 = c12.reshape(shape)
+
+        # Direct assignment is faster than stack (no intermediate copies)
+        matrix = xp.empty(self.channel_shape + shape, dtype=xp.complex128)
+        matrix[0, 0] = c00
+        matrix[1, 1] = c11
+        matrix[2, 2] = c22
+        matrix[0, 1] = c01
+        matrix[1, 0] = c01.conj()
+        matrix[0, 2] = c02
+        matrix[2, 0] = c02.conj()
+        matrix[1, 2] = c12
+        matrix[2, 1] = c12.conj()
+        
+        return matrix
+    
+    def _extract_matrix_elements(self, matrix_in, flatten=False):
+        """Extract the 6 unique sensitivity matrix elements from the full 3x3 matrix."""
+
+        c00 = matrix_in[0, 0].real
+        c11 = matrix_in[1, 1].real
+        c22 = matrix_in[2, 2].real
+        c01 = matrix_in[0, 1]
+        c02 = matrix_in[0, 2]
+        c12 = matrix_in[1, 2]
+
+        if flatten:
+           return c00.flatten(), c11.flatten(), c22.flatten(), c01.flatten(), c02.flatten(), c12.flatten()
+
+        return c00, c11, c22, c01, c02, c12
+
+    
+    def compute_sensitivity_matrix(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
+        """Compute the full 3x3 sensitivity matrix using the c++ backend."""
+        c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
+            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2
+        )
+        matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+        return matrix
+
+    def set_sensitivity_matrix(self, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
+        """Internally store the sensitivity matrix computed at the basis frequencies."""
+
+        freqs = self.xp.asarray(self.basis_settings.f_arr)
+        c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
+            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2
+        )
+
+        self.sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+
+
+    def _inverse_logdet_wrapper(self, c00, c11, c22, c01, c02, c12):
+        """Wrapper to call c++ backend for inverse log-determinant computation."""
+        xp = self.xp
+        total_terms = self.basis_settings.total_terms
+
+        i00 = xp.empty(total_terms, dtype=xp.float64)
+        i11 = xp.empty(total_terms, dtype=xp.float64)
+        i22 = xp.empty(total_terms, dtype=xp.float64)
+        i01 = xp.empty(total_terms, dtype=xp.complex128)
+        i02 = xp.empty(total_terms, dtype=xp.complex128)
+        i12 = xp.empty(total_terms, dtype=xp.complex128)
+
+        logdet = xp.empty(total_terms, dtype=xp.float64)
+
+        self.cpp_sensitivity_matrix.get_inverse_logdet_wrap(
+            c00, c01, c02, c11, c12, c22,
+            i00, i01, i02, i11, i12, i22,
+            logdet,
+            total_terms
+        )
+        
+        inverse_matrix = self._fill_matrix(i00, i11, i22, i01, i02, i12)
+        return inverse_matrix, logdet.reshape(self.basis_settings.basis_shape)
+
+    
+    def compute_inverse_logdet(self, matrix_in):
+        """
+        Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
+
+
+        """
+        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(matrix_in, flatten=True)
+        inverse_matrix, logdet = self._inverse_logdet_wrapper(c00, c11, c22, c01, c02, c12)
+        return inverse_matrix, logdet
+
+
+    def compute_log_like(self,
+                         data_in_all, 
+                         data_index_all,
+                         Soms_in_all, 
+                         Sa_in_all,
+                         Amp_in_all,
+                         alpha_in_all,
+                         sl1_in_all,
+                         kn_in_all,
+                         sl2_in_all):
+        """Compute log-likelihood using the c++ backend."""
+
+        xp = self.xp
+
+        if len(self.basis_settings.basis_shape) == 1:
+            num_times = 1
+            num_freqs = self.basis_settings.basis_shape[0]
+        else:
+            num_times, num_freqs = self.basis_settings.basis_shape
+
+        num_psds = len(Soms_in_all)
+
+        log_like_out = xp.empty((num_psds,), dtype=xp.float64)
+
+        self.cpp_sensitivity_matrix.get_log_likelihood_wrap(
+            log_like_out,
+            xp.asarray(data_in_all.flatten().copy()),
+            xp.asarray(data_index_all.flatten().copy()),
+            xp.asarray(Soms_in_all),
+            xp.asarray(Sa_in_all),
+            xp.asarray(Amp_in_all),
+            xp.asarray(alpha_in_all),
+            xp.asarray(sl1_in_all),
+            xp.asarray(kn_in_all),
+            xp.asarray(sl2_in_all),
+            self.basis_settings.df,
+            num_freqs,
+            num_times,
+            num_psds
+        )
+
+        return log_like_out

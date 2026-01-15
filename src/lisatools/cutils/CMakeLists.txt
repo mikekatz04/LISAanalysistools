@@ -19,66 +19,26 @@ else()
   set(BACKEND_BASE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
 
-# apply_gpu_backend_common_options
-# --------------------------------
-#
-# This method applies some common directive to GPU backend targets. It:
-#
-# * Expects a single "libname" argument
-# * Expects the target to be named "lisaanalysistools_gpu_${libname}"
-# * Defines the LIBRARY_OUTPUT_DIRECTORY property
-# * Defines the OUTPUT_NAME property
-# * Installs the target in the GPU backend directory (e.g.
-#   'lisatools_backend_cuda12x')
-# * Ensures the target includes the NumPy header directory
-# * Disable NumPy deprecated API
-# * Ensures the target links against CUDA libraries (cuBLAS, cuSPARSE, ...)
-# * Defines the CUDA_ARCHITECTURE property
-#
-# Usage example: apply_gpu_backend_common_options(lisatools_utils_wrap)
-function(apply_gpu_backend_common_options libname)
-  set(target_name "lisaanalysistools_gpu_${libname}")
-  set(backend_name "lisatools_backend_cuda${CUDAToolkit_VERSION_MAJOR}x")
-  set_property(
-    TARGET ${target_name}
-    PROPERTY LIBRARY_OUTPUT_DIRECTORY
-             "${BACKEND_BASE_OUTPUT_DIRECTORY}/${backend_name}")
-  set_property(TARGET ${target_name} PROPERTY OUTPUT_NAME ${libname})
 
-  install(TARGETS ${target_name} DESTINATION ${backend_name})
+execute_process(
+  COMMAND "${PYTHON_EXECUTABLE}" -c "if True:
+    import gpubackendtools
+    print(gpubackendtools.__file__.split('__init__.py')[0] + 'cutils')"
+  OUTPUT_VARIABLE GBT_CUTILS
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-  target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
-  target_compile_definitions(${target_name}
-                             PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
-  target_link_libraries(${target_name} PUBLIC CUDA::cudart CUDA::cublas
-                                              CUDA::cusparse)
-  set_property(TARGET ${target_name} PROPERTY CUDA_ARCHITECTURES
-                                              ${LISATOOLS_CUDA_ARCH})
-endfunction()
+set(GBT_CMAKE_TOOLS "${GBT_CUTILS}/cmake_functions.cmake")
 
-function(apply_cpu_backend_common_options libname)
-  set(target_name "lisaanalysistools_cpu_${libname}")
-  set_property(
-    TARGET ${target_name}
-    PROPERTY LIBRARY_OUTPUT_DIRECTORY
-             "${BACKEND_BASE_OUTPUT_DIRECTORY}/lisatools_backend_cpu")
-  set_property(TARGET ${target_name} PROPERTY OUTPUT_NAME ${libname})
+# Check if the file exists
+if(EXISTS "${GBT_CMAKE_TOOLS}")
+    message("INFO: ${GBT_CMAKE_TOOLS} exists.")
+else()
+    message(FATAL_ERROR "${GBT_CMAKE_TOOLS} not found.")
+    # Handle the case where the file is missing
+endif()
 
-  install(TARGETS ${target_name} DESTINATION lisatools_backend_cpu)
-
-  get_target_property(LISATOOLS_CXX_MARCH_OPT lisaanalysistools CXX_MARCH)
-  if(LISATOOLS_CXX_MARCH_OPT)
-    target_compile_options(${target_name} PRIVATE "${LISATOOLS_CXX_MARCH_OPT}")
-  endif()
-
-  target_include_directories(${target_name} PRIVATE ${Python_NumPy_INCLUDE_DIR})
-  target_compile_definitions(${target_name}
-                             PRIVATE NPY_NO_DEPRECATED_API=NPY_1_9_API_VERSION)
-endfunction()
-
-# * * * * * * * * * * * * * * * * * * * *
-# * * Definition of compiled backends * *
-# * * * * * * * * * * * * * * * * * * * *
+include(${GBT_CMAKE_TOOLS})
+set(HERE_CUDA_ARCH ${LISATOOLS_CUDA_ARCH})
 
 # * * * * * * * * * * * * * * * * * * * *
 # * * Definition of compiled backends * *
@@ -89,15 +49,13 @@ endfunction()
 # ----------------------
 
 # I. Process pycppdetector.pyx into a C++ file
-add_custom_command(
-  OUTPUT "pycppdetector.cxx"
-  COMMENT "Cythonize pycppdetector.pyx into pycppdetector.cxx"
-  COMMAND
-    Python::Interpreter -m cython "${CMAKE_CURRENT_SOURCE_DIR}/pycppdetector.pyx"
-    --output-file "${CMAKE_CURRENT_BINARY_DIR}/pycppdetector.cxx" -3 -+ --module-name
-    "pycppdetector" -I "${CMAKE_CURRENT_SOURCE_DIR}"
-  DEPENDS "pycppdetector.pyx"
-  VERBATIM)
+
+if(EXISTS "${GBT_CUTILS}/gbt_global.h")
+    message("INFO: ${GBT_CUTILS}/gbt_global.h exists.")
+else()
+    message(FATAL_ERROR "${GBT_CUTILS}/gbt_global.h not found.")
+    # Handle the case where the file is missing
+endif()
 
 # II. Declare the CPU backend
 if(LISATOOLS_WITH_CPU)
@@ -107,21 +65,65 @@ if(LISATOOLS_WITH_CPU)
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/Detector.cu"
             "${CMAKE_CURRENT_BINARY_DIR}/Detector.cxx"
     DEPENDS "Detector.cu"
-    VERBATIM)
+    VERBATIM
+    )
+  
+  # NEW: Copy L1Detector.cu to L1Detector.cxx for CPU build
+  add_custom_command(
+    OUTPUT "L1Detector.cxx"
+    COMMENT "Copy L1Detector.cu to L1Detector.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/L1Detector.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/L1Detector.cxx"
+    DEPENDS "L1Detector.cu"
+    VERBATIM
+    )
 
-  python_add_library(lisaanalysistools_cpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cxx)
-  apply_cpu_backend_common_options(pycppdetector)
+  # Copy PSD.cu to PSD.cxx for CPU build
+  add_custom_command(
+    OUTPUT "PSD.cxx"
+    COMMENT "Copy PSD.cu to PSD.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/PSD.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/PSD.cxx"
+    DEPENDS "PSD.cu"
+    VERBATIM
+    )
 
+  # Add L1Detector.cxx to the sources
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx L1Detector.cxx PSD.cxx)
+  apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
+  target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
+  
+  # Add L1Detector.hpp to header files
+  target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
+                                        Detector.hpp L1Detector.hpp PSD.hpp)
+
+  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
+  apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
+  target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
+  target_include_directories(lisaanalysistools_cpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp Detector.hpp)
+                                      binding.hpp)
 endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  python_add_library(lisaanalysistools_gpu_pycppdetector MODULE WITH_SOABI pycppdetector.cxx Detector.cu)
-  apply_gpu_backend_common_options(pycppdetector)
+  # Add L1Detector.cu to the GPU sources
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu L1Detector.cu PSD.cu)
+  apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
+  target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
+  
+  # Add L1Detector.hpp to header files
+  target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
+                                        Detector.hpp L1Detector.hpp PSD.hpp)
+
+  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
+  apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
+  target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
+  
+  target_include_directories(lisaanalysistools_gpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp Detector.hpp)
+                                      binding.hpp)
+
 endif()
 
 

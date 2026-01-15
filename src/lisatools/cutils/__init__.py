@@ -12,13 +12,23 @@ from gpubackendtools.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
-    pycppDetector: object
+    OrbitsWrap: object
+    Orbits: object
+    L1OrbitsWrap: object
+    L1Orbits: object
+    SensitivityMatrixWrap: object
+    check_orbits: typing.Callable[(...), None]
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
 
 class LISAToolsBackend:
     # TODO: not ClassVar?
-    pycppDetector: object
+    OrbitsWrap: object
+    Orbits: object
+    L1OrbitsWrap: object
+    L1Orbits: object
+    check_orbits: typing.Callable[(...), None]
+    SensitivityMatrixWrap: object
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
 
@@ -27,7 +37,12 @@ class LISAToolsBackend:
         # set direct lisatools methods
         # pass rest to general backend
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
-        self.pycppDetector = lisatools_backend_methods.pycppDetector
+        self.OrbitsWrap = lisatools_backend_methods.OrbitsWrap
+        self.Orbits = lisatools_backend_methods.Orbits
+        self.L1OrbitsWrap = lisatools_backend_methods.L1OrbitsWrap
+        self.L1Orbits = lisatools_backend_methods.L1Orbits
+        self.check_orbits = lisatools_backend_methods.check_orbits
+        self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap
         self.psd_likelihood = lisatools_backend_methods.psd_likelihood
         self.compute_logpdf = lisatools_backend_methods.compute_logpdf
 
@@ -54,7 +69,12 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         numpy = LISAToolsCpuBackend.check_numpy()
 
         return LISAToolsBackendMethods(
-            pycppDetector=lisatools_backend_cpu.pycppdetector.pycppDetector,
+            OrbitsWrap=lisatools_backend_cpu.pycppdetector.OrbitsWrapCPU,
+            Orbits=lisatools_backend_cpu.pycppdetector.OrbitsCPU,
+            L1OrbitsWrap=lisatools_backend_cpu.pycppdetector.L1OrbitsWrapCPU,
+            L1Orbits=lisatools_backend_cpu.pycppdetector.L1OrbitsCPU,
+            check_orbits=lisatools_backend_cpu.pycppdetector.check_orbits,
+            SensitivityMatrixWrap=lisatools_backend_cpu.pycppdetector.XYZSensitivityMatrixWrapCPU,
             psd_likelihood=lisatools_backend_cpu.psd.psd_likelihood,
             compute_logpdf=lisatools_backend_cpu.psd.compute_logpdf,
             xp=numpy,
@@ -75,7 +95,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
     def cuda11x_module_loader():
         try:
             import lisatools_backend_cuda11x.pycppdetector
-            import lisatools_backend_cuda11x.psd
+            # import lisatools_backend_cuda11x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
@@ -90,7 +110,12 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            pycppDetector=lisatools_backend_cuda11x.pycppdetector.pycppDetector,
+            OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.OrbitsWrapGPU,
+            Orbits=lisatools_backend_cuda11x.pycppdetector.OrbitsGPU,
+            L1OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.L1OrbitsWrapGPU,
+            L1Orbits=lisatools_backend_cuda11x.pycppdetector.L1OrbitsGPU,
+            check_orbits=lisatools_backend_cuda11x.pycppdetector.check_orbits,
+            SensitivityMatrixWrap=lisatools_backend_cuda11x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             psd_likelihood=lisatools_backend_cuda11x.psd.psd_likelihood,
             compute_logpdf=lisatools_backend_cuda11x.psd.compute_logpdf,
             xp=cupy,
@@ -124,7 +149,12 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            pycppDetector=lisatools_backend_cuda12x.pycppdetector.pycppDetector,
+            OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.OrbitsWrapGPU,
+            Orbits=lisatools_backend_cuda12x.pycppdetector.OrbitsGPU,
+            L1OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.L1OrbitsWrapGPU,
+            L1Orbits=lisatools_backend_cuda12x.pycppdetector.L1OrbitsGPU,
+            check_orbits=lisatools_backend_cuda12x.pycppdetector.check_orbits,
+            SensitivityMatrixWrap=lisatools_backend_cuda12x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             psd_likelihood=lisatools_backend_cuda12x.psd.psd_likelihood,
             compute_logpdf=lisatools_backend_cuda12x.psd.compute_logpdf,
             xp=cupy,
