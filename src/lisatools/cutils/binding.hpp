@@ -3,6 +3,7 @@
 
 #include "L1Detector.hpp"
 #include "Detector.hpp"
+#include "PSD.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -18,6 +19,33 @@ using array_type = cai::cuda_array_t<T>;
 template<typename T>
 using array_type = py::array_t<T>;
 #endif
+
+
+void psd_likelihood_legacy_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+                         array_type<int> data_index_all, array_type<double>Soms_d_in_all, array_type<double>Sa_a_in_all, array_type<double>E_Soms_d_in_all, array_type<double>E_Sa_a_in_all, 
+                         array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, double df, int data_length, int num_data, int num_psds);
+
+void get_psd_val_legacy_wrap(array_type<double> Sn_A_out, array_type<double> Sn_E_out, array_type<double> f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
+                               double Amp, double alpha, double sl1, double kn, double sl2, int num_f);
+
+template<typename T>
+T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
+{
+    #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        
+#else
+        py::buffer_info buf1 = input1.request();
+
+        if (buf1.size != N * multiplier)
+        {
+            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
+            throw std::invalid_argument(err_out);
+        }
+        T* ptr1 = static_cast<T *>(buf1.ptr);
+#endif
+        return ptr1;
+};
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #define OrbitsWrap OrbitsWrapGPU
@@ -151,9 +179,25 @@ public:
     void psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
                              array_type<int> data_index_all, array_type<int> time_index_all,
                              array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
-                             array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, 
-                             double df, int data_length, int num_psds);
+                             array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
+                             double df, int num_freqs, int num_times, int num_psds);
 
+    void get_noise_covariance_wrap(
+        array_type<double> freqs, array_type<int> time_indices,
+        double Soms_d_in, double Sa_a_in,
+        double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+        array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
+        array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
+        int num_freqs, int num_times);
+
+    void get_inverse_logdet_wrap(
+        array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
+        array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
+        array_type<double> i00_arr, array_type<std::complex<double>> i01_arr, array_type<std::complex<double>> i02_arr,
+        array_type<double> i11_arr, array_type<std::complex<double>> i12_arr, array_type<double> i22_arr,
+        array_type<double> log_det_arr,
+        int num);
+    
     template<typename T>
     T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
     {

@@ -1,5 +1,6 @@
 #include "Detector.hpp"
 #include "L1Detector.hpp"
+#include "PSD.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -139,23 +140,74 @@ void XYZSensitivityMatrixWrap::get_noise_tfs_wrap(array_type<double> freqs,
 void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
                           array_type<int> data_index_all, array_type<int> time_index_all,
                           array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
-                          array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, 
-                          double df, int data_length, int num_psds)
+                          array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
+                          double df, int num_freqs, int num_times, int num_psds)
 {
+    int total_tf_pairs = num_times * num_freqs;
     sensitivity_matrix->psd_likelihood_wrap(
         return_pointer_and_check_length(like_contrib_final, "like_contrib_final", num_psds, 1),
-        return_pointer_and_check_length(f_arr, "f_arr", data_length, 1),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(data, "data", num_psds * 3 * data_length, 1)), // Should match data size check logic
+        return_pointer_and_check_length(f_arr, "f_arr", num_freqs, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(data, "data", num_psds * 3 * total_tf_pairs, 1)),
         return_pointer_and_check_length(data_index_all, "data_index_all", num_psds, 1),
-        return_pointer_and_check_length(time_index_all, "time_index_all", num_psds, 1),
+        return_pointer_and_check_length(time_index_all, "time_index_all", num_times, 1),
         return_pointer_and_check_length(Soms_d_in_all, "Soms_d_in_all", num_psds, 1),
         return_pointer_and_check_length(Sa_a_in_all, "Sa_a_in_all", num_psds, 1),
         return_pointer_and_check_length(Amp_all, "Amp_all", num_psds, 1),
         return_pointer_and_check_length(alpha_all, "alpha_all", num_psds, 1),
-        return_pointer_and_check_length(sl1_all, "sl1_all", num_psds, 1),
-        return_pointer_and_check_length(kn_all, "kn_all", num_psds, 1),
-        return_pointer_and_check_length(sl2_all, "sl2_all", num_psds, 1),
-        df, data_length, num_psds
+        return_pointer_and_check_length(slope_1_all, "slope_1_all", num_psds, 1),
+        return_pointer_and_check_length(f_knee_all, "f_knee_all", num_psds, 1),
+        return_pointer_and_check_length(slope_2_all, "slope_2_all", num_psds, 1),
+        df, num_freqs, num_times, num_psds
+    );
+}
+
+void XYZSensitivityMatrixWrap::get_noise_covariance_wrap(
+    array_type<double> freqs, array_type<int> time_indices,
+    double Soms_d_in, double Sa_a_in,
+    double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+    array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
+    array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
+    int num_freqs, int num_times)
+{
+    int total_size = num_freqs * num_times;
+    sensitivity_matrix->get_noise_covariance_arr(
+        return_pointer_and_check_length(freqs, "freqs", num_freqs, 1),
+        return_pointer_and_check_length(time_indices, "time_indices", num_times, 1),
+        Soms_d_in, Sa_a_in,
+        Amp, alpha, slope_1, f_knee, slope_2,
+        return_pointer_and_check_length(c00_arr, "c00_arr", total_size, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c01_arr, "c01_arr", total_size, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c02_arr, "c02_arr", total_size, 1)),
+        return_pointer_and_check_length(c11_arr, "c11_arr", total_size, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c12_arr, "c12_arr", total_size, 1)),
+        return_pointer_and_check_length(c22_arr, "c22_arr", total_size, 1),
+        num_freqs, num_times
+    );
+}
+
+void XYZSensitivityMatrixWrap::get_inverse_logdet_wrap(
+    array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
+    array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
+    array_type<double> i00_arr, array_type<std::complex<double>> i01_arr, array_type<std::complex<double>> i02_arr,
+    array_type<double> i11_arr, array_type<std::complex<double>> i12_arr, array_type<double> i22_arr,
+    array_type<double> log_det_arr,
+    int num)
+{
+    sensitivity_matrix->get_inverse_logdet_arr(
+        return_pointer_and_check_length(c00_arr, "c00_arr", num, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c01_arr, "c01_arr", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c02_arr, "c02_arr", num, 1)),
+        return_pointer_and_check_length(c11_arr, "c11_arr", num, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c12_arr, "c12_arr", num, 1)),
+        return_pointer_and_check_length(c22_arr, "c22_arr", num, 1),
+        return_pointer_and_check_length(i00_arr, "i00_arr", num, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(i01_arr, "i01_arr", num, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(i02_arr, "i02_arr", num, 1)),
+        return_pointer_and_check_length(i11_arr, "i11_arr", num, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(i12_arr, "i12_arr", num, 1)),
+        return_pointer_and_check_length(i22_arr, "i22_arr", num, 1),
+        return_pointer_and_check_length(log_det_arr, "log_det_arr", num, 1),
+        num
     );
 }
 
@@ -215,6 +267,60 @@ void detector_part(py::module &m) {
     ;
 }
 
+template<typename T>
+T* return_ptr(array_type<T> input1, std::string name, int N, int multiplier)
+{
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        
+#else
+        py::buffer_info buf1 = input1.request();
+
+        if (buf1.size != N * multiplier)
+        {
+            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
+            throw std::invalid_argument(err_out);
+        }
+        T* ptr1 = static_cast<T *>(buf1.ptr);
+#endif
+        return ptr1;
+};
+
+void psd_likelihood_legacy_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+                         array_type<int> data_index_all, array_type<double>Soms_d_in_all, array_type<double>Sa_a_in_all, array_type<double>E_Soms_d_in_all, array_type<double>E_Sa_a_in_all, 
+                         array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, double df, int data_length, int num_data, int num_psds)
+{
+    psd_likelihood_wrap(
+        return_ptr(like_contrib_final, "like_contrib_final", num_psds, 1),
+        return_ptr(f_arr, "f_arr", data_length, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_ptr(data, "data", data_length * num_data, 1)),
+        return_ptr(data_index_all, "data_index_all", num_psds, 1),
+        return_ptr(Soms_d_in_all, "Soms_d_in_all", num_psds, 1),
+        return_ptr(Sa_a_in_all, "Sa_a_in_all", num_psds, 1),
+        return_ptr(E_Soms_d_in_all, "E_Soms_d_in_all", num_psds, 1),
+        return_ptr(E_Sa_a_in_all, "E_Sa_a_in_all", num_psds, 1),
+        return_ptr(Amp_all, "Amp_all", num_psds, 1),
+        return_ptr(alpha_all, "alpha_all", num_psds, 1),
+        return_ptr(sl1_all, "sl1_all", num_psds, 1),
+        return_ptr(kn_all, "kn_all", num_psds, 1),
+        return_ptr(sl2_all, "sl2_all", num_psds, 1),
+        df, data_length, num_data, num_psds
+    );
+
+}
+
+void get_psd_val_legacy_wrap(array_type<double> Sn_A_out, array_type<double> Sn_E_out, array_type<double> f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
+                               double Amp, double alpha, double sl1, double kn, double sl2, int num_f)
+{
+    get_psd_val_wrap(
+        return_ptr(Sn_A_out, "Sn_A_out", num_f, 1),
+        return_ptr(Sn_E_out, "Sn_E_out", num_f, 1),
+        return_ptr(f_arr, "f_arr", num_f, 1),
+        A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
+        Amp, alpha, sl1, kn, sl2, num_f
+    );
+}
+
 void L1detector_part(py::module &m) {
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
@@ -257,6 +363,8 @@ void L1detector_part(py::module &m) {
             py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"))
     .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
+    .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
+    .def("get_inverse_logdet_wrap", &XYZSensitivityMatrixWrap::get_inverse_logdet_wrap, "Batch invert 3x3 Hermitian matrices and compute log determinants.")
     .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
     ;
     
@@ -268,6 +376,9 @@ void L1detector_part(py::module &m) {
     .def(py::init<double *, double *, int, double, int>(),
             py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"))
     ;
+
+    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
+    m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap, "Legacy PSD val wrapping");
 }
 
 

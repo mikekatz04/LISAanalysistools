@@ -62,6 +62,7 @@ class DomainBase:
     
 @dataclasses.dataclass
 class TDSettings(DomainSettingsBase):
+    t0: float
     N: int
     dt: float
 
@@ -79,18 +80,18 @@ class TDSettings(DomainSettingsBase):
     
     @property
     def args(self) -> tuple:
-        return (self.N, self.dt)   
+        return (self.t0, self.N, self.dt)   
     
     @property
     def t_arr(self) -> np.ndarray:
-        return np.arange(self.N) * self.dt
+        return self.t0 + np.arange(self.N) * self.dt
     
     @property
     def basis_shape(self) -> tuple:
         return (self.N,)
     
     def __eq__(self, value):
-        return (value.N == self.N) and (value.dt == self.dt)
+        return (value.N == self.N) and (value.dt == self.dt) and (value.t0 == self.t0)
     
     @property
     def differential_component(self) -> float:
@@ -436,6 +437,7 @@ class FDSignal(FDSettings, DomainBase):
 
 @dataclasses.dataclass
 class STFTSettings(DomainSettingsBase):
+    t0: float
     dt: float
     df: float 
     NT: int
@@ -450,32 +452,36 @@ class STFTSettings(DomainSettingsBase):
         return self.get_associated_class()
     
     @property
+    def basis_shape(self) -> tuple:
+        return (self.NT, self.NF)
+    
+    @property
+    def total_terms(self) -> int:
+        return self.NT * self.NF
+    
+    @property
     def t_arr(self) -> np.ndarray:
-        return np.arange(self.NT) * self.dt
+        return self.t0 + np.arange(self.NT) * self.dt
 
     @property
     def f_arr(self) -> np.ndarray:
         return np.arange(self.NF) * self.df
     
     def __eq__(self, value):
-        return (value.NT == self.NT) and (value.NF == self.NF) and (value.dt == self.dt) and (value.df == self.df)
+        return (value.NT == self.NT) and (value.NF == self.NF) and (value.dt == self.dt) and (value.df == self.df) and (value.t0 == self.t0)
 
 class STFTSignal(STFTSettings, DomainBase):
     def __init__(self, arr, settings: STFTSettings):
-        STFTSettings.__init__(self, settings.dt, settings.df)
+        STFTSettings.__init__(self, settings.t0, settings.dt, settings.df, settings.NT, settings.NF)
         DomainBase.__init__(self, arr)
 
     @property
     def settings(self) -> STFTSettings:
-        return STFTSettings(self.dt, self.df)
+        return STFTSettings(self.t0, self.dt, self.df, self.NT, self.NF)
     
     @property
     def differential_component(self) -> float:
         return 1.0
-    
-    @property
-    def total_terms(self) -> int:
-        return self.NT * self.NF
 
 
 WAVELET_BANDWIDTH = 6.51041666666667e-5
@@ -490,6 +496,7 @@ class WDMSettings(DomainSettingsBase):
         self,
         Tobs: float, 
         dt: float,
+        t0: float = 0.0,
         oversample: int = 8,
         window: Optional[np.ndarray] = None,
     ):
@@ -500,6 +507,7 @@ class WDMSettings(DomainSettingsBase):
 
         self.df = WAVELET_BANDWIDTH
         self.dt = WAVELET_DURATION
+        self.t0 = t0
         self.oversample = oversample
 
         self.cadence = WAVELET_DURATION/self.NF
@@ -524,7 +532,7 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def t_arr(self) -> np.ndarray:
-        return np.arange(self.NT) * self.dt
+        return self.t0 + np.arange(self.NT) * self.dt
 
     @property
     def f_arr(self) -> np.ndarray:
