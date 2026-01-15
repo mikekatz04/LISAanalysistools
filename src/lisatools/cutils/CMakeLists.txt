@@ -154,7 +154,7 @@ if(LISATOOLS_WITH_CPU)
     VERBATIM)
 
   python_add_library(lisaanalysistools_cpu_psd MODULE WITH_SOABI psdgen.cxx PSD.cxx)
-  apply_cpu_backend_common_options(psd)
+  apply_cpu_backend_common_options(psd lisatools lisaanalysistools false)
 
   target_sources(lisaanalysistools_cpu_psd PUBLIC FILE_SET HEADERS FILES
                                          global.hpp PSD.hpp)
@@ -163,7 +163,7 @@ endif()
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
   python_add_library(lisaanalysistools_gpu_psd MODULE WITH_SOABI psdgen.cxx PSD.cu)
-  apply_gpu_backend_common_options(psd)
+  apply_gpu_backend_common_options(psd lisatools lisaanalysistools false)
   target_sources(lisaanalysistools_gpu_psd PUBLIC FILE_SET HEADERS FILES
                                          global.hpp PSD.hpp)
 endif()
