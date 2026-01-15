@@ -75,8 +75,8 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             L1Orbits=lisatools_backend_cpu.pycppdetector.L1OrbitsCPU,
             check_orbits=lisatools_backend_cpu.pycppdetector.check_orbits,
             SensitivityMatrixWrap=lisatools_backend_cpu.pycppdetector.XYZSensitivityMatrixWrapCPU,
-            psd_likelihood=lisatools_backend_cpu.psd.psd_likelihood,
-            compute_logpdf=lisatools_backend_cpu.psd.compute_logpdf,
+            psd_likelihood=lisatools_backend_cpu.pycppdetector.psd_likelihood,
+            compute_logpdf=lisatools_backend_cpu.pycppdetector.compute_logpdf,
             xp=numpy,
         )
 
@@ -116,8 +116,8 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             L1Orbits=lisatools_backend_cuda11x.pycppdetector.L1OrbitsGPU,
             check_orbits=lisatools_backend_cuda11x.pycppdetector.check_orbits,
             SensitivityMatrixWrap=lisatools_backend_cuda11x.pycppdetector.XYZSensitivityMatrixWrapGPU,
-            psd_likelihood=lisatools_backend_cuda11x.psd.psd_likelihood,
-            compute_logpdf=lisatools_backend_cuda11x.psd.compute_logpdf,
+            psd_likelihood=lisatools_backend_cuda11x.pycppdetector.psd_likelihood,
+            compute_logpdf=lisatools_backend_cuda11x.pycppdetector.compute_logpdf,
             xp=cupy,
         )
 
@@ -134,7 +134,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
     def cuda12x_module_loader():
         try:
             import lisatools_backend_cuda12x.pycppdetector
-            import lisatools_backend_cuda12x.psd
+            # import lisatools_backend_cuda12x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
             raise BackendUnavailableException(
@@ -155,8 +155,8 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             L1Orbits=lisatools_backend_cuda12x.pycppdetector.L1OrbitsGPU,
             check_orbits=lisatools_backend_cuda12x.pycppdetector.check_orbits,
             SensitivityMatrixWrap=lisatools_backend_cuda12x.pycppdetector.XYZSensitivityMatrixWrapGPU,
-            psd_likelihood=lisatools_backend_cuda12x.psd.psd_likelihood,
-            compute_logpdf=lisatools_backend_cuda12x.psd.compute_logpdf,
+            psd_likelihood=lisatools_backend_cuda12x.pycppdetector.psd_likelihood,
+            compute_logpdf=lisatools_backend_cuda12x.pycppdetector.compute_logpdf,
             xp=cupy,
         )
 

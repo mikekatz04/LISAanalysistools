@@ -1128,7 +1128,7 @@ void compute_logpdf_wrap(double *logpdf_out, int *component_index, double *point
 const double lisaL = 2.5e9;           // LISA's arm meters
 const double lisaLT = lisaL / Clight; // LISA's armn in sec
 
-CUDA_DEVICE void lisanoises(double *Spm, double *Sop, double f, double Soms_d_in, double Sa_a_in, bool return_relative_frequency)
+CUDA_CALLABLE_MEMBER void lisanoises(double *Spm, double *Sop, double f, double Soms_d_in, double Sa_a_in, bool return_relative_frequency)
 {
     double frq = f;
     // Acceleration noise
@@ -1168,19 +1168,19 @@ CUDA_DEVICE void lisanoises(double *Spm, double *Sop, double f, double Soms_d_in
     //     printf("%.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e \n", frq, Sa_a_in, Soms_d_in, Sa_a, Sa_d, Sa_nu, *Spm, Soms_d, Soms_nu, *Sop);
 }
 
-CUDA_DEVICE double SGal(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double SGal(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double Sgal_out = (Amp * exp(-(pow(fr, alpha)) * sl1) * (pow(fr, (-7.0 / 3.0))) * 0.5 * (1.0 + tanh(-(fr - kn) * sl2)));
     return Sgal_out;
 }
 
-CUDA_DEVICE double GalConf(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double GalConf(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double Sgal_int = SGal(fr, Amp, alpha, sl1, kn, sl2);
     return Sgal_int;
 }
 
-CUDA_DEVICE double WDconfusionX(double f, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double WDconfusionX(double f, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double t = 4.0 * pow(x, 2) * pow(sin(x), 2);
@@ -1191,13 +1191,13 @@ CUDA_DEVICE double WDconfusionX(double f, double Amp, double alpha, double sl1, 
     return t * Sg_sens;
 }
 
-CUDA_DEVICE double WDconfusionAE(double f, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double WDconfusionAE(double f, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double SgX = WDconfusionX(f, Amp, alpha, sl1, kn, sl2);
     return 1.5 * SgX;
 }
 
-CUDA_DEVICE double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
+CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double Sa_d, Sop;
@@ -1223,7 +1223,7 @@ CUDA_DEVICE double lisasens(const double f, const double Soms_d_in, const double
     return Sens;
 }
 
-CUDA_DEVICE double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
+CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double Spm, Sop;
@@ -1241,7 +1241,7 @@ CUDA_DEVICE double noisepsd_AE(const double f, const double Soms_d_in, const dou
     //,
 }
 
-CUDA_DEVICE
+CUDA_CALLABLE_MEMBER
 double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in, double Amp, double alpha, double sl1, double kn, double sl2)
 {
     double A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;

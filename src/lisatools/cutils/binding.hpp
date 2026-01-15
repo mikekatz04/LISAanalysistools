@@ -28,6 +28,17 @@ void psd_likelihood_legacy_wrap(array_type<double> like_contrib_final, array_typ
 void get_psd_val_legacy_wrap(array_type<double> Sn_A_out, array_type<double> Sn_E_out, array_type<double> f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
                                double Amp, double alpha, double sl1, double kn, double sl2, int num_f);
 
+// Wrapper for psd_likelihood (same as legacy, exposed with different name for consistency)
+void psd_likelihood_binding(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+                         array_type<int> data_index_all, array_type<double>Soms_d_in_all, array_type<double>Sa_a_in_all, array_type<double>E_Soms_d_in_all, array_type<double>E_Sa_a_in_all, 
+                         array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, double df, int data_length, int num_data, int num_psds);
+
+// Wrapper for compute_logpdf
+void compute_logpdf_binding(array_type<double> logpdf_out, array_type<int> component_index, array_type<double> points,
+                    array_type<double> weights, array_type<double> mins, array_type<double> maxs, 
+                    array_type<double> means, array_type<double> invcovs, array_type<double> dets, array_type<double> log_Js, 
+                    int num_points, array_type<int> start_index, int num_components, int ndim);
+
 template<typename T>
 T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
 {

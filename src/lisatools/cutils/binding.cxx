@@ -321,6 +321,51 @@ void get_psd_val_legacy_wrap(array_type<double> Sn_A_out, array_type<double> Sn_
     );
 }
 
+void psd_likelihood_binding(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+                         array_type<int> data_index_all, array_type<double>Soms_d_in_all, array_type<double>Sa_a_in_all, array_type<double>E_Soms_d_in_all, array_type<double>E_Sa_a_in_all, 
+                         array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> sl1_all, array_type<double> kn_all, array_type<double> sl2_all, double df, int data_length, int num_data, int num_psds)
+{
+    psd_likelihood_wrap(
+        return_ptr(like_contrib_final, "like_contrib_final", num_psds, 1),
+        return_ptr(f_arr, "f_arr", data_length, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_ptr(data, "data", data_length * num_data, 1)),
+        return_ptr(data_index_all, "data_index_all", num_psds, 1),
+        return_ptr(Soms_d_in_all, "Soms_d_in_all", num_psds, 1),
+        return_ptr(Sa_a_in_all, "Sa_a_in_all", num_psds, 1),
+        return_ptr(E_Soms_d_in_all, "E_Soms_d_in_all", num_psds, 1),
+        return_ptr(E_Sa_a_in_all, "E_Sa_a_in_all", num_psds, 1),
+        return_ptr(Amp_all, "Amp_all", num_psds, 1),
+        return_ptr(alpha_all, "alpha_all", num_psds, 1),
+        return_ptr(sl1_all, "sl1_all", num_psds, 1),
+        return_ptr(kn_all, "kn_all", num_psds, 1),
+        return_ptr(sl2_all, "sl2_all", num_psds, 1),
+        df, data_length, num_data, num_psds
+    );
+}
+
+void compute_logpdf_binding(array_type<double> logpdf_out, array_type<int> component_index, array_type<double> points,
+                    array_type<double> weights, array_type<double> mins, array_type<double> maxs, 
+                    array_type<double> means, array_type<double> invcovs, array_type<double> dets, array_type<double> log_Js, 
+                    int num_points, array_type<int> start_index, int num_components, int ndim)
+{
+    compute_logpdf_wrap(
+        return_ptr(logpdf_out, "logpdf_out", num_points, 1),
+        return_ptr(component_index, "component_index", num_points, 1),
+        return_ptr(points, "points", num_points * ndim, 1),
+        return_ptr(weights, "weights", num_components, 1),
+        return_ptr(mins, "mins", num_components * ndim, 1),
+        return_ptr(maxs, "maxs", num_components * ndim, 1),
+        return_ptr(means, "means", num_components * ndim, 1),
+        return_ptr(invcovs, "invcovs", num_components * ndim * ndim, 1),
+        return_ptr(dets, "dets", num_components, 1),
+        return_ptr(log_Js, "log_Js", num_components, 1),
+        num_points,
+        return_ptr(start_index, "start_index", num_components + 1, 1),
+        num_components,
+        ndim
+    );
+}
+
 void L1detector_part(py::module &m) {
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
@@ -379,6 +424,8 @@ void L1detector_part(py::module &m) {
 
     m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
     m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap, "Legacy PSD val wrapping");
+    m.def("psd_likelihood", &psd_likelihood_binding, "PSD likelihood computation");
+    m.def("compute_logpdf", &compute_logpdf_binding, "Compute log PDF from GMM");
 }
 
 
