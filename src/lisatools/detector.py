@@ -315,7 +315,11 @@ class Orbits(LISAToolsParallelModule, ABC):
 
         # prepare cpp class args to load when needed
         if make_cpp:
-            self.pycppdetector_args = [
+            self.pycppdetector_args = [ # duplicate ltts and positions informations when using the more general c++ class
+                0,
+                dt,
+                len(self.t),
+                0, 
                 dt,
                 len(self.t),
                 self.xp.asarray(self.n.flatten().copy()),

@@ -275,7 +275,7 @@ class L1Orbits(Orbits):
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
-        self._pycppdetector = self.backend.L1OrbitsWrap(*self._pycppdetector_args)
+        self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
         return self._pycppdetector
     
     def configure(
@@ -743,8 +743,13 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
 
+    
+    def _setup_det_and_inv(self):
+        """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
+        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
+        self.invC, self.detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
 
-    def _inverse_logdet_wrapper(self, c00, c11, c22, c01, c02, c12):
+    def _inverse_det_wrapper(self, c00, c11, c22, c01, c02, c12):
         """Wrapper to call c++ backend for inverse log-determinant computation."""
         xp = self.xp
         total_terms = self.basis_settings.total_terms
@@ -756,28 +761,28 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         i02 = xp.empty(total_terms, dtype=xp.complex128)
         i12 = xp.empty(total_terms, dtype=xp.complex128)
 
-        logdet = xp.empty(total_terms, dtype=xp.float64)
+        det = xp.empty(total_terms, dtype=xp.float64)
 
-        self.cpp_sensitivity_matrix.get_inverse_logdet_wrap(
+        self.cpp_sensitivity_matrix.get_inverse_det_wrap(
             c00, c01, c02, c11, c12, c22,
             i00, i01, i02, i11, i12, i22,
-            logdet,
+            det,
             total_terms
         )
         
         inverse_matrix = self._fill_matrix(i00, i11, i22, i01, i02, i12)
-        return inverse_matrix, logdet.reshape(self.basis_settings.basis_shape)
+        return inverse_matrix, det.reshape(self.basis_settings.basis_shape)
 
     
-    def compute_inverse_logdet(self, matrix_in):
+    def compute_inverse_det(self, matrix_in):
         """
         Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
 
 
         """
         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(matrix_in, flatten=True)
-        inverse_matrix, logdet = self._inverse_logdet_wrapper(c00, c11, c22, c01, c02, c12)
-        return inverse_matrix, logdet
+        inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
+        return inverse_matrix, det
 
 
     def compute_log_like(self,

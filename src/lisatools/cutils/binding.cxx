@@ -185,15 +185,15 @@ void XYZSensitivityMatrixWrap::get_noise_covariance_wrap(
     );
 }
 
-void XYZSensitivityMatrixWrap::get_inverse_logdet_wrap(
+void XYZSensitivityMatrixWrap::get_inverse_det_wrap(
     array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
     array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
     array_type<double> i00_arr, array_type<std::complex<double>> i01_arr, array_type<std::complex<double>> i02_arr,
     array_type<double> i11_arr, array_type<std::complex<double>> i12_arr, array_type<double> i22_arr,
-    array_type<double> log_det_arr,
+    array_type<double> det_arr,
     int num)
 {
-    sensitivity_matrix->get_inverse_logdet_arr(
+    sensitivity_matrix->get_inverse_det_arr(
         return_pointer_and_check_length(c00_arr, "c00_arr", num, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c01_arr, "c01_arr", num, 1)),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c02_arr, "c02_arr", num, 1)),
@@ -206,7 +206,7 @@ void XYZSensitivityMatrixWrap::get_inverse_logdet_wrap(
         return_pointer_and_check_length(i11_arr, "i11_arr", num, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(i12_arr, "i12_arr", num, 1)),
         return_pointer_and_check_length(i22_arr, "i22_arr", num, 1),
-        return_pointer_and_check_length(log_det_arr, "log_det_arr", num, 1),
+        return_pointer_and_check_length(det_arr, "det_arr", num, 1),
         num
     );
 }
@@ -409,7 +409,7 @@ void L1detector_part(py::module &m) {
     .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
-    .def("get_inverse_logdet_wrap", &XYZSensitivityMatrixWrap::get_inverse_logdet_wrap, "Batch invert 3x3 Hermitian matrices and compute log determinants.")
+    .def("get_inverse_det_wrap", &XYZSensitivityMatrixWrap::get_inverse_det_wrap, "Batch invert 3x3 Hermitian matrices and compute determinants.")
     .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
     ;
     

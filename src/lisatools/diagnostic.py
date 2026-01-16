@@ -16,7 +16,7 @@ except (ModuleNotFoundError, ImportError):
 
     pass
 
-from .sensitivity import get_sensitivity, SensitivityMatrix
+from .sensitivity import get_sensitivity, SensitivityMatrix, SensitivityMatrixBase 
 from .datacontainer import DataResidualArray
 from .utils.utility import get_array_module
 from . import domains
@@ -25,7 +25,7 @@ def inner_product(
     sig1: np.ndarray | list | DataResidualArray,
     sig2: np.ndarray | list | DataResidualArray,
     basis_settings: domains.DomainSettingsBase = None,
-    psd: Optional[str | None | np.ndarray | SensitivityMatrix] = "LISASens",
+    psd: Optional[str | None | np.ndarray | SensitivityMatrixBase] = "LISASens",
     psd_args: Optional[tuple] = (),
     psd_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
@@ -99,7 +99,7 @@ def inner_product(
     basis = sig1.data_res_arr.settings
 
     # get psd weighting
-    if not isinstance(psd, SensitivityMatrix):
+    if not isinstance(psd, SensitivityMatrixBase):
         psd = SensitivityMatrix(basis, [psd], *psd_args, **psd_kwargs)
 
     else:
@@ -251,7 +251,7 @@ def residual_source_likelihood_term(
     return -1 / 2.0 * ip_val
 
 
-def noise_likelihood_term(psd: SensitivityMatrix) -> float:
+def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
     """Calculate the noise term in the Likelihood.
 
     The noise term in the likelihood is given by,
@@ -268,7 +268,7 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
 
     """
     fix = np.isnan(psd[:]) | np.isinf(psd[:])
-    assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
+    assert np.sum(fix) == np.prod(psd.shape[:len(psd.basis_settings.basis_shape)]) or np.sum(fix) == 0
     # TODO: check on this / add warning
     detC = psd.detC
     keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
@@ -279,7 +279,7 @@ def noise_likelihood_term(psd: SensitivityMatrix) -> float:
 
 def residual_full_source_and_noise_likelihood(
     data_res_arr: DataResidualArray,
-    psd: str | None | np.ndarray | SensitivityMatrix,
+    psd: str | None | np.ndarray | SensitivityMatrixBase,
     **kwargs: dict,
 ) -> float | complex:
     """Calculate the full Likelihood including noise and source terms.
@@ -297,9 +297,10 @@ def residual_full_source_and_noise_likelihood(
        Full Likelihood value.
 
     """
-    if not isinstance(psd, SensitivityMatrix):
+    if not isinstance(psd, SensitivityMatrixBase):
         # TODO: maybe adjust so it can take a list just like Sensitivity matrix
-        psd = SensitivityMatrix(data_res_arr.f_arr, [psd], **kwargs)
+        basis = data_res_arr.data_res_arr.settings
+        psd = SensitivityMatrix(basis, [psd], **kwargs)
 
     # remove key
     for key in "psd", "psd_args", "psd_kwargs":
@@ -342,7 +343,7 @@ def data_signal_source_likelihood_term(
 def data_signal_full_source_and_noise_likelihood(
     data_arr: DataResidualArray,
     sig_arr: DataResidualArray,
-    psd: str | None | np.ndarray | SensitivityMatrix,
+    psd: str | None | np.ndarray | SensitivityMatrixBase,
     **kwargs: dict,
 ) -> float | complex:
     """Calculate the full Likelihood including noise and source terms.
@@ -363,9 +364,10 @@ def data_signal_full_source_and_noise_likelihood(
        Full Likelihood value.
 
     """
-    if not isinstance(psd, SensitivityMatrix):
+    if not isinstance(psd, SensitivityMatrixBase):
         # TODO: maybe adjust so it can take a list just like Sensitivity matrix
-        psd = SensitivityMatrix(data_arr.f_arr, [psd], **kwargs)
+        basis = data_arr.data_res_arr.settings
+        psd = SensitivityMatrix(basis, [psd], **kwargs)
 
     # remove key
     for key in "psd", "psd_args", "psd_kwargs":

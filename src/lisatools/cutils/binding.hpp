@@ -201,12 +201,12 @@ public:
         array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
         int num_freqs, int num_times);
 
-    void get_inverse_logdet_wrap(
+    void get_inverse_det_wrap(
         array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
         array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
         array_type<double> i00_arr, array_type<std::complex<double>> i01_arr, array_type<std::complex<double>> i02_arr,
         array_type<double> i11_arr, array_type<std::complex<double>> i12_arr, array_type<double> i22_arr,
-        array_type<double> log_det_arr,
+        array_type<double> det_arr,
         int num);
     
     template<typename T>

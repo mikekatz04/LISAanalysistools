@@ -100,12 +100,12 @@ class XYZSensitivityMatrix {
         double *c11_arr, gcmplx::complex<double> *c12_arr, double *c22_arr,
         int num_freqs, int num_times);
 
-    void get_inverse_logdet_arr(
+    void get_inverse_det_arr(
     double *c00_arr, gcmplx::complex<double> *c01_arr, gcmplx::complex<double> *c02_arr,
     double *c11_arr, gcmplx::complex<double> *c12_arr, double *c22_arr,
     double *i00_arr, gcmplx::complex<double> *i01_arr, gcmplx::complex<double> *i02_arr,
     double *i11_arr, gcmplx::complex<double> *i12_arr, double *i22_arr,
-    double *log_det_arr,
+    double *det_arr,
     int num);
 
     void dealloc() {};

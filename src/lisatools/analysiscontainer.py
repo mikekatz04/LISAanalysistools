@@ -28,7 +28,7 @@ from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
 )
 from .datacontainer import DataResidualArray
-from .sensitivity import SensitivityMatrix
+from .sensitivity import SensitivityMatrixBase, SensitivityMatrix
 from .diagnostic import (
     noise_likelihood_term,
     residual_full_source_and_noise_likelihood,
@@ -53,7 +53,7 @@ class AnalysisContainer:
     def __init__(
         self,
         data_res_arr: DataResidualArray,
-        sens_mat: SensitivityMatrix,
+        sens_mat: SensitivityMatrixBase,
         signal_gen: Optional[callable] = None,
     ) -> None:
         self.data_res_arr = data_res_arr
@@ -74,14 +74,14 @@ class AnalysisContainer:
         self._data_res_arr = data_res_arr
 
     @property
-    def sens_mat(self) -> SensitivityMatrix:
+    def sens_mat(self) -> SensitivityMatrixBase:
         """Sensitivity information."""
         return self._sens_mat
 
     @sens_mat.setter
-    def sens_mat(self, sens_mat: SensitivityMatrix) -> None:
+    def sens_mat(self, sens_mat: SensitivityMatrixBase) -> None:
         "Set sensitivity information."
-        assert isinstance(sens_mat, SensitivityMatrix)
+        assert isinstance(sens_mat, SensitivityMatrixBase)
         self._sens_mat = sens_mat
 
     @property

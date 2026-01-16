@@ -176,7 +176,7 @@ void NoiseLevels::get_galactic_foreground(double *S_gal, double f, double Amp, d
  * 
  * @param[in] c00, c01, c02, c11, c12, c22 Input matrix upper triangle.
  * @param[out] i00, i01, i02, i11, i12, i22 Inverse matrix upper triangle.
- * @param[out] log_det Natural log of determinant.
+ * @param[out] det Determinant.
  */
 static CUDA_DEVICE
 void invert_3x3_hermitian(
@@ -186,7 +186,7 @@ void invert_3x3_hermitian(
     double &i00, cmplx &i01, cmplx &i02,
     double &i11, cmplx &i12,
     double &i22,
-    double &log_det)
+    double &det)
 {
     // Cofactors for diagonal elements (real)
     double C00 = c11 * c22 - gcmplx::norm(c12);
@@ -199,9 +199,9 @@ void invert_3x3_hermitian(
     cmplx C12 = c01 * gcmplx::conj(c02) - c00 * gcmplx::conj(c12);
 
     // Determinant (real for Hermitian matrix)
-    double det = c00 * C00 + (c01 * C01).real() + (c02 * C02).real();
-    double inv_det = 1.0 / det;
-    log_det = log(det);
+    double _det = c00 * C00 + (c01 * C01).real() + (c02 * C02).real();
+    double inv_det = 1.0 / _det;
+    det = _det;
 
     // Inverse = adjugate / det (adjugate = conjugate transpose of cofactor matrix)
     i00 = C00 * inv_det;
@@ -296,7 +296,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double c00, c11, c22;
     cmplx c01, c02, c12;
     // Inverse elements
-    double i00, i11, i22, log_det;
+    double i00, i11, i22, det;
     cmplx i01, i02, i12;
 
     int start_psd, incr_psd;
@@ -368,7 +368,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 
             // Invert C -> C^-1
             invert_3x3_hermitian(c00, c01, c02, c11, c12, c22, 
-                                 i00, i01, i02, i11, i12, i22, log_det);
+                                 i00, i01, i02, i11, i12, i22, det);
             
             // Get Data: layout matches loop (time-major)
             // data_in[(data_index * 3 + channel) * total_tf_pairs + idx]
@@ -381,7 +381,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
             
             // Likelihood Accumulation
-            like_vals[tid] += -0.5 * (4.0 * df * Q + log_det);
+            like_vals[tid] += -0.5 * (4.0 * df * Q + log(det));
         }
 #ifdef __CUDACC__
         CUDA_SYNC_THREADS;
@@ -858,12 +858,12 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
 // ============================================================================
 
 CUDA_KERNEL
-void get_inverse_logdet_kernel(
+void get_inverse_det_kernel(
     double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
     double *c11_arr, cmplx *c12_arr, double *c22_arr,
     double *i00_arr, cmplx *i01_arr, cmplx *i02_arr,
     double *i11_arr, cmplx *i12_arr, double *i22_arr,
-    double *log_det_arr,
+    double *det_arr,
     int num)
 {
     int start, end, increment;
@@ -885,40 +885,40 @@ void get_inverse_logdet_kernel(
             c11_arr[i], c12_arr[i], c22_arr[i],
             i00_arr[i], i01_arr[i], i02_arr[i],
             i11_arr[i], i12_arr[i], i22_arr[i],
-            log_det_arr[i]
+            det_arr[i]
         );
     }
 }
 
-void XYZSensitivityMatrix::get_inverse_logdet_arr(
+void XYZSensitivityMatrix::get_inverse_det_arr(
     double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
     double *c11_arr, cmplx *c12_arr, double *c22_arr,
     double *i00_arr, cmplx *i01_arr, cmplx *i02_arr,
     double *i11_arr, cmplx *i12_arr, double *i22_arr,
-    double *log_det_arr,
+    double *det_arr,
     int num)
 {
 #ifdef __CUDACC__
     int num_blocks = (num + NUM_THREADS - 1) / NUM_THREADS;
     
-    get_inverse_logdet_kernel<<<num_blocks, NUM_THREADS>>>(
+    get_inverse_det_kernel<<<num_blocks, NUM_THREADS>>>(
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
         i00_arr, i01_arr, i02_arr,
         i11_arr, i12_arr, i22_arr,
-        log_det_arr,
+        det_arr,
         num
     );
     
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
 #else
-    get_inverse_logdet_kernel(
+    get_inverse_det_kernel(
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
         i00_arr, i01_arr, i02_arr,
         i11_arr, i12_arr, i22_arr,
-        log_det_arr,
+        det_arr,
         num
     );
 #endif
