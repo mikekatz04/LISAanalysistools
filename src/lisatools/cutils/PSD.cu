@@ -271,6 +271,12 @@ double quadratic_form(
  * @param df Frequency resolution.
  * @param num_psds Number of PSD configurations (batch size).
  */
+// Debug counter for term counting
+#ifdef __CUDACC__
+// __device__ int debug_term_counter = 0;
+// __device__ double debug_like_sum = 0.0;
+#endif
+
 CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *like_contrib, double *f_arr, cmplx *data_in,
     int *data_index_all, int *time_index_all,
@@ -358,6 +364,11 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             time_index = time_index_all[t_idx];
             f = f_arr[f_idx];
 
+            if (f == 0.0)
+            {
+                f = df; // Avoid zero frequency
+            }
+
             // Get noise covariance matrix for this (time, frequency) pair
             sensitivity_matrix.get_noise_covariance(
                 f, time_index,
@@ -380,8 +391,11 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             // Compute Quadratic Form: d^H * C^-1 * d
             double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
             
+            // Likelihood term for this (t, f) pair
+            double like_term = -0.5 * (4.0 * df * Q + log(det));
+            
             // Likelihood Accumulation
-            like_vals[tid] += -0.5 * (4.0 * df * Q + log(det));
+            like_vals[tid] += like_term;
         }
 #ifdef __CUDACC__
         CUDA_SYNC_THREADS;
@@ -450,11 +464,17 @@ CUDA_KERNEL void like_sum_from_contrib(double *like_contrib_final, double *like_
 #ifdef __CUDACC__
         CUDA_SYNC_THREADS;
         
-        for (unsigned int s = 1; s < blockDim.x; s *= 2) {
-             if (tid % (2 * s) == 0) {
-                 shared_sum[tid] += shared_sum[tid + s];
-             }
-             CUDA_SYNC_THREADS;
+        // for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+        //      if (tid % (2 * s) == 0) {
+        //          shared_sum[tid] += shared_sum[tid + s];
+        //      }
+        //      CUDA_SYNC_THREADS;
+        // }
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_sum[tid] += shared_sum[tid + s];
+            }
+            CUDA_SYNC_THREADS;
         }
 #endif
         
@@ -493,6 +513,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         df, num_freqs, num_times, num_psds, *dev_ptr);
         
     gpuErrchk(cudaGetLastError());
+    cudaDeviceSynchronize();
     
     // Reduction across blocks
     dim3 grid_reduc(1, std::min(num_psds, 65535), 1);

@@ -152,17 +152,22 @@ class TDSignal(DomainBase, TDSettings):
         assert isinstance(settings, STFTSettings)
         big_dt = settings.dt
 
-        assert float(int(big_dt / self.dt)) == big_dt / self.dt
-        big_df = settings.df
-        nperseg = int(big_dt / self.dt)
+        # Validate that big_dt is an integer multiple of self.dt
+        nperseg = round(big_dt / self.dt)
+        assert abs(nperseg * self.dt - big_dt) < 1e-10 * big_dt, \
+            f"big_dt={big_dt} must be an integer multiple of dt={self.dt}"
+
         if window is None:
             window = self.xp.ones(nperseg, dtype=float)
 
-        # _, _, stft_arr = self._stft(self.arr, window=window, scaling="spectrum",
-        #                                               fs=(1/self.dt), nperseg=nperseg, noverlap=0, 
-        #                                               boundary='zeros', padded=True, axis=-1)
+        # Use NT from settings directly to ensure consistency
+        Nsegments = settings.NT
 
-        Nsegments = int(self.N / nperseg)
+        # Check we have enough data
+        required_samples = Nsegments * nperseg
+        if self.N < required_samples:
+            raise ValueError(f"Not enough data: have {self.N} samples, need {required_samples} for {Nsegments} segments")
+
         _arr = self.arr[..., :Nsegments * nperseg]
 
         stft_arr = self.dt * self.xp.fft.rfft(
@@ -170,8 +175,7 @@ class TDSignal(DomainBase, TDSettings):
             axis=-1
         )
 
-        #return STFTSignal(stft_arr[..., 1:-1].swapaxes(-1,-2), settings) # (nchannels, NT, NF)
-        return STFTSignal(stft_arr, settings) # (nchannels, NT, NF)
+        return STFTSignal(stft_arr, settings)  # (nchannels, NT, NF)
     
     def wdmtransform(self, settings=None, window=None):
         if window is None:

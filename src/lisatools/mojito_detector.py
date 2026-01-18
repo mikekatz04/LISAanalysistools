@@ -807,12 +807,14 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         num_psds = len(Soms_in_all)
 
-        log_like_out = xp.empty((num_psds,), dtype=xp.float64)
+        log_like_out = xp.empty(shape=(num_psds,), dtype=xp.float64)
 
-        self.cpp_sensitivity_matrix.get_log_likelihood_wrap(
+        self.cpp_sensitivity_matrix.psd_likelihood_wrap(
             log_like_out,
+            xp.asarray(self.basis_settings.f_arr[1:]),
             xp.asarray(data_in_all.flatten().copy()),
             xp.asarray(data_index_all.flatten().copy()),
+            xp.asarray(self.time_indices),
             xp.asarray(Soms_in_all),
             xp.asarray(Sa_in_all),
             xp.asarray(Amp_in_all),
@@ -821,7 +823,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             xp.asarray(kn_in_all),
             xp.asarray(sl2_in_all),
             self.basis_settings.df,
-            num_freqs,
+            num_freqs-1,
             num_times,
             num_psds
         )
