@@ -105,7 +105,7 @@ jobs:
             cuda_minor: 4
             reqpython: '>=3.10'
           - release: cpu
-            os: ubuntu-24.04-arm
+            os: ubuntu-latest
             arch: aarch64
             kind: core
             reqpython: '>=3.10'
@@ -147,10 +147,6 @@ jobs:
       # ========================
       # = II - Update sources  =
       # ========================
-      #- name: Install HDF5 C library (Linux/Ubuntu example)
-      #  if: runner.os == 'Linux'
-      #  run: |
-      #    sudo apt-get update && sudo apt-get install -y libhdf5-dev 
       - name: Add release suffix to project name
         if: matrix.kind != 'core'
         run: |
@@ -164,6 +160,7 @@ jobs:
         if: matrix.kind == 'cuda_plugin'
         run: |
           sed -i'' -e 's|#@DEPS_CUPYCUDA@|"cupy-cuda${{ matrix.cuda_major }}x"|g' pyproject.toml
+          sed -i'' -e 's/) #@ADDCUDAHERE@/ CUDA)/g' CMakeLists.txt
       # Add Core project dependency
       - name: Add core project dependency on plugin
         if: matrix.kind != 'core' && needs.select.outputs.core-suffix == 'true'
@@ -234,24 +231,32 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=ONLY
-            cmake.define.LISATOOLS_CUDA_ARCH=all
+            cmake.define.LISATOOLS_CUDA_ARCH="70;75;80;86;90"
           # Use dnf to install cuda-toolkit and gcc inside the manylinux container
           CIBW_BEFORE_ALL: >
             dnf install -y scl-utils &&
             dnf install -y gcc-toolset-11-toolchain &&
-            scl enable gcc-toolset-11 bash &&
+            echo "CHECK1" &&
+            source scl_source enable gcc-toolset-11 &&
+            gcc --version &&
+            echo "CHECK2" &&
+            which gcc &&
             dnf -y install epel-release &&
-            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo &&
             dnf clean all &&
-            dnf -y install cuda-toolkit &&
+            dnf -y install cuda-toolkit-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} &&
             ls -al /usr/local &&
             export PATH=$PATH:/usr/local/cuda/bin &&
+            gcc --version && 
+            echo "CHECKCHECKCHECK" &&
             nvcc --version
             #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
             #source /opt/rh/gcc-toolset-11/enable
             #nvcc --version &&
             #gcc --version
-          CIBW_BEFORE_BUILD: scl enable gcc-toolset-11 bash
+          CIBW_BEFORE_BUILD: |
+            source scl_source enable gcc-toolset-11 &&
+            gcc --version
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
             LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
@@ -259,8 +264,8 @@ jobs:
             CUDA_ROOT=/usr/local/cuda
             CUDA_PATH=/usr/local/cuda
             CUDADIR=/usr/local/cuda
-            CC=gcc
-            CXX=g++
+            CC=/opt/rh/gcc-toolset-11/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-11/root/usr/bin/g++
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel} --exclude "libcudart.so.${{ matrix.cuda_major }}" --exclude "libcusparse.so.${{ matrix.cuda_major }}" --exclude "libcublas.so.${{ matrix.cuda_major }}" --exclude "libnvJitLink.so.${{ matrix.cuda_major }}" --exclude "libcublasLt.so.${{ matrix.cuda_major }}"
       # =====================
