@@ -662,12 +662,24 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             avg_ltts.shape[0],  # n_times
             self.orbits.armlength,
             self.tdi_generation,
+            self.use_splines,
         ]
 
         self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
 
 
-    def _compute_matrix_elements(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
+    def _compute_matrix_elements(self, 
+                                 freqs, 
+                                 Soms_d_in=15e-12, 
+                                 Sa_a_in=3e-15, 
+                                 Amp=0, 
+                                 alpha=0, 
+                                 sl1=0, 
+                                 kn=0, 
+                                 sl2=0, 
+                                 knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                                 knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                                 ):
         """Compute the 6 sensitivity matrix terms using the c++ backend."""
         
         xp = self.xp
@@ -680,6 +692,15 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         c02 = xp.empty(total_terms, dtype=xp.complex128)
         c12 = xp.empty(total_terms, dtype=xp.complex128)
 
+        if self.use_splines:
+            assert knots_position_all is not None and knots_amplitude_all is not None
+            splines_out = self.spline_interpolant(freqs, knots_position_all, knots_amplitude_all)
+            splines_in_isi_oms = splines_out[0]
+            spline_in_testmass = splines_out[1]
+        else:
+            splines_in_isi_oms = xp.zeros(len(freqs), dtype=xp.float64)
+            spline_in_testmass = xp.zeros(len(freqs), dtype=xp.float64)
+
         self.pycpp_sensitivity_matrix.get_noise_covariance_wrap(
             xp.asarray(freqs),
             self.time_indices,
@@ -690,6 +711,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             float(sl1),
             float(kn),
             float(sl2),
+            splines_in_isi_oms,
+            spline_in_testmass,
             c00, c01, c02, c11, c12, c22,
             len(freqs),
             len(self.time_indices)
@@ -740,20 +763,22 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return c00, c11, c22, c01, c02, c12
 
     
-    def compute_sensitivity_matrix(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
+    def compute_sensitivity_matrix(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0, knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                                   knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,):
         """Compute the full 3x3 sensitivity matrix using the c++ backend."""
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
-            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2
+            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
         )
         matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
         return matrix
 
-    def set_sensitivity_matrix(self, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
+    def set_sensitivity_matrix(self, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0, knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                               knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,):
         """Internally store the sensitivity matrix computed at the basis frequencies."""
 
         freqs = self.xp.asarray(self.basis_settings.f_arr)
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
-            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2
+            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
         )
 
         self.sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
@@ -873,8 +898,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.pycpp_sensitivity_matrix.psd_likelihood_wrap(
             log_like_out,
             xp.asarray(self.basis_settings.f_arr),
-            xp.asarray(data_in_all.flatten().copy()),
-            xp.asarray(data_index_all.flatten().copy()),
+            xp.asarray(data_in_all.flatten()),
+            xp.asarray(data_index_all.flatten()),
             xp.asarray(self.time_indices),
             xp.asarray(Soms_in_all),
             xp.asarray(Sa_in_all),

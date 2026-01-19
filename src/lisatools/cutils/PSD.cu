@@ -328,11 +328,13 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 
     // Allocate "shared" memory for CPU (just one thread)
     double like_vals[1];
+    double compensation[1];
 #endif
 
 #ifdef __CUDACC__
     CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
-#endif
+    CUDA_SHARED double compensation[NUM_THREADS_LIKE];
+#endif 
 
     // Loop over PSDs
     for (int psd_i = start_psd; psd_i < num_psds; psd_i += incr_psd)
@@ -348,10 +350,9 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
         f_knee = f_knee_all[psd_i];
         slope_2 = slope_2_all[psd_i];
 
-
         // Initialize reduction
-        if (tid < NUM_THREADS_LIKE)
-            like_vals[tid] = 0.0;
+        like_vals[tid] = 0.0;
+        compensation[tid] = 0.0;
         
 #ifdef __CUDACC__
         CUDA_SYNC_THREADS;
@@ -372,9 +373,14 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             
             time_index = time_index_all[t_idx];
             f = f_arr[f_idx];
+
+            if (f == 0.0)
+            {
+                f = df; // Avoid zero frequency
+            }
             
-            double spline_in_testmass = spline_in_testmass_all[psd_i * num_freqs + f_idx];
             double spline_in_isi_oms = spline_in_isi_oms_all[psd_i * num_freqs + f_idx];
+            double spline_in_testmass = spline_in_testmass_all[psd_i * num_freqs + f_idx];
 
             // Get noise covariance matrix for this (time, frequency) pair
             sensitivity_matrix.get_noise_covariance(
@@ -400,7 +406,13 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
             
             // Likelihood Accumulation
-            like_vals[tid] += -0.5 * (4.0 * df * Q + log(det));
+            double term = -0.5 * (4.0 * df * Q + log(det));
+            // Kahan Summation
+            double y = term - compensation[tid];
+            double t = like_vals[tid] + y;
+            compensation[tid] = (t - like_vals[tid]) - y;
+            like_vals[tid] = t;
+            // like_vals[tid] += term;
         }
 #ifdef __CUDACC__
         CUDA_SYNC_THREADS;
@@ -410,7 +422,12 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
         {
             if (tid < s)
             {
-                like_vals[tid] += like_vals[tid + s];
+                // Perform addition with Kahan summation
+                double y = like_vals[tid + s] - compensation[tid + s] - compensation[tid];
+                double t = like_vals[tid] + y;
+                compensation[tid] = (t - like_vals[tid]) - y;
+                like_vals[tid] = t;
+                // like_vals[tid] += like_vals[tid + s];
             }
             CUDA_SYNC_THREADS;
         }
@@ -420,9 +437,11 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
         if (tid == 0)
         {
 #ifdef __CUDACC__
-            like_contrib[psd_i * gridDim.x + blockIdx.x] = like_vals[0];
+            like_contrib[psd_i * gridDim.x + blockIdx.x] = like_vals[0] - compensation[0];
+            // like_contrib[psd_i * gridDim.x + blockIdx.x] = like_vals[0];
 #else
-            like_contrib[psd_i] = like_vals[0];
+            like_contrib[psd_i] = like_vals[0] - compensation[0];
+            //like_contrib[psd_i] = like_vals[0];
 #endif
         }
 #ifdef __CUDACC__
