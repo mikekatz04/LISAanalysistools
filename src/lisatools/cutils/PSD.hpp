@@ -18,19 +18,21 @@
 class NoiseLevels {
 public:
     bool return_relative_frequency;
+    bool use_splines;
     double f_knee_tm;
     double f_break_tm;
     double f_knee_oms;
     
-    NoiseLevels(bool return_relative_frequency_, double f_knee_tm_, double f_break_tm_, double f_knee_oms_){
+    NoiseLevels(bool return_relative_frequency_, bool use_splines_, double f_knee_tm_, double f_break_tm_, double f_knee_oms_){
         return_relative_frequency = return_relative_frequency_;
+        use_splines = use_splines_;
         f_knee_tm = f_knee_tm_;
         f_break_tm = f_break_tm_;
         f_knee_oms = f_knee_oms_;
     };
 
-    CUDA_DEVICE void get_testmass_noise(double *S_tm, double f, double Sa_a_in);
-    CUDA_DEVICE void get_isi_oms_noise(double *S_isi_oms, double f, double Soms_d_in);
+    CUDA_DEVICE void get_testmass_noise(double *S_tm, double f, double Sa_a_in, double spline_in_testmass);
+    CUDA_DEVICE void get_isi_oms_noise(double *S_isi_oms, double f, double Soms_d_in, double spline_in_isi_oms);
     CUDA_DEVICE void get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double slope_1, double f_knee, double slope_2);
 
     void dealloc() {};
@@ -47,8 +49,8 @@ class XYZSensitivityMatrix {
     int generation;
     NoiseLevels noise_levels;
 
-    XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_, int n_times_, double armlength_, int generation_)
-        : noise_levels(true, 0.4e-3, 8e-3, 2.0e-3)
+    XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_, int n_times_, double armlength_, int generation_, bool spline_noise_)
+        : noise_levels(true, spline_noise_, .4e-3, 8e-3, 2.0e-3)
     {
         averaged_ltts_arr = averaged_ltts_arr_; // flattened array of size Ntimes * 6
         delta_ltts_arr = delta_ltts_arr_; // flattened array of size Ntimes * 6
@@ -62,26 +64,27 @@ class XYZSensitivityMatrix {
         left_mosas[2] = 31;
     };
     CUDA_DEVICE int get_adjacent_mosa(int mosa);
-    CUDA_DEVICE gcmplx::complex<double> oms_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
+    CUDA_DEVICE double oms_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
     CUDA_DEVICE gcmplx::complex<double> oms_xy_unequal_armlength(double f, double avg_d_ij, double avg_d_ik, double avg_d_jk, double delta_d_ij);
-    CUDA_DEVICE gcmplx::complex<double> tm_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
+    CUDA_DEVICE double tm_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
     CUDA_DEVICE gcmplx::complex<double> tm_xy_unequal_armlength(double f, double avg_d_ij, double avg_d_ik, double avg_d_jk, double delta_d_ij);
 
     CUDA_DEVICE void get_noise_tfs(double f, 
-                                  gcmplx::complex<double> *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, gcmplx::complex<double> *oms_yy, gcmplx::complex<double> *oms_yz, gcmplx::complex<double> *oms_zz,
-                                  gcmplx::complex<double> *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, gcmplx::complex<double> *tm_yy, gcmplx::complex<double> *tm_yz, gcmplx::complex<double> *tm_zz,
+                                  double *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, double *oms_yy, gcmplx::complex<double> *oms_yz, double *oms_zz,
+                                  double *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, double *tm_yy, gcmplx::complex<double> *tm_yz, double *tm_zz,
                                   int time_index); 
 
     CUDA_DEVICE void get_noise_covariance(
         double f, int time_index,
         double Soms_d_in, double Sa_a_in,
         double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+        double spline_in_isi_oms, double spline_in_testmass, 
         double *c00, gcmplx::complex<double> *c01, gcmplx::complex<double> *c02,
         double *c11, gcmplx::complex<double> *c12, double *c22);
                 
     void get_noise_tfs_arr(double *freqs, 
-                          gcmplx::complex<double> *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, gcmplx::complex<double> *oms_yy, gcmplx::complex<double> *oms_yz, gcmplx::complex<double> *oms_zz,
-                          gcmplx::complex<double> *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, gcmplx::complex<double> *tm_yy, gcmplx::complex<double> *tm_yz, gcmplx::complex<double> *tm_zz,
+                          double *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, double *oms_yy, gcmplx::complex<double> *oms_yz, double *oms_zz,
+                          double *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, double *tm_yy, gcmplx::complex<double> *tm_yz, double *tm_zz,
                           int num,
                           int *time_indices);
 
@@ -89,6 +92,7 @@ class XYZSensitivityMatrix {
                              int *data_index_all, int *time_index_all,
                              double *Soms_d_in_all, double *Sa_a_in_all, 
                              double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
+                             double *spline_in_isi_oms_all, double *spline_in_testmass_all, 
                              double df, int num_freqs, int num_times, int num_psds);
 
     // Noise covariance matrix computation
@@ -96,6 +100,7 @@ class XYZSensitivityMatrix {
         double *freqs, int *time_indices,
         double Soms_d_in, double Sa_a_in,
         double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+        double *spline_in_isi_oms_all, double *spline_in_testmass_all, 
         double *c00_arr, gcmplx::complex<double> *c01_arr, gcmplx::complex<double> *c02_arr,
         double *c11_arr, gcmplx::complex<double> *c12_arr, double *c22_arr,
         int num_freqs, int num_times);

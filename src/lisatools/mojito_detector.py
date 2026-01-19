@@ -7,11 +7,20 @@ import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
+try:
+    import cupy as cp
+except (ModuleNotFoundError, ImportError):
+    import numpy as cp
+
+from cudakima import AkimaInterpolant1D
+
 #import lisaconstants
 from .detector import Orbits, LINEAR_INTERP_TIMESTEP
 from .utils.parallelbase import LISAToolsParallelModule
 from .domains import DomainSettingsBase
 from .sensitivity import SensitivityMatrixBase
+
+NUM_SPLINE_THREADS = 256
 
 @jax.jit
 def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
@@ -580,6 +589,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                  orbits: L1Orbits,
                  settings: DomainSettingsBase,
                  tdi_generation: int = 2,
+                 use_splines: bool = False,
                  force_backend: Optional[str] = 'cpu'):
         
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
@@ -589,6 +599,11 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.orbits = orbits
         self.tdi_generation = tdi_generation
         self.channel_shape = (3, 3) 
+
+        _use_gpu = force_backend != 'cpu'
+
+        self.use_splines = use_splines
+        self.spline_interpolant = AkimaInterpolant1D(use_gpu=_use_gpu, threadsperblock=NUM_SPLINE_THREADS, order='cubic')
 
         self._setup()
 
@@ -649,7 +664,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.tdi_generation,
         ]
 
-        self.cpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
+        self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
 
 
     def _compute_matrix_elements(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0):
@@ -665,7 +680,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         c02 = xp.empty(total_terms, dtype=xp.complex128)
         c12 = xp.empty(total_terms, dtype=xp.complex128)
 
-        self.cpp_sensitivity_matrix.get_noise_covariance_wrap(
+        self.pycpp_sensitivity_matrix.get_noise_covariance_wrap(
             xp.asarray(freqs),
             self.time_indices,
             float(Soms_d_in),
@@ -763,7 +778,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         det = xp.empty(total_terms, dtype=xp.float64)
 
-        self.cpp_sensitivity_matrix.get_inverse_det_wrap(
+        self.pycpp_sensitivity_matrix.get_inverse_det_wrap(
             c00, c01, c02, c11, c12, c22,
             i00, i01, i02, i11, i12, i22,
             det,
@@ -784,17 +799,53 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
         return inverse_matrix, det
 
+    def compute_transfer_functions(self, 
+                                   freqs: np.ndarray | cp.ndarray
+                                   ) -> tuple:
+        
+        """Compute transfer functions using the c++ backend."""
+
+        xp = self.xp
+        num_freqs = len(freqs)
+
+        oms_xx = xp.empty(shape=(num_freqs,), dtype=xp.float64)
+        oms_yy = xp.empty(shape=(num_freqs,), dtype=xp.float64)
+        oms_zz = xp.empty(shape=(num_freqs,), dtype=xp.float64)
+        oms_xy = xp.empty(shape=(num_freqs,), dtype=xp.complex128)
+        oms_xz = xp.empty(shape=(num_freqs,), dtype=xp.complex128)
+        oms_yz = xp.empty(shape=(num_freqs,), dtype=xp.complex128)
+
+        tm_xx = xp.empty(shape=(num_freqs,), dtype=xp.float64)
+        tm_yy = xp.empty(shape=(num_freqs,), dtype=xp.float64)
+        tm_zz = xp.empty(shape=(num_freqs,), dtype=xp.float64)
+        tm_xy = xp.empty(shape=(num_freqs,), dtype=xp.complex128)
+        tm_xz = xp.empty(shape=(num_freqs,), dtype=xp.complex128)
+        tm_yz = xp.empty(shape=(num_freqs,), dtype=xp.complex128)
+
+        self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
+            xp.asarray(freqs),
+            oms_xx, oms_xy, oms_xz, oms_yy, oms_yz, oms_zz,
+            tm_xx, tm_xy, tm_xz, tm_yy, tm_yz, tm_zz,
+            num_freqs,
+            self._time_indices
+        )
+
+        return (oms_xx, oms_yy, oms_zz, oms_xy, oms_xz, oms_yz,
+                tm_xx, tm_yy, tm_zz, tm_xy, tm_xz, tm_yz)
 
     def compute_log_like(self,
-                         data_in_all, 
-                         data_index_all,
-                         Soms_in_all, 
-                         Sa_in_all,
-                         Amp_in_all,
-                         alpha_in_all,
-                         sl1_in_all,
-                         kn_in_all,
-                         sl2_in_all):
+                         data_in_all: np.ndarray | cp.ndarray | jnp.ndarray, 
+                         data_index_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         Soms_in_all: np.ndarray | cp.ndarray | jnp.ndarray, 
+                         Sa_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         Amp_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         alpha_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         sl1_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         kn_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         sl2_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
+                         knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                         knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                         ) -> np.ndarray | cp.ndarray | jnp.ndarray:
         """Compute log-likelihood using the c++ backend."""
 
         xp = self.xp
@@ -809,9 +860,19 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         log_like_out = xp.empty(shape=(num_psds,), dtype=xp.float64)
 
-        self.cpp_sensitivity_matrix.psd_likelihood_wrap(
+        if self.use_splines:
+            splines_weights = self.spline_interpolant(xp.log10(self.basis_settings.f_arr), knots_position_all, knots_amplitude_all)
+
+            splines_weights_testmass = splines_weights[:num_psds].flatten()
+            splines_weights_isi_oms = splines_weights[num_psds:].flatten()
+
+        else:
+            splines_weights_testmass = xp.zeros(shape=(num_psds * num_freqs))
+            splines_weights_isi_oms = xp.zeros(shape=(num_psds * num_freqs))
+
+        self.pycpp_sensitivity_matrix.psd_likelihood_wrap(
             log_like_out,
-            xp.asarray(self.basis_settings.f_arr[1:]),
+            xp.asarray(self.basis_settings.f_arr),
             xp.asarray(data_in_all.flatten().copy()),
             xp.asarray(data_index_all.flatten().copy()),
             xp.asarray(self.time_indices),
@@ -822,8 +883,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             xp.asarray(sl1_in_all),
             xp.asarray(kn_in_all),
             xp.asarray(sl2_in_all),
+            xp.asarray(splines_weights_isi_oms),
+            xp.asarray(splines_weights_testmass), 
             self.basis_settings.df,
-            num_freqs-1,
+            num_freqs,
             num_times,
             num_psds
         )

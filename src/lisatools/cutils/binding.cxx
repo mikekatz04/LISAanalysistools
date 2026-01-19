@@ -113,25 +113,25 @@ void check_L1orbits(L1Orbits *orbits)
 }
 
 void XYZSensitivityMatrixWrap::get_noise_tfs_wrap(array_type<double> freqs, 
-                          array_type<std::complex<double>> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<std::complex<double>> oms_yy, array_type<std::complex<double>> oms_yz, array_type<std::complex<double>> oms_zz,
-                          array_type<std::complex<double>> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<std::complex<double>> tm_yy, array_type<std::complex<double>> tm_yz, array_type<std::complex<double>> tm_zz,
+                          array_type<double> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<double> oms_yy, array_type<std::complex<double>> oms_yz, array_type<double> oms_zz,
+                          array_type<double> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<double> tm_yy, array_type<std::complex<double>> tm_yz, array_type<double> tm_zz,
                           int num,
                           array_type<int> time_indices)
 {
     sensitivity_matrix->get_noise_tfs_arr(
         return_pointer_and_check_length(freqs, "freqs", num, 1),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xx, "oms_xx", num, 1)),
+        return_pointer_and_check_length(oms_xx, "oms_xx", num, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xy, "oms_xy", num, 1)),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xz, "oms_xz", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yy, "oms_yy", num, 1)),
+        return_pointer_and_check_length(oms_yy, "oms_yy", num, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yz, "oms_yz", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_zz, "oms_zz", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xx, "tm_xx", num, 1)),
+        return_pointer_and_check_length(oms_zz, "oms_zz", num, 1),
+        return_pointer_and_check_length(tm_xx, "tm_xx", num, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xy, "tm_xy", num, 1)),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xz, "tm_xz", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yy, "tm_yy", num, 1)),
+        return_pointer_and_check_length(tm_yy, "tm_yy", num, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yz, "tm_yz", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_zz, "tm_zz", num, 1)),
+        return_pointer_and_check_length(tm_zz, "tm_zz", num, 1),
         num,
         return_pointer_and_check_length(time_indices, "time_indices", num, 1)
     );
@@ -141,6 +141,7 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contr
                           array_type<int> data_index_all, array_type<int> time_index_all,
                           array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
                           array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
+                          array_type<double> spline_in_isi_oms_all, array_type<double> spline_in_testmass_all,
                           double df, int num_freqs, int num_times, int num_psds)
 {
     int total_tf_pairs = num_times * num_freqs;
@@ -157,6 +158,8 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contr
         return_pointer_and_check_length(slope_1_all, "slope_1_all", num_psds, 1),
         return_pointer_and_check_length(f_knee_all, "f_knee_all", num_psds, 1),
         return_pointer_and_check_length(slope_2_all, "slope_2_all", num_psds, 1),
+        return_pointer_and_check_length(spline_in_isi_oms_all, "spline_in_isi_oms_all", num_psds * num_freqs, 1),
+        return_pointer_and_check_length(spline_in_testmass_all, "spline_in_testmass_all", num_psds * num_freqs, 1),
         df, num_freqs, num_times, num_psds
     );
 }
@@ -165,6 +168,7 @@ void XYZSensitivityMatrixWrap::get_noise_covariance_wrap(
     array_type<double> freqs, array_type<int> time_indices,
     double Soms_d_in, double Sa_a_in,
     double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+    array_type<double> spline_in_isi_oms_arr, array_type<double> spline_in_testmass_arr,
     array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
     array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
     int num_freqs, int num_times)
@@ -175,6 +179,8 @@ void XYZSensitivityMatrixWrap::get_noise_covariance_wrap(
         return_pointer_and_check_length(time_indices, "time_indices", num_times, 1),
         Soms_d_in, Sa_a_in,
         Amp, alpha, slope_1, f_knee, slope_2,
+        return_pointer_and_check_length(spline_in_isi_oms_arr, "spline_in_isi_oms_arr", num_freqs, 1),
+        return_pointer_and_check_length(spline_in_testmass_arr, "spline_in_testmass_arr", num_freqs, 1),
         return_pointer_and_check_length(c00_arr, "c00_arr", total_size, 1),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c01_arr, "c01_arr", total_size, 1)),
         reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(c02_arr, "c02_arr", total_size, 1)),
@@ -404,8 +410,8 @@ void L1detector_part(py::module &m) {
 #else
     py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapCPU")
 #endif
-    .def(py::init<array_type<double>, array_type<double>, int, double, int>(),
-            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"))
+    .def(py::init<array_type<double>, array_type<double>, int, double, int, bool>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"))
     .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
@@ -418,8 +424,8 @@ void L1detector_part(py::module &m) {
 #else
     py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixCPU")
 #endif
-    .def(py::init<double *, double *, int, double, int>(),
-            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"))
+    .def(py::init<double *, double *, int, double, int, bool>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"))
     ;
 
     m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
