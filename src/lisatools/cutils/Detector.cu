@@ -1,24 +1,30 @@
 #include "stdio.h"
 #include "gbt_global.h"
 #include "Detector.hpp"
+
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <cmath>
+#include <algorithm>
 
-
+// ============================================================================
+// Macro Definitions for CPU/GPU Compatibility
+// ============================================================================
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define Orbits OrbitsGPU
 #else
 #define Orbits OrbitsCPU
 #endif
-// TODO WHEN BACK FROM BREAK:
-// SEPARATE OUT ANY FUNCTION THAT INCLUDES ANYTHING PYBIND RELATED INTO BINDING. INHERIT THE ORBITS CLASS INTO A WRAPPER CLASS THAT ADDS THE FUNCTIONS THAT SPECIFICALLY TAKE IN NUMPY AND CUPY ARRAYS 
+
+// Thread block sizes
+#define NUM_THREADS 64
 
 CUDA_DEVICE
-int Orbits::get_window(double t)
+int Orbits::get_window(double t, double t0, double dt, int N)
 {
-    int out = int(t / dt);
+    int out = int( (t - t0) / dt);
     if ((out < 0) || (out >= N))
         return -1;
     else
@@ -73,13 +79,13 @@ int Orbits::get_sc_ind(int sc)
 }
 
 CUDA_DEVICE
-double Orbits::interpolate(double t, double *in_arr, int window, int major_ndim, int major_ind, int ndim, int pos)
+double Orbits::interpolate(double t, double *in_arr, double t0, double dt, int window, int major_ndim, int major_ind, int ndim, int pos)
 {
     double up = in_arr[((window + 1) * major_ndim + major_ind) * ndim + pos]; // down_ind * ndim + pos];
     double down = in_arr[(window * major_ndim + major_ind) * ndim + pos];
 
     // m *(x - x0) + y0
-    double fin = ((up - down) / dt) * (t - (dt * window)) + down;
+    double fin = ((up - down) / dt) * (t - (t0 + dt * window)) + down;
     // if ((ndim == 1))
     //     printf("%d %e %e %e %e \n", window, fin, down, up, (t - (dt * window)));
 
@@ -98,7 +104,7 @@ void Orbits::get_normal_unit_vec_ptr(Vec *vec, double t, int link)
 CUDA_DEVICE
 Vec Orbits::get_normal_unit_vec(double t, int link)
 {
-    int window = get_window(t);
+    int window = get_window(t, sc_t0, sc_dt, sc_N);
     if (window == -1)
     {
         // out of bounds
@@ -111,11 +117,11 @@ Vec Orbits::get_normal_unit_vec(double t, int link)
     int down_ind = window * nlinks + link_ind;
 
     // x (pos = 0) ndim = 3
-    double x_out = interpolate(t, n_arr, window, nlinks, link_ind, 3, 0);
+    double x_out = interpolate(t, n_arr, sc_t0, sc_dt, window, nlinks, link_ind, 3, 0);
     // y (pos = 1)
-    double y_out = interpolate(t, n_arr, window, nlinks, link_ind, 3, 1);
+    double y_out = interpolate(t, n_arr, sc_t0, sc_dt, window, nlinks, link_ind, 3, 1);
     // z (pos = 2)
-    double z_out = interpolate(t, n_arr, window, nlinks, link_ind, 3, 2);
+    double z_out = interpolate(t, n_arr, sc_t0, sc_dt, window, nlinks, link_ind, 3, 2);
 
     return Vec(x_out, y_out, z_out);
 }
@@ -123,7 +129,7 @@ Vec Orbits::get_normal_unit_vec(double t, int link)
 CUDA_DEVICE
 double Orbits::get_light_travel_time(double t, int link)
 {
-    int window = get_window(t);
+    int window = get_window(t, ltt_t0, ltt_dt, ltt_N);
     if (window == -1)
     {
         // out of bounds
@@ -135,7 +141,7 @@ double Orbits::get_light_travel_time(double t, int link)
     int down_ind = window * (nlinks + link_ind);
 
     // x (pos = 0), ndim = 1
-    double ltt_out = interpolate(t, ltt_arr, window, nlinks, link_ind, 1, 0);
+    double ltt_out = interpolate(t, ltt_arr, ltt_t0, ltt_dt, window, nlinks, link_ind, 1, 0);
 
     return ltt_out;
 }
@@ -143,7 +149,7 @@ double Orbits::get_light_travel_time(double t, int link)
 CUDA_DEVICE
 Vec Orbits::get_pos(double t, int sc)
 {
-    int window = get_window(t);
+    int window = get_window(t, sc_t0, sc_dt, sc_N);
     if (window == -1)
     {
         // out of bounds
@@ -153,11 +159,11 @@ Vec Orbits::get_pos(double t, int sc)
     int sc_ind = get_sc_ind(sc);
 
     // x (pos = 0), ndim = 3
-    double x_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 0);
+    double x_out = interpolate(t, x_arr, sc_t0, sc_dt, window, nspacecraft, sc_ind, 3, 0);
     // y (pos = 1), ndim = 3
-    double y_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 1);
+    double y_out = interpolate(t, x_arr, sc_t0, sc_dt, window, nspacecraft, sc_ind, 3, 1);
     // z (pos = 2), ndim = 3
-    double z_out = interpolate(t, x_arr, window, nspacecraft, sc_ind, 3, 2);
+    double z_out = interpolate(t, x_arr, sc_t0, sc_dt, window, nspacecraft, sc_ind, 3, 2);
     return Vec(x_out, y_out, z_out);
 }
 
@@ -169,9 +175,6 @@ void Orbits::get_pos_ptr(Vec *vec, double t, int sc)
     vec->y = _tmp.y;
     vec->z = _tmp.z;
 }
-
-#define NUM_THREADS 64
-
 
 CUDA_KERNEL
 void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Orbits &orbits)
@@ -313,4 +316,3 @@ void Orbits::get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_u
 
 #endif // __CUDACC__
 }
-

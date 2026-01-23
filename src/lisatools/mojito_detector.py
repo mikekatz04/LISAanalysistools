@@ -3,6 +3,7 @@
 import numpy as np
 from scipy import interpolate
 from typing import Optional
+from copy import deepcopy
 import jax 
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
@@ -21,6 +22,9 @@ from .domains import DomainSettingsBase
 from .sensitivity import SensitivityMatrixBase
 
 NUM_SPLINE_THREADS = 256
+
+def _skip_deepcopy(self, memo):
+    return self
 
 @jax.jit
 def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
@@ -89,18 +93,18 @@ class L1Orbits(Orbits):
 
     def __init__(
         self, 
-        mojito_file_path: str,
+        filename: str,
         armlength: float = 2.5e9,
         force_backend: Optional[str] = None,
         **kwargs
     ):
         # Store the Mojito file path
-        self.mojito_file_path = mojito_file_path
+        self.filename = filename
         
         # Don't call super().__init__ - we need to override _setup
         # Instead, manually initialize the minimal required attributes
         self._armlength = armlength
-        self._filename = mojito_file_path  # For compatibility
+        self._filename = filename  # For compatibility
         self.configured = False
         
         # Load data from Mojito file
@@ -116,7 +120,7 @@ class L1Orbits(Orbits):
             from mojito import MojitoL1File
         except ImportError:
             raise ImportError("mojito package required for L1Orbits. Follow instructions at: https://mojito-e66317.io.esa.int/content/installation.html")
-        f = MojitoL1File(self.mojito_file_path)
+        f = MojitoL1File(self.filename)
         return f
     
     def _load_mojito_data(self):
@@ -285,6 +289,7 @@ class L1Orbits(Orbits):
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
         self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
+
         return self._pycppdetector
     
     def configure(
@@ -405,7 +410,7 @@ class JAXL1Orbits(L1Orbits):
     fallback to CPU if CUDA is not available.
     
     Args:
-        mojito_file_path: Path to Mojito L1 HDF5 file
+        filename: Path to Mojito L1 HDF5 file
         armlength: Armlength of detector (default 2.5e9 m)
         force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
     """
@@ -524,7 +529,7 @@ class JAXL1Orbits(L1Orbits):
         
         # Collect aux_data (static configuration)
         aux_data = {
-            'mojito_file_path': self.mojito_file_path,
+            'filename': self.filename,
             'armlength': self._armlength,
             'configured': self.configured,
             'ltt_dt': self.ltt_dt,
@@ -546,7 +551,7 @@ class JAXL1Orbits(L1Orbits):
         obj = object.__new__(cls)
         
         # Restore aux_data
-        obj.mojito_file_path = aux_data['mojito_file_path']
+        obj.filename = aux_data['filename']
         obj._armlength = aux_data['armlength']
         obj.configured = aux_data['configured']
         obj.ltt_dt = aux_data['ltt_dt']
@@ -554,7 +559,7 @@ class JAXL1Orbits(L1Orbits):
         obj.ltt_t0 = aux_data['ltt_t0']
         obj.sc_t0 = aux_data['sc_t0']
         obj.use_gpu = aux_data['use_gpu']
-        obj._filename = aux_data['mojito_file_path']
+        obj._filename = aux_data['filename']
         
         if aux_data.get('_dt') is not None:
             obj._dt = aux_data['_dt']
@@ -581,6 +586,8 @@ class JAXL1Orbits(L1Orbits):
         
         return obj
 
+class XYZSensitivityBackend:
+    pass
 
 class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     """Helper class for sensitivity matrix with c++ backend."""
@@ -590,13 +597,18 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                  settings: DomainSettingsBase,
                  tdi_generation: int = 2,
                  use_splines: bool = False,
-                 force_backend: Optional[str] = 'cpu'):
+                 force_backend: Optional[str] = 'cpu'
+                 ):
         
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
 
         assert self.backend.xp == orbits.xp, "Orbits and Sensitivity backend mismatch."
+        
         self.orbits = orbits
+        if not self.orbits.configured:
+            self.orbits.configure(linear_interp_setup=True)
+
         self.tdi_generation = tdi_generation
         self.channel_shape = (3, 3) 
 
@@ -667,6 +679,33 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
 
+    def __deepcopy__(self, memo):
+        """Custom deepcopy to handle unpicklable backend objects."""
+        from copy import copy
+        
+        # Create a new instance without calling __init__
+        cls = self.__class__
+        new_obj = cls.__new__(cls)
+        
+        # Copy the memo to avoid infinite recursion
+        memo[id(self)] = new_obj
+        
+        # Manually copy attributes
+        for key, value in self.__dict__.items():
+            if key in ('_backend', 'pycpp_sensitivity_matrix'):
+                # Don't deepcopy backend objects - just reference
+                setattr(new_obj, key, value)
+            elif key == 'orbits':
+                # Shallow copy orbits (share the same backend)
+                setattr(new_obj, key, copy(value))
+            elif key == 'spline_interpolant':
+                # Shallow copy spline interpolant
+                setattr(new_obj, key, copy(value))
+            else:
+                # Deepcopy everything else
+                setattr(new_obj, key, deepcopy(value, memo))
+        
+        return new_obj
 
     def _compute_matrix_elements(self, 
                                  freqs, 
@@ -772,11 +811,21 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
         return matrix
 
-    def set_sensitivity_matrix(self, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0, knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
-                               knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,):
+    def set_sensitivity_matrix(self, 
+                               Soms_d_in: float = 15e-12, 
+                               Sa_a_in: float = 3e-15, 
+                               knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                               knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
+                               Amp: float = 0., 
+                               alpha: float = 0., 
+                               sl1: float = 0., 
+                               kn: float = 0., 
+                               sl2: float = 0., 
+                               ):
         """Internally store the sensitivity matrix computed at the basis frequencies."""
 
         freqs = self.xp.asarray(self.basis_settings.f_arr)
+        
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
             freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
         )
@@ -789,8 +838,17 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
         self.invC, self.detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
 
-    def _inverse_det_wrapper(self, c00, c11, c22, c01, c02, c12):
+    def _inverse_det_wrapper(self, 
+                             c00: np.ndarray | cp.ndarray | jnp.ndarray, 
+                             c11: np.ndarray | cp.ndarray | jnp.ndarray, 
+                             c22: np.ndarray | cp.ndarray | jnp.ndarray, 
+                             c01: np.ndarray | cp.ndarray | jnp.ndarray, 
+                             c02: np.ndarray | cp.ndarray | jnp.ndarray, 
+                             c12: np.ndarray | cp.ndarray | jnp.ndarray
+                             ) -> tuple:
+        
         """Wrapper to call c++ backend for inverse log-determinant computation."""
+        
         xp = self.xp
         total_terms = self.basis_settings.total_terms
 
@@ -811,21 +869,28 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         )
         
         inverse_matrix = self._fill_matrix(i00, i11, i22, i01, i02, i12)
+
         return inverse_matrix, det.reshape(self.basis_settings.basis_shape)
 
-    
-    def compute_inverse_det(self, matrix_in):
+    def compute_inverse_det(self, 
+                            matrix_in: np.ndarray | cp.ndarray | jnp.ndarray
+                            ) -> tuple:
         """
         Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
 
-
+        Args:
+            matrix_in: Input sensitivity matrix. Shape (3, 3, ...)
+        
+        Returns:
+            inverse_matrix: Inverted sensitivity matrix. Shape (3, 3, ...)
+            det: Determinant of the sensitivity matrix. Shape (...)
         """
         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(matrix_in, flatten=True)
         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
         return inverse_matrix, det
 
     def compute_transfer_functions(self, 
-                                   freqs: np.ndarray | cp.ndarray
+                                   freqs: np.ndarray | cp.ndarray | jnp.ndarray
                                    ) -> tuple:
         
         """Compute transfer functions using the c++ backend."""
@@ -871,10 +936,29 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                          knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
                          knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
                          ) -> np.ndarray | cp.ndarray | jnp.ndarray:
-        """Compute log-likelihood using the c++ backend."""
+        """
+        Compute log-likelihood using the c++ backend.
+
+        Args:
+            data_in_all: Input data array. Shape (num_psds, num_freqs * num_times)
+            data_index_all: Data indices array to keep track of which data corresponds to which PSD. Shape (num_psds)
+            Soms_in_all: Displacement noise levels for each walker. Shape (num_psds)
+            Sa_in_all: Acceleration noise levels for each walker. Shape (num_psds)
+            Amp_in_all: Galactic foreground amplitude for each walker. Shape (num_psds)
+            alpha_in_all: Galactic foreground alpha for each walker. Shape (num_psds)
+            sl1_in_all: First galactic foreground slope parameter for each walker. Shape (num_psds)
+            kn_in_all: Galactic foreground knee frequency parameter for each walker. Shape (num_psds)
+            sl2_in_all: Second galactic foreground slope parameter for each walker. Shape (num_psds)
+            knots_position_all: Positions of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
+            knots_amplitude_all: Amplitudes of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
+
+        Returns:
+            log_like_out: Computed log-likelihoods for each PSD. Shape (num_psds,)
+        """
 
         xp = self.xp
-
+        
+        
         if len(self.basis_settings.basis_shape) == 1:
             num_times = 1
             num_freqs = self.basis_settings.basis_shape[0]
@@ -888,16 +972,16 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if self.use_splines:
             splines_weights = self.spline_interpolant(xp.log10(self.basis_settings.f_arr), knots_position_all, knots_amplitude_all)
 
-            splines_weights_testmass = splines_weights[:num_psds].flatten()
-            splines_weights_isi_oms = splines_weights[num_psds:].flatten()
+            splines_weights_isi_oms = splines_weights[:num_psds].flatten()
+            splines_weights_testmass = splines_weights[num_psds:].flatten()
 
         else:
-            splines_weights_testmass = xp.zeros(shape=(num_psds * num_freqs))
             splines_weights_isi_oms = xp.zeros(shape=(num_psds * num_freqs))
+            splines_weights_testmass = xp.zeros(shape=(num_psds * num_freqs))
 
         self.pycpp_sensitivity_matrix.psd_likelihood_wrap(
             log_like_out,
-            xp.asarray(self.basis_settings.f_arr),
+            self.basis_settings.f_arr,
             xp.asarray(data_in_all.flatten()),
             xp.asarray(data_index_all.flatten()),
             xp.asarray(self.time_indices),
@@ -910,10 +994,53 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             xp.asarray(sl2_in_all),
             xp.asarray(splines_weights_isi_oms),
             xp.asarray(splines_weights_testmass), 
-            self.basis_settings.df,
+            self.basis_settings.differential_component,
             num_freqs,
             num_times,
             num_psds
         )
 
         return log_like_out
+
+    def __call__(self, 
+                name: str,
+                psd_params: np.ndarray, 
+                galfor_params: np.ndarray=None
+                ) -> XYZSensitivityBackend:
+        """
+        Update the internal sensitivity matrix with new noise parameters and return to be used in a AnalysisContainer.
+
+        Args:
+            psd_params: Array of PSD parameters in order [Soms_d, Sa_a, (optional spline params...)]
+            galfor_params: Array of galactic foreground parameters in order [Amp, alpha, sl1, kn, sl2].
+        
+        Returns:
+            self: a configured copy of the sensitivity matrix backend.
+        """
+        self.name = name
+
+        Soms_d = psd_params[0]
+        Sa_a = psd_params[1]
+
+        if self.use_splines:
+            # todo add a container for the noise
+            spline_params = psd_params[2:]
+            spline_knots_position = spline_params[::2]
+            spline_knots_amplitude = spline_params[1::2]
+
+        else:
+            spline_knots_position = None
+            spline_knots_amplitude = None
+        
+        if galfor_params is None:
+            galfor_params = np.zeros(5)
+    
+        self.set_sensitivity_matrix(
+            Soms_d,
+            Sa_a,
+            spline_knots_position,
+            spline_knots_amplitude,
+            *galfor_params
+        )
+
+        return deepcopy(self) #todo self, or deepcopy(self)?

@@ -281,7 +281,7 @@ double quadratic_form(
  * @param time_index_all Array of time indices for orbit config lookup, length num_times.
  * @param num_freqs Number of frequency bins.
  * @param num_times Number of time segments.
- * @param df Frequency resolution.
+ * @param differential_component Frequency resolution.
  * @param num_psds Number of PSD configurations (batch size).
  */
 CUDA_KERNEL void psd_likelihood_xyz_kernel(
@@ -290,7 +290,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *Soms_d_in_all, double *Sa_a_in_all,
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all,
     double *spline_in_isi_oms_all, double *spline_in_testmass_all,
-    double df, int num_freqs, int num_times, int num_psds, 
+    double differential_component, int num_freqs, int num_times, int num_psds, 
     XYZSensitivityMatrix &sensitivity_matrix)
 {
     int tid;
@@ -376,7 +376,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 
             if (f == 0.0)
             {
-                f = df; // Avoid zero frequency
+                f = f_arr[f_idx + 1]; // Avoid zero frequency 
             }
             
             double spline_in_isi_oms = spline_in_isi_oms_all[psd_i * num_freqs + f_idx];
@@ -406,7 +406,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
             
             // Likelihood Accumulation
-            double term = -0.5 * (4.0 * df * Q + log(det));
+            double term = -0.5 * (4.0 * differential_component * Q + log(det));
             // Kahan Summation
             double y = term - compensation[tid];
             double t = like_vals[tid] + y;
@@ -508,7 +508,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     double *Soms_d_in_all, double *Sa_a_in_all, 
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
     double *spline_in_testmass_all, double *spline_in_isi_oms_all,
-    double df, int num_freqs, int num_times, int num_psds)
+    double differential_component, int num_freqs, int num_times, int num_psds)
 {
     int total_tf_pairs = num_times * num_freqs;
     
@@ -530,7 +530,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        df, num_freqs, num_times, num_psds, *dev_ptr);
+        differential_component, num_freqs, num_times, num_psds, *dev_ptr);
         
     gpuErrchk(cudaGetLastError());
     
@@ -548,7 +548,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        df, num_freqs, num_times, num_psds, *this);
+        differential_component, num_freqs, num_times, num_psds, *this);
 #endif
 }
 

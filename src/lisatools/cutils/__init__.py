@@ -12,8 +12,6 @@ from gpubackendtools.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
-    LegacyOrbitsWrap: object
-    LegacyOrbits: object
     OrbitsWrap: object
     Orbits: object
     SensitivityMatrixWrap: object
@@ -25,8 +23,6 @@ class LISAToolsBackend:
     # TODO: not ClassVar?
     OrbitsWrap: object
     Orbits: object
-    L1OrbitsWrap: object
-    L1Orbits: object
     check_orbits: typing.Callable[(...), None]
     SensitivityMatrixWrap: object
     psd_likelihood: typing.Callable[(...), None]
@@ -37,8 +33,6 @@ class LISAToolsBackend:
         # set direct lisatools methods
         # pass rest to general backend
         assert isinstance(lisatools_backend_methods, LISAToolsBackendMethods)
-        self.LegacyOrbitsWrap = lisatools_backend_methods.LegacyOrbitsWrap
-        self.LegacyOrbits = lisatools_backend_methods.LegacyOrbits
         self.OrbitsWrap = lisatools_backend_methods.OrbitsWrap
         self.Orbits = lisatools_backend_methods.Orbits
         self.check_orbits = lisatools_backend_methods.check_orbits
@@ -68,10 +62,8 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
         numpy = LISAToolsCpuBackend.check_numpy()
 
         return LISAToolsBackendMethods(
-            LegacyOrbitsWrap=lisatools_backend_cpu.pycppdetector.OrbitsWrapCPU,
-            LegacyOrbits=lisatools_backend_cpu.pycppdetector.OrbitsCPU,
-            OrbitsWrap=lisatools_backend_cpu.pycppdetector.L1OrbitsWrapCPU,
-            Orbits=lisatools_backend_cpu.pycppdetector.L1OrbitsCPU,
+            OrbitsWrap=lisatools_backend_cpu.pycppdetector.OrbitsWrapCPU,
+            Orbits=lisatools_backend_cpu.pycppdetector.OrbitsCPU,
             check_orbits=lisatools_backend_cpu.pycppdetector.check_orbits,
             SensitivityMatrixWrap=lisatools_backend_cpu.pycppdetector.XYZSensitivityMatrixWrapCPU,
             psd_likelihood=lisatools_backend_cpu.pycppdetector.psd_likelihood,
@@ -109,10 +101,8 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            LegacyOrbitsWrap=lisatools_backend_cuda11x.pycppdetector.OrbitsWrapGPU,
-            LegacyOrbits=lisatools_backend_cuda11x.pycppdetector.OrbitsGPU,
-            OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.L1OrbitsWrapGPU,
-            Orbits=lisatools_backend_cuda11x.pycppdetector.L1OrbitsGPU,
+            OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.OrbitsWrapGPU,
+            Orbits=lisatools_backend_cuda11x.pycppdetector.OrbitsGPU,
             check_orbits=lisatools_backend_cuda11x.pycppdetector.check_orbits,
             SensitivityMatrixWrap=lisatools_backend_cuda11x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             psd_likelihood=lisatools_backend_cuda11x.pycppdetector.psd_likelihood,
@@ -148,10 +138,8 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             ) from e
 
         return LISAToolsBackendMethods(
-            LegacyOrbitsWrap=lisatools_backend_cuda12x.pycppdetector.OrbitsWrapGPU,
-            LegacyOrbits=lisatools_backend_cuda12x.pycppdetector.OrbitsGPU,
-            OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.L1OrbitsWrapGPU,
-            Orbits=lisatools_backend_cuda12x.pycppdetector.L1OrbitsGPU,
+            OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.OrbitsWrapGPU,
+            Orbits=lisatools_backend_cuda12x.pycppdetector.OrbitsGPU,
             check_orbits=lisatools_backend_cuda12x.pycppdetector.check_orbits,
             SensitivityMatrixWrap=lisatools_backend_cuda12x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             psd_likelihood=lisatools_backend_cuda12x.pycppdetector.psd_likelihood,

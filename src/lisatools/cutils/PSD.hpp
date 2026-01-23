@@ -93,7 +93,7 @@ class XYZSensitivityMatrix {
                              double *Soms_d_in_all, double *Sa_a_in_all, 
                              double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
                              double *spline_in_isi_oms_all, double *spline_in_testmass_all, 
-                             double df, int num_freqs, int num_times, int num_psds);
+                             double differential_component, int num_freqs, int num_times, int num_psds);
 
     // Noise covariance matrix computation
     void get_noise_covariance_arr(
