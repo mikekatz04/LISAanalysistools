@@ -5,7 +5,7 @@ requires = [
   "scikit_build_core",
   "eryn",
   "pybind11",
-  "gpubackendtools @ file:///Users/mlkatz/Research/GPUBackendTools",  # ==0.0.15 
+  "gpubackendtools",  # @ file:///home/mlkatz/GPUBackendTools",  # ==0.0.15 
 ]
 build-backend = "scikit_build_core.build"
 

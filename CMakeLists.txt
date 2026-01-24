@@ -124,7 +124,7 @@ endif()
 get_target_property(_LISATOOLS_WITH_GPU lisaanalysistools WITH_GPU)
 if(_LISATOOLS_WITH_GPU)
   set(CMAKE_CUDA_ARCHITECTURES ${LISATOOLS_CUDA_ARCH})
-  # enable_language(CUDA)
+  enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
 endif()
 

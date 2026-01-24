@@ -126,6 +126,7 @@ public:
     int *sc_r;
     int *sc_e;
     
+    CUDA_CALLABLE_MEMBER
     Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
         dt = dt_;
@@ -143,18 +144,20 @@ public:
 
     };
 
+    CUDA_DEVICE
     int get_sc_r_from_arr(int i)
     {
         
         return sc_r[i];
     };
 
+    CUDA_DEVICE
     int get_sc_e_from_arr(int i)
     {
         
         return sc_e[i];
     };
-    int get_link_from_arr(int i)
+    CUDA_DEVICE int get_link_from_arr(int i)
     {
         
         return links[i];
@@ -168,11 +171,11 @@ public:
     CUDA_DEVICE double get_light_travel_time(double t, int link);
     CUDA_DEVICE Vec get_pos(double t, int sc);
     CUDA_DEVICE void get_normal_unit_vec_ptr(Vec *vec, double t, int link);
-    CUDA_DEVICE void get_pos_ptr(Vec *vec, double t, int sc);
-    void get_light_travel_time_arr(double *ltt, double *t, int *link, int num);
-    void get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num);
-    void get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num);
-    void dealloc() {};
+    CUDA_DEVICE void get_pos_ptr(Vec *vec, double t, int sc); 
 };
+
+void get_light_travel_time_arr(Orbits *orbits, double *ltt, double *t, int *link, int num);
+void get_pos_arr(Orbits *orbits, double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num);
+void get_normal_unit_vec_arr(Orbits *orbits, double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num);
 
 #endif // __DETECTOR_HPP__

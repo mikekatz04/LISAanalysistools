@@ -88,7 +88,7 @@ if(LISATOOLS_WITH_GPU)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
                                         Detector.hpp)
-
+				# set_target_properties(lisaanalysistools_gpu_detector_gpu_static PROPERTIES LINKER_LANGUAGE CXX)
   pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
