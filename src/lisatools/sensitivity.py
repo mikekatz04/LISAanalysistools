@@ -9,14 +9,21 @@ from lisatools.utils.utility import get_array_module
 import math
 import numpy as np
 from scipy import interpolate
+from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d as np_gaussian_filter1d
 import matplotlib.pyplot as plt
 from . import domains
 
 try:
     import cupy as cp
+    from cupyx.scipy.ndimage import gaussian_filter1d as cp_gaussian_filter1d
 
 except (ModuleNotFoundError, ImportError):
-    pass
+    import numpy as cp
+    cp_gaussian_filter1d = np_gaussian_filter1d
+
+from cudakima import AkimaInterpolant1D
+NUM_SPLINE_THREADS = 256
 
 from . import detector as lisa_models
 from .utils.utility import AET, get_array_module
@@ -26,6 +33,9 @@ from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
     check_stochastic,
 )
+from .utils.parallelbase import LISAToolsParallelModule
+from .detector import L1Orbits
+from .domains import DomainSettingsBase
 
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
@@ -1518,7 +1528,7 @@ def get_sensitivity(
         return PSD ** (1 / 2)
 
     elif return_type == "char_strain":
-        return (f * PSD) ** (1 / 2)
+        return (basis_settings.f_arr * PSD) ** (1 / 2)
 
     else:
         raise ValueError("return_type must be PSD, ASD, or char_strain.")
@@ -1608,3 +1618,557 @@ def check_sensitivity(sensitivity: Any) -> Sensitivity:
         raise ValueError("sensitivity argument not given correctly.")
 
     return sensitivity
+
+
+
+class XYZSensitivityBackend:
+    pass
+
+class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
+    """Helper class for sensitivity matrix with c++ backend."""
+    
+    def __init__(self, 
+                 orbits: L1Orbits,
+                 settings: DomainSettingsBase,
+                 tdi_generation: int = 2,
+                 use_splines: bool = False,
+                 force_backend: Optional[str] = 'cpu',
+                 mask_percentage: Optional[float] = None,
+                 ):
+        
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        SensitivityMatrixBase.__init__(self, settings)
+
+        assert self.backend.xp == orbits.xp, "Orbits and Sensitivity backend mismatch."
+        
+        self.orbits = orbits
+        if not self.orbits.configured:
+            self.orbits.configure(linear_interp_setup=True)
+
+        self.tdi_generation = tdi_generation
+        self.channel_shape = (3, 3) 
+
+        _use_gpu = force_backend != 'cpu'
+
+        self.use_splines = use_splines
+        self.spline_interpolant = AkimaInterpolant1D(use_gpu=_use_gpu, threadsperblock=NUM_SPLINE_THREADS, order='cubic')
+
+        self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
+
+        self._setup()
+
+    @property
+    def xp(self):
+        """Array module."""
+        return self.backend.xp
+    
+    @property
+    def time_indices(self):
+        return self._time_indices
+    @time_indices.setter
+    def time_indices(self, x):
+        self._time_indices = x
+    
+    def get_averaged_ltts(self):
+        # first, compute the average ltts and their differences. 
+        # check if we need multiple time points
+        if hasattr(self.basis_settings, 't_arr'):
+            t_arr = self.xp.asarray(self.basis_settings.t_arr)
+            tiled_times = self.xp.tile(
+                t_arr[:, self.xp.newaxis], (1, 6)
+            ).flatten()  # compute ltts at these times with orbits
+
+            links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
+
+            ltts = self.orbits.get_light_travel_times(
+                tiled_times, links
+            ).reshape(len(t_arr), 6)
+
+            self.time_indices = self.xp.arange(len(t_arr), dtype=self.xp.int32)
+        
+        else:
+            ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
+            self.time_indices = self.xp.array([0], dtype=self.xp.int32)
+
+        # with orbits.LINKS order: 12, 23, 31, 13, 32, 21, we need averages between pairs
+        # pairs: (12,21), (23,32), (31,13)
+        # Use direct indexing to avoid assignment issues with shape (1, 6) arrays
+        indices = [0, 1, 2, 3, 4, 5]
+        opposite_indices = indices[::-1]
+
+        avg_ltts = 0.5 * (ltts[:, indices] + ltts[:, opposite_indices])
+        delta_ltts = ltts[:, indices] - ltts[:, opposite_indices]
+
+        return avg_ltts, delta_ltts
+
+    def _setup(self):
+        """Setup the arguments for the c++ backend."""
+        
+        avg_ltts, delta_ltts = self.get_averaged_ltts()
+        
+        self.pycppsensmat_args = [
+            self.xp.asarray(avg_ltts.flatten().copy()),
+            self.xp.asarray(delta_ltts.flatten().copy()),
+            avg_ltts.shape[0],  # n_times
+            self.orbits.armlength,
+            self.tdi_generation,
+            self.use_splines,
+        ]
+
+        self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
+
+        self._init_basis_settings()
+
+    def __deepcopy__(self, memo):
+        """Custom deepcopy to handle unpicklable backend objects."""
+        from copy import copy
+        
+        # Create a new instance without calling __init__
+        cls = self.__class__
+        new_obj = cls.__new__(cls)
+        
+        # Copy the memo to avoid infinite recursion
+        memo[id(self)] = new_obj
+        
+        # Manually copy attributes
+        for key, value in self.__dict__.items():
+            if key in ('_backend', 'pycpp_sensitivity_matrix'):
+                # Don't deepcopy backend objects - just reference
+                setattr(new_obj, key, value)
+            elif key == 'orbits':
+                # Shallow copy orbits (share the same backend)
+                setattr(new_obj, key, copy(value))
+            elif key == 'spline_interpolant':
+                # Shallow copy spline interpolant
+                setattr(new_obj, key, copy(value))
+            else:
+                # Deepcopy everything else
+                setattr(new_obj, key, deepcopy(value, memo))
+        
+        return new_obj
+
+    def _init_basis_settings(self):
+        """Initialize basis settings from domain settings."""
+        self.f_arr = self.xp.asarray(self.basis_settings.f_arr)
+        
+        if hasattr(self.basis_settings, 't_arr'):
+            self.t_arr = self.xp.asarray(self.basis_settings.t_arr)
+
+        self.num_times = len(self.t_arr) if hasattr(self, 't_arr') else 1
+        self.num_freqs = len(self.f_arr)
+
+        dips_indices = self._get_dips_indices()
+
+        dips_mask = self.xp.zeros((self.num_times, self.num_freqs), dtype=bool)
+        for t_idx in range(self.num_times):
+            dips_mask[t_idx, dips_indices[t_idx]] = True
+        
+        self.dips_mask = dips_mask.flatten()
+
+    def _find_dips_with_percentage(self, tf, mask_percentage=0.05):
+
+        if hasattr(self.f_arr, 'get'):
+            f_arr = self.f_arr.get()
+            tf = tf.get()
+
+        peaks = find_peaks(-tf)[0]
+        
+        all_indices = set()
+        for peak in peaks:
+            freq = self.f_arr[peak]
+            df = self.f_arr[1] - self.f_arr[0]
+            
+            lower_freq = freq - mask_percentage * freq
+            upper_freq = freq + mask_percentage * freq
+
+            lower_idx = int(self.xp.searchsorted(self.f_arr, lower_freq - df/2))
+            upper_idx = int(self.xp.searchsorted(self.f_arr, upper_freq + df/2))
+            
+            all_indices.update(range(lower_idx, upper_idx))
+        
+        return self.xp.array(sorted(all_indices), dtype=self.xp.int32)
+
+    def _get_dips_indices(self,):
+
+        transfer_functions = self.compute_transfer_functions(self.f_arr)
+
+        tf = transfer_functions[0]
+
+        dips_indices = [
+            self._find_dips_with_percentage(tf[t_idx], mask_percentage=self.mask_percentage)
+            for t_idx in range(self.num_times)
+        ]
+
+        return dips_indices
+
+
+    def _compute_matrix_elements(self, 
+                                 freqs, 
+                                 Soms_d_in=15e-12, 
+                                 Sa_a_in=3e-15, 
+                                 Amp=0, 
+                                 alpha=0, 
+                                 sl1=0, 
+                                 kn=0, 
+                                 sl2=0, 
+                                 knots_position_all: np.ndarray | cp.ndarray = None,
+                                 knots_amplitude_all: np.ndarray | cp.ndarray = None,
+                                 ):
+        """Compute the 6 sensitivity matrix terms using the c++ backend."""
+        
+        xp = self.xp
+        total_terms = self.basis_settings.total_terms
+        
+        c00 = xp.empty(total_terms, dtype=xp.float64)
+        c11 = xp.empty(total_terms, dtype=xp.float64)
+        c22 = xp.empty(total_terms, dtype=xp.float64)
+        c01 = xp.empty(total_terms, dtype=xp.complex128)
+        c02 = xp.empty(total_terms, dtype=xp.complex128)
+        c12 = xp.empty(total_terms, dtype=xp.complex128)
+
+        if self.use_splines:
+            assert knots_position_all is not None and knots_amplitude_all is not None
+            splines_out = self.spline_interpolant(freqs, knots_position_all, knots_amplitude_all)
+            splines_in_isi_oms = splines_out[0]
+            spline_in_testmass = splines_out[1]
+        else:
+            splines_in_isi_oms = xp.zeros(len(freqs), dtype=xp.float64)
+            spline_in_testmass = xp.zeros(len(freqs), dtype=xp.float64)
+
+        self.pycpp_sensitivity_matrix.get_noise_covariance_wrap(
+            xp.asarray(freqs),
+            self.time_indices,
+            float(Soms_d_in),
+            float(Sa_a_in),
+            float(Amp),
+            float(alpha),
+            float(sl1),
+            float(kn),
+            float(sl2),
+            splines_in_isi_oms,
+            spline_in_testmass,
+            c00, c01, c02, c11, c12, c22,
+            len(freqs),
+            len(self.time_indices)
+        )
+
+        return c00, c11, c22, c01, c02, c12
+    
+    def _fill_matrix(self, c00, c11, c22, c01, c02, c12):
+        """Fill the full 3x3 sensitivity matrix from its 6 unique elements."""
+        xp = self.xp    
+        shape = self.basis_settings.basis_shape
+
+        # Reshape views (no copy)
+        c00 = c00.reshape(shape)
+        c11 = c11.reshape(shape)
+        c22 = c22.reshape(shape)
+        c01 = c01.reshape(shape)
+        c02 = c02.reshape(shape)
+        c12 = c12.reshape(shape)
+
+        # Direct assignment is faster than stack (no intermediate copies)
+        matrix = xp.empty(self.channel_shape + shape, dtype=xp.complex128)
+        matrix[0, 0] = c00
+        matrix[1, 1] = c11
+        matrix[2, 2] = c22
+        matrix[0, 1] = c01
+        matrix[1, 0] = c01.conj()
+        matrix[0, 2] = c02
+        matrix[2, 0] = c02.conj()
+        matrix[1, 2] = c12
+        matrix[2, 1] = c12.conj()
+        
+        return matrix
+    
+    def _extract_matrix_elements(self, matrix_in, flatten=False):
+        """Extract the 6 unique sensitivity matrix elements from the full 3x3 matrix."""
+
+        c00 = matrix_in[0, 0].real
+        c11 = matrix_in[1, 1].real
+        c22 = matrix_in[2, 2].real
+        c01 = matrix_in[0, 1]
+        c02 = matrix_in[0, 2]
+        c12 = matrix_in[1, 2]
+
+        if flatten:
+           return c00.flatten(), c11.flatten(), c22.flatten(), c01.flatten(), c02.flatten(), c12.flatten()
+
+        return c00, c11, c22, c01, c02, c12
+
+    
+    def compute_sensitivity_matrix(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0, knots_position_all: np.ndarray | cp.ndarray = None,
+                                   knots_amplitude_all: np.ndarray | cp.ndarray = None,):
+        """Compute the full 3x3 sensitivity matrix using the c++ backend."""
+        c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
+            freqs, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
+        )
+        matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+        return matrix
+
+    def set_sensitivity_matrix(self, 
+                               Soms_d_in: float = 15e-12, 
+                               Sa_a_in: float = 3e-15, 
+                               knots_position_all: np.ndarray | cp.ndarray = None,
+                               knots_amplitude_all: np.ndarray | cp.ndarray = None,
+                               Amp: float = 0., 
+                               alpha: float = 0., 
+                               sl1: float = 0., 
+                               kn: float = 0., 
+                               sl2: float = 0., 
+                               ):
+        """Internally store the sensitivity matrix computed at the basis frequencies."""
+
+        
+        
+        c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
+            self.f_arr, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
+        )
+
+        sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+
+        self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=5)
+
+    
+    def _setup_det_and_inv(self):
+        """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
+        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
+        self.invC, self.detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
+
+    def _inverse_det_wrapper(self, 
+                             c00: np.ndarray | cp.ndarray, 
+                             c11: np.ndarray | cp.ndarray, 
+                             c22: np.ndarray | cp.ndarray, 
+                             c01: np.ndarray | cp.ndarray, 
+                             c02: np.ndarray | cp.ndarray, 
+                             c12: np.ndarray | cp.ndarray 
+                             ) -> tuple:
+        
+        """Wrapper to call c++ backend for inverse log-determinant computation."""
+        
+        xp = self.xp
+        total_terms = self.basis_settings.total_terms
+
+        i00 = xp.empty(total_terms, dtype=xp.float64)
+        i11 = xp.empty(total_terms, dtype=xp.float64)
+        i22 = xp.empty(total_terms, dtype=xp.float64)
+        i01 = xp.empty(total_terms, dtype=xp.complex128)
+        i02 = xp.empty(total_terms, dtype=xp.complex128)
+        i12 = xp.empty(total_terms, dtype=xp.complex128)
+
+        det = xp.empty(total_terms, dtype=xp.float64)
+
+        self.pycpp_sensitivity_matrix.get_inverse_det_wrap(
+            c00, c01, c02, c11, c12, c22,
+            i00, i01, i02, i11, i12, i22,
+            det,
+            total_terms
+        )
+        
+        inverse_matrix = self._fill_matrix(i00, i11, i22, i01, i02, i12)
+
+        return inverse_matrix, det.reshape(self.basis_settings.basis_shape)
+
+    def compute_inverse_det(self, 
+                            matrix_in: np.ndarray | cp.ndarray 
+                            ) -> tuple:
+        """
+        Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
+
+        Args:
+            matrix_in: Input sensitivity matrix. Shape (3, 3, ...)
+        
+        Returns:
+            inverse_matrix: Inverted sensitivity matrix. Shape (3, 3, ...)
+            det: Determinant of the sensitivity matrix. Shape (...)
+        """
+        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(matrix_in, flatten=True)
+        inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
+        return inverse_matrix, det
+
+    def compute_transfer_functions(self, 
+                                   freqs: np.ndarray | cp.ndarray 
+                                   ) -> tuple:
+        
+        """Compute transfer functions using the c++ backend."""
+
+        xp = self.xp
+        num_freqs = len(freqs)
+
+        total_shape = self.num_times * num_freqs
+
+        oms_xx = xp.empty(shape=(total_shape,), dtype=xp.float64)
+        oms_yy = xp.empty(shape=(total_shape,), dtype=xp.float64)
+        oms_zz = xp.empty(shape=(total_shape,), dtype=xp.float64)
+        oms_xy = xp.empty(shape=(total_shape,), dtype=xp.complex128)
+        oms_xz = xp.empty(shape=(total_shape,), dtype=xp.complex128)
+        oms_yz = xp.empty(shape=(total_shape,), dtype=xp.complex128)
+
+        tm_xx = xp.empty(shape=(total_shape,), dtype=xp.float64)
+        tm_yy = xp.empty(shape=(total_shape,), dtype=xp.float64)
+        tm_zz = xp.empty(shape=(total_shape,), dtype=xp.float64)
+        tm_xy = xp.empty(shape=(total_shape,), dtype=xp.complex128)
+        tm_xz = xp.empty(shape=(total_shape,), dtype=xp.complex128)
+        tm_yz = xp.empty(shape=(total_shape,), dtype=xp.complex128)
+
+        self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
+            xp.asarray(freqs),
+            oms_xx, oms_xy, oms_xz, oms_yy, oms_yz, oms_zz,
+            tm_xx, tm_xy, tm_xz, tm_yy, tm_yz, tm_zz,
+            num_freqs, self.num_times,
+            self._time_indices
+        )
+
+        return (oms_xx.reshape(self.num_times, num_freqs), 
+                oms_xy.reshape(self.num_times, num_freqs),
+                oms_xz.reshape(self.num_times, num_freqs),
+                oms_yy.reshape(self.num_times, num_freqs), 
+                oms_yz.reshape(self.num_times, num_freqs),
+                oms_zz.reshape(self.num_times, num_freqs), 
+                tm_xx.reshape(self.num_times, num_freqs), 
+                tm_xy.reshape(self.num_times, num_freqs),
+                tm_xz.reshape(self.num_times, num_freqs),
+                tm_yy.reshape(self.num_times, num_freqs), 
+                tm_yz.reshape(self.num_times, num_freqs),
+                tm_zz.reshape(self.num_times, num_freqs)
+                )
+
+    def compute_log_like(self,
+                         data_in_all: np.ndarray | cp.ndarray, 
+                         data_index_all: np.ndarray | cp.ndarray,
+                         Soms_in_all: np.ndarray | cp.ndarray, 
+                         Sa_in_all: np.ndarray | cp.ndarray,
+                         Amp_in_all: np.ndarray | cp.ndarray,
+                         alpha_in_all: np.ndarray | cp.ndarray,
+                         sl1_in_all: np.ndarray | cp.ndarray,
+                         kn_in_all: np.ndarray | cp.ndarray,
+                         sl2_in_all: np.ndarray | cp.ndarray,
+                         knots_position_all: np.ndarray | cp.ndarray = None,
+                         knots_amplitude_all: np.ndarray | cp.ndarray = None,
+                         ) -> np.ndarray | cp.ndarray:
+        """
+        Compute log-likelihood using the c++ backend.
+
+        Args:
+            data_in_all: Input data array. Shape (num_psds, num_freqs * num_times)
+            data_index_all: Data indices array to keep track of which data corresponds to which PSD. Shape (num_psds)
+            Soms_in_all: Displacement noise levels for each walker. Shape (num_psds)
+            Sa_in_all: Acceleration noise levels for each walker. Shape (num_psds)
+            Amp_in_all: Galactic foreground amplitude for each walker. Shape (num_psds)
+            alpha_in_all: Galactic foreground alpha for each walker. Shape (num_psds)
+            sl1_in_all: First galactic foreground slope parameter for each walker. Shape (num_psds)
+            kn_in_all: Galactic foreground knee frequency parameter for each walker. Shape (num_psds)
+            sl2_in_all: Second galactic foreground slope parameter for each walker. Shape (num_psds)
+            knots_position_all: Positions of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
+            knots_amplitude_all: Amplitudes of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
+
+        Returns:
+            log_like_out: Computed log-likelihoods for each PSD. Shape (num_psds,)
+        """
+
+        xp = self.xp
+
+        num_psds = len(Soms_in_all)
+
+        log_like_out = xp.zeros(shape=(num_psds,), dtype=xp.float64)
+
+        if self.use_splines:
+            splines_weights = self.spline_interpolant(xp.log10(self.f_arr), knots_position_all, knots_amplitude_all)
+
+            splines_weights_isi_oms = splines_weights[:num_psds].flatten()
+            splines_weights_testmass = splines_weights[num_psds:].flatten()
+
+        else:
+            splines_weights_isi_oms = xp.zeros(shape=(num_psds * self.num_freqs))
+            splines_weights_testmass = xp.zeros(shape=(num_psds * self.num_freqs))
+    
+        self.pycpp_sensitivity_matrix.psd_likelihood_wrap(
+            log_like_out,
+            self.f_arr,
+            xp.asarray(data_in_all.flatten()),
+            xp.asarray(data_index_all.flatten()),
+            xp.asarray(self.time_indices),
+            xp.asarray(Soms_in_all),
+            xp.asarray(Sa_in_all),
+            xp.asarray(Amp_in_all),
+            xp.asarray(alpha_in_all),
+            xp.asarray(sl1_in_all),
+            xp.asarray(kn_in_all),
+            xp.asarray(sl2_in_all),
+            xp.asarray(splines_weights_isi_oms),
+            xp.asarray(splines_weights_testmass), 
+            self.basis_settings.differential_component,
+            self.num_freqs,
+            self.num_times,
+            self.dips_mask,
+            num_psds
+        )
+
+        return log_like_out
+    
+    def smooth_sensitivity_matrix(self,
+                                  matrix_in: np.ndarray | cp.ndarray,
+                                  sigma: float = 5.0,
+                                  ) -> np.ndarray | cp.ndarray:
+        
+        """
+        Perform log-frequency smoothing of the sensitivity matrix to get rid of the very sharp dips.
+
+        Args:
+            matrix_in: Input sensitivity matrix. Shape (3, 3, num_times, num_freqs)
+            sigma: Width of the Gaussian smoothing kernel in frequency bins.
+        """
+        filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d
+        
+        smoothed_matrix = matrix_in.copy()
+        mask = self.dips_mask.reshape(self.num_times, self.num_freqs)
+        _smoothed = filter_func(matrix_in, sigma=sigma, axis=-1)
+
+        smoothed_matrix[..., mask] = _smoothed[..., mask]
+
+        return smoothed_matrix
+        
+
+
+    def __call__(self, 
+                name: str,
+                psd_params: np.ndarray, 
+                galfor_params: np.ndarray=None
+                ) -> XYZSensitivityBackend:
+        """
+        Update the internal sensitivity matrix with new noise parameters and return to be used in a AnalysisContainer.
+
+        Args:
+            psd_params: Array of PSD parameters in order [Soms_d, Sa_a, (optional spline params...)]
+            galfor_params: Array of galactic foreground parameters in order [Amp, alpha, sl1, kn, sl2].
+        
+        Returns:
+            self: a configured copy of the sensitivity matrix backend.
+        """
+        self.name = name
+
+        Soms_d = psd_params[0]
+        Sa_a = psd_params[1]
+
+        if self.use_splines:
+            # todo add a container for the noise
+            spline_params = psd_params[2:]
+            spline_knots_position = spline_params[::2]
+            spline_knots_amplitude = spline_params[1::2]
+
+        else:
+            spline_knots_position = None
+            spline_knots_amplitude = None
+        
+        if galfor_params is None:
+            galfor_params = np.zeros(5)
+    
+        self.set_sensitivity_matrix(
+            Soms_d,
+            Sa_a,
+            spline_knots_position,
+            spline_knots_amplitude,
+            *galfor_params
+        )
+
+        return deepcopy(self) #todo self, or deepcopy(self)?
