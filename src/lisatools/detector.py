@@ -674,21 +674,22 @@ class L1Orbits(Orbits):
         force_backend: Optional[str] = None,
         **kwargs
     ):
-        # Store the Mojito file path
-        self.filename = filename
+        super().__init__(filename, armlength, force_backend, **kwargs)
+        # # Store the Mojito file path
+        # self.filename = filename
         
-        # Don't call super().__init__ - we need to override _setup
-        # Instead, manually initialize the minimal required attributes
-        self._armlength = armlength
-        self._filename = filename  # For compatibility
-        self.configured = False
+        # # Don't call super().__init__ - we need to override _setup
+        # # Instead, manually initialize the minimal required attributes
+        # self._armlength = armlength
+        # self._filename = filename  # For compatibility
+        # self.configured = False
         
-        # Load data from Mojito file
-        self._load_mojito_data()
+        # # Load data from Mojito file
+        # self._load_mojito_data()
         
-        # Initialize backend
-        # from .utils.parallelbase import LISAToolsParallelModule
-        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+        # # Initialize backend
+        # # from .utils.parallelbase import LISAToolsParallelModule
+        # LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         
     def open(self):
         """Override base class open method."""
@@ -699,7 +700,7 @@ class L1Orbits(Orbits):
         f = MojitoL1File(self.filename)
         return f            
     
-    def _load_mojito_data(self):
+    def _setup(self):
         """Load orbit and LTT data from Mojito file."""
         
         with self.open() as f:
@@ -911,7 +912,11 @@ class L1Orbits(Orbits):
         pos_interp_shape = (len(t_arr), 3, 3)
         pos_interpolated = np.zeros(pos_interp_shape)
         vel_interpolated = np.zeros(pos_interp_shape)
+        n_interpolated = np.zeros((len(t_arr), 6, 3))
         
+        # Store position splines for later use in unit vector calculation
+        pos_splines = [[None for _ in range(3)] for _ in range(3)]
+
         for isc in range(3):  # 3 spacecraft
             for icoord in range(3):  # x, y, z
                 # Cubic spline interpolation
@@ -919,6 +924,7 @@ class L1Orbits(Orbits):
                     self.sc_t_base, 
                     self.x_base[:, isc, icoord]
                 )
+                pos_splines[isc][icoord] = cs
                 pos_interpolated[:, isc, icoord] = cs(t_arr)
 
                 #interpolate velocities as well
@@ -928,13 +934,47 @@ class L1Orbits(Orbits):
                 )
                 vel_interpolated[:, isc, icoord] = cs(t_arr)
         
-       
+        # Calculate unit vectors        
+        # Link order: 12, 23, 31, 13, 32, 21
+        # indices: 0, 1, 2, 3, 4, 5
+        
+        # Retrieve rec and emit spacecraft indices (0-based)
+        # self.link_space_craft_r/e are 1-based lists
+        rec_indices = [x - 1 for x in self.link_space_craft_r]
+        emit_indices = [x - 1 for x in self.link_space_craft_e]
+
+        for i in range(6):
+            rec_idx = rec_indices[i]
+            emit_idx = emit_indices[i]
+            
+            # Interpolate LTT for this link
+            cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
+            ltt_i = cs_ltt(t_arr)
+            
+            # Emission time
+            t_emit = t_arr - ltt_i
+            
+            # Emitter position at emission time
+            pos_emit = np.zeros((len(t_arr), 3))
+            for icoord in range(3):
+                pos_emit[:, icoord] = pos_splines[emit_idx][icoord](t_emit)
+            
+            # Receiver position at reception time (already computed)
+            pos_rec = pos_interpolated[:, rec_idx, :]
+            
+            # Vector from emitter to receiver
+            vec = pos_rec - pos_emit
+            
+            # Normalize
+            norm = np.linalg.norm(vec, axis=1)[:, None]
+            n_interpolated[:, i, :] = vec / norm
+
         # Store interpolated data
         self.sc_dt = dt
         self.sc_t = self.xp.asarray(t_arr)
         self.x = self.xp.asarray(pos_interpolated)
         self.v = self.xp.asarray(vel_interpolated)
-        self.n = self.xp.zeros((len(t_arr), 18))
+        self.n = self.xp.asarray(n_interpolated)
 
         # make sure base spacecraft and link inormation is ready
         lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
@@ -964,9 +1004,9 @@ class L1Orbits(Orbits):
             self.pycppdetector_args = None
 
 
-    def _setup(self):
-        """Override base class _setup - we load data in `_load_mojito_data` instead."""
-        pass
+    # def _setup(self):
+    #     """Override base class _setup - we load data in `_load_mojito_data` instead."""
+    #     pass
     
 
 @jax.tree_util.register_pytree_node_class
