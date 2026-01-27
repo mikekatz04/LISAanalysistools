@@ -3,6 +3,7 @@
 import numpy as np
 from scipy import interpolate
 from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d as np_gaussian_filter1d
 from typing import Optional
 from copy import deepcopy
 import jax 
@@ -11,8 +12,10 @@ jax.config.update("jax_enable_x64", True)
 
 try:
     import cupy as cp
+    from cupyx.scipy.ndimage import gaussian_filter1d as cp_gaussian_filter1d
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
+    cp_gaussian_filter1d = np_gaussian_filter1d
 
 from cudakima import AkimaInterpolant1D
 
@@ -750,9 +753,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         
         self.dips_mask = dips_mask.flatten()
 
-        # self.num_dips_per_time = dips_indices.shape[1]
-        # self.dips_indices = dips_indices.flatten()
-
     def _find_dips_with_percentage(self, tf, mask_percentage=0.05):
 
         if hasattr(self.f_arr, 'get'):
@@ -913,7 +913,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.f_arr, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
         )
 
-        self.sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+        sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+
+        self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=5)
 
     
     def _setup_det_and_inv(self):
@@ -1089,8 +1091,32 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.dips_mask,
             num_psds
         )
-        
+
         return log_like_out
+    
+    def smooth_sensitivity_matrix(self,
+                                  matrix_in: np.ndarray | cp.ndarray | jnp.ndarray,
+                                  sigma: float = 5.0,
+                                  ) -> np.ndarray | cp.ndarray | jnp.ndarray:
+        
+        """
+        Perform log-frequency smoothing of the sensitivity matrix to get rid of the very sharp dips.
+
+        Args:
+            matrix_in: Input sensitivity matrix. Shape (3, 3, num_times, num_freqs)
+            sigma: Width of the Gaussian smoothing kernel in frequency bins.
+        """
+        filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d if self.xp == cp else jax_gaussian_filter1d
+        
+        smoothed_matrix = matrix_in.copy()
+        mask = self.dips_mask.reshape(self.num_times, self.num_freqs)
+        _smoothed = filter_func(matrix_in, sigma=sigma, axis=-1)
+
+        smoothed_matrix[..., mask] = _smoothed[..., mask]
+
+        return smoothed_matrix
+        
+
 
     def __call__(self, 
                 name: str,
