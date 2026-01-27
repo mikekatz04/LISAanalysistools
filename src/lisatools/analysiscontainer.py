@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 
 from eryn.utils import TransformContainer
 
+from lisatools.domains import DomainSettingsBase
+
 
 try:
     import cupy as cp
@@ -504,9 +506,13 @@ class AnalysisContainerArray:
         self.acs = acs
         self.acs_shape = acs.shape
         self.acs_total_entries = np.prod(acs.shape)
+
+        # generalize to a potential time-frequency input, where 
         try:
-            self.nchannels, self.data_length = acs.flatten()[0].data_res_arr.shape
-        except ValueError:
+            self.nchannels = acs.flatten()[0].data_res_arr.nchannels
+            self.data_shape = acs.flatten()[0].data_res_arr.data_shape
+            self.data_length = np.prod(self.data_shape)
+        except ValueError: #todo is this still correct?
             self.data_length = acs.flatten()[0].data_res_arr.shape[0]
             self.nchannels = 1
 
@@ -523,8 +529,8 @@ class AnalysisContainerArray:
         # xp = get_array_module(acs.flatten()[0].data_res_arr[0])
 
         ac_tmp = acs.flatten()[0]
-        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-1]
-
+        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-len(self.data_shape)]
+        
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory
         num_machines = 1 if gpus is None else len(gpus)
@@ -542,7 +548,7 @@ class AnalysisContainerArray:
             self.gpu_map[split] = gpus[i]
             self.split_map[split] = i
             self.linear_data_arr.append(xp.zeros(self.data_length * self.nchannels * len(split), dtype=complex))
-            self.linear_psd_arr.append(xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=float))
+            self.linear_psd_arr.append(xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=complex))
 
         self.num_acs = num_acs = len(acs.flatten())
         self.gpus = gpus 
@@ -563,6 +569,9 @@ class AnalysisContainerArray:
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
 
+        settings = self.settings
+        signal_class = settings.associated_class
+
         for i, ac in enumerate(self.acs.flatten()):
             gpu = self.gpu_map[i]
             split = self.split_map[i]
@@ -574,7 +583,7 @@ class AnalysisContainerArray:
             start_index = intra_split_index * (self.nchannels * self.data_length)
             end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
             self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(ac.data_res_arr.flatten())
-            ac.data_res_arr._data_res_arr = self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, self.data_length)
+            ac.data_res_arr._data_res_arr = signal_class(arr=self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, *self.data_shape), settings=settings)    
             # TODO: add check to make sure changes are made inline along with protections
             if self.gpus is not None:
                 self.xp.get_default_memory_pool().free_all_blocks()
@@ -597,7 +606,7 @@ class AnalysisContainerArray:
             start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
             end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
             self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(ac.sens_mat.invC.flatten())
-            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + (self.data_length,))
+            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + self.data_shape)
 
             # TODO: add check to make sure changes are made inline along with protections
             if self.gpus is not None:
@@ -605,6 +614,11 @@ class AnalysisContainerArray:
 
         if self.gpus is not None:
             self.xp.cuda.runtime.setDevice(main_gpu)
+
+    @property
+    def settings(self) -> DomainSettingsBase:
+        """Basis settings of the data residual array."""
+        return self.acs[0].data_res_arr.settings
 
     @property
     def f_arr(self):
@@ -627,7 +641,7 @@ class AnalysisContainerArray:
                 _tmp_output = _tmp
 
             if i == 0:
-                output = np.zeros(self.acs_total_entries, dtype=type(_tmp_output))
+                output = np.zeros(self.acs_total_entries, dtype=_tmp_output.dtype)
 
             output[i] = _tmp_output
 
@@ -652,7 +666,7 @@ class AnalysisContainerArray:
     def signal_operation(self, sign, templates, data_index=None, start_index=None):
 
         assert isinstance(templates, np.ndarray) or isinstance(templates, cp.ndarray)
-        
+        # todo change this to align to TF setup
         if templates.ndim == 2:
             _nchannels, template_length = templates.shape
             num_templates = 1
@@ -687,7 +701,7 @@ class AnalysisContainerArray:
         for i, tmp in enumerate(self.linear_data_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape(-1, self.nchannels, self.data_length)) 
+            out.append(tmp.reshape(-1, self.nchannels, *self.data_shape)) 
         return out
         
     @property
@@ -696,7 +710,7 @@ class AnalysisContainerArray:
         for i, tmp in enumerate(self.linear_psd_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape(-1, *self.shape_sens, self.data_length)) 
+            out.append(tmp.reshape(-1, *self.shape_sens, *self.data_shape)) 
         return out
 
     

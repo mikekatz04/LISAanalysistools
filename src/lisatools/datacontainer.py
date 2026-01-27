@@ -55,6 +55,7 @@ class DataResidualArray:
         data_res_in: List[np.ndarray] | np.ndarray | DataResidualArray,
         signal_domain: Optional[SignalSettingsBase] = None,
         input_signal_domain: Optional[SignalSettingsBase] = None,
+        window: np.ndarray | cp.ndarray | None = None,
         **kwargs: dict,
     ) -> None:
         
@@ -90,7 +91,7 @@ class DataResidualArray:
             if signal_domain == input_signal_domain:
                 self.data_res_arr = data_res_in
             else:
-                self.data_res_arr = data_res_in.transform(signal_domain)
+                self.data_res_arr = data_res_in.transform(signal_domain, window=window)
 
             self.nchannels = self.data_res_arr.nchannels
             self.data_shape = self.data_res_arr.settings.basis_shape
@@ -182,6 +183,11 @@ class DataResidualArray:
             raise ValueError(
                 "Entered or determined f_arr does not have the same length as the data channel inputs."
             )
+
+    @property
+    def settings(self) -> DomainSettingsBase:
+        """Basis settings of the data residual array."""
+        return self.data_res_arr.settings
 
     @property
     def fmax(self):

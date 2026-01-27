@@ -461,6 +461,7 @@ class PSDSettings(Settings):
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 4
+    transform_fn: TransformContainer = None
 
 class PSDSetup(Setup):
     def __init__(self, psd_settings: PSDSettings):
@@ -512,6 +513,8 @@ class PSDSetup(Setup):
             self.other_tempering_kwargs["permute"] = False
             
         assert not self.other_tempering_kwargs["permute"]
+
+        self.transform_fn = self.psd_kwargs.get("transform_fn", None)
 
     def init_setup(self):
         self.init_sampling_info()

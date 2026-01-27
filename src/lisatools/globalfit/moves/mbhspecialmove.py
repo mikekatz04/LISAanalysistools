@@ -11,7 +11,7 @@ from eryn.moves import RedBlueMove, StretchMove
 # from eryn.state import State
 from ..state import GFState
 from ...sampling.moves.skymodehop import SkyMove
-from bbhx.likelihood import NewHeterodynedLikelihood
+#from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 from .addremovemove import ResidualAddOneRemoveOneMove

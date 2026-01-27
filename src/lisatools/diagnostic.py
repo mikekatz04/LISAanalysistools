@@ -268,8 +268,10 @@ def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
 
     """
     fix = np.isnan(psd[:]) | np.isinf(psd[:])
-    assert np.sum(fix) == np.prod(psd.shape[:len(psd.basis_settings.basis_shape)]) or np.sum(fix) == 0
-    # TODO: check on this / add warning
+    
+    #assert np.sum(fix) == np.prod(psd.shape[:len(psd.basis_settings.basis_shape)]) or np.sum(fix) == 0, f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}" #todo fix this
+    assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0, f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}"
+    # TODO: check on this / add warning 
     detC = psd.detC
     keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
     

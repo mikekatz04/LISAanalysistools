@@ -7,7 +7,7 @@ from eryn.moves import Move, StretchMove, TemperatureControl
 # from eryn.state import State
 from lisatools.globalfit.state import GFState
 from lisatools.sampling.moves.skymodehop import SkyMove
-from bbhx.likelihood import NewHeterodynedLikelihood
+#from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 

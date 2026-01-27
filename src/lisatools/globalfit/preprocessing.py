@@ -15,8 +15,7 @@ import h5py
 
 from mojito import MojitoL1File
 
-from ..detector import Orbits  
-from ..mojito_detector import L1Orbits
+from ..detector import Orbits, L1Orbits 
 from ..datacontainer import DataResidualArray
 from ..domains import TDSettings, TDSignal, DomainSettingsBase, DomainBase
 from ..utils.utility import detrend, get_array_module

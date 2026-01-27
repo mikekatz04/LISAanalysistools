@@ -25,9 +25,9 @@ dependencies = [
   "h5py",
   "matplotlib",
   "jsonschema",                            # To validate content of file registry
-  "lisaconstants",
+  "lisaconstants>=2.0.1",
   "multispline",
-  #"numba==0.63.1",
+  "numba>=0.63.1",
   "numpy",
   "nvidia-ml-py",                          # To detect CUDA version if any
   "platformdirs",                          # To locate config and data dir on all platforms

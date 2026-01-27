@@ -26,7 +26,7 @@ import cupy as cp
 from ..sampling.prior import GBPriorWrap
 from .psdglobal import log_like as psd_log_like
 from .psdglobal import PSDwithGBPriorWrap
-from .moves import MBHSpecialMove
+#from .moves import MBHSpecialMove
 
 from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
@@ -294,14 +294,15 @@ class GlobalFit:
     
         cp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
 
-        df = self.curr.general_info.df
-        N = self.curr.general_info.injection[0].shape[-1]
+        # df = self.curr.general_info.df
+        # N = self.curr.general_info.injection[0].shape[-1]
 
-        f_arr = (np.arange(N) + self.curr.general_info.start_freq_ind) * df
+        # f_arr = (np.arange(N) + self.curr.general_info.start_freq_ind) * df
 
         acs_tmp = []
         for w in range(self.nwalkers):
-            data_res_arr = DataResidualArray(deepcopy(self.curr.general_info.injection), f_arr=f_arr, df=df)
+            #data_res_arr = DataResidualArray(deepcopy(self.curr.general_info.injection), f_arr=f_arr, df=df)
+            data_res_arr = deepcopy(self.curr.general_info.input_data_residual_array)
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
@@ -311,10 +312,10 @@ class GlobalFit:
                 else:
                     galfor_params = None
 
-                sens_here = self.curr.general_info.new_sens_mat(f"walker_{w}", psd_params, data_res_arr.f_arr, galfor_params=galfor_params)
+                sens_here = self.curr.general_info.sensitivity_backend(f"walker_{w}", psd_params, galfor_params=galfor_params)
             else:
                 # TODO: update this
-                sens_here = self.curr.general_info.sensitivity_matrix(data_res_arr.f_arr, **self.curr.general_info.fixed_psd_kwargs)
+                sens_here = self.curr.general_info.sensitivity_backend(f"walker_{w}", **self.curr.general_info.fixed_psd_kwargs)
 
             # sens_AE[0] = psd[0][w]
             # sens_AE[1] = psd[1][w]
@@ -335,7 +336,8 @@ class GlobalFit:
 
             templates_tmp = cp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
 
-            acs.add_signal_to_residual(templates_tmp)  # no need to adjust data index or start_freq_ind as it is taken care of
+            acs.add_signal_to_r
+            esidual(templates_tmp)  # no need to adjust data index or start_freq_ind as it is taken care of
 
             del templates_tmp
             cp.get_default_memory_pool().free_all_blocks()
@@ -465,7 +467,8 @@ class GlobalFit:
             acs = self.setup_acs(state)
             self.logger.debug("acs setup done")
 
-            state.log_like[:] = acs.likelihood()
+            state.log_like[:] = acs.likelihood(complex=False)
+            print("initial log likes:", state.log_like)
 
             like_mix = BasicResidualacsLikelihood(acs)
 

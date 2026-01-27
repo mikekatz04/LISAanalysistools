@@ -11,6 +11,7 @@ except (ImportError, ModuleNotFoundError) as e:
 
 from eryn.state import State, BranchSupplemental
 from eryn.utils.utility import groups_from_inds
+from eryn.utils.transform import TransformContainer
 
 
 class DetermineGBGroups:
@@ -409,3 +410,18 @@ class HeterodynedUpdate:
         sample_state.blobs = blobs
 
         # sampler.backend.save_step(sample_state, np.full_like(lp, True))
+
+def get_psd_transform_container(Soms_fill: float = None,
+                                Sa_fill: float = None,
+                                n_knots: int = 5,
+                                freq_min: float = None,
+                                freq_max: float = None
+                                ) -> TransformContainer:
+    
+    """
+    Prepare the transform container for psd sampling.
+
+
+    """
+    
+    
