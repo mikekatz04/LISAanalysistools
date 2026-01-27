@@ -8,6 +8,7 @@ from tqdm import tqdm
 from .globalfitmove import GlobalFitMove
 import warnings
 from eryn.moves import RedBlueMove, StretchMove
+from eryn.utils.transform import TransformContainer
 from ..moves import GlobalFitMove
 #from ..utils import new_sens_mat
 from tqdm import tqdm
@@ -15,6 +16,8 @@ import time
 
 from ... import get_backend
 from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba 
+from ...analysiscontainer import AnalysisContainerArray
+from ...mojito_detector import XYZSensitivityBackend
 
 
 def psd_log_like_ae(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
@@ -94,9 +97,7 @@ def psd_log_like_xyz(x, freqs, data, df, data_length, supps=None, tdi2=False, **
     num_data = 1
     num_psds = psd_pars.shape[0]
     
-    # TODO AS: implement XYZ version of psd_likelihood
-    # ll = psd_likelihood_xyz_cupy(freqs, data, data_index_all,  Soms_d_in_all,  Sa_a_in_all, 
-    #                  Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, df, data_length)
+
 
     ll = psd_likelihood_numba(freqs, data, data_index_all,  Soms_d_in_all,  Sa_a_in_all, 
                       Amp_all,  alpha_all,  sl1_all,  kn_all, sl2_all, df, data_length, tdi2=tdi2)
@@ -106,18 +107,102 @@ def psd_log_like_xyz(x, freqs, data, df, data_length, supps=None, tdi2=False, **
 # TODO: temperature swap permutation
 
 class PSDMove(GlobalFitMove, StretchMove):
-    def __init__(self, acs, priors, *args, num_repeats=1, max_logl_mode=False, psd_kwargs={}, new_sens_mat=None, **kwargs):
+    def __init__(self, 
+                 acs: AnalysisContainerArray, 
+                 priors, 
+                 *args, 
+                 num_repeats: int = 1, 
+                 max_logl_mode: bool = False, 
+                 psd_kwargs: dict = {}, 
+                 sensitivity_backend: XYZSensitivityBackend = None, 
+                 psd_transform_fn: TransformContainer = None,
+                 galfor_transform_fn: TransformContainer = None,
+                 **kwargs):
+        
         GlobalFitMove.__init__(self, *args, **kwargs)
         StretchMove.__init__(self, *args, **kwargs)
         self.acs = acs
-        self.psd_log_like = psd_log_like_xyz if acs.nchannels == 3 else psd_log_like_ae
         self.psd_kwargs = psd_kwargs
         self.priors = priors
         self.num_repeats = num_repeats
         self.max_logl_mode = max_logl_mode
         self.starting_now = True
         
-        self.new_sens_mat = new_sens_mat
+        self.sensitivity_backend = sensitivity_backend
+        self.psd_transform_fn = psd_transform_fn
+        self.galfor_transform_fn = galfor_transform_fn
+
+    def psd_log_like(self, x, data, supps=None, **sens_kwargs):
+        """
+        """
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        wi = supps["walker_inds"]
+        
+        # TODO: better way so avoid order issues?
+        if self.psd_transform_fn is not None:
+            psd_pars = self.psd_transform_fn.both_transforms(x[0])
+        else:
+            psd_pars = x[0]
+
+        if len(x) == 1:
+            galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
+        else:   
+            if self.galfor_transform_fn is not None:
+                galfor_pars = self.galfor_transform_fn.both_transforms(x[1])
+            else:
+                galfor_pars = x[1]
+        
+        data_index_all = cp.asarray(wi).astype(np.int32)
+        #ll = cp.zeros(psd_pars.shape[0]) 
+        Soms_d_in_all = cp.asarray(psd_pars[:, 0])
+        Sa_a_in_all = cp.asarray(psd_pars[:, 1])
+
+        if self.sensitivity_backend.use_splines:
+            knots_positions = cp.asarray(psd_pars[:, 2::2])
+            knots_amplitudes = cp.asarray(psd_pars[:, 3::2])
+            
+            # put the 2 noise levels on the batch axis
+            n_knots = int(knots_positions.shape[1] / 2)
+
+            oms_positions, oms_amplitudes = knots_positions[:, :n_knots], knots_amplitudes[:, :n_knots]
+            testmass_positions, testmass_amplitudes = knots_positions[:, n_knots:], knots_amplitudes[:, n_knots:]
+            
+            knots_positions = cp.vstack([oms_positions, testmass_positions])
+            knots_amplitudes = cp.vstack([oms_amplitudes, testmass_amplitudes])
+
+            # now check if any knot position is not in ascending order
+            invalid_knots = cp.any(cp.diff(knots_positions, axis=1) < 0, axis=1)
+
+        else:
+            knots_positions = None
+            knots_amplitudes = None
+            invalid_knots = cp.zeros(psd_pars.shape[0], dtype=bool)
+
+        Amp_all = cp.asarray(galfor_pars[:, 0])
+        kn_all = cp.asarray(galfor_pars[:, 1])
+        alpha_all = cp.asarray(galfor_pars[:, 2])
+        sl1_all = cp.asarray(galfor_pars[:, 3])
+        sl2_all = cp.asarray(galfor_pars[:, 4])
+
+        ll = self.sensitivity_backend.compute_log_like(
+            data,
+            data_index_all,
+            Soms_d_in_all,
+            Sa_a_in_all,
+            Amp_all,
+            alpha_all,
+            sl1_all,
+            kn_all,
+            sl2_all,
+            knots_positions,
+            knots_amplitudes,
+        )
+
+        ll[invalid_knots] = -1e300
+
+        return ll.get()
 
     def compute_log_like(
         self, coords, inds=None, logp=None, supps=None, branch_supps=None
@@ -141,7 +226,7 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         supps = supps[logp_keep]
         
-        tmp_logl = self.psd_log_like(input_args, cp.asarray(self.acs.f_arr), self.acs.linear_data_arr[0], self.acs.df, self.acs.data_length, supps=supps, **self.psd_kwargs)
+        tmp_logl = self.psd_log_like(input_args, self.acs.linear_data_arr[0], supps=supps, **self.psd_kwargs)
 
         logl[logp_keep] = tmp_logl
 
@@ -317,7 +402,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             else:
                 galfor_params = None
 
-            new_sens = self.new_sens_mat(f"walker_{w}", psd_params, self.acs.f_arr, galfor_params=galfor_params)
+            new_sens = self.sensitivity_backend(f"walker_{w}", psd_params, galfor_params=galfor_params)
             self.acs[w].sens_mat = new_sens
 
         self.acs.reset_linear_psd_arr()

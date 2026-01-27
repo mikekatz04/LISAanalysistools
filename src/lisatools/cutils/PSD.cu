@@ -23,14 +23,13 @@ using cmplx = gcmplx::complex<double>;
 #define NoiseLevels NoiseLevelsCPU
 
 #endif
-
+// ============================================================================
 #define NUM_THREADS 64
 #define NUM_THREADS_LIKE 256
 
 // ============================================================================
 // Helper Math Functions (static device functions)
 // ============================================================================
-
 
 /**
  * @brief Angular frequency from frequency in Hz.
@@ -125,6 +124,9 @@ int link_to_index(int link)
 CUDA_DEVICE
 void NoiseLevels::get_testmass_noise(double *S_tm, double f, double Sa_a_in, double spline_in_testmass)
 {
+    // Clamp frequency to avoid numerical overflow at very low frequencies
+    // double f_safe = fmax(f, 1e-6);
+    
     double Sa_a = Sa_a_in * Sa_a_in * (1.0 + pow(f_knee_tm / f, 2)) * (1.0 + pow(f / f_break_tm, 4));
     double Sa_d = Sa_a * pow(2.0 * M_PI * f, -4.0);  // In displacement
     double Sa_nu = Sa_d * pow(2.0 * M_PI * f / Clight, 2);  // In relative frequency  
@@ -134,6 +136,10 @@ void NoiseLevels::get_testmass_noise(double *S_tm, double f, double Sa_a_in, dou
     } else {
         S_tm_analytic = Sa_d;
     }
+    
+    // Clamp to prevent overflow
+    // S_tm_analytic = fmin(S_tm_analytic, 1e100);
+    
     if (use_splines) {
         *S_tm = S_tm_analytic * pow(10.0, spline_in_testmass);
     } else {
@@ -144,6 +150,9 @@ void NoiseLevels::get_testmass_noise(double *S_tm, double f, double Sa_a_in, dou
 CUDA_DEVICE
 void NoiseLevels::get_isi_oms_noise(double *S_oms, double f, double Soms_d_in, double spline_in_isi_oms)
 {
+    // Clamp frequency to avoid numerical overflow at very low frequencies
+    // double f_safe = fmax(f, 1e-6);
+    
     double Soms_d = Soms_d_in * Soms_d_in * (1.0 + pow(f_knee_oms / f, 4));
     double Soms_nu = Soms_d * pow(2.0 * M_PI * f / Clight, 2);
     double S_oms_analytic;
@@ -152,6 +161,9 @@ void NoiseLevels::get_isi_oms_noise(double *S_oms, double f, double Soms_d_in, d
     } else {
         S_oms_analytic = Soms_d;
     }
+
+    // Clamp to prevent overflow
+    // S_oms_analytic = fmin(S_oms_analytic, 1e100);
 
     if (use_splines) {
         *S_oms = S_oms_analytic * pow(10.0, spline_in_isi_oms);
@@ -290,7 +302,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *Soms_d_in_all, double *Sa_a_in_all,
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all,
     double *spline_in_isi_oms_all, double *spline_in_testmass_all,
-    double differential_component, int num_freqs, int num_times, int num_psds, 
+    double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds, 
     XYZSensitivityMatrix &sensitivity_matrix)
 {
     int tid;
@@ -374,6 +386,11 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             time_index = time_index_all[t_idx];
             f = f_arr[f_idx];
 
+            // Skip masked dip frequencies
+            if (dips_mask[t_idx * num_freqs + f_idx]) {
+                continue;
+            }
+
             if (f == 0.0)
             {
                 f = f_arr[f_idx + 1]; // Avoid zero frequency 
@@ -395,18 +412,32 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             invert_3x3_hermitian(c00, c01, c02, c11, c12, c22, 
                                  i00, i01, i02, i11, i12, i22, det);
             
-            // Get Data: layout matches loop (time-major)
-            // data_in[(data_index * 3 + channel) * total_tf_pairs + idx]
-            int base_idx = data_index * 3 * total_tf_pairs + idx;
-            d_X = data_in[base_idx];
-            d_Y = data_in[base_idx + total_tf_pairs];
-            d_Z = data_in[base_idx + 2 * total_tf_pairs];
+            // Guard against invalid determinant (would cause NaN in log)
+            if (det == 0.0 || !isfinite(det)) {
+                // printf("Invalid det: %e at f=%.3e Hz, t_idx=%d, psd_i=%d\n", det, f, t_idx, psd_i);
+                continue;  // Skip this frequency point
+            }
+
+            // Get Data: layout is walker-major, channel-major, then time-frequency
+            // linear_data_arr layout: [walker0_ch0_data, walker0_ch1_data, walker0_ch2_data, walker1_ch0_data, ...]
+            // For walker data_index, channel c, element idx:
+            // position = data_index * 3 * total_tf_pairs + c * total_tf_pairs + idx
+            int base_idx = data_index * 3 * total_tf_pairs;
+            d_X = data_in[base_idx + idx];
+            d_Y = data_in[base_idx + total_tf_pairs + idx];
+            d_Z = data_in[base_idx + 2 * total_tf_pairs + idx];
 
             // Compute Quadratic Form: d^H * C^-1 * d
             double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
             
+            // Guard against invalid quadratic form
+            if (!isfinite(Q) || Q < 0.0) {
+                // printf("Invalid Q: %e at f=%.3e Hz, t_idx=%d, psd_i=%d\n", Q, f, t_idx, psd_i);
+                continue;  // Skip this frequency point
+            }
+
             // Likelihood Accumulation
-            double term = -0.5 * (4.0 * differential_component * Q + log(det));
+            double term = -0.5 * (4.0 * differential_component * Q + log(std::abs(det)));
             // Kahan Summation
             double y = term - compensation[tid];
             double t = like_vals[tid] + y;
@@ -441,7 +472,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             // like_contrib[psd_i * gridDim.x + blockIdx.x] = like_vals[0];
 #else
             like_contrib[psd_i] = like_vals[0] - compensation[0];
-            //like_contrib[psd_i] = like_vals[0];
+            // like_contrib[psd_i] = like_vals[0];
 #endif
         }
 #ifdef __CUDACC__
@@ -488,8 +519,9 @@ CUDA_KERNEL void like_sum_from_contrib(double *like_contrib_final, double *like_
 #ifdef __CUDACC__
         CUDA_SYNC_THREADS;
         
-        for (unsigned int s = 1; s < blockDim.x; s *= 2) {
-             if (tid % (2 * s) == 0) {
+        // Tree-based reduction (avoid out-of-bounds reads)
+        for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+             if (tid < s) {
                  shared_sum[tid] += shared_sum[tid + s];
              }
              CUDA_SYNC_THREADS;
@@ -508,7 +540,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     double *Soms_d_in_all, double *Sa_a_in_all, 
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
     double *spline_in_testmass_all, double *spline_in_isi_oms_all,
-    double differential_component, int num_freqs, int num_times, int num_psds)
+    double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds)
 {
     int total_tf_pairs = num_times * num_freqs;
     
@@ -530,7 +562,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        differential_component, num_freqs, num_times, num_psds, *dev_ptr);
+        differential_component, num_freqs, num_times, dips_mask, num_psds, *dev_ptr);
         
     gpuErrchk(cudaGetLastError());
     
@@ -548,7 +580,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        differential_component, num_freqs, num_times, num_psds, *this);
+        differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
 #endif
 }
 
@@ -573,6 +605,7 @@ double XYZSensitivityMatrix::oms_xx_unequal_armlength(double f, double avg_d_ij,
     {
         _oms = _oms * 4.0 * pow(s_wl(avg_d_ij + avg_d_ik, f), 2);
     }
+
     return _oms;
 }
 
@@ -595,6 +628,7 @@ cmplx XYZSensitivityMatrix::oms_xy_unequal_armlength(double f, double avg_d_ij, 
             * gcmplx::exp(cmplx(0.0, -1.0) * d_times_omega((avg_d_ik - avg_d_jk), f))
         );
     }
+
     return _oms;
 }
 
@@ -609,6 +643,7 @@ double XYZSensitivityMatrix::tm_xx_unequal_armlength(double f, double avg_d_ij, 
     {
         _tm *= 4.0 * pow(s_wl(avg_d_ij + avg_d_ik, f), 2);
     }
+
     return _tm;
 }
 
@@ -630,6 +665,7 @@ cmplx XYZSensitivityMatrix::tm_xy_unequal_armlength(double f, double avg_d_ij, d
             * gcmplx::exp(cmplx(0.0, -1.0) * d_times_omega((avg_d_ik - avg_d_jk), f))
         );
     }
+
     return _tm;
 }
 
@@ -681,40 +717,56 @@ void get_noise_tfs_kernel(double *frequencies, int *time_indices,
                           double *oms_yy_arr, cmplx *oms_yz_arr, double *oms_zz_arr,
                           double *tm_xx_arr, cmplx *tm_xy_arr, cmplx *tm_xz_arr,
                           double *tm_yy_arr, cmplx *tm_yz_arr, double *tm_zz_arr,
-                          int num, XYZSensitivityMatrix &sensitivity_matrix)
+                          int num_freqs, int num_times, XYZSensitivityMatrix &sensitivity_matrix)
 {
     int start, end, increment;
     int start_time, end_time, increment_time;
 #ifdef __CUDACC__
     start = blockIdx.x * blockDim.x + threadIdx.x;
-    end = num;
+    end = num_freqs;
     increment = gridDim.x * blockDim.x;
 
     start_time = blockIdx.y * blockDim.y + threadIdx.y;
-    end_time = sensitivity_matrix.n_times;
+    end_time = num_times;
     increment_time = gridDim.y * blockDim.y;   
 #else  // __CUDACC__
     start = 0;
-    end = num;
+    end = num_freqs;
     increment = 1;
     start_time = 0;
-    end_time = sensitivity_matrix.n_times;
+    end_time = num_times;
     increment_time = 1;
 #endif // __CUDACC__
 
-    for (int i = start; i < end; i += increment)
+    for (int t_idx = start_time; t_idx < end_time; t_idx += increment_time)
     {
-        double f = frequencies[i];
-        for (int j = start_time; j < end_time; j += increment_time)
+        int time_index = time_indices[t_idx];
+        for (int i = start; i < end; i += increment)
         {
-            int time_index = time_indices[j];
+            double f = frequencies[i];
+            double oms_xx, oms_yy, oms_zz, tm_xx, tm_yy, tm_zz;
+            cmplx oms_xy, oms_xz, oms_yz, tm_xy, tm_xz, tm_yz;
 
             sensitivity_matrix.get_noise_tfs(f,
-                                             &oms_xx_arr[j * num + i], &oms_xy_arr[j * num + i], &oms_xz_arr[j * num + i],
-                                             &oms_yy_arr[j * num + i], &oms_yz_arr[j * num + i], &oms_zz_arr[j * num + i],
-                                             &tm_xx_arr[j * num + i], &tm_xy_arr[j * num + i], &tm_xz_arr[j * num + i],
-                                             &tm_yy_arr[j * num + i], &tm_yz_arr[j * num + i], &tm_zz_arr[j * num + i],
+                                             &oms_xx, &oms_xy, &oms_xz,
+                                             &oms_yy, &oms_yz, &oms_zz,
+                                             &tm_xx, &tm_xy, &tm_xz,
+                                             &tm_yy, &tm_yz, &tm_zz,
                                              time_index);
+            // Store results in output arrays
+            int idx = t_idx * num_freqs + i; // Layout: time-major
+            oms_xx_arr[idx] = oms_xx;
+            oms_xy_arr[idx] = oms_xy;
+            oms_xz_arr[idx] = oms_xz;
+            oms_yy_arr[idx] = oms_yy;
+            oms_yz_arr[idx] = oms_yz;
+            oms_zz_arr[idx] = oms_zz;
+            tm_xx_arr[idx] = tm_xx;
+            tm_xy_arr[idx] = tm_xy;
+            tm_xz_arr[idx] = tm_xz;
+            tm_yy_arr[idx] = tm_yy;
+            tm_yz_arr[idx] = tm_yz;
+            tm_zz_arr[idx] = tm_zz;
         }
     }
 }
@@ -724,11 +776,11 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(double *freqs,
                           double *oms_yy_arr, cmplx *oms_yz_arr, double *oms_zz_arr,
                           double *tm_xx_arr, cmplx *tm_xy_arr, cmplx *tm_xz_arr,
                           double *tm_yy_arr, cmplx *tm_yz_arr, double *tm_zz_arr,
-                          int num,
+                          int num_freqs, int num_times,
                           int *time_indices)
 {
 #ifdef __CUDACC__
-    int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
+    int num_blocks = std::ceil((num_freqs + NUM_THREADS - 1) / NUM_THREADS);
     // copy self to GPU
     XYZSensitivityMatrix *sensitivity_matrix_gpu;
     gpuErrchk(cudaMalloc(&sensitivity_matrix_gpu, sizeof(XYZSensitivityMatrix)));
@@ -738,7 +790,7 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(double *freqs,
                                                       oms_yy_arr, oms_yz_arr, oms_zz_arr,
                                                       tm_xx_arr, tm_xy_arr, tm_xz_arr,
                                                       tm_yy_arr, tm_yz_arr, tm_zz_arr,
-                                                      num, *sensitivity_matrix_gpu);
+                                                      num_freqs, num_times, *sensitivity_matrix_gpu);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(sensitivity_matrix_gpu));
@@ -748,7 +800,7 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(double *freqs,
                         oms_yy_arr, oms_yz_arr, oms_zz_arr, 
                         tm_xx_arr, tm_xy_arr, tm_xz_arr,
                         tm_yy_arr, tm_yz_arr, tm_zz_arr,
-                        num, *this);
+                        num_freqs, num_times, *this);
 #endif // __CUDACC__
 }
 

@@ -68,25 +68,26 @@ void check_orbits(Orbits *orbits)
 void XYZSensitivityMatrixWrap::get_noise_tfs_wrap(array_type<double> freqs, 
                           array_type<double> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<double> oms_yy, array_type<std::complex<double>> oms_yz, array_type<double> oms_zz,
                           array_type<double> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<double> tm_yy, array_type<std::complex<double>> tm_yz, array_type<double> tm_zz,
-                          int num,
+                          int num_freqs, int num_times,
                           array_type<int> time_indices)
 {
     sensitivity_matrix->get_noise_tfs_arr(
-        return_pointer_and_check_length(freqs, "freqs", num, 1),
-        return_pointer_and_check_length(oms_xx, "oms_xx", num, 1),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xy, "oms_xy", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xz, "oms_xz", num, 1)),
-        return_pointer_and_check_length(oms_yy, "oms_yy", num, 1),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yz, "oms_yz", num, 1)),
-        return_pointer_and_check_length(oms_zz, "oms_zz", num, 1),
-        return_pointer_and_check_length(tm_xx, "tm_xx", num, 1),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xy, "tm_xy", num, 1)),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xz, "tm_xz", num, 1)),
-        return_pointer_and_check_length(tm_yy, "tm_yy", num, 1),
-        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yz, "tm_yz", num, 1)),
-        return_pointer_and_check_length(tm_zz, "tm_zz", num, 1),
-        num,
-        return_pointer_and_check_length(time_indices, "time_indices", num, 1)
+        return_pointer_and_check_length(freqs, "freqs", num_freqs, 1),
+        return_pointer_and_check_length(oms_xx, "oms_xx", num_freqs * num_times, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xy, "oms_xy", num_freqs * num_times, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xz, "oms_xz", num_freqs * num_times, 1)),
+        return_pointer_and_check_length(oms_yy, "oms_yy", num_freqs * num_times, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yz, "oms_yz", num_freqs * num_times, 1)),
+        return_pointer_and_check_length(oms_zz, "oms_zz", num_freqs * num_times, 1),
+        return_pointer_and_check_length(tm_xx, "tm_xx", num_freqs * num_times, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xy, "tm_xy", num_freqs * num_times, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xz, "tm_xz", num_freqs * num_times, 1)),
+        return_pointer_and_check_length(tm_yy, "tm_yy", num_freqs * num_times, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yz, "tm_yz", num_freqs * num_times, 1)),
+        return_pointer_and_check_length(tm_zz, "tm_zz", num_freqs * num_times, 1),
+        num_freqs,
+        num_times,
+        return_pointer_and_check_length(time_indices, "time_indices", num_times, 1)
     );
 }
 
@@ -95,7 +96,8 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contr
                           array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
                           array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
                           array_type<double> spline_in_isi_oms_all, array_type<double> spline_in_testmass_all,
-                          double differential_component, int num_freqs, int num_times, int num_psds)
+                          double differential_component, int num_freqs, int num_times, 
+                          array_type<bool> dips_mask, int num_psds)
 {
     int total_tf_pairs = num_times * num_freqs;
     sensitivity_matrix->psd_likelihood_wrap(
@@ -113,7 +115,11 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contr
         return_pointer_and_check_length(slope_2_all, "slope_2_all", num_psds, 1),
         return_pointer_and_check_length(spline_in_isi_oms_all, "spline_in_isi_oms_all", num_psds * num_freqs, 1),
         return_pointer_and_check_length(spline_in_testmass_all, "spline_in_testmass_all", num_psds * num_freqs, 1),
-        differential_component, num_freqs, num_times, num_psds
+        differential_component, 
+        num_freqs, 
+        num_times, 
+        return_pointer_and_check_length(dips_mask, "dips_mask", num_times * num_freqs, 1),
+        num_psds
     );
 }
 

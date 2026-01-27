@@ -143,7 +143,7 @@ public:
     void get_noise_tfs_wrap(array_type<double> freqs, 
                           array_type<double> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<double> oms_yy, array_type<std::complex<double>> oms_yz, array_type<double> oms_zz,
                           array_type<double> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<double> tm_yy, array_type<std::complex<double>> tm_yz, array_type<double> tm_zz,
-                          int num,
+                          int num_freqs, int num_times,
                           array_type<int> time_indices);
                           
     void psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
@@ -151,7 +151,8 @@ public:
                              array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
                              array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
                              array_type<double> spline_in_isi_oms_all, array_type<double> spline_in_testmass_all,
-                             double differential_component, int num_freqs, int num_times, int num_psds);
+                             double differential_component, int num_freqs, int num_times, 
+                             array_type<bool> dips_mask, int num_psds);
 
     void get_noise_covariance_wrap(
         array_type<double> freqs, array_type<int> time_indices,

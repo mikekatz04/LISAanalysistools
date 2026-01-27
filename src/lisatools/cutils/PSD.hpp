@@ -85,7 +85,7 @@ class XYZSensitivityMatrix {
     void get_noise_tfs_arr(double *freqs, 
                           double *oms_xx, gcmplx::complex<double> *oms_xy, gcmplx::complex<double> *oms_xz, double *oms_yy, gcmplx::complex<double> *oms_yz, double *oms_zz,
                           double *tm_xx, gcmplx::complex<double> *tm_xy, gcmplx::complex<double> *tm_xz, double *tm_yy, gcmplx::complex<double> *tm_yz, double *tm_zz,
-                          int num,
+                          int num_freqs, int num_times,
                           int *time_indices);
 
     void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, gcmplx::complex<double> *data, 
@@ -93,7 +93,7 @@ class XYZSensitivityMatrix {
                              double *Soms_d_in_all, double *Sa_a_in_all, 
                              double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
                              double *spline_in_isi_oms_all, double *spline_in_testmass_all, 
-                             double differential_component, int num_freqs, int num_times, int num_psds);
+                             double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds);
 
     // Noise covariance matrix computation
     void get_noise_covariance_arr(

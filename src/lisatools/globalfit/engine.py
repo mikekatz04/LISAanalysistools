@@ -1,4 +1,5 @@
 from __future__ import annotations
+from os import times
 from eryn.ensemble import EnsembleSampler
 from collections import namedtuple
 from typing import Optional
@@ -17,12 +18,16 @@ from ..utils.utility import tukey, detrend, AET
 
 from eryn.backends import backend as eryn_Backend
 from eryn.state import State as eryn_State
+from eryn.utils.transform import TransformContainer
+from eryn.prior import ProbDistContainer
 
 
 from .utils import NewSensitivityMatrix
-from lisatools.detector import Orbits
+from lisatools.detector import Orbits, EqualArmlengthOrbits
 from ..detector import sangria, mojito, LISAModel
 from ..sensitivity import XYZ1SensitivityMatrix, XYZ2SensitivityMatrix, AE1SensitivityMatrix, AE2SensitivityMatrix, AET2SensitivityMatrix
+from ..mojito_detector import XYZSensitivityBackend
+from .preprocessing import BaseProcessingStep
 
 
 @dataclasses.dataclass
@@ -77,30 +82,33 @@ class Settings:
     branch_backend: Optional[eryn_Backend] = None
 
 
-
 @dataclasses.dataclass
 class GeneralSettings(Settings):
     Tobs: float = None
     dt: float = None
     file_store_dir: str = None
     base_file_name: str = None
-    data_input_path: str = None
     main_file_key: Optional[str] = "parameter_estimation_main"
     past_file_for_start: Optional[str] = None
     orbits: Orbits = None
     gpu_orbits: Orbits = None
+    basis_domain: str = "stft"
     start_freq: float = None
     end_freq: float = None
+    stft_dt: float = None
     random_seed: int = None
     backup_iter: int = None
     nwalkers: int = None
     ntemps: int = None
     tukey_alpha: float = None
     gpus: typing.List[int] = None
-    remove_from_data: typing.List[str] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
-    channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
-    noise_model: Optional[LISAModel] = None
+    #channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
+    #noise_model: Optional[LISAModel] = None
+    data_processor: Optional[BaseProcessingStep] = None
+    processor_init_kwargs: Optional[dict] = None
+    preprocess_kwargs: Optional[dict] = None
+    sensitivity_init_kwargs: Optional[dict] = None
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
 
@@ -144,11 +152,10 @@ class GeneralSetup(Setup, GeneralSettings):
             raise ValueError("Must provide file_store_dir settings for GeneralSetup.")
         if self.base_file_name is None:
             raise ValueError("Must provide base_file_name settings for GeneralSetup.")
-        if self.data_input_path is None:    
-            raise ValueError("Must provide base_file_name settings for GeneralSetup.")
+        # if self.data_input_path is None:    
+        #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
         self.init_data_information()
-        self.init_orbit_information()
 
     def init_orbit_information(self):
         if self.orbits is None:
@@ -161,151 +168,106 @@ class GeneralSetup(Setup, GeneralSettings):
 
     def init_data_information(self):
 
+        #load data #todo add here not in file
+        if self.data_processor is None:
+            raise ValueError("Must provide data_processor for GeneralSetup.")
+        
+        data_processor = self.data_processor(**(self.processor_init_kwargs or {}))
+
+        # preprocess data
         if self.fixed_psd_kwargs is None:
-            self.fixed_psd_kwargs = dict(
-                model=self.noise_model, 
-            )
-        if self.remove_from_data is None:
-            self.remove_from_data = []
-
-        assert isinstance(self.remove_from_data, list)
-
-        # TODO: Generalize input. 
-        with h5py.File(self.data_input_path, "r") as f:
-            if "noise" not in self.remove_from_data:
-                tXYZ = f["obs"]["tdi"][:]
-
-                # remove sources
-                for source in self.remove_from_data:  # , "dgb", "igb"]:  # "vgb" ,
-                    if source == "noise":
-                        continue
-                    print(f"Removing {source} from data injection.")
-                    change_arr = f["sky"][source]["tdi"][:]
-                    for change in ["X", "Y", "Z"]:
-                        tXYZ[change] -= change_arr[change]
-
-            else: 
-                keys = list(f["sky"])
-                print("Initial keys in data injection: ", keys) 
-                tmp_keys = keys.copy()
-                for key in tmp_keys:
-                    print(key)
-                    if key in self.remove_from_data:
-                        keys.remove(key)
-                        print(f"Removing {key} from data injection.")
-                tXYZ = f["sky"][keys[0]]["tdi"][:]
-                for key in keys[1:]:
-                    tXYZ["X"] += f["sky"][key]["tdi"][:]["X"]
-                    tXYZ["Y"] += f["sky"][key]["tdi"][:]["Y"]
-                    tXYZ["Y"] += f["sky"][key]["tdi"][:]["Z"]
-
-        self.t, self.X, self.Y, self.Z = (
-            tXYZ["t"].squeeze(),
-            tXYZ["X"].squeeze(),
-            tXYZ["Y"].squeeze(),
-            tXYZ["Z"].squeeze(),
-        )
-
-        self.dt = self.t[1] - self.t[0]
-        _Tobs = self.Tobs
-        Nobs = int(_Tobs / self.dt)  # len(t)
-        self.t = self.t[:Nobs]
-        self.X = self.X[:Nobs]
-        self.Y = self.Y[:Nobs]
-        self.Z = self.Z[:Nobs]
-
-        self.Tobs = Nobs * self.dt
-        self.df = 1 / self.Tobs
-
-        # TODO: @nikos what do you think about the window needed here. For this case at 1 year, I do not think it matters. But for other stuff.
-        # the time domain waveforms like emris right now will apply this as well
-        tukey_here = tukey(self.X.shape[0], self.tukey_alpha)
-        X = detrend(self.t, tukey_here * self.X.copy())
-        Y = detrend(self.t, tukey_here * self.Y.copy())
-        Z = detrend(self.t, tukey_here * self.Z.copy())
-
-        import matplotlib.pyplot as plt
-        try: #AS: emritools is a package I put together for EMRI work on the ESA gitlab, I am using it here just for a quick SFT plot of the data channel
-            from emritools.plotting.waveforms import plot_sft
-            _ = plot_sft(X, 24*3600, self.dt, fmin=1e-3); plt.yscale('log'); plt.savefig(f'{self.file_store_dir}/Xchannel_sft.png'); plt.close()
-        except:
-            pass
-
-        # f***ing dt
-        Xf, Yf, Zf = (np.fft.rfft(X) * self.dt, np.fft.rfft(Y) * self.dt, np.fft.rfft(Z) * self.dt)
-        Af, Ef, Tf = AET(Xf, Yf, Zf)
-        # Af[:] = 0.0
-        # Ef[:] = 0.0
-        # Tf[:] = 0.0
-
-        if self.start_freq is None:
-            self.start_freq_ind = 0
-        else:
-            self.start_freq_ind = int(self.start_freq / self.df)
-        
-        if self.end_freq is None:
-            self.end_freq_ind = len(Xf) # + self.start_freq_ind
-        else:
-            self.end_freq_ind = int(self.end_freq / self.df)
-
-        # setup injection data channels
-        channels_dict = dict(
-            X=Xf,
-            Y=Yf,
-            Z=Zf,
-            A=Af,
-            E=Ef,
-            T=Tf,
-        )
-
-        #breakpoint()
-
-        self.injection = [channels_dict[ch][self.start_freq_ind:self.end_freq_ind] for ch in self.channels]
-
-        # self.A_inj, self.E_inj = (
-        #     Af[self.start_freq_ind:self.end_freq_ind],
-        #     Ef[self.start_freq_ind:self.end_freq_ind],
-        # )
-
-        self.fd = (np.arange(len(self.injection[0])) + self.start_freq_ind) * self.df
-
-        
-        # TODO: clean this up
-        assert len(self.t) == len(self.X) == len(self.Y) == len(self.Z)
-        assert len(self.fd) == len(self.injection[0]) == len(self.injection[1])
-        for i in range(len(self.channels)):
-            assert len(self.injection[i]) == self.end_freq_ind - self.start_freq_ind
-        
-        if self.noise_model.name == 'sangria':
-            if "A" in self.channels:
-                sens_fns = [
-                    'A1TDISens',
-                    'E1TDISens',
-                ]
-                self.sensitivity_matrix = AE1SensitivityMatrix
-            elif "X" in self.channels:
-                sens_fns = XYZ1SensitivityMatrix
-                self.sensitivity_matrix = XYZ1SensitivityMatrix
-
-        elif self.noise_model.name == 'mojito':
             
-            if "A" in self.channels:
-                sens_fns = [
-                    'A2TDISens',
-                    'E2TDISens',
-                    'T2TDISens',
-                ][:len(self.channels)]
-                self.sensitivity_matrix = AET2SensitivityMatrix if len(self.channels) == 3 else AE2SensitivityMatrix
-            else:
-                
-                sens_fns = XYZ2SensitivityMatrix
-                self.sensitivity_matrix = XYZ2SensitivityMatrix
-
-        self.new_sens_mat = NewSensitivityMatrix(
-                orbits=self.orbits,
-                noise_model=self.noise_model,
-                sens_fns=sens_fns,
+            self.fixed_psd_kwargs = dict(
+                psd_params = [15e-12, 3e-15],  # default scirdv1
+                galfor_params = None,
+            )
+        
+        default_preprocess_kwargs = dict(
+            do_detrend = True,
+            highpass_kwargs = dict(cutoff=5e-6, order=2, zero_phase=True),
+            trim_kwargs = dict(duration=200 * 3600, is_percent=False, trimming_type='from_each_end'),
+            Tobs = self.Tobs,
         )
+
+        if self.preprocess_kwargs is None:
+            preprocess_kwargs = default_preprocess_kwargs
+        else:
+            preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
+
+        times, _ = data_processor.process(**preprocess_kwargs)
+        dt = data_processor.td_signal.settings.dt
+        Nt = len(times)
+
+        if self.basis_domain == "stft":
+            from ..domains import get_stft_settings
+
+            if self.stft_dt is None:
+                raise ValueError("Must provide `stft_dt` for stft basis domain.")
+            domain_settings = get_stft_settings(times=times, big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq)
+            nperseg = domain_settings.get_nperseg(dt)
+            window = tukey(nperseg, alpha=self.tukey_alpha)
+        
+        elif self.basis_domain == "fd":
+            from ..domains import FDSettings
+
+            df = 1. / (Nt * dt)
+            Nf = Nt // 2 + 1
+            domain_settings = FDSettings(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
+            window = tukey(Nt, alpha=self.tukey_alpha)
+        
+        else:
+            raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
+        
+        self.input_data_residual_array, orbits = data_processor.pour(settings = domain_settings, window=window, return_orbits=True)
+        
+        # use logger to output domain info
+
+        for key, value in domain_settings.__dict__.items():
+            self.logger.info(f"Domain setting: {key} = {value}")
+
+        if orbits is not None:
+            self.orbits = orbits
+            self.gpu_orbits = data_processor.orbits_class(filename=orbits.filename, armlength=orbits.armlength, force_backend="cuda12x")
+            #self.gpu_orbits.configure()
+        
+        self.init_orbit_information()
+
+        #todo make it flexible when adding also AET backend.
+        self.sensitivity_backend = XYZSensitivityBackend(orbits=self.gpu_orbits,
+                                                        settings=domain_settings,
+                                                        **self.sensitivity_init_kwargs,
+                                                        )
+        
+        # if self.noise_model.name == 'sangria':
+        #     if "A" in self.channels:
+        #         sens_fns = [
+        #             'A1TDISens',
+        #             'E1TDISens',
+        #         ]
+        #         self.sensitivity_matrix = AE1SensitivityMatrix
+        #     elif "X" in self.channels:
+        #         sens_fns = XYZ1SensitivityMatrix
+        #         self.sensitivity_matrix = XYZ1SensitivityMatrix
+
+        # elif self.noise_model.name == 'mojito':
+            
+        #     if "A" in self.channels:
+        #         sens_fns = [
+        #             'A2TDISens',
+        #             'E2TDISens',
+        #             'T2TDISens',
+        #         ][:len(self.channels)]
+        #         self.sensitivity_matrix = AET2SensitivityMatrix if len(self.channels) == 3 else AE2SensitivityMatrix
+        #     else:
+                
+        #         sens_fns = XYZ2SensitivityMatrix
+        #         self.sensitivity_matrix = XYZ2SensitivityMatrix
+
+        # self.new_sens_mat = NewSensitivityMatrix(
+        #         orbits=self.orbits,
+        #         noise_model=self.noise_model,
+        #         sens_fns=sens_fns,
+        # )
 
 
 
@@ -318,7 +280,6 @@ class GlobalFitSettings:
     setup_function: typing.Callable[(...), None]
 
 
-import dataclasses
 @dataclasses.dataclass
 class EngineInfo:
     branch_names: typing.List[str]
