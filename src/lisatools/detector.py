@@ -632,6 +632,31 @@ def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
     
     return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
 
+
+@jax.jit
+def interpolate_n(query_t, link_idx, t_grid, n_grid):
+    """
+    Interpolate Normal Unit Vectors using JAX.
+
+    Args:
+        query_t: shape (N,)
+        link_idx: shape (N_links,) or (1,) - 0-based index
+        t_grid: shape (T_dense,)
+        n_grid: shape (T_dense, N_links, 3_coords)
+    """
+
+    def _single_point(t, l):
+        # Helper for 1D interp
+        def interp_1d(vals):
+            return jnp.interp(t, t_grid, vals)
+        
+        val_x = interp_1d(n_grid[:, l, 0])
+        val_y = interp_1d(n_grid[:, l, 1])
+        val_z = interp_1d(n_grid[:, l, 2])
+        return jnp.array([val_x, val_y, val_z])
+
+    return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
+
 def icrs_to_ecliptic(positions_icrs):
     """
     Convert cartesian positions from ICRS to ecliptic coordinates.
@@ -1119,6 +1144,40 @@ class JAXL1Orbits(L1Orbits):
         
         return output.block_until_ready()
 
+    def get_normal_unit_vec(self, t, link):
+        """
+        Compute normal unit vectors using Numba CUDA interpolation.
+        
+        Args:
+            t: time (scalar, array, or list)
+            link: link index (12, 23, 31, 13, 32, 21) or array of indices
+        """
+        if not self.configured:
+            raise RuntimeError("Must call configure() before get_normal_unit_vec()")
+        
+        squeeze_t = jnp.isscalar(t)
+        squeeze_link = jnp.isscalar(link)
+
+        t_arr = jnp.atleast_1d(t)
+        link_arr = jnp.atleast_1d(link)
+        
+        link_map_keys = jnp.array(self.LINKS)
+        link_map_vals = jnp.arange(len(self.LINKS))
+        
+        def map_link(l):
+            return jnp.sum(link_map_vals * (link_map_keys == l))
+
+        link_idx = jax.vmap(map_link)(link_arr)
+        
+        output = interpolate_n(t_arr, link_idx, self.sc_t, self.n)
+
+        if squeeze_link:
+            output = output.squeeze(axis=1)
+        if squeeze_t:
+            output = output.squeeze(axis=0)
+        
+        return output.block_until_ready()
+
     def tree_flatten(self):
         # Collect children (JAX arrays)
         children = (
@@ -1215,7 +1274,7 @@ class DefaultOrbits(EqualArmlengthOrbits):
     """Set default orbit class to Equal Armlength orbits for now."""
 
     pass
-
+    
 @dataclass
 class CurrentNoises:
     """Noise values at a given frequency. 
