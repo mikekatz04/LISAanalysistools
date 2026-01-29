@@ -769,6 +769,7 @@ class L1Orbits(Orbits):
     def x_base(self):
         """Spacecraft positions from Mojito file."""
         return self._x_base
+    
     @x_base.setter
     def x_base(self, x):
         self._x_base = x
@@ -777,6 +778,7 @@ class L1Orbits(Orbits):
     def v_base(self):
         """Velocities from Mojito file."""
         return self._v_base
+    
     @v_base.setter
     def v_base(self, x):
         self._v_base = x
@@ -785,6 +787,7 @@ class L1Orbits(Orbits):
     def sc_t_base(self):
         """Spacecraft position file time."""
         return self._sc_t_base
+    
     @sc_t_base.setter
     def sc_t_base(self, x):
         self._sc_t_base = x
@@ -793,6 +796,7 @@ class L1Orbits(Orbits):
     def ltt_dt(self):
         """Time step of LTT data."""
         return self._ltt_dt
+    
     @ltt_dt.setter
     def ltt_dt(self, x):
         self._ltt_dt = x
@@ -801,6 +805,7 @@ class L1Orbits(Orbits):
     def sc_dt_base(self):    
         """Time step of spacecraft position data."""
         return self._sc_dt_base
+    
     @sc_dt_base.setter
     def sc_dt_base(self, x):
         self._sc_dt_base = x
@@ -809,6 +814,7 @@ class L1Orbits(Orbits):
     def ltt_t0(self):
         """Start time of LTT data."""
         return self._ltt_t0
+    
     @ltt_t0.setter
     def ltt_t0(self, x):
         self._ltt_t0 = x    
@@ -817,6 +823,7 @@ class L1Orbits(Orbits):
     def sc_t0(self):
         """Start time of spacecraft position data."""
         return self._sc_t0
+    
     @sc_t0.setter
     def sc_t0(self, x):
         self._sc_t0 = x
@@ -825,6 +832,7 @@ class L1Orbits(Orbits):
     def sc_dt(self):    
         """Time step of spacecraft position data."""
         return self._sc_dt
+    
     @sc_dt.setter
     def sc_dt(self, x):
         self._sc_dt = x
@@ -833,6 +841,7 @@ class L1Orbits(Orbits):
     def sc_t(self):
         """Configured spacecraft time array."""
         return self._sc_t
+    
     @sc_t.setter
     def sc_t(self, x):
         self._sc_t = x
@@ -847,6 +856,7 @@ class L1Orbits(Orbits):
         """Configured spacecraft positions."""
         self._check_configured()
         return self._x
+    
     @x.setter
     def x(self, x):
         self._x = x
@@ -856,26 +866,20 @@ class L1Orbits(Orbits):
         """Configured spacecraft velocities."""
         self._check_configured()
         return self._v
+    
     @v.setter
     def v(self, x):
         self._v = x
     
     @property
     def n(self):
+        """Configured normal unit vectors."""
+        self._check_configured()
         return self._n
+    
     @n.setter
     def n(self, x):
         self._n = x
-
-    # @property
-    # def LINKS(self):
-    #     """Link IDs in Mojito convention."""
-    #     return lisaconstants.indexing.LINKS
-
-    # @property
-    # def SC(self):
-    #     """Spacecraft IDs in Mojito convention."""
-    #     return lisaconstants.indexing.SPACECRAFT
 
     
     @property
@@ -889,16 +893,10 @@ class L1Orbits(Orbits):
 
         return self._pycppdetector
     
-    def configure(
-        self,
-        t_arr=None,
-        dt=None, 
-        linear_interp_setup=False
-    ):
+    def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
         """Configure orbits with interpolation to a target time grid.
         
-        This handles the fact that ltts and positions come from different
-        time arrays in the Mojito file.
+        Handles different time arrays for LTTs and positions in Mojito files.
         
         Args:
             t_arr: Target time array (if None, will be constructed)
@@ -1042,8 +1040,7 @@ class JAXL1Orbits(L1Orbits):
     - Light travel times and positions have different time arrays
     - Both time arrays may start at t0 != 0
     
-    Uses Numba CUDA kernels for fast GPU interpolation, with automatic
-    fallback to CPU if CUDA is not available.
+    Uses JAX for JIT-compiled interpolation on CPU or GPU.
     
     Args:
         filename: Path to Mojito L1 HDF5 file
@@ -1077,13 +1074,32 @@ class JAXL1Orbits(L1Orbits):
     def dt(self, dt):
         self._dt = dt
     
-    def get_pos(self, t, sc):
-        """
-        Compute spacecraft position using Numba CUDA interpolation.
+    def _map_link_to_index(self, link_arr):
+        """Map link IDs to array indices.
         
         Args:
-            t: time (scalar, array, or list)
-            sc: spacecraft index (1, 2, or 3) or array of indices
+            link_arr: Array of link IDs (12, 23, 31, 13, 32, 21)
+            
+        Returns:
+            Array of indices (0-5) corresponding to link positions
+        """
+        link_map_keys = jnp.array(self.LINKS)
+        link_map_vals = jnp.arange(len(self.LINKS))
+        
+        def map_single_link(l):
+            return jnp.sum(link_map_vals * (link_map_keys == l))
+        
+        return jax.vmap(map_single_link)(link_arr)
+    
+    def get_pos(self, t, sc):
+        """Compute spacecraft position using JAX interpolation.
+        
+        Args:
+            t: Time (scalar or array)
+            sc: Spacecraft index (1, 2, or 3) or array of indices
+            
+        Returns:
+            Spacecraft position(s) with shape (..., 3) for coordinates
         """
         if not self.configured:
             raise RuntimeError("Must call configure() before get_pos()")
@@ -1105,12 +1121,14 @@ class JAXL1Orbits(L1Orbits):
 
     
     def get_light_travel_times(self, t, link):
-        """
-        Compute light travel times using Numba CUDA interpolation.
+        """Compute light travel times using JAX interpolation.
         
         Args:
-            t: time (scalar, array, or list)
-            link: link index (12, 23, 31, 13, 32, 21) or array of indices
+            t: Time (scalar or array)
+            link: Link index (12, 23, 31, 13, 32, 21) or array of indices
+            
+        Returns:
+            Light travel time(s)
         """
         if not self.configured:
             raise RuntimeError("Must call configure() before get_light_travel_times()")
@@ -1120,20 +1138,7 @@ class JAXL1Orbits(L1Orbits):
 
         t_arr = jnp.atleast_1d(t)
         link_arr = jnp.atleast_1d(link)
-        
-        link_map_keys = jnp.array(self.LINKS)
-        link_map_vals = jnp.arange(len(self.LINKS))
-        
-        def map_link(l):
-            # Find index where link_map_keys == l
-            # jnp.where returns (array_of_indices,)
-            # We take the first match. 
-            # Note: This might be slow inside vmap if not optimized, but for small list constant (6) it's fine.
-            # Faster: use a direct lookup array if link IDs were small integers, but they are 12, 23 etc.
-            # We can use a boolean mask.
-            return jnp.sum(link_map_vals * (link_map_keys == l))
-
-        link_idx = jax.vmap(map_link)(link_arr)
+        link_idx = self._map_link_to_index(link_arr)
         
         output = interpolate_ltt(t_arr, link_idx, self.ltt_t, self.ltt)
 
@@ -1145,12 +1150,14 @@ class JAXL1Orbits(L1Orbits):
         return output.block_until_ready()
 
     def get_normal_unit_vec(self, t, link):
-        """
-        Compute normal unit vectors using Numba CUDA interpolation.
+        """Compute normal unit vectors using JAX interpolation.
         
         Args:
-            t: time (scalar, array, or list)
-            link: link index (12, 23, 31, 13, 32, 21) or array of indices
+            t: Time (scalar or array)
+            link: Link index (12, 23, 31, 13, 32, 21) or array of indices
+            
+        Returns:
+            Normal unit vector(s) with shape (..., 3) for coordinates
         """
         if not self.configured:
             raise RuntimeError("Must call configure() before get_normal_unit_vec()")
@@ -1160,14 +1167,7 @@ class JAXL1Orbits(L1Orbits):
 
         t_arr = jnp.atleast_1d(t)
         link_arr = jnp.atleast_1d(link)
-        
-        link_map_keys = jnp.array(self.LINKS)
-        link_map_vals = jnp.arange(len(self.LINKS))
-        
-        def map_link(l):
-            return jnp.sum(link_map_vals * (link_map_keys == l))
-
-        link_idx = jax.vmap(map_link)(link_arr)
+        link_idx = self._map_link_to_index(link_arr)
         
         output = interpolate_n(t_arr, link_idx, self.sc_t, self.n)
 

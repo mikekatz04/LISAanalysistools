@@ -1658,6 +1658,19 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self._setup()
 
     @property
+    def kwargs(self):
+        """Keyword arguments for class initialization."""
+        return {
+            "orbits": self.orbits,
+            "settings": self.basis_settings,
+            "tdi_generation": self.tdi_generation,
+            "use_splines": self.use_splines,
+            "force_backend": self.force_backend,
+            "mask_percentage": self.mask_percentage,
+        }
+
+
+    @property
     def xp(self):
         """Array module."""
         return self.backend.xp
@@ -2145,6 +2158,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Returns:
             self: a configured copy of the sensitivity matrix backend.
         """
+
+        new_sens_mat = XYZSensitivityBackend(**self.kwargs)
+
         self.name = name
 
         Soms_d = psd_params[0]
@@ -2163,7 +2179,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if galfor_params is None:
             galfor_params = np.zeros(5)
     
-        self.set_sensitivity_matrix(
+        new_sens_mat.set_sensitivity_matrix(
             Soms_d,
             Sa_a,
             spline_knots_position,
@@ -2171,4 +2187,4 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             *galfor_params
         )
 
-        return deepcopy(self) #todo self, or deepcopy(self)?
+        return new_sens_mat
