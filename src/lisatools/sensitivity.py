@@ -1155,7 +1155,6 @@ class SensitivityMatrix:
         xp = get_array_module(self.sens_mat)
 
         # setup detC
-       
         if self.sens_mat.ndim < 3:
             self.detC = xp.prod(self.sens_mat, axis=0)
             self.invC = 1 / self.sens_mat
@@ -1174,8 +1173,7 @@ class SensitivityMatrix:
             invC[self.detC == 0.0] = 1e-100
             
             # switch them after they were effectively switched above
-            back_transpose_shape = tuple(range(3)[::-1])
-            self.invC = invC.transpose(back_transpose_shape)
+            self.invC = invC.transpose(transpose_shape)
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
@@ -1481,7 +1479,7 @@ def get_sensitivity(
                     raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
             
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        PSD = np.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)])
+        PSD = np.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
 
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")
@@ -1497,7 +1495,7 @@ def get_sensitivity(
         return PSD ** (1 / 2)
 
     elif return_type == "char_strain":
-        return (f * PSD) ** (1 / 2)
+        return (basis_settings.f_arr * PSD) ** (1 / 2)
 
     else:
         raise ValueError("return_type must be PSD, ASD, or char_strain.")

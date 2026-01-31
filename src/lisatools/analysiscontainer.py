@@ -12,7 +12,7 @@ from scipy import interpolate
 import matplotlib.pyplot as plt
 
 from eryn.utils import TransformContainer
-
+from . import domains
 
 try:
     import cupy as cp
@@ -481,3 +481,246 @@ class AnalysisContainer:
 
         else:
             raise ValueError("x must be a 1D or 2D array.")
+
+
+class AnalysisContainerArray:
+    @property
+    def xp(self) -> object:
+        return cp if self.gpus is not None else np
+    
+    def __init__(self, analysis_containers, gpus=None):
+        if isinstance(analysis_containers, AnalysisContainer):
+            acs = np.array([analysis_containers], dtype=object)
+        elif isinstance(analysis_containers, np.ndarray):
+            assert analysis_containers.dtype == object
+            assert np.all([isinstance(tmp, AnalysisContainer) for tmp in analysis_containers.flatten()])
+            acs = analysis_containers
+        elif isinstance(analysis_containers, list):
+            if isinstance(analysis_containers[0], list):
+                raise ValueError("If inputing list of containers, must be 1D. Use a numpy object array for 2+D.")
+            acs = np.asarray(analysis_containers, dtype=object)
+        else:
+            raise ValueError("Analysis container must be single container, 1D list, or numpy object array.")
+        
+        self.acs = acs
+        self.acs_shape = acs.shape
+        self.acs_total_entries = np.prod(acs.shape)
+
+        data_shape = acs.flatten()[0].data_res_arr.shape
+
+        if len(data_shape) == 1:
+            self.data_length = data_shape[0]
+            self.nchannels = 1
+            self.end_shape = (self.data_length,)
+        elif len(data_shape) == 2:
+            self.nchannels, self.data_length = data_shape
+            self.end_shape = (self.data_length,)
+        elif len(data_shape) == 3:
+            self.nchannels, self.m, self.n = data_shape
+            self.data_length = self.m * self.n
+            self.end_shape = (self.m, self.n)
+
+        if gpus is not None:
+            xp = cp
+            if isinstance(gpus, list):
+                if len(gpus) > 1:
+                    raise NotImplementedError
+                xp.cuda.runtime.setDevice(gpus[0])
+            elif isinstance(gpus, int):
+                xp.cuda.runtime.setDevice(gpus)
+        else:
+            xp = np
+        # xp = get_array_module(acs.flatten()[0].data_res_arr[0])
+
+        ac_tmp = acs.flatten()[0]
+        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-len(ac_tmp.sens_mat.data_shape)]
+        if isinstance(ac_tmp.sens_mat.basis_settings, domains.WDMSettings):
+            self.data_dtype = float
+        else:
+            self.data_dtype = complex
+        assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
+        # reset so that all data are linear in memory
+        num_machines = 1 if gpus is None else len(gpus)
+
+        split_num = int(np.ceil(self.acs_total_entries / num_machines))
+        split_inds = np.arange(split_num, self.acs_total_entries, split_num)
+
+        self.gpu_splits = gpu_splits = np.split(np.arange(self.acs_total_entries), split_inds)
+
+        self.gpu_map = np.zeros(self.acs_total_entries, dtype=int)
+        self.split_map = np.zeros(self.acs_total_entries, dtype=int)
+        self.linear_data_arr = []
+        self.linear_psd_arr = []
+        for i, split in enumerate(gpu_splits):
+            if gpus is not None:
+                self.gpu_map[split] = gpus[i]
+            else:
+                self.gpu_map[split] = 0
+            self.split_map[split] = i
+            self.linear_data_arr.append(xp.zeros(self.data_length * self.nchannels * len(split), dtype=self.data_dtype))
+            self.linear_psd_arr.append(xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=float))
+
+        self.num_acs = num_acs = len(acs.flatten())
+        self.gpus = gpus 
+        self.reset_linear_data_arr()
+        self.reset_linear_psd_arr()
+
+    def zero_out_data_arr(self):
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+        
+        for gpu_i, gpu in enumerate(self.gpus):
+            with self.xp.cuda.device.Device(gpu):
+                self.linear_data_arr[gpu_i][:] = 0.0
+
+        self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def reset_linear_data_arr(self):
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+
+        for i, ac in enumerate(self.acs.flatten()):
+            gpu = self.gpu_map[i]
+            split = self.split_map[i]
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(gpu)
+
+            # following assumes everything is ordered purposefully
+            intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
+            start_index = intra_split_index * (self.nchannels * self.data_length)
+            end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
+            self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(ac.data_res_arr.flatten())
+            ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][start_index:end_index].reshape((self.nchannels,) + self.end_shape)
+            # TODO: add check to make sure changes are made inline along with protections
+            if self.gpus is not None:
+                self.xp.get_default_memory_pool().free_all_blocks()
+
+        if self.gpus is not None:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def reset_linear_psd_arr(self):
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+
+        for i, ac in enumerate(self.acs.flatten()):
+            gpu = self.gpu_map[i]
+            split = self.split_map[i]
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(gpu)
+
+            # TODO: should I not store this in memory?!?!?
+            intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
+            start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
+            end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
+            self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(ac.sens_mat.invC.flatten())
+            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + (self.m, self.n))
+
+            # TODO: add check to make sure changes are made inline along with protections
+            if self.gpus is not None:
+                self.xp.get_default_memory_pool().free_all_blocks()
+
+        if self.gpus is not None:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    @property
+    def f_arr(self):
+        return self.acs[0].data_res_arr.f_arr
+        
+    @property
+    def df(self):
+        return self.f_arr[1] - self.f_arr[0]
+
+    def __len__(self) -> int:
+        return len(self.acs)
+        
+    def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
+        for i, ac in enumerate(self.acs.flatten()):
+            _tmp = getattr(ac, operation)
+            if callable(_tmp):
+                _tmp_output = _tmp(**kwargs)
+            else:
+                # must be property or attribute
+                _tmp_output = _tmp
+
+            if i == 0:
+                output = np.zeros(self.acs_total_entries, dtype=type(_tmp_output))
+
+            output[i] = _tmp_output
+
+        return output.reshape(self.acs_shape)
+
+    @property
+    def start_freq_ind(self):
+        return self._loop_operation("start_freq_ind")
+
+    def inner_product(self, **kwargs):
+        return self._loop_operation("inner_product", **kwargs)
+
+    def likelihood(self, **kwargs):
+        return self._loop_operation("likelihood", **kwargs)
+
+    def snr(self, **kwargs):
+        return self._loop_operation("snr", **kwargs)
+
+    def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:
+        return self.acs[index]
+
+    def signal_operation(self, sign, templates, data_index=None, start_index=None):
+
+        assert isinstance(templates, np.ndarray) or isinstance(templates, cp.ndarray)
+        
+        if isinstance(self.acs[0].data_res_arr.basis_settings, domains.WDMSettings):
+            if templates.ndim == 2:
+                _nchannels, template_length = templates.shape
+                num_templates = 1
+                templates = templates[None, :]
+            elif templates.ndim == 3:
+                num_templates, _nchannels, template_length = templates.shape
+        else:
+            if templates.ndim == 3:
+                _nchannels, template_m, template_n = templates.shape
+                templates = templates[None, :]
+                num_templates = 1
+            elif templates.ndim == 4:
+                num_templates, _nchannels, template_m, template_n = templates.shape
+            template_length = template_m * template_n
+
+        if data_index is None:
+            assert num_templates == self.acs_total_entries
+            data_index = np.arange(num_templates)
+        else: 
+            assert data_index.max() < self.acs_total_entries
+
+        if start_index is None:
+            start_index = np.zeros_like(data_index)
+        else:
+            assert len(start_index) == num_templates
+            assert start_index < self.data_length
+
+        assert len(start_index) == len(data_index)
+        for i, (di, si) in enumerate(zip(data_index, start_index)):
+            self.acs[di].data_res_arr[:, si:si+template_length] += sign * templates[i]
+        
+    def add_signal_to_residual(self, *args, **kwargs):
+        self.signal_operation(-1, *args, **kwargs)
+
+    def remove_signal_from_residual(self, *args, **kwargs):
+        self.signal_operation(+1, *args, **kwargs)
+
+    @property
+    def data_shaped(self):
+        out = []
+        for i, tmp in enumerate(self.linear_data_arr):
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(self.gpus[i])
+            out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape))
+        return out
+        
+    @property
+    def psd_shaped(self):
+        out = []
+        for i, tmp in enumerate(self.linear_psd_arr):
+            if self.gpus is not None:
+                self.xp.cuda.runtime.setDevice(self.gpus[i])
+            out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape)) 
+        return out

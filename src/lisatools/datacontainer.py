@@ -246,7 +246,7 @@ class DataResidualArray:
 
     def flatten(self) -> np.ndarray:
         """Flatten the ``data_res_arr``."""
-        return self.data_res_arr.flatten()
+        return self.data_res_arr[:].flatten()
 
     @property
     def shape(self) -> tuple:
