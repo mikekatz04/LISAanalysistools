@@ -751,13 +751,15 @@ class WDMSignal(WDMSettings, DomainBase):
         return fig, ax
 
 class WDMLookupTable(WDMSettings):
-    def __init__(self, settings: WDMSettings, f_steps: int, fdot_steps: int):
+    def __init__(self, settings: WDMSettings, f_steps: int, fdot_steps: int, num_channel: int):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
-        d_fdot = 0.1
+        d_fdot = self.d_fdot = 0.1
         fdot_step = self.df/self.T*d_fdot
         self.f_steps = f_steps
         self.fdot_steps = fdot_steps
         self.deltaf = self.BW/(self.f_steps)
+        self.num_channel = num_channel
+        
         # The odd wavelets coefficienst can be obtained from the even.
         # odd cosine = -even sine, odd sine = even cosine
         # each wavelet covers a frequency band of width DW
@@ -772,8 +774,12 @@ class WDMLookupTable(WDMSettings):
 
         wave = self.wavelet(self.N, in_fd=False)
         
-        self.f_vals = f0 + ((np.arange(self.f_steps)-self.f_steps/2)+0.5)*self.deltaf
-            
+        self.f_scaled_vals = ((np.arange(self.f_steps)-self.f_steps/2)+0.5)*self.deltaf
+        self.f_vals = f0 + self.f_scaled_vals
+        self.min_f_scaled = self.f_scaled_vals.min().item()
+        self.max_f_scaled = self.f_scaled_vals.max().item()
+        self.min_fdot = self.fdot_vals.min().item()
+        self.max_fdot = self.fdot_vals.max().item()
         t = (np.arange(self.N) - int(self.N/2)) * self.cadence
         phase = 2 * np.pi * self.f_vals[:, None, None] * t[None, None, :] + np.pi * self.fdot_vals[None, :, None]* (t * t)[None, None, :]
         
