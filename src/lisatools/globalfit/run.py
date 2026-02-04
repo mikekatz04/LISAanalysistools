@@ -66,6 +66,8 @@ from .engine import EngineInfo, GlobalFitSettings, GeneralSetup
 import typing
 import dataclasses
 
+from .diagnosticplot import DiagnosticPlotter
+
 
 class CurrentInfoGlobalFit:
     def __init__(self, settings: GlobalFitSettings):
@@ -265,6 +267,15 @@ class GlobalFit:
                 inds["psd"][:] = True
             if "galfor" in inds:
                 inds["galfor"][:] = True
+            if "emri" in inds:
+                inds["emri"][:] = True
+                self.logger.debug("initializing emri inds to true")
+                
+                self.logger.debug("override emri starting coords to be close to the injection") 
+                factor = 1e-5
+
+                coords["emri"] = self.curr.source_info['emri'].injection + factor * np.random.randn(self.ntemps, self.nwalkers, self.engine_info.nleaves_max["emri"])
+               
 
             state = GFState(coords, inds=inds, random_state=np.random.get_state(), sub_state_bases=self.engine_info.branch_states)
             
@@ -276,6 +287,7 @@ class GlobalFit:
             state.log_like = np.zeros((self.ntemps, self.nwalkers))
             state.log_prior = np.zeros((self.ntemps, self.nwalkers))
             # self.logger.debug("pickle state load success")
+
         return state
 
     def setup_acs(self, state):
@@ -391,6 +403,7 @@ class GlobalFit:
             walker_vals = np.tile(np.arange(nwalkers), (ntemps, 1))
             supps = BranchSupplemental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
             state.supplemental = supps
+            #breakpoint()    
 
             # backend.reset(
             #     nwalkers,
@@ -558,6 +571,7 @@ class GlobalFit:
             from eryn.moves import StretchMove
             _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
+            update_fn = DiagnosticPlotter(curr=self.curr, plot_every=5)
             sampler_mix = GlobalFitEngine(
                 acs,
                 self.nwalkers,
@@ -575,6 +589,8 @@ class GlobalFit:
                 vectorize=True,
                 periodic=periodic,
                 branch_names=branch_names,
+                update_fn=update_fn,
+                update_iterations=1,
                 # update_fn=recipe,  # stop_converge_mix,
                 # update_iterations=1,  # TODO: change this?
                 provide_groups=True,
@@ -588,7 +604,7 @@ class GlobalFit:
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
             state.log_prior = np.zeros_like(state.log_like)  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
-            sampler_mix.run_mcmc(state, 100, thin_by=1, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:

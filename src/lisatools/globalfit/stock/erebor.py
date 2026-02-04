@@ -1,7 +1,7 @@
 from __future__ import annotations
 import dataclasses
 import typing
-from typing import Optional
+from typing import Any, Optional
 import numpy as np
 import h5py
 
@@ -319,6 +319,138 @@ class MBHSetup(Setup):
         
         if self.branch_backend is None:
             self.branch_backend = MBHHDFBackend
+
+from ..hdfbackend import EMRIHDFBackend
+from ..state import EMRIState
+@dataclasses.dataclass
+class EMRISettings(Settings):
+    logm1_lims: typing.List[float, float] = None
+    m2_lims: typing.List[float, float] = None
+    a_lims: typing.List[float, float] = None
+    p0_lims: typing.List[float, float] = None
+    e0_lims: typing.List[float, float] = None
+    waveform_kwargs: Optional[dict] = None
+    injection: Optional[np.ndarray] = None # AS here only for the starting state 
+    info_matrix_gen: Optional[Any] = None #todo change name to info matrix or smth
+    fill_values: np.ndarray = dataclasses.field(default_factory=lambda: np.array([1.0, 0.0])) 
+    betas: Optional[np.ndarray] = None
+    inner_moves: Optional[typing.List[Move]] = None
+    num_prop_repeats: Optional[int] = 10
+    emri_search_file_key: Optional[str] = "_emri_search_tmp_file"
+
+class EMRISetup(Setup):
+    def __init__(self, emri_settings: EMRISettings):
+        
+        # had a better way to do this but it stopped allowing for pickle
+        super().__init__(emri_settings)
+
+        level = logging.DEBUG
+        name = "EMRISetup"
+        self.logger = init_logger(filename="emri_setup.log", level=level, name=name)
+        
+        self.init_setup()
+        
+    def init_sampling_info(self):
+
+        if self.transform is None:
+
+            # for transforms
+
+            emri_fill_dict = {
+            "ndim_full": 14,
+            "fill_values": self.fill_values, # inclination and Phi_theta
+            "fill_inds": np.array([5, 12]),
+            }
+
+            emri_transform_fn_in = {
+                0: np.exp,  # M 
+                7: np.arccos, # qS
+                9: np.arccos,  # qK
+            }
+
+            self.transform = TransformContainer(
+                parameter_transforms=emri_transform_fn_in, fill_dict=emri_fill_dict
+            )
+
+        if self.periodic is None:
+            self.periodic = {"emri": {7: 2 * np.pi, 9: 2 * np.pi, 10: 2 * np.pi, 11: 2 * np.pi}}
+
+
+        self.setup_priors()
+        
+        if self.betas is None:
+            snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
+            ntemps_pe = 24  # len(snrs_ladder)
+            # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
+            betas = 1 / 1.2 ** np.arange(ntemps_pe)
+            #betas[-1] = 0.0001
+            self.betas = betas
+
+        self.logger.info(f"Using betas: {self.betas} in EMRI branch")
+
+        # TODO: maybe combine this into Setup
+        if self.other_tempering_kwargs is None:
+            self.other_tempering_kwargs = dict(permute=False)
+
+        if "permute" not in self.other_tempering_kwargs:
+            self.other_tempering_kwargs["permute"] = False
+
+        assert not self.other_tempering_kwargs["permute"]
+
+        if self.initialize_kwargs is None:
+            self.initialize_kwargs = {}
+
+        if self.inner_moves is None:
+            from eryn.moves import StretchMove
+            self.inner_moves = [
+                (StretchMove(), 1.0)
+            ]
+
+    def setup_priors(self,):
+        """
+        Get the prior distributions for the EMRI parameters.
+        override the default priors with custom boundaries for the intrinsic parameters. 
+
+        Args:
+
+        Returns:
+            ProbDistContainer: Container with prior distributions for each parameter.
+        """
+
+        priors_emri = {
+            0: uniform_dist(np.log(5e5), np.log(5e6)), #log m1
+            1: uniform_dist(1, 100), # m2
+            2: uniform_dist(0.01, 0.999),  # a
+            3: uniform_dist(5.0, 100.0), # p0
+            4: uniform_dist(0.001, 0.8), # e0
+            5: uniform_dist(0.01, 100.0),  # dist in Gpc
+            6: uniform_dist(-0.99999, 0.99999),  # qS
+            7: uniform_dist(0.0, 2 * np.pi),  # phiS
+            8: uniform_dist(-0.99999, 0.99999),  # qK
+            9: uniform_dist(0.0, 2 * np.pi),  # phiK
+            10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+            11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+        }
+
+        limits = ['logm1_lims', 'm2_lims', 'a_lims', 'p0_lims', 'e0_lims']
+        for i, lims in enumerate(limits):
+            if getattr(self, lims) is not None:
+                self.logger.info(f'Setting prior for parameter {i} using limits {getattr(self, lims)}')
+                priors_emri[i] = uniform_dist(*getattr(self, lims))
+
+        self.priors = {"emri": ProbDistContainer(priors_emri)}
+
+    def init_setup(self):
+        self.init_sampling_info()
+        self.init_state_backend_info()
+
+    def init_state_backend_info(self):
+        if self.branch_state is None:
+            self.branch_state = EMRIState
+        
+        if self.branch_backend is None:
+            self.branch_backend = EMRIHDFBackend
+
 
 from lisatools.detector import EqualArmlengthOrbits
 

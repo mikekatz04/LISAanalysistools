@@ -163,7 +163,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             supps = new_state.supplemental
 
             logP = self.compute_log_posterior(logl, logp)
-            self.temperature_control.temperature_swaps(
+            (x, logP, logl, logp, inds, blobs, supps, branch_supps) = self.temperature_control.temperature_swaps(
                 x, logP, logl, logp, 
                 supps=supps,
                 branch_supps=branch_supps, 
