@@ -23,6 +23,7 @@ jobs:
       - name: publish wheels on commit message
         if: contains(github.event.head_commit.message, '[ci:publish-wheels]')
         run: |
+          echo "LISATOOLSWHL_BUILD=true" >> "$GITHUB_ENV"
           echo "LISATOOLSWHL_PUBLISH=true" >> "$GITHUB_ENV"
       - name: build and publish on tag 'v*'
         if: startsWith(github.event.ref, 'refs/tags/v')
@@ -59,6 +60,7 @@ jobs:
           python-version: '3.12'
       - run: |
           pip install setuptools_scm
+
       # ========================
       # = III - Detect version =
       # ========================
@@ -70,10 +72,19 @@ jobs:
         id: setuptools_scm
         run: |
           VERSION="$(python -m setuptools_scm)"
-          echo "RUNNING CHECK $(python -m setuptools_scm)"
           echo "notice:: Detected version: ${VERSION}"
           echo "value=${VERSION}" >> $GITHUB_OUTPUT
           echo "version: ${VERSION}" >> $GITHUB_STEP_SUMMARY
+
+      # =======================
+      # = IV - install llvm   =
+      # =======================
+      # - name: Install LLVM and Clang
+      #   uses: KyleMayes/install-llvm-action@v2
+      #   with:
+      #     version: "17.0"
+      #     directory: ${{ runner.temp }}/llvm
+      
   build:
     name: lisaanalysistools-${{ matrix.release }} on ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
@@ -121,12 +132,12 @@ jobs:
             kind: cuda_plugin
             cuda_major: 12
             cuda_minor: 6
-          - release: cpu
-            os: macos-15-intel
-            kind: core
-            reqpython: '>=3.10'
-            arch: x86_64
-            macos_ver: 15.0
+          # - release: cpu
+          #   os: macos-15-intel
+          #   kind: core
+          #   reqpython: '>=3.10'
+          #   arch: x86_64
+          #   macos_ver: 15.0
           - release: cpu
             os: macos-15
             kind: core
@@ -155,12 +166,16 @@ jobs:
         if: matrix.kind == 'core' && needs.select.outputs.core-suffix == 'true'
         run: |
           sed -i'' -e 's|" #@NAMESUFFIX@|-${{ matrix.release }}"|g' pyproject.toml
+      - name: Add cuda1xx python dependency for lisatools.
+        if: matrix.kind == 'cuda_plugin'
+        run: |
+          sed -i'' -e 's|" #@LISATOOLS_CUDA@|lisaanalysistools-${{ matrix.release }}"|g' pyproject.toml
+          sed -i 's/) #@ADDCUDAHERE@/ CUDA)/g' CMakeLists.txt
       # Add CuPy dependency
       - name: Add Cupy dependency
         if: matrix.kind == 'cuda_plugin'
         run: |
           sed -i'' -e 's|#@DEPS_CUPYCUDA@|"cupy-cuda${{ matrix.cuda_major }}x"|g' pyproject.toml
-          sed -i'' -e 's/) #@ADDCUDAHERE@/ CUDA)/g' CMakeLists.txt
       # Add Core project dependency
       - name: Add core project dependency on plugin
         if: matrix.kind != 'core' && needs.select.outputs.core-suffix == 'true'
@@ -202,7 +217,7 @@ jobs:
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=OFF
           # TODO: check this
-          # CIBW_TEST_COMMAND: python -m lisatools.tests --disable testfile
+          # CIBW_TEST_COMMAND: python -m lisaanalysistools.tests --disable testfile
           CIBW_ENVIRONMENT: >
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_ver }}
@@ -219,16 +234,16 @@ jobs:
             cmake.define.LISATOOLS_WITH_GPU=OFF
           CIBW_ENVIRONMENT: >
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
-          # CIBW_TEST_COMMAND: python -m lisatools.tests --disable testfile
+          # CIBW_TEST_COMMAND: python -m lisaanalysistools.tests --disable testfile
       - name: Build cuda plugin wheels (Linux)
         if: runner.os == 'Linux' && matrix.kind == 'cuda_plugin' && matrix.arch == 'x86_64'
-        uses: pypa/cibuildwheel@v2.23.2
+        uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
           CIBW_SKIP: pp* *musllinux*
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28 
           CIBW_CONFIG_SETTINGS: >
             cmake.define.LISATOOLS_WITH_GPU=ONLY
             cmake.define.LISATOOLS_CUDA_ARCH="70;75;80;86;90"
@@ -237,23 +252,14 @@ jobs:
             dnf install -y scl-utils &&
             dnf install -y gcc-toolset-13 &&
             source scl_source enable gcc-toolset-13 &&
-            gcc --version &&
-            which gcc &&
             dnf -y install epel-release &&
-            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo &&
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo &&
             dnf clean all &&
-            dnf -y install cuda-toolkit-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} &&
+            dnf -y install cuda-toolkit &&
             ls -al /usr/local &&
             export PATH=$PATH:/usr/local/cuda/bin &&
-            gcc --version && 
             nvcc --version
-            #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
-            #source /opt/rh/gcc-toolset-13/enable
-            #nvcc --version &&
-            #gcc --version
-          CIBW_BEFORE_BUILD: |
-            source scl_source enable gcc-toolset-13 &&
-            gcc --version
+          CIBW_BEFORE_BUILD: source scl_source enable gcc-toolset-13
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
             LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
@@ -261,8 +267,8 @@ jobs:
             CUDA_ROOT=/usr/local/cuda
             CUDA_PATH=/usr/local/cuda
             CUDADIR=/usr/local/cuda
-            CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
-            CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            CC=gcc
+            CXX=g++
             CUDACXX="nvcc -ccbin /opt/rh/gcc-toolset-13/root/usr/bin/gcc"
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel} --exclude "libcudart.so.${{ matrix.cuda_major }}" --exclude "libcusparse.so.${{ matrix.cuda_major }}" --exclude "libcublas.so.${{ matrix.cuda_major }}" --exclude "libnvJitLink.so.${{ matrix.cuda_major }}" --exclude "libcublasLt.so.${{ matrix.cuda_major }}"
