@@ -81,9 +81,8 @@ optional-dependencies.sampling = [
 optional-dependencies.testing = [
   "matplotlib",
   "eryn",
-  "gbgpu",
   "corner",
-  "gpubackendtools",
+  "gpubackendtools>=0.0.16",
 ]
 
 [tool.setuptools_scm]
