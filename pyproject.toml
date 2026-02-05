@@ -83,6 +83,7 @@ optional-dependencies.testing = [
   "eryn",
   "gbgpu",
   "corner",
+  "gpubackendtools",
 ]
 
 [tool.setuptools_scm]
