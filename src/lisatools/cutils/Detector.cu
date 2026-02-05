@@ -6,7 +6,6 @@
 #include <string>
 #include <sstream>
 
-
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define Orbits OrbitsGPU
 #else
