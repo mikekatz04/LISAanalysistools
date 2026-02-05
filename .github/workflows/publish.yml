@@ -235,11 +235,9 @@ jobs:
           # Use dnf to install cuda-toolkit and gcc inside the manylinux container
           CIBW_BEFORE_ALL: >
             dnf install -y scl-utils &&
-            dnf install -y gcc-toolset-11-toolchain &&
-            echo "CHECK1" &&
-            source scl_source enable gcc-toolset-11 &&
+            dnf install -y gcc-toolset-13 &&
+            source scl_source enable gcc-toolset-13 &&
             gcc --version &&
-            echo "CHECK2" &&
             which gcc &&
             dnf -y install epel-release &&
             dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo &&
@@ -248,14 +246,13 @@ jobs:
             ls -al /usr/local &&
             export PATH=$PATH:/usr/local/cuda/bin &&
             gcc --version && 
-            echo "CHECKCHECKCHECK" &&
             nvcc --version
             #dnf -y install cuda-compiler-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }}.${{ matrix.arch }} cuda-libraries-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} cuda-libraries-devel-${{ matrix.cuda_major }}-${{ matrix.cuda_minor }} &&
-            #source /opt/rh/gcc-toolset-11/enable
+            #source /opt/rh/gcc-toolset-13/enable
             #nvcc --version &&
             #gcc --version
           CIBW_BEFORE_BUILD: |
-            source scl_source enable gcc-toolset-11 &&
+            source scl_source enable gcc-toolset-13 &&
             gcc --version
           CIBW_ENVIRONMENT: >
             PATH="/usr/local/cuda/bin:${PATH}"
@@ -264,8 +261,9 @@ jobs:
             CUDA_ROOT=/usr/local/cuda
             CUDA_PATH=/usr/local/cuda
             CUDADIR=/usr/local/cuda
-            CC=/opt/rh/gcc-toolset-11/root/usr/bin/gcc
-            CXX=/opt/rh/gcc-toolset-11/root/usr/bin/g++
+            CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            CUDACXX="nvcc -ccbin /opt/rh/gcc-toolset-13/root/usr/bin/gcc"
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           CIBW_REPAIR_WHEEL_COMMAND: auditwheel repair -w {dest_dir} {wheel} --exclude "libcudart.so.${{ matrix.cuda_major }}" --exclude "libcusparse.so.${{ matrix.cuda_major }}" --exclude "libcublas.so.${{ matrix.cuda_major }}" --exclude "libnvJitLink.so.${{ matrix.cuda_major }}" --exclude "libcublasLt.so.${{ matrix.cuda_major }}"
       # =====================
