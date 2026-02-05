@@ -11,7 +11,6 @@
 
 namespace py = pybind11;
 
-
 void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
 {
     orbits->get_light_travel_time_arr(
