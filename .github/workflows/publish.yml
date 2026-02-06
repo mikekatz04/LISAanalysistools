@@ -16,6 +16,7 @@ jobs:
           echo "LISATOOLSWHL_BUILD=false" >> "$GITHUB_ENV"
           echo "LISATOOLSWHL_CORE_SUFFIX=false" >> "$GITHUB_ENV"
           echo "LISATOOLSWHL_PUBLISH=false" >> "$GITHUB_ENV"
+          echo "LISATOOLSWHL_PUBLISH_CUDA=false" >> "$GITHUB_ENV"
       - name: build on commit message
         if: contains(github.event.head_commit.message, '[ci:build-wheels]')
         run: |
@@ -25,6 +26,12 @@ jobs:
         run: |
           echo "LISATOOLSWHL_BUILD=true" >> "$GITHUB_ENV"
           echo "LISATOOLSWHL_PUBLISH=true" >> "$GITHUB_ENV"
+      - name: publish wheels on commit message
+        if: contains(github.event.head_commit.message, '[ci:publish-wheels-cuda]')
+        run: |
+          echo "LISATOOLSWHL_BUILD=true" >> "$GITHUB_ENV"
+          echo "LISATOOLSWHL_PUBLISH=true" >> "$GITHUB_ENV"
+          echo "LISATOOLSWHL_PUBLISH_CUDA=true" >> "$GITHUB_ENV"
       - name: build and publish on tag 'v*'
         if: startsWith(github.event.ref, 'refs/tags/v')
         run: |
@@ -39,6 +46,7 @@ jobs:
         run: |
           echo "build=$LISATOOLSWHL_BUILD" >> $GITHUB_OUTPUT
           echo "publish=$LISATOOLSWHL_PUBLISH" >> $GITHUB_OUTPUT
+          echo "publish_cuda=$LISATOOLSWHL_PUBLISH_CUDA" >> $GITHUB_OUTPUT
           echo "core-suffix=$LISATOOLSWHL_CORE_SUFFIX" >> $GITHUB_OUTPUT
   version:
     runs-on: ubuntu-latest
@@ -208,7 +216,7 @@ jobs:
           compiler: gcc
           version: 14
       - name: Build core wheels (macOS)
-        if: runner.os == 'macOS' && matrix.kind == 'core'
+        if: runner.os == 'macOS' && matrix.kind == 'core' && publish_cuda == false
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_SKIP: pp*
@@ -222,7 +230,7 @@ jobs:
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_ver }}
       - name: Build core wheels (Linux)
-        if: runner.os == 'Linux' && matrix.kind == 'core'
+        if: runner.os == 'Linux' && matrix.kind == 'core' && publish_cuda == false
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
@@ -310,4 +318,5 @@ jobs:
           TWINE_REPOSITORY: ${{ vars.TWINE_REPOSITORY }}
           TWINE_USERNAME: ${{ vars.TWINE_USERNAME }}
         run: |
+          ls -lh wheelhouse/*
           twine upload wheelhouse/*
