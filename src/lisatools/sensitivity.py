@@ -1151,7 +1151,6 @@ class SensitivityMatrixBase:
         xp = get_array_module(self.sens_mat)
 
         # setup detC
-       
         if self.sens_mat.ndim < 3:
             self.detC = xp.prod(self.sens_mat, axis=0)
             self.invC = 1 / self.sens_mat
@@ -1168,13 +1167,9 @@ class SensitivityMatrixBase:
                 self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
             )
             invC[self.detC == 0.0] = 1e-100
-
+            
             # switch them after they were effectively switched above
-            _mat_axes = mat_axes
-            mat_axes = basis_axes
-            basis_axes = _mat_axes
-            back_transpose_shape = mat_axes + basis_axes
-            self.invC = invC.transpose(back_transpose_shape)
+            self.invC = invC.transpose(transpose_shape)
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
@@ -1424,9 +1419,9 @@ class AE2SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(self, f: np.ndarray, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A2TDISens, E2TDISens]
-        super().__init__(f, sens_mat, **sens_kwargs)
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 
 class LISASensSensitivityMatrix(SensitivityMatrix):
@@ -1439,9 +1434,9 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(self, f: np.ndarray, nchannels: int, **sens_kwargs: dict) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, nchannels: int, **sens_kwargs: dict) -> None:
         sens_mat = [LISASens for _ in range(nchannels)]
-        super().__init__(f, sens_mat, **sens_kwargs)
+        super().__init__(settings, sens_mat, **sens_kwargs)
 
 
 def get_sensitivity(
@@ -1512,7 +1507,7 @@ def get_sensitivity(
                     raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
             
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        PSD = np.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)])
+        PSD = np.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
 
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")

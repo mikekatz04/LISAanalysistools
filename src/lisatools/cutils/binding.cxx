@@ -14,7 +14,8 @@ namespace py = pybind11;
 
 void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
 {
-    orbits->get_light_travel_time_arr(
+    get_light_travel_time_arr(
+        orbits,
         return_pointer_and_check_length(ltt, "ltt", num, 1),
         return_pointer_and_check_length(t, "t", num, 1),
         return_pointer_and_check_length(link, "sc", num, 1),
@@ -25,7 +26,8 @@ void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<d
 
 void OrbitsWrap::get_pos_wrap(array_type<double> pos_x, array_type<double> pos_y, array_type<double> pos_z, array_type<double> t, array_type<int> sc, int num)
 {
-    orbits->get_pos_arr(
+    get_pos_arr(
+        orbits,
         return_pointer_and_check_length(pos_x, "pos_x", num, 1),
         return_pointer_and_check_length(pos_y, "pos_y", num, 1),
         return_pointer_and_check_length(pos_z, "pos_z", num, 1),
@@ -40,7 +42,8 @@ void OrbitsWrap::get_normal_unit_vec_wrap(array_type<double>normal_unit_vec_x, a
 {
     
 // #ifdef __CUDACC__
-    orbits->get_normal_unit_vec_arr(
+    get_normal_unit_vec_arr(
+        orbits,
         return_pointer_and_check_length(normal_unit_vec_x, "n_arr_x", num, 1),
         return_pointer_and_check_length(normal_unit_vec_y, "n_arr_y", num, 1),
         return_pointer_and_check_length(normal_unit_vec_z, "n_arr_z", num, 1),
@@ -378,7 +381,7 @@ PYBIND11_MODULE(pycppdetector, m) {
 
     // Call initialization functions from other files
     detector_part(m);
-    m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
+    // m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 
     m.def("get_module_path_cpp", &get_module_path, "Returns the file path of the module");
     m.def("check_12", &check_12, "Check12");

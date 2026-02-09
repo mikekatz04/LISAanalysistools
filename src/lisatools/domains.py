@@ -10,6 +10,8 @@ from scipy import interpolate
 from scipy import special as scipy_special
 from scipy import signal
 import matplotlib.pyplot as plt
+from matplotlib import cm
+from scipy import interpolate
 
 try:
     import cupy as cp
@@ -246,7 +248,19 @@ class FDSettings(DomainSettingsBase):
     @property
     def differential_component(self) -> float:
         return self.df
-
+    
+    @property
+    def ind_min_actual(self) -> int:
+        if self.ind_min is None:
+            return 0
+        return self.ind_min
+    
+    @property
+    def ind_max_actual(self) -> int:
+        if self.ind_max is None:
+            return self.N - 1
+        return self.ind_max
+    
     @staticmethod
     def get_associated_class():
         return FDSignal
@@ -304,22 +318,15 @@ class FDSettings(DomainSettingsBase):
         sl = self.active_slice
         return sl.stop - sl.start
     
-try:
-    from pywavelet.transforms.phi_computer import phitilde_vec_norm
-    from pywavelet.transforms.numpy.forward.from_freq import (
-        transform_wavelet_freq_helper
-    )
+# try:
+#     from pywavelet.transforms.phi_computer import phitilde_vec_norm
+#     from pywavelet.transforms.numpy.forward.from_freq import (
+#         transform_wavelet_freq_helper
+#     )
 
-    from pywavelet.transforms.numpy.inverse.to_freq import (
-        inverse_wavelet_freq_helper_fast as inverse_wavelet_freq_helper,
-    )
-except (ModuleNotFoundError, ImportError):
-    def phitilde_vec_norm(NF, NT, B):
-        raise ModuleNotFoundError("pywavelet is not installed.")
-    
-    def inverse_wavelet_freq_helper(arr, phif, NF, NT):
-        raise ModuleNotFoundError("pywavelet is not installed.")
-
+# from pywavelet.transforms.numpy.inverse.to_freq import (
+#     inverse_wavelet_freq_helper_fast as inverse_wavelet_freq_helper,
+# )
 
 class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
@@ -383,8 +390,7 @@ class FDSignal(FDSettings, DomainBase):
         
         # free(wdm_temp);
         
-
-    def wdmtransform(self, settings=None, window=None):
+    def wdmtransform(self, settings=None, window=None, return_transpose_time_axis_first: bool = False):
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
@@ -397,21 +403,24 @@ class FDSignal(FDSettings, DomainBase):
         n = xp.tile(xp.arange(settings.NT), (settings.NF, 1))
         k = (m - 1) * int(settings.NT / 2) + xp.arange(settings.NT)[None, :]
         
-        
+
+        # removed zero frequency and mirrored
+        k = settings.get_shift_map(m)
+
         base_window = settings.window[:-1]  # TODO: compared to Tyson's code he does i=-N/2; i<N/2; i++
         dc_window = settings.dc_layer_window
         # TODO: check if this is right?!?!
         max_freq_window = settings.max_freq_layer_window
 
-        k[0] += int(settings.NT / 2)
+        # k[0] += int(settings.NT / 2)
         # k[-1] -= int(settings.NT / 2)
         # it is 2 because the max frequency would be at 1, but it removes that (?)
         assert k.max().item() == self.N - 2
         tmp = self.arr[:, k]
         
         tmp[:, 1:-1] *= base_window[None, None, :]
-        tmp[0] *= dc_window
-        tmp[-1] *= max_freq_window
+        # tmp[0] *= dc_window
+        # tmp[-1] *= max_freq_window
 
         after_ifft = xp.fft.ifft(tmp, axis=-1)
         
@@ -419,8 +428,15 @@ class FDSignal(FDSettings, DomainBase):
         _new_arr = xp.zeros((self.nchannels, settings.NF, settings.NT), dtype=float)
         _new_arr[:, is_m_plus_n_even] = xp.sqrt(2) * xp.real(after_ifft)[:, is_m_plus_n_even]
         _new_arr[:, (~is_m_plus_n_even)] = (-1) ** ((m * n)[(~is_m_plus_n_even)] + 1) * xp.sqrt(2) * xp.imag(after_ifft)[:, (~is_m_plus_n_even)]
+        
+        # TODO: need to fix top and bottom layer
+        _new_arr[:, np.array([0, -1])] = 0.0
+        if return_transpose_time_axis_first:
+            output = _new_arr.transpose(0, 2, 1).copy()
+        else:
+            output = _new_arr
 
-        return WDMSignal(_new_arr.transpose(0, 2, 1).copy(), settings=settings)
+        return WDMSignal(output, settings=settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         xp = get_array_module(self.arr)
@@ -487,7 +503,14 @@ class STFTSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(min_freq=self.min_freq, max_freq=self.max_freq)
-    
+        
+    @property
+    def f_arr_edges(self) -> np.ndarray:
+        return np.arange(self.NF + 1) * self.df
+    @property
+    def t_arr_edges(self) -> np.ndarray:
+        return np.arange(self.NT + 1) * self.dt
+
     def __eq__(self, value):
         if not isinstance(value, STFTSettings):
             return False
@@ -589,7 +612,7 @@ class WDMSettings(DomainSettingsBase):
         Tobs: float, 
         dt: float,
         t0: float = 0.0,
-        oversample: int = 8,
+        oversample: int = 16,
         window: Optional[np.ndarray | cp.ndarray] = None,
     ):
         self.Tobs = Tobs
@@ -605,29 +628,28 @@ class WDMSettings(DomainSettingsBase):
         self.cadence = WAVELET_DURATION/self.NF
         self.Omega = np.pi/self.cadence
         self.dOmega = self.Omega/self.NF
+        self.domega = 2 * np.pi / self.Tobs
         self.inv_root_dOmega = 1.0/np.sqrt(self.dOmega)
-        self.B = self.dOmega
+        self.B = self.Omega / (2 * self.NF)
         self.A = (self.dOmega-self.B)/2.0
         
         self.BW = (self.A+self.B)/np.pi
 
         self.N = self.oversample * 2 * self.NF
+        self.T = self.N * self.cadence
         if window is None:
             self.setup_window()
         else:
             assert len(window) == self.NT + 1
             self.window = window
-
-    @property
-    def special(self):
-        if xp is np:
-            return scipy_special
-        else:
-            return cupy_special
-
+            T = self.dt * self.NT
+            domega = 2 * np.pi / T
+            self.omega = (np.arange(self.NT + 1) - int(self.NT / 2)) * domega
+            self.norm = np.sqrt(self.N * self.cadence / self.dOmega)
+   
     @property
     def basis_shape(self) -> tuple:
-        return (self.NT, self.NF)
+        return (self.NF, self.NT)
     
     @property
     def t_arr(self, xp=np) -> np.ndarray | cp.ndarray:
@@ -636,6 +658,13 @@ class WDMSettings(DomainSettingsBase):
     @property
     def f_arr(self, xp=np) -> np.ndarray | cp.ndarray:
         return xp.arange(self.NF) * self.df
+    
+    @property
+    def f_arr_edges(self) -> np.ndarray:
+        return np.arange(self.NF + 1) * self.df
+    @property
+    def t_arr_edges(self) -> np.ndarray:
+        return np.arange(self.NT + 1) * self.dt
 
     def phitilde(self, omega, xp=np):
         insDOM = self.inv_root_dOmega
@@ -650,10 +679,43 @@ class WDMSettings(DomainSettingsBase):
         z[(xp.abs(omega) < A)] = insDOM
         
         return z
+    
+    def wavelet(self, N: int, in_fd: Optional[bool] = True) -> np.ndarray:
 
-    def setup_window(self):
+        # NT * NF is even 
+        # assert (self.NT * self.NF) % 2 == 0
+        base_window = self.window[:-1]
+        omega_N = (np.arange(self.N) - int(self.N / 2)) * self.domega
+        wavelet_N = 1 / np.sqrt(2.) * self.phitilde(omega_N)
+        
+        if in_fd:
+            return wavelet_N
+        else:
+            return np.fft.ifft(wavelet_N) / self.norm
+        breakpoint()
+        wavelets_rfft = np.zeros((len(m), int((self.NT * self.NF) / 2 + 1)))
 
-        # double *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
+        np.put_along_axis(wavelets_rfft, k, base_window * 1 / np.sqrt(2.), axis=-1)
+        freq = np.fft.fftshift(np.fft.fftfreq(self.NT * self.NF, self.data_dt))
+        wavelets_fft = np.exp(-1j * 2 * np.pi * freq[None, :] * n[:, None] * self.dt) * np.concatenate([wavelets_rfft[:, ::-1][:, :-1], wavelets_rfft[:, :-1]], axis=-1)
+        if in_fd:
+            return wavelets_fft
+        else:
+            wavelets_time = np.fft.ifft(wavelets_fft, axis=-1) / self.norm
+            return wavelets_time
+        
+    def get_shift_map(self, m: np.ndarray[int]) -> np.ndarray:
+        if m.ndim == 1:
+            m_in = m[:, None]
+        elif m.ndim == 2:
+            m_in = m
+        else:
+            raise ValueError("m must be 1D or 2D array.")
+        return (m_in - 1) * int(self.NT / 2) + np.arange(self.NT)[None, :]
+        
+    def setup_window(self, xp=np):
+
+        # *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
         # zero frequency
         # REAL(DX,0) =  wdm->inv_root_dOmega
         # IMAG(DX,0) =  0.0
@@ -708,8 +770,8 @@ class WDMSignal(WDMSettings, DomainBase):
         return WDMSettings(*self.args, **self.kwargs)
     
     def wdm_to_fd(self, settings=None, window=None):
-        
-        phif = phitilde_vec_norm(self.NF, self.NT, 4.0)
+        raise NotImplementedError
+        phif = phitilde_vec_norm(self.NT, self.NF, 4.0)
 
         # determine FD parameters
         total_pixels = self.NT * self.NF
@@ -754,7 +816,85 @@ class WDMSignal(WDMSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
+    def heatmap(self, **kwargs):
+        # if fig is not None or ax is not None:
+        #     if fig is None or ax is None:
+        #         raise ValueError("If providing fig or ax, must provide both.")
+            
+        # else:
+        #     # fig and ax are None
+        fig, ax = plt.subplots(3, 1, sharex=True, sharey=True)
+        
+        if "cmap" not in kwargs:
+            kwargs["cmap"] = cm.RdBu
+
+        for i, (ax_i, channel)  in enumerate(zip(ax, ["X", "Y", "Z"])):
+            z = self.arr[i]
+            x, y = self.t_arr_edges, self.f_arr_edges
+            sc = ax_i.pcolormesh(
+                x, y, z, 
+                # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
+                **kwargs
+            )
+            ax_i.set_ylabel(channel)
+        
+        cax = fig.add_axes([0.9, 0.2, 0.05, 0.6])
+        fig.colorbar(sc, cax=cax)
+
+        plt.subplots_adjust(right=0.85, hspace=0.1)
+        return fig, ax
+
+class WDMLookupTable(WDMSettings):
+    def __init__(self, settings: WDMSettings, f_steps: int, fdot_steps: int, num_channel: int):
+        WDMSettings.__init__(self, *settings.args, **settings.kwargs)
+        d_fdot = self.d_fdot = 0.1
+        fdot_step = self.df/self.T*d_fdot
+        self.f_steps = f_steps
+        self.fdot_steps = fdot_steps
+        self.deltaf = self.BW/(self.f_steps)
+        self.num_channel = num_channel
+        
+        # The odd wavelets coefficienst can be obtained from the even.
+        # odd cosine = -even sine, odd sine = even cosine
+        # each wavelet covers a frequency band of width DW
+        # execept for the first and last wasvelets
+        # there is some overlap. The wavelet pixels are of width
+        # DOM/PI, except for the first and last which have width
+        # half that
+        ref_layer = int(self.NF/2)
     
+        f0 = ref_layer * self.df
+        self.fdot_vals = (np.arange(fdot_steps) - int(fdot_steps / 2)) * fdot_step
+
+        wave = self.wavelet(self.N, in_fd=False)
+        
+        self.f_scaled_vals = ((np.arange(self.f_steps)-self.f_steps/2)+0.5)*self.deltaf
+        self.f_vals = f0 + self.f_scaled_vals
+        self.min_f_scaled = self.f_scaled_vals.min().item()
+        self.max_f_scaled = self.f_scaled_vals.max().item()
+        self.min_fdot = self.fdot_vals.min().item()
+        self.max_fdot = self.fdot_vals.max().item()
+        t = (np.arange(self.N) - int(self.N/2)) * self.cadence
+        phase = 2 * np.pi * self.f_vals[:, None, None] * t[None, None, :] + np.pi * self.fdot_vals[None, :, None]* (t * t)[None, None, :]
+        
+        real_coeff = np.sum(wave * np.cos(phase)*self.cadence, axis=-1)  # TODO: trapz?
+        imag_coeff = np.sum(wave * np.sin(phase)*self.cadence, axis=-1)  
+        self.table = real_coeff + 1j * imag_coeff
+
+    @property
+    def table(self) -> np.ndarray:
+        return self._table
+    
+    @table.setter
+    def table(self, table: np.ndarray):
+        self._table = table
+        points = np.asarray([tmp.ravel() for tmp in np.meshgrid(self.f_vals, self.fdot_vals)]).T
+        self._interpolant = interpolate.LinearNDInterpolator(points, table.flatten(), rescale=True)
+
+    def get_table_coeffs(self, f_arr: np.ndarray, fdot_arr: np.ndarray):
+        assert np.all((f_arr > self.f_vals.min()) & (f_arr < self.f_vals.max()))
+        assert np.all((fdot_arr > self.fdot_vals.min()) & (fdot_arr < self.fdot_vals.max()))
+        return self._interpolant(np.array([f_arr, fdot_arr]).T)
 
 
 __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]

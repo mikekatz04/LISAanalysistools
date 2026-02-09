@@ -126,8 +126,11 @@ class BBHCalculationController(CalculationController):
             11: time_convert,
             (0, 1): mT_q_to_m1_m2,
         }
+
+        input_basis = list(range(12))
+        output_basis = list(range(12))
         self.transform_fn = TransformContainer(
-            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis, output_basis, parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
         )
 
         super(BBHCalculationController, self).__init__(*args, **kwargs)
@@ -263,8 +266,11 @@ class GBCalculationController(CalculationController):
             8: np.arcsin,
             # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
         }
+
+        input_basis = list(range(9))
+        output_basis = list(range(9))
         self.transform_fn = TransformContainer(
-            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis, output_basis, parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
         )
 
         super(GBCalculationController, self).__init__(*args, **kwargs)
@@ -389,8 +395,11 @@ class EMRICalculationController(CalculationController):
             9: np.arccos,
             # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
         }
+        
+        input_basis = list(range(14))
+        output_basis = list(range(14))
         self.transform_fn = TransformContainer(
-            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis, output_basis, parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
         )
 
         super(EMRICalculationController, self).__init__(*args, **kwargs)

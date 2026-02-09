@@ -80,7 +80,7 @@ class DataResidualArray:
             if signal_domain is None:
                 if isinstance(input_signal_domain, TDSettings):
                     # default for TD for now is in FD
-                    Nf = np.fft.rfft(np.ones(input_signal_domain.N))
+                    Nf = np.fft.rfft(np.ones(input_signal_domain.N)).shape[0]
                     df = 1. / (input_signal_domain.N * input_signal_domain.dt)
                     signal_domain = FDSettings(Nf, df)
 
@@ -96,6 +96,8 @@ class DataResidualArray:
             self.nchannels = self.data_res_arr.nchannels
             self.data_shape = self.data_res_arr.settings.basis_shape
             
+        self.init_kwargs = dict(signal_domain=signal_domain, input_signal_domain=input_signal_domain, **kwargs)
+    
     @property
     def init_kwargs(self) -> dict:
         """Initial dt, df, f_arr"""
@@ -106,25 +108,27 @@ class DataResidualArray:
         """Set initial kwargs."""
         self._init_kwargs = init_kwargs
 
-    def _check_inputs(
-        self,
-        dt: Optional[float] = None,
-        f_arr: Optional[np.ndarray] = None,
-        df: Optional[float] = None,
-    ):
-        
-        if dt is None and f_arr is None and df is None:
-            raise ValueError("Must provide either df, dt, or f_arr.")
-        
-        self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
+    # def _check_inputs(
+    #     self,
+    #     dt: Optional[float] = None,
+    #     f_arr: Optional[np.ndarray] = None,
+    #     df: Optional[float] = None,
+    # ):
+    #     number_of_none = 0
 
-    @property
-    def start_freq_ind(self):
-        if self.df is not None:
-            return int(self.f_arr[0] / self.df)
-        else:
-            return None
-        
+    #     number_of_none += 1 if dt is None else 0
+    #     number_of_none += 1 if f_arr is None else 0
+    #     number_of_none += 1 if df is None else 0
+
+    #     if number_of_none == 3:
+    #         raise ValueError("Must provide either df, dt, or f_arr.")
+
+    #     elif number_of_none == 1:
+    #         raise ValueError(
+    #             "Can only provide one of dt, f_arr, or df. Not more than one."
+    #         )
+    #     self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
+
     def _store_time_and_frequency_information(
         self,
         dt: Optional[float] = None,
@@ -253,7 +257,7 @@ class DataResidualArray:
 
     def flatten(self) -> np.ndarray:
         """Flatten the ``data_res_arr``."""
-        return self.data_res_arr.flatten()
+        return self.data_res_arr[:].flatten()
 
     @property
     def shape(self) -> tuple:
