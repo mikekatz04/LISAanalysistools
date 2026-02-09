@@ -160,6 +160,8 @@ class L1DataLoader:
         self.data_folder = os.path.join(L1_folder, 'data')
         self.catalogues_folder = os.path.join(L1_folder, 'catalogues')
 
+        self.catalogue = {}
+
         source_types = [st.upper() for st in source_types]
 
         for source_type in source_types:
@@ -186,6 +188,38 @@ class L1DataLoader:
             if self.orbits_kwargs:
                 logger.info(f"Orbits kwargs: {self.orbits_kwargs}")
 
+    @property
+    def catalogues_map(self) -> dict:
+        """
+        Property to get the mapping of source types to their catalogue file names.
+
+        Returns:
+            dict: Mapping of source types to catalogue file names.
+        """
+        return {
+            'GB': 'wdwd_cat_mojito_lite_processed.hdf5',
+            'VGB': 'vgb_cat_mojito_lite_processed.hdf5',
+            'MBHB': 'mbhb_cat_mojito_lite_processed_MT.hdf5',
+            'EMRI': 'emri_cat_mojito_lite_processed_MT.hdf5',
+            'SOBHB': 'sobhb_cat_mojito_lite_processed_MT.hdf5'
+        }
+    
+    def load_single_binary(self, group: h5py.Group, binary_id: int) -> dict:
+        """
+        Load a single binary source from the given HDF5 group.
+
+        Args:
+            group (h5py.Group): The HDF5 group containing binary sources.
+            binary_id (int): The identifier of the binary source to load.
+        
+        Returns:
+            dict: A dictionary containing the parameters of the binary source.
+        """
+        params = {}
+        for key in group.keys():
+            params[key] = group[key][binary_id][()]
+
+        return params
 
     def _open(self, file_path: str) -> MojitoL1File:
         raise NotImplementedError("_open method should be implemented in subclasses.")
@@ -236,12 +270,20 @@ class L1DataLoader:
                 ids = [ids] 
             if len(ids) == 0:
                 raise ValueError(f"No source IDs provided for source type '{source_type}'.")
+            
+            binary_params = h5py.File(os.path.join(self.catalogues_folder, self.catalogues_map.get(source_type)), 'r')['Binaries']
+
+            self.catalogue[source_type] = {}
 
             if self.verbose:
                 logger.info(f"Loading data for source type '{source_type}'")
 
             for source_id in tqdm(ids, desc=f"Loading {source_type} sources", disable=not self.verbose):
                 file_path = find_file(subfolder, source_type, source_id)
+    
+                self.catalogue[source_type][source_id] = self.load_single_binary(binary_params, source_id)
+                if self.verbose:
+                    logger.info(f"Loaded catalogue parameters for {source_type} source ID {source_id} from catalogue.")
 
                 with self._open(file_path) as f:
                     _xyz = f.tdis.xyz_doppler[:]

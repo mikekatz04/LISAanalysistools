@@ -226,7 +226,7 @@ class DataResidualArray:
     @property
     def frequency_arr(self) -> np.ndarray:
         """Frequency array"""
-        return self._f_arr
+        return self.settings.f_arr
 
     @property
     def data_res_arr(self) -> np.ndarray:

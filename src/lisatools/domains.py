@@ -148,12 +148,15 @@ class TDSignal(DomainBase, TDSettings):
 
         df = 1 / (self.N * self.dt)
         
+        fd_arr = xp.fft.rfft(self.arr * window) * self.dt
+
         if settings is not None:
             assert isinstance(settings, FDSettings)
             assert settings.df == df
-
-        fd_arr = p.fft.rfft(self.arr * window) * self.dt
-        fd_settings = FDSettings(fd_arr.shape[-1], df,)
+            fd_settings = settings
+        else:
+            fd_settings = FDSettings(fd_arr.shape[-1], df,)
+        
         return FDSignal(fd_arr[..., fd_settings.active_slice], fd_settings)
 
     def stft(self, settings=None, window=None):
@@ -322,10 +325,10 @@ class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
         FDSettings.__init__(self, *settings.args, **settings.kwargs)
         
-        if hasattr(arr, "get") and settings.xp == np:
-            arr = arr.get()
-        else:
-            arr = settings.xp.asarray(arr)
+        # if hasattr(arr, "get") and settings.xp == np:
+        #     arr = arr.get()
+        # else:
+        #     arr = settings.xp.asarray(arr)
 
         DomainBase.__init__(self, arr)
 

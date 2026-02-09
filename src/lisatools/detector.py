@@ -19,6 +19,7 @@ try:
     import jax
     import jax.numpy as jnp
     jax.config.update("jax_enable_x64", True)
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 except (ModuleNotFoundError, ImportError):
     jax = None
     jnp = None
@@ -202,6 +203,16 @@ class Orbits(LISAToolsParallelModule, ABC):
         self._t = t
 
     @property
+    def sc_t(self) -> np.ndarray:
+        """Spacecraft time grid. In this version of the orbits all the quantities are on the same grid"""
+        return self.t
+    
+    @property
+    def ltt_t(self) -> np.ndarray:
+        """LTTs time grid. In this version of the orbits all the quantities are on the same grid"""
+        return self.t
+    
+    @property
     def ltt(self) -> np.ndarray:
         """Light travel time."""
         self._check_configured()
@@ -323,10 +334,10 @@ class Orbits(LISAToolsParallelModule, ABC):
         # prepare cpp class args to load when needed
         if make_cpp:
             self.pycppdetector_args = [ # duplicate ltts and positions informations when using the more general c++ class
-                0,
+                0.,
                 dt,
                 len(self.t),
-                0, 
+                0., 
                 dt,
                 len(self.t),
                 self.xp.asarray(self.n.flatten().copy()),
@@ -352,6 +363,16 @@ class Orbits(LISAToolsParallelModule, ABC):
     @dt.setter
     def dt(self, dt: float) -> None:
         self._dt = dt
+
+    @property
+    def sc_dt(self) -> float:
+        """Spacecraft dt. In this version of the orbits all the quantities are on the same grid"""
+        return self.dt
+    
+    @property
+    def ltt_dt(self) -> float:
+        """LTTs dt. In this version of the orbits all the quantities are on the same grid"""
+        return self.dt
 
     @property
     def pycppdetector(self) -> object:
@@ -697,24 +718,23 @@ class L1Orbits(Orbits):
         filename: str,
         armlength: float = 2.5e9,
         force_backend: Optional[str] = None,
+        frame: str = "ecliptic",
         **kwargs
     ):
+        assert frame in ["ecliptic", "icrs"], "frame must be 'ecliptic' or 'icrs'"
+        self.frame = frame
         super().__init__(filename, armlength, force_backend, **kwargs)
-        # # Store the Mojito file path
-        # self.filename = filename
-        
-        # # Don't call super().__init__ - we need to override _setup
-        # # Instead, manually initialize the minimal required attributes
-        # self._armlength = armlength
-        # self._filename = filename  # For compatibility
-        # self.configured = False
-        
-        # # Load data from Mojito file
-        # self._load_mojito_data()
-        
-        # # Initialize backend
-        # # from .utils.parallelbase import LISAToolsParallelModule
-        # LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+       
+
+    @property
+    def kwargs(self):
+        """Keyword arguments for recreating this class instance."""
+        return {
+            "filename": self.filename,
+            "armlength": self.armlength,
+            "force_backend": self.backend,
+            "frame": self.frame,
+        }
         
     def open(self):
         """Override base class open method."""
@@ -735,9 +755,14 @@ class L1Orbits(Orbits):
             
             # Load spacecraft positions and their time array  
             pos_icrs = f.orbits.positions[:]  # Shape: (N_pos_times, 3, 3)
-            self.x_base = icrs_to_ecliptic(pos_icrs)  # Convert to ecliptic frame
+            if self.frame == "ecliptic":
+                self.x_base = icrs_to_ecliptic(pos_icrs)
+            else:
+                self.x_base = pos_icrs
             self.v_base = f.orbits.velocities[:] # Shape: (N_pos_times, 3, 3)
             self.sc_t_base = f.orbits.time_sampling.t()  # Shape: (N_pos_times,)
+            self.size_base = self.sc_t_base.shape[0]
+            self.dt_base = float(f.orbits.time_sampling.dt)
             
             # Store dt from each dataset (they may differ)
             self.ltt_dt = f.ltts.time_sampling.dt
