@@ -125,4 +125,3 @@ if(LISATOOLS_WITH_GPU)
                                       binding.hpp)
 
 endif()
-

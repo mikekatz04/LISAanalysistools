@@ -381,30 +381,6 @@ wheels = [
 ]
 
 [[package]]
-name = "eryn"
-version = "1.2.5"
-source = { registry = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/simple" }
-dependencies = [
-    { name = "h5py" },
-    { name = "jsonschema" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "nvidia-ml-py" },
-    { name = "platformdirs" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "scipy" },
-    { name = "tqdm" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/29/e8/831703510bd023412c6621a9f0c2002b4b689151b2b76d54381c2e8c2e14/eryn-1.2.5.tar.gz", hash = "sha256:4ad5602d07fd9a71496deab01cc63c39d9d1d3ceccfd24c25d7fbf26849ecb44", size = 91492, upload-time = "2025-11-22T07:03:44.94Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/c8/89da6e46b67423c3ee0e808a948c061f9c5665ed8148b7ce383eac1b294d/eryn-1.2.5-py3-none-any.whl", hash = "sha256:d1544586843b00f49c15b0fd417db57502a73a96ef7f23726ab11eab13fd2b5f", size = 112908, upload-time = "2025-11-22T07:03:43.918Z" },
-]
-
-[[package]]
 name = "executing"
 version = "2.2.1"
 source = { registry = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/simple" }
@@ -891,12 +867,10 @@ doc = [
 sampling = [
     { name = "chainconsumer" },
     { name = "corner" },
-    { name = "eryn" },
     { name = "fastlisaresponse" },
 ]
 testing = [
     { name = "corner" },
-    { name = "eryn" },
     { name = "gbgpu" },
     { name = "matplotlib" },
 ]
@@ -907,8 +881,6 @@ requires-dist = [
     { name = "corner", marker = "extra == 'doc'" },
     { name = "corner", marker = "extra == 'sampling'" },
     { name = "corner", marker = "extra == 'testing'" },
-    { name = "eryn", marker = "extra == 'sampling'" },
-    { name = "eryn", marker = "extra == 'testing'" },
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "fastlisaresponse", marker = "extra == 'sampling'" },
     { name = "gbgpu", marker = "extra == 'testing'" },
@@ -917,7 +889,7 @@ requires-dist = [
     { name = "ipython", marker = "extra == 'doc'" },
     { name = "ipywidgets", marker = "extra == 'doc'" },
     { name = "jsonschema" },
-    { name = "lisaconstants", specifier = ">=2.0.1" },
+    { name = "lisaconstants", specifier = "==2.0.2" },
     { name = "matplotlib" },
     { name = "matplotlib", marker = "extra == 'testing'" },
     { name = "mojito", index = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/simple" },
