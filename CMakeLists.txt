@@ -10,7 +10,7 @@
 cmake_minimum_required(VERSION 3.23...3.31)
 
 # ---- Main project definition ----
-project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX) #@ADDCUDAHERE@
+project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX)
 
 # ---- Find required dependencies ----
 find_package(Python COMPONENTS Interpreter Development.Module NumPy REQUIRED)
@@ -51,7 +51,7 @@ set_property(
 # backend if it is compiled. See the documentation of CUDA_ARCHITECTURES:
 # https://cmake.org/cmake/help/latest/prop_tgt/CUDA_ARCHITECTURES.html
 set(
-  LISATOOLS_CUDA_ARCH "70;75;80;86;90"
+  LISATOOLS_CUDA_ARCH "native"
   CACHE STRING "CUDA Architecture targetted for LISATOOLS compilation (see doc of \
           CMAKE_CUDA_ARCHITECTURES)."
 )
@@ -123,7 +123,6 @@ endif()
 # ---- Handle GPU support ----
 get_target_property(_LISATOOLS_WITH_GPU lisaanalysistools WITH_GPU)
 if(_LISATOOLS_WITH_GPU)
-  set(CMAKE_CUDA_ARCHITECTURES ${LISATOOLS_CUDA_ARCH})
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
 endif()

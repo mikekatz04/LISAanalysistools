@@ -3,9 +3,8 @@ requires = [
   "Cython",
   "numpy",
   "scikit_build_core",
-  "eryn",
   "pybind11",
-  "gpubackendtools",  # @ file:///home/mlkatz/GPUBackendTools",  # ==0.0.15 
+  "gpubackendtools==0.0.15",  # @ file:///home/mlkatz/GPUBackendTools",  
 ]
 build-backend = "scikit_build_core.build"
 
@@ -26,7 +25,7 @@ dependencies = [
   "h5py",
   "matplotlib",
   "jsonschema",                            # To validate content of file registry
-  "lisaconstants>=2.0.1",
+  "lisaconstants==2.0.2",
   "multispline",
   "numba>=0.63.1",
   "numpy",
@@ -74,7 +73,7 @@ optional-dependencies.doc = [
 ]
 
 optional-dependencies.sampling = [
-  # "eryn",
+  "eryn",
   "fastlisaresponse",
   "corner",
   "chainconsumer",
@@ -82,14 +81,14 @@ optional-dependencies.sampling = [
 
 optional-dependencies.testing = [
   "matplotlib",
-  # "eryn",
+  "eryn",
   "gbgpu",
   "corner",
 ]
 
 [tool.setuptools_scm]
-version_scheme = "only-version"  # "no-guess-dev"
-local_scheme = "no-local-version" #  "node-and-date"
+version_scheme = "no-guess-dev"
+local_scheme = "node-and-date"
 version_file = "src/lisatools/_version.py"
 
 [[tool.uv.index]]

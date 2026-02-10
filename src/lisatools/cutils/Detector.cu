@@ -202,7 +202,7 @@ void get_light_travel_time_kernel(double *ltt, double *t, int *link, int num, Or
 }
 
 
-void get_light_travel_time_arr(Orbits *orbits, double *ltt, double *t, int *link, int num)
+void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int num)
 {
 #ifdef __CUDACC__
     int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
@@ -210,7 +210,7 @@ void get_light_travel_time_arr(Orbits *orbits, double *ltt, double *t, int *link
     // copy self to GPU
     Orbits *orbits_gpu;
     gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
-    gpuErrchk(cudaMemcpy(orbits_gpu, orbits, sizeof(Orbits), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
 
     get_light_travel_time_kernel<<<num_blocks, NUM_THREADS>>>(ltt, t, link, num, *orbits_gpu);
     cudaDeviceSynchronize();
@@ -220,7 +220,7 @@ void get_light_travel_time_arr(Orbits *orbits, double *ltt, double *t, int *link
 
 #else // __CUDACC__
 
-    get_light_travel_time_kernel(ltt, t, link, num, *orbits);
+    get_light_travel_time_kernel(ltt, t, link, num, *this);
 
 #endif // __CUDACC__
 }
@@ -251,7 +251,7 @@ void get_pos_kernel(double *pos_x, double *pos_y, double *pos_z, double *t, int 
 }
 
 
-void get_pos_arr(Orbits *orbits, double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num)
+void Orbits::get_pos_arr(double *pos_x, double *pos_y, double *pos_z, double *t, int *sc, int num)
 {
 #ifdef __CUDACC__
     int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
@@ -259,7 +259,7 @@ void get_pos_arr(Orbits *orbits, double *pos_x, double *pos_y, double *pos_z, do
     // copy self to GPU
     Orbits *orbits_gpu;
     gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
-    gpuErrchk(cudaMemcpy(orbits_gpu, orbits, sizeof(Orbits), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
 
     get_pos_kernel<<<num_blocks, NUM_THREADS>>>(pos_x, pos_y, pos_z, t, sc, num, *orbits_gpu);
     cudaDeviceSynchronize();
@@ -269,7 +269,7 @@ void get_pos_arr(Orbits *orbits, double *pos_x, double *pos_y, double *pos_z, do
 
 #else // __CUDACC__
 
-    get_pos_kernel(pos_x, pos_y, pos_z, t, sc, num, *orbits);
+    get_pos_kernel(pos_x, pos_y, pos_z, t, sc, num, *this);
 
 #endif // __CUDACC__
 }
@@ -299,7 +299,7 @@ void get_normal_unit_vec_kernel(double *normal_unit_vec_x, double *normal_unit_v
     }
 }
 
-void get_normal_unit_vec_arr(Orbits *orbits, double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num)
+void Orbits::get_normal_unit_vec_arr(double *normal_unit_vec_x, double *normal_unit_vec_y, double *normal_unit_vec_z, double *t, int *link, int num)
 {
 #ifdef __CUDACC__
     int num_blocks = std::ceil((num + NUM_THREADS - 1) / NUM_THREADS);
@@ -307,7 +307,7 @@ void get_normal_unit_vec_arr(Orbits *orbits, double *normal_unit_vec_x, double *
     // copy self to GPU
     Orbits *orbits_gpu;
     gpuErrchk(cudaMalloc(&orbits_gpu, sizeof(Orbits)));
-    gpuErrchk(cudaMemcpy(orbits_gpu, orbits, sizeof(Orbits), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(orbits_gpu, this, sizeof(Orbits), cudaMemcpyHostToDevice));
 
     get_normal_unit_vec_kernel<<<num_blocks, NUM_THREADS>>>(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *orbits_gpu);
     cudaDeviceSynchronize();
@@ -317,7 +317,7 @@ void get_normal_unit_vec_arr(Orbits *orbits, double *normal_unit_vec_x, double *
 
 #else // __CUDACC__
 
-    get_normal_unit_vec_kernel(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *orbits);
+    get_normal_unit_vec_kernel(normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z, t, link, num, *this);
 
 #endif // __CUDACC__
 }

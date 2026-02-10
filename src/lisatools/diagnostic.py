@@ -146,7 +146,7 @@ def inner_product(
     out = 0.0
     # x = freqs
 
-    tmp = []
+    #tmp = []
     # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
         factor = op_set["factor"]
@@ -183,11 +183,12 @@ def inner_product(
         # # switching to summation for comp to other domains
         # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
         # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
-        tmp.append(tmp_out)
+        
+        #tmp.append(tmp_out)
         
         out += tmp_out
 
-    tmp = np.asarray(tmp)
+    # tmp = np.asarray(tmp)
     # normalize the inner produce
     normalization_value = 1.0
     if normalize is True:

@@ -17,7 +17,7 @@ import time
 from ... import get_backend
 from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba 
 from ...analysiscontainer import AnalysisContainerArray
-from ...mojito_detector import XYZSensitivityBackend
+from ...sensitivity import XYZSensitivityBackend
 
 
 def psd_log_like_ae(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
