@@ -1114,8 +1114,8 @@ class SensitivityMatrix:
             self.sens_kwargs = tmp_kwargs
             
             num_components = np.prod(outer_shape).item()
-            # xp = get_array_module(self.frequency_arr)
-            xp = np
+            xp = get_array_module(self.basis_settings.f_arr)
+            # xp = np
             if self.is_array_base:
                 _sens_mat = xp.asarray(sens_mat)
             
@@ -1478,8 +1478,9 @@ def get_sensitivity(
                 if not isinstance(tmp, tuple) and not isinstance(tmp, list):
                     raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
             
+        xp = get_array_module(basis_settings.f_arr)
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        PSD = np.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
+        PSD = xp.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
 
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")

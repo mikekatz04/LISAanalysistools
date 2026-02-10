@@ -186,7 +186,7 @@ def inner_product(
         
         out += tmp_out
 
-    tmp = np.asarray(tmp)
+    tmp = xp.asarray(tmp)
     # normalize the inner produce
     normalization_value = 1.0
     if normalize is True:
