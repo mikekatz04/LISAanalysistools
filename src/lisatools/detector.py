@@ -20,9 +20,11 @@ try:
     import jax.numpy as jnp
     jax.config.update("jax_enable_x64", True)
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    jax_here = True
 except (ModuleNotFoundError, ImportError):
     jax = None
     jnp = None
+    jax_here = False
 
 SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
@@ -599,85 +601,6 @@ class ESAOrbits(Orbits):
         super().__init__("esa-trailing-orbits.h5", *args, **kwargs)
 
 
-@jax.jit
-def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
-    """
-    Interpolate spacecraft position using JAX.
-    
-    Args:
-        query_t: shape (N,)
-        sc_idx: shape (N,) or (1,) - 0-based index (0, 1, 2)
-        t_grid: shape (T_dense,)
-        pos_grid: shape (T_dense, 3_sc, 3_coords)
-    """
-
-    def _single_point(t, sc):
-        # t: scalar float
-        # sc: scalar int (0, 1, 2)
-        
-        # pos_grid is (Times, SC, 3)
-        # We want to interpolate along axis 0.
-        
-        # Helper for 1D interp
-        def interp_1d(vals):
-            return jnp.interp(t, t_grid, vals)
-            
-        # Select the trajectory for this spacecraft
-        # pos_grid[:, sc, 0] gives x(t) for spacecraft sc
-        # We use simple indexing. Since 'sc' is a tracer in JIT, simple indexing might need dynamic_slice 
-        # or just work if shape is static. JAX numpy indexing usually works fine.
-        
-        val_x = interp_1d(pos_grid[:, sc, 0])
-        val_y = interp_1d(pos_grid[:, sc, 1])
-        val_z = interp_1d(pos_grid[:, sc, 2])
-        return jnp.array([val_x, val_y, val_z])
-
-    # If inputs are arrays, we vmap. 
-    # query_t is (N,), sc_idx is (3,) or (1,)
-    return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, sc_idx)
-
-@jax.jit
-def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
-    """
-    Interpolate Light Travel Time using JAX.
-    
-    Args:
-        query_t: shape (N,)
-        link_idx: shape (N_links,) or (1,) - 0-based index
-        t_grid: shape (T_dense,)
-        ltt_grid: shape (T_dense, N_links)
-    """
-    def _single_point(t, l):
-        vals = ltt_grid[:, l]
-        return jnp.interp(t, t_grid, vals)
-    
-    return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
-
-
-@jax.jit
-def interpolate_n(query_t, link_idx, t_grid, n_grid):
-    """
-    Interpolate Normal Unit Vectors using JAX.
-
-    Args:
-        query_t: shape (N,)
-        link_idx: shape (N_links,) or (1,) - 0-based index
-        t_grid: shape (T_dense,)
-        n_grid: shape (T_dense, N_links, 3_coords)
-    """
-
-    def _single_point(t, l):
-        # Helper for 1D interp
-        def interp_1d(vals):
-            return jnp.interp(t, t_grid, vals)
-        
-        val_x = interp_1d(n_grid[:, l, 0])
-        val_y = interp_1d(n_grid[:, l, 1])
-        val_z = interp_1d(n_grid[:, l, 2])
-        return jnp.array([val_x, val_y, val_z])
-
-    return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
-
 def icrs_to_ecliptic(positions_icrs):
     """
     Convert cartesian positions from ICRS to ecliptic coordinates.
@@ -1056,230 +979,313 @@ class L1Orbits(Orbits):
     #     """Override base class _setup - we load data in `_load_mojito_data` instead."""
     #     pass
     
+if jax_here:
+    @jax.jit
+    def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
+        """
+        Interpolate spacecraft position using JAX.
+        
+        Args:
+            query_t: shape (N,)
+            sc_idx: shape (N,) or (1,) - 0-based index (0, 1, 2)
+            t_grid: shape (T_dense,)
+            pos_grid: shape (T_dense, 3_sc, 3_coords)
+        """
 
-@jax.tree_util.register_pytree_node_class
-class JAXL1Orbits(L1Orbits):
-    """LISA Orbits from Mojito L1 File structure with JAX support.
-    
-    This class handles orbit data from MojitoL1File where:
-    - Light travel times and positions have different time arrays
-    - Both time arrays may start at t0 != 0
-    
-    Uses JAX for JIT-compiled interpolation on CPU or GPU.
-    
-    Args:
-        filename: Path to Mojito L1 HDF5 file
-        armlength: Armlength of detector (default 2.5e9 m)
-        force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
-    """
-    
-    
-    def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
-        super().configure(t_arr, dt, linear_interp_setup)
-        # No C++ backend for this implementation, ovverride attribute
-        self._pycppdetector_args = None
+        def _single_point(t, sc):
+            # t: scalar float
+            # sc: scalar int (0, 1, 2)
+            
+            # pos_grid is (Times, SC, 3)
+            # We want to interpolate along axis 0.
+            
+            # Helper for 1D interp
+            def interp_1d(vals):
+                return jnp.interp(t, t_grid, vals)
+                
+            # Select the trajectory for this spacecraft
+            # pos_grid[:, sc, 0] gives x(t) for spacecraft sc
+            # We use simple indexing. Since 'sc' is a tracer in JIT, simple indexing might need dynamic_slice 
+            # or just work if shape is static. JAX numpy indexing usually works fine.
+            
+            val_x = interp_1d(pos_grid[:, sc, 0])
+            val_y = interp_1d(pos_grid[:, sc, 1])
+            val_z = interp_1d(pos_grid[:, sc, 2])
+            return jnp.array([val_x, val_y, val_z])
 
-        # move arrays to JAX
-        self.sc_t = jnp.asarray(self.sc_t)
-        self.x = jnp.asarray(self.x)
-        self.v = jnp.asarray(self.v)
-        self.n = jnp.asarray(self.n)
+        # If inputs are arrays, we vmap. 
+        # query_t is (N,), sc_idx is (3,) or (1,)
+        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, sc_idx)
 
-        self.ltt_t = jnp.asarray(self.ltt_t)
-        self.ltt = jnp.asarray(self.ltt)
-    
-    @property
-    def dt(self):
-        """Time step of configured grid."""
-        if not self.configured:
+    @jax.jit
+    def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
+        """
+        Interpolate Light Travel Time using JAX.
+        
+        Args:
+            query_t: shape (N,)
+            link_idx: shape (N_links,) or (1,) - 0-based index
+            t_grid: shape (T_dense,)
+            ltt_grid: shape (T_dense, N_links)
+        """
+        def _single_point(t, l):
+            vals = ltt_grid[:, l]
+            return jnp.interp(t, t_grid, vals)
+        
+        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
+
+
+    @jax.jit
+    def interpolate_n(query_t, link_idx, t_grid, n_grid):
+        """
+        Interpolate Normal Unit Vectors using JAX.
+
+        Args:
+            query_t: shape (N,)
+            link_idx: shape (N_links,) or (1,) - 0-based index
+            t_grid: shape (T_dense,)
+            n_grid: shape (T_dense, N_links, 3_coords)
+        """
+
+        def _single_point(t, l):
+            # Helper for 1D interp
+            def interp_1d(vals):
+                return jnp.interp(t, t_grid, vals)
+            
+            val_x = interp_1d(n_grid[:, l, 0])
+            val_y = interp_1d(n_grid[:, l, 1])
+            val_z = interp_1d(n_grid[:, l, 2])
+            return jnp.array([val_x, val_y, val_z])
+
+        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
+
+    @jax.tree_util.register_pytree_node_class
+    class JAXL1Orbits(L1Orbits):
+        """LISA Orbits from Mojito L1 File structure with JAX support.
+        
+        This class handles orbit data from MojitoL1File where:
+        - Light travel times and positions have different time arrays
+        - Both time arrays may start at t0 != 0
+        
+        Uses JAX for JIT-compiled interpolation on CPU or GPU.
+        
+        Args:
+            filename: Path to Mojito L1 HDF5 file
+            armlength: Armlength of detector (default 2.5e9 m)
+            force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
+        """
+        
+        
+        def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
+            super().configure(t_arr, dt, linear_interp_setup)
+            # No C++ backend for this implementation, ovverride attribute
+            self._pycppdetector_args = None
+
+            # move arrays to JAX
+            self.sc_t = jnp.asarray(self.sc_t)
+            self.x = jnp.asarray(self.x)
+            self.v = jnp.asarray(self.v)
+            self.n = jnp.asarray(self.n)
+
+            self.ltt_t = jnp.asarray(self.ltt_t)
+            self.ltt = jnp.asarray(self.ltt)
+        
+        @property
+        def dt(self):
+            """Time step of configured grid."""
+            if not self.configured:
+                return self._dt
             return self._dt
-        return self._dt
-    
-    @dt.setter
-    def dt(self, dt):
-        self._dt = dt
-    
-    def _map_link_to_index(self, link_arr):
-        """Map link IDs to array indices.
         
-        Args:
-            link_arr: Array of link IDs (12, 23, 31, 13, 32, 21)
+        @dt.setter
+        def dt(self, dt):
+            self._dt = dt
+        
+        def _map_link_to_index(self, link_arr):
+            """Map link IDs to array indices.
             
-        Returns:
-            Array of indices (0-5) corresponding to link positions
-        """
-        link_map_keys = jnp.array(self.LINKS)
-        link_map_vals = jnp.arange(len(self.LINKS))
-        
-        def map_single_link(l):
-            return jnp.sum(link_map_vals * (link_map_keys == l))
-        
-        return jax.vmap(map_single_link)(link_arr)
-    
-    def get_pos(self, t, sc):
-        """Compute spacecraft position using JAX interpolation.
-        
-        Args:
-            t: Time (scalar or array)
-            sc: Spacecraft index (1, 2, or 3) or array of indices
+            Args:
+                link_arr: Array of link IDs (12, 23, 31, 13, 32, 21)
+                
+            Returns:
+                Array of indices (0-5) corresponding to link positions
+            """
+            link_map_keys = jnp.array(self.LINKS)
+            link_map_vals = jnp.arange(len(self.LINKS))
             
-        Returns:
-            Spacecraft position(s) with shape (..., 3) for coordinates
-        """
-        if not self.configured:
-            raise RuntimeError("Must call configure() before get_pos()")
-
-        squeeze_t = jnp.isscalar(t)
-        squeeze_sc = jnp.isscalar(sc)
-
-        t_arr = jnp.atleast_1d(t)
-        sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
-
-        output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.x)
-        
-        if squeeze_sc:
-            output = output.squeeze(axis=1)
-        if squeeze_t:
-            output = output.squeeze(axis=0)
-        
-        return output.block_until_ready()
-
-    
-    def get_light_travel_times(self, t, link):
-        """Compute light travel times using JAX interpolation.
-        
-        Args:
-            t: Time (scalar or array)
-            link: Link index (12, 23, 31, 13, 32, 21) or array of indices
+            def map_single_link(l):
+                return jnp.sum(link_map_vals * (link_map_keys == l))
             
-        Returns:
-            Light travel time(s)
-        """
-        if not self.configured:
-            raise RuntimeError("Must call configure() before get_light_travel_times()")
+            return jax.vmap(map_single_link)(link_arr)
         
-        squeeze_t = jnp.isscalar(t)
-        squeeze_link = jnp.isscalar(link)
-
-        t_arr = jnp.atleast_1d(t)
-        link_arr = jnp.atleast_1d(link)
-        link_idx = self._map_link_to_index(link_arr)
-        
-        output = interpolate_ltt(t_arr, link_idx, self.ltt_t, self.ltt)
-
-        if squeeze_link:
-            output = output.squeeze(axis=1)
-        if squeeze_t:
-            output = output.squeeze(axis=0)
-        
-        return output.block_until_ready()
-
-    def get_normal_unit_vec(self, t, link):
-        """Compute normal unit vectors using JAX interpolation.
-        
-        Args:
-            t: Time (scalar or array)
-            link: Link index (12, 23, 31, 13, 32, 21) or array of indices
+        def get_pos(self, t, sc):
+            """Compute spacecraft position using JAX interpolation.
             
-        Returns:
-            Normal unit vector(s) with shape (..., 3) for coordinates
-        """
-        if not self.configured:
-            raise RuntimeError("Must call configure() before get_normal_unit_vec()")
-        
-        squeeze_t = jnp.isscalar(t)
-        squeeze_link = jnp.isscalar(link)
+            Args:
+                t: Time (scalar or array)
+                sc: Spacecraft index (1, 2, or 3) or array of indices
+                
+            Returns:
+                Spacecraft position(s) with shape (..., 3) for coordinates
+            """
+            if not self.configured:
+                raise RuntimeError("Must call configure() before get_pos()")
 
-        t_arr = jnp.atleast_1d(t)
-        link_arr = jnp.atleast_1d(link)
-        link_idx = self._map_link_to_index(link_arr)
-        
-        output = interpolate_n(t_arr, link_idx, self.sc_t, self.n)
+            squeeze_t = jnp.isscalar(t)
+            squeeze_sc = jnp.isscalar(sc)
 
-        if squeeze_link:
-            output = output.squeeze(axis=1)
-        if squeeze_t:
-            output = output.squeeze(axis=0)
-        
-        return output.block_until_ready()
+            t_arr = jnp.atleast_1d(t)
+            sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
 
-    def tree_flatten(self):
-        # Collect children (JAX arrays)
-        children = (
-            self.ltt,
-            self.ltt_t,
-            self.x_base,
-            self.v_base,
-            self.sc_t_base,
-        )
+            output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.x)
+            
+            if squeeze_sc:
+                output = output.squeeze(axis=1)
+            if squeeze_t:
+                output = output.squeeze(axis=0)
+            
+            return output.block_until_ready()
+
         
-        # If configured, add interpolated arrays
-        if self.configured:
-            children += (
-                self.sc_t,
-                self.x,
-                self.v,
-                self.n
+        def get_light_travel_times(self, t, link):
+            """Compute light travel times using JAX interpolation.
+            
+            Args:
+                t: Time (scalar or array)
+                link: Link index (12, 23, 31, 13, 32, 21) or array of indices
+                
+            Returns:
+                Light travel time(s)
+            """
+            if not self.configured:
+                raise RuntimeError("Must call configure() before get_light_travel_times()")
+            
+            squeeze_t = jnp.isscalar(t)
+            squeeze_link = jnp.isscalar(link)
+
+            t_arr = jnp.atleast_1d(t)
+            link_arr = jnp.atleast_1d(link)
+            link_idx = self._map_link_to_index(link_arr)
+            
+            output = interpolate_ltt(t_arr, link_idx, self.ltt_t, self.ltt)
+
+            if squeeze_link:
+                output = output.squeeze(axis=1)
+            if squeeze_t:
+                output = output.squeeze(axis=0)
+            
+            return output.block_until_ready()
+
+        def get_normal_unit_vec(self, t, link):
+            """Compute normal unit vectors using JAX interpolation.
+            
+            Args:
+                t: Time (scalar or array)
+                link: Link index (12, 23, 31, 13, 32, 21) or array of indices
+                
+            Returns:
+                Normal unit vector(s) with shape (..., 3) for coordinates
+            """
+            if not self.configured:
+                raise RuntimeError("Must call configure() before get_normal_unit_vec()")
+            
+            squeeze_t = jnp.isscalar(t)
+            squeeze_link = jnp.isscalar(link)
+
+            t_arr = jnp.atleast_1d(t)
+            link_arr = jnp.atleast_1d(link)
+            link_idx = self._map_link_to_index(link_arr)
+            
+            output = interpolate_n(t_arr, link_idx, self.sc_t, self.n)
+
+            if squeeze_link:
+                output = output.squeeze(axis=1)
+            if squeeze_t:
+                output = output.squeeze(axis=0)
+            
+            return output.block_until_ready()
+
+        def tree_flatten(self):
+            # Collect children (JAX arrays)
+            children = (
+                self.ltt,
+                self.ltt_t,
+                self.x_base,
+                self.v_base,
+                self.sc_t_base,
             )
-        
-        # Collect aux_data (static configuration)
-        aux_data = {
-            'filename': self.filename,
-            'armlength': self._armlength,
-            'configured': self.configured,
-            'ltt_dt': self.ltt_dt,
-            'sc_dt': self.sc_dt,
-            'ltt_t0': self.ltt_t0,
-            'sc_t0': self.sc_t0,
-            # Capture other potential attributes
-            '_dt': getattr(self, '_dt', None),
-            '_t0': getattr(self, '_t0', None),
-            # Preserve backend info if needed (though usually static)
-            'use_gpu': getattr(self, 'use_gpu', False)
-        }
-        
-        return (children, aux_data)
+            
+            # If configured, add interpolated arrays
+            if self.configured:
+                children += (
+                    self.sc_t,
+                    self.x,
+                    self.v,
+                    self.n
+                )
+            
+            # Collect aux_data (static configuration)
+            aux_data = {
+                'filename': self.filename,
+                'armlength': self._armlength,
+                'configured': self.configured,
+                'ltt_dt': self.ltt_dt,
+                'sc_dt': self.sc_dt,
+                'ltt_t0': self.ltt_t0,
+                'sc_t0': self.sc_t0,
+                # Capture other potential attributes
+                '_dt': getattr(self, '_dt', None),
+                '_t0': getattr(self, '_t0', None),
+                # Preserve backend info if needed (though usually static)
+                'use_gpu': getattr(self, 'use_gpu', False)
+            }
+            
+            return (children, aux_data)
 
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        # Create empty instance without calling __init__
-        obj = object.__new__(cls)
-        
-        # Restore aux_data
-        obj.filename = aux_data['filename']
-        obj._armlength = aux_data['armlength']
-        obj.configured = aux_data['configured']
-        obj.ltt_dt = aux_data['ltt_dt']
-        obj.sc_dt = aux_data['sc_dt']
-        obj.ltt_t0 = aux_data['ltt_t0']
-        obj.sc_t0 = aux_data['sc_t0']
-        obj.use_gpu = aux_data['use_gpu']
-        obj._filename = aux_data['filename']
-        
-        if aux_data.get('_dt') is not None:
-            obj._dt = aux_data['_dt']
-        if aux_data.get('_t0') is not None:
-            obj._t0 = aux_data['_t0']
+        @classmethod
+        def tree_unflatten(cls, aux_data, children):
+            # Create empty instance without calling __init__
+            obj = object.__new__(cls)
+            
+            # Restore aux_data
+            obj.filename = aux_data['filename']
+            obj._armlength = aux_data['armlength']
+            obj.configured = aux_data['configured']
+            obj.ltt_dt = aux_data['ltt_dt']
+            obj.sc_dt = aux_data['sc_dt']
+            obj.ltt_t0 = aux_data['ltt_t0']
+            obj.sc_t0 = aux_data['sc_t0']
+            obj.use_gpu = aux_data['use_gpu']
+            obj._filename = aux_data['filename']
+            
+            if aux_data.get('_dt') is not None:
+                obj._dt = aux_data['_dt']
+            if aux_data.get('_t0') is not None:
+                obj._t0 = aux_data['_t0']
 
-        # Restore children
-        # Base arrays always present (first 5)
-        obj.ltt = children[0]
-        obj.ltt_t = children[1]
-        obj.x_base = children[2]
-        obj.v_base = children[3]
-        obj.sc_t_base = children[4]
-        
-        if obj.configured:
-            # Configured arrays (next 4)
-            obj.sc_t = children[5]
-            obj.x = children[6]
-            obj.v = children[7]
-            obj.n = children[8]
-        
-        # Initialize other attributes needed for method calls
-        obj._pycppdetector_args = None
-        
-        return obj
+            # Restore children
+            # Base arrays always present (first 5)
+            obj.ltt = children[0]
+            obj.ltt_t = children[1]
+            obj.x_base = children[2]
+            obj.v_base = children[3]
+            obj.sc_t_base = children[4]
+            
+            if obj.configured:
+                # Configured arrays (next 4)
+                obj.sc_t = children[5]
+                obj.x = children[6]
+                obj.v = children[7]
+                obj.n = children[8]
+            
+            # Initialize other attributes needed for method calls
+            obj._pycppdetector_args = None
+            
+            return obj
+else:
+    class JAXL1Orbits(L1Orbits):
+        def __init__(self, *args, **kwargs):
+            raise ImportError("JAX is not available. Install JAX to use JAXL1Orbits.")
 
 class DefaultOrbits(EqualArmlengthOrbits):
     """Set default orbit class to Equal Armlength orbits for now."""
