@@ -126,7 +126,6 @@ jobs:
             cuda_minor: 4
             gcc_version: 13
             reqpython: '>=3.10'
-            gcc_version: 14
           - release: cpu
             os: ubuntu-latest
             arch: aarch64
