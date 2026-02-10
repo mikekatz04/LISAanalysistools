@@ -75,35 +75,40 @@ class GBSetup(Setup, GBSettings):
 
     def init_sampling_info(self):
 
+        input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+
         if self.transform is None:
             gb_transform_fn_in = {
-                0: np.exp,
-                1: f_ms_to_s,
-                5: np.arccos,
-                8: np.arcsin,
+                "A": np.exp,
+                "f0": f_ms_to_s,
+                "cos_iota": np.arccos,
+                "sin_beta": np.arcsin,
             }
 
-            gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
+            output_basis = ["A", "f0", "fdot", "fddot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+            gb_fill_dict = {"fddot": 0.0}
+
+            #gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
 
             self.transform = TransformContainer(
-                parameter_transforms=gb_transform_fn_in, fill_dict=gb_fill_dict
+                input_basis=input_basis, output_basis=output_basis, parameter_transforms=gb_transform_fn_in, fill_dict=gb_fill_dict
             )
 
         if self.periodic is None:
-            self.periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}}
+            self.periodic = {"gb": {"phi0": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}}
 
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
             # TODO: change to scaled linear in amplitude!?!
             priors_gb = {
-                0: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                1: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)), # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
-                2: uniform_dist(*self.fdot_lims),
-                3: uniform_dist(*self.phi0_lims),
-                4: uniform_dist(*np.cos(self.iota_lims)),
-                5: uniform_dist(*self.psi_lims),
-                6: uniform_dist(*self.lam_lims),
-                7: uniform_dist(*np.sin(self.beta_lims)),
+                input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
+                input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)), # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
+                input_basis[2]: uniform_dist(*self.fdot_lims),
+                input_basis[3]: uniform_dist(*self.phi0_lims),
+                input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
+                input_basis[5]: uniform_dist(*self.psi_lims),
+                input_basis[6]: uniform_dist(*self.lam_lims),
+                input_basis[7]: uniform_dist(*np.sin(self.beta_lims)),
             }
 
             # TODO: orbits check against sangria/sangria_hm
@@ -228,46 +233,48 @@ class MBHSetup(Setup):
         
     def init_sampling_info(self):
 
+        input_basis = ["logM", "q", "s1z", "s2z", "dist", "phi_ref", "cos_iota", "lam", "sin_beta", "psi", "t_ref"]
+
         if self.transform is None:
+            
+            output_basis = ["logM", "q", "s1z", "s2z", "dist", "phi_ref", "f_ref", "cos_iota", "lam", "sin_beta", "psi", "t_ref"]
 
             mbh_transform_fn_in = {
-                0: np.exp,
-                4: mbh_dist_trans,
-                7: np.arccos,
-                9: np.arcsin,
-                (0, 1): mT_q,
-                (11, 8, 9, 10): LISA_to_SSB,
+                "logM": np.exp,
+                "dist": mbh_dist_trans,
+                "cos_iota": np.arccos,
+                "sin_beta": np.arcsin,
+                ("logM", "q"): mT_q,
+                ("t_ref", "lam", "sin_beta", "psi"): LISA_to_SSB,
             }
 
             # for transforms
             mbh_fill_dict = {
-                "ndim_full": 12,
-                "fill_values": np.array([0.0]),
-                "fill_inds": np.array([6]),
+                "f_ref": 0.0
             }
 
             self.transform = TransformContainer(
-                parameter_transforms=mbh_transform_fn_in, fill_dict=mbh_fill_dict
+                input_basis=input_basis, output_basis=output_basis, parameter_transforms=mbh_transform_fn_in, fill_dict=mbh_fill_dict
             )
 
         if self.periodic is None:
-            self.periodic = {"mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}}
+            self.periodic = {"mbh": {"phi_ref": 2 * np.pi, "lam": 2 * np.pi, "psi": np.pi}}
 
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
             # TODO: change to scaled linear in amplitude!?!
             priors_mbh = {
-                0: uniform_dist(np.log(1e4), np.log(1e8)),
-                1: uniform_dist(0.01, 0.999999999),
-                2: uniform_dist(-0.99999999, +0.99999999),
-                3: uniform_dist(-0.99999999, +0.99999999),
-                4: uniform_dist(0.01, 1000.0),
-                5: uniform_dist(0.0, 2 * np.pi),
-                6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                7: uniform_dist(0.0, 2 * np.pi),
-                8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                9: uniform_dist(0.0, np.pi),
-                10: uniform_dist(0.0, self.Tobs + 3600.0),
+                input_basis[0]: uniform_dist(np.log(1e4), np.log(1e8)),
+                input_basis[1]: uniform_dist(0.01, 0.999999999),
+                input_basis[2]: uniform_dist(-0.99999999, +0.99999999),
+                input_basis[3]: uniform_dist(-0.99999999, +0.99999999),
+                input_basis[4]: uniform_dist(0.01, 1000.0),
+                input_basis[5]: uniform_dist(0.0, 2 * np.pi),
+                input_basis[6]: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                input_basis[7]: uniform_dist(0.0, 2 * np.pi),
+                input_basis[8]: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                input_basis[9]: uniform_dist(0.0, np.pi),
+                input_basis[10]: uniform_dist(0.0, self.Tobs + 3600.0),
             }
 
             # TODO: orbits check against sangria/sangria_hm
@@ -352,31 +359,34 @@ class EMRISetup(Setup):
         
     def init_sampling_info(self):
 
+        input_basis = ["logm1", "m2", "a", "p0", "e0", "dist", "qS", "phiS", "qK", "phiK", "Phi_phi0", "Phi_r0"]
+
         if self.transform is None:
+
+            output_basis = ["logm1", "m2", "a", "p0", "e0", "xI0", "dist", "qS", "phiS", "qK", "phiK", "Phi_phi0", "Phi_theta0", "Phi_r0"]
 
             # for transforms
 
             emri_fill_dict = {
-            "ndim_full": 14,
-            "fill_values": self.fill_values, # inclination and Phi_theta
-            "fill_inds": np.array([5, 12]),
+            "xI0": self.fill_values[0], # inclination
+            "Phi_theta0": self.fill_values[1], # Phi_theta
             }
 
             emri_transform_fn_in = {
-                0: np.exp,  # M 
-                7: np.arccos, # qS
-                9: np.arccos,  # qK
+                output_basis[0]: np.exp,  # M 
+                output_basis[7]: np.arccos, # qS
+                output_basis[9]: np.arccos,  # qK
             }
 
             self.transform = TransformContainer(
-                parameter_transforms=emri_transform_fn_in, fill_dict=emri_fill_dict
+                input_basis=input_basis, output_basis=output_basis, parameter_transforms=emri_transform_fn_in, fill_dict=emri_fill_dict
             )
 
         if self.periodic is None:
-            self.periodic = {"emri": {7: 2 * np.pi, 9: 2 * np.pi, 10: 2 * np.pi, 11: 2 * np.pi}}
+            self.periodic = {"emri": {"phiS": 2 * np.pi, "phiK": 2 * np.pi, "Phi_phi0": 2 * np.pi, "Phi_r0": 2 * np.pi}}
 
 
-        self.setup_priors()
+        self.setup_priors(input_basis)
         
         if self.betas is None:
             snrs_ladder = np.array([1., 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2])
@@ -406,7 +416,7 @@ class EMRISetup(Setup):
                 (StretchMove(), 1.0)
             ]
 
-    def setup_priors(self,):
+    def setup_priors(self, input_basis):
         """
         Get the prior distributions for the EMRI parameters.
         override the default priors with custom boundaries for the intrinsic parameters. 
@@ -418,25 +428,25 @@ class EMRISetup(Setup):
         """
 
         priors_emri = {
-            0: uniform_dist(np.log(5e5), np.log(5e6)), #log m1
-            1: uniform_dist(1, 100), # m2
-            2: uniform_dist(0.01, 0.999),  # a
-            3: uniform_dist(5.0, 100.0), # p0
-            4: uniform_dist(0.001, 0.8), # e0
-            5: uniform_dist(0.01, 100.0),  # dist in Gpc
-            6: uniform_dist(-0.99999, 0.99999),  # qS
-            7: uniform_dist(0.0, 2 * np.pi),  # phiS
-            8: uniform_dist(-0.99999, 0.99999),  # qK
-            9: uniform_dist(0.0, 2 * np.pi),  # phiK
-            10: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
-            11: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
+            input_basis[0]: uniform_dist(np.log(5e5), np.log(5e6)), #log m1
+            input_basis[1]: uniform_dist(1, 100), # m2
+            input_basis[2]: uniform_dist(0.01, 0.999),  # a
+            input_basis[3]: uniform_dist(5.0, 100.0), # p0
+            input_basis[4]: uniform_dist(0.001, 0.8), # e0
+            input_basis[5]: uniform_dist(0.01, 100.0),  # dist in Gpc
+            input_basis[6]: uniform_dist(-0.99999, 0.99999),  # qS
+            input_basis[7]: uniform_dist(0.0, 2 * np.pi),  # phiS
+            input_basis[8]: uniform_dist(-0.99999, 0.99999),  # qK
+            input_basis[9]: uniform_dist(0.0, 2 * np.pi),  # phiK
+            input_basis[10]: uniform_dist(0.0, 2 * np.pi),  # Phi_phi0
+            input_basis[11]: uniform_dist(0.0, 2 * np.pi),  # Phi_r0
         }
 
         limits = ['logm1_lims', 'm2_lims', 'a_lims', 'p0_lims', 'e0_lims']
         for i, lims in enumerate(limits):
             if getattr(self, lims) is not None:
                 self.logger.info(f'Setting prior for parameter {i} using limits {getattr(self, lims)}')
-                priors_emri[i] = uniform_dist(*getattr(self, lims))
+                priors_emri[input_basis[i]] = uniform_dist(*getattr(self, lims))
 
         self.priors = {"emri": ProbDistContainer(priors_emri)}
 
@@ -486,10 +496,10 @@ class PSDSetup(Setup):
         if self.priors is None:
             # TODO: change to scaled linear in amplitude!?!
             priors_psd = {
-                0: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-                1: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
-                2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
-                3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
+                r'$S_{\rm oms}$': uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
+                r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
+                # 2: uniform_dist(6.0e-12, 20.0e-12),  # Soms_d
+                # 3: uniform_dist(1.0e-15, 20.0e-15),  # Sa_a
             }
 
             # TODO: orbits check against sangria/sangria_hm

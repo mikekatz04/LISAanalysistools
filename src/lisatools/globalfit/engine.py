@@ -24,7 +24,7 @@ from eryn.prior import ProbDistContainer
 
 from .utils import NewSensitivityMatrix
 from lisatools.detector import Orbits, EqualArmlengthOrbits
-from ..detector import sangria, mojito, LISAModel
+from ..detector import sangria, LISAModel
 from ..sensitivity import XYZSensitivityBackend, XYZ1SensitivityMatrix, XYZ2SensitivityMatrix, AE1SensitivityMatrix, AE2SensitivityMatrix, AET2SensitivityMatrix
 from .preprocessing import BaseProcessingStep
 

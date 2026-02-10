@@ -1665,7 +1665,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "settings": self.basis_settings,
             "tdi_generation": self.tdi_generation,
             "use_splines": self.use_splines,
-            "force_backend": self.force_backend,
+            "force_backend": 'cpu' if self.backend.xp == np else 'gpu',
             "mask_percentage": self.mask_percentage,
         }
 
