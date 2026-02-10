@@ -216,7 +216,7 @@ jobs:
           compiler: gcc
           version: 14
       - name: Build core wheels (macOS)
-        if: runner.os == 'macOS' && matrix.kind == 'core' && publish_cuda == false
+        if: runner.os == 'macOS' && matrix.kind == 'core' && needs.select.outputs.publish_cuda == false
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_SKIP: pp*
@@ -230,7 +230,7 @@ jobs:
             SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.version.outputs.version }}"
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_ver }}
       - name: Build core wheels (Linux)
-        if: runner.os == 'Linux' && matrix.kind == 'core' && publish_cuda == false
+        if: runner.os == 'Linux' && matrix.kind == 'core' && needs.select.outputs.publish_cuda == false
         uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.reqpython }}
