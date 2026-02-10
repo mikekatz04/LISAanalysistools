@@ -1281,20 +1281,6 @@ class JAXL1Orbits(L1Orbits):
         
         return obj
 
-class MojitoESAOrbits(Orbits):
-    """ESA Orbits for the Mojito common dataset
-
-    Orbit file: esa-trailing-orbits.h5
-
-    Args:
-        *args: Arguments for :class:`Orbits`.
-        **kwargs: Kwargs for :class:`Orbits`.
-
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__("esa-trailing-orbits-mojito.h5", *args, **kwargs)
-
 class DefaultOrbits(EqualArmlengthOrbits):
     """Set default orbit class to Equal Armlength orbits for now."""
 
@@ -1426,7 +1412,6 @@ proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "proposal
 mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "mrdv1")
 sangria = LISAModel((7.9e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "sangria") 
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
-mojito = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, MojitoESAOrbits(), "mojito")
     
 @dataclass
 class ExtendedLISAModelSettings:
