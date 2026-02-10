@@ -5,7 +5,7 @@ requires = [
   "scikit_build_core",
   "eryn",
   "pybind11",
-  "gpubackendtools",  # @ file:///home/mlkatz/GPUBackendTools",  # ==0.0.15 
+  "gpubackendtools>=0.1.1",  # @ file:///home/mlkatz/GPUBackendTools",  
 ]
 build-backend = "scikit_build_core.build"
 
@@ -81,9 +81,9 @@ optional-dependencies.sampling = [
 
 optional-dependencies.testing = [
   "matplotlib",
-  # "eryn",
-  "gbgpu",
+  "eryn",
   "corner",
+  "gpubackendtools>=0.0.16",
 ]
 
 [tool.setuptools_scm]

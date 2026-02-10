@@ -6,6 +6,13 @@
 #include <string>
 #include <sstream>
 
+#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+#define Orbits OrbitsGPU
+#else
+#define Orbits OrbitsCPU
+#endif
+// TODO WHEN BACK FROM BREAK:
+// SEPARATE OUT ANY FUNCTION THAT INCLUDES ANYTHING PYBIND RELATED INTO BINDING. INHERIT THE ORBITS CLASS INTO A WRAPPER CLASS THAT ADDS THE FUNCTIONS THAT SPECIFICALLY TAKE IN NUMPY AND CUPY ARRAYS 
 
 CUDA_DEVICE
 int Orbits::get_window(double t)
