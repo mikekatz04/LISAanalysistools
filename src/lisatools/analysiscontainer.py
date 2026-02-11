@@ -161,6 +161,74 @@ class AnalysisContainer:
 
         """
         return self.inner_product(**kwargs).real ** (1 / 2)
+    
+    def _slice_to_template(self, template: DataResidualArray) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
+        """Slice the data residual array to the same shape as the template.
+
+        This is used for calculating inner products and likelihoods with templates that are shorter than the data.
+
+        Args:
+            template: Template signal.
+        """
+        data_settings = self.data_res_arr.settings
+        templ_settings = template.settings
+
+        if type(data_settings) != type(templ_settings):
+            raise ValueError(
+                f"Data domain ({type(data_settings).__name__}) and template domain "
+                f"({type(templ_settings).__name__}) must match."
+            )
+
+        # Fast path: settings identical → no slicing needed
+        if data_settings == templ_settings:
+            return self.data_res_arr, template, self.sens_mat
+        
+        elif isinstance(data_settings, domains.STFTSettings):
+            return self._slice_stft_to_template(template)
+        else:
+            raise NotImplementedError(
+                f"Automatic region slicing not yet implemented for "
+                f"{type(data_settings).__name__}. Ensure template and data "
+                f"have the same shape, or use STFT domain."
+            )
+    
+    def _slice_stft_to_template(self, template: DataResidualArray) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
+        """
+        Slice the data residual array and sensitivity matrix to the time and frequency region covered 
+        by the template, for the case of STFT domain settings.
+
+        Args:
+            template: Template signal.
+        
+        Returns:
+            Tuple of (sliced data residual array, sliced template, sliced sensitivity matrix).
+        """
+
+        data_settings = self.data_res_arr.settings
+        templ_settings = template.settings
+
+        # validate grids
+        if not np.isclose(data_settings.dt, templ_settings.dt):
+            raise ValueError(
+                f"Data segment duration ({data_settings.dt}) and template segment "
+                f"duration ({templ_settings.dt}) must match in STFT."
+            )
+        if not np.isclose(data_settings.df, templ_settings.df):
+            raise ValueError(
+                f"Data df ({data_settings.df}) and template df ({templ_settings.df}) must match."
+            )
+
+        # find indices for slicing
+        tmin, tmax = templ_settings.t0, templ_settings.t0 + templ_settings.NT * templ_settings.dt
+        fmin, fmax = templ_settings.f_arr[0], templ_settings.f_arr[-1]
+
+        slices = data_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
+
+        sliced_data_res_arr = self.data_res_arr.get_slice(slices)
+        sliced_sens_mat = self.sens_mat.get_slice(slices)
+
+        return sliced_data_res_arr, template, sliced_sens_mat
+
 
     def template_inner_product(
         self, template: DataResidualArray, **kwargs: dict
@@ -181,7 +249,9 @@ class AnalysisContainer:
         if "include_psd_info" in kwargs:
             kwargs.pop("include_psd_info")
 
-        ip_val = inner_product(self.data_res_arr, template, psd=self.sens_mat, **kwargs)
+        data_res_arr_sliced, template_sliced, sens_mat_sliced = self._slice_to_template(template)
+
+        ip_val = inner_product(data_res_arr_sliced, template_sliced, psd=sens_mat_sliced, **kwargs)
         return ip_val
 
     def template_snr(
@@ -205,10 +275,12 @@ class AnalysisContainer:
         if "complex" in kwargs_in:
             kwargs_in.pop("complex")
 
+        sliced_data_res_arr, sliced_template, sliced_sens_mat = self._slice_to_template(template)
+
         # TODO: should we cache?
-        h_h = inner_product(template, template, psd=self.sens_mat, **kwargs_in)
+        h_h = inner_product(sliced_template, sliced_template, psd=sliced_sens_mat, **kwargs_in)
         non_marg_d_h = inner_product(
-            self.data_res_arr, template, psd=self.sens_mat, complex=True, **kwargs_in
+            sliced_data_res_arr, sliced_template, psd=sliced_sens_mat, complex=True, **kwargs_in
         )
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
@@ -245,14 +317,20 @@ class AnalysisContainer:
         if "complex" in kwargs_in:
             kwargs_in.pop("complex")
 
+        data_res_arr_sliced, template_sliced, sens_mat_sliced = self._slice_to_template(template)
+
+        # when computing the <d|d> term we need the full data and sensitivity matrix.
+
         # TODO: should we cache?
         d_d = inner_product(
             self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs_in
         )
-        h_h = inner_product(template, template, psd=self.sens_mat, **kwargs_in)
+        h_h = inner_product(template_sliced, template_sliced, psd=sens_mat_sliced, **kwargs_in)
+        
         non_marg_d_h = inner_product(
-            self.data_res_arr, template, psd=self.sens_mat, complex=True, **kwargs_in
+            data_res_arr_sliced, template_sliced, psd=sens_mat_sliced, complex=True, **kwargs_in
         )
+
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
 
@@ -529,7 +607,7 @@ class AnalysisContainerArray:
             self.nchannels, self.data_length = data_shape
             self.end_shape = (self.data_length,)
         elif len(data_shape) == 3:
-            self.nchannels, self.m, self.n = data_shape
+            self.nchannels, self.m, self.n = data_shape # let's call the external layer m and n for now. In the stft case, m would be the number of time segments and n would be the number of frequencies. In WDM it seems this is switched.
             self.data_length = self.m * self.n
             self.end_shape = (self.m, self.n)
 

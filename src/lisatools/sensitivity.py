@@ -942,17 +942,19 @@ class SensitivityMatrixBase:
     """Base Container to hold sensitivity information.
 
     Args:
-        basis_x: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
-
+        basis_settings: Frequency array in FD. Time array in TD. Wavelet basis in WDM. Etc.
+        skip_inv_det: Whether to skip the determinant check when updating sensitivities. This is relevant for slicing operations.
     """
 
     def __init__(
         self,
         settings: domains.DomainSettingsBase,
-        
+        skip_inv_det: bool = False,
     ) -> None:
         self.basis_settings = settings
         self.data_shape = self.basis_settings.basis_shape
+
+        self.do_inv_det = not skip_inv_det
 
     @property
     def basis_settings(self) -> np.ndarray:
@@ -1138,11 +1140,42 @@ class SensitivityMatrixBase:
             raise ValueError("Must input array or list.")
         
         self.channel_shape = self._sens_mat.shape[:-len(self.data_shape)]
-        self._setup_det_and_inv()
+        
+        if self.do_inv_det:
+            self._setup_det_and_inv()
 
     @property
     def differential_component(self) -> float:
         return self.basis_settings.differential_component
+
+    # use the getitem to get a slice of the sensitivity matrix, then use that to get the corresponding slice of the determinant and inverse
+    def get_slice(self, index: tuple | slice) -> SensitivityMatrixBase:
+        """
+        Get a time and frequency slice of the sensitivity matrix, and corresponding slices of the determinant and inverse.
+        
+        Args:
+            index (tuple | slice): Slice, or tuple of slices, to apply to the sensitivity matrix. 
+                                   The slice(s) should select part of the time and frequency dimensions of the sensitivity matrix, which are the last dimensions of the array.
+                   
+        Returns:
+            A new SensitivityMatrixBase object with the sliced sensitivity matrix, and corresponding sliced determinant and inverse.
+        """
+        new_settings = self.basis_settings.get_slice(index)
+        new_mat = SensitivityMatrixBase(new_settings, skip_inv_det=True)
+
+        # Normalize index to a tuple so that multi-dimensional basis slices
+        # (e.g. (time_slice, freq_slice) for STFT) unpack correctly when
+        # combined with Ellipsis for the channel dimensions.
+        basis_idx = index if isinstance(index, tuple) else (index,)
+
+        new_mat.sens_mat = self.sens_mat[(Ellipsis,) + basis_idx]
+        new_mat.detC = self.detC[basis_idx]
+        new_mat.invC = self.invC[(Ellipsis,) + basis_idx]
+
+        # now set skip_inv_det to False 
+        new_mat.do_inv_det = True
+        
+        return new_mat
 
     def _setup_det_and_inv(self):
         """Determinant and inverse of TDI matrix."""

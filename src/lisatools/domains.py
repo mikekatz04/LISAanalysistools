@@ -31,7 +31,9 @@ import dataclasses
 
 @dataclasses.dataclass
 class DomainSettingsBase:
-    pass
+    
+    def get_slice(self, index: tuple) -> DomainSettingsBase:
+        raise NotImplementedError("get_slice needs to be implemented for this signal type.")
     
 class DomainBase:
 
@@ -79,6 +81,11 @@ class DomainBase:
     @property
     def shape(self) -> tuple:
         return self.arr.shape
+    
+    def get_slice(self, index: tuple) -> DomainBase:
+        new_arr = self.arr[(Ellipsis,) + index]
+        new_settings = self.settings.get_slice(index)
+        return self.settings.associated_class(new_arr, new_settings)
 
     
 @dataclasses.dataclass
@@ -480,7 +487,7 @@ class STFTSettings(DomainSettingsBase):
     
     @property
     def basis_shape(self) -> tuple:
-        return (self.NT, self.NF_active)
+        return (self.NT, self.NF_active) #! in the STFT domain, the basis shape is (# number of times segments, # number of frequencies)
     
     @property
     def total_terms(self) -> int:
@@ -550,6 +557,69 @@ class STFTSettings(DomainSettingsBase):
             f"big_dt={self.dt} must be an integer multiple of dt={small_dt}"
         
         return nperseg
+    
+    def compute_slice_indices(self, tmin: float, tmax: float, fmin: float, fmax: float) -> Tuple[slice, slice]:
+        """
+        Compute the slice indices for the time and frequency dimensions based on the provided min and max values.
+
+        Args:   
+            tmin: Minimum time value for the slice.
+            tmax: Maximum time value for the slice.
+            fmin: Minimum frequency value for the slice.
+            fmax: Maximum frequency value for the slice.
+
+        Returns:
+            A tuple of slices for the time and frequency dimensions, e.g. (slice(0, 10), slice(5, 15)).
+        """
+
+        if tmin < self.t0:
+            raise ValueError("tmin must be greater than or equal to t0.")
+        if tmax > self.t0 + self.NT * self.dt:
+            raise ValueError("tmax must be less than or equal to t0 + NT*dt.")
+        if fmin < 0:
+            raise ValueError("fmin must be non-negative.")
+        if fmax > (self.NF - 1) * self.df:
+            raise ValueError("fmax must be less than or equal to (NF-1)*df.")
+        
+        time_start_idx = int(np.floor((tmin - self.t0) / self.dt))
+        time_end_idx = int(np.ceil((tmax - self.t0) / self.dt))
+        freq_start_idx = int(np.floor(fmin / self.df))
+        freq_end_idx = int(np.ceil(fmax / self.df))
+
+        return slice(time_start_idx, time_end_idx), slice(freq_start_idx, freq_end_idx)
+    
+    def get_slice(self, index: tuple) -> STFTSettings:
+        """
+        Return a new STFTSettings object corresponding to the slice of the time and frequency points specified by index.
+
+        Args:
+            index: A tuple of slices for the time and frequency dimensions, e.g. (slice(0, 10), slice(5, 15)).
+        
+        Returns:
+            STFTSettings: A new STFTSettings object corresponding to the slice.
+        """
+        if not isinstance(index, tuple) or len(index) != 2:
+            raise ValueError("Index must be a tuple of two slices for time and frequency dimensions.")
+        
+        time_slice, freq_slice = index
+
+        new_t0 = self.t0 + time_slice.start * self.dt
+        new_NT = time_slice.stop - time_slice.start
+        new_NF = freq_slice.stop - freq_slice.start
+
+        new_min_freq = self.f_arr[freq_slice.start] if self.min_freq is not None else None
+        new_max_freq = self.f_arr[freq_slice.stop - 1] if self.max_freq is not None else None
+
+        return STFTSettings(
+            t0=new_t0,
+            dt=self.dt,
+            df=self.df,
+            NT=new_NT,
+            NF=new_NF,
+            min_freq=new_min_freq,
+            max_freq=new_max_freq
+        )
+
 
 
 def get_stft_settings(times: np.ndarray | cp.ndarray, 
