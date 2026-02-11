@@ -5,6 +5,8 @@ requires = [
   "scikit_build_core",
   "pybind11",
   "gpubackendtools==0.0.15",  # @ file:///home/mlkatz/GPUBackendTools",  
+  "h5py",
+  "setuptools_scm"
 ]
 build-backend = "scikit_build_core.build"
 

@@ -66,8 +66,7 @@ from .engine import EngineInfo, GlobalFitSettings, GeneralSetup
 import typing
 import dataclasses
 
-from .diagnosticplot import DiagnosticPlotter
-
+from eryn.utils.plot import PlotContainer
 
 class CurrentInfoGlobalFit:
     def __init__(self, settings: GlobalFitSettings):
@@ -566,14 +565,18 @@ class GlobalFit:
                 
             for rank, tmp in rank_instructions.items():
                 self.comm.send({"rank": rank, **tmp}, dest=rank)
-            
-            self.recipe.backend = backend
-            backend.add_recipe(self.recipe)
 
             from eryn.moves import StretchMove
             _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
-            update_fn = DiagnosticPlotter(curr=self.curr, plot_every=5)
+            
+            plot_container = PlotContainer(
+                plots=['base', 'tempering'],
+                parent_folder=self.curr.general_info.main_file_path.replace('parameter_estimation_main.h5', 'diagnostics/'),
+                tempering_palette="icefire",
+                discard=0.1
+            )
+
             sampler_mix = GlobalFitEngine(
                 acs,
                 self.nwalkers,
@@ -591,8 +594,10 @@ class GlobalFit:
                 vectorize=True,
                 periodic=periodic,
                 branch_names=branch_names,
-                update_fn=update_fn,
-                update_iterations=1,
+                #update_fn=update_fn,
+                plot_generator=plot_container,
+                plot_iterations=10,
+                #update_iterations=1,
                 # update_fn=recipe,  # stop_converge_mix,
                 # update_iterations=1,  # TODO: change this?
                 provide_groups=True,
@@ -602,6 +607,9 @@ class GlobalFit:
                 stopping_iterations=1,
             )
             _tmp_move.temperature_control.swaps_accepted = np.zeros((self.ntemps, self.nwalkers), dtype=int)
+
+            self.recipe.backend = backend
+            backend.add_recipe(self.recipe)
             
             state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
             state.log_prior = np.zeros_like(state.log_like)  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)

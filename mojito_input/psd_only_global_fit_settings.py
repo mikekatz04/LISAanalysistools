@@ -162,8 +162,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     initialize_kwargs_psd = dict()
 
     priors_psd = {
-                0: uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                1: uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
+                r'$S_{\rm oms}$': uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
+                r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
             }
     priors = {"psd": ProbDistContainer(priors_psd)}
 
@@ -190,7 +190,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "psd_separate_3rd_try"
+    base_file_name = "psd_separate_4th_try"
     file_store_dir = head_dir + "mojito_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
