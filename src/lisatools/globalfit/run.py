@@ -1,78 +1,45 @@
-import numpy as np
+import logging
+import os
+import time
+from abc import ABC
 from copy import deepcopy
 
-# from .generatefuncs import GenerateCurrentState
 import numpy as np
 from mpi4py import MPI
-import sys, os
-import warnings
-from copy import deepcopy
-from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-# from ..datacontainer import DataResidualArray
-# from ..sensitivity import AE1SensitivityMatrix
-from .state import GFState
-# from ..detector import EqualArmlengthOrbits
-# from ..stochastic import HyperbolicTangentGalacticForeground
-from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-# from eryn.backends import HDFBackend
-# from eryn.moves import Move
-# from ..detector import LISAModel
-from eryn.state import BranchSupplemental
-from eryn.ensemble import EnsembleSampler
-from .engine import GlobalFitEngine
-# from global_fit_input.global_fit_settings import get_global_fit_settings
-from ..utils.multigpudataholder import MultiGPUDataHolder
+
 try:
     import cupy as xp
 except (ModuleNotFoundError, ImportError):
     import numpy as xp
-    print("cupy not found, using numpy instead. This will be very slow for large runs. Please install cupy and a compatible CUDA version for GPU acceleration.")
-from ..sampling.prior import GBPriorWrap
-from .psdglobal import log_like as psd_log_like
-from .psdglobal import PSDwithGBPriorWrap
-#from .moves import MBHSpecialMove
+    print("cupy not found, using numpy instead. This will be very slow for large runs. "
+          "Please install cupy and a compatible CUDA version for GPU acceleration.")
 
-from eryn.state import State as eryn_State
-from eryn.ensemble import _FunctionWrapper
-from .moves import GlobalFitMove
-from .hdfbackend import save_to_backend_asynchronously_and_plot
-from .utils import new_sens_mat, BasicResidualacsLikelihood
-# from .utils import SetupInfoTransfer, AllSetupInfoTransfer
-
-# from ..sensitivity import get_sensitivity
-from .hdfbackend import GFHDFBackend
-from .state import GFState
-# from bbhx.waveformbuild import BBHWaveformFD
-
-# from .mbhsearch import ParallelMBHSearchControl
-# from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
-# from .psdglobal import run_psd_pe
-# from .mbhglobal import run_mbh_pe
-
-# from ..sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
-# from .plot import RunResultsProduction
-from .hdfbackend import save_to_backend_asynchronously_and_plot
-
-from gbgpu.gbgpu import GBGPU
-
-from eryn.backends import HDFBackend
-
-from .loginfo import init_logger
-import logging
-
-import time
-import os
-import pickle
-
-from abc import ABC
-
-from .engine import EngineInfo, GlobalFitSettings, GeneralSetup
 import typing
-import dataclasses
-
+from eryn.state import BranchSupplemental
+from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
+from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from .engine import EngineInfo, GlobalFitEngine, GlobalFitSettings, GeneralSetup
+from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
+from .loginfo import init_logger
+from .moves import GFCombineMove, GlobalFitMove
+from .recipe import Recipe
+from .state import GFState
+from .utils import BasicResidualacsLikelihood
+
 class CurrentInfoGlobalFit:
+    """Manages the current state and configuration information for a global fit run.
+    
+    This class wraps the global fit settings and provides convenient access to
+    various configuration components including source information, rank assignments,
+    GPU assignments, and backend storage.
+    
+    Args:
+        settings: GlobalFitSettings object containing all configuration parameters
+            for the global fit run.
+    """
+    
     def __init__(self, settings: GlobalFitSettings):
 
         self.settings_dict = settings
@@ -108,36 +75,43 @@ class CurrentInfoGlobalFit:
     
     @property
     def branch_names(self) -> typing.List[str]:
+        """List of branch names in the global fit model."""
         _names = list(self.source_info.keys())
         return _names
     
     @property
     def nleaves_max(self) -> typing.Dict[str, int]:
+        """Maximum number of leaves for each branch."""
         _nleaves_max = {name: self.source_info[name].nleaves_max for name in self.branch_names}
         return _nleaves_max
     
     @property
     def nleaves_min(self) -> typing.Dict[str, int]:
+        """Minimum number of leaves for each branch."""
         _nleaves_min = {name: self.source_info[name].nleaves_min for name in self.branch_names}
         return _nleaves_min
     
     @property
     def ndims(self) -> typing.Dict[str, int]:
+        """Number of dimensions for each branch."""
         _ndims = {name: self.source_info[name].ndim for name in self.branch_names}
         return _ndims
     
     @property
     def branch_states(self) -> typing.Dict[str, eryn_State]:
+        """Branch state objects for each branch."""
         _branch_states = {name: self.source_info[name].branch_state for name in self.branch_names}
         return _branch_states
     
     @property
     def branch_backends(self) -> typing.Dict[str, eryn_State]:
+        """Branch backend objects for each branch."""
         _branch_backends = {name: self.source_info[name].branch_backend for name in self.branch_names}
         return _branch_backends
     
     @property
     def engine_info(self) -> EngineInfo:
+        """EngineInfo object containing branch configuration for the sampler engine."""
         engine_info = EngineInfo(
             branch_names=self.branch_names,
             ndims=self.ndims,
@@ -150,65 +124,47 @@ class CurrentInfoGlobalFit:
 
     @property
     def settings(self):
+        """GlobalFitSettings dictionary."""
         return self.settings_dict
 
     @property
     def all_info(self):
+        """Complete current information dictionary."""
         return self.current_info
 
     @property
     def general_info(self) -> GeneralSetup:
+        """GeneralSetup object containing general configuration."""
         return self.current_info.general_info
 
     @property
     def source_info(self):
+        """Source-specific configuration information."""
         return self.current_info.source_info
 
     @property
     def rank_info(self):
+        """MPI rank assignment information."""
         return self.current_info.rank_info
 
     @property
     def gpu_assignments(self):
+        """GPU assignment information."""
         return self.current_info.general_info.gpu_assignments
     
 
-import numpy as np
-from mpi4py import MPI
-import os
-import warnings
-from copy import deepcopy
-from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-# from ..sensitivity import AE1SensitivityMatrix
-from .state import GFState
-# from ..detector import EqualArmlengthOrbits
-# from ..stochastic import HyperbolicTangentGalacticForeground
-from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
-# from eryn.backends import HDFBackend
-# from eryn.moves import Move
-# from ..detector import LISAModel
-from eryn.state import BranchSupplemental
-from eryn.ensemble import EnsembleSampler
-from .engine import GlobalFitEngine
-# from global_fit_input.global_fit_settings import get_global_fit_settings
-# from ..utils.multigpudataholder import MultiGPUDataHolder
-# from ..sampling.prior import GBPriorWrap
-# from .psdglobal import log_like as psd_log_like
-# from .psdglobal import PSDwithGBPriorWrap
-# from eryn.model import Model
-from eryn.state import State as eryn_State
-from eryn.ensemble import _FunctionWrapper
-from .run import CurrentInfoGlobalFit
-from .moves import GlobalFitMove, GFCombineMove
-from .hdfbackend import save_to_backend_asynchronously_and_plot
-# from eryn.moves import CombineMove
-# from .moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove
-# from .galaxyglobal import make_gmm
-from .utils import new_sens_mat, BasicResidualacsLikelihood
-from .recipe import Recipe
-
 
 class GlobalFit:
+    """Main class for managing the global fit MCMC sampling run.
+    
+    Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
+    for fitting multiple gravitational wave sources simultaneously.
+    
+    Args:
+        curr: CurrentInfoGlobalFit object containing all run configuration.
+        comm: MPI communicator for parallel processing.
+    """
+    
     def __init__(self, curr, comm):
         self.comm = comm
         self.curr = curr
@@ -238,6 +194,18 @@ class GlobalFit:
         self.logger = init_logger(filename="global_fit.log", level=level, name=name)
 
     def load_info(self, priors):
+        """Load or initialize the MCMC state from backend or priors.
+        
+        Attempts to load the state from the main backend file. If that doesn't exist,
+        tries to load from a past file if specified. Otherwise, initializes a new state
+        by drawing from the prior distributions.
+        
+        Args:
+            priors: Dictionary of prior distributions for each branch.
+            
+        Returns:
+            GFState object containing the initial or loaded MCMC state.
+        """
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
         backend_path = self.curr.general_info.main_file_path
@@ -293,6 +261,17 @@ class GlobalFit:
         return state
 
     def setup_acs(self, state):
+        """Set up AnalysisContainerArray for likelihood computations.
+        
+        Creates analysis containers for each walker, initializing data residuals
+        and sensitivity curves. Adds initial signal templates to the residuals.
+        
+        Args:
+            state: GFState object containing current parameter values.
+            
+        Returns:
+            AnalysisContainerArray containing data, residuals, and sensitivity for all walkers.
+        """
         if xp.__name__ == "cupy":
             xp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
 
@@ -356,10 +335,20 @@ class GlobalFit:
     
     @property
     def engine_info(self) -> EngineInfo:
-        __doc__ = self.curr.engine_info.__doc__
+        """EngineInfo object containing branch configuration for the sampler engine."""
         return self.curr.engine_info
 
     def run_global_fit(self):
+        """Execute the main global fit MCMC sampling run.
+        
+        Coordinates the entire sampling workflow including:
+        - Setting up the backend for storing results
+        - Loading or initializing the state
+        - Setting up analysis containers and likelihood
+        - Configuring the sampler with moves and priors
+        - Running the MCMC chain
+        - Distributing tasks across MPI ranks
+        """
         
         backend_path = self.curr.general_info.main_file_path
         
@@ -636,6 +625,17 @@ class GlobalFit:
             
             
 class GlobalFitSegment(ABC):
+    """Abstract base class for a segment of the global fit workflow.
+    
+    Defines the interface for individual components or stages in a multi-step
+    global fit process. Subclasses must implement methods to adjust settings
+    and execute the specific segment.
+    
+    Args:
+        comm: MPI communicator for parallel processing.
+        copy_settings_file: Whether to copy the settings file. Defaults to False.
+    """
+    
     def __init__(self, comm, copy_settings_file=False):
         self.comm = comm
         # self.base_settings = get_global_fit_settings(copy_settings_file=copy_settings_file)
@@ -646,13 +646,39 @@ class GlobalFitSegment(ABC):
         self.current_info = CurrentInfoGlobalFit(settings)
 
     def adjust_settings(self, settings):
+        """Adjust settings for this specific workflow segment.
+        
+        Args:
+            settings: Settings dictionary to modify.
+            
+        Raises:
+            NotImplementedError: Must be implemented by subclasses.
+        """
         raise NotImplementedError
 
     def run(self):
+        """Execute this workflow segment.
+        
+        Raises:
+            NotImplementedError: Must be implemented by subclasses.
+        """
         raise NotImplementedError
         
 
 class MPIControlGlobalFit:
+    """Controller for managing MPI processes in a global fit run.
+    
+    Coordinates MPI rank assignments for different components of the global fit,
+    including main sampling, results processing, and auxiliary computations.
+    
+    Args:
+        current_info: CurrentInfoGlobalFit object with run configuration.
+        comm: MPI communicator for parallel processing.
+        gpus: List of GPU device IDs available for computation.
+        run_results_update: Whether to run asynchronous results updates. Defaults to True.
+        **run_results_update_kwargs: Additional keyword arguments for results updates.
+    """
+    
     def __init__(self, current_info, comm, gpus, run_results_update=True, **run_results_update_kwargs):
 
         ranks = np.arange(comm.Get_size())
@@ -681,6 +707,17 @@ class MPIControlGlobalFit:
             assert gpu_assign in self.gpus
 
     def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
+        """Execute the global fit workflow with specified components.
+        
+        Coordinates the execution of different global fit components (PSD estimation,
+        MBH fitting, GB parameter estimation, GB searches) across MPI ranks.
+        
+        Args:
+            run_psd: Whether to run PSD estimation. Defaults to True.
+            run_mbhs: Whether to run MBH fitting. Defaults to True.
+            run_gbs_pe: Whether to run GB parameter estimation. Defaults to True.
+            run_gbs_search: Whether to run GB searches. Defaults to True.
+        """
         if self.rank == self.head_rank:
             # send to refit 
             print("sending data")
