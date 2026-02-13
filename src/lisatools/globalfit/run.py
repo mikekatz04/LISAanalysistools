@@ -1,28 +1,32 @@
 import numpy as np
 from copy import deepcopy
 
-from .generatefuncs import GenerateCurrentState
+# from .generatefuncs import GenerateCurrentState
 import numpy as np
 from mpi4py import MPI
 import sys, os
 import warnings
 from copy import deepcopy
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ..datacontainer import DataResidualArray
-from ..sensitivity import AE1SensitivityMatrix
+# from ..datacontainer import DataResidualArray
+# from ..sensitivity import AE1SensitivityMatrix
 from .state import GFState
-from ..detector import EqualArmlengthOrbits
-from ..stochastic import HyperbolicTangentGalacticForeground
+# from ..detector import EqualArmlengthOrbits
+# from ..stochastic import HyperbolicTangentGalacticForeground
 from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-from eryn.backends import HDFBackend
-from eryn.moves import Move
-from ..detector import LISAModel
+# from eryn.backends import HDFBackend
+# from eryn.moves import Move
+# from ..detector import LISAModel
 from eryn.state import BranchSupplemental
 from eryn.ensemble import EnsembleSampler
 from .engine import GlobalFitEngine
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 from ..utils.multigpudataholder import MultiGPUDataHolder
-import cupy as cp
+try:
+    import cupy as xp
+except (ModuleNotFoundError, ImportError):
+    import numpy as xp
+    print("cupy not found, using numpy instead. This will be very slow for large runs. Please install cupy and a compatible CUDA version for GPU acceleration.")
 from ..sampling.prior import GBPriorWrap
 from .psdglobal import log_like as psd_log_like
 from .psdglobal import PSDwithGBPriorWrap
@@ -33,20 +37,20 @@ from eryn.ensemble import _FunctionWrapper
 from .moves import GlobalFitMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
 from .utils import new_sens_mat, BasicResidualacsLikelihood
-from .utils import SetupInfoTransfer, AllSetupInfoTransfer
+# from .utils import SetupInfoTransfer, AllSetupInfoTransfer
 
-from ..sensitivity import get_sensitivity
+# from ..sensitivity import get_sensitivity
 from .hdfbackend import GFHDFBackend
 from .state import GFState
-from bbhx.waveformbuild import BBHWaveformFD
+# from bbhx.waveformbuild import BBHWaveformFD
 
-from .mbhsearch import ParallelMBHSearchControl
-from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
-from .psdglobal import run_psd_pe
-from .mbhglobal import run_mbh_pe
+# from .mbhsearch import ParallelMBHSearchControl
+# from .galaxyglobal import run_gb_pe, run_gb_bulk_search, fit_each_leaf
+# from .psdglobal import run_psd_pe
+# from .mbhglobal import run_mbh_pe
 
-from ..sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
-from .plot import RunResultsProduction
+# from ..sampling.stopping import SearchConvergeStopping, MPICommunicateStopping
+# from .plot import RunResultsProduction
 from .hdfbackend import save_to_backend_asynchronously_and_plot
 
 from gbgpu.gbgpu import GBGPU
@@ -175,32 +179,31 @@ import os
 import warnings
 from copy import deepcopy
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ..sensitivity import AE1SensitivityMatrix
+# from ..sensitivity import AE1SensitivityMatrix
 from .state import GFState
-from ..detector import EqualArmlengthOrbits
-from ..stochastic import HyperbolicTangentGalacticForeground
+# from ..detector import EqualArmlengthOrbits
+# from ..stochastic import HyperbolicTangentGalacticForeground
 from .hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend
-from eryn.backends import HDFBackend
-from eryn.moves import Move
-from ..detector import LISAModel
+# from eryn.backends import HDFBackend
+# from eryn.moves import Move
+# from ..detector import LISAModel
 from eryn.state import BranchSupplemental
 from eryn.ensemble import EnsembleSampler
 from .engine import GlobalFitEngine
 # from global_fit_input.global_fit_settings import get_global_fit_settings
-from ..utils.multigpudataholder import MultiGPUDataHolder
-import cupy as cp
-from ..sampling.prior import GBPriorWrap
-from .psdglobal import log_like as psd_log_like
-from .psdglobal import PSDwithGBPriorWrap
-from eryn.model import Model
+# from ..utils.multigpudataholder import MultiGPUDataHolder
+# from ..sampling.prior import GBPriorWrap
+# from .psdglobal import log_like as psd_log_like
+# from .psdglobal import PSDwithGBPriorWrap
+# from eryn.model import Model
 from eryn.state import State as eryn_State
 from eryn.ensemble import _FunctionWrapper
 from .run import CurrentInfoGlobalFit
 from .moves import GlobalFitMove, GFCombineMove
 from .hdfbackend import save_to_backend_asynchronously_and_plot
-from eryn.moves import CombineMove
-from .moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove
-from .galaxyglobal import make_gmm
+# from eryn.moves import CombineMove
+# from .moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove
+# from .galaxyglobal import make_gmm
 from .utils import new_sens_mat, BasicResidualacsLikelihood
 from .recipe import Recipe
 
@@ -290,8 +293,8 @@ class GlobalFit:
         return state
 
     def setup_acs(self, state):
-    
-        cp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
+        if xp.__name__ == "cupy":
+            xp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
 
         # df = self.curr.general_info.df
         # N = self.curr.general_info.injection[0].shape[-1]
@@ -333,13 +336,14 @@ class GlobalFit:
             if True:  # name == "psd" or name == "emri":
                 continue
 
-            templates_tmp = cp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
+            templates_tmp = xp.asarray(source_info["get_templates"](state, source_info, self.curr.general_info))
 
             acs.add_signal_to_r
             esidual(templates_tmp)  # no need to adjust data index or start_freq_ind as it is taken care of
 
             del templates_tmp
-            cp.get_default_memory_pool().free_all_blocks()
+            if xp.__name__ == "cupy":
+                xp.get_default_memory_pool().free_all_blocks()
             print(f"added {name} to acs.")
         # generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=False, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
         # generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=False, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
