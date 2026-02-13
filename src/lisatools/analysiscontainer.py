@@ -223,9 +223,15 @@ class AnalysisContainer:
         fmin, fmax = templ_settings.f_arr[0], templ_settings.f_arr[-1]
 
         slices = data_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
-
-        sliced_data_res_arr = self.data_res_arr.get_slice(slices)
+        tmp = self.data_res_arr.data_res_arr.get_array_slice(slices)
+        print(type(tmp))
+        sliced_data_res_arr = DataResidualArray(tmp)
         sliced_sens_mat = self.sens_mat.get_slice(slices)
+
+        #print all the shapes to make sure they are correct
+        print(f"Data residual array shape: {sliced_data_res_arr.shape}")
+        print(f"Template shape: {template.shape}")
+        print(f"Sliced sensitivity matrix shape: {sliced_sens_mat.shape}")
 
         return sliced_data_res_arr, template, sliced_sens_mat
 

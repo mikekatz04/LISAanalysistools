@@ -82,7 +82,7 @@ class DomainBase:
     def shape(self) -> tuple:
         return self.arr.shape
     
-    def get_slice(self, index: tuple) -> DomainBase:
+    def get_array_slice(self, index: tuple) -> DomainBase:
         new_arr = self.arr[(Ellipsis,) + index]
         new_settings = self.settings.get_slice(index)
         return self.settings.associated_class(new_arr, new_settings)
@@ -114,7 +114,7 @@ class TDSettings(DomainSettingsBase):
     
     @property
     def t_arr(self) -> np.ndarray:
-        return self.t0 + np.arange(self.NT) * self.dt
+        return self.t0 + np.arange(self.N) * self.dt
     
     @property
     def basis_shape(self) -> tuple:
@@ -498,6 +498,37 @@ class STFTSettings(DomainSettingsBase):
         return self.t0 + np.arange(self.NT) * self.dt
 
     @property
+    def min_freq(self) -> float:
+        return self._min_freq
+
+    @min_freq.setter
+    def min_freq(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError("min_freq must be non-negative.")
+        
+        #self._min_freq = value
+        # set it to the closest frequency bin
+        if value is not None:
+            self._min_freq = np.ceil(value / self.df) * self.df
+        else:
+            self._min_freq = 0.0
+
+    @property
+    def max_freq(self) -> Optional[float]:
+        return self._max_freq
+    @max_freq.setter
+    def max_freq(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError("max_freq must be non-negative.")
+        
+        #self._max_freq = value
+        # set it to the closest frequency bin
+        if value is not None:
+            self._max_freq = np.floor(value / self.df) * self.df
+        else:
+            self._max_freq = (self.NF - 1) * self.df
+
+    @property
     def f_arr(self) -> np.ndarray:
         
         _all_freqs = np.arange(0, self.NF) * self.df
@@ -581,10 +612,10 @@ class STFTSettings(DomainSettingsBase):
         if fmax > (self.NF - 1) * self.df:
             raise ValueError("fmax must be less than or equal to (NF-1)*df.")
         
-        time_start_idx = int(np.floor((tmin - self.t0) / self.dt))
-        time_end_idx = int(np.ceil((tmax - self.t0) / self.dt))
-        freq_start_idx = int(np.floor(fmin / self.df))
-        freq_end_idx = int(np.ceil(fmax / self.df))
+        time_start_idx = int(np.round((tmin - self.t0) / self.dt))
+        time_end_idx = int(np.round((tmax - self.t0) / self.dt))
+        freq_start_idx = int(np.round((fmin - self.f_arr[0]) / self.df))
+        freq_end_idx = int(np.floor((fmax - self.f_arr[0]) / self.df)) + 1
 
         return slice(time_start_idx, time_end_idx), slice(freq_start_idx, freq_end_idx)
     
@@ -605,7 +636,7 @@ class STFTSettings(DomainSettingsBase):
 
         new_t0 = self.t0 + time_slice.start * self.dt
         new_NT = time_slice.stop - time_slice.start
-        new_NF = freq_slice.stop - freq_slice.start
+        new_NF = self.NF
 
         new_min_freq = self.f_arr[freq_slice.start] if self.min_freq is not None else None
         new_max_freq = self.f_arr[freq_slice.stop - 1] if self.max_freq is not None else None

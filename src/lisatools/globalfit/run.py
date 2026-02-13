@@ -347,7 +347,7 @@ class GlobalFit:
         # data = generated_info["data"]
         # psd = generated_info["psd"]
         # lisasens = generated_info["lisasens"]
-
+        breakpoint()
         return acs 
     
     @property
