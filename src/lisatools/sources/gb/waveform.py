@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import numpy as np
-from typing import Optional, Any, Tuple
 from copy import deepcopy
+from typing import Any, Optional, Tuple
 
-from few.waveform import GenerateEMRIWaveform
-
+import numpy as np
 # imports
 from fastlisaresponse import ResponseWrapper
-from lisatools.detector import EqualArmlengthOrbits
-from ..waveformbase import AETTDIWaveform
-
+from few.waveform import GenerateEMRIWaveform
 from gbgpu.gbgpu import GBGPU
+
+from lisatools.detector import EqualArmlengthOrbits
+
+from ..waveformbase import AETTDIWaveform
 
 
 class GBAETWaveform(AETTDIWaveform):

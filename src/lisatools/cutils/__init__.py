@@ -1,14 +1,18 @@
 from __future__ import annotations
+
+import abc
 import dataclasses
 import enum
 import types
 import typing
-import abc
 from typing import Optional, Sequence, TypeVar, Union
+
+from gpubackendtools.exceptions import *
+from gpubackendtools.gpubackendtools import (BackendMethods, CpuBackend,
+                                             Cuda11xBackend, Cuda12xBackend)
+
 from ..utils.exceptions import *
 
-from gpubackendtools.gpubackendtools import BackendMethods, CpuBackend, Cuda11xBackend, Cuda12xBackend
-from gpubackendtools.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
@@ -18,6 +22,7 @@ class LISAToolsBackendMethods(BackendMethods):
     check_orbits: typing.Callable[(...), None]
     psd_likelihood: typing.Callable[(...), None]
     compute_logpdf: typing.Callable[(...), None]
+
 
 class LISAToolsBackend:
     # TODO: not ClassVar?
@@ -40,11 +45,13 @@ class LISAToolsBackend:
         self.psd_likelihood = lisatools_backend_methods.psd_likelihood
         self.compute_logpdf = lisatools_backend_methods.compute_logpdf
 
+
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
     """Implementation of the CPU backend"""
-    
+
     _backend_name = "lisatools_backend_cpu"
     _name = "lisatools_cpu"
+
     def __init__(self, *args, **kwargs):
         CpuBackend.__init__(self, *args, **kwargs)
         LISAToolsBackend.__init__(self, self.cpu_methods_loader())
@@ -73,19 +80,20 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
 
 
 class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
-
     """Implementation of CUDA 11.x backend"""
-    _backend_name : str = "lisatools_backend_cuda11x"
+
+    _backend_name: str = "lisatools_backend_cuda11x"
     _name = "lisatools_cuda11x"
 
     def __init__(self, *args, **kwargs):
         Cuda11xBackend.__init__(self, *args, **kwargs)
         LISAToolsBackend.__init__(self, self.cuda11x_module_loader())
-        
+
     @staticmethod
     def cuda11x_module_loader():
         try:
             import lisatools_backend_cuda11x.pycppdetector
+
             # import lisatools_backend_cuda11x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
@@ -110,19 +118,22 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             xp=cupy,
         )
 
+
 class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
     """Implementation of CUDA 12.x backend"""
-    _backend_name : str = "lisatools_backend_cuda12x"
+
+    _backend_name: str = "lisatools_backend_cuda12x"
     _name = "lisatools_cuda12x"
-    
+
     def __init__(self, *args, **kwargs):
         Cuda12xBackend.__init__(self, *args, **kwargs)
         LISAToolsBackend.__init__(self, self.cuda12x_module_loader())
-        
+
     @staticmethod
     def cuda12x_module_loader():
         try:
             import lisatools_backend_cuda12x.pycppdetector
+
             # import lisatools_backend_cuda12x.psd
 
         except (ModuleNotFoundError, ImportError) as e:

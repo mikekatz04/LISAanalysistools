@@ -1,18 +1,18 @@
 from __future__ import annotations
-import numpy as np
-from typing import Any, Tuple, List, Optional
 
-from ..diagnostic import snr as snr_func
-from lisatools.diagnostic import (
-    covariance,
-    plot_covariance_corner,
-    plot_covariance_contour,
-)
-from ..sensitivity import A1TDISens, Sensitivity
-from .waveformbase import SNRWaveform, AETTDIWaveform
-from ..detector import LISAModel
-from ..utils.constants import *
+from typing import Any, List, Optional, Tuple
+
+import numpy as np
 from eryn.utils import TransformContainer
+
+from lisatools.diagnostic import (covariance, plot_covariance_contour,
+                                  plot_covariance_corner)
+
+from ..detector import LISAModel
+from ..diagnostic import snr as snr_func
+from ..sensitivity import A1TDISens, Sensitivity
+from ..utils.constants import *
+from .waveformbase import AETTDIWaveform, SNRWaveform
 
 
 class CalculationController:
@@ -130,7 +130,10 @@ class BBHCalculationController(CalculationController):
         input_basis = list(range(12))
         output_basis = list(range(12))
         self.transform_fn = TransformContainer(
-            input_basis, output_basis, parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis,
+            output_basis,
+            parameter_transforms=parameter_transforms,
+            fill_dict=None,  # fill_dict
         )
 
         super(BBHCalculationController, self).__init__(*args, **kwargs)
@@ -161,7 +164,7 @@ class BBHCalculationController(CalculationController):
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
         precision: bool = False,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
@@ -270,7 +273,10 @@ class GBCalculationController(CalculationController):
         input_basis = list(range(9))
         output_basis = list(range(9))
         self.transform_fn = TransformContainer(
-            input_basis, output_basis, parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis,
+            output_basis,
+            parameter_transforms=parameter_transforms,
+            fill_dict=None,  # fill_dict
         )
 
         super(GBCalculationController, self).__init__(*args, **kwargs)
@@ -284,7 +290,7 @@ class GBCalculationController(CalculationController):
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
         precision: bool = False,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
@@ -395,11 +401,14 @@ class EMRICalculationController(CalculationController):
             9: np.arccos,
             # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
         }
-        
+
         input_basis = list(range(14))
         output_basis = list(range(14))
         self.transform_fn = TransformContainer(
-            input_basis, output_basis, parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis,
+            output_basis,
+            parameter_transforms=parameter_transforms,
+            fill_dict=None,  # fill_dict
         )
 
         super(EMRICalculationController, self).__init__(*args, **kwargs)
@@ -411,7 +420,7 @@ class EMRICalculationController(CalculationController):
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
         precision: bool = False,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 

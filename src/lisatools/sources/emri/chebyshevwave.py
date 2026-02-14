@@ -1,72 +1,74 @@
 from __future__ import annotations
-import sys
+
 import os
+import sys
 import typing
 
-import numpy.typing as npt
-#import few
+# import few
 import matplotlib.pyplot as plt
-#get_ipython().run_line_magic('matplotlib', 'inline')
-from numpy import pi
 import numpy as np
-from scipy.interpolate import make_interp_spline
-from scipy.interpolate import interp1d
-from scipy.interpolate import CubicSpline
-#rem I need to remind myself which of these I use
+import numpy.typing as npt
+# get_ipython().run_line_magic('matplotlib', 'inline')
+from numpy import pi
+# rem I need to remind myself which of these I use
 from scipy.integrate import cumulative_simpson as cumulative_simpson_scipy
-#from emri_singleharmonic_funcs import *
+from scipy.interpolate import CubicSpline, interp1d, make_interp_spline
 
-def alpha_to_tf(alpha,npts,fmin,fmax):
-#This function takes in the Chebyshev coeffs \vec \alpha (alpha_0
-# thru \alpha4) and calculates t(f) on a 1-d grid where the f values are
-#evenly spaced in lnf.  npts is the number of pts in the grid.     
-#The "zero of time" convention here is that
-#t=0 when f = fmid, where fmid is the geometric mean of fmin and fmax.   
-#As an intermediate step, it calculates t(y), where
-# y is basically ln(f), but squeezed and shifted so it goes from y= -1 and y=1.
-    
-#   from emri_singleharmonic_funcs import chebyfit   #probably dont need this
-#Msun = 4.925490949197807e-06  #mass of sun in sec  #prob don't need this either
-    fmid = np.sqrt(fmin*fmax)
-    kappa = 0.5*(np.log(fmax/fmin))
-    y = np.linspace(-1.e0, 1.e0, num=npts, endpoint=True)
+# from emri_singleharmonic_funcs import *
+
+
+def alpha_to_tf(alpha, npts, fmin, fmax):
+    # This function takes in the Chebyshev coeffs \vec \alpha (alpha_0
+    # thru \alpha4) and calculates t(f) on a 1-d grid where the f values are
+    # evenly spaced in lnf.  npts is the number of pts in the grid.
+    # The "zero of time" convention here is that
+    # t=0 when f = fmid, where fmid is the geometric mean of fmin and fmax.
+    # As an intermediate step, it calculates t(y), where
+    # y is basically ln(f), but squeezed and shifted so it goes from y= -1 and y=1.
+
+    #   from emri_singleharmonic_funcs import chebyfit   #probably dont need this
+    # Msun = 4.925490949197807e-06  #mass of sun in sec  #prob don't need this either
+    fmid = np.sqrt(fmin * fmax)
+    kappa = 0.5 * (np.log(fmax / fmin))
+    y = np.linspace(-1.0e0, 1.0e0, num=npts, endpoint=True)
     nterms = np.size(alpha)
-    basis_funcs = np.zeros([npts,nterms])  #these are the Chebyshev polys (of 2nd kind)
-    y0 = (y + 2.0)**0.0
-    basis_funcs[:,0] = y0
-    y1 = 2*y
-    basis_funcs[:,1] = y1
-    y2 = y1**2.0 -1.0
-    basis_funcs[:,2] = y2
-    y3 = y1*(y2-1.0)
-    basis_funcs[:,3] = y3
-    y4 = y1*y3 - y2
-    basis_funcs[:,4] = y4
-    dw = 2.0/(npts-1)
-    midpt = (npts-1)//2
-    #print('midpt =',midpt)
-    input1 = np.matmul(basis_funcs,alpha) + kappa*y
-    input1.shape = (npts,1)
-    pre_integrand =np.zeros([npts,1])
-    pre_integrand = np.exp(input1) #using nterm chebyshev fit to y
-#We call this the pre-integrand since it was stripped from a code     
-    exp_kappa_y = np.exp(kappa*y)
-    f = fmid*exp_kappa_y
-    exp_kappa_y.shape = (npts,1)
-    integrand = np.zeros([npts,1])
-    integrand[:,0] = dw*cumulative_simpson_scipy(pre_integrand[:,0], initial=0.e0)
-    integrand.shape = (npts,1)
-    const1 = integrand[midpt,0]
-    integrand = integrand - np.ones([npts,1])*const1
-    #integrand = integrand*exp_kappa_y*2.0*pi*kappa*kappa
-    t = integrand*kappa
-    #Psi  = np.zeros([npts,1])
-    #Psi[:,0] = dw*cumulative_simpson_scipy(integrand[:,0], initial=0.e0)
-    #Psi.shape = (npts,1)
-    #const2 = Psi[midpt,0]
-    #Psi = Psi - const2*np.ones([npts,1])
-    return f,t
-
+    basis_funcs = np.zeros(
+        [npts, nterms]
+    )  # these are the Chebyshev polys (of 2nd kind)
+    y0 = (y + 2.0) ** 0.0
+    basis_funcs[:, 0] = y0
+    y1 = 2 * y
+    basis_funcs[:, 1] = y1
+    y2 = y1**2.0 - 1.0
+    basis_funcs[:, 2] = y2
+    y3 = y1 * (y2 - 1.0)
+    basis_funcs[:, 3] = y3
+    y4 = y1 * y3 - y2
+    basis_funcs[:, 4] = y4
+    dw = 2.0 / (npts - 1)
+    midpt = (npts - 1) // 2
+    # print('midpt =',midpt)
+    input1 = np.matmul(basis_funcs, alpha) + kappa * y
+    input1.shape = (npts, 1)
+    pre_integrand = np.zeros([npts, 1])
+    pre_integrand = np.exp(input1)  # using nterm chebyshev fit to y
+    # We call this the pre-integrand since it was stripped from a code
+    exp_kappa_y = np.exp(kappa * y)
+    f = fmid * exp_kappa_y
+    exp_kappa_y.shape = (npts, 1)
+    integrand = np.zeros([npts, 1])
+    integrand[:, 0] = dw * cumulative_simpson_scipy(pre_integrand[:, 0], initial=0.0e0)
+    integrand.shape = (npts, 1)
+    const1 = integrand[midpt, 0]
+    integrand = integrand - np.ones([npts, 1]) * const1
+    # integrand = integrand*exp_kappa_y*2.0*pi*kappa*kappa
+    t = integrand * kappa
+    # Psi  = np.zeros([npts,1])
+    # Psi[:,0] = dw*cumulative_simpson_scipy(integrand[:,0], initial=0.e0)
+    # Psi.shape = (npts,1)
+    # const2 = Psi[midpt,0]
+    # Psi = Psi - const2*np.ones([npts,1])
+    return f, t
 
 
 def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
@@ -134,18 +136,18 @@ def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
             shape[axis] = -1
             d = d.reshape(shape)
         elif len(x.shape) != len(y.shape):
-            raise ValueError("If given, shape of x must be 1-D or the "
-                             "same as y.")
+            raise ValueError("If given, shape of x must be 1-D or the " "same as y.")
         else:
             d = np.diff(x, axis=axis)
 
         if d.shape[axis] != y.shape[axis] - 1:
-            raise ValueError("If given, length of x along axis must be the "
-                             "same as y.")
+            raise ValueError(
+                "If given, length of x along axis must be the " "same as y."
+            )
 
     nd = len(y.shape)
-    slice1 = tupleset((slice(None),)*nd, axis, slice(1, None))
-    slice2 = tupleset((slice(None),)*nd, axis, slice(None, -1))
+    slice1 = tupleset((slice(None),) * nd, axis, slice(1, None))
+    slice2 = tupleset((slice(None),) * nd, axis, slice(None, -1))
     res = np.cumsum(d * (y[slice1] + y[slice2]) / 2.0, axis=axis)
 
     if initial is not None:
@@ -156,8 +158,7 @@ def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
 
         shape = list(res.shape)
         shape[axis] = 1
-        res = np.concatenate([np.full(shape, initial, dtype=res.dtype), res],
-                             axis=axis)
+        res = np.concatenate([np.full(shape, initial, dtype=res.dtype), res], axis=axis)
 
     return res
 
@@ -307,10 +308,14 @@ def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
 
     elif x is not None:
         x = _ensure_float_array(x)
-        message = ("If given, shape of `x` must be the same as `y` or 1-D with "
-                   "the same length as `y` along `axis`.")
-        if not (x.shape == original_shape
-                or (x.ndim == 1 and len(x) == original_shape[axis])):
+        message = (
+            "If given, shape of `x` must be the same as `y` or 1-D with "
+            "the same length as `y` along `axis`."
+        )
+        if not (
+            x.shape == original_shape
+            or (x.ndim == 1 and len(x) == original_shape[axis])
+        ):
             raise ValueError(message)
 
         x = np.broadcast_to(x, y.shape) if x.ndim == 1 else np.swapaxes(x, axis, -1)
@@ -325,8 +330,10 @@ def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
         dx = _ensure_float_array(dx)
         final_dx_shape = tupleset(original_shape, axis, original_shape[axis] - 1)
         alt_input_dx_shape = tupleset(original_shape, axis, 1)
-        message = ("If provided, `dx` must either be a scalar or have the same "
-                   "shape as `y` but with only 1 point along `axis`.")
+        message = (
+            "If provided, `dx` must either be a scalar or have the same "
+            "shape as `y` but with only 1 point along `axis`."
+        )
         if not (dx.ndim == 0 or dx.shape == alt_input_dx_shape):
             raise ValueError(message)
         dx = np.broadcast_to(dx, final_dx_shape)
@@ -338,8 +345,10 @@ def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
     if initial is not None:
         initial = _ensure_float_array(initial)
         alt_initial_input_shape = tupleset(original_shape, axis, 1)
-        message = ("If provided, `initial` must either be a scalar or have the "
-                   "same shape as `y` but with only 1 point along `axis`.")
+        message = (
+            "If provided, `initial` must either be a scalar or have the "
+            "same shape as `y` but with only 1 point along `axis`."
+        )
         if not (initial.ndim == 0 or initial.shape == alt_initial_input_shape):
             raise ValueError(message)
         initial = np.broadcast_to(initial, alt_initial_input_shape)
@@ -352,26 +361,25 @@ def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
     return res
 
 
-
 def _cumulatively_sum_simpson_integrals(
-    y: np.ndarray, 
-    dx: np.ndarray, 
+    y: np.ndarray,
+    dx: np.ndarray,
     integration_func: Callable[[np.ndarray, np.ndarray], np.ndarray],
 ) -> np.ndarray:
     """Calculate cumulative sum of Simpson integrals.
-    Takes as input the integration function to be used. 
+    Takes as input the integration function to be used.
     The integration_func is assumed to return the cumulative sum using
     composite Simpson's rule. Assumes the axis of summation is -1.
     """
     sub_integrals_h1 = integration_func(y, dx)
     sub_integrals_h2 = integration_func(y[..., ::-1], dx[..., ::-1])[..., ::-1]
-    
+
     shape = list(sub_integrals_h1.shape)
     shape[-1] += 1
     sub_integrals = np.empty(shape)
     sub_integrals[..., :-1:2] = sub_integrals_h1[..., ::2]
     sub_integrals[..., 1::2] = sub_integrals_h2[..., ::2]
-    # Integral over last subinterval can only be calculated from 
+    # Integral over last subinterval can only be calculated from
     # formula for h2
     sub_integrals[..., -1] = sub_integrals_h2[..., -1]
     res = np.cumsum(sub_integrals, axis=-1)
@@ -404,8 +412,8 @@ def _cumulative_simpson_unequal_intervals(y: np.ndarray, dx: np.ndarray) -> np.n
     f3 = y[..., 2:]
 
     x31 = x21 + x32
-    x21_x31 = x21/x31
-    x21_x32 = x21/x32
+    x21_x31 = x21 / x31
+    x21_x32 = x21 / x32
     x21x21_x31x32 = x21_x31 * x21_x32
 
     # Calculate integral over the subintervals (eqn (8) of Reference [2])
@@ -413,7 +421,7 @@ def _cumulative_simpson_unequal_intervals(y: np.ndarray, dx: np.ndarray) -> np.n
     coeff2 = 3 + x21x21_x31x32 + x21_x31
     coeff3 = -x21x21_x31x32
 
-    return x21/6 * (coeff1*f1 + coeff2*f2 + coeff3*f3)
+    return x21 / 6 * (coeff1 * f1 + coeff2 * f2 + coeff3 * f3)
 
 
 def _ensure_float_array(arr: npt.ArrayLike) -> np.ndarray:
@@ -424,80 +432,96 @@ def _ensure_float_array(arr: npt.ArrayLike) -> np.ndarray:
 
 
 class ChebyshevWave:
-    
-    def __init__(self, npts: int,fmin: float,fmax: float):
 
-        self.npts, self.fmin, self.fmax = npts,fmin,fmax
-        
-        self.fmid = np.sqrt(self.fmin*self.fmax)
-        self.kappa = 0.5*(np.log(self.fmax/self.fmin))
-        self.y = np.linspace(-1.e0, 1.e0, num=self.npts, endpoint=True)
+    def __init__(self, npts: int, fmin: float, fmax: float):
+
+        self.npts, self.fmin, self.fmax = npts, fmin, fmax
+
+        self.fmid = np.sqrt(self.fmin * self.fmax)
+        self.kappa = 0.5 * (np.log(self.fmax / self.fmin))
+        self.y = np.linspace(-1.0e0, 1.0e0, num=self.npts, endpoint=True)
         self.kappa_y = self.kappa * self.y
         self.exp_kappa_y = np.exp(self.kappa_y)
-        self.dw = 2.0/(self.npts-1)
-        self.midpt = (self.npts-1)//2
+        self.dw = 2.0 / (self.npts - 1)
+        self.midpt = (self.npts - 1) // 2
 
-    def __call__(self, *alpha_in: np.ndarray | list) -> typing.Tuple[np.ndarray, np.ndarray]:
-        
+    def __call__(
+        self, *alpha_in: np.ndarray | list
+    ) -> typing.Tuple[np.ndarray, np.ndarray]:
+
         alpha = np.asarray(alpha_in).T
-        squeeze = (alpha.ndim == 1)
+        squeeze = alpha.ndim == 1
         alpha = np.atleast_2d(alpha)
-        
+
         assert alpha.ndim < 3
 
         nsource, nterms = alpha.shape
-        basis_funcs = np.zeros([nsource, self.npts, nterms])  #these are the Chebyshev polys (of 2nd kind)
-        y0 = (self.y + 2.0)**0.0
-        basis_funcs[:, :,0] = y0[None, :]
-        y1 = 2*self.y
-        basis_funcs[:, :,1] = y1[None, :]
-        y2 = y1**2.0 -1.0
-        basis_funcs[:, :,2] = y2[None, :]
-        y3 = y1*(y2-1.0)
-        basis_funcs[:, :,3] = y3[None, :]
-        y4 = y1*y3 - y2
-        basis_funcs[:, :,4] = y4[None, :]
+        basis_funcs = np.zeros(
+            [nsource, self.npts, nterms]
+        )  # these are the Chebyshev polys (of 2nd kind)
+        y0 = (self.y + 2.0) ** 0.0
+        basis_funcs[:, :, 0] = y0[None, :]
+        y1 = 2 * self.y
+        basis_funcs[:, :, 1] = y1[None, :]
+        y2 = y1**2.0 - 1.0
+        basis_funcs[:, :, 2] = y2[None, :]
+        y3 = y1 * (y2 - 1.0)
+        basis_funcs[:, :, 3] = y3[None, :]
+        y4 = y1 * y3 - y2
+        basis_funcs[:, :, 4] = y4[None, :]
 
-        #print('midpt =',midpt)
+        # print('midpt =',midpt)
         # faster than einsum?
-        input1 = (np.einsum("...ij,...j->...i", basis_funcs, alpha) + self.kappa_y)
+        input1 = np.einsum("...ij,...j->...i", basis_funcs, alpha) + self.kappa_y
 
-        pre_integrand = np.exp(input1) #using nterm chebyshev fit to y
-    #We call this the pre-integrand since it was stripped from a code     
-        f = self.fmid*self.exp_kappa_y
-        
+        pre_integrand = np.exp(input1)  # using nterm chebyshev fit to y
+        # We call this the pre-integrand since it was stripped from a code
+        f = self.fmid * self.exp_kappa_y
+
         # test_pre_integrand = np.tile(pre_integrand, (9, 1))
-        
+
         # _integrand = self.dw*cumulative_simpson_scipy(test_pre_integrand, initial=0.e0, axis=-1)
-        integrand = self.dw*cumulative_simpson(pre_integrand, initial=0.e0, axis=-1)
+        integrand = self.dw * cumulative_simpson(pre_integrand, initial=0.0e0, axis=-1)
         const1 = integrand[:, self.midpt]
         integrand -= const1[:, None]
-        #integrand = integrand*exp_kappa_y*2.0*pi*kappa*kappa
-        t = integrand*self.kappa
+        # integrand = integrand*exp_kappa_y*2.0*pi*kappa*kappa
+        t = integrand * self.kappa
         if squeeze:
             return t[0], f
         return t, f
-    
+
 
 from fastlisaresponse.tdionfly import FDTDIonTheFly
 from gpubackendtools.interpolate import CubicSplineInterpolant
 
 
 class ChebyshevXYZ(ChebyshevWave):
-    
+
     def __init__(self, fs, *args, **kwargs):
         ChebyshevWave.__init__(self, *args, **kwargs)
         # Need to initialize FDTDIonTheFly each time through
         self.fd_gen = FDTDIonTheFly
         self.fs = fs
 
-    def __call__(self, amp0, phi0, inc, psi, lam, beta, t_start, *alpha, return_spline: bool =False, **cheb_kwargs):
-        
+    def __call__(
+        self,
+        amp0,
+        phi0,
+        inc,
+        psi,
+        lam,
+        beta,
+        t_start,
+        *alpha,
+        return_spline: bool = False,
+        **cheb_kwargs,
+    ):
+
         t_intrinsic, _f = ChebyshevWave.__call__(self, *alpha, **cheb_kwargs)
-        
-        squeeze = (t_intrinsic.ndim == 1)
+
+        squeeze = t_intrinsic.ndim == 1
         t_intrinsic = np.atleast_2d(t_intrinsic)
-        
+
         amp0 = np.atleast_1d(amp0)
         phi0 = np.atleast_1d(phi0)
         inc = np.atleast_1d(inc)
@@ -509,7 +533,11 @@ class ChebyshevXYZ(ChebyshevWave):
         num_bin = inc.shape[0]
         f = np.tile(_f, (num_bin, 1))
 
-        assert t_start.ndim == 1 and t_start.shape[0] == inc.shape[0] and t_start.shape[0] == t_intrinsic.shape[0]
+        assert (
+            t_start.ndim == 1
+            and t_start.shape[0] == inc.shape[0]
+            and t_start.shape[0] == t_intrinsic.shape[0]
+        )
         t = t_intrinsic - (t_intrinsic[:, 0] - t_start)[:, None]
 
         t_max = t.max(axis=-1)
@@ -527,12 +555,21 @@ class ChebyshevXYZ(ChebyshevWave):
         CUBIC_SPLINE_GENERAL_SPACING = 3
 
         phase_ref = (2 * np.pi * f * t).flatten().copy()
-        
+
         # 11 is nparams / will not affect spline
         # needs to be 4? need to check that
-        fd_wave_gen = self.fd_gen(t_tdi, A_of_t, f_of_t, phase_ref, self.fs, nsources, n_params=4, spline_type=CUBIC_SPLINE_GENERAL_SPACING)
+        fd_wave_gen = self.fd_gen(
+            t_tdi,
+            A_of_t,
+            f_of_t,
+            phase_ref,
+            self.fs,
+            nsources,
+            n_params=4,
+            spline_type=CUBIC_SPLINE_GENERAL_SPACING,
+        )
         wave_output = fd_wave_gen(inc, psi, lam, beta, return_spline=return_spline)
-        
+
         # will reset splines if splines are desired
         # TODO: remove this for speed?
         if np.any(amp0 != 1.0):
@@ -541,14 +578,15 @@ class ChebyshevXYZ(ChebyshevWave):
             wave_output.phase_ref = wave_output.phase_ref + phi0[:, None]
         return wave_output
 
+
 if __name__ == "__main__":
 
-    alpha = [13.0,-0.80,3.e-1,-1.e-3,2.e-4] #just any old alpha
-    npts = 32001  #first do on fine grid
+    alpha = [13.0, -0.80, 3.0e-1, -1.0e-3, 2.0e-4]  # just any old alpha
+    npts = 32001  # first do on fine grid
 
-    fmin = 0.003 #3mHz
+    fmin = 0.003  # 3mHz
     fmax = 0.008
-    f,t = alpha_to_tf(alpha,npts,fmin,fmax)
+    f, t = alpha_to_tf(alpha, npts, fmin, fmax)
     cheb_wave = ChebyshevWave(npts, fmin, fmax)
     t1, f1 = cheb_wave(alpha)
     # fig, (ax1, ax2) = plt.subplots(2, 1)
@@ -556,7 +594,7 @@ if __name__ == "__main__":
 
     # ax1.plot(t1, f1, "--")
     # ax2.plot(t1.squeeze() - t.squeeze())
-    
+
     # print(t[(npts-1)//2]) #should be zero
     # plt.show()
     # plt.close()
@@ -565,4 +603,3 @@ if __name__ == "__main__":
     cheb_xyz = ChebyshevXYZ(npts, fmin, fmax)
 
     temp_xyz = cheb_xyz(alpha)
-    

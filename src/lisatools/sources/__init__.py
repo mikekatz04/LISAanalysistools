@@ -1,6 +1,2 @@
-from .utils import (
-    CalculationController,
-    BBHCalculationController,
-    GBCalculationController,
-    EMRICalculationController,
-)
+from .utils import (BBHCalculationController, CalculationController,
+                    EMRICalculationController, GBCalculationController)

@@ -1,59 +1,94 @@
-import numpy as np
-import cupy as cp
-from copy import deepcopy
 import os
+from copy import deepcopy
 
-from lisatools.stochastic import HyperbolicTangentGalacticForeground
-from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
-                
-
+import cupy as cp
+import numpy as np
+from eryn.ensemble import EnsembleSampler
 from eryn.moves import RedBlueMove, StretchMove
+# from bbhx.likelihood import NewHeterodynedLikelihood
+from tqdm import tqdm
+
+from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
+from lisatools.stochastic import HyperbolicTangentGalacticForeground
+
+from ...analysiscontainer import AnalysisContainer
+from ...datacontainer import DataResidualArray
+from ...detector import sangria
+from ...sampling.moves.skymodehop import SkyMove
+from ...sampling.stopping import SearchConvergeStopping
+from ...sensitivity import AET1SensitivityMatrix
+from ...utils.constants import *
+from ...utils.parallelbase import LISAToolsParallelModule
+from ...utils.utility import tukey
 # from eryn.state import State
 from ..state import GFState
-from ...sampling.moves.skymodehop import SkyMove
-#from bbhx.likelihood import NewHeterodynedLikelihood
-from tqdm import tqdm
-from .globalfitmove import GlobalFitMove
 from .addremovemove import ResidualAddOneRemoveOneMove
-from ...utils.utility import tukey
-from ...sampling.stopping import SearchConvergeStopping
-from ...utils.constants import *
+from .globalfitmove import GlobalFitMove
 
-from eryn.ensemble import EnsembleSampler
-from ...sensitivity import AET1SensitivityMatrix
-from ...detector import sangria
-from ...datacontainer import DataResidualArray
-from ...analysiscontainer import AnalysisContainer
-from ...utils.parallelbase import LISAToolsParallelModule
 
 def update_fn(i, last_sample, sampler):
-    print("max logl:", last_sample.log_like.max()) 
+    print("max logl:", last_sample.log_like.max())
     last_sample.branches_coords["mbh"][-1] = last_sample.branches_coords["mbh"][0]
     last_sample.log_like[-1] = last_sample.log_like[0]
     last_sample.log_prior[-1] = last_sample.log_prior[0]
 
 
-def search_likelihood_wrap(x, wave_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, transform_fn, like_args, mbh_kwargs):
+def search_likelihood_wrap(
+    x,
+    wave_gen,
+    initial_t_vals,
+    end_t_vals,
+    d_d_vals,
+    t_ref_lims,
+    transform_fn,
+    like_args,
+    mbh_kwargs,
+):
     x_in = transform_fn.both_transforms(x)
 
-    data_index = noise_index = (np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1).astype(np.int32)
+    data_index = noise_index = (
+        np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1
+    ).astype(np.int32)
     # wave_gen.amp
-    
+
     wave_gen.amp_phase_gen.initial_t_val = initial_t_vals[data_index][:, None]
     t_obs_start = initial_t_vals[data_index] / YRSID_SI
     t_obs_end = end_t_vals[data_index] / YRSID_SI
     wave_gen.d_d = cp.asarray(d_d_vals[data_index])
     fd, all_data, psd, df = like_args
 
-    ll = wave_gen.get_direct_ll(fd, all_data, psd, df, *x_in.T, noise_index=noise_index, data_index=data_index, t_obs_start=t_obs_start, t_obs_end=t_obs_end, **mbh_kwargs).real.get()
-    
+    ll = wave_gen.get_direct_ll(
+        fd,
+        all_data,
+        psd,
+        df,
+        *x_in.T,
+        noise_index=noise_index,
+        data_index=data_index,
+        t_obs_start=t_obs_start,
+        t_obs_end=t_obs_end,
+        **mbh_kwargs,
+    ).real.get()
+
     return ll
 
 
-class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove):
-    def __init__(self, *args, file_backend=None, search_fp=None, force_backend=None, run_search=False, **kwargs):
-        
-        LISAToolsParallelModule.__init__(self, *args, force_backend=force_backend, **kwargs)
+class MBHSpecialMove(
+    LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove
+):
+    def __init__(
+        self,
+        *args,
+        file_backend=None,
+        search_fp=None,
+        force_backend=None,
+        run_search=False,
+        **kwargs,
+    ):
+
+        LISAToolsParallelModule.__init__(
+            self, *args, force_backend=force_backend, **kwargs
+        )
         RedBlueMove.__init__(self, **kwargs)
         ResidualAddOneRemoveOneMove.__init__(self, *args, **kwargs)
         self.force_backend_base = self.backend.name.split("_")[-1]
@@ -64,35 +99,38 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
 
             assert search_fp is not None
             self.search_fp = search_fp
-            
+
         self.finished_search = False
 
     @classmethod
     def supported_backends(cls):
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
- 
+
     def setup(self, model, state):
-        
+
         ntemps, nwalkers, _, _ = state.branches["mbh"].shape
         _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
-        
+
         if not self.run_search:
-            return 
+            return
 
         fp = self.search_fp
 
         acs_all = model.analysis_container_arr
 
-        _moves = [(move_i, weight_i) for move_i, weight_i in zip(self.moves, self.move_weights)]
+        _moves = [
+            (move_i, weight_i)
+            for move_i, weight_i in zip(self.moves, self.move_weights)
+        ]
         max_logl_walker = np.argmax(acs_all.likelihood()).item()
-        
+
         data = acs_all.data_shaped[0][max_logl_walker].copy()
         psd = acs_all.psd_shaped[0][max_logl_walker].copy()
 
         # TODO: connect this general_info.fixed_psd_kwargs
         model_A = deepcopy(sangria)
         model_E = deepcopy(sangria)
-        
+
         if "psd" in state.branches:
             psd_best = state.branches["psd"].coords[0, max_logl_walker, 0]
 
@@ -104,30 +142,30 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         if "galfor" in state.branches:
             galfor_best = state.branches["galfor"].coords[0, max_logl_walker, 0]
             stochastic_kwargs = dict(
-                stochastic_function=HyperbolicTangentGalacticForeground, 
-                stochastic_params=galfor_best
+                stochastic_function=HyperbolicTangentGalacticForeground,
+                stochastic_params=galfor_best,
             )
         else:
             stochastic_kwargs = dict()
 
-        bool_leaves_not_filled_yet = (~state.branches['mbh'].inds[0, 0, :])
+        bool_leaves_not_filled_yet = ~state.branches["mbh"].inds[0, 0, :]
 
         fd = cp.asarray(acs_all.f_arr)
         df = acs_all.df
-        dt = acs_all[0].data_res_arr.dt 
+        dt = acs_all[0].data_res_arr.dt
         # TODO: do we want to rerun search after much of the fitting?
-        while not self.finished_search:  # will not enter once search has finished for this run
+        while (
+            not self.finished_search
+        ):  # will not enter once search has finished for this run
             # TODO: adjust these moves?
-            
 
             ntemps = 10
             nwalkers = 50
 
-            # take inverse FFT 
+            # take inverse FFT
             At, Et = np.fft.irfft(data[0].get() / dt), np.fft.irfft(data[1].get() / dt)
             full_length = len(At)
             # TODO: do anything with incoming tukey window?
-            
 
             start_params = self.priors["mbh"].rvs(size=(ntemps, nwalkers, 1))
             # ll = wave_gen.get_direct_ll(fd, data, psd, df, *x_in.T, **self.waveform_like_kwargs).real.get()
@@ -144,7 +182,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             initial_t_vals = []
             # assert ind_start > 0
             # omits first day and last day
-            delta = int(12.0 * 3600.0 / dt)  # int(15 * 24 * 3600.0 / dt)  # 
+            delta = int(12.0 * 3600.0 / dt)  # int(15 * 24 * 3600.0 / dt)  #
             # TODO: need to fill in days on edges of windows
             t_start_ind = int((0.25 * YRSID_SI / 12.0 - 24.0 * 3600.0) / dt)  # 0
             if t_start_ind > len(At) - 2:
@@ -177,7 +215,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 # plt.savefig("check0.png")
                 # plt.close()
                 # fucking dt
-            
+
                 # Af, Ef, Tf = (
                 #     np.fft.rfft(A_here) * dt,
                 #     np.fft.rfft(E_here) * dt,
@@ -188,7 +226,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                     np.fft.rfft(A_here) * dt,
                     np.fft.rfft(E_here) * dt,
                 )
-                
+
                 initial_t_vals.append(start_t)
                 end_t_vals.append(end_t)
                 if i == 0:
@@ -197,9 +235,13 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                     df_short = fd_short[1] - fd_short[0]
                     Tobs_short = dt * len(t_here)
                 else:
-                    assert length_check == len(Af)  
+                    assert length_check == len(Af)
 
-                data_res_arr = DataResidualArray([Af, Ef, np.zeros_like(Ef)], f_arr=fd_short, df=df_short, )
+                data_res_arr = DataResidualArray(
+                    [Af, Ef, np.zeros_like(Ef)],
+                    f_arr=fd_short,
+                    df=df_short,
+                )
                 _psd_A = A1TDISens.get_Sn(fd_short, model=model_A, **stochastic_kwargs)
                 _psd_E = E1TDISens.get_Sn(fd_short, model=model_E, **stochastic_kwargs)
                 _psd_T = np.full_like(_psd_A, 1e10)
@@ -210,13 +252,21 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                     _psd_E[0] = 1e10
 
                 tmp_mat = [_psd_A, _psd_E, _psd_T]
-                sens_mat = SensitivityMatrix(fd_short,tmp_mat)
+                sens_mat = SensitivityMatrix(fd_short, tmp_mat)
 
-                analysis = AnalysisContainer(data_res_arr, sens_mat)  # , signal_gen=MBHWrap(wave_gen))
+                analysis = AnalysisContainer(
+                    data_res_arr, sens_mat
+                )  # , signal_gen=MBHWrap(wave_gen))
                 acs_tmp.append(analysis)
 
-                print(start_t, t_ref_lims[i], end_t, t_ref_lims[i + 1], analysis.inner_product())
-            
+                print(
+                    start_t,
+                    t_ref_lims[i],
+                    end_t,
+                    t_ref_lims[i + 1],
+                    analysis.inner_product(),
+                )
+
             fd_short = cp.asarray(fd_short)
             # all_data_cpu = np.asarray(data).transpose(1, 0, 2)
             # data_length = len(fd_short)
@@ -224,6 +274,7 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             end_t_vals = np.asarray(end_t_vals)
 
             from lisatools.analysiscontainer import AnalysisContainerArray
+
             acs = AnalysisContainerArray(acs_tmp, gpus=[cp.cuda.runtime.getDevice()])
             fd_short = cp.asarray(fd_short)
             data_length_short = len(fd_short)
@@ -231,24 +282,31 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             end_t_vals = np.asarray(end_t_vals)
 
             # check = analysis.calculate_signal_likelihood(*inj_params_in, source_only=True, waveform_kwargs=tmp_kwargs)
-            
-            from bbhx.likelihood import HeterodynedLikelihood, NewHeterodynedLikelihood, Likelihood
-            
+
+            from bbhx.likelihood import (HeterodynedLikelihood, Likelihood,
+                                         NewHeterodynedLikelihood)
             # priors
             from eryn.prior import ProbDistContainer, uniform_dist
-            priors_mbh = {"mbh": ProbDistContainer({
-                0: uniform_dist(np.log(1e4), np.log(1e8)),  # 
-                1: uniform_dist(0.01, 0.999999999),
-                2: uniform_dist(-0.99999999, +0.99999999),
-                3: uniform_dist(-0.99999999, +0.99999999),
-                4: uniform_dist(0.01, 1000.0),
-                5: uniform_dist(0.0, 2 * np.pi),
-                6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                7: uniform_dist(0.0, 2 * np.pi),
-                8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                9: uniform_dist(0.0, np.pi),
-                10: uniform_dist(t_ref_lims[0], t_ref_lims[-1]), #0.0, t_ref_L + 48 * 3600.0),
-            })}
+
+            priors_mbh = {
+                "mbh": ProbDistContainer(
+                    {
+                        0: uniform_dist(np.log(1e4), np.log(1e8)),  #
+                        1: uniform_dist(0.01, 0.999999999),
+                        2: uniform_dist(-0.99999999, +0.99999999),
+                        3: uniform_dist(-0.99999999, +0.99999999),
+                        4: uniform_dist(0.01, 1000.0),
+                        5: uniform_dist(0.0, 2 * np.pi),
+                        6: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                        7: uniform_dist(0.0, 2 * np.pi),
+                        8: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                        9: uniform_dist(0.0, np.pi),
+                        10: uniform_dist(
+                            t_ref_lims[0], t_ref_lims[-1]
+                        ),  # 0.0, t_ref_L + 48 * 3600.0),
+                    }
+                )
+            }
 
             # ll_het = NewHeterodynedLikelihood(
             #     wave_gen,
@@ -263,19 +321,20 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             # )
 
             from eryn.utils import PeriodicContainer
+
             # sampler treats periodic variables by wrapping them properly
-            periodic_mbh = PeriodicContainer({
-                "mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}
-            })
+            periodic_mbh = PeriodicContainer(
+                {"mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}}
+            )
 
             inner_moves = [
                 (SkyMove(which="both"), 0.02),
                 (SkyMove(which="long"), 0.05),
                 (SkyMove(which="lat"), 0.05),
-                (StretchMove(), 0.88)
+                (StretchMove(), 0.88),
             ]
 
-            # TODO: random generators to gpu backend tools? 
+            # TODO: random generators to gpu backend tools?
 
             nwalkers = 100
             ntemps = 12
@@ -283,19 +342,35 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
 
             # psd_cpu = np.asarray([np.tile(A_psd, (all_data_cpu.shape[1], 1)), np.tile(E_psd, (all_data_cpu.shape[1], 1)), np.tile(np.full_like(A_psd, 1e10), (all_data_cpu.shape[1], 1))])
 
-            d_d_vals = np.zeros(len(acs))  # 4 * df * np.sum(np.asarray([(all_data_cpu[i].conj() * all_data_cpu[i]) / psd_cpu[i] for i in range(all_data_cpu.shape[0])]), axis=(0, 2))
+            d_d_vals = np.zeros(
+                len(acs)
+            )  # 4 * df * np.sum(np.asarray([(all_data_cpu[i].conj() * all_data_cpu[i]) / psd_cpu[i] for i in range(all_data_cpu.shape[0])]), axis=(0, 2))
 
             # d_d_vals[:] = acs.inner_product()
             full_kwargs = self.waveform_like_kwargs.copy()
             full_kwargs["phase_marginalize"] = True
             full_kwargs["length"] = 1024
 
-            like_args = (self.waveform_gen, initial_t_vals, end_t_vals, d_d_vals, t_ref_lims, self.transform_fn, (cp.asarray(fd_short), acs.linear_data_arr[0], 1. / acs.linear_psd_arr[0], df_short), full_kwargs)
+            like_args = (
+                self.waveform_gen,
+                initial_t_vals,
+                end_t_vals,
+                d_d_vals,
+                t_ref_lims,
+                self.transform_fn,
+                (
+                    cp.asarray(fd_short),
+                    acs.linear_data_arr[0],
+                    1.0 / acs.linear_psd_arr[0],
+                    df_short,
+                ),
+                full_kwargs,
+            )
             # # check3 = search_likelihood_wrap(start_points, *like_args)
-            
-            
+
             if os.path.exists(fp):
                 from eryn.backends import HDFBackend as eryn_HDFBackend
+
                 start_state = eryn_HDFBackend(fp).get_last_sample()
 
             else:
@@ -303,25 +378,28 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 start_points = start_points.reshape(ntemps, nwalkers, 1, 11)
                 # start_points = priors_mbh["mbh"].rvs(size=(ntemps, nwalkers, 1))
                 from eryn.state import State
+
                 start_state = State({"mbh": start_points})
 
-            stop_fn = SearchConvergeStopping(n_iters=30, diff=1.0, verbose=True, start_iteration=0)
+            stop_fn = SearchConvergeStopping(
+                n_iters=30, diff=1.0, verbose=True, start_iteration=0
+            )
             sampler = EnsembleSampler(
                 nwalkers,
-                {"mbh": 11}, 
+                {"mbh": 11},
                 search_likelihood_wrap,  ## ll_wrap, #
                 priors_mbh,
                 tempering_kwargs=temp_kwargs,
-                args=like_args,  # (ll_het, transform_fn_mbh), # 
+                args=like_args,  # (ll_het, transform_fn_mbh), #
                 vectorize=True,
-                periodic=periodic_mbh, 
+                periodic=periodic_mbh,
                 backend=fp,
                 moves=inner_moves,
                 branch_names=["mbh"],
                 update_fn=update_fn,
-                update_iterations=200, 
+                update_iterations=200,
                 stopping_fn=stop_fn,
-                stopping_iterations=1
+                stopping_iterations=1,
             )
 
             # start_like4 = search_likelihood_wrap(start_points, *like_args)
@@ -335,60 +413,79 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             # samples = reader.get_chain(temp_index=0)["mbh"][5000:, :, 0].reshape(-1, 11)
             # # fig = corner.corner(chain, plot_datapoints=False, plot_density=False, levels=(1 - np.exp(-0.5 * np.array([1, 2, 3]) ** 2)))
             # # fig.savefig("check1.png")
-            
+
             # checkit = ll_wrap(samples[-10:], ll_het, transform_fn_mbh)
-            
+
             nsteps = 500
             print("start like", acs.likelihood(source_only=True).max())
             # check_params = np.load("check_params.npy")[None, :]
             # start_like4 = search_likelihood_wrap(mbh_params_best[None, :], *like_args)
-            final_state = sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=True)
+            final_state = sampler.run_mcmc(
+                start_state, nsteps, thin_by=50, progress=True
+            )
             print("End like:", sampler.get_log_like().max())
 
             full_kwargs["phase_marginalize"] = True
             coords_post_like = final_state.branches["mbh"].coords[0, :, 0]
             new_ll = search_likelihood_wrap(coords_post_like, *like_args)
 
-            opt_snr = self.waveform_gen.h_h.copy() ** (1/2)
+            opt_snr = self.waveform_gen.h_h.copy() ** (1 / 2)
             det_snr = self.waveform_gen.d_h / opt_snr
             phase_change = np.angle(self.waveform_gen.non_marg_d_h)
             full_kwargs["phase_marginalize"] = False
             _coords_check = coords_post_like.copy()
             # adjust phase due to phase marginalizations
-            _coords_check[:, 5] = _coords_check[:, 5] + 1./2. * phase_change.get()
+            _coords_check[:, 5] = _coords_check[:, 5] + 1.0 / 2.0 * phase_change.get()
             _ll_check = search_likelihood_wrap(_coords_check, *like_args)
 
             assert np.allclose(_ll_check, new_ll)
 
             # NEED THIS TO GET ADJUSTED PHASE FROM MAXIMIZATION
-            coords_post_like[:, 5] = coords_post_like[:, 5] + 1./2. * phase_change.get()
+            coords_post_like[:, 5] = (
+                coords_post_like[:, 5] + 1.0 / 2.0 * phase_change.get()
+            )
             # TODO: make option / DECIDE ABOUT THIS
             self.snr_det_lim = 30.0
 
-            keep_it = np.any((opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim))
+            keep_it = np.any(
+                (opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim)
+            )
 
             if keep_it:
                 # get current highest leaf in MBH store
                 # this will return first False value for leaves
-                nwalkers_main = state.branches['mbh'].coords.shape[1]
+                nwalkers_main = state.branches["mbh"].coords.shape[1]
                 next_leaf = state.branches["mbh"].inds[0, 0].argmin()
                 new_ll_keep = np.argsort(new_ll)[-nwalkers_main:]
                 new_coords = coords_post_like[new_ll_keep]
                 new_ll_here = new_ll[new_ll_keep]
 
-                old_tmrg = state.branches['mbh'].coords[state.branches['mbh'].inds][:, -1]
-                
+                old_tmrg = state.branches["mbh"].coords[state.branches["mbh"].inds][
+                    :, -1
+                ]
+
                 new_tmrg = new_coords[:, -1]
                 # HOWEVER: we still want to remove this from the search residual even if it is a repeat
-                # TODO: reload from tmp_file? make an option so that it will not repeat the repeats  
+                # TODO: reload from tmp_file? make an option so that it will not repeat the repeats
                 # -1 here is the max likelihood
                 AET_remove_params = new_coords[-1][None, :]
-                AET_remove_params_in = self.transform_fn.both_transforms(AET_remove_params)
+                AET_remove_params_in = self.transform_fn.both_transforms(
+                    AET_remove_params
+                )
                 self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
-                AET_remove = self.waveform_gen(*AET_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
+                AET_remove = self.waveform_gen(
+                    *AET_remove_params_in.T,
+                    t_obs_start=0.0,
+                    t_obs_end=full_length * dt / YRSID_SI,
+                    compress=True,
+                    direct=False,
+                    fill=True,
+                    freqs=self.xp.asarray(acs_all.f_arr),
+                    **self.waveform_gen_kwargs,
+                )
                 AE_remove = AET_remove[0, :2]
 
-                #analyze_here = AnalysisContainer(DataResidualArray(AE_remove, f_arr=acs_all.f_arr), sens_mat=acs_all[max_logl_walker].sens_mat)
+                # analyze_here = AnalysisContainer(DataResidualArray(AE_remove, f_arr=acs_all.f_arr), sens_mat=acs_all[max_logl_walker].sens_mat)
 
                 # within 3600 seconds (1 hr) ?
                 self.time_diff = 3600.0
@@ -397,10 +494,11 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 # check if this is a repeat due to imperfect subtraction
                 if not any_same:
                     # store to file and global state
-                    state.branches['mbh'].inds[:, :, next_leaf] = True
-                    state.branches['mbh'].coords[:, :, next_leaf] = new_coords[None, :, :]
+                    state.branches["mbh"].inds[:, :, next_leaf] = True
+                    state.branches["mbh"].coords[:, :, next_leaf] = new_coords[
+                        None, :, :
+                    ]
                     self.file_backend.save_step(state, _accepted)
-        
 
                 # only adjusting data here
                 data[0] -= AE_remove[0]
@@ -410,17 +508,35 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
 
             else:
 
-                if np.any(state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet):
+                if np.any(
+                    state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet
+                ):
                     # remove the cold chain parameters from their respective residual.
                     inds_remove = np.arange(state.branches["mbh"].shape[2])[
-                        (state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet)
+                        (
+                            state.branches["mbh"].inds[0, 0, :]
+                            & bool_leaves_not_filled_yet
+                        )
                     ]
                     for leaf_remove in inds_remove:
-                        CHANNELS_remove_params = state.branches['mbh'].coords[0, :, leaf_remove].copy()  # new_coords  # 
-                        CHANNELS_remove_params_in = self.transform_fn.both_transforms(CHANNELS_remove_params)
+                        CHANNELS_remove_params = (
+                            state.branches["mbh"].coords[0, :, leaf_remove].copy()
+                        )  # new_coords  #
+                        CHANNELS_remove_params_in = self.transform_fn.both_transforms(
+                            CHANNELS_remove_params
+                        )
                         self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
-                        CHANNELS_remove = self.waveform_gen(*CHANNELS_remove_params_in.T, t_obs_start=0.0, t_obs_end=full_length * dt / YRSID_SI, compress=True, direct=False, fill=True, freqs=self.xp.asarray(acs_all.f_arr), **self.waveform_gen_kwargs)
-                        TDI_remove = CHANNELS_remove[:, :acs_all.nchannels]
+                        CHANNELS_remove = self.waveform_gen(
+                            *CHANNELS_remove_params_in.T,
+                            t_obs_start=0.0,
+                            t_obs_end=full_length * dt / YRSID_SI,
+                            compress=True,
+                            direct=False,
+                            fill=True,
+                            freqs=self.xp.asarray(acs_all.f_arr),
+                            **self.waveform_gen_kwargs,
+                        )
+                        TDI_remove = CHANNELS_remove[:, : acs_all.nchannels]
                         # check_like = acs_all[max_logl_walker].template_likelihood(DataResidualArray(AE_remove[max_logl_walker], f_arr=acs_all.f_arr), complex=True)
                         acs_all.add_signal_to_residual(TDI_remove)
 
@@ -430,14 +546,16 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
 
     def propose(self, model, state):
         __doc__ = ResidualAddOneRemoveOneMove.propose.__doc__
-        assert np.all(state.branches["mbh"].nleaves[0,0] == state.branches["mbh"].nleaves)
-        if self.finished_search and state.branches["mbh"].nleaves[0,0] == 0:
+        assert np.all(
+            state.branches["mbh"].nleaves[0, 0] == state.branches["mbh"].nleaves
+        )
+        if self.finished_search and state.branches["mbh"].nleaves[0, 0] == 0:
             print("No MBHs in sampler. Skipping proposal.")
             ntemps, nwalkers = state.branches["mbh"].shape[:2]
             _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
             return state, _accepted
-        
-        # TODO: fix so it is generic. 
+
+        # TODO: fix so it is generic.
         self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
         output = ResidualAddOneRemoveOneMove.propose(self, model, state)
         return output
@@ -467,34 +585,39 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
             noise_index=noise_index,
             force_backend=self.force_backend_base,  # self.use_gpu,
         )
-        
+
         # set d_d term in the likelihood
-        self.like_fn.d_d = -2. * self.like_fn.get_ll(
-            het_coords, 
-            constants_index=data_index,
-            **self.waveform_like_kwargs
-        )  
+        self.like_fn.d_d = -2.0 * self.like_fn.get_ll(
+            het_coords, constants_index=data_index, **self.waveform_like_kwargs
+        )
         # I do not think we want this here
         #  + self.acs.likelihood(noise_only=True)[data_index]
 
         cp.get_default_memory_pool().free_all_blocks()
-        
+
     def compute_like(self, new_points_in, data_index):
         assert data_index is not None
         logl = self.like_fn.get_ll(
-            new_points_in, 
+            new_points_in,
             constants_index=data_index,
         )
-                    
+
         return logl
 
     def get_waveform_here(self, coords):
         cp.get_default_memory_pool().free_all_blocks()
-        waveforms = cp.zeros((coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex)
-        
+        waveforms = cp.zeros(
+            (coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex
+        )
+
         for i in range(coords.shape[0]):
-            waveforms[i] = self.waveform_gen(*coords[i], fill=True, freqs=cp.asarray(self.acs.f_arr), **self.waveform_gen_kwargs)[:, :self.acs[0].data_res_arr.shape[0]]
-        
+            waveforms[i] = self.waveform_gen(
+                *coords[i],
+                fill=True,
+                freqs=cp.asarray(self.acs.f_arr),
+                **self.waveform_gen_kwargs,
+            )[:, : self.acs[0].data_res_arr.shape[0]]
+
         return waveforms
 
     def replace_residuals(self, old_state, new_state):
@@ -504,11 +627,15 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
         for leaf in range(old_state.branches["mbh"].shape[-2]):
             removal_coords = old_state.branches["mbh"].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
-            removal_waveforms = self.waveform_gen(*removal_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs).transpose(1, 0, 2)
-            
+            removal_waveforms = self.waveform_gen(
+                *removal_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs
+            ).transpose(1, 0, 2)
+
             add_coords = new_state.branches["mbh"].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
-            add_waveforms = self.waveform_gen(*add_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs).transpose(1, 0, 2)
+            add_waveforms = self.waveform_gen(
+                *add_coords_in.T, fill=True, freqs=fd, **self.mbh_kwargs
+            ).transpose(1, 0, 2)
 
             if leaf == 0:
                 old_contrib[0] = removal_waveforms[0]
@@ -520,7 +647,6 @@ class MBHSpecialMove(LISAToolsParallelModule, ResidualAddOneRemoveOneMove, Globa
                 old_contrib[1] += removal_waveforms[1]
                 new_contrib[0] += add_waveforms[0]
                 new_contrib[1] += add_waveforms[1]
-            
+
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
         cp.get_default_memory_pool().free_all_blocks()
-

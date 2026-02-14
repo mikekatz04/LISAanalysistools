@@ -1,12 +1,12 @@
-import numpy as np
-from typing import Optional, Any, Tuple
 from copy import deepcopy
+from typing import Any, Optional, Tuple
 
+import numpy as np
+from bbhx.waveformbuild import BBHWaveformFD
 # imports
 from fastlisaresponse import ResponseWrapper
-from bbhx.waveformbuild import BBHWaveformFD
-from ...utils.constants import *
 
+from ...utils.constants import *
 from ..waveformbase import SNRWaveform
 
 
@@ -56,7 +56,7 @@ class BBHSNRWaveform(SNRWaveform):
         mf_min: Optional[float] = 1e-4,
         mf_max: Optional[float] = 0.6,
         freqs: Optional[np.ndarray] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | np.ndarray:
         """Generate waveforms for SNR calculations.
 
@@ -104,3 +104,6 @@ class BBHSNRWaveform(SNRWaveform):
             return AET
         else:
             return (AET[0], AET[1], AET[2])
+        
+
+

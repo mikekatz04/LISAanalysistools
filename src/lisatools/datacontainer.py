@@ -1,13 +1,13 @@
 from __future__ import annotations
-import warnings
-from abc import ABC
-from typing import Any, Tuple, Optional, List
 
 import math
-import numpy as np
-from scipy import interpolate
-from scipy import signal
+import warnings
+from abc import ABC
+from typing import Any, List, Optional, Tuple
+
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy import interpolate, signal
 
 try:
     import cupy as cp
@@ -15,19 +15,16 @@ try:
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
-from . import detector as lisa_models
-from .utils.utility import AET, get_array_module
-from .utils.constants import *
-from .stochastic import (
-    StochasticContribution,
-    FittedHyperbolicTangentGalacticForeground,
-)
-from .sensitivity import SensitivityMatrix
-
-
 import dataclasses
 
+from . import detector as lisa_models
 from .domains import *
+from .sensitivity import SensitivityMatrix
+from .stochastic import (FittedHyperbolicTangentGalacticForeground,
+                         StochasticContribution)
+from .utils.constants import *
+from .utils.utility import AET, get_array_module
+
 
 class DataResidualArray:
     pass
@@ -58,7 +55,7 @@ class DataResidualArray:
         window: np.ndarray | cp.ndarray | None = None,
         **kwargs: dict,
     ) -> None:
-        
+
         self.data_res_in_orig_input = data_res_in
         if isinstance(data_res_in, DataResidualArray):
             for key, item in data_res_in.__dict__.items():
@@ -66,38 +63,50 @@ class DataResidualArray:
 
         else:
             if not isinstance(data_res_in, DomainBase):
-                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
+                assert isinstance(data_res_in, np.ndarray) or isinstance(
+                    data_res_in, cp.ndarray
+                )
 
                 xp = get_array_module(data_res_in)
                 data_res_in = xp.atleast_2d(data_res_in)
                 if input_signal_domain is None:
-                    raise ValueError("If inputing a basic array, must put in the input_signal_domain argument.")
+                    raise ValueError(
+                        "If inputing a basic array, must put in the input_signal_domain argument."
+                    )
                 assert isinstance(input_signal_domain, DomainSettingsBase)
-                data_res_in = input_signal_domain.associated_class(data_res_in, input_signal_domain)
-            
+                data_res_in = input_signal_domain.associated_class(
+                    data_res_in, input_signal_domain
+                )
+
             input_signal_domain = data_res_in.settings
 
             if signal_domain is None:
                 if isinstance(input_signal_domain, TDSettings):
                     # default for TD for now is in FD
                     Nf = np.fft.rfft(np.ones(input_signal_domain.N)).shape[0]
-                    df = 1. / (input_signal_domain.N * input_signal_domain.dt)
+                    df = 1.0 / (input_signal_domain.N * input_signal_domain.dt)
                     signal_domain = FDSettings(Nf, df)
 
                 else:
                     # default is same domain
                     signal_domain = input_signal_domain
-        
+
             if signal_domain == input_signal_domain:
                 self.data_res_arr = data_res_in
             else:
                 self.data_res_arr = data_res_in.transform(signal_domain, window=window)
 
             self.nchannels = self.data_res_arr.nchannels
+            self.nbatch = self.data_res_arr.nbatch
+            self.is_batched = self.data_res_arr.is_batched
             self.data_shape = self.data_res_arr.settings.basis_shape
-            
-        self.init_kwargs = dict(signal_domain=signal_domain, input_signal_domain=input_signal_domain, **kwargs)
-    
+
+        self.init_kwargs = dict(
+            signal_domain=signal_domain,
+            input_signal_domain=input_signal_domain,
+            **kwargs,
+        )
+
     @property
     def init_kwargs(self) -> dict:
         """Initial dt, df, f_arr"""
@@ -156,7 +165,9 @@ class DataResidualArray:
             # constant spacing
             if np.allclose(np.diff(f_arr), np.diff(f_arr)[0]):
                 if df is None:
-                    raise ValueError("When providing evenly spaced f_arr, need to also provide df to avoid numerical issues.")
+                    raise ValueError(
+                        "When providing evenly spaced f_arr, need to also provide df to avoid numerical issues."
+                    )
                 # TODO: fix this up in the docs
                 self._df = df  # np.diff(f_arr)[0].item()
 
@@ -182,7 +193,6 @@ class DataResidualArray:
             self._dt = 1 / (2 * self._fmax)
             self._f_arr = np.arange(0.0, self._fmax, self._df)
 
-        
         if len(self.f_arr) != self.data_length:
             raise ValueError(
                 "Entered or determined f_arr does not have the same length as the data channel inputs."

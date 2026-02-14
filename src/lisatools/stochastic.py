@@ -1,9 +1,10 @@
 from __future__ import annotations
-import warnings
-from abc import ABC
-from typing import Any, Tuple, Optional, List, Dict
 
 import math
+import warnings
+from abc import ABC
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 from scipy import interpolate
 
@@ -14,8 +15,8 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
 from . import detector as lisa_models
-from .utils.utility import AET
 from .utils.constants import *
+from .utils.utility import AET
 
 
 class StochasticContribution(ABC):

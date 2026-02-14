@@ -1,11 +1,14 @@
-import numpy as np
 from copy import deepcopy
 from dataclasses import dataclass
-from eryn.state import State as eryn_State
+
+import numpy as np
 from eryn.state import Branch as eryn_Branch
+from eryn.state import State as eryn_State
+
 
 def return_x(x):
     return x
+
 
 class GBState(eryn_State):
 
@@ -28,7 +31,19 @@ class GBState(eryn_State):
 
     @property
     def band_info_keys(self):
-        return ["initialized", "band_edges", "band_temps", 'band_swaps_proposed', 'band_swaps_accepted', 'band_num_proposed', 'band_num_accepted', 'band_num_proposed_rj', 'band_num_accepted_rj', 'band_num_binaries']
+        return [
+            "initialized",
+            "band_edges",
+            "band_temps",
+            "band_swaps_proposed",
+            "band_swaps_accepted",
+            "band_num_proposed",
+            "band_num_accepted",
+            "band_num_proposed_rj",
+            "band_num_accepted_rj",
+            "band_num_binaries",
+        ]
+
     @property
     def band_info(self):
         return self._band_info
@@ -43,27 +58,46 @@ class GBState(eryn_State):
         self._band_info["initialized"] = True
 
     def initialize_band_information(self, nwalkers, ntemps, band_edges, band_temps):
-        
+
         if not hasattr(self, "intialized"):
             band_info = {}
-            band_info["nwalkers"], band_info["ntemps"], band_info["band_edges"] = nwalkers, ntemps, band_edges
+            band_info["nwalkers"], band_info["ntemps"], band_info["band_edges"] = (
+                nwalkers,
+                ntemps,
+                band_edges,
+            )
 
-            band_info["num_bands"] =  len(band_info["band_edges"]) - 1
+            band_info["num_bands"] = len(band_info["band_edges"]) - 1
 
             assert band_temps.shape == (band_info["num_bands"], band_info["ntemps"])
             band_info["band_temps"] = band_temps
 
-            band_info["band_swaps_proposed"] =  np.zeros((band_info["num_bands"], band_info["ntemps"] - 1), dtype=int)
-            band_info["band_swaps_accepted"] =  np.zeros((band_info["num_bands"], band_info["ntemps"] - 1), dtype=int)
+            band_info["band_swaps_proposed"] = np.zeros(
+                (band_info["num_bands"], band_info["ntemps"] - 1), dtype=int
+            )
+            band_info["band_swaps_accepted"] = np.zeros(
+                (band_info["num_bands"], band_info["ntemps"] - 1), dtype=int
+            )
 
-            band_info["band_num_proposed"] =  np.zeros((band_info["num_bands"], band_info["ntemps"]), dtype=int)
-            band_info["band_num_accepted"] =  np.zeros((band_info["num_bands"], band_info["ntemps"]), dtype=int)
-            
-            band_info["band_num_proposed_rj"] =  np.zeros((band_info["num_bands"], band_info["ntemps"]), dtype=int)
-            band_info["band_num_accepted_rj"] =  np.zeros((band_info["num_bands"], band_info["ntemps"]), dtype=int)
+            band_info["band_num_proposed"] = np.zeros(
+                (band_info["num_bands"], band_info["ntemps"]), dtype=int
+            )
+            band_info["band_num_accepted"] = np.zeros(
+                (band_info["num_bands"], band_info["ntemps"]), dtype=int
+            )
 
-            band_info["band_num_binaries"] =  np.zeros((band_info["ntemps"], band_info["nwalkers"], band_info["num_bands"]), dtype=int)
-            band_info["initialized"] =  True
+            band_info["band_num_proposed_rj"] = np.zeros(
+                (band_info["num_bands"], band_info["ntemps"]), dtype=int
+            )
+            band_info["band_num_accepted_rj"] = np.zeros(
+                (band_info["num_bands"], band_info["ntemps"]), dtype=int
+            )
+
+            band_info["band_num_binaries"] = np.zeros(
+                (band_info["ntemps"], band_info["nwalkers"], band_info["num_bands"]),
+                dtype=int,
+            )
+            band_info["initialized"] = True
             self.band_info = band_info
 
         else:
@@ -71,11 +105,19 @@ class GBState(eryn_State):
             assert ntemps == band_info["ntemps"]
             assert np.all(band_edges == band_info["band_edges"])
 
-    def update_band_information(self, band_temps, band_num_proposed, band_num_accepted, band_swaps_proposed, band_swaps_accepted,
-                                band_num_binaries, is_rj):
+    def update_band_information(
+        self,
+        band_temps,
+        band_num_proposed,
+        band_num_accepted,
+        band_swaps_proposed,
+        band_swaps_accepted,
+        band_num_binaries,
+        is_rj,
+    ):
         self.band_info["band_temps"][:] = band_temps
         self.band_info["band_num_binaries"][:] = band_num_binaries
-        
+
         if not is_rj:
             self.band_info["band_num_proposed"] += band_num_proposed
             self.band_info["band_num_accepted"] += band_num_accepted
@@ -101,9 +143,7 @@ class GBState(eryn_State):
         band_group = h5_group.create_group("gb_sub_state")
 
         band_group.create_dataset(
-            "band_edges",
-            data=self.band_info["band_edges"],
-            **h5_kwargs
+            "band_edges", data=self.band_info["band_edges"], **h5_kwargs
         )
         num_bands = self.band_info["num_bands"]
         band_group.attrs["num_bands"] = num_bands
@@ -112,56 +152,56 @@ class GBState(eryn_State):
             "band_temps",
             (0, num_bands, ntemps),
             maxshape=(None, num_bands, ntemps),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_swaps_proposed",
             (0, num_bands, ntemps - 1),
             maxshape=(None, num_bands, ntemps - 1),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_swaps_accepted",
             (0, num_bands, ntemps - 1),
             maxshape=(None, num_bands, ntemps - 1),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_num_proposed",
             (0, num_bands, ntemps),
             maxshape=(None, num_bands, ntemps),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_num_accepted",
             (0, num_bands, ntemps),
             maxshape=(None, num_bands, ntemps),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_num_proposed_rj",
             (0, num_bands, ntemps),
             maxshape=(None, num_bands, ntemps),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_num_accepted_rj",
             (0, num_bands, ntemps),
             maxshape=(None, num_bands, ntemps),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
         band_group.create_dataset(
             "band_num_binaries",
             (0, ntemps, nwalkers, num_bands),
             maxshape=(None, ntemps, nwalkers, num_bands),
-            **h5_kwargs
+            **h5_kwargs,
         )
 
     def grow_backend(self, h5_group, ngrow, *args):
@@ -197,8 +237,10 @@ class GBState(eryn_State):
             band_edges=self.band_info["band_edges"],
         )
 
+
 class MBHState(eryn_State):
     remove_kwargs = ["betas_all"]
+
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
@@ -216,6 +258,7 @@ class MBHState(eryn_State):
 
 class EMRIState(eryn_State):
     remove_kwargs = ["betas_all"]
+
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
@@ -226,14 +269,20 @@ class EMRIState(eryn_State):
     @property
     def reset_kwargs(self):
         # TODO: this okay for future?
-        return dict(
-            num_emris=1 #self.betas_all.shape[0]
-        )
+        return dict(num_emris=1)  # self.betas_all.shape[0]
+
 
 class GFState(eryn_State):
     # TODO: bandaid fix this
-    def __init__(self, possible_state, *args, is_eryn_state_input:bool=False, sub_state_bases: dict=None, **kwargs):
-        
+    def __init__(
+        self,
+        possible_state,
+        *args,
+        is_eryn_state_input: bool = False,
+        sub_state_bases: dict = None,
+        **kwargs,
+    ):
+
         eryn_State.__init__(self, possible_state, *args, **kwargs)
         self.sub_states = {}
         if isinstance(possible_state, type(self)) and not is_eryn_state_input:
@@ -242,29 +291,27 @@ class GFState(eryn_State):
                 sub_state_base = self.sub_state_bases.get(name, None)
                 if sub_state_base is not None:
                     self.sub_states[name] = sub_state_base(
-                        possible_state.sub_states[name],
-                        *args,
-                        **kwargs
+                        possible_state.sub_states[name], *args, **kwargs
                     )
                 else:
                     self.sub_states[name] = None
 
         else:
             self.sub_state_bases = sub_state_bases
-            
+
             for name in self.branches:
                 if sub_state_bases is not None and sub_state_bases[name] is not None:
                     self.sub_states[name] = sub_state_bases[name](
-                        possible_state, # this is just coords in the first input
+                        possible_state,  # this is just coords in the first input
                         *args,
-                        **kwargs
+                        **kwargs,
                     )
                 else:
                     self.sub_states[name] = None
-                
+
         # elif sub_state_bases is None and is_eryn_state_input:
         #     raise ValueError
-        
+
         # elif is_eryn_state_input:
         #     self.sub_state_bases = sub_state_bases
         #     for name in self.branches:
@@ -272,7 +319,7 @@ class GFState(eryn_State):
         #         if sub_state_base is not None:
         #             self.sub_states[name] = sub_state_base(
         #                 None,
-        #                 *args, 
+        #                 *args,
         #                 **kwargs
         #             )
         #         else:
@@ -281,19 +328,37 @@ class GFState(eryn_State):
 
 class AllGFBranchInfo:
     def __init__(self, branch_1, branch_2):
-        
-        for key in ["name", "ndims", "nleaves_max", "nleaves_min", "branch_state", "branch_backend"]:
-            if isinstance(branch_1, AllGFBranchInfo) and isinstance(branch_2, AllGFBranchInfo):
+
+        for key in [
+            "name",
+            "ndims",
+            "nleaves_max",
+            "nleaves_min",
+            "branch_state",
+            "branch_backend",
+        ]:
+            if isinstance(branch_1, AllGFBranchInfo) and isinstance(
+                branch_2, AllGFBranchInfo
+            ):
                 if key == "name":
                     self.branch_names = branch_1.branch_names + branch_2.name
                     continue
                 setattr(self, key, {**getattr(branch_1, key), **getattr(branch_2, key)})
-                
-            elif isinstance(branch_1, GFBranchInfo) and isinstance(branch_2, GFBranchInfo):
+
+            elif isinstance(branch_1, GFBranchInfo) and isinstance(
+                branch_2, GFBranchInfo
+            ):
                 if key == "name":
                     self.branch_names = [branch_1.name, branch_2.name]
                     continue
-                setattr(self, key, {branch_1.name: getattr(branch_1, key), branch_2.name: getattr(branch_2, key)})
+                setattr(
+                    self,
+                    key,
+                    {
+                        branch_1.name: getattr(branch_1, key),
+                        branch_2.name: getattr(branch_2, key),
+                    },
+                )
             else:
                 if not isinstance(branch_2, GFBranchInfo):
                     # switch so all branch is in position 1
@@ -303,15 +368,19 @@ class AllGFBranchInfo:
                 if key == "name":
                     self.branch_names = branch_1.branch_names + [branch_2.name]
                     continue
-                setattr(self, key, {**getattr(branch_1, key), branch_2.name: getattr(branch_2, key)})
-        
+                setattr(
+                    self,
+                    key,
+                    {**getattr(branch_1, key), branch_2.name: getattr(branch_2, key)},
+                )
+
     def __add__(self, branch_2):
         return AllGFBranchInfo(self, branch_2)
-    
+
     @property
     def ndims(self):
         return self._ndims
-    
+
     @ndims.setter
     def ndims(self, ndims):
         assert isinstance(ndims, dict)
@@ -320,7 +389,7 @@ class AllGFBranchInfo:
     @property
     def branch_names(self):
         return self._branch_names
-    
+
     @branch_names.setter
     def branch_names(self, branch_names):
         assert isinstance(branch_names, list)
@@ -329,7 +398,7 @@ class AllGFBranchInfo:
     @property
     def nleaves_max(self):
         return self._nleaves_max
-    
+
     @nleaves_max.setter
     def nleaves_max(self, nleaves_max):
         assert isinstance(nleaves_max, dict)
@@ -338,7 +407,7 @@ class AllGFBranchInfo:
     @property
     def nleaves_min(self):
         return self._nleaves_min
-    
+
     @nleaves_min.setter
     def nleaves_min(self, nleaves_min):
         assert isinstance(nleaves_min, dict)
@@ -360,7 +429,9 @@ class AllGFBranchInfo:
     def branch_backend(self, branch_backend):
         self._branch_backend = branch_backend
 
+
 from eryn.backends import backend as eryn_Backend
+
 
 @dataclass
 class GFBranchInfo:
@@ -370,11 +441,6 @@ class GFBranchInfo:
     nleaves_min: int
     branch_state: eryn_State = None
     branch_backend: eryn_Backend = None
-    
+
     def __add__(self, branch_2):
         return AllGFBranchInfo(self, branch_2)
-
-
-
-    
-

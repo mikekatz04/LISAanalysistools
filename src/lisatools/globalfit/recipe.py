@@ -1,4 +1,3 @@
-
 class Recipe:
     def __init__(self):
         self.recipe = []
@@ -20,9 +19,11 @@ class Recipe:
         if name is None:
             name = f"recipe step {len(self.recipe) + 1}"
         self.recipe.append({"name": name, "adjust": adjust_fn, "status": False})
-    
+
     def to_file(self):
-        _tmp = {recipe_step["name"]: recipe_step["status"] for recipe_step in self.recipe}
+        _tmp = {
+            recipe_step["name"]: recipe_step["status"] for recipe_step in self.recipe
+        }
         return _tmp
 
     def __next__(self):
@@ -43,7 +44,7 @@ class Recipe:
         next(self)
         if self._current_iter >= len(self.recipe):
             raise ValueError("Recipe is already finished.")
-            
+
         self._current_recipe_step["adjust"].setup_run(iteration, last_sample, sampler)
         self._has_setup_first_step = True
 
@@ -52,16 +53,20 @@ class Recipe:
         return self._current_recipe_step
 
     def __call__(self, iteration, last_sample, sampler):
-        stop_here = self._current_recipe_step["adjust"].stopping_function(iteration, last_sample, sampler)
+        stop_here = self._current_recipe_step["adjust"].stopping_function(
+            iteration, last_sample, sampler
+        )
         if stop_here:
             self.backend.completed_recipe_step(self._current_recipe_step["name"])
             self._current_recipe_step["status"] = True
             next(self)
-            
+
             if self._current_iter >= len(self.recipe):
                 return True
-            self._current_recipe_step["adjust"].setup_run(iteration, last_sample, sampler)
-        
+            self._current_recipe_step["adjust"].setup_run(
+                iteration, last_sample, sampler
+            )
+
         return False
 
 
@@ -78,7 +83,7 @@ class RecipeStep:
         if not hasattr(self, "_moves"):
             raise ValueError("Must add moves for this recipe step.")
         return self._moves
-    
+
     @moves.setter
     def moves(self, moves):
         self._moves = moves
@@ -86,7 +91,7 @@ class RecipeStep:
     @property
     def weights(self):
         if not hasattr(self, "_weights"):
-            self._weights = [1.0 / len(self.moves)  for _ in self.moves] 
+            self._weights = [1.0 / len(self.moves) for _ in self.moves]
         return self._weights
 
     @weights.setter

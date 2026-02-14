@@ -1,12 +1,11 @@
 from __future__ import annotations
+
 import warnings
-from typing import Optional, Any, Tuple, List
+from typing import Any, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
-
-from eryn.utils import TransformContainer
-
 import numpy as np
+from eryn.utils import TransformContainer
 
 try:
     import cupy as cp
@@ -16,10 +15,12 @@ except (ModuleNotFoundError, ImportError):
 
     pass
 
-from .sensitivity import get_sensitivity, SensitivityMatrix, SensitivityMatrixBase 
-from .datacontainer import DataResidualArray
-from .utils.utility import get_array_module
 from . import domains
+from .datacontainer import DataResidualArray
+from .sensitivity import (SensitivityMatrix, SensitivityMatrixBase,
+                          get_sensitivity)
+from .utils.utility import get_array_module
+
 
 def inner_product(
     sig1: np.ndarray | list | DataResidualArray,
@@ -71,6 +72,9 @@ def inner_product(
         Inner product value.
 
     """
+    # todo: add broadcasting against batches. 
+    # todo: if signal 2 is a batch of signals but signal 1 is not, then it should broadcast the inner product across the batch and return an array of inner products.
+
     # initial input checks and setup
     sig1 = DataResidualArray(sig1, input_signal_domain=basis_settings)
     sig2 = DataResidualArray(sig2, input_signal_domain=basis_settings)
@@ -79,7 +83,7 @@ def inner_product(
         raise ValueError(
             f"Signal 1 has {sig1.nchannels} channels. Signal 2 has {sig2.nchannels} channels. Must be the same."
         )
-    
+
     nchannels = sig1.nchannels
 
     xp = get_array_module(sig1[0])
@@ -105,10 +109,12 @@ def inner_product(
     else:
         if psd.basis_settings != basis:
             raise ValueError("PSD basis is not equivalent to signal basis.")
-        
+
         for i in list(psd.channel_shape):
             if i != nchannels:
-                raise ValueError("Number of channels in PSD not equal to number of channels in signal.")
+                raise ValueError(
+                    "Number of channels in PSD not equal to number of channels in signal."
+                )
 
     operational_sets = []
 
@@ -146,7 +152,7 @@ def inner_product(
     out = 0.0
     # x = freqs
 
-    #tmp = []
+    # tmp = []
     # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
         factor = op_set["factor"]
@@ -170,7 +176,9 @@ def inner_product(
             inv_psd_component = inv_psd_tmp[:, ind_start:]
 
         else:
-            raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")
+            raise ValueError(
+                f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}."
+            )
 
         y = (
             func(sig_component_1.conj() * sig_component_2) * inv_psd_component
@@ -183,9 +191,9 @@ def inner_product(
         # # switching to summation for comp to other domains
         # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
         # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
-        
-        #tmp.append(tmp_out)
-        
+
+        # tmp.append(tmp_out)
+
         out += tmp_out
 
     # tmp = np.asarray(tmp)
@@ -217,7 +225,7 @@ def inner_product(
         else:
             raise ValueError(
                 "If normalizing with respect to sig1 or sig2, normalize kwarg must either be 'sig1' or 'sig2'."
-            )
+            )j
 
         normalization_value = inner_product(
             sig_to_normalize,
@@ -285,13 +293,15 @@ def noise_likelihood_term(psd: SensitivityMatrixBase) -> float:
 
     """
     fix = np.isnan(psd[:]) | np.isinf(psd[:])
-    
-    #assert np.sum(fix) == np.prod(psd.shape[:len(psd.basis_settings.basis_shape)]) or np.sum(fix) == 0, f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}" #todo fix this
-    assert np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0, f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}"
-    # TODO: check on this / add warning 
+
+    # assert np.sum(fix) == np.prod(psd.shape[:len(psd.basis_settings.basis_shape)]) or np.sum(fix) == 0, f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}" #todo fix this
+    assert (
+        np.sum(fix) == np.prod(psd.shape[:-1]) or np.sum(fix) == 0
+    ), f"sum fix: {np.sum(fix)}; psd shape: {psd.shape}; basis shape: {psd.basis_settings.basis_shape}"
+    # TODO: check on this / add warning
     detC = psd.detC
     keep = (detC != 0.0) & (~np.isinf(detC)) & (~np.isnan(detC))
-    
+
     nl_val = -np.sum(np.log(np.abs(detC[keep])))
     return nl_val
 

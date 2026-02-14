@@ -1,10 +1,18 @@
 import numpy as np
 from eryn.moves import CombineMove
 
+
 class GlobalFitMove:
     ranks_initialized = False
 
-    def __init__(self, *args, name=None, iters_compare_likelihood=-1, iters_reset_buffers=-1, **kwargs):
+    def __init__(
+        self,
+        *args,
+        name=None,
+        iters_compare_likelihood=-1,
+        iters_reset_buffers=-1,
+        **kwargs,
+    ):
         assert name is not None
         self.name = name
 
@@ -30,7 +38,7 @@ class GlobalFitMove:
     def iters_compare_likelihood(self, iters_compare_likelihood: int):
         assert isinstance(iters_compare_likelihood, int)
         self._iters_compare_likelihood = iters_compare_likelihood
-        
+
     @property
     def comm(self):
         return self._comm
@@ -47,7 +55,7 @@ class GlobalFitMove:
         #         move.comm = comm
 
         self._comm = comm
-    
+
     @property
     def ranks_needed(self):
         if not hasattr(self, "_ranks_needed"):
@@ -80,9 +88,9 @@ class GlobalFitMove:
         assert isinstance(ranks, list)
         self.ranks_initialized = True
         self._ranks = ranks
-    
+
     @property
-    def ranks_needed(self): 
+    def ranks_needed(self):
         if not hasattr(self, "_ranks_needed"):
             return 0
         return self._ranks_needed
@@ -91,7 +99,7 @@ class GlobalFitMove:
     def ranks_needed(self, ranks_needed):
         assert isinstance(ranks_needed, int)
         self._ranks_needed = ranks_needed
-       
+
 
 class GFCombineMove(CombineMove, GlobalFitMove):
     update_comm_special = True

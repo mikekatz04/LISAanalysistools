@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-
+import math
 import warnings
 from abc import ABC
-from typing import Any, Tuple, Optional, List
+from typing import Any, List, Optional, Tuple
 
-import math
-import numpy as np
-
-from scipy import interpolate
 import matplotlib.pyplot as plt
-
+import numpy as np
 from eryn.utils import TransformContainer
-from . import domains
+from scipy import interpolate
 
 from lisatools.domains import DomainSettingsBase
 
+from . import domains
 
 try:
     import cupy as cp
@@ -24,22 +21,17 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
 from . import detector as lisa_models
-from .utils.utility import AET, get_array_module
-from .utils.constants import *
-from .stochastic import (
-    StochasticContribution,
-    FittedHyperbolicTangentGalacticForeground,
-)
 from .datacontainer import DataResidualArray
-from .sensitivity import SensitivityMatrixBase, SensitivityMatrix
-from .diagnostic import (
-    noise_likelihood_term,
-    residual_full_source_and_noise_likelihood,
-    residual_source_likelihood_term,
-    inner_product,
-    data_signal_source_likelihood_term,
-    data_signal_full_source_and_noise_likelihood,
-)
+from .diagnostic import (data_signal_full_source_and_noise_likelihood,
+                         data_signal_source_likelihood_term, inner_product,
+                         noise_likelihood_term,
+                         residual_full_source_and_noise_likelihood,
+                         residual_source_likelihood_term)
+from .sensitivity import SensitivityMatrix, SensitivityMatrixBase
+from .stochastic import (FittedHyperbolicTangentGalacticForeground,
+                         StochasticContribution)
+from .utils.constants import *
+from .utils.utility import AET, get_array_module
 
 
 class AnalysisContainer:
@@ -105,7 +97,7 @@ class AnalysisContainer:
     @property
     def start_freq_ind(self):
         return self.data_res_arr.start_freq_ind
-        
+
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
 
@@ -148,7 +140,9 @@ class AnalysisContainer:
         if "psd" in kwargs:
             kwargs.pop("psd")
 
-        return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs)
+        return inner_product(
+            self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs
+        )
 
     def snr(self, **kwargs: dict) -> float:
         """Return the SNR of the current set of information
@@ -161,8 +155,10 @@ class AnalysisContainer:
 
         """
         return self.inner_product(**kwargs).real ** (1 / 2)
-    
-    def _slice_to_template(self, template: DataResidualArray) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
+
+    def _slice_to_template(
+        self, template: DataResidualArray
+    ) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
         """Slice the data residual array to the same shape as the template.
 
         This is used for calculating inner products and likelihoods with templates that are shorter than the data.
@@ -182,7 +178,7 @@ class AnalysisContainer:
         # Fast path: settings identical → no slicing needed
         if data_settings == templ_settings:
             return self.data_res_arr, template, self.sens_mat
-        
+
         elif isinstance(data_settings, domains.STFTSettings):
             return self._slice_stft_to_template(template)
         else:
@@ -191,15 +187,17 @@ class AnalysisContainer:
                 f"{type(data_settings).__name__}. Ensure template and data "
                 f"have the same shape, or use STFT domain."
             )
-    
-    def _slice_stft_to_template(self, template: DataResidualArray) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
+
+    def _slice_stft_to_template(
+        self, template: DataResidualArray
+    ) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
         """
-        Slice the data residual array and sensitivity matrix to the time and frequency region covered 
+        Slice the data residual array and sensitivity matrix to the time and frequency region covered
         by the template, for the case of STFT domain settings.
 
         Args:
             template: Template signal.
-        
+
         Returns:
             Tuple of (sliced data residual array, sliced template, sliced sensitivity matrix).
         """
@@ -219,7 +217,10 @@ class AnalysisContainer:
             )
 
         # find indices for slicing
-        tmin, tmax = templ_settings.t0, templ_settings.t0 + templ_settings.NT * templ_settings.dt
+        tmin, tmax = (
+            templ_settings.t0,
+            templ_settings.t0 + templ_settings.NT * templ_settings.dt,
+        )
         fmin, fmax = templ_settings.f_arr[0], templ_settings.f_arr[-1]
 
         slices = data_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
@@ -228,13 +229,12 @@ class AnalysisContainer:
         sliced_data_res_arr = DataResidualArray(tmp)
         sliced_sens_mat = self.sens_mat.get_slice(slices)
 
-        #print all the shapes to make sure they are correct
+        # print all the shapes to make sure they are correct
         print(f"Data residual array shape: {sliced_data_res_arr.shape}")
         print(f"Template shape: {template.shape}")
         print(f"Sliced sensitivity matrix shape: {sliced_sens_mat.shape}")
 
         return sliced_data_res_arr, template, sliced_sens_mat
-
 
     def template_inner_product(
         self, template: DataResidualArray, **kwargs: dict
@@ -255,9 +255,13 @@ class AnalysisContainer:
         if "include_psd_info" in kwargs:
             kwargs.pop("include_psd_info")
 
-        data_res_arr_sliced, template_sliced, sens_mat_sliced = self._slice_to_template(template)
+        data_res_arr_sliced, template_sliced, sens_mat_sliced = self._slice_to_template(
+            template
+        )
 
-        ip_val = inner_product(data_res_arr_sliced, template_sliced, psd=sens_mat_sliced, **kwargs)
+        ip_val = inner_product(
+            data_res_arr_sliced, template_sliced, psd=sens_mat_sliced, **kwargs
+        )
         return ip_val
 
     def template_snr(
@@ -281,12 +285,20 @@ class AnalysisContainer:
         if "complex" in kwargs_in:
             kwargs_in.pop("complex")
 
-        sliced_data_res_arr, sliced_template, sliced_sens_mat = self._slice_to_template(template)
+        sliced_data_res_arr, sliced_template, sliced_sens_mat = self._slice_to_template(
+            template
+        )
 
         # TODO: should we cache?
-        h_h = inner_product(sliced_template, sliced_template, psd=sliced_sens_mat, **kwargs_in)
+        h_h = inner_product(
+            sliced_template, sliced_template, psd=sliced_sens_mat, **kwargs_in
+        )
         non_marg_d_h = inner_product(
-            sliced_data_res_arr, sliced_template, psd=sliced_sens_mat, complex=True, **kwargs_in
+            sliced_data_res_arr,
+            sliced_template,
+            psd=sliced_sens_mat,
+            complex=True,
+            **kwargs_in,
         )
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
@@ -323,7 +335,9 @@ class AnalysisContainer:
         if "complex" in kwargs_in:
             kwargs_in.pop("complex")
 
-        data_res_arr_sliced, template_sliced, sens_mat_sliced = self._slice_to_template(template)
+        data_res_arr_sliced, template_sliced, sens_mat_sliced = self._slice_to_template(
+            template
+        )
 
         # when computing the <d|d> term we need the full data and sensitivity matrix.
 
@@ -331,10 +345,16 @@ class AnalysisContainer:
         d_d = inner_product(
             self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs_in
         )
-        h_h = inner_product(template_sliced, template_sliced, psd=sens_mat_sliced, **kwargs_in)
-        
+        h_h = inner_product(
+            template_sliced, template_sliced, psd=sens_mat_sliced, **kwargs_in
+        )
+
         non_marg_d_h = inner_product(
-            data_res_arr_sliced, template_sliced, psd=sens_mat_sliced, complex=True, **kwargs_in
+            data_res_arr_sliced,
+            template_sliced,
+            psd=sens_mat_sliced,
+            complex=True,
+            **kwargs_in,
         )
 
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
@@ -343,10 +363,10 @@ class AnalysisContainer:
         if amp_maximize:
             amp_factor = d_h.real / h_h.real
             d_h *= amp_factor
-            h_h *= amp_factor ** 2
+            h_h *= amp_factor**2
         # breakpoint()
         like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
-        
+
         if include_psd_info:
             # add noise term if requested
             like_out += self.likelihood(noise_only=True)
@@ -403,9 +423,9 @@ class AnalysisContainer:
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
                 This can be used if any transforms are desired prior to the Likelihood computation. If it is not input,
                 the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.
-            transform_fn: Transform information for signal parameters if they 
+            transform_fn: Transform information for signal parameters if they
                 are entered on a basis other than the waveform basis.
-            signal_gen: In scope waveform generator. Replaces ``self.signal_gen`` if this input is not ``None``. 
+            signal_gen: In scope waveform generator. Replaces ``self.signal_gen`` if this input is not ``None``.
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
 
         Returns:
@@ -589,20 +609,29 @@ class AnalysisContainerArray:
             acs = np.array([analysis_containers], dtype=object)
         elif isinstance(analysis_containers, np.ndarray):
             assert analysis_containers.dtype == object
-            assert np.all([isinstance(tmp, AnalysisContainer) for tmp in analysis_containers.flatten()])
+            assert np.all(
+                [
+                    isinstance(tmp, AnalysisContainer)
+                    for tmp in analysis_containers.flatten()
+                ]
+            )
             acs = analysis_containers
         elif isinstance(analysis_containers, list):
             if isinstance(analysis_containers[0], list):
-                raise ValueError("If inputing list of containers, must be 1D. Use a numpy object array for 2+D.")
+                raise ValueError(
+                    "If inputing list of containers, must be 1D. Use a numpy object array for 2+D."
+                )
             acs = np.asarray(analysis_containers, dtype=object)
         else:
-            raise ValueError("Analysis container must be single container, 1D list, or numpy object array.")
-        
+            raise ValueError(
+                "Analysis container must be single container, 1D list, or numpy object array."
+            )
+
         self.acs = acs
         self.acs_shape = acs.shape
         self.acs_total_entries = np.prod(acs.shape)
 
-        # generalize to a potential time-frequency input, where 
+        # generalize to a potential time-frequency input, where
         data_shape = acs.flatten()[0].data_res_arr.shape
 
         if len(data_shape) == 1:
@@ -613,7 +642,9 @@ class AnalysisContainerArray:
             self.nchannels, self.data_length = data_shape
             self.end_shape = (self.data_length,)
         elif len(data_shape) == 3:
-            self.nchannels, self.m, self.n = data_shape # let's call the external layer m and n for now. In the stft case, m would be the number of time segments and n would be the number of frequencies. In WDM it seems this is switched.
+            self.nchannels, self.m, self.n = (
+                data_shape  # let's call the external layer m and n for now. In the stft case, m would be the number of time segments and n would be the number of frequencies. In WDM it seems this is switched.
+            )
             self.data_length = self.m * self.n
             self.end_shape = (self.m, self.n)
 
@@ -630,13 +661,15 @@ class AnalysisContainerArray:
         # xp = get_array_module(acs.flatten()[0].data_res_arr[0])
 
         ac_tmp = acs.flatten()[0]
-        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-len(ac_tmp.sens_mat.data_shape)]
+        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[
+            : -len(ac_tmp.sens_mat.data_shape)
+        ]
 
         if isinstance(ac_tmp.sens_mat.basis_settings, domains.WDMSettings):
             self.data_dtype = float
         else:
-            self.data_dtype = complex        
-        
+            self.data_dtype = complex
+
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory
         num_machines = 1 if gpus is None else len(gpus)
@@ -644,7 +677,9 @@ class AnalysisContainerArray:
         split_num = int(np.ceil(self.acs_total_entries / num_machines))
         split_inds = np.arange(split_num, self.acs_total_entries, split_num)
 
-        self.gpu_splits = gpu_splits = np.split(np.arange(self.acs_total_entries), split_inds)
+        self.gpu_splits = gpu_splits = np.split(
+            np.arange(self.acs_total_entries), split_inds
+        )
 
         self.gpu_map = np.zeros(self.acs_total_entries, dtype=int)
         self.split_map = np.zeros(self.acs_total_entries, dtype=int)
@@ -658,18 +693,27 @@ class AnalysisContainerArray:
 
             self.gpu_map[split] = gpus[i]
             self.split_map[split] = i
-            self.linear_data_arr.append(xp.zeros(self.data_length * self.nchannels * len(split), dtype=self.data_dtype))
-            self.linear_psd_arr.append(xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=complex))
+            self.linear_data_arr.append(
+                xp.zeros(
+                    self.data_length * self.nchannels * len(split),
+                    dtype=self.data_dtype,
+                )
+            )
+            self.linear_psd_arr.append(
+                xp.zeros(
+                    self.data_length * np.prod(shape_sens) * len(split), dtype=complex
+                )
+            )
 
         self.num_acs = num_acs = len(acs.flatten())
-        self.gpus = gpus 
+        self.gpus = gpus
         self.reset_linear_data_arr()
         self.reset_linear_psd_arr()
 
     def zero_out_data_arr(self):
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
-        
+
         for gpu_i, gpu in enumerate(self.gpus):
             with self.xp.cuda.device.Device(gpu):
                 self.linear_data_arr[gpu_i][:] = 0.0
@@ -693,9 +737,13 @@ class AnalysisContainerArray:
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
             start_index = intra_split_index * (self.nchannels * self.data_length)
             end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
-            self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(ac.data_res_arr.flatten())
-            #ac.data_res_arr._data_res_arr = signal_class(arr=self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, *self.data_shape), settings=settings)     #as todo check: are those 2 lines the same? 
-            ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][start_index:end_index].reshape((self.nchannels,) + self.end_shape)
+            self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(
+                ac.data_res_arr.flatten()
+            )
+            # ac.data_res_arr._data_res_arr = signal_class(arr=self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, *self.data_shape), settings=settings)     #as todo check: are those 2 lines the same?
+            ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][
+                start_index:end_index
+            ].reshape((self.nchannels,) + self.end_shape)
             # TODO: add check to make sure changes are made inline along with protections
             if self.gpus is not None:
                 self.xp.get_default_memory_pool().free_all_blocks()
@@ -715,10 +763,18 @@ class AnalysisContainerArray:
 
             # TODO: should I not store this in memory?!?!?
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
-            start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
-            end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
-            self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(ac.sens_mat.invC.flatten())
-            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + (self.m, self.n))
+            start_index = intra_split_index * (
+                np.prod(self.shape_sens) * self.data_length
+            )
+            end_index = (intra_split_index + 1) * (
+                np.prod(self.shape_sens) * self.data_length
+            )
+            self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(
+                ac.sens_mat.invC.flatten()
+            )
+            ac.sens_mat.invC = self.linear_psd_arr[split][
+                start_index:end_index
+            ].reshape(self.shape_sens + (self.m, self.n))
 
             # TODO: add check to make sure changes are made inline along with protections
             if self.gpus is not None:
@@ -735,14 +791,14 @@ class AnalysisContainerArray:
     @property
     def f_arr(self):
         return self.acs[0].data_res_arr.f_arr
-        
+
     @property
     def df(self):
         return self.f_arr[1] - self.f_arr[0]
 
     def __len__(self) -> int:
         return len(self.acs)
-        
+
     def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
         for i, ac in enumerate(self.acs.flatten()):
             _tmp = getattr(ac, operation)
@@ -797,7 +853,7 @@ class AnalysisContainerArray:
         if data_index is None:
             assert num_templates == self.acs_total_entries
             data_index = np.arange(num_templates)
-        else: 
+        else:
             assert data_index.max() < self.acs_total_entries
 
         if start_index is None:
@@ -808,8 +864,10 @@ class AnalysisContainerArray:
 
         assert len(start_index) == len(data_index)
         for i, (di, si) in enumerate(zip(data_index, start_index)):
-            self.acs[di].data_res_arr[:, si:si+template_length] += sign * templates[i]
-        
+            self.acs[di].data_res_arr[:, si : si + template_length] += (
+                sign * templates[i]
+            )
+
     def add_signal_to_residual(self, *args, **kwargs):
         self.signal_operation(-1, *args, **kwargs)
 
@@ -822,16 +880,14 @@ class AnalysisContainerArray:
         for i, tmp in enumerate(self.linear_data_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape(-1, self.nchannels, *self.data_shape)) 
+            out.append(tmp.reshape(-1, self.nchannels, *self.data_shape))
         return out
-        
+
     @property
     def psd_shaped(self):
         out = []
         for i, tmp in enumerate(self.linear_psd_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape(-1, *self.shape_sens, *self.data_shape)) 
+            out.append(tmp.reshape(-1, *self.shape_sens, *self.data_shape))
         return out
-
-    

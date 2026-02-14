@@ -1,15 +1,21 @@
+import shutil
+import time
+
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
-from .state import GFState, MBHState, EMRIState, GBState
+
 from .plot import RunResultsProduction
-import time
-import shutil
+from .state import EMRIState, GBState, GFState, MBHState
 
 
-def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_rank, plot_iter, backup_iter):
+def save_to_backend_asynchronously_and_plot(
+    gb_reader, comm, main_rank, head_rank, plot_iter, backup_iter
+):
 
     print("starting run SAVE")
-    run_results_production = None ## RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
+    run_results_production = (
+        None  ## RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
+    )
     run = True
     i = 0
     while run:
@@ -20,7 +26,7 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_ran
             run = False
             continue
 
-        time.sleep(15.)  # to allow for ending the code
+        time.sleep(15.0)  # to allow for ending the code
         save_args = save_dict["save_args"]
         save_kwargs = save_dict["save_kwargs"]
         print("attempting to save step")
@@ -45,14 +51,24 @@ def save_to_backend_asynchronously_and_plot(gb_reader, comm, main_rank, head_ran
         if ((i + 1) % backup_iter) == 0:
             print("copy to backup file")
             # copy to backup file
-            shutil.copy(gb_reader.filename, gb_reader.filename[:-3] + "_running_backup_copy.h5")
+            shutil.copy(
+                gb_reader.filename, gb_reader.filename[:-3] + "_running_backup_copy.h5"
+            )
 
         i += 1
-    return 
+    return
 
 
 class GFHDFBackend(eryn_HDFBackend):
-    def __init__(self, *args, comm=None, sub_backend=None, sub_state_bases=None, save_plot_rank=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        comm=None,
+        sub_backend=None,
+        sub_state_bases=None,
+        save_plot_rank=None,
+        **kwargs,
+    ):
 
         super().__init__(*args, **kwargs)
 
@@ -62,36 +78,37 @@ class GFHDFBackend(eryn_HDFBackend):
 
         self.comm = comm
         self.save_plot_rank = save_plot_rank
-        
-        
+
         self.sub_backend = sub_backend
         if self.sub_backend is not None:
-            self.sub_backend = {key: self.sub_backend[key](*args, **kwargs) for key in self.sub_backend if self.sub_backend[key] is not None}
-    
+            self.sub_backend = {
+                key: self.sub_backend[key](*args, **kwargs)
+                for key in self.sub_backend
+                if self.sub_backend[key] is not None
+            }
+
         self.sub_state_bases = sub_state_bases
         self.recipe_added = False
 
     def reset(self, *args, **kwargs):
         # regular reset
         super().reset(*args, **kwargs)
-        
+
         if self.sub_backend is not None:
             with self.open("a") as f:
                 g = f[self.name]
                 if "sub_backend" not in g:
                     g.create_group("sub_backend")
-            
+
             for sub_backend_tmp in self.sub_backend.values():
                 sub_backend_tmp.reset(*args, **kwargs)
 
         with self.open("a") as f:
             f[self.name].attrs["has_recipe"] = False
 
-    
-
     def grow(self, ngrow, *args):
         super().grow(ngrow, *args)
-        
+
         # open the file in append mode
         if self.sub_backend is not None:
             with self.open("a") as f:
@@ -104,15 +121,10 @@ class GFHDFBackend(eryn_HDFBackend):
                         continue
                     sub_backend_tmp.grow(ngrow, *args)
 
-    def save_step_main(
-        self,
-        state,
-        *args, 
-        **kwargs
-    ):
+    def save_step_main(self, state, *args, **kwargs):
 
         super().save_step(state, *args, **kwargs)
-        
+
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]
@@ -128,12 +140,8 @@ class GFHDFBackend(eryn_HDFBackend):
                     if sub_state is None:
                         continue
                     sub_state.save_step(state, *args, **kwargs)
-        
-    def save_step(
-        self,
-        *args, 
-        **kwargs
-    ):
+
+    def save_step(self, *args, **kwargs):
         """Save a step to the backend
 
         Args:
@@ -147,7 +155,7 @@ class GFHDFBackend(eryn_HDFBackend):
                 is False, then rj_accepted must be None, which is the default.
             swaps_accepted (ndarray, optional): 1D array with number of swaps accepted
                 for the in-model step. (default: ``None``)
-            moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the 
+            moves_accepted_fraction (dict, optional): Dict of acceptance fraction arrays for all of the
                 moves in the sampler. This dict must have the same keys as ``self.move_keys``.
                 (default: ``None``)
 
@@ -155,11 +163,13 @@ class GFHDFBackend(eryn_HDFBackend):
 
         if self.comm is None or self.comm.Get_size() < 3:
             self.save_step_main(*args, **kwargs)
-        
+
         else:
             state = args[0]
-            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
-            
+            self.comm.send(
+                {"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank
+            )
+
     def get_a_sample(self, it):
         """Access a sample in the chain
 
@@ -181,7 +191,9 @@ class GFHDFBackend(eryn_HDFBackend):
             )
 
         tmp_state = super().get_a_sample(it)
-        state = GFState(tmp_state, sub_state_bases=self.sub_state_bases, is_eryn_state_input=True)
+        state = GFState(
+            tmp_state, sub_state_bases=self.sub_state_bases, is_eryn_state_input=True
+        )
 
         # open for appending in with statement
         if self.sub_backend is not None:
@@ -197,7 +209,7 @@ class GFHDFBackend(eryn_HDFBackend):
 
                 sub_states[key] = sub_backend_tmp.get_a_sample(it)
                 sub_state_bases[key] = type(sub_states[key])
-        
+
         else:
             sub_states = None
             sub_state_bases = None
@@ -219,7 +231,9 @@ class GFHDFBackend(eryn_HDFBackend):
             order = []
             keys = []
             for key in f[self.name]["recipe"]:
-                _recipe[key] = {key: val for key, val in f["mcmc"]["recipe"][key].attrs.items()}
+                _recipe[key] = {
+                    key: val for key, val in f["mcmc"]["recipe"][key].attrs.items()
+                }
                 order.append(_recipe[key]["order num"])
                 keys.append(key)
 
@@ -241,7 +255,7 @@ class GFHDFBackend(eryn_HDFBackend):
                     recipe.recipe[i]["status"] = recipe_step_group.attrs["status"]
                     order_i_in_file = recipe_step_group.attrs["order num"]
                     assert order_i_in_file == i + 1
-                 
+
         else:
             _tmp = recipe.to_file()
             with self.open("a") as f:
@@ -259,9 +273,12 @@ class GFHDFBackend(eryn_HDFBackend):
             recipe_step_group = recipe_group[step_name]
             recipe_step_group.attrs["status"] = True
 
+
 class GBHDFBackend(eryn_HDFBackend):
 
-    def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
+    def reset(
+        self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs
+    ):
         if num_bands is None or band_edges is None:
             raise ValueError("Must provide num_bands and band_edges kwargs.")
 
@@ -368,12 +385,10 @@ class GBHDFBackend(eryn_HDFBackend):
     @property
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
-        return dict(
-            num_bands=self.num_bands
-        )
+        return dict(num_bands=self.num_bands)
 
     def grow(self, ngrow, *args):
-    
+
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
@@ -398,8 +413,8 @@ class GBHDFBackend(eryn_HDFBackend):
             discard (int, optional): Discard the first ``discard`` steps in
                 the chain as burn-in. (default: ``0``)
             slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
-                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be 
-                ignored if slice_vals is not ``None``. This is particularly useful if files are 
+                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be
+                ignored if slice_vals is not ``None``. This is particularly useful if files are
                 very large and the user only wants a small subset of the overall array.
                 (default: ``None``)
 
@@ -439,7 +454,11 @@ class GBHDFBackend(eryn_HDFBackend):
                         )
 
                     gb_group = g["sub_backend"]["gb"]
-                    v_all = {key: gb_group[key][slice_vals] for key in gb_group if key != "band_edges"}
+                    v_all = {
+                        key: gb_group[key][slice_vals]
+                        for key in gb_group
+                        if key != "band_edges"
+                    }
                     v_all["band_edges"] = gb_group["band_edges"][:]
                     successful = True
             except OSError:
@@ -448,7 +467,7 @@ class GBHDFBackend(eryn_HDFBackend):
                 time.sleep(20.0)
         if not successful:
             raise OSError("Unable to open h5 file after many tries.")
-            
+
         return v_all
 
     def get_band_info(self, **kwargs):
@@ -460,9 +479,9 @@ class GBHDFBackend(eryn_HDFBackend):
             discard (int, optional): Discard the first ``discard`` steps in
                 the chain as burn-in. (default: ``0``)
             slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
-                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``. 
-                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``. 
-                This is particularly useful if files are very large and the user only wants a 
+                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``.
+                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``.
+                This is particularly useful if files are very large and the user only wants a
                 small subset of the overall array. (default: ``None``)
 
         Returns:
@@ -475,12 +494,7 @@ class GBHDFBackend(eryn_HDFBackend):
         tmp["initialized"] = True
         return tmp
 
-    def save_step(
-        self,
-        state,
-        *args, 
-        **kwargs
-    ):
+    def save_step(self, state, *args, **kwargs):
 
         # open for appending in with statement
         with self.open("a") as f:
@@ -506,7 +520,7 @@ class GBHDFBackend(eryn_HDFBackend):
 
         # reset the counter for band info
         state.sub_states["gb"].reset_band_counters()
-        
+
     def get_a_sample(self, it):
         """Access a sample in the chain
 
@@ -520,7 +534,7 @@ class GBHDFBackend(eryn_HDFBackend):
             AttributeError: Backend is not initialized.
 
         """
-        
+
         thin = self.iteration - it if it != self.iteration else 1
         discard = it + 1 - thin
 
@@ -529,11 +543,10 @@ class GBHDFBackend(eryn_HDFBackend):
         sample.band_info["initialized"] = True
         return sample
 
-    
 
 class MBHHDFBackend(eryn_HDFBackend):
 
-    def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int=None, **kwargs):
+    def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int = None, **kwargs):
         if num_mbhs is None:
             raise ValueError("Must provide num_mbhs kwarg.")
 
@@ -563,12 +576,10 @@ class MBHHDFBackend(eryn_HDFBackend):
     @property
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
-        return dict(
-            num_mbhs=self.num_mbhs
-        )
+        return dict(num_mbhs=self.num_mbhs)
 
     def grow(self, ngrow, *args):
-        
+
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
@@ -590,8 +601,8 @@ class MBHHDFBackend(eryn_HDFBackend):
             discard (int, optional): Discard the first ``discard`` steps in
                 the chain as burn-in. (default: ``0``)
             slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
-                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be 
-                ignored if slice_vals is not ``None``. This is particularly useful if files are 
+                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be
+                ignored if slice_vals is not ``None``. This is particularly useful if files are
                 very large and the user only wants a small subset of the overall array.
                 (default: ``None``)
 
@@ -638,9 +649,9 @@ class MBHHDFBackend(eryn_HDFBackend):
             discard (int, optional): Discard the first ``discard`` steps in
                 the chain as burn-in. (default: ``0``)
             slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
-                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``. 
-                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``. 
-                This is particularly useful if files are very large and the user only wants a 
+                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``.
+                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``.
+                This is particularly useful if files are very large and the user only wants a
                 small subset of the overall array. (default: ``None``)
 
         Returns:
@@ -651,12 +662,7 @@ class MBHHDFBackend(eryn_HDFBackend):
         """
         return self.get_value("betas_all", **kwargs)
 
-    def save_step(
-        self,
-        state,
-        *args, 
-        **kwargs
-    ):
+    def save_step(self, state, *args, **kwargs):
 
         # open for appending in with statement
         with self.open("a") as f:
@@ -688,15 +694,14 @@ class MBHHDFBackend(eryn_HDFBackend):
         sample = MBHState(None, betas_all=betas_all)
         return sample
 
-    
+
 # TODO: @ alessandro, we can use the same for EMRIs and MBHs
 # for now, but I assume we will want it separate in the end
 
 
-
 class EMRIHDFBackend(eryn_HDFBackend):
 
-    def reset(self, nwalkers, *args, ntemps=1, num_emris: int=None, **kwargs):
+    def reset(self, nwalkers, *args, ntemps=1, num_emris: int = None, **kwargs):
         if num_emris is None:
             raise ValueError("Must provide num_emris kwarg.")
 
@@ -726,12 +731,10 @@ class EMRIHDFBackend(eryn_HDFBackend):
     @property
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
-        return dict(
-            num_emris=self.num_emris
-        )
+        return dict(num_emris=self.num_emris)
 
     def grow(self, ngrow, *args):
-        
+
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
@@ -753,8 +756,8 @@ class EMRIHDFBackend(eryn_HDFBackend):
             discard (int, optional): Discard the first ``discard`` steps in
                 the chain as burn-in. (default: ``0``)
             slice_vals (indexing np.ndarray or slice, optional): If provided, slice the array directly
-                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be 
-                ignored if slice_vals is not ``None``. This is particularly useful if files are 
+                from the HDF5 file with slice = ``slice_vals``. ``thin`` and ``discard`` will be
+                ignored if slice_vals is not ``None``. This is particularly useful if files are
                 very large and the user only wants a small subset of the overall array.
                 (default: ``None``)
 
@@ -801,9 +804,9 @@ class EMRIHDFBackend(eryn_HDFBackend):
             discard (int, optional): Discard the first ``discard`` steps in
                 the chain as burn-in. (default: ``0``)
             slice_vals (indexing np.ndarray or slice, optional): This is only available in :class:`eryn.backends.hdfbackend`.
-                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``. 
-                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``. 
-                This is particularly useful if files are very large and the user only wants a 
+                If provided, slice the array directly from the HDF5 file with slice = ``slice_vals``.
+                ``thin`` and ``discard`` will be ignored if slice_vals is not ``None``.
+                This is particularly useful if files are very large and the user only wants a
                 small subset of the overall array. (default: ``None``)
 
         Returns:
@@ -814,12 +817,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
         """
         return self.get_value("betas_all", **kwargs)
 
-    def save_step(
-        self,
-        state,
-        *args, 
-        **kwargs
-    ):
+    def save_step(self, state, *args, **kwargs):
 
         # open for appending in with statement
         with self.open("a") as f:
@@ -850,5 +848,3 @@ class EMRIHDFBackend(eryn_HDFBackend):
 
         sample = EMRIState(None, betas_all=betas_all)
         return sample
-
-    

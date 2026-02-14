@@ -1,5 +1,8 @@
-from .mbhspecialmove import MBHSpecialMove
-from .gbspecialstretch import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, GBSpecialRJSerialSearchMCMC
-from .globalfitmove import GlobalFitMove, GFCombineMove
-from .psdmove import PSDMove
 from .addremovemove import ResidualAddOneRemoveOneMove
+from .gbspecialstretch import (GBSpecialRJPriorMove, GBSpecialRJRefitMove,
+                               GBSpecialRJSearchMove,
+                               GBSpecialRJSerialSearchMCMC,
+                               GBSpecialStretchMove)
+from .globalfitmove import GFCombineMove, GlobalFitMove
+from .mbhspecialmove import MBHSpecialMove
+from .psdmove import PSDMove
