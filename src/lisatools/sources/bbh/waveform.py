@@ -6,8 +6,16 @@ from bbhx.waveformbuild import BBHWaveformFD
 # imports
 from fastlisaresponse import ResponseWrapper
 
+from ...domains import DomainSettingsBase
 from ...utils.constants import *
-from ..waveformbase import SNRWaveform
+from ..waveformbase import SNRWaveform, TDWaveformBase
+
+try:
+    import phentax
+
+    phentax_available = True
+except (ImportError, ModuleNotFoundError):
+    phentax_available = False
 
 
 class BBHSNRWaveform(SNRWaveform):
@@ -104,6 +112,79 @@ class BBHSNRWaveform(SNRWaveform):
             return AET
         else:
             return (AET[0], AET[1], AET[2])
-        
 
 
+class PhenomTHMTDIWaveform(TDWaveformBase):
+    """
+    Generate PhenomTHM waveforms with the TDI LISA Response.
+
+    Args:
+
+    """
+
+    def __init__(
+        self,
+        waveform_kwargs: dict,
+        t0: float = 0.0,
+        dt: float = 10.0,
+        Tobs: float = 1.0,
+        response_kwargs: dict = None,
+        buffer_time: int = 600,
+        tukey_alpha: float = 0.01,
+    ) -> None:
+
+        if not phentax_available:
+            raise ImportError(
+                "PhenomTHM is not available. Please install phentax to use this waveform."
+            )
+
+        super().__init__(
+            t0=t0,
+            dt=dt,
+            Tobs=Tobs,
+            response_kwargs=response_kwargs,
+            buffer_time=buffer_time,
+            tukey_alpha=tukey_alpha,
+        )
+
+        self.waveform = phentax.waveform.IMRPhenomTHM(T=self.Tobs, **waveform_kwargs)
+
+    def wave_gen(
+        self,
+        m1: float,
+        m2: float,
+        s1z: float,
+        s2z: float,
+        distance: float,
+        phi_ref: float,
+        ref_freq: float,
+        start_freq: float,
+        inclination: float,
+        psi: float,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Generate the waveform's polarizations.
+
+        Returns:
+            t_arr, h_plus, h_cross
+
+        """
+
+        times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
+            m1,
+            m2,
+            s1z,
+            s2z,
+            distance,
+            phi_ref,
+            ref_freq,
+            start_freq,
+            inclination,
+            psi,
+            delta_t=self.dt,
+        )
+
+        return (
+            self.xp.asarray(times[mask]),
+            self.xp.asarray(hplus[mask]),
+            self.xp.asarray(hcross[mask]),
+        )
