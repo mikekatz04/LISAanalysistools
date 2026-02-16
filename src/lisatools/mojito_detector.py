@@ -1,13 +1,15 @@
 """Mojito-specific Orbits implementation with JAX."""
 
+from copy import deepcopy
+from typing import Optional
+
+import jax
+import jax.numpy as jnp
 import numpy as np
 from scipy import interpolate
-from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d as np_gaussian_filter1d
-from typing import Optional
-from copy import deepcopy
-import jax 
-import jax.numpy as jnp
+from scipy.signal import find_peaks
+
 jax.config.update("jax_enable_x64", True)
 
 try:
@@ -15,15 +17,16 @@ try:
     from cupyx.scipy.ndimage import gaussian_filter1d as cp_gaussian_filter1d
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
+
     cp_gaussian_filter1d = np_gaussian_filter1d
 
 from cudakima import AkimaInterpolant1D
-
 from lisaconstants.indexing import link2sc
-from .detector import Orbits, LINEAR_INTERP_TIMESTEP
-from .utils.parallelbase import LISAToolsParallelModule
+
+from .detector import LINEAR_INTERP_TIMESTEP, Orbits
 from .domains import DomainSettingsBase
 from .sensitivity import SensitivityMatrixBase
+from .utils.parallelbase import LISAToolsParallelModule
 
 NUM_SPLINE_THREADS = 256
 
@@ -32,7 +35,7 @@ NUM_SPLINE_THREADS = 256
 # def interpolate_pos(query_t, sc_idx, t_grid, pos_grid):
 #     """
 #     Interpolate spacecraft position using JAX.
-    
+
 #     Args:
 #         query_t: shape (N,)
 #         sc_idx: shape (N,) or (1,) - 0-based index (0, 1, 2)
@@ -43,25 +46,25 @@ NUM_SPLINE_THREADS = 256
 #     def _single_point(t, sc):
 #         # t: scalar float
 #         # sc: scalar int (0, 1, 2)
-        
+
 #         # pos_grid is (Times, SC, 3)
 #         # We want to interpolate along axis 0.
-        
+
 #         # Helper for 1D interp
 #         def interp_1d(vals):
 #             return jnp.interp(t, t_grid, vals)
-            
+
 #         # Select the trajectory for this spacecraft
 #         # pos_grid[:, sc, 0] gives x(t) for spacecraft sc
-#         # We use simple indexing. Since 'sc' is a tracer in JIT, simple indexing might need dynamic_slice 
+#         # We use simple indexing. Since 'sc' is a tracer in JIT, simple indexing might need dynamic_slice
 #         # or just work if shape is static. JAX numpy indexing usually works fine.
-        
+
 #         val_x = interp_1d(pos_grid[:, sc, 0])
 #         val_y = interp_1d(pos_grid[:, sc, 1])
 #         val_z = interp_1d(pos_grid[:, sc, 2])
 #         return jnp.array([val_x, val_y, val_z])
 
-#     # If inputs are arrays, we vmap. 
+#     # If inputs are arrays, we vmap.
 #     # query_t is (N,), sc_idx is (3,) or (1,)
 #     return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, sc_idx)
 
@@ -69,7 +72,7 @@ NUM_SPLINE_THREADS = 256
 # def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
 #     """
 #     Interpolate Light Travel Time using JAX.
-    
+
 #     Args:
 #         query_t: shape (N,)
 #         link_idx: shape (N_links,) or (1,) - 0-based index
@@ -79,7 +82,7 @@ NUM_SPLINE_THREADS = 256
 #     def _single_point(t, l):
 #         vals = ltt_grid[:, l]
 #         return jnp.interp(t, t_grid, vals)
-    
+
 #     return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
 
 # def icrs_to_ecliptic(positions_icrs):
@@ -89,14 +92,14 @@ NUM_SPLINE_THREADS = 256
 #     Args:
 #         positions_icrs: Array of shape (n_times, 3, 3) representing positions
 #                         in ICRS frame for 3 spacecraft over n_times.
-    
+
 #     Returns:
 #         positions_ecliptic: Array of shape (n_times, 3, 3) in ecliptic frame.
 #     """
 
 #     import astropy
 #     positions_ecliptic = np.zeros_like(positions_icrs)
-    
+
 #     for sc in range(3):
 
 #         c_icrs = astropy.coordinates.SkyCoord(positions_icrs[:,sc,0], positions_icrs[:,sc,1], positions_icrs[:,sc,2], frame='icrs', unit='m', representation_type='cartesian')
@@ -108,17 +111,17 @@ NUM_SPLINE_THREADS = 256
 
 # class L1Orbits(Orbits):
 #     """Base class for LISA Orbits from Mojito L1 File structure.
-    
+
 #     This class handles orbit data from MojitoL1File where:
 #     - Light travel times and positions have different time arrays
 #     - Both time arrays may start at t0 != 0
-    
+
 #     Args:
 #         armlength: Armlength of detector (default 2.5e9 m)
 #     """
 
 #     def __init__(
-#         self, 
+#         self,
 #         filename: str,
 #         armlength: float = 2.5e9,
 #         force_backend: Optional[str] = None,
@@ -126,20 +129,20 @@ NUM_SPLINE_THREADS = 256
 #     ):
 #         # Store the Mojito file path
 #         self.filename = filename
-        
+
 #         # Don't call super().__init__ - we need to override _setup
 #         # Instead, manually initialize the minimal required attributes
 #         self._armlength = armlength
 #         self._filename = filename  # For compatibility
 #         self.configured = False
-        
+
 #         # Load data from Mojito file
 #         self._load_mojito_data()
-        
+
 #         # Initialize backend
 #         from .utils.parallelbase import LISAToolsParallelModule
 #         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
-        
+
 #     def open(self):
 #         """Override base class open method."""
 #         try:
@@ -147,39 +150,39 @@ NUM_SPLINE_THREADS = 256
 #         except ImportError:
 #             raise ImportError("mojito package required for L1Orbits. Follow instructions at: https://mojito-e66317.io.esa.int/content/installation.html")
 #         f = MojitoL1File(self.filename)
-#         return f            
-    
+#         return f
+
 #     def _load_mojito_data(self):
 #         """Load orbit and LTT data from Mojito file."""
-        
+
 #         with self.open() as f:
 #             # Load light travel times and their time array
 #             self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6)
 #             self.ltt_t = f.ltts.time_sampling.t()  # Shape: (N_ltt_times,)
-            
-#             # Load spacecraft positions and their time array  
+
+#             # Load spacecraft positions and their time array
 #             pos_icrs = f.orbits.positions[:]  # Shape: (N_pos_times, 3, 3)
 #             self.x_base = icrs_to_ecliptic(pos_icrs)  # Convert to ecliptic frame
 #             self.v_base = f.orbits.velocities[:] # Shape: (N_pos_times, 3, 3)
 #             self.sc_t_base = f.orbits.time_sampling.t()  # Shape: (N_pos_times,)
-            
+
 #             # Store dt from each dataset (they may differ)
 #             self.ltt_dt = f.ltts.time_sampling.dt
 #             self.sc_dt = f.orbits.time_sampling.dt
-            
+
 #             # Store t0 values
 #             self.ltt_t0 = float(self.ltt_t[0])
 #             self.sc_t0 = float(self.sc_t_base[0])
-    
+
 #     @property
 #     def ltt_t(self):
 #         """LTT file time."""
 #         return self._ltt_t
-    
+
 #     @ltt_t.setter
 #     def ltt_t(self, x):
 #         self._ltt_t = x
-    
+
 #     @property
 #     def ltt(self):
 #         """Light travel times from Mojito file."""
@@ -188,7 +191,7 @@ NUM_SPLINE_THREADS = 256
 #     @ltt.setter
 #     def ltt(self, x):
 #         self._ltt = x
-    
+
 #     @property
 #     def x_base(self):
 #         """Spacecraft positions from Mojito file."""
@@ -212,7 +215,7 @@ NUM_SPLINE_THREADS = 256
 #     @sc_t_base.setter
 #     def sc_t_base(self, x):
 #         self._sc_t_base = x
-    
+
 #     @property
 #     def ltt_dt(self):
 #         """Time step of LTT data."""
@@ -220,22 +223,22 @@ NUM_SPLINE_THREADS = 256
 #     @ltt_dt.setter
 #     def ltt_dt(self, x):
 #         self._ltt_dt = x
-    
+
 #     @property
-#     def sc_dt_base(self):    
+#     def sc_dt_base(self):
 #         """Time step of spacecraft position data."""
 #         return self._sc_dt_base
 #     @sc_dt_base.setter
 #     def sc_dt_base(self, x):
 #         self._sc_dt_base = x
-    
+
 #     @property
 #     def ltt_t0(self):
 #         """Start time of LTT data."""
 #         return self._ltt_t0
 #     @ltt_t0.setter
 #     def ltt_t0(self, x):
-#         self._ltt_t0 = x    
+#         self._ltt_t0 = x
 
 #     @property
 #     def sc_t0(self):
@@ -246,7 +249,7 @@ NUM_SPLINE_THREADS = 256
 #         self._sc_t0 = x
 
 #     @property
-#     def sc_dt(self):    
+#     def sc_dt(self):
 #         """Time step of spacecraft position data."""
 #         return self._sc_dt
 #     @sc_dt.setter
@@ -260,7 +263,7 @@ NUM_SPLINE_THREADS = 256
 #     @sc_t.setter
 #     def sc_t(self, x):
 #         self._sc_t = x
-    
+
 #     @property
 #     def t(self):
 #         """Configured time array (spacecraft positions)."""
@@ -274,7 +277,7 @@ NUM_SPLINE_THREADS = 256
 #     @x.setter
 #     def x(self, x):
 #         self._x = x
-    
+
 #     @property
 #     def v(self):
 #         """Configured spacecraft velocities."""
@@ -283,7 +286,7 @@ NUM_SPLINE_THREADS = 256
 #     @v.setter
 #     def v(self, x):
 #         self._v = x
-    
+
 #     @property
 #     def n(self):
 #         return self._n
@@ -301,7 +304,7 @@ NUM_SPLINE_THREADS = 256
 #     #     """Spacecraft IDs in Mojito convention."""
 #     #     return lisaconstants.indexing.SPACECRAFT
 
-    
+
 #     @property
 #     def pycppdetector(self) -> object:
 #         """C++ class"""
@@ -312,24 +315,24 @@ NUM_SPLINE_THREADS = 256
 #         self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
 
 #         return self._pycppdetector
-    
+
 #     def configure(
 #         self,
 #         t_arr=None,
-#         dt=None, 
+#         dt=None,
 #         linear_interp_setup=False
 #     ):
 #         """Configure orbits with interpolation to a target time grid.
-        
+
 #         This handles the fact that ltts and positions come from different
 #         time arrays in the Mojito file.
-        
+
 #         Args:
 #             t_arr: Target time array (if None, will be constructed)
 #             dt: Target time step
 #             linear_interp_setup: If True, create dense grid for fast linear interpolation
 #         """
-        
+
 #         # Determine target time array
 #         if linear_interp_setup:
 #             make_cpp = True
@@ -337,10 +340,10 @@ NUM_SPLINE_THREADS = 256
 #             # interpolate only the orbit quantities, the ltts are already dense enough
 #             t0 = self.sc_t0
 #             t_end = float(self._sc_t_base[-1])
-                        
+
 #             t_arr = np.arange(t0, t_end + dt, dt)
 #             t_arr = t_arr[t_arr <= t_end]
-            
+
 #         elif t_arr is None:
 #             if dt is not None:
 #                 # Use position time range as reference
@@ -355,18 +358,18 @@ NUM_SPLINE_THREADS = 256
 #                 make_cpp = False
 #         else:
 #             make_cpp = True
-                
+
 #         # Interpolate positions from their native time grid to target grid
 #         # _pos_data is (N_pos, 3_sc, 3_xyz)
 #         pos_interp_shape = (len(t_arr), 3, 3)
 #         pos_interpolated = np.zeros(pos_interp_shape)
 #         vel_interpolated = np.zeros(pos_interp_shape)
-        
+
 #         for isc in range(3):  # 3 spacecraft
 #             for icoord in range(3):  # x, y, z
 #                 # Cubic spline interpolation
 #                 cs = interpolate.CubicSpline(
-#                     self.sc_t_base, 
+#                     self.sc_t_base,
 #                     self.x_base[:, isc, icoord]
 #                 )
 #                 pos_interpolated[:, isc, icoord] = cs(t_arr)
@@ -377,8 +380,8 @@ NUM_SPLINE_THREADS = 256
 #                     self.v_base[:, isc, icoord]
 #                 )
 #                 vel_interpolated[:, isc, icoord] = cs(t_arr)
-        
-       
+
+
 #         # Store interpolated data
 #         self.sc_dt = dt
 #         self.sc_t = self.xp.asarray(t_arr)
@@ -390,7 +393,7 @@ NUM_SPLINE_THREADS = 256
 #         lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
 #         lse = np.asarray(self.link_space_craft_e).copy().astype(np.int32)
 #         ll = np.asarray(self.LINKS).copy().astype(np.int32)
-                
+
 #         # Mark as configured
 #         self.configured = True
 
@@ -417,26 +420,26 @@ NUM_SPLINE_THREADS = 256
 #     def _setup(self):
 #         """Override base class _setup - we load data in `_load_mojito_data` instead."""
 #         pass
-    
+
 
 # @jax.tree_util.register_pytree_node_class
 # class JAXL1Orbits(L1Orbits):
 #     """LISA Orbits from Mojito L1 File structure with JAX support.
-    
+
 #     This class handles orbit data from MojitoL1File where:
 #     - Light travel times and positions have different time arrays
 #     - Both time arrays may start at t0 != 0
-    
+
 #     Uses Numba CUDA kernels for fast GPU interpolation, with automatic
 #     fallback to CPU if CUDA is not available.
-    
+
 #     Args:
 #         filename: Path to Mojito L1 HDF5 file
 #         armlength: Armlength of detector (default 2.5e9 m)
 #         force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
 #     """
-    
-    
+
+
 #     def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
 #         super().configure(t_arr, dt, linear_interp_setup)
 #         # No C++ backend for this implementation, ovverride attribute
@@ -450,22 +453,22 @@ NUM_SPLINE_THREADS = 256
 
 #         self.ltt_t = jnp.asarray(self.ltt_t)
 #         self.ltt = jnp.asarray(self.ltt)
-    
+
 #     @property
 #     def dt(self):
 #         """Time step of configured grid."""
 #         if not self.configured:
 #             return self._dt
 #         return self._dt
-    
+
 #     @dt.setter
 #     def dt(self, dt):
 #         self._dt = dt
-    
+
 #     def get_pos(self, t, sc):
 #         """
 #         Compute spacecraft position using Numba CUDA interpolation.
-        
+
 #         Args:
 #             t: time (scalar, array, or list)
 #             sc: spacecraft index (1, 2, or 3) or array of indices
@@ -480,53 +483,53 @@ NUM_SPLINE_THREADS = 256
 #         sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
 
 #         output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.x)
-        
+
 #         if squeeze_sc:
 #             output = output.squeeze(axis=1)
 #         if squeeze_t:
 #             output = output.squeeze(axis=0)
-        
+
 #         return output.block_until_ready()
 
-    
+
 #     def get_light_travel_times(self, t, link):
 #         """
 #         Compute light travel times using Numba CUDA interpolation.
-        
+
 #         Args:
 #             t: time (scalar, array, or list)
 #             link: link index (12, 23, 31, 13, 32, 21) or array of indices
 #         """
 #         if not self.configured:
 #             raise RuntimeError("Must call configure() before get_light_travel_times()")
-        
+
 #         squeeze_t = jnp.isscalar(t)
 #         squeeze_link = jnp.isscalar(link)
 
 #         t_arr = jnp.atleast_1d(t)
 #         link_arr = jnp.atleast_1d(link)
-        
+
 #         link_map_keys = jnp.array(self.LINKS)
 #         link_map_vals = jnp.arange(len(self.LINKS))
-        
+
 #         def map_link(l):
 #             # Find index where link_map_keys == l
 #             # jnp.where returns (array_of_indices,)
-#             # We take the first match. 
+#             # We take the first match.
 #             # Note: This might be slow inside vmap if not optimized, but for small list constant (6) it's fine.
 #             # Faster: use a direct lookup array if link IDs were small integers, but they are 12, 23 etc.
 #             # We can use a boolean mask.
 #             return jnp.sum(link_map_vals * (link_map_keys == l))
 
 #         link_idx = jax.vmap(map_link)(link_arr)
-        
+
 #         output = interpolate_ltt(t_arr, link_idx, self.ltt_t, self.ltt)
 
 #         if squeeze_link:
 #             output = output.squeeze(axis=1)
 #         if squeeze_t:
 #             output = output.squeeze(axis=0)
-        
+
 #         return output.block_until_ready()
 
 #     def tree_flatten(self):
@@ -538,7 +541,7 @@ NUM_SPLINE_THREADS = 256
 #             self.v_base,
 #             self.sc_t_base,
 #         )
-        
+
 #         # If configured, add interpolated arrays
 #         if self.configured:
 #             children += (
@@ -547,7 +550,7 @@ NUM_SPLINE_THREADS = 256
 #                 self.v,
 #                 self.n
 #             )
-        
+
 #         # Collect aux_data (static configuration)
 #         aux_data = {
 #             'filename': self.filename,
@@ -563,14 +566,14 @@ NUM_SPLINE_THREADS = 256
 #             # Preserve backend info if needed (though usually static)
 #             'use_gpu': getattr(self, 'use_gpu', False)
 #         }
-        
+
 #         return (children, aux_data)
 
 #     @classmethod
 #     def tree_unflatten(cls, aux_data, children):
 #         # Create empty instance without calling __init__
 #         obj = object.__new__(cls)
-        
+
 #         # Restore aux_data
 #         obj.filename = aux_data['filename']
 #         obj._armlength = aux_data['armlength']
@@ -581,7 +584,7 @@ NUM_SPLINE_THREADS = 256
 #         obj.sc_t0 = aux_data['sc_t0']
 #         obj.use_gpu = aux_data['use_gpu']
 #         obj._filename = aux_data['filename']
-        
+
 #         if aux_data.get('_dt') is not None:
 #             obj._dt = aux_data['_dt']
 #         if aux_data.get('_t0') is not None:
@@ -594,17 +597,17 @@ NUM_SPLINE_THREADS = 256
 #         obj.x_base = children[2]
 #         obj.v_base = children[3]
 #         obj.sc_t_base = children[4]
-        
+
 #         if obj.configured:
 #             # Configured arrays (next 4)
 #             obj.sc_t = children[5]
 #             obj.x = children[6]
 #             obj.v = children[7]
 #             obj.n = children[8]
-        
+
 #         # Initialize other attributes needed for method calls
 #         obj._pycppdetector_args = None
-        
+
 #         return obj
 
 # class XYZSensitivityBackend:
@@ -612,8 +615,8 @@ NUM_SPLINE_THREADS = 256
 
 # class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 #     """Helper class for sensitivity matrix with c++ backend."""
-    
-#     def __init__(self, 
+
+#     def __init__(self,
 #                  orbits: L1Orbits,
 #                  settings: DomainSettingsBase,
 #                  tdi_generation: int = 2,
@@ -621,18 +624,18 @@ NUM_SPLINE_THREADS = 256
 #                  force_backend: Optional[str] = 'cpu',
 #                  mask_percentage: Optional[float] = None,
 #                  ):
-        
+
 #         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 #         SensitivityMatrixBase.__init__(self, settings)
 
 #         assert self.backend.xp == orbits.xp, "Orbits and Sensitivity backend mismatch."
-        
+
 #         self.orbits = orbits
 #         if not self.orbits.configured:
 #             self.orbits.configure(linear_interp_setup=True)
 
 #         self.tdi_generation = tdi_generation
-#         self.channel_shape = (3, 3) 
+#         self.channel_shape = (3, 3)
 
 #         _use_gpu = force_backend != 'cpu'
 
@@ -647,16 +650,16 @@ NUM_SPLINE_THREADS = 256
 #     def xp(self):
 #         """Array module."""
 #         return self.backend.xp
-    
+
 #     @property
 #     def time_indices(self):
 #         return self._time_indices
 #     @time_indices.setter
 #     def time_indices(self, x):
 #         self._time_indices = x
-    
+
 #     def get_averaged_ltts(self):
-#         # first, compute the average ltts and their differences. 
+#         # first, compute the average ltts and their differences.
 #         # check if we need multiple time points
 #         if hasattr(self.basis_settings, 't_arr'):
 #             t_arr = self.xp.asarray(self.basis_settings.t_arr)
@@ -671,7 +674,7 @@ NUM_SPLINE_THREADS = 256
 #             ).reshape(len(t_arr), 6)
 
 #             self.time_indices = self.xp.arange(len(t_arr), dtype=self.xp.int32)
-        
+
 #         else:
 #             ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
 #             self.time_indices = self.xp.array([0], dtype=self.xp.int32)
@@ -689,9 +692,9 @@ NUM_SPLINE_THREADS = 256
 
 #     def _setup(self):
 #         """Setup the arguments for the c++ backend."""
-        
+
 #         avg_ltts, delta_ltts = self.get_averaged_ltts()
-        
+
 #         self.pycppsensmat_args = [
 #             self.xp.asarray(avg_ltts.flatten().copy()),
 #             self.xp.asarray(delta_ltts.flatten().copy()),
@@ -708,14 +711,14 @@ NUM_SPLINE_THREADS = 256
 #     def __deepcopy__(self, memo):
 #         """Custom deepcopy to handle unpicklable backend objects."""
 #         from copy import copy
-        
+
 #         # Create a new instance without calling __init__
 #         cls = self.__class__
 #         new_obj = cls.__new__(cls)
-        
+
 #         # Copy the memo to avoid infinite recursion
 #         memo[id(self)] = new_obj
-        
+
 #         # Manually copy attributes
 #         for key, value in self.__dict__.items():
 #             if key in ('_backend', 'pycpp_sensitivity_matrix'):
@@ -730,13 +733,13 @@ NUM_SPLINE_THREADS = 256
 #             else:
 #                 # Deepcopy everything else
 #                 setattr(new_obj, key, deepcopy(value, memo))
-        
+
 #         return new_obj
 
 #     def _init_basis_settings(self):
 #         """Initialize basis settings from domain settings."""
 #         self.f_arr = self.xp.asarray(self.basis_settings.f_arr)
-        
+
 #         if hasattr(self.basis_settings, 't_arr'):
 #             self.t_arr = self.xp.asarray(self.basis_settings.t_arr)
 
@@ -748,7 +751,7 @@ NUM_SPLINE_THREADS = 256
 #         dips_mask = self.xp.zeros((self.num_times, self.num_freqs), dtype=bool)
 #         for t_idx in range(self.num_times):
 #             dips_mask[t_idx, dips_indices[t_idx]] = True
-        
+
 #         self.dips_mask = dips_mask.flatten()
 
 #     def _find_dips_with_percentage(self, tf, mask_percentage=0.05):
@@ -758,20 +761,20 @@ NUM_SPLINE_THREADS = 256
 #             tf = tf.get()
 
 #         peaks = find_peaks(-tf)[0]
-        
+
 #         all_indices = set()
 #         for peak in peaks:
 #             freq = self.f_arr[peak]
 #             df = self.f_arr[1] - self.f_arr[0]
-            
+
 #             lower_freq = freq - mask_percentage * freq
 #             upper_freq = freq + mask_percentage * freq
 
 #             lower_idx = int(self.xp.searchsorted(self.f_arr, lower_freq - df/2))
 #             upper_idx = int(self.xp.searchsorted(self.f_arr, upper_freq + df/2))
-            
+
 #             all_indices.update(range(lower_idx, upper_idx))
-        
+
 #         return self.xp.array(sorted(all_indices), dtype=self.xp.int32)
 
 #     def _get_dips_indices(self,):
@@ -788,23 +791,23 @@ NUM_SPLINE_THREADS = 256
 #         return dips_indices
 
 
-#     def _compute_matrix_elements(self, 
-#                                  freqs, 
-#                                  Soms_d_in=15e-12, 
-#                                  Sa_a_in=3e-15, 
-#                                  Amp=0, 
-#                                  alpha=0, 
-#                                  sl1=0, 
-#                                  kn=0, 
-#                                  sl2=0, 
+#     def _compute_matrix_elements(self,
+#                                  freqs,
+#                                  Soms_d_in=15e-12,
+#                                  Sa_a_in=3e-15,
+#                                  Amp=0,
+#                                  alpha=0,
+#                                  sl1=0,
+#                                  kn=0,
+#                                  sl2=0,
 #                                  knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
 #                                  knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
 #                                  ):
 #         """Compute the 6 sensitivity matrix terms using the c++ backend."""
-        
+
 #         xp = self.xp
 #         total_terms = self.basis_settings.total_terms
-        
+
 #         c00 = xp.empty(total_terms, dtype=xp.float64)
 #         c11 = xp.empty(total_terms, dtype=xp.float64)
 #         c22 = xp.empty(total_terms, dtype=xp.float64)
@@ -839,10 +842,10 @@ NUM_SPLINE_THREADS = 256
 #         )
 
 #         return c00, c11, c22, c01, c02, c12
-    
+
 #     def _fill_matrix(self, c00, c11, c22, c01, c02, c12):
 #         """Fill the full 3x3 sensitivity matrix from its 6 unique elements."""
-#         xp = self.xp    
+#         xp = self.xp
 #         shape = self.basis_settings.basis_shape
 
 #         # Reshape views (no copy)
@@ -864,9 +867,9 @@ NUM_SPLINE_THREADS = 256
 #         matrix[2, 0] = c02.conj()
 #         matrix[1, 2] = c12
 #         matrix[2, 1] = c12.conj()
-        
+
 #         return matrix
-    
+
 #     def _extract_matrix_elements(self, matrix_in, flatten=False):
 #         """Extract the 6 unique sensitivity matrix elements from the full 3x3 matrix."""
 
@@ -882,7 +885,7 @@ NUM_SPLINE_THREADS = 256
 
 #         return c00, c11, c22, c01, c02, c12
 
-    
+
 #     def compute_sensitivity_matrix(self, freqs, Soms_d_in=15e-12, Sa_a_in=3e-15, Amp=0, alpha=0, sl1=0, kn=0, sl2=0, knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
 #                                    knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,):
 #         """Compute the full 3x3 sensitivity matrix using the c++ backend."""
@@ -892,21 +895,20 @@ NUM_SPLINE_THREADS = 256
 #         matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
 #         return matrix
 
-#     def set_sensitivity_matrix(self, 
-#                                Soms_d_in: float = 15e-12, 
-#                                Sa_a_in: float = 3e-15, 
+#     def set_sensitivity_matrix(self,
+#                                Soms_d_in: float = 15e-12,
+#                                Sa_a_in: float = 3e-15,
 #                                knots_position_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
 #                                knots_amplitude_all: np.ndarray | cp.ndarray | jnp.ndarray = None,
-#                                Amp: float = 0., 
-#                                alpha: float = 0., 
-#                                sl1: float = 0., 
-#                                kn: float = 0., 
-#                                sl2: float = 0., 
+#                                Amp: float = 0.,
+#                                alpha: float = 0.,
+#                                sl1: float = 0.,
+#                                kn: float = 0.,
+#                                sl2: float = 0.,
 #                                ):
 #         """Internally store the sensitivity matrix computed at the basis frequencies."""
 
-        
-        
+
 #         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
 #             self.f_arr, Soms_d_in, Sa_a_in, Amp, alpha, sl1, kn, sl2, knots_position_all, knots_amplitude_all
 #         )
@@ -915,23 +917,23 @@ NUM_SPLINE_THREADS = 256
 
 #         self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=5)
 
-    
+
 #     def _setup_det_and_inv(self):
 #         """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
 #         c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
 #         self.invC, self.detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
 
-#     def _inverse_det_wrapper(self, 
-#                              c00: np.ndarray | cp.ndarray | jnp.ndarray, 
-#                              c11: np.ndarray | cp.ndarray | jnp.ndarray, 
-#                              c22: np.ndarray | cp.ndarray | jnp.ndarray, 
-#                              c01: np.ndarray | cp.ndarray | jnp.ndarray, 
-#                              c02: np.ndarray | cp.ndarray | jnp.ndarray, 
+#     def _inverse_det_wrapper(self,
+#                              c00: np.ndarray | cp.ndarray | jnp.ndarray,
+#                              c11: np.ndarray | cp.ndarray | jnp.ndarray,
+#                              c22: np.ndarray | cp.ndarray | jnp.ndarray,
+#                              c01: np.ndarray | cp.ndarray | jnp.ndarray,
+#                              c02: np.ndarray | cp.ndarray | jnp.ndarray,
 #                              c12: np.ndarray | cp.ndarray | jnp.ndarray
 #                              ) -> tuple:
-        
+
 #         """Wrapper to call c++ backend for inverse log-determinant computation."""
-        
+
 #         xp = self.xp
 #         total_terms = self.basis_settings.total_terms
 
@@ -950,12 +952,12 @@ NUM_SPLINE_THREADS = 256
 #             det,
 #             total_terms
 #         )
-        
+
 #         inverse_matrix = self._fill_matrix(i00, i11, i22, i01, i02, i12)
 
 #         return inverse_matrix, det.reshape(self.basis_settings.basis_shape)
 
-#     def compute_inverse_det(self, 
+#     def compute_inverse_det(self,
 #                             matrix_in: np.ndarray | cp.ndarray | jnp.ndarray
 #                             ) -> tuple:
 #         """
@@ -963,7 +965,7 @@ NUM_SPLINE_THREADS = 256
 
 #         Args:
 #             matrix_in: Input sensitivity matrix. Shape (3, 3, ...)
-        
+
 #         Returns:
 #             inverse_matrix: Inverted sensitivity matrix. Shape (3, 3, ...)
 #             det: Determinant of the sensitivity matrix. Shape (...)
@@ -972,10 +974,10 @@ NUM_SPLINE_THREADS = 256
 #         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
 #         return inverse_matrix, det
 
-#     def compute_transfer_functions(self, 
+#     def compute_transfer_functions(self,
 #                                    freqs: np.ndarray | cp.ndarray | jnp.ndarray
 #                                    ) -> tuple:
-        
+
 #         """Compute transfer functions using the c++ backend."""
 
 #         xp = self.xp
@@ -1005,24 +1007,24 @@ NUM_SPLINE_THREADS = 256
 #             self._time_indices
 #         )
 
-#         return (oms_xx.reshape(self.num_times, num_freqs), 
+#         return (oms_xx.reshape(self.num_times, num_freqs),
 #                 oms_xy.reshape(self.num_times, num_freqs),
 #                 oms_xz.reshape(self.num_times, num_freqs),
-#                 oms_yy.reshape(self.num_times, num_freqs), 
+#                 oms_yy.reshape(self.num_times, num_freqs),
 #                 oms_yz.reshape(self.num_times, num_freqs),
-#                 oms_zz.reshape(self.num_times, num_freqs), 
-#                 tm_xx.reshape(self.num_times, num_freqs), 
+#                 oms_zz.reshape(self.num_times, num_freqs),
+#                 tm_xx.reshape(self.num_times, num_freqs),
 #                 tm_xy.reshape(self.num_times, num_freqs),
 #                 tm_xz.reshape(self.num_times, num_freqs),
-#                 tm_yy.reshape(self.num_times, num_freqs), 
+#                 tm_yy.reshape(self.num_times, num_freqs),
 #                 tm_yz.reshape(self.num_times, num_freqs),
 #                 tm_zz.reshape(self.num_times, num_freqs)
 #                 )
 
 #     def compute_log_like(self,
-#                          data_in_all: np.ndarray | cp.ndarray | jnp.ndarray, 
+#                          data_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
 #                          data_index_all: np.ndarray | cp.ndarray | jnp.ndarray,
-#                          Soms_in_all: np.ndarray | cp.ndarray | jnp.ndarray, 
+#                          Soms_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
 #                          Sa_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
 #                          Amp_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
 #                          alpha_in_all: np.ndarray | cp.ndarray | jnp.ndarray,
@@ -1067,7 +1069,7 @@ NUM_SPLINE_THREADS = 256
 #         else:
 #             splines_weights_isi_oms = xp.zeros(shape=(num_psds * self.num_freqs))
 #             splines_weights_testmass = xp.zeros(shape=(num_psds * self.num_freqs))
-    
+
 #         self.pycpp_sensitivity_matrix.psd_likelihood_wrap(
 #             log_like_out,
 #             self.f_arr,
@@ -1082,7 +1084,7 @@ NUM_SPLINE_THREADS = 256
 #             xp.asarray(kn_in_all),
 #             xp.asarray(sl2_in_all),
 #             xp.asarray(splines_weights_isi_oms),
-#             xp.asarray(splines_weights_testmass), 
+#             xp.asarray(splines_weights_testmass),
 #             self.basis_settings.differential_component,
 #             self.num_freqs,
 #             self.num_times,
@@ -1091,12 +1093,12 @@ NUM_SPLINE_THREADS = 256
 #         )
 
 #         return log_like_out
-    
+
 #     def smooth_sensitivity_matrix(self,
 #                                   matrix_in: np.ndarray | cp.ndarray | jnp.ndarray,
 #                                   sigma: float = 5.0,
 #                                   ) -> np.ndarray | cp.ndarray | jnp.ndarray:
-        
+
 #         """
 #         Perform log-frequency smoothing of the sensitivity matrix to get rid of the very sharp dips.
 
@@ -1105,7 +1107,7 @@ NUM_SPLINE_THREADS = 256
 #             sigma: Width of the Gaussian smoothing kernel in frequency bins.
 #         """
 #         filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d if self.xp == cp else jax_gaussian_filter1d
-        
+
 #         smoothed_matrix = matrix_in.copy()
 #         mask = self.dips_mask.reshape(self.num_times, self.num_freqs)
 #         _smoothed = filter_func(matrix_in, sigma=sigma, axis=-1)
@@ -1113,12 +1115,11 @@ NUM_SPLINE_THREADS = 256
 #         smoothed_matrix[..., mask] = _smoothed[..., mask]
 
 #         return smoothed_matrix
-        
 
 
-#     def __call__(self, 
+#     def __call__(self,
 #                 name: str,
-#                 psd_params: np.ndarray, 
+#                 psd_params: np.ndarray,
 #                 galfor_params: np.ndarray=None
 #                 ) -> XYZSensitivityBackend:
 #         """
@@ -1127,7 +1128,7 @@ NUM_SPLINE_THREADS = 256
 #         Args:
 #             psd_params: Array of PSD parameters in order [Soms_d, Sa_a, (optional spline params...)]
 #             galfor_params: Array of galactic foreground parameters in order [Amp, alpha, sl1, kn, sl2].
-        
+
 #         Returns:
 #             self: a configured copy of the sensitivity matrix backend.
 #         """
@@ -1145,10 +1146,10 @@ NUM_SPLINE_THREADS = 256
 #         else:
 #             spline_knots_position = None
 #             spline_knots_amplitude = None
-        
+
 #         if galfor_params is None:
 #             galfor_params = np.zeros(5)
-    
+
 #         self.set_sensitivity_matrix(
 #             Soms_d,
 #             Sa_a,
