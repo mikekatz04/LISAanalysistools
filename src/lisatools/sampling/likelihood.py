@@ -1,7 +1,7 @@
 import warnings
-from eryn.state import Branch, BranchSupplemental
 
 import numpy as np
+from eryn.state import Branch, BranchSupplemental
 
 try:
     import cupy as cp

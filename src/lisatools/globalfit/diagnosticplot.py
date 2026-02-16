@@ -1,14 +1,19 @@
 import os
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-import seaborn as sns
+
 import chainconsumer
 import corner
-from lisatools.globalfit.hdfbackend import GFHDFBackend
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import seaborn as sns
 
-def set_plotting_style(background_color: str = 'white', front_color: str = 'black') -> None:
+from lisatools.globalfit.hdfbackend import GFHDFBackend
+
+
+def set_plotting_style(
+    background_color: str = "white", front_color: str = "black"
+) -> None:
     """
     Set the plotting style for matplotlib.
 
@@ -19,41 +24,45 @@ def set_plotting_style(background_color: str = 'white', front_color: str = 'blac
     """
     if background_color == front_color:
         raise ValueError("Background color and main color cannot be the same.")
-   
+
     # text settings
-    mpl.rcParams['text.usetex'] = True  # Use LaTeX for text rendering
-    mpl.rcParams['text.latex.preamble'] = r'\usepackage{amsmath}'  # Use AMS math package
-    mpl.rcParams['font.family'] = 'serif'  # Use serif font for text
-    mpl.rcParams['font.serif'] = ['Computer Modern Roman']  # Use Computer Modern font for LaTeX
-    mpl.rcParams['font.weight'] = 'medium'
-    
+    mpl.rcParams["text.usetex"] = True  # Use LaTeX for text rendering
+    mpl.rcParams["text.latex.preamble"] = (
+        r"\usepackage{amsmath}"  # Use AMS math package
+    )
+    mpl.rcParams["font.family"] = "serif"  # Use serif font for text
+    mpl.rcParams["font.serif"] = [
+        "Computer Modern Roman"
+    ]  # Use Computer Modern font for LaTeX
+    mpl.rcParams["font.weight"] = "medium"
+
     # set colors
     set_colors(background_color, front_color)
     # Set the style for matplotlib plots
-    mpl.rcParams['grid.color'] = '#d3d3d3'  # Light gray for grid lines
-    mpl.rcParams['grid.linestyle'] = '--'  # Dashed grid lines
-    mpl.rcParams['grid.linewidth'] = 0.5  # Thinner grid
-    mpl.rcParams['lines.linewidth'] = 1.5  # Thicker lines
-    mpl.rcParams['font.size'] = 20
-    mpl.rcParams['figure.dpi'] = 100  # Set the figure resolution   
-    mpl.rcParams['figure.figsize'] = (7, 7)  # Set default figure size
-    mpl.rcParams['savefig.bbox'] = 'tight'
-    #mpl.rcParams['savefig.transparent'] = True
+    mpl.rcParams["grid.color"] = "#d3d3d3"  # Light gray for grid lines
+    mpl.rcParams["grid.linestyle"] = "--"  # Dashed grid lines
+    mpl.rcParams["grid.linewidth"] = 0.5  # Thinner grid
+    mpl.rcParams["lines.linewidth"] = 1.5  # Thicker lines
+    mpl.rcParams["font.size"] = 20
+    mpl.rcParams["figure.dpi"] = 100  # Set the figure resolution
+    mpl.rcParams["figure.figsize"] = (7, 7)  # Set default figure size
+    mpl.rcParams["savefig.bbox"] = "tight"
+    # mpl.rcParams['savefig.transparent'] = True
 
     # set ticks size
     fontsize = 12
-    mpl.rcParams['xtick.labelsize'] = fontsize
-    mpl.rcParams['ytick.labelsize'] = fontsize
-    mpl.rcParams['axes.formatter.limits'] = [-2, 4]
-    mpl.rcParams['axes.titlesize'] = 15
-    mpl.rcParams['axes.labelsize'] = 15
-    mpl.rcParams['xtick.major.size'] = 5
-    mpl.rcParams['xtick.minor.size'] = 3
-    mpl.rcParams['ytick.major.size'] = 5
-    mpl.rcParams['ytick.minor.size'] = 3
+    mpl.rcParams["xtick.labelsize"] = fontsize
+    mpl.rcParams["ytick.labelsize"] = fontsize
+    mpl.rcParams["axes.formatter.limits"] = [-2, 4]
+    mpl.rcParams["axes.titlesize"] = 15
+    mpl.rcParams["axes.labelsize"] = 15
+    mpl.rcParams["xtick.major.size"] = 5
+    mpl.rcParams["xtick.minor.size"] = 3
+    mpl.rcParams["ytick.major.size"] = 5
+    mpl.rcParams["ytick.minor.size"] = 3
 
 
-def set_colors(background_color='white', front_color='black'):
+def set_colors(background_color="white", front_color="black"):
     """
     Set the colors for the plot.
 
@@ -62,19 +71,19 @@ def set_colors(background_color='white', front_color='black'):
         front_color (str): The foreground color of the plot. Default is 'black'.
     """
 
-    mpl.rcParams['text.color'] = front_color
-    mpl.rcParams['axes.labelcolor'] = front_color
-    mpl.rcParams['axes.edgecolor'] = front_color
-    mpl.rcParams['xtick.color'] = front_color
-    mpl.rcParams['ytick.color'] = front_color
-    mpl.rcParams['axes.facecolor'] = background_color
-    mpl.rcParams['figure.facecolor'] = background_color
-    mpl.rcParams['legend.facecolor'] = background_color
-    #mpl.rcParams['legend.edgecolor'] = front_color
-    mpl.rcParams['axes.titlecolor'] = front_color
-    mpl.rcParams['legend.labelcolor'] = front_color
-    mpl.rcParams['grid.color'] = front_color
-    mpl.rcParams['lines.color'] = front_color
+    mpl.rcParams["text.color"] = front_color
+    mpl.rcParams["axes.labelcolor"] = front_color
+    mpl.rcParams["axes.edgecolor"] = front_color
+    mpl.rcParams["xtick.color"] = front_color
+    mpl.rcParams["ytick.color"] = front_color
+    mpl.rcParams["axes.facecolor"] = background_color
+    mpl.rcParams["figure.facecolor"] = background_color
+    mpl.rcParams["legend.facecolor"] = background_color
+    # mpl.rcParams['legend.edgecolor'] = front_color
+    mpl.rcParams["axes.titlecolor"] = front_color
+    mpl.rcParams["legend.labelcolor"] = front_color
+    mpl.rcParams["grid.color"] = front_color
+    mpl.rcParams["lines.color"] = front_color
 
 
 def override_plotting_style(custom_style: dict) -> None:
@@ -86,14 +95,22 @@ def override_plotting_style(custom_style: dict) -> None:
     """
     for key, value in custom_style.items():
         mpl.rcParams[key] = value
-    set_colors(mpl.rcParams.get('axes.facecolor', 'white'), mpl.rcParams.get('text.color', 'black'))
+    set_colors(
+        mpl.rcParams.get("axes.facecolor", "white"),
+        mpl.rcParams.get("text.color", "black"),
+    )
+
 
 def restore_default_plotting_style() -> None:
     """
     Restore the default matplotlib plotting style.
     """
     mpl.rcParams.update(mpl.rcParamsDefault)
-    set_colors(mpl.rcParams.get('axes.facecolor', 'white'), mpl.rcParams.get('text.color', 'black'))
+    set_colors(
+        mpl.rcParams.get("axes.facecolor", "white"),
+        mpl.rcParams.get("text.color", "black"),
+    )
+
 
 # make a decorator to set the plotting style for a function
 def with_custom_plotting_style(func):
@@ -101,14 +118,17 @@ def with_custom_plotting_style(func):
     Decorator to set the plotting style for a function.
 
     Args:
-        func (callable): Function to be decorated.  
+        func (callable): Function to be decorated.
     Returns:
         callable: Decorated function with plotting style set.
     """
+
     def wrapper(*args, **kwargs):
         set_plotting_style()
         return func(*args, **kwargs)
+
     return wrapper
+
 
 # make a decorator to set the plotting style to default for a function
 def with_default_plotting_style(func):
@@ -116,21 +136,23 @@ def with_default_plotting_style(func):
     Decorator to set the default plotting style for a function.
 
     Args:
-        func (callable): Function to be decorated.  
+        func (callable): Function to be decorated.
     Returns:
         callable: Decorated function with default plotting style set.
     """
+
     def wrapper(*args, **kwargs):
         current_style = mpl.rcParams.copy()
         restore_default_plotting_style()
         result = func(*args, **kwargs)
         mpl.rcParams.update(current_style)
         return result
+
     return wrapper
 
 
 @with_custom_plotting_style
-def plot_loglikelihood(reader, discard=0, save_dir='./'):
+def plot_loglikelihood(reader, discard=0, save_dir="./"):
     logl = reader.get_log_like(discard=discard)[:, 0]
 
     nsteps, nwalkers = logl.shape
@@ -151,28 +173,35 @@ def plot_loglikelihood(reader, discard=0, save_dir='./'):
     step = np.tile(range(nsteps), nwalkers)
     walker = np.int32(np.repeat(range(nwalkers), nsteps))
 
-    df = pd.DataFrame(np.c_[facet_logl.flat, step, walker],
-                      columns=[r"$\Delta \log\mathcal{L}$", "step", "walker"])
-    
+    df = pd.DataFrame(
+        np.c_[facet_logl.flat, step, walker],
+        columns=[r"$\Delta \log\mathcal{L}$", "step", "walker"],
+    )
+
     # Initialize a grid of plots with an Axes for each walker
-    grid = sns.FacetGrid(df, col="walker", hue="walker", palette="tab20c",
-                     col_wrap=9, height=1.5)
-    
+    grid = sns.FacetGrid(
+        df, col="walker", hue="walker", palette="tab20c", col_wrap=9, height=1.5
+    )
+
     # Draw a line plot to show the trajectory of each random walk
     grid.map(plt.plot, "step", r"$\Delta \log\mathcal{L}$", marker=".")
 
-    grid.refline(y=0, linestyle=":") # Add a horizontal reference line at y=0 ~ average loglikelihood at each step
+    grid.refline(
+        y=0, linestyle=":"
+    )  # Add a horizontal reference line at y=0 ~ average loglikelihood at each step
 
     plt.savefig(save_dir + "loglikelihood_facetgrid.png")
     plt.close()
 
-@with_custom_plotting_style
-def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_corner=True, truths=None):
 
+@with_custom_plotting_style
+def base_branch_plots(
+    chain, key, labels, save_dir="./", plot_trace=True, plot_corner=True, truths=None
+):
 
     nsteps, nwalkers, nleaves, ndim = chain.shape
 
-    #chain = chain.reshape((nsteps, nwalkers, ndim)) 
+    # chain = chain.reshape((nsteps, nwalkers, ndim))
 
     if plot_trace:
         fig, axes = plt.subplots(ndim, 1, figsize=(8, 2 * ndim), sharex=True)
@@ -180,7 +209,7 @@ def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_c
             for j in range(nwalkers):
                 axes[i].plot(chain[:, j, :, i], color=f"C{j % 10}", alpha=0.3)
             if truths is not None:
-                axes[i].axhline(truths[i], color='red', linestyle='--')
+                axes[i].axhline(truths[i], color="red", linestyle="--")
             axes[i].set_ylabel(labels[i])
         axes[-1].set_xlabel("Sampler Iteration")
         savename = save_dir + f"{key}_traceplot.png"
@@ -191,136 +220,182 @@ def base_branch_plots(chain, key, labels, save_dir='./', plot_trace=True, plot_c
         savename = save_dir + f"{key}_corner.png"
         chain = chain.reshape((-1, ndim))
         chain = chain[np.isfinite(chain).all(axis=1)]  # remove rows with NaNs or infs
-        #fig = corner.corner(chain, labels=labels, truths=truths)
+        # fig = corner.corner(chain, labels=labels, truths=truths)
         df = pd.DataFrame(chain, columns=labels)
         C = chainconsumer.ChainConsumer()
         C.add_chain(chain=chainconsumer.Chain(samples=df, name=f"{key} posterior"))
         if truths is not None:
-            C.add_truth(chainconsumer.Truth(location=dict(zip(labels, truths)), name="Injection"))
+            C.add_truth(
+                chainconsumer.Truth(
+                    location=dict(zip(labels, truths)), name="Injection"
+                )
+            )
 
         plot_config = {
             "serif": True,
             "usetex": True,
             "spacing": 1.5,
         }
-        C.set_plot_config(
-            chainconsumer.PlotConfig(**plot_config)
-        )
+        C.set_plot_config(chainconsumer.PlotConfig(**plot_config))
         fig = C.plotter.plot()
         fig.savefig(savename)
         plt.close()
 
-def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir='./', truths=None):
+
+def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
     labels = [
-        r'$\log (m_1 / M_\odot)$',
-        r'$q$',
-        r'$a_1$',
-        r'$a_2$',
-        r'$d_L$',
-        r'$\Phi_{0}$',
-        r'$\cos(\iota)$',
-        r'$\beta$',
-        r'$\sin(\lambda)$',
-        r'$\psi$',   
-        r'$t_c$',     
+        r"$\log (m_1 / M_\odot)$",
+        r"$q$",
+        r"$a_1$",
+        r"$a_2$",
+        r"$d_L$",
+        r"$\Phi_{0}$",
+        r"$\cos(\iota)$",
+        r"$\beta$",
+        r"$\sin(\lambda)$",
+        r"$\psi$",
+        r"$t_c$",
     ]
 
     if chain is None:
         chain = reader.get_chain(discard=discard)["mbh"][:, 0]
-    
+
     base_branch_plots(chain, key="mbh", labels=labels, save_dir=save_dir, truths=truths)
 
-def produce_gb_plots(chain=None, reader=None, discard=0, save_dir='./'):
+
+def produce_gb_plots(chain=None, reader=None, discard=0, save_dir="./"):
     pass
 
 
-def produce_emri_plots(chain=None, reader=None, discard=0, save_dir='./', truths=None):
+def produce_emri_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
     labels = [
-        r'$\log (m_1 / M_\odot)$',
-        r'$m_2 / M_\odot$',
-        r'$a$',
-        r'$p_0$',
-        r'$e_0$',
-        r'$d_L / \rm{Gpc}$',
-        r'$\cos(\theta_S)$',
-        r'$\phi_S$',
-        r'$\cos(\theta_K)$',
-        r'$\phi_K$',
-        r'$\Phi_{\phi_0}$',
-        r'$\Phi_{r_0}$'
+        r"$\log (m_1 / M_\odot)$",
+        r"$m_2 / M_\odot$",
+        r"$a$",
+        r"$p_0$",
+        r"$e_0$",
+        r"$d_L / \rm{Gpc}$",
+        r"$\cos(\theta_S)$",
+        r"$\phi_S$",
+        r"$\cos(\theta_K)$",
+        r"$\phi_K$",
+        r"$\Phi_{\phi_0}$",
+        r"$\Phi_{r_0}$",
     ]
-    
+
     if chain is None:
         chain = reader.get_chain(discard=discard)["emri"][:, 0]
-    
-    base_branch_plots(chain, key="emri", labels=labels, save_dir=save_dir, truths=truths)
 
-def produce_psd_plots(chain=None, reader=None, discard=0, save_dir='./', truths=None):
-    labels = [r"$S_{\mathrm{oms}_A}$", r"$S_{\mathrm{acc}_A}$", r"$S_{\mathrm{oms}_E}$", r"$S_{\mathrm{acc}_E}$"]
-    
+    base_branch_plots(
+        chain, key="emri", labels=labels, save_dir=save_dir, truths=truths
+    )
+
+
+def produce_psd_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
+    labels = [
+        r"$S_{\mathrm{oms}_A}$",
+        r"$S_{\mathrm{acc}_A}$",
+        r"$S_{\mathrm{oms}_E}$",
+        r"$S_{\mathrm{acc}_E}$",
+    ]
+
     if chain is None:
         chain = reader.get_chain(discard=discard)["psd"][:, 0]
 
-    base_branch_plots(chain, key="psd", labels=labels[:chain.shape[-1]], save_dir=save_dir, truths=truths)
+    base_branch_plots(
+        chain,
+        key="psd",
+        labels=labels[: chain.shape[-1]],
+        save_dir=save_dir,
+        truths=truths,
+    )
 
-def produce_galfor_plots(chain=None, reader=None, discard=0, save_dir='./'):
+
+def produce_galfor_plots(chain=None, reader=None, discard=0, save_dir="./"):
     pass
 
+
 all_branches = ["mbh", "gb", "emri", "psd", "galfor"]
-all_branches_functions = dict(zip(all_branches, [produce_mbh_plots, produce_gb_plots, produce_emri_plots, produce_psd_plots, produce_galfor_plots]))
+all_branches_functions = dict(
+    zip(
+        all_branches,
+        [
+            produce_mbh_plots,
+            produce_gb_plots,
+            produce_emri_plots,
+            produce_psd_plots,
+            produce_galfor_plots,
+        ],
+    )
+)
+
 
 class DiagnosticPlotter:
     def __init__(self, curr, plot_every=10):
-        self.curr = curr # information holder
+        self.curr = curr  # information holder
         self.plot_every = plot_every
-        savedir = self.curr.general_info.main_file_path.replace('parameter_estimation_main.h5', 'diagnostic_plots/')
+        savedir = self.curr.general_info.main_file_path.replace(
+            "parameter_estimation_main.h5", "diagnostic_plots/"
+        )
         if not os.path.exists(savedir):
             os.makedirs(savedir)
         self.savedir = savedir
 
         self.truths = {}
         for source in self.curr.source_info.keys():
-            self.truths[source] = self.curr.source_info[source].injection if hasattr(self.curr.source_info[source], "injection") else None
-        
+            self.truths[source] = (
+                self.curr.source_info[source].injection
+                if hasattr(self.curr.source_info[source], "injection")
+                else None
+            )
+
         print("Saving diagnostic plots to ", self.savedir)
 
     def __call__(self, iteration, last_sample, sampler):
         if iteration > 0 and iteration % self.plot_every == 0:
 
             for move in sampler.moves:
-                print(f"{move.__class__.__name__} acceptance fraction: {np.mean(move.acceptance_fraction[0]):.4f}")
+                print(
+                    f"{move.__class__.__name__} acceptance fraction: {np.mean(move.acceptance_fraction[0]):.4f}"
+                )
             discard = int(0.1 * sampler.iteration)
 
             for branch in sampler.branch_names:
                 if branch in all_branches:
                     if branch == "emri":
-                        truths_here = self.truths['emri']
+                        truths_here = self.truths["emri"]
                     elif branch == "psd":
                         truths_here = [7.9e-12, 2.4e-15, 7.9e-12, 2.4e-15]
                     else:
                         truths_here = None
                     try:
-                        all_branches_functions[branch](reader=sampler, discard=discard, save_dir=self.savedir, truths=truths_here)
+                        all_branches_functions[branch](
+                            reader=sampler,
+                            discard=discard,
+                            save_dir=self.savedir,
+                            truths=truths_here,
+                        )
                     except Exception as e:
                         print(f"Error producing plots for branch {branch}: {e}")
 
             plot_loglikelihood(sampler, discard=discard, save_dir=self.savedir)
 
-    
 
 if __name__ == "__main__":
-    filepath = '/data/asantini/packages/LISAanalysistools/global_fit_output/psd_separate_9th_try_parameter_estimation_main.h5'
+    filepath = "/data/asantini/packages/LISAanalysistools/global_fit_output/psd_separate_9th_try_parameter_estimation_main.h5"
     reader = GFHDFBackend(filepath)
     discard = 0
 
     logl = reader.get_log_like(discard=discard)[:, 0]
     breakpoint()
     walkers_keep = np.where((logl > 0.9 * np.max(logl)).all(axis=0))[0]
-    print(f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut.")
-    
+    print(
+        f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut."
+    )
+
     # produce_mbh_plots(reader=reader, discard=0, save_dir='./')
     chain = reader.get_chain(discard=discard)["psd"][:, 0, walkers_keep]
-    produce_psd_plots(chain=chain, reader=reader, discard=discard, save_dir='./')
+    produce_psd_plots(chain=chain, reader=reader, discard=discard, save_dir="./")
 
     # chain = reader.get_chain(discard=discard)["emri"][:, 0, walkers_keep]
     # produce_emri_plots(chain=chain, reader=reader, discard=discard, save_dir='./')

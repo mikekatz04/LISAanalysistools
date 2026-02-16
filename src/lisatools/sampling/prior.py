@@ -1,19 +1,18 @@
 import numpy as np
+from eryn.moves.multipletry import logsumexp
 from scipy import stats
 
-from ..utils.constants import *
 from ..sensitivity import get_sensitivity
-from eryn.moves.multipletry import logsumexp
+from ..utils.constants import *
 
 try:
     from ..cutils.psd_gpu import compute_logpdf
-    
+
 except (ModuleNotFoundError, ImportError) as e:
     pass
 
-from typing import Union, Optional, Tuple, List
-
 import sys
+from typing import List, Optional, Tuple, Union
 
 sys.path.append(
     "/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/"
@@ -368,7 +367,9 @@ class GBPriorWrap:
         xp = np if not self.use_cupy else cp
         assert x.shape[1] == self.ndim and x.ndim == 2
 
-        logpdf_everything_else = xp.asarray(self.base_prior.logpdf(x, keys=self.keys_sep))
+        logpdf_everything_else = xp.asarray(
+            self.base_prior.logpdf(x, keys=self.keys_sep)
+        )
 
         f0 = xp.asarray(x[:, 1])
         amp = xp.asarray(x[:, 0])

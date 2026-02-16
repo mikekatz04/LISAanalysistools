@@ -1,7 +1,6 @@
-import time 
+import time
 
 import numpy as np
-
 from eryn.utils.stopping import Stopping
 from eryn.utils.utility import thermodynamic_integration_log_evidence
 
@@ -57,8 +56,8 @@ class NLeavesSearchStopping:
             nleaves_cc = sampler.backend.get_nleaves()["gb"][:, 0]
 
             # do not include most recent
-            nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
-            nleaves_cc_max_new = nleaves_cc[-self.convergence_iter:].max()
+            nleaves_cc_max_old = nleaves_cc[: -self.convergence_iter].max()
+            nleaves_cc_max_new = nleaves_cc[-self.convergence_iter :].max()
 
             if nleaves_cc_max_old >= nleaves_cc_max_new:
                 stop = True
@@ -73,7 +72,7 @@ class NLeavesSearchStopping:
                     nleaves_cc_max_old,
                     "\nnleaves max new:\n",
                     nleaves_cc_max_new,
-                    f"\nTIME TO NOW: {dur} hours"
+                    f"\nTIME TO NOW: {dur} hours",
                 )
 
         return stop
@@ -115,10 +114,11 @@ class SearchConvergeStopping(Stopping):
             return False
 
 
-
 class GBBandLogLConvergeStopping(Stopping):
 
-    def __init__(self, fd, band_edges, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
+    def __init__(
+        self, fd, band_edges, n_iters=30, diff=1.0, verbose=False, start_iteration=0
+    ):
         self.band_edge_inds = np.searchsorted(fd, band_edges, side="right") - 1
         self.num_bands = self.band_edge_inds.shape[0] - 1
         self.converged = np.zeros(self.num_bands, dtype=bool)
@@ -133,9 +133,9 @@ class GBBandLogLConvergeStopping(Stopping):
         self.mgh = mgh
 
     def __call__(self, i, sample, sampler):
-        
+
         ll_per_band = self.mgh.get_ll(band_edge_inds=self.band_edge_inds).max(axis=0)
-        
+
         ll_movement = (ll_per_band - self.past_like_best) > self.diff
 
         self.iters_consecutive[~ll_movement] += 1
@@ -149,20 +149,23 @@ class GBBandLogLConvergeStopping(Stopping):
         #     move.converged_sub_bands = self.converged.copy()
 
         if self.verbose:
-            print("Num still going:", (~self.converged).sum(), "\nChanged here:", (ll_movement).sum())
+            print(
+                "Num still going:",
+                (~self.converged).sum(),
+                "\nChanged here:",
+                (ll_movement).sum(),
+            )
 
         if np.all(self.converged):
             return True
         else:
             return False
 
-        
-
-            
-
 
 class SearchConvergeStopping2(Stopping):
-    def __init__(self, n_iters=30, diff=0.1, verbose=False, start_iteration=0, iter_back_check=-1):
+    def __init__(
+        self, n_iters=30, diff=0.1, verbose=False, start_iteration=0, iter_back_check=-1
+    ):
         self.n_iters = n_iters
         self.iters_consecutive = 0
         self.past_like_best = -np.inf
@@ -183,13 +186,15 @@ class SearchConvergeStopping2(Stopping):
         if sampler.iteration <= self.start_iteration:
             return False
 
-        lps = sampler.get_log_like(discard=self.start_iteration)[self.last_sampler_iteration - self.start_iteration:]
+        lps = sampler.get_log_like(discard=self.start_iteration)[
+            self.last_sampler_iteration - self.start_iteration :
+        ]
         try:
-           like_best = lps.max()
+            like_best = lps.max()
         except:
             breakpoint()
         self.last_sampler_iteration = sampler.iteration
-        
+
         if np.any(np.asarray(self.back_check) == None):
             for i in range(len(self.back_check)):
                 if self.back_check[i] is None:
@@ -200,17 +205,20 @@ class SearchConvergeStopping2(Stopping):
         second_check = np.all(like_best >= np.asarray(self.back_check))
 
         # spread in stored values is below difference
-        third_check = np.asarray(self.back_check).max() - np.asarray(self.back_check).min() < self.diff
+        third_check = (
+            np.asarray(self.back_check).max() - np.asarray(self.back_check).min()
+            < self.diff
+        )
 
         update = (
-            (first_check and second_check and self.past_like_best == -np.inf) 
+            (first_check and second_check and self.past_like_best == -np.inf)
             or (self.past_like_best == -np.inf and third_check)
             or (self.past_like_best > -np.inf and first_check)
         )
 
         self.back_check[self.back_check_ind] = like_best
         self.back_check_ind = (self.back_check_ind + 1) % len(self.back_check)
-        
+
         if update:
             self.past_like_best = like_best
             self.iters_consecutive = 0
@@ -223,8 +231,10 @@ class SearchConvergeStopping2(Stopping):
                 "\nITERS CONSECUTIVE:\n",
                 self.iters_consecutive,
                 f"previous best: {self.past_like_best}, overall best: {like_best},",
-                "first check:", first_check,
-                "second check:", second_check
+                "first check:",
+                first_check,
+                "second check:",
+                second_check,
             )
 
         if self.iters_consecutive >= self.n_iters:
@@ -233,7 +243,6 @@ class SearchConvergeStopping2(Stopping):
 
         else:
             return False
-
 
 
 class EvidenceStopping(Stopping):
@@ -249,7 +258,6 @@ class EvidenceStopping(Stopping):
         logZ, dlogZ = thermodynamic_integration_log_evidence(betas, logls)
         print(logZ, dlogZ)
         return False
-        
 
         if self.verbose:
             print(
@@ -284,15 +292,21 @@ class MPICommunicateStopping(Stopping):
     def __call__(self, *args, **kwargs):
 
         if not hasattr(self, "comm"):
-            raise ValueError("Must add comm via add_comm method before __call__ is used.")
+            raise ValueError(
+                "Must add comm via add_comm method before __call__ is used."
+            )
 
         if not hasattr(self, "rank"):
             self.rank = self.comm.Get_rank()
             if not self.rank == self.stopper_rank and not self.rank in self.other_ranks:
-                raise ValueError(f"Rank ({self.rank}) is not available in other ranks list ({self.other_ranks}). Must be either stopper rank ({self.stopper_rank}) or in other ranks list.")
+                raise ValueError(
+                    f"Rank ({self.rank}) is not available in other ranks list ({self.other_ranks}). Must be either stopper rank ({self.stopper_rank}) or in other ranks list."
+                )
 
             if self.stopper_rank == self.rank and self.stop_fn is None:
-                raise ValueError("Rank is equivalent to stopper rank but stop_fn is not provided. It must be provided.")
+                raise ValueError(
+                    "Rank is equivalent to stopper rank but stop_fn is not provided. It must be provided."
+                )
 
         if self.rank == self.stopper_rank:
             stop = self.stop_fn(*args, **kwargs)
@@ -312,10 +326,5 @@ class MPICommunicateStopping(Stopping):
             else:
                 check_stop.cancel()
                 stop = False
-        
+
         return stop
-
-
-
-
-        

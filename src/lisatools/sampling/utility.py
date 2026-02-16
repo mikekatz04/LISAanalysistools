@@ -1,5 +1,5 @@
-from multiprocessing.sharedctypes import Value
 import os
+from multiprocessing.sharedctypes import Value
 
 import numpy as np
 
@@ -9,9 +9,9 @@ try:
 except (ImportError, ModuleNotFoundError) as e:
     pass
 
-from eryn.state import State, BranchSupplemental
-from eryn.utils.utility import groups_from_inds
+from eryn.state import BranchSupplemental, State
 from eryn.utils.transform import TransformContainer
+from eryn.utils.utility import groups_from_inds
 
 
 class DetermineGBGroups:
@@ -411,17 +411,16 @@ class HeterodynedUpdate:
 
         # sampler.backend.save_step(sample_state, np.full_like(lp, True))
 
-def get_psd_transform_container(Soms_fill: float = None,
-                                Sa_fill: float = None,
-                                n_knots: int = 5,
-                                freq_min: float = None,
-                                freq_max: float = None
-                                ) -> TransformContainer:
-    
+
+def get_psd_transform_container(
+    Soms_fill: float = None,
+    Sa_fill: float = None,
+    n_knots: int = 5,
+    freq_min: float = None,
+    freq_max: float = None,
+) -> TransformContainer:
     """
     Prepare the transform container for psd sampling.
 
 
     """
-    
-    

@@ -204,8 +204,8 @@ class GeneralSetup(Setup, GeneralSettings):
             )
 
         default_preprocess_kwargs = dict(
-            do_detrend=True,
-            highpass_kwargs=dict(cutoff=5e-6, order=2, zero_phase=True),
+            do_detrend=False,
+            highpass_kwargs=dict(cutoff=5e-5, order=2, zero_phase=True),
             trim_kwargs=dict(
                 duration=200 * 3600, is_percent=False, trimming_type="from_each_end"
             ),

@@ -9,8 +9,7 @@ from typing import Any, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import cm
-from scipy import interpolate, signal
-from scipy import special as scipy_special
+from scipy import interpolate, signal, special
 
 try:
     import cupy as cp
@@ -651,6 +650,7 @@ class STFTSettings(DomainSettingsBase):
         return sl.stop - sl.start
 
     def get_nperseg(self, small_dt: float):
+
         nperseg = round(self.dt / small_dt)
 
         assert (
@@ -749,9 +749,9 @@ def get_stft_settings(
         STFTSettings: The settings for the STFT.
     """
 
-    t0 = times[0]
+    t0 = float(times[0])
     N = len(times)
-    dt = times[1] - times[0]
+    dt = float(times[1] - times[0])
 
     big_dt = int(big_dt / dt) * dt  # make sure big_dt is an integer multiple of dt
     NT = int(np.floor(N / (big_dt / dt)))
@@ -778,6 +778,24 @@ class STFTSignal(STFTSettings, DomainBase):
     @property
     def settings(self) -> STFTSettings:
         return STFTSettings(*self.args, **self.kwargs)
+    
+    def plot(self, channel=0, ax=None, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        t_arr = self.t_arr if get_array_module(self.t_arr) == np else self.t_arr.get()
+        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+        cb = ax.pcolormesh(t_arr, f_arr, (np.abs(arr_here)**2).T, shading='auto', cmap='cividis')
+
+        ax.set_yscale('log')
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Frequency')
+        ax.set_ylim(self.min_freq, self.max_freq)
+        plt.colorbar(cb, ax=ax, label='Magnitude')
+        return ax
 
 
 WAVELET_BANDWIDTH = 6.51041666666667e-5
@@ -856,7 +874,7 @@ class WDMSettings(DomainSettingsBase):
         z = xp.zeros(omega.shape[0])
         beta_inc_calc = (xp.abs(omega) >= A) & (xp.abs(omega) <= A + B)
         x = (xp.abs(omega[beta_inc_calc]) - A) / B
-        y = self.special.betainc(WAVELET_FILTER_CONSTANT, WAVELET_FILTER_CONSTANT, x)
+        y = special.betainc(WAVELET_FILTER_CONSTANT, WAVELET_FILTER_CONSTANT, x)
         z[beta_inc_calc] = insDOM * xp.cos(y * xp.pi / 2.0)
         z[(xp.abs(omega) < A)] = insDOM
 

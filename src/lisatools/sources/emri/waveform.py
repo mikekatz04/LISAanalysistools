@@ -22,7 +22,6 @@ from ..waveformbase import AETTDIWaveform
 # _ = few.get_backend('cuda12x')
 
 
-
 default_response_kwargs = dict(
     t0=30000.0,
     order=25,

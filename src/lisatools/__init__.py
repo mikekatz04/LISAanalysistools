@@ -2,8 +2,8 @@
 
 # ruff: noqa: E402
 try:
-    from lisatools._version import (__version__,  # pylint: disable=E0401,E0611
-                                    __version_tuple__)
+    from lisatools._version import __version__  # pylint: disable=E0401,E0611
+    from lisatools._version import __version_tuple__
 
 except ModuleNotFoundError:
     from importlib.metadata import (PackageNotFoundError,  # pragma: no cover

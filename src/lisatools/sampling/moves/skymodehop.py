@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-
 from eryn.moves import MHMove
 
 __all__ = ["GaussianMove"]
@@ -90,9 +89,7 @@ class SkyMove(MHMove):
         """
 
         q = {}
-        for name, coords in zip(
-            branches_coords.keys(), branches_coords.values()
-        ):
+        for name, coords in zip(branches_coords.keys(), branches_coords.values()):
 
             if branches_inds is None:
                 inds = np.ones(coords.shape[:-1], dtype=bool)

@@ -1,6 +1,8 @@
 from __future__ import annotations
-from typing import Tuple
+
 import typing
+from typing import Tuple
+
 import numpy as np
 
 try:
@@ -10,7 +12,7 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
     pass
-    
+
 
 def tukey(N, alpha, xp=None):
 
@@ -18,17 +20,16 @@ def tukey(N, alpha, xp=None):
         xp = np
 
     assert 0.0 < alpha < 1.0
-    n = xp.arange(int(xp.ceil(N/2.)))
-    in_window_edge = (n < alpha * N / 2)
+    n = xp.arange(int(xp.ceil(N / 2.0)))
+    in_window_edge = n < alpha * N / 2
 
-    tmp = (
-        (in_window_edge) * 1. / 2. * (1. - xp.cos(2. * np.pi * n / (alpha * N)))
-        + (~in_window_edge) * 1.0
-    )
+    tmp = (in_window_edge) * 1.0 / 2.0 * (
+        1.0 - xp.cos(2.0 * np.pi * n / (alpha * N))
+    ) + (~in_window_edge) * 1.0
     tukey_out = xp.zeros(N, dtype=float)
     # TODO: check this works for odd functions
-    tukey_out[:tmp.shape[0]] = tmp
-    tukey_out[-tmp.shape[0]:] = tmp[::-1]
+    tukey_out[: tmp.shape[0]] = tmp
+    tukey_out[-tmp.shape[0] :] = tmp[::-1]
 
     return tukey_out
 
@@ -56,31 +57,42 @@ def get_array_module(arr: np.ndarray | cp.ndarray) -> object:
         raise ValueError("arr must be a numpy or cupy array.")
 
 
-def generate_noise_fd(N: int, df: float, *sensitivity_args: typing.Any, func: typing.Optional[typing.Callable]=None, **sensitivity_kwargs: typing.Any) -> np.ndarray[float]:
-    """Generate noise directly in the Frequency Domain. 
-    
+def generate_noise_fd(
+    N: int,
+    df: float,
+    *sensitivity_args: typing.Any,
+    func: typing.Optional[typing.Callable] = None,
+    **sensitivity_kwargs: typing.Any,
+) -> np.ndarray[float]:
+    """Generate noise directly in the Frequency Domain.
+
     Args:
         N: Number of points in frequency domain waveform assuming frequencies greater than
             or equal to zero.
-        df: Frequency domain bin size (``1 / (N * dt)``). 
+        df: Frequency domain bin size (``1 / (N * dt)``).
         sensitivity_args: Arguments for ``func``.
         func: Function for generating the sensitivity curve as a function of frequency. (default: :func:`lisatools.sensitivity.get_sensivity`)
-        sensitivity_kwargs: Keyword arguments for ``func``. 
+        sensitivity_kwargs: Keyword arguments for ``func``.
 
     Returns:
-        An instance of generated noise in the frequency domain. 
+        An instance of generated noise in the frequency domain.
 
 
     """
     if not isinstance(N, int):
-        raise ValueError(f"N must be an integer. See documentation for more information.")
+        raise ValueError(
+            f"N must be an integer. See documentation for more information."
+        )
 
     if not isinstance(df, float):
-        raise ValueError(f"N must be an integer. See documentation for more information.")
+        raise ValueError(
+            f"N must be an integer. See documentation for more information."
+        )
 
     if func is None:
         # TODO: make this better
         from lisatools.sensitivity import get_sensitivity
+
         func = get_sensitivity
 
     freqs = np.arange(N) * df
@@ -148,6 +160,7 @@ def searchsorted2d_vec(a, b, xp=None, gpu=None, **kwargs):
         pass
 
     return out
+
 
 def get_groups_from_band_structure(
     f0, band_edges, f0_2=None, xp=None, num_groups_base=3, fix_f_test=None, inds=None
