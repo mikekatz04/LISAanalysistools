@@ -76,6 +76,7 @@ class TDWaveformBase(ABC):
         response_kwargs: dict = None,
         buffer_time: int = 600,
         tukey_alpha: float = 0.01,
+        force_backend: str = "cpu",
     ) -> None:
 
         self.t0 = t0
@@ -85,6 +86,8 @@ class TDWaveformBase(ABC):
 
         num_points = int(self.Tobs / self.dt)
         response_kwargs["num_pts"] = num_points
+        response_kwargs["force_backend"] = force_backend
+        self.backend = force_backend
 
         self.response = pyResponseTDI(**response_kwargs)
         self.buffer_time = buffer_time
@@ -153,7 +156,7 @@ class TDWaveformBase(ABC):
         tdis[:, : self.response.tdi_start_ind] = 0.0
         tdis[:, -self.response.tdi_start_ind :] = 0.0
 
-        td_settings = TDSettings(t0=float(t_arr[0]), dt=self.dt, N=int(t_arr.shape[-1]))
+        td_settings = TDSettings(t0=float(t_arr[0]), dt=self.dt, N=int(t_arr.shape[-1]), force_backend=self.backend)
         td_signal = TDSignal(arr=tdis, settings=td_settings)
 
         # now prepare the output. If the output domain is TD return the TDSignal
@@ -162,13 +165,13 @@ class TDWaveformBase(ABC):
 
         elif output_domain == "STFT":
 
-            out_settings = get_stft_settings(t_arr, **domain_kwargs)
+            out_settings = get_stft_settings(t_arr, **domain_kwargs, force_backend=self.backend)
             nperseg = out_settings.get_nperseg(td_settings.dt)
 
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
-            out_settings = FDSettings(**domain_kwargs)
+            out_settings = FDSettings(**domain_kwargs, force_backend=self.backend)
             window = tukey(td_settings.N, alpha=self.tukey_alpha, xp=self.xp)
 
         else:

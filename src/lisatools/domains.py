@@ -25,13 +25,21 @@ except (ModuleNotFoundError, ImportError):
 
 import dataclasses
 
-from . import detector as lisa_models
 from .utils.constants import *
 from .utils.utility import AET, get_array_module, tukey
+from .utils.parallelbase import LISAToolsParallelModule
 
 
 @dataclasses.dataclass
-class DomainSettingsBase:
+class DomainSettingsBase(LISAToolsParallelModule):
+    force_backend: str = None
+
+    def __init__(self, force_backend: str = None):
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+
+    @classmethod
+    def supported_backends(cls):
+        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_slice(self, index: tuple) -> DomainSettingsBase:
         raise NotImplementedError(
@@ -113,12 +121,16 @@ class DomainBase:
         return self.settings.associated_class(new_arr, new_settings)
 
 
-@dataclasses.dataclass
 class TDSettings(DomainSettingsBase):
     t0: float
     N: int
     dt: float
-    # p: Any = np
+
+    def __init__(self, t0: float, N: int, dt: float, **kwargs):
+        self.t0 = t0
+        self.N = N
+        self.dt = dt
+        super().__init__(**kwargs)
 
     @staticmethod
     def get_associated_class():
@@ -130,7 +142,7 @@ class TDSettings(DomainSettingsBase):
 
     @property
     def kwargs(self) -> dict:
-        return dict()
+        return dict(force_backend=self.force_backend)
 
     @property
     def args(self) -> tuple:
@@ -138,7 +150,7 @@ class TDSettings(DomainSettingsBase):
 
     @property
     def t_arr(self) -> np.ndarray:
-        return self.t0 + np.arange(self.N) * self.dt
+        return self.t0 + self.xp.arange(self.N) * self.dt
 
     @property
     def basis_shape(self) -> tuple:
@@ -162,12 +174,6 @@ class TDSettings(DomainSettingsBase):
 class TDSignal(DomainBase, TDSettings):
     def __init__(self, arr, settings: TDSettings):
         TDSettings.__init__(self, *settings.args, **settings.kwargs)
-
-        # if hasattr(arr, "get") and settings.xp == np:
-        #     arr = arr.get()
-        # else:
-        #     arr = settings.xp.asarray(arr)
-
         DomainBase.__init__(self, arr)
 
     @property
@@ -191,6 +197,7 @@ class TDSignal(DomainBase, TDSettings):
             fd_settings = FDSettings(
                 fd_arr.shape[-1],
                 df,
+                force_backend=self.force_backend,  
             )
 
         return FDSignal(fd_arr[..., fd_settings.active_slice], fd_settings)
@@ -278,12 +285,18 @@ class TDSignal(DomainBase, TDSettings):
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
 
-@dataclasses.dataclass
 class FDSettings(DomainSettingsBase):
     N: int
     df: float
     min_freq: Optional[float] = 0.0
     max_freq: Optional[float] = None
+
+    def __init__(self, N: int, df: float, min_freq: Optional[float] = 0.0, max_freq: Optional[float] = None, **kwargs):
+        self.N = N
+        self.df = df
+        self.min_freq = min_freq
+        self.max_freq = max_freq
+        super().__init__(**kwargs)
 
     @property
     def differential_component(self) -> float:
@@ -314,6 +327,7 @@ class FDSettings(DomainSettingsBase):
         return dict(
             min_freq=self.min_freq,
             max_freq=self.max_freq,
+            force_backend=self.force_backend,
         )
 
     @property
@@ -326,7 +340,7 @@ class FDSettings(DomainSettingsBase):
 
     @property
     def f_arr(self) -> np.ndarray:
-        _all_freqs = np.arange(0, self.N) * self.df
+        _all_freqs = self.xp.arange(0, self.N) * self.df
 
         return _all_freqs[self.active_slice]
 
@@ -383,12 +397,6 @@ class FDSettings(DomainSettingsBase):
 class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
         FDSettings.__init__(self, *settings.args, **settings.kwargs)
-
-        # if hasattr(arr, "get") and settings.xp == np:
-        #     arr = arr.get()
-        # else:
-        #     arr = settings.xp.asarray(arr)
-
         DomainBase.__init__(self, arr)
 
     @property
@@ -409,7 +417,7 @@ class FDSignal(FDSettings, DomainBase):
             assert isinstance(settings, TDSettings)
             assert settings.dt == dt
 
-        td_settings = TDSettings(dt)
+        td_settings = TDSettings(t0=0.0, N=N, dt=dt, force_backend=self.force_backend)
         return TDSignal(td_arr, td_settings)
 
     def get_fd_window_for_wdm(self, settings):
@@ -522,7 +530,6 @@ class FDSignal(FDSettings, DomainBase):
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
 
-@dataclasses.dataclass
 class STFTSettings(DomainSettingsBase):
     t0: float
     dt: float
@@ -531,6 +538,26 @@ class STFTSettings(DomainSettingsBase):
     NF: int
     min_freq: Optional[float] = 0.0
     max_freq: Optional[float] = None
+
+    def __init__(
+        self,
+        t0: float,
+        dt: float,
+        df: float,
+        NT: int,
+        NF: int,
+        min_freq: Optional[float] = 0.0,
+        max_freq: Optional[float] = None,
+        **kwargs,
+    ):
+        self.t0 = t0
+        self.dt = dt
+        self.df = df
+        self.NT = NT
+        self.NF = NF
+        self.min_freq = min_freq
+        self.max_freq = max_freq
+        super().__init__(**kwargs)
 
     @staticmethod
     def get_associated_class():
@@ -553,7 +580,7 @@ class STFTSettings(DomainSettingsBase):
 
     @property
     def t_arr(self) -> np.ndarray:
-        return self.t0 + np.arange(self.NT) * self.dt
+        return self.t0 + self.xp.arange(self.NT) * self.dt
 
     @property
     def min_freq(self) -> float:
@@ -590,7 +617,7 @@ class STFTSettings(DomainSettingsBase):
     @property
     def f_arr(self) -> np.ndarray:
 
-        _all_freqs = np.arange(0, self.NF) * self.df
+        _all_freqs = self.xp.arange(0, self.NF) * self.df
         return _all_freqs[self.active_slice]
 
     @property
@@ -599,15 +626,15 @@ class STFTSettings(DomainSettingsBase):
 
     @property
     def kwargs(self) -> dict:
-        return dict(min_freq=self.min_freq, max_freq=self.max_freq)
+        return dict(min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.force_backend)
 
     @property
     def f_arr_edges(self) -> np.ndarray:
-        return np.arange(self.NF + 1) * self.df
+        return self.xp.arange(self.NF + 1) * self.df
 
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return np.arange(self.NT + 1) * self.dt
+        return self.xp.arange(self.NT + 1) * self.dt
 
     def __eq__(self, value):
         if not isinstance(value, STFTSettings):
@@ -636,11 +663,11 @@ class STFTSettings(DomainSettingsBase):
         if self.min_freq is None:
             start_idx = 0
         else:
-            start_idx = int(np.ceil(self.min_freq / self.df))
+            start_idx = int(self.xp.ceil(self.min_freq / self.df))
         if self.max_freq is None:
             end_idx = self.NF
         else:
-            end_idx = int(np.floor(self.max_freq / self.df)) + 1
+            end_idx = int(self.xp.floor(self.max_freq / self.df)) + 1
 
         return slice(start_idx, end_idx)
 
@@ -684,10 +711,10 @@ class STFTSettings(DomainSettingsBase):
         if fmax > (self.NF - 1) * self.df:
             raise ValueError("fmax must be less than or equal to (NF-1)*df.")
 
-        time_start_idx = int(np.round((tmin - self.t0) / self.dt))
-        time_end_idx = int(np.round((tmax - self.t0) / self.dt))
-        freq_start_idx = int(np.round((fmin - self.f_arr[0]) / self.df))
-        freq_end_idx = int(np.floor((fmax - self.f_arr[0]) / self.df)) + 1
+        time_start_idx = int(self.xp.round((tmin - self.t0) / self.dt))
+        time_end_idx = int(self.xp.round((tmax - self.t0) / self.dt))
+        freq_start_idx = int(self.xp.round((fmin - self.f_arr[0]) / self.df))
+        freq_end_idx = int(self.xp.floor((fmax - self.f_arr[0]) / self.df)) + 1
 
         return slice(time_start_idx, time_end_idx), slice(freq_start_idx, freq_end_idx)
 
@@ -727,6 +754,7 @@ class STFTSettings(DomainSettingsBase):
             NF=new_NF,
             min_freq=new_min_freq,
             max_freq=new_max_freq,
+            force_backend=self.force_backend,
         )
 
 
@@ -735,6 +763,7 @@ def get_stft_settings(
     big_dt: float,
     min_freq: Optional[float] = 0.0,
     max_freq: Optional[float] = None,
+    **kwargs,
 ) -> STFTSettings:
     """
     Get STFT settings from time array and desired big_dt.
@@ -744,6 +773,7 @@ def get_stft_settings(
         big_dt: Desired time resolution for STFT segments.
         min_freq: Minimum frequency to consider.
         max_freq: Maximum frequency to consider.
+        **kwargs: Additional keyword arguments to pass to STFTSettings.
 
     Returns:
         STFTSettings: The settings for the STFT.
@@ -760,19 +790,13 @@ def get_stft_settings(
     NF = nperseg // 2 + 1
 
     return STFTSettings(
-        t0=t0, dt=big_dt, df=DF, NT=NT, NF=NF, min_freq=min_freq, max_freq=max_freq
+        t0=t0, dt=big_dt, df=DF, NT=NT, NF=NF, min_freq=min_freq, max_freq=max_freq, **kwargs
     )
 
 
 class STFTSignal(STFTSettings, DomainBase):
     def __init__(self, arr, settings: STFTSettings):
         STFTSettings.__init__(self, *settings.args, **settings.kwargs)
-
-        # if hasattr(arr, "get") and settings.xp == np:
-        #     arr = arr.get()
-        # else:
-        #     arr = settings.xp.asarray(arr)
-
         DomainBase.__init__(self, arr)
 
     @property
@@ -813,6 +837,7 @@ class WDMSettings(DomainSettingsBase):
         t0: float = 0.0,
         oversample: int = 16,
         window: Optional[np.ndarray | cp.ndarray] = None,
+        **kwargs,
     ):
         self.Tobs = Tobs
         self.NT = int(np.ceil(Tobs / WAVELET_DURATION).astype(int))
@@ -845,6 +870,8 @@ class WDMSettings(DomainSettingsBase):
             domega = 2 * np.pi / T
             self.omega = (np.arange(self.NT + 1) - int(self.NT / 2)) * domega
             self.norm = np.sqrt(self.N * self.cadence / self.dOmega)
+
+        super().__init__(**kwargs)
 
     @property
     def basis_shape(self) -> tuple:
@@ -915,7 +942,7 @@ class WDMSettings(DomainSettingsBase):
             m_in = m
         else:
             raise ValueError("m must be 1D or 2D array.")
-        return (m_in - 1) * int(self.NT / 2) + np.arange(self.NT)[None, :]
+        return (m_in - 1) * int(self.NT / 2) + self.xp.arange(self.NT)[None, :]
 
     def setup_window(self, xp=np):
 

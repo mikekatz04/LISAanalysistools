@@ -131,6 +131,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         response_kwargs: dict = None,
         buffer_time: int = 600,
         tukey_alpha: float = 0.01,
+        force_backend: str = "cpu",
     ) -> None:
 
         if not phentax_available:
@@ -145,6 +146,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             response_kwargs=response_kwargs,
             buffer_time=buffer_time,
             tukey_alpha=tukey_alpha,
+            force_backend=force_backend,
         )
 
         self.waveform = phentax.waveform.IMRPhenomTHM(T=self.Tobs, **waveform_kwargs)

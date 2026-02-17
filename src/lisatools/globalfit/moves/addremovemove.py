@@ -1,39 +1,48 @@
 import logging
 import time
 from copy import deepcopy
+from typing import Callable
 
 import cupy as xp
 import numpy as np
 from eryn.moves import Move, StretchMove, TemperatureControl
+from eryn.prior import ProbDistContainer
+from eryn.utils.transform import TransformContainer
 # from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 
-# from eryn.state import State
-from lisatools.globalfit.state import GFState
-from lisatools.sampling.moves.skymodehop import SkyMove
-
+# from lisatools.globalfit.state import GFState
+# from lisatools.sampling.moves.skymodehop import SkyMove
+from ...analysiscontainer import AnalysisContainerArray
 from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
 
 
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
+    """
+    Move that handles adding and removing sources to and from the residuals stored in the analysis container array.
+    This is done by first removing the contribution of the current sources in the cold chain from the residual, 
+    then proposing new sources for this leaf, and then adding back in the contribution of the new sources to the residual.
+    This way we can make sure that the likelihoods are computed correctly for each proposed source and that the likelihoods are consistent with the current state of the residuals in the analysis container array.
+
+
+    """
+
     def __init__(
         self,
-        branch_name,
-        coords_shape,
-        waveform_gen,
-        tempering_kwargs,
-        waveform_gen_kwargs,
-        waveform_like_kwargs,
-        acs,
-        num_repeats,
-        transform_fn,
-        priors,
-        inner_moves,
-        df,
-        Tmax=np.inf,
-        betas_all=None,
+        branch_name: str,
+        coords_shape: tuple,
+        waveform_gen: Callable,
+        waveform_gen_kwargs: dict,
+        waveform_like_kwargs: dict,
+        acs: AnalysisContainerArray,
+        num_repeats: int,
+        transform_fn: TransformContainer,
+        priors: ProbDistContainer,
+        inner_moves: list,
+        Tmax: float = np.inf,
+        betas_all: np.ndarray = None,
         **kwargs,
     ):
 
@@ -54,9 +63,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         move_weights = [move[1] for move in inner_moves]
         self.moves = moves_tmp
         self.move_weights = move_weights
-        self.df = acs.df
-        # get data frequency array on gpu
-        self.fd = xp.asarray(acs.f_arr)
+        # self.df = acs.df
+        # # get data frequency array on gpu
+        # self.fd = xp.asarray(acs.f_arr)
 
         self.temperature_controls = [None for _ in range(self.nleaves_max)]
         for i in range(self.nleaves_max):
@@ -92,6 +101,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.temperature_controls[i].skip_swap_branches = skip_swap_branches
 
     def add_back_in_cold_chain_sources(self, coords):
+        """
+        Remove the contribution of the current sources in the cold chain from the residual.
+
+        Args:
+            coords: coordinates of the sources in the cold chain that we want to add back in to the residual.
+        """
 
         # TODO: fix T channel
         # d - h -> need to add removal waveforms
@@ -111,6 +126,13 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
     def remove_cold_chain_sources(self, coords):
+        """
+        Add the contribution of the current sources in the cold chain from the residual.
+
+        Args:
+            coords: coordinates of the sources in the cold chain that we want to remove from the residual.
+        """
+
         # TODO: fix T channel
         # d - h -> need to add removal waveforms
         # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
@@ -128,28 +150,58 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             source_only=True
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
-    def get_waveform_here(self, coords):
-        xp.get_default_memory_pool().free_all_blocks()
-        waveforms = xp.zeros(
-            (coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex
-        )
+    def get_waveform_here(self, coords: np.ndarray):
+        """
+        Get the waveform for the given coordinates.
 
+        Args:
+            coords: coordinates of the sources for which we want to get the waveform. Shape is (n_sources, ndim).
+
+        Returns:    
+            waveforms: waveforms for the given coordinates. Shape is (n_sources, n_channels, (data_shape)).
+        """
+    
+        xp.get_default_memory_pool().free_all_blocks()
+        # change this to be more memory efficient if some waveforms are shorter than the full data array
+        # waveforms = xp.zeros(
+        #     (coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex
+        # )
+
+        # for i in range(coords.shape[0]):
+        #     waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+
+        waveforms = []
         for i in range(coords.shape[0]):
-            waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+            waveforms.append(
+                self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+            )
+        
+        # now concatenate along axis to get shape (n_sources, n_channels, data_length)
+        waveforms = xp.stack(waveforms, axis=0) 
 
         return waveforms
 
     def setup_likelihood_here(self, coords):
         pass
 
-    def compute_like(self, old_coords_in, data_index):
+    def compute_like(self, coords_in, data_index):
+        """
+        Compute the likelihood for the given coordinates and data index.
+
+        Args:
+            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
+            data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
+
+        Returns:
+            ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
+        """
         # TODO: we should probably move the prior in here even though
         # in general with current setup it should only be points in the prior
         # that make it here
         ll = np.full_like(data_index.get(), -1e300, dtype=float)
 
         for i, (coords_in_now, data_index_now) in enumerate(
-            zip(old_coords_in, data_index.get())
+            zip(coords_in, data_index.get())
         ):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
@@ -163,6 +215,20 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
+        """
+        Compute the log likelihood for the given coordinates and data index for use in fancy swapping. 
+        This is needed because when permuting the coordinates during tempering, we need to recompute the likelihood against the new set of residuals and covariance matrix.
+
+        Args:
+            x: Dictionary of coordinates of the sources for which we want to compute the likelihood. 
+                The coordinates are expected to be in the shape (ntemps, nwalkers, nleaves_max, ndim).
+            supps: supplimental information for the likelihood computation. #todo add
+            branch_supps: Branch supplimental. #todo add
+
+        Returns:
+            ll: likelihood for the given coordinates and data index. Shape is (ntemps, nwalkers).
+            blobs: blobs for the given coordinates and data index. Default is None.
+        """
         assert (
             x[self.branch_name].ndim == 4
             and x[self.branch_name].shape[1] == self.nwalkers
