@@ -706,10 +706,16 @@ class STFTSettings(DomainSettingsBase):
             raise ValueError("tmin must be greater than or equal to t0.")
         if tmax > self.t0 + self.NT * self.dt:
             raise ValueError("tmax must be less than or equal to t0 + NT*dt.")
-        if fmin < 0:
-            raise ValueError("fmin must be non-negative.")
-        if fmax > (self.NF - 1) * self.df:
-            raise ValueError("fmax must be less than or equal to (NF-1)*df.")
+        f_min_active = self.f_arr[0]
+        f_max_active = self.f_arr[-1]
+        if fmin < f_min_active:
+            raise ValueError(
+                f"fmin ({fmin}) must be >= the active minimum frequency ({f_min_active})."
+            )
+        if fmax > f_max_active:
+            raise ValueError(
+                f"fmax ({fmax}) must be <= the active maximum frequency ({f_max_active})."
+            )
 
         time_start_idx = int(self.xp.round((tmin - self.t0) / self.dt))
         time_end_idx = int(self.xp.round((tmax - self.t0) / self.dt))
@@ -739,12 +745,8 @@ class STFTSettings(DomainSettingsBase):
         new_NT = time_slice.stop - time_slice.start
         new_NF = self.NF
 
-        new_min_freq = (
-            self.f_arr[freq_slice.start] if self.min_freq is not None else None
-        )
-        new_max_freq = (
-            self.f_arr[freq_slice.stop - 1] if self.max_freq is not None else None
-        )
+        new_min_freq = float(self.f_arr[freq_slice.start])
+        new_max_freq = float(self.f_arr[freq_slice.stop - 1])
 
         return STFTSettings(
             t0=new_t0,
@@ -1173,6 +1175,92 @@ class WDMLookupTable(WDMSettings):
             (fdot_arr > self.fdot_vals.min()) & (fdot_arr < self.fdot_vals.max())
         )
         return self._interpolant(np.array([f_arr, fdot_arr]).T)
+
+
+class DomainBaseArray:
+    """Container for a collection of :class:`DomainBase` objects.
+
+    When all signals share identical settings (uniform case), the signals are
+    stacked into a single batched :class:`DomainBase`, enabling vectorized
+    domain transforms (e.g. a single batched FFT instead of N sequential ones).
+    Otherwise the class falls back to per-element processing.
+
+    Args:
+        signals: List of :class:`DomainBase` objects.
+
+    """
+
+    def __init__(self, signals: List[DomainBase]) -> None:
+        if not all(isinstance(s, DomainBase) for s in signals):
+            raise TypeError("All elements of DomainBaseArray must be DomainBase instances.")
+        self.signals = list(signals)
+
+        if len(signals) > 1:
+            s0 = signals[0].settings
+            self.is_uniform = all(s.settings == s0 for s in signals[1:])
+        else:
+            self.is_uniform = True
+
+        if self.is_uniform and len(signals) > 0:
+            xp = get_array_module(signals[0].arr)
+            arr_stacked = xp.stack([s.arr for s in signals], axis=0)
+            settings = signals[0].settings
+            self._batched = settings.associated_class(arr_stacked, settings)
+        else:
+            self._batched = None
+
+    def __len__(self) -> int:
+        return len(self.signals)
+
+    def __iter__(self):
+        return iter(self.signals)
+
+    def __getitem__(self, index):
+        return self.signals[index]
+
+    @property
+    def batched(self) -> Optional[DomainBase]:
+        """Batched :class:`DomainBase` (shape ``(nbatch, nchannels, *basis_shape)``),
+        or ``None`` when settings are non-uniform."""
+        return self._batched
+
+    @property
+    def settings(self) -> List[DomainSettingsBase]:
+        """List of settings for each signal."""
+        return [s.settings for s in self.signals]
+
+    def transform(
+        self,
+        target_settings: DomainSettingsBase,
+        window: Optional[np.ndarray] = None,
+    ) -> "DomainBaseArray":
+        """Transform all signals to *target_settings*.
+
+        Uses a single vectorized call when all signals share the same settings
+        (uniform case); otherwise transforms each signal individually.
+
+        Args:
+            target_settings: Target domain settings.
+            window: Optional window to apply during the transform.
+
+        Returns:
+            :class:`DomainBaseArray` of transformed signals.
+
+        """
+        if self.is_uniform and self._batched is not None:
+            transformed_batched = self._batched.transform(target_settings, window=window)
+            # unstack along the batch axis
+            transformed_signals = [
+                target_settings.associated_class(
+                    transformed_batched.arr[i], target_settings
+                )
+                for i in range(len(self.signals))
+            ]
+            return DomainBaseArray(transformed_signals)
+        else:
+            return DomainBaseArray(
+                [s.transform(target_settings, window=window) for s in self.signals]
+            )
 
 
 __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]
