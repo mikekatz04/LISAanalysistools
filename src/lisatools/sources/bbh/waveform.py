@@ -120,28 +120,21 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
 
     Args:
         waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
-        t0: Initial time in seconds.
-        dt: Time step in seconds.
         Tobs: Observation time in years.
-        response_kwargs: Keyword arguments for the TDI response.
-        buffer_time: Buffer time in seconds added around the signal edges.
-        tukey_alpha: Alpha parameter for the Tukey window.
-        force_backend: Backend selector ('cpu' or 'cuda').
-        force_uniform_stft: See :class:`TDWaveformBase`.
-
+        start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls. 
+        ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
+        *args: Additional positional arguments forwarded to :class:`TDWaveformBase`.
+        **kwargs: Additional keyword arguments forwarded to :class:`TDWaveformBase`.
     """
 
     def __init__(
         self,
         waveform_kwargs: dict,
-        t0: float = 0.0,
-        dt: float = 10.0,
         Tobs: float = 1.0,
-        response_kwargs: dict = None,
-        buffer_time: int = 600,
-        tukey_alpha: float = 0.01,
-        force_backend: str = "cpu",
-        force_uniform_stft: bool = False,
+        start_freq: float = None,
+        ref_freq: float = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
 
         if not phentax_available:
@@ -150,17 +143,15 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             )
 
         super().__init__(
-            t0=t0,
-            dt=dt,
+            *args,
+            **kwargs,
             Tobs=Tobs,
-            response_kwargs=response_kwargs,
-            buffer_time=buffer_time,
-            tukey_alpha=tukey_alpha,
-            force_backend=force_backend,
-            force_uniform_stft=force_uniform_stft,
         )
 
         self.waveform = phentax.waveform.IMRPhenomTHM(T=self.Tobs, **waveform_kwargs)
+
+        self.start_freq = start_freq
+        self.ref_freq = ref_freq
 
     def wave_gen(
         self,
@@ -170,10 +161,10 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         s2z: float,
         distance: float,
         phi_ref: float,
-        ref_freq: float,
-        start_freq: float,
         inclination: float,
         psi: float,
+        ref_freq: float = None,
+        start_freq: float = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Generate the waveform's polarizations for a single source.
 
@@ -181,6 +172,9 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             t_arr, h_plus, h_cross
 
         """
+
+        start_freq = start_freq if start_freq is not None else self.start_freq
+        ref_freq = ref_freq if ref_freq is not None else self.ref_freq
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
             m1,
@@ -210,10 +204,10 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         s2z: np.ndarray,
         distance: np.ndarray,
         phi_ref: np.ndarray,
-        ref_freq: np.ndarray,
-        start_freq: np.ndarray,
         inclination: np.ndarray,
         psi: np.ndarray,
+        ref_freq: float = None,
+        start_freq: float = None,
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Generate polarizations for a batch of sources using phentax's vectorised path.
@@ -229,10 +223,10 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             s2z: Dimensionless spin of source 2, shape (Nbatch,).
             distance: Luminosity distance in Mpc, shape (Nbatch,).
             phi_ref: Reference phase in radians, shape (Nbatch,).
-            ref_freq: Reference frequency in Hz, shape (Nbatch,).
-            start_freq: Starting frequency in Hz, shape (Nbatch,).
             inclination: Inclination angle in radians, shape (Nbatch,).
             psi: Polarisation angle in radians, shape (Nbatch,).
+            ref_freq: Reference frequency in Hz, float.
+            start_freq: Starting frequency in Hz, float.
             **kwargs: Additional keyword arguments forwarded to
                 ``compute_polarizations_at_once`` (e.g. ``T`` for observation time
                 override, ``t_min``, ``t_ref``).
@@ -241,6 +235,10 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             Tuple of (times_batch, mask_batch, h_plus_batch, h_cross_batch),
             each of shape (Nbatch, Ntimes) as plain NumPy arrays.
         """
+
+        ref_freq = ref_freq if ref_freq is not None else self.ref_freq
+        start_freq = start_freq if start_freq is not None else self.start_freq
+
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
             m1,
             m2,

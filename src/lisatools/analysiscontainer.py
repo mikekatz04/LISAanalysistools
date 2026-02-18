@@ -218,17 +218,30 @@ class AnalysisContainer:
             )
 
         # find indices for slicing
-        tmin, tmax = (
+        templ_tmin, templ_tmax = (
             templ_settings.t0,
             templ_settings.t0 + templ_settings.NT * templ_settings.dt,
         )
+        
+        # now limit the time range to the data range if necessary, and print a warning if this is the case
+        data_tmin, data_tmax = (
+            data_settings.t0,
+            data_settings.t0 + data_settings.NT * data_settings.dt,
+        )
+
+        tmin = max(templ_tmin, data_tmin)
+        tmax = min(templ_tmax, data_tmax)
+
         fmin, fmax = templ_settings.f_arr[0], templ_settings.f_arr[-1]
 
         slices = data_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
         sliced_data_res_arr = DataResidualArray(self.data_res_arr.data_res_arr.get_array_slice(slices))
         sliced_sens_mat = self.sens_mat.get_slice(slices)
 
-        return sliced_data_res_arr, template, sliced_sens_mat
+        templ_slice = templ_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
+        sliced_template = DataResidualArray(template.data_res_arr.get_array_slice(templ_slice))
+
+        return sliced_data_res_arr, sliced_template, sliced_sens_mat
 
     def template_inner_product(
         self, template: DataResidualArray, **kwargs: dict
@@ -894,10 +907,10 @@ class AnalysisContainerArray:
         tmpl_t_end = t_end_data - time_offset
 
         # --- frequency intersection (in active-freq-bin coordinates) ---
-        data_f0 = data_settings.f_arr[0]
-        tmpl_f0 = template_settings.f_arr[0]
-        data_f1 = data_settings.f_arr[-1]
-        tmpl_f1 = template_settings.f_arr[-1]
+        data_f0 = float(data_settings.f_arr[0])
+        tmpl_f0 = float(template_settings.f_arr[0])
+        data_f1 = float(data_settings.f_arr[-1])
+        tmpl_f1 = float(template_settings.f_arr[-1])
 
         f_lo = max(data_f0, tmpl_f0)
         f_hi = min(data_f1, tmpl_f1)
@@ -944,10 +957,10 @@ class AnalysisContainerArray:
                 f"({template_settings.df}) must match."
             )
 
-        data_f0 = data_settings.f_arr[0]
-        tmpl_f0 = template_settings.f_arr[0]
-        data_f1 = data_settings.f_arr[-1]
-        tmpl_f1 = template_settings.f_arr[-1]
+        data_f0 = float(data_settings.f_arr[0])
+        tmpl_f0 = float(template_settings.f_arr[0])
+        data_f1 = float(data_settings.f_arr[-1])
+        tmpl_f1 = float(template_settings.f_arr[-1])
 
         f_lo = max(data_f0, tmpl_f0)
         f_hi = min(data_f1, tmpl_f1)
