@@ -814,7 +814,7 @@ class STFTSignal(STFTSettings, DomainBase):
         f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
 
         arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
-        cb = ax.pcolormesh(t_arr, f_arr, (np.abs(arr_here)**2).T, shading='auto', cmap='cividis')
+        cb = ax.pcolormesh(t_arr, f_arr, (np.abs(arr_here)**2).T, shading='auto', cmap='cividis', **kwargs)
 
         ax.set_yscale('log')
         ax.set_xlabel('Time')

@@ -119,6 +119,15 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
     Generate PhenomTHM waveforms with the TDI LISA Response.
 
     Args:
+        waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
+        t0: Initial time in seconds.
+        dt: Time step in seconds.
+        Tobs: Observation time in years.
+        response_kwargs: Keyword arguments for the TDI response.
+        buffer_time: Buffer time in seconds added around the signal edges.
+        tukey_alpha: Alpha parameter for the Tukey window.
+        force_backend: Backend selector ('cpu' or 'cuda').
+        force_uniform_stft: See :class:`TDWaveformBase`.
 
     """
 
@@ -132,6 +141,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         buffer_time: int = 600,
         tukey_alpha: float = 0.01,
         force_backend: str = "cpu",
+        force_uniform_stft: bool = False,
     ) -> None:
 
         if not phentax_available:
@@ -147,6 +157,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             buffer_time=buffer_time,
             tukey_alpha=tukey_alpha,
             force_backend=force_backend,
+            force_uniform_stft=force_uniform_stft,
         )
 
         self.waveform = phentax.waveform.IMRPhenomTHM(T=self.Tobs, **waveform_kwargs)
@@ -164,7 +175,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         inclination: float,
         psi: float,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Generate the waveform's polarizations.
+        """Generate the waveform's polarizations for a single source.
 
         Returns:
             t_arr, h_plus, h_cross
@@ -189,4 +200,66 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             self.xp.asarray(times[mask]),
             self.xp.asarray(hplus[mask]),
             self.xp.asarray(hcross[mask]),
+        )
+
+    def wave_gen_batch(
+        self,
+        m1: np.ndarray,
+        m2: np.ndarray,
+        s1z: np.ndarray,
+        s2z: np.ndarray,
+        distance: np.ndarray,
+        phi_ref: np.ndarray,
+        ref_freq: np.ndarray,
+        start_freq: np.ndarray,
+        inclination: np.ndarray,
+        psi: np.ndarray,
+        **kwargs,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Generate polarizations for a batch of sources using phentax's vectorised path.
+
+        phentax uses JAX vmap internally, so all parameters must be broadcastable
+        to the batch shape.  The returned arrays still carry the padded time axis;
+        per-source masking is handled by the caller (:meth:`_call_batched`).
+
+        Args:
+            m1: Source-1 masses in solar masses, shape (Nbatch,).
+            m2: Source-2 masses in solar masses, shape (Nbatch,).
+            s1z: Dimensionless spin of source 1, shape (Nbatch,).
+            s2z: Dimensionless spin of source 2, shape (Nbatch,).
+            distance: Luminosity distance in Mpc, shape (Nbatch,).
+            phi_ref: Reference phase in radians, shape (Nbatch,).
+            ref_freq: Reference frequency in Hz, shape (Nbatch,).
+            start_freq: Starting frequency in Hz, shape (Nbatch,).
+            inclination: Inclination angle in radians, shape (Nbatch,).
+            psi: Polarisation angle in radians, shape (Nbatch,).
+            **kwargs: Additional keyword arguments forwarded to
+                ``compute_polarizations_at_once`` (e.g. ``T`` for observation time
+                override, ``t_min``, ``t_ref``).
+
+        Returns:
+            Tuple of (times_batch, mask_batch, h_plus_batch, h_cross_batch),
+            each of shape (Nbatch, Ntimes) as plain NumPy arrays.
+        """
+        times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
+            m1,
+            m2,
+            s1z,
+            s2z,
+            distance,
+            phi_ref,
+            ref_freq,
+            start_freq,
+            inclination,
+            psi,
+            delta_t=self.dt,
+            **kwargs,
+        )
+        # Move to the target backend: zero-copy on GPU via __cuda_array_interface__,
+        # host transfer on CPU. _call_batched will slice and re-wrap as needed.
+        return (
+            self.xp.asarray(times),
+            self.xp.asarray(mask),
+            self.xp.asarray(hplus),
+            self.xp.asarray(hcross),
         )

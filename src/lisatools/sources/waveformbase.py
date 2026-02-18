@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import Tuple, Union
+from typing import List, Tuple
 
 import numpy as np
 
@@ -11,8 +11,8 @@ except ImportError:
 from fastlisaresponse import pyResponseTDI
 from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
 
-from ..domains import (DomainBase, DomainSettingsBase, FDSettings,
-                       STFTSettings, TDSettings, TDSignal, get_stft_settings)
+from ..domains import (DomainBase, DomainBaseArray, FDSettings, TDSettings,
+                       TDSignal, get_stft_settings)
 from ..utils.utility import tukey
 
 
@@ -65,6 +65,9 @@ class TDWaveformBase(ABC):
     response_kwargs: Keyword arguments for the TDI response.
     buffer_time: Time in seconds to add as buffer to the TDI response to ensure proper calculation at the beginning and end of the signal.
     tukey_alpha: Alpha parameter for the Tukey window applied to the output signal. Only applied if settings_class is not None.
+    force_uniform_stft: If True, batched calls in STFT mode will force all signals onto a common STFT grid
+        spanning the union of all source time ranges. If False (default), each source retains its natural
+        STFT grid derived from its own time range. Only relevant for batched calls with output_domain='STFT'.
 
     """
 
@@ -77,12 +80,14 @@ class TDWaveformBase(ABC):
         buffer_time: int = 600,
         tukey_alpha: float = 0.01,
         force_backend: str = "cpu",
+        force_uniform_stft: bool = False,
     ) -> None:
 
         self.t0 = t0
         self.dt = dt
         self.Tobs = Tobs * YRSID_SI
         self.tukey_alpha = tukey_alpha
+        self.force_uniform_stft = force_uniform_stft
 
         num_points = int(self.Tobs / self.dt)
         response_kwargs["num_pts"] = num_points
@@ -102,13 +107,210 @@ class TDWaveformBase(ABC):
     ) -> Tuple[
         np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray
     ]:
-        """Generate the waveform.
+        """Generate the waveform for a single source.
 
         Returns:
             Tuple of (t_arr, h_plus, h_cross).
 
         """
         raise NotImplementedError("wave_gen method must be implemented in subclass.")
+
+    def wave_gen_batch(
+        self, *args, **kwargs
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Generate waveforms for a batch of sources.
+
+        Subclasses that support batched waveform generation should override this
+        method to return pre-masked, padded arrays. The batch loop in
+        ``_call_batched`` will apply per-source masking and the TDI response.
+
+        Returns:
+            Tuple of (times_batch, mask_batch, h_plus_batch, h_cross_batch),
+            each of shape (Nbatch, Ntimes). ``mask_batch`` is a boolean array
+            selecting the valid (non-padded) time samples for each source.
+
+        """
+        raise NotImplementedError(
+            "wave_gen_batch is not implemented for this waveform. "
+            "Batched calls require implementing wave_gen_batch in the subclass."
+        )
+
+    def _apply_response_single(
+        self,
+        t_arr: np.ndarray | cp.ndarray,
+        h_plus: np.ndarray | cp.ndarray,
+        h_cross: np.ndarray | cp.ndarray,
+        ra: float,
+        dec: float,
+        merger_time: float,
+    ) -> TDSignal:
+        """Apply the TDI response to a single source and return a TDSignal.
+
+        Args:
+            t_arr: Time array relative to zero (output of wave_gen).
+            h_plus: Plus polarization.
+            h_cross: Cross polarization.
+            ra: Right ascension in radians.
+            dec: Declination in radians.
+            merger_time: Time of merger in seconds (relative to t0).
+
+        Returns:
+            TDSignal with the TDI response applied.
+        """
+        self.response.num_pts = t_arr.shape[-1]
+
+        # Snap merger_time to the nearest sample and shift the time array.
+        merger_time_snapped = int((self.t0 + merger_time) / self.dt) * self.dt
+        t_arr_shifted = t_arr + merger_time_snapped  # new array, does not mutate input
+
+        strain = h_plus + 1j * h_cross
+
+        self.response.get_projections(
+            strain, lam=ra, beta=dec, t0=t_arr_shifted[0], t_buffer=self.buffer_time
+        )
+        tdis = self.xp.array(self.response.get_tdi_delays())
+
+        # Zero out the samples affected by the TDI boundary artefacts.
+        tdis[:, : self.response.tdi_start_ind] = 0.0
+        tdis[:, -self.response.tdi_start_ind :] = 0.0
+
+        td_settings = TDSettings(
+            t0=float(t_arr_shifted[0]),
+            dt=self.dt,
+            N=int(t_arr_shifted.shape[-1]),
+            force_backend=self.backend,
+        )
+        return TDSignal(arr=tdis, settings=td_settings)
+
+    def _td_to_output_domain(
+        self,
+        td_signal: TDSignal,
+        output_domain: str,
+        domain_kwargs: dict,
+    ) -> DomainBase:
+        """Transform a TDSignal to the specified output domain.
+
+        Args:
+            td_signal: Input time-domain signal.
+            output_domain: Target domain ('TD', 'STFT', or 'FD').
+            domain_kwargs: Extra kwargs forwarded to the domain settings constructor.
+
+        Returns:
+            Signal in the requested output domain.
+        """
+        if output_domain == "TD":
+            return td_signal
+
+        elif output_domain == "STFT":
+            # Derive STFT settings from the signal's own time grid.
+            out_settings = get_stft_settings(
+                td_signal.settings.t_arr, **domain_kwargs, force_backend=self.backend
+            )
+            nperseg = out_settings.get_nperseg(td_signal.settings.dt)
+            window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
+
+        elif output_domain == "FD":
+            out_settings = FDSettings(**domain_kwargs, force_backend=self.backend)
+            window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
+
+        else:
+            raise ValueError(
+                f"output_domain must be either 'TD', 'STFT', or 'FD'. "
+                f"'WDM' is not supported yet. Got: {output_domain}."
+            )
+
+        return td_signal.transform(out_settings, window=window)
+
+    def _call_batched(
+        self,
+        *args,
+        ra: np.ndarray,
+        dec: np.ndarray,
+        merger_time: np.ndarray,
+        output_domain: str,
+        domain_kwargs: dict,
+        **kwargs,
+    ) -> DomainBaseArray:
+        """Handle batched waveform generation and return a DomainBaseArray.
+
+        Loops over the batch dimension for the TDI response (which does not support
+        batching natively), then optionally projects all signals onto a common STFT
+        grid when ``self.force_uniform_stft`` is True.
+        """
+        times_batch, mask_batch, hplus_batch, hcross_batch = self.wave_gen_batch(
+            *args, **kwargs
+        )
+
+        Nbatch = times_batch.shape[0]
+        td_signals: List[TDSignal] = []
+
+        for i in range(Nbatch):
+            mask_i = mask_batch[i]
+            t_arr_i = self.xp.asarray(times_batch[i][mask_i])
+            hplus_i = self.xp.asarray(hplus_batch[i][mask_i])
+            hcross_i = self.xp.asarray(hcross_batch[i][mask_i])
+
+            td_signals.append(
+                self._apply_response_single(
+                    t_arr_i, hplus_i, hcross_i,
+                    float(ra[i]), float(dec[i]), float(merger_time[i]),
+                )
+            )
+
+        if output_domain == "TD":
+            return DomainBaseArray(td_signals)
+
+        if output_domain == "STFT" and self.force_uniform_stft:
+            return self._to_uniform_stft(td_signals, domain_kwargs)
+
+        # Natural (non-uniform) path: transform each signal with its own settings.
+        return DomainBaseArray(
+            [self._td_to_output_domain(s, output_domain, domain_kwargs) for s in td_signals]
+        )
+
+    def _to_uniform_stft(
+        self,
+        td_signals: List[TDSignal],
+        domain_kwargs: dict,
+    ) -> DomainBaseArray:
+        """Project all TDSignals onto a common STFT grid spanning the union of their time ranges.
+
+        Sources whose time range is shorter than the global span are zero-padded at
+        the appropriate boundary so that all signals share exactly the same
+        STFTSettings, yielding a uniform DomainBaseArray.
+        """
+        # Determine the global time span.
+        t0_global = min(s.settings.t0 for s in td_signals)
+        t_end_global = max(
+            s.settings.t0 + s.settings.N * s.settings.dt for s in td_signals
+        )
+        N_global = int(round((t_end_global - t0_global) / self.dt))
+
+        # Derive a common STFTSettings from the global time grid.
+        ref_t_arr = self.xp.arange(N_global) * self.dt + t0_global
+        common_settings = get_stft_settings(
+            ref_t_arr, **domain_kwargs, force_backend=self.backend
+        )
+        nperseg = common_settings.get_nperseg(self.dt)
+        window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
+
+        signals = []
+        for td_sig in td_signals:
+            left_pad = int(round((td_sig.settings.t0 - t0_global) / self.dt))
+            right_pad = max(N_global - left_pad - td_sig.settings.N, 0)
+
+            # pad_width: keep all outer dims (channels) intact, pad only the time axis.
+            pad_width = [(0, 0)] * len(td_sig.outer_shape) + [(left_pad, right_pad)]
+            padded_arr = self.xp.pad(
+                td_sig.arr, pad_width, mode="constant", constant_values=0
+            )
+            padded_settings = TDSettings(
+                t0=t0_global, dt=self.dt, N=N_global, force_backend=self.backend
+            )
+            padded_td = TDSignal(arr=padded_arr, settings=padded_settings)
+            signals.append(padded_td.transform(common_settings, window=window))
+
+        return DomainBaseArray(signals)
 
     def __call__(
         self,
@@ -119,64 +321,41 @@ class TDWaveformBase(ABC):
         output_domain: str = "TD",
         domain_kwargs: dict = None,
         **kwargs,
-    ) -> DomainBase:
+    ) -> DomainBase | DomainBaseArray:
         """
         Generate the waveform and return the signal in the specified output domain.
 
+        When ``ra`` is a 1-D array the call is treated as batched: ``wave_gen_batch``
+        is invoked and a :class:`DomainBaseArray` is returned.  For scalar ``ra`` the
+        single-source path is used and a :class:`DomainBase` is returned.
+
         Args:
-            *args: Arguments for the wave_gen method.
-            ra: Right ascension in radians.
-            dec: Declination in radians.
-            merger_time: Time of merger in seconds.
-            **kwargs: Keyword arguments for the wave_gen method.
+            *args: Arguments for the wave_gen / wave_gen_batch method.
+            ra: Right ascension in radians.  Scalar for single source, 1-D array for batch.
+            dec: Declination in radians.  Same shape as ``ra``.
+            merger_time: Time of merger in seconds.  Same shape as ``ra``.
+            output_domain: Target output domain ('TD', 'STFT', or 'FD').
+            domain_kwargs: Extra keyword arguments forwarded to the domain settings constructor.
+            **kwargs: Keyword arguments for the wave_gen / wave_gen_batch method.
 
         Returns:
-            Signal in the specified output domain.
+            Signal in the specified output domain.  A single :class:`DomainBase` for
+            scalar ``ra``, a :class:`DomainBaseArray` for array ``ra``.
         """
-        t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
-
-        # add the buffer time to the time array to ensure that the TDI response is properly calculated at the beginning and end of the signal.
-
-        # update the number of points in the output
-        self.response.num_pts = t_arr.shape[-1]
-
-        # shift the time array by the merger time and the initial offset
-        merger_time = int((self.t0 + merger_time) / self.dt) * self.dt
-
-        t_arr += merger_time
-
-        strain = h_plus + 1j * h_cross
-
-        self.response.get_projections(
-            strain, lam=ra, beta=dec, t0=t_arr[0], t_buffer=self.buffer_time
-        )
-        tdis = self.xp.array(self.response.get_tdi_delays())
-
-        # now set to zeros the points before the start and end of the TDI range
-        tdis[:, : self.response.tdi_start_ind] = 0.0
-        tdis[:, -self.response.tdi_start_ind :] = 0.0
-
-        td_settings = TDSettings(t0=float(t_arr[0]), dt=self.dt, N=int(t_arr.shape[-1]), force_backend=self.backend)
-        td_signal = TDSignal(arr=tdis, settings=td_settings)
-
-        # now prepare the output. If the output domain is TD return the TDSignal
-        if output_domain == "TD":
-            return td_signal
-
-        elif output_domain == "STFT":
-
-            out_settings = get_stft_settings(t_arr, **domain_kwargs, force_backend=self.backend)
-            nperseg = out_settings.get_nperseg(td_settings.dt)
-
-            window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
-
-        elif output_domain == "FD":
-            out_settings = FDSettings(**domain_kwargs, force_backend=self.backend)
-            window = tukey(td_settings.N, alpha=self.tukey_alpha, xp=self.xp)
-
-        else:
-            raise ValueError(
-                f"output_domain must be either 'TD', 'STFT', or 'FD'. 'WDM' is not supported yet. Got: {output_domain}."
+        if np.ndim(ra) >= 1:
+            return self._call_batched(
+                *args,
+                ra=ra,
+                dec=dec,
+                merger_time=merger_time,
+                output_domain=output_domain,
+                domain_kwargs=domain_kwargs,
+                **kwargs,
             )
 
-        return td_signal.transform(out_settings, window=window)
+        # Single-source path.
+        t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
+        td_signal = self._apply_response_single(
+            t_arr, h_plus, h_cross, ra, dec, merger_time
+        )
+        return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)

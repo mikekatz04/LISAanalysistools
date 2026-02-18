@@ -710,7 +710,7 @@ class AnalysisContainerArray:
                 )
             )
 
-        self.num_acs = num_acs = len(acs.flatten())
+        self.num_acs = len(acs.flatten())
         self.gpus = gpus
         self.reset_linear_data_arr()
         self.reset_linear_psd_arr()
