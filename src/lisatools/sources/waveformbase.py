@@ -273,7 +273,8 @@ class TDWaveformBase(ABC):
         td_signals: List[TDSignal],
         domain_kwargs: dict,
     ) -> DomainBaseArray:
-        """Project all TDSignals onto a common STFT grid spanning the union of their time ranges.
+        """
+        Project all TDSignals onto a common STFT grid spanning the union of their time ranges.
 
         Sources whose time range is shorter than the global span are zero-padded at
         the appropriate boundary so that all signals share exactly the same
