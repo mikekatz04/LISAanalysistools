@@ -112,6 +112,9 @@ def inner_product(
 
     else:
         if psd.basis_settings != basis:
+            print(f"{psd.basis_settings}")
+            print(f"{basis}")
+
             raise ValueError("PSD basis is not equivalent to signal basis.")
 
         for i in list(psd.channel_shape):

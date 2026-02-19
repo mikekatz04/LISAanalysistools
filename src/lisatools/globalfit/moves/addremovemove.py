@@ -14,6 +14,7 @@ from tqdm import tqdm
 # from lisatools.globalfit.state import GFState
 # from lisatools.sampling.moves.skymodehop import SkyMove
 from ...analysiscontainer import AnalysisContainerArray
+from ...domains import DomainBase, DomainBaseArray
 from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,20 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     then proposing new sources for this leaf, and then adding back in the contribution of the new sources to the residual.
     This way we can make sure that the likelihoods are computed correctly for each proposed source and that the likelihoods are consistent with the current state of the residuals in the analysis container array.
 
-
+    Args:
+        branch_name: name of the branch that this move will operate on.
+        coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
+        waveform_gen: function that generates the waveforms for the sources given their coordinates. 
+        waveform_gen_kwargs: keyword arguments for the waveform generator function.
+        waveform_like_kwargs: keyword arguments for the likelihood computation function.
+        acs: analysis container array that contains the residuals and other information needed for the likelihood computation.
+        num_repeats: number of times to repeat the proposal step for each leaf.
+        transform_fn: transform container that contains the transforms to be applied to the coordinates before generating waveforms and computing likelihoods.
+        priors: prior distribution container that contains the prior distributions for the sources in the branch.
+        inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
+        Tmax: maximum temperature for the temperature control.
+        betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
+        **kwargs: additional keyword arguments for the Move class.
     """
 
     def __init__(
@@ -115,9 +129,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         ll_tmp2 = self.acs.likelihood(
             source_only=True
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        self.acs.remove_signal_from_residual(
-            removal_waveforms, data_index=None, start_index=None
-        )
+        self.acs.remove_signal_from_residual(removal_waveforms, data_index=None)
         del removal_waveforms
         xp.get_default_memory_pool().free_all_blocks()
 
@@ -140,9 +152,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         ll_tmp2 = self.acs.likelihood(
             source_only=True
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        self.acs.add_signal_to_residual(
-            removal_waveforms, data_index=None, start_index=None
-        )
+        self.acs.add_signal_to_residual(removal_waveforms, data_index=None)
         del removal_waveforms
         xp.get_default_memory_pool().free_all_blocks()
 
@@ -150,36 +160,30 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             source_only=True
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
-    def get_waveform_here(self, coords: np.ndarray):
-        """
-        Get the waveform for the given coordinates.
+    def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray:
+        """Get the waveforms for the given source coordinates.
+
+        Each call to ``waveform_gen`` returns a :class:`~lisatools.domains.DomainBase`
+        (e.g. :class:`~lisatools.domains.STFTSignal` or
+        :class:`~lisatools.domains.FDSignal`).  The results are collected into a
+        :class:`~lisatools.domains.DomainBaseArray`, which batches them for
+        vectorized downstream operations when all signals share the same
+        domain settings.
 
         Args:
-            coords: coordinates of the sources for which we want to get the waveform. Shape is (n_sources, ndim).
+            coords: Source coordinates, shape ``(n_sources, ndim)``.
 
-        Returns:    
-            waveforms: waveforms for the given coordinates. Shape is (n_sources, n_channels, (data_shape)).
+        Returns:
+            :class:`~lisatools.domains.DomainBaseArray` of length ``n_sources``.
+
         """
-    
         xp.get_default_memory_pool().free_all_blocks()
-        # change this to be more memory efficient if some waveforms are shorter than the full data array
-        # waveforms = xp.zeros(
-        #     (coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex
-        # )
-
-        # for i in range(coords.shape[0]):
-        #     waveforms[i] = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
 
         waveforms = []
         for i in range(coords.shape[0]):
-            waveforms.append(
-                self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
-            )
-        
-        # now concatenate along axis to get shape (n_sources, n_channels, data_length)
-        waveforms = xp.stack(waveforms, axis=0) 
+            waveforms.append(self.waveform_gen(*coords[i], **self.waveform_gen_kwargs))
 
-        return waveforms
+        return DomainBaseArray(waveforms)
 
     def setup_likelihood_here(self, coords):
         pass

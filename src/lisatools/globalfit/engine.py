@@ -22,6 +22,7 @@ from eryn.utils.transform import TransformContainer
 
 from lisatools.detector import EqualArmlengthOrbits, Orbits
 
+from ..analysiscontainer import AnalysisContainerArray
 from ..detector import LISAModel, sangria
 from ..sensitivity import (AE1SensitivityMatrix, AE2SensitivityMatrix,
                            AET2SensitivityMatrix, XYZ1SensitivityMatrix,
@@ -84,8 +85,6 @@ class Setup:
     def init_df(self):
         self.Tobs = int(self.Tobs / self.dt) * self.dt
         self.df = 1.0 / self.Tobs
-
-
 @dataclasses.dataclass
 class Settings:
     Tobs: float = None
