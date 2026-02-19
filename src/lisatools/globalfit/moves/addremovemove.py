@@ -27,7 +27,20 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     then proposing new sources for this leaf, and then adding back in the contribution of the new sources to the residual.
     This way we can make sure that the likelihoods are computed correctly for each proposed source and that the likelihoods are consistent with the current state of the residuals in the analysis container array.
 
-
+    Args:
+        branch_name: name of the branch that this move will operate on.
+        coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
+        waveform_gen: function that generates the waveforms for the sources given their coordinates. 
+        waveform_gen_kwargs: keyword arguments for the waveform generator function.
+        waveform_like_kwargs: keyword arguments for the likelihood computation function.
+        acs: analysis container array that contains the residuals and other information needed for the likelihood computation.
+        num_repeats: number of times to repeat the proposal step for each leaf.
+        transform_fn: transform container that contains the transforms to be applied to the coordinates before generating waveforms and computing likelihoods.
+        priors: prior distribution container that contains the prior distributions for the sources in the branch.
+        inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
+        Tmax: maximum temperature for the temperature control.
+        betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
+        **kwargs: additional keyword arguments for the Move class.
     """
 
     def __init__(

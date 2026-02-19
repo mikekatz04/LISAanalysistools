@@ -190,10 +190,17 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             delta_t=self.dt,
         )
 
+        hcross.block_until_ready()  # ensure all outputs are ready before moving to self.xp
+
+        xp_mask = self.xp.asarray(mask).copy()
+        out_times = self.xp.asarray(times).copy()[xp_mask]
+        out_hplus = self.xp.asarray(hplus).copy()[xp_mask]
+        out_hcross = self.xp.asarray(hcross).copy()[xp_mask]
+
         return (
-            self.xp.asarray(times[mask]),
-            self.xp.asarray(hplus[mask]),
-            self.xp.asarray(hcross[mask]),
+            out_times,
+            out_hplus,
+            out_hcross,
         )
 
     def wave_gen_batch(
@@ -253,11 +260,13 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             delta_t=self.dt,
             **kwargs,
         )
+        hcross.block_until_ready()  # ensure all outputs are ready before moving to self.xp
+
         # Move to the target backend: zero-copy on GPU via __cuda_array_interface__,
         # host transfer on CPU. _call_batched will slice and re-wrap as needed.
         return (
-            self.xp.asarray(times),
-            self.xp.asarray(mask),
-            self.xp.asarray(hplus),
-            self.xp.asarray(hcross),
+            self.xp.asarray(times).copy(),
+            self.xp.asarray(mask).copy(),
+            self.xp.asarray(hplus).copy(),
+            self.xp.asarray(hcross).copy(),
         )

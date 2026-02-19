@@ -160,15 +160,13 @@ class TDWaveformBase(ABC):
         Returns:
             TDSignal with the TDI response applied.
         """
-        self.response.num_pts = t_arr.shape[-1]
-
-        
-        t_arr += (merger_time + self.waveform_t0)
+        shifted_t_arr = (t_arr + merger_time + self.waveform_t0).copy()
+        self.response.num_pts = shifted_t_arr.shape[-1]
 
         strain = h_plus + 1j * h_cross
 
         self.response.get_projections(
-            strain, lam=ra, beta=dec, t0=t_arr[0], t_buffer=self.buffer_time
+            strain, lam=ra, beta=dec, t0=shifted_t_arr[0], t_buffer=self.buffer_time
         )
         tdis = self.xp.array(self.response.get_tdi_delays())
 
@@ -178,20 +176,21 @@ class TDWaveformBase(ABC):
 
         # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
 
-        t_arr_shift = (self.data_t0 - t_arr[0]) % self.dt
-        t_arr += t_arr_shift
+        t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
+        shifted_t_arr += t_arr_shift
 
         # now remove everything before the start of the data
-        start_ind = int((self.data_t0 - t_arr[0]) / self.dt)
+        start_ind = int((self.data_t0 - shifted_t_arr[0]) / self.dt)
         if start_ind > 0:
+            shifted_t_arr = shifted_t_arr[start_ind:]
             tdis = tdis[:, start_ind:]
             t_arr = t_arr[start_ind:]
 
 
         td_settings = TDSettings(
-            t0=float(t_arr[0]),
+            t0=float(shifted_t_arr[0]),
             dt=self.dt,
-            N=int(t_arr.shape[-1]),
+            N=int(shifted_t_arr.shape[-1]),
             force_backend=self.backend,
         )
         return TDSignal(arr=tdis, settings=td_settings)
@@ -291,6 +290,7 @@ class TDWaveformBase(ABC):
 
         for i in range(Nbatch):
             mask_i = mask_batch[i]
+
             t_arr_i = self.xp.asarray(times_batch[i][mask_i])
             hplus_i = self.xp.asarray(hplus_batch[i][mask_i])
             hcross_i = self.xp.asarray(hcross_batch[i][mask_i])
@@ -398,11 +398,13 @@ class TDWaveformBase(ABC):
                 domain_kwargs=domain_kwargs,
                 **kwargs,
             )
-
-        # Single-source path.
-        t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
-        td_signal = self._apply_response_single(
-            t_arr, h_plus, h_cross, ra, dec, merger_time
-        )
         
-        return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)
+        else:
+            # Single-source path.
+            t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
+
+            td_signal = self._apply_response_single(
+                t_arr, h_plus, h_cross, ra, dec, merger_time
+            )
+            
+            return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)
