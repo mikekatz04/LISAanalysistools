@@ -323,12 +323,15 @@ class DataResidualArray:
 
         elif fig is not None:
             raise NotImplementedError
+        
+        _f_arr = self.settings.f_arr.get() if isinstance(self.settings.f_arr, cp.ndarray) else self.settings.f_arr
+        _data_res_arr = self.data_res_arr.arr.get() if isinstance(self.data_res_arr.arr, cp.ndarray) else self.data_res_arr.arr
 
         for i, ax_tmp in zip(inds_list, ax):
-            plot_in = np.abs(self.data_res_arr[i])
+            plot_in = np.abs(_data_res_arr[i])
             if char_strain:
-                plot_in *= self.frequency_arr
-            ax_tmp.loglog(self.frequency_arr, plot_in, **kwargs)
+                plot_in *= _f_arr
+            ax_tmp.loglog(_f_arr, plot_in, **kwargs)
 
         return (fig, ax)
 

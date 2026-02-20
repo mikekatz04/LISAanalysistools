@@ -173,6 +173,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # if self.data_input_path is None:
         #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
+        self.force_backend = "cuda12x" if self.gpus is not None else 'cpu'
         self.init_data_information()
 
     def init_orbit_information(self):
@@ -180,7 +181,7 @@ class GeneralSetup(Setup, GeneralSettings):
             self.orbits = EqualArmlengthOrbits()
             self.gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
         else:
-            if self.gpu_orbits is None:
+            if self.gpu_orbits is None and self.force_backend == "cuda12x":
                 # TODO: make better
                 raise ValueError(
                     "If adding orbits, make sure to duplicate into GPU orbits."
@@ -219,17 +220,19 @@ class GeneralSetup(Setup, GeneralSettings):
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
+        self.data_t0 = float(times[0])
 
         if self.basis_domain == "stft":
             from ..domains import get_stft_settings
 
             if self.stft_dt is None:
                 raise ValueError("Must provide `stft_dt` for stft basis domain.")
+            self.basis_kwargs = dict(big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq)
+
             domain_settings = get_stft_settings(
                 times=times,
-                big_dt=self.stft_dt,
-                min_freq=self.start_freq,
-                max_freq=self.end_freq,
+                **self.basis_kwargs,
+                force_backend=self.force_backend,
             )
             nperseg = domain_settings.get_nperseg(dt)
             window = tukey(nperseg, alpha=self.tukey_alpha)
@@ -239,10 +242,15 @@ class GeneralSetup(Setup, GeneralSettings):
 
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
+
+            self.basis_kwargs=dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
+
             domain_settings = FDSettings(
-                N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq
+                **self.basis_kwargs, force_backend=self.force_backend
             )
             window = tukey(Nt, alpha=self.tukey_alpha)
+
+
 
         else:
             raise NotImplementedError(
@@ -260,11 +268,12 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if orbits is not None:
             self.orbits = orbits
-            self.gpu_orbits = data_processor.orbits_class(
-                filename=orbits.filename,
-                armlength=orbits.armlength,
-                force_backend="cuda12x",
-            )
+            if self.force_backend == "cuda12x":
+                self.gpu_orbits = data_processor.orbits_class(
+                    filename=orbits.filename,
+                    armlength=orbits.armlength,
+                    force_backend="cuda12x",
+                )
             # self.gpu_orbits.configure()
 
         self.init_orbit_information()
@@ -273,6 +282,7 @@ class GeneralSetup(Setup, GeneralSettings):
         self.sensitivity_backend = XYZSensitivityBackend(
             orbits=self.gpu_orbits,
             settings=domain_settings,
+            force_backend=self.force_backend,
             **self.sensitivity_init_kwargs,
         )
 

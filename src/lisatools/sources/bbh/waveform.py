@@ -12,10 +12,12 @@ from ..waveformbase import SNRWaveform, TDWaveformBase
 
 try:
     import phentax
+    import jax.numpy as jnp
 
     phentax_available = True
 except (ImportError, ModuleNotFoundError):
     phentax_available = False
+    jnp = np  # type: ignore
 
 
 class BBHSNRWaveform(SNRWaveform):
@@ -153,6 +155,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         self.start_freq = start_freq
         self.ref_freq = ref_freq
 
+
     def wave_gen(
         self,
         m1: float,
@@ -166,7 +169,8 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         ref_freq: float = None,
         start_freq: float = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Generate the waveform's polarizations for a single source.
+        """
+        Generate the waveform's polarizations for a single source.
 
         Returns:
             t_arr, h_plus, h_cross

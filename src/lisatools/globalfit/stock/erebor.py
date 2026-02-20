@@ -241,6 +241,12 @@ class GBSetup(Setup, GBSettings):
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
 
+def gpc_to_mpc(x):
+    """
+    Transform from Gpc to Mpc, for distance prior.
+    """
+    return x * 1e3
+
 
 from bbhx.utils.transform import *
 from eryn.moves import Move
@@ -251,6 +257,7 @@ from ..state import MBHState
 
 @dataclasses.dataclass
 class MBHSettings(Settings):
+    waveform_kwargs: Optional[dict] = None
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 200
@@ -296,7 +303,7 @@ class MBHSetup(Setup):
             "psi",
             "lam",
             "sin_beta",
-            "t_ref",
+            "t_plunge",
         ]
 
         if self.transform is None:
@@ -308,25 +315,27 @@ class MBHSetup(Setup):
                 "s2z",
                 "dist",
                 "phi_ref",
-                "f_ref",
+                #"f_ref",
                 "cos_iota",
+                "psi",
                 "lam",
                 "sin_beta",
-                "psi",
-                "t_ref",
+                #"psi",
+                "t_plunge",
             ]
 
             mbh_transform_fn_in = {
                 "logM": np.exp,
-                "dist": mbh_dist_trans,
+                "dist": gpc_to_mpc,
                 "cos_iota": np.arccos,
                 "sin_beta": np.arcsin,
                 ("logM", "q"): mT_q,
-                ("t_ref", "lam", "sin_beta", "psi"): LISA_to_SSB,
+                ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
             }
 
             # for transforms
-            mbh_fill_dict = {"f_ref": 0.0}
+            #mbh_fill_dict = {"f_ref": 0.0}
+            mbh_fill_dict = {}
 
             self.transform = TransformContainer(
                 input_basis=input_basis,
@@ -342,22 +351,19 @@ class MBHSetup(Setup):
 
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
             priors_mbh = {
-                input_basis[0]: uniform_dist(np.log(1e4), np.log(1e8)),
-                input_basis[1]: uniform_dist(0.01, 0.999999999),
-                input_basis[2]: uniform_dist(-0.99999999, +0.99999999),
-                input_basis[3]: uniform_dist(-0.99999999, +0.99999999),
-                input_basis[4]: uniform_dist(0.01, 1000.0),
-                input_basis[5]: uniform_dist(0.0, 2 * np.pi),
-                input_basis[6]: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                input_basis[7]: uniform_dist(0.0, 2 * np.pi),
-                input_basis[8]: uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                input_basis[9]: uniform_dist(0.0, np.pi),
-                input_basis[10]: uniform_dist(0.0, self.Tobs + 3600.0),
+                "logM": uniform_dist(np.log(1e4), np.log(1e8)),
+                "q": uniform_dist(0.01, 0.999999999),
+                "s1z": uniform_dist(-0.99999999, +0.99999999),
+                "s2z": uniform_dist(-0.99999999, +0.99999999),
+                "dist": uniform_dist(0.01, 1000.0),
+                "phi_ref": uniform_dist(0.0, 2 * np.pi),
+                "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                "psi": uniform_dist(0.0, 2 * np.pi),
+                "lam": uniform_dist(0.0, 2 * np.pi),
+                "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                "t_plunge": uniform_dist(0.0, self.Tobs + 3600.0),
             }
-
-            # TODO: orbits check against sangria/sangria_hm
 
             self.priors = {"mbh": ProbDistContainer(priors_mbh)}
 
@@ -400,20 +406,26 @@ class MBHSetup(Setup):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
-        self.waveform_kwargs = dict(
-            modes=[(2, 2)],
-            length=1024,
-        )
+        if self.waveform_kwargs is None:
+            self.logger.warning(
+                "No waveform kwargs provided for MBHSetup, using defaults. These are the legacy BBHx settings"
+            )
+            self.waveform_kwargs = dict(
+                modes=[(2, 2)],
+                length=1024,
+            )
 
         if self.inner_moves is None:
             from eryn.moves import StretchMove
 
             from lisatools.sampling.moves.skymodehop import SkyMove
 
+            angles_map = dict(cosinc=6, psi=7, lam=8, sinbeta=9)
+
             self.inner_moves = [
-                (SkyMove(which="both"), 0.02),
-                (SkyMove(which="long"), 0.05),
-                (SkyMove(which="lat"), 0.05),
+                (SkyMove(ind_map=angles_map, which="both"), 0.02),
+                (SkyMove(ind_map=angles_map, which="long"), 0.05),
+                (SkyMove(ind_map=angles_map, which="lat"), 0.05),
                 (StretchMove(), 0.88),
             ]
 

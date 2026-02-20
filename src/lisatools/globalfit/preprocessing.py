@@ -824,11 +824,14 @@ class BaseProcessingStep(SignalProcessor):
                 filename="science_data.png",
                 **kwargs,
             )
+        
+        xp = get_array_module(self.data)
 
         settings = TDSettings(
             t0=self.times[0],
             dt=self.dt,
             N=self.N,
+            force_backend='cpu' if xp is np else 'gpu',
             # xp = get_array_module(self.data)
         )
         self.td_signal = TDSignal(arr=self.data, settings=settings)
