@@ -271,6 +271,20 @@ class MBHSetup(Setup):
 
     def init_sampling_info(self):
 
+        # input_basis = [
+        #     "logM",
+        #     "q",
+        #     "s1z",
+        #     "s2z",
+        #     "dist",
+        #     "phi_ref",
+        #     "cos_iota",
+        #     "lam",
+        #     "sin_beta",
+        #     "psi",
+        #     "t_ref",
+        # ]
+
         input_basis = [
             "logM",
             "q",
@@ -279,9 +293,9 @@ class MBHSetup(Setup):
             "dist",
             "phi_ref",
             "cos_iota",
+            "psi",
             "lam",
             "sin_beta",
-            "psi",
             "t_ref",
         ]
 

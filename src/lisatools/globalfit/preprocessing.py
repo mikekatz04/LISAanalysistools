@@ -811,6 +811,12 @@ class BaseProcessingStep(SignalProcessor):
             )
 
         if Tobs is not None:
+            if Tobs > self.T:
+                logger.warning(
+                    f"Requested observation time Tobs={Tobs}s exceeds total data duration T={self.T}s. No trimming applied."
+                )
+                Tobs = self.T
+            
             _, _ = self.trim(
                 duration=Tobs,
                 is_percent=False,

@@ -167,7 +167,7 @@ class TDSettings(DomainSettingsBase):
         if not isinstance(value, TDSettings):
             return False
 
-        return (value.N == self.N) and (value.dt == self.dt) and (value.t0 == self.t0)
+        return (value.N == self.N) and (value.dt == self.dt) and (self.xp.isclose(value.t0, self.t0))
 
     @property
     def differential_component(self) -> float:
@@ -405,8 +405,8 @@ class FDSettings(DomainSettingsBase):
         return (
             (value.N == self.N)
             and (value.df == self.df)
-            and (value.min_freq == self.min_freq)
-            and (value.max_freq == self.max_freq)
+            and (self.xp.isclose(value.min_freq, self.min_freq))
+            and (self.xp.isclose(value.max_freq, self.max_freq))
         )
 
     @property
@@ -704,7 +704,9 @@ class STFTSettings(DomainSettingsBase):
             and (value.NF == self.NF)
             and (value.dt == self.dt)
             and (value.df == self.df)
-            and (value.t0 == self.t0)
+            and (self.xp.isclose(value.t0, self.t0))
+            and (self.xp.isclose(value.min_freq, self.min_freq))
+            and (self.xp.isclose(value.max_freq, self.max_freq))
         )
 
     @property

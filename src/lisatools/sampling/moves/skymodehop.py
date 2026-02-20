@@ -10,7 +10,12 @@ class SkyMove(MHMove):
     """A Metropolis step with a Gaussian proposal function.
 
     Args:
-
+        ind_map (dict, optional): A dictionary mapping the coordinate names to
+            their indices in the coordinates array. The default is
+            ``{"cosinc": 6, "lam": 7, "sinbeta": 8, "psi": 9}``.
+        which (str, optional): Which transformation to apply. Must be one of
+            ``"both"``, ``"lat"``, or ``"long"``. The default is ``"both"``.
+        **kwargs: Additional keyword arguments to pass to the parent class.
 
     Raises:
         ValueError: If the proposal dimensions are invalid or if any of any of
