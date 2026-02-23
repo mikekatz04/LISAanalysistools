@@ -90,8 +90,60 @@ class GFHDFBackend(eryn_HDFBackend):
         self.sub_state_bases = sub_state_bases
         self.recipe_added = False
 
+    @property
+    def reset_kwargs(self):
+        """Get reset_kwargs including sub-backend kwargs from h5 file."""
+        base_kwargs = super().reset_kwargs
+        if self.sub_backend is not None:
+            # First, determine which sub-backend groups exist in the file.
+            existing_keys = set()
+            try:
+                with self.open() as f:
+                    if (
+                        self.name in f
+                        and "sub_backend" in f[self.name]
+                    ):
+                        existing_keys = set(f[self.name]["sub_backend"].keys())
+            except Exception:
+                pass
+            # Now read reset_kwargs from each existing sub-backend
+            # (outside the parent file handle to avoid nested opens).
+            for key, sub_backend_tmp in self.sub_backend.items():
+                if key in existing_keys:
+                    try:
+                        base_kwargs.update(sub_backend_tmp.reset_kwargs)
+                    except Exception:
+                        pass
+        return base_kwargs
+
     def reset(self, *args, **kwargs):
-        # regular reset
+        # Store sub-backend kwargs before super().reset() deletes the HDF5 group.
+        # super().reset() calls `del f[self.name]` which wipes everything,
+        # including the sub_backend group. We need to preserve the kwargs
+        # so sub-backends can be re-created.
+        sub_backend_saved_kwargs = {}
+        if self.sub_backend is not None:
+            # First, determine which sub-backend groups exist in the file.
+            existing_keys = set()
+            try:
+                with self.open() as f:
+                    if (
+                        self.name in f
+                        and "sub_backend" in f[self.name]
+                    ):
+                        existing_keys = set(f[self.name]["sub_backend"].keys())
+            except Exception:
+                pass
+            # Now read reset_kwargs from each existing sub-backend
+            # (outside the parent file handle to avoid nested opens).
+            for key, sub_backend_tmp in self.sub_backend.items():
+                if key in existing_keys:
+                    try:
+                        sub_backend_saved_kwargs[key] = sub_backend_tmp.reset_kwargs
+                    except Exception:
+                        pass
+
+        # regular reset — this deletes and recreates f[self.name]
         super().reset(*args, **kwargs)
 
         if self.sub_backend is not None:
@@ -100,8 +152,18 @@ class GFHDFBackend(eryn_HDFBackend):
                 if "sub_backend" not in g:
                     g.create_group("sub_backend")
 
-            for sub_backend_tmp in self.sub_backend.values():
-                sub_backend_tmp.reset(*args, **kwargs)
+            for key, sub_backend_tmp in self.sub_backend.items():
+                # Use saved kwargs if available, otherwise fall back to
+                # kwargs passed directly to this reset call.
+                sub_backend_kwargs = sub_backend_saved_kwargs.get(key, {})
+                # Merge in any kwargs passed by the caller (e.g. num_mbhs,
+                # num_bands, band_edges). Don't use hasattr() to check for
+                # reset_kwargs — it's a @property that reads from the HDF5
+                # file which was just wiped by super().reset().
+                for kw_key, kw_val in kwargs.items():
+                    if kw_key not in sub_backend_kwargs:
+                        sub_backend_kwargs[kw_key] = kw_val
+                sub_backend_tmp.reset(*args, **sub_backend_kwargs)
 
         with self.open("a") as f:
             f[self.name].attrs["has_recipe"] = False
@@ -273,7 +335,6 @@ class GFHDFBackend(eryn_HDFBackend):
             recipe_step_group = recipe_group[step_name]
             recipe_step_group.attrs["status"] = True
 
-
 class GBHDFBackend(eryn_HDFBackend):
 
     def reset(
@@ -385,7 +446,7 @@ class GBHDFBackend(eryn_HDFBackend):
     @property
     def reset_kwargs(self):
         """Get reset_kwargs from h5 file."""
-        return dict(num_bands=self.num_bands)
+        return dict(num_bands=self.num_bands, band_edges=self.band_edges)
 
     def grow(self, ngrow, *args):
 
@@ -571,7 +632,8 @@ class MBHHDFBackend(eryn_HDFBackend):
     def num_mbhs(self):
         """Get num_bands from h5 file."""
         with self.open() as f:
-            return f[self.name].attrs["num_mbhs"]
+            mbh_group = f[self.name]["sub_backend"]["mbh"]
+            return mbh_group.attrs["num_mbhs"]
 
     @property
     def reset_kwargs(self):

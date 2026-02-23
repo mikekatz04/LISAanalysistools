@@ -182,7 +182,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         "mbh",  # branch_name,
         coords_shape,
         wave_gen,
-        tempering_kwargs,
+        # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs,
         acs,
@@ -192,7 +192,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         inner_moves,
     )
 
-    mbh_pe_move = ResidualAddOneRemoveOneMove(*mbh_move_args)
+    mbh_pe_move = ResidualAddOneRemoveOneMove(*mbh_move_args, betas_all=betas_all)
     mbh_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     
@@ -200,7 +200,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 ##### SETTINGS ###########
 ###############
 
-def get_mbh_global_fit_settings(general_set: GeneralSetup) -> MBHSetup:
+def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     
     hms = [21, 33, 44]
 
@@ -234,7 +234,7 @@ def get_mbh_global_fit_settings(general_set: GeneralSetup) -> MBHSetup:
         ref_freq=2.0886886878886526e-05, # source 18
         buffer_time=3000,
         tukey_alpha=general_set.tukey_alpha,
-        is_tref=False,
+        #is_tref=False,
         force_backend=general_set.force_backend,
     )
 
@@ -296,8 +296,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     base_file_name = "mbh_psd_separate_1st_try"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [2]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
+    # Restrict JAX to only see the target GPU — must be set before JAX backend init
+    import jax
+    jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
+
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
     ntemps = 10
@@ -313,7 +317,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  verbose=True,
                                  do_plots=True,
                                  orbits_class=L1Orbits,
-                                 orbirs_kwargs=dict(force_backend=backend, frame="icrs")
+                                 orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
                                 )
     
     preprocess_kwargs = dict(plot_folder=file_store_dir)

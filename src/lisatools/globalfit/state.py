@@ -245,14 +245,16 @@ class MBHState(eryn_State):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
+            self.num_mbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
+            self.num_mbhs = possible_state['mbh'].shape[-2]
 
     @property
     def reset_kwargs(self):
         # TODO: this okay for future?
         return dict(
-            num_mbhs=15,  # self.betas_all.shape[0]
+            num_mbhs=self.num_mbhs,
         )
 
 
@@ -263,13 +265,15 @@ class EMRIState(eryn_State):
         if isinstance(possible_state, self.__class__):
             dc = deepcopy if copy else return_x
             self.betas_all = dc(possible_state.betas_all)
+            self.num_emris = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
+            self.num_emris = possible_state['emri'].shape[-2]
 
     @property
     def reset_kwargs(self):
         # TODO: this okay for future?
-        return dict(num_emris=1)  # self.betas_all.shape[0]
+        return dict(num_emris=self.num_emris)  # self.betas_all.shape[0]
 
 
 class GFState(eryn_State):

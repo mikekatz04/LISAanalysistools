@@ -177,7 +177,20 @@ class GlobalFit:
         comm: MPI communicator for parallel processing.
     """
 
-    def __init__(self, curr, comm):
+    def __init__(self, 
+                 curr: CurrentInfoGlobalFit, 
+                 comm: MPI.Comm
+                 ):
+        """Main class for managing the global fit MCMC sampling run.
+
+        Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
+        for fitting multiple gravitational wave sources simultaneously.
+
+        Args:
+            curr: CurrentInfoGlobalFit object containing all run configuration.
+            comm: MPI communicator for parallel processing.
+        """
+
         self.comm = comm
         self.curr = curr
         self.rank = comm.Get_rank()
@@ -205,8 +218,11 @@ class GlobalFit:
         name = "GlobalFit"
         self.logger = init_logger(filename="global_fit.log", level=level, name=name)
 
-    def load_info(self, priors):
-        """Load or initialize the MCMC state from backend or priors.
+    def load_info(self, 
+                  priors: typing.Dict[str, typing.Any]
+                  ) -> GFState:
+        """
+        Load or initialize the MCMC state from backend or priors.
 
         Attempts to load the state from the main backend file. If that doesn't exist,
         tries to load from a past file if specified. Otherwise, initializes a new state
@@ -319,8 +335,11 @@ class GlobalFit:
 
         return state
 
-    def setup_acs(self, state):
-        """Set up AnalysisContainerArray for likelihood computations.
+    def setup_acs(self, 
+                  state: GFState
+                  ) -> AnalysisContainerArray:
+        """
+        Set up AnalysisContainerArray for likelihood computations.
 
         Creates analysis containers for each walker, initializing data residuals
         and sensitivity curves. Adds initial signal templates to the residuals.
@@ -399,7 +418,7 @@ class GlobalFit:
         # data = generated_info["data"]
         # psd = generated_info["psd"]
         # lisasens = generated_info["lisasens"]
-        breakpoint()
+        # breakpoint()
         return acs
 
     @property
@@ -469,7 +488,6 @@ class GlobalFit:
                     ):
                         for key, value in self.curr.source_info[name].periodic.items():
                             periodic[key] = value
-                # breakpoint()
 
             state = self.load_info(priors)
             self.logger.debug("state loaded")
