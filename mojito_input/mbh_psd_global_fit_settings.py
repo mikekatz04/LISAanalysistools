@@ -10,10 +10,8 @@ except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
     gpu_available = False
 
-from eryn.moves.tempering import TemperatureControl, make_ladder
 
 from lisatools.detector import L1Orbits
-from eryn.moves import TemperatureControl
 from lisatools.utils.constants import *
 #from gbgpu.utils.utility import get_fdot
 from eryn.state import BranchSupplemental
@@ -44,7 +42,7 @@ from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
 from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
+from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, MBHSpecialMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
@@ -55,145 +53,23 @@ from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralS
 
 from eryn.utils.updates import Update
 
-from lisatools.globalfit.recipe import Recipe, RecipeStep
-import time
-
 from lisatools.globalfit.preprocessing import L1ProcessingStep
+from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves, build_mbh_moves_phenom
 
 from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
 
 
-################
-
-### DEFINE RECIPE
-
-#############
-
-
-class PSDSearchRecipeStep(RecipeStep):
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return True
-
-
-class PSDPERecipeStep(RecipeStep):
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return False
-
-
-from lisatools.sampling.stopping import SearchConvergeStopping
-
-
-################
-
-### DEFINE RECIPE
-
-#############
-
-
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-   
-    # TODO: adjust this indide current info
-    general_info = curr.general_info
-    nwalkers = curr.general_info.nwalkers
-    ntemps = curr.general_info.ntemps
+    cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
 
-    psd_info = curr.source_info["psd"]
-    mbh_info = curr.source_info["mbh"]
+    psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors)
 
-    gpus = curr.general_info.gpus
-    cp.cuda.runtime.setDevice(gpus[0])
-    
-    # setup psd search move
-    effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
-    Tmax = 1e6
-    temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False)
-    
-    psd_move_args = (acs, priors)
+    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
 
-    psd_move_kwargs = dict(
-        num_repeats=60,
-        live_dangerously=True,
-        psd_transform_fn = psd_info.transform_fn,
-        sensitivity_backend = general_info.sensitivity_backend,
-        # gibbs_sampling_setup=[{
-        #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
-        #     "galfor": np.ones((1, engine_info.ndims["galfor"]), dtype=bool)
-        # }],
-        temperature_control=temperature_control
-    )
-    
-    psd_search_move = PSDMove(
-        *psd_move_args, 
-        max_logl_mode=True,
-        name="psd search move",
-        **psd_move_kwargs,
-    )
-
-    psd_pe_move = PSDMove(
-        *psd_move_args, 
-        max_logl_mode=False,
-        name="psd pe move",
-        **psd_move_kwargs,
-    )
-    # TODO: put this under the hood
-    psd_search_move.accepted = np.zeros((ntemps, nwalkers))
-    psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
-
-    recipe.add_recipe_component(PSDSearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    recipe.add_recipe_component(PSDPERecipeStep(moves=[psd_pe_move]), name="psd pe")
-
-    # now do the black holes
-
-    from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
-
-    wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
-
-    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
-        for leaf in range(mbh_inds.shape[-1]):
-            if mbh_inds[0, leaf]:
-                assert np.all(mbh_inds[:, leaf])
-                inj_coords = state.branches_coords["mbh"][0, :, leaf]
-                inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
-                
-                signals_in = wave_gen(*inj_coords_in.T, **mbh_info.waveform_kwargs)
-                breakpoint()
-                acs.add_signal_to_residual(signals_in)
-    
-    betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
-    state.sub_states["mbh"].betas_all = betas_all
-
-    inner_moves = mbh_info.inner_moves
-    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
-    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
-
-    mbh_move_args = (
-        "mbh",  # branch_name,
-        coords_shape,
-        wave_gen,
-        # tempering_kwargs,
-        mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs,
-        mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs,
-        acs,
-        mbh_info.num_prop_repeats,
-        mbh_info.transform,
-        priors,
-        inner_moves,
-    )
-
-    mbh_pe_move = ResidualAddOneRemoveOneMove(*mbh_move_args, betas_all=betas_all)
-    mbh_pe_move.accepted = np.zeros((ntemps, nwalkers))
+    # now do the black holes (WIP)
+    _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state)
+    # TODO: add mbh recipe components
 
     
 #######################
