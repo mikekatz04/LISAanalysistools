@@ -33,8 +33,11 @@ NUM_SPLINE_THREADS = 256
 from . import detector as lisa_models
 from .detector import L1Orbits
 from .domains import DomainSettingsBase
-from .stochastic import (FittedHyperbolicTangentGalacticForeground,
-                         StochasticContribution, check_stochastic)
+from .stochastic import (
+    FittedHyperbolicTangentGalacticForeground,
+    StochasticContribution,
+    check_stochastic,
+)
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
@@ -61,9 +64,7 @@ class Sensitivity(ABC):
         except ValueError:
             if isinstance(array, float):
                 return np
-            raise ValueError(
-                "array must be a numpy or cupy array (it can be a float as well)."
-            )
+            raise ValueError("array must be a numpy or cupy array (it can be a float as well).")
 
     @staticmethod
     def transform(
@@ -195,9 +196,7 @@ class Sensitivity(ABC):
 
             stochastic_function = check_stochastic(stochastic_function)
 
-            sgal[:] = stochastic_function.get_Sh(
-                f, *stochastic_params, **stochastic_kwargs
-            )
+            sgal[:] = stochastic_function.get_Sh(f, *stochastic_params, **stochastic_kwargs)
 
         if squeeze:
             sgal = sgal.squeeze()
@@ -955,9 +954,7 @@ class CornishLISASens(LISASens):
     """
 
     @staticmethod
-    def get_Sn(
-        f: float | np.ndarray, average: bool = True, **kwargs: dict
-    ) -> float | np.ndarray:
+    def get_Sn(f: float | np.ndarray, average: bool = True, **kwargs: dict) -> float | np.ndarray:
         # TODO: documentation here
 
         sky_averaging_constant = 20.0 / 3.0 if average else 1.0
@@ -969,12 +966,7 @@ class CornishLISASens(LISASens):
         Poms = ((1.5e-11) * (1.5e-11)) * (1 + np.power((2e-3) / f, 4))
 
         # Acceleration Noise
-        Pacc = (
-            (3e-15)
-            * (3e-15)
-            * (1 + (4e-4 / f) * (4e-4 / f))
-            * (1 + np.power(f / (8e-3), 4))
-        )
+        Pacc = (3e-15) * (3e-15) * (1 + (4e-4 / f) * (4e-4 / f)) * (1 + np.power(f / (8e-3), 4))
 
         # constants for Galactic background after 1 year of observation
         alpha = 0.171
@@ -1006,9 +998,7 @@ class FlatPSDFunction(LISASens):
     """White Noise PSD function."""
 
     @classmethod
-    def get_Sn(
-        cls, f: float | np.ndarray, val: float, **kwargs: dict
-    ) -> float | np.ndarray:
+    def get_Sn(cls, f: float | np.ndarray, val: float, **kwargs: dict) -> float | np.ndarray:
         # TODO: documentation here
         xp = cls.get_xp(f)
         out = xp.full_like(f, val)
@@ -1134,18 +1124,14 @@ class SensitivityMatrixBase:
                         _type_1 = type(tmp)
                     else:
                         if _type_1 != type(tmp):
-                            raise ValueError(
-                                "List inputs must be all of the same type."
-                            )
+                            raise ValueError("List inputs must be all of the same type.")
 
                     if isinstance(tmp, list):
                         if _test_length is None:
                             _test_length = len(tmp)
                         else:
                             if len(tmp) != _test_length:
-                                raise ValueError(
-                                    "Input list structure is not Rectangular."
-                                )
+                                raise ValueError("Input list structure is not Rectangular.")
                     elif isinstance(tmp, np.ndarray) or isinstance(tmp, cp.ndarray):
                         if tmp.ndim > 1:
                             raise ValueError(
@@ -1155,18 +1141,14 @@ class SensitivityMatrixBase:
                             _test_length = len(tmp)
                         else:
                             if len(tmp) != _test_length:
-                                raise ValueError(
-                                    "Input list/array structure is not Rectangular."
-                                )
+                                raise ValueError("Input list/array structure is not Rectangular.")
 
                 if isinstance(_layer[0], list):
                     outer_shape.append(len(_layer[0]))
                     _layer = _layer[0]
                     continue
 
-                elif isinstance(_layer[0], np.ndarray) or isinstance(
-                    _layer[0], cp.ndarray
-                ):
+                elif isinstance(_layer[0], np.ndarray) or isinstance(_layer[0], cp.ndarray):
                     # hit the array, must be last layer
                     _run = False
                     self.can_redo = False
@@ -1193,18 +1175,14 @@ class SensitivityMatrixBase:
                         "Matrix element must be Sensitivity object, string representing a sensitivity object, or an array with values."
                     )
 
-            if isinstance(self.sens_kwargs, np.ndarray) or isinstance(
-                self.sens_kwargs, list
-            ):
+            if isinstance(self.sens_kwargs, np.ndarray) or isinstance(self.sens_kwargs, list):
                 tmp_kwargs = np.asarray(self.sens_kwargs, dtype=object)
                 assert tmp_kwargs.shape == tuple(outer_shape)
 
             elif isinstance(self.sens_kwargs, dict):
                 tmp_kwargs = np.full(outer_shape, self.sens_kwargs, dtype=object)
             else:
-                raise ValueError(
-                    "sens_kwargs Must be numpy object array, list, or dict."
-                )
+                raise ValueError("sens_kwargs Must be numpy object array, list, or dict.")
 
             # TODO: sens_kwargs property setup
             self.sens_kwargs = tmp_kwargs
@@ -1217,14 +1195,10 @@ class SensitivityMatrixBase:
 
             else:
                 _flattened_arr = np.asarray(sens_mat, dtype=object).flatten()
-                _sens_mat = xp.zeros(
-                    (num_components,) + self.basis_settings.basis_shape
-                )
+                _sens_mat = xp.zeros((num_components,) + self.basis_settings.basis_shape)
                 for i, matrix_member in enumerate(_flattened_arr):
                     # calculate it
-                    if hasattr(matrix_member, "get_Sn") or isinstance(
-                        matrix_member, str
-                    ):
+                    if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
                         _sens_mat[i, :] = get_sensitivity(
                             self.basis_settings,
                             *self.sens_args,
@@ -1236,9 +1210,7 @@ class SensitivityMatrixBase:
                         raise ValueError
 
             # setup in array form
-            self._sens_mat = _sens_mat.reshape(
-                tuple(outer_shape) + self.basis_settings.basis_shape
-            )
+            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + self.basis_settings.basis_shape)
 
         else:
             raise ValueError("Must input array or list.")
@@ -1396,9 +1368,7 @@ class SensitivityMatrixBase:
             ax.loglog(self.frequency_arr, plot_in, **kwargs)
 
         else:
-            raise ValueError(
-                "ax must be a list of axes objects or a single axes object."
-            )
+            raise ValueError("ax must be a list of axes objects or a single axes object.")
 
         return (fig, ax)
 
@@ -1449,9 +1419,7 @@ class XYZ1SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(
-        self, settings: domains.DomainSettingsBase, **sens_kwargs: dict
-    ) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [
             [X1TDISens, XY1TDISens, ZX1TDISens],
             [XY1TDISens, Y1TDISens, YZ1TDISens],
@@ -1483,9 +1451,7 @@ class XYZ2SensitivityMatrix(SensitivityMatrix):
         - The detC attribute provides det[Σ(f)] for normalization
     """
 
-    def __init__(
-        self, settings: domains.DomainSettingsBase, **sens_kwargs: dict
-    ) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         """
         Initialize TDI2 sensitivity matrix.
 
@@ -1520,9 +1486,7 @@ class AET1SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(
-        self, settings: domains.DomainSettingsBase, **sens_kwargs: dict
-    ) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens, T1TDISens]
         super().__init__(settings, sens_mat, **sens_kwargs)
 
@@ -1538,9 +1502,7 @@ class AET2SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(
-        self, settings: domains.DomainSettingsBase, **sens_kwargs: dict
-    ) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A2TDISens, E2TDISens, T2TDISens]
         super().__init__(settings, sens_mat, **sens_kwargs)
 
@@ -1554,9 +1516,7 @@ class AE1SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(
-        self, settings: domains.DomainSettingsBase, **sens_kwargs: dict
-    ) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A1TDISens, E1TDISens]
         super().__init__(settings, sens_mat, **sens_kwargs)
 
@@ -1570,9 +1530,7 @@ class AE2SensitivityMatrix(SensitivityMatrix):
 
     """
 
-    def __init__(
-        self, settings: domains.DomainSettingsBase, **sens_kwargs: dict
-    ) -> None:
+    def __init__(self, settings: domains.DomainSettingsBase, **sens_kwargs: dict) -> None:
         sens_mat = [A2TDISens, E2TDISens]
         super().__init__(settings, sens_mat, **sens_kwargs)
 
@@ -1661,15 +1619,12 @@ def get_sensitivity(
             assert len(args_list) == basis_settings.NT
             for tmp in args_list:
                 if not isinstance(tmp, tuple) and not isinstance(tmp, list):
-                    raise ValueError(
-                        "Value in args_list is not a tuple. Must be a tuple."
-                    )
+                    raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
 
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
         PSD = np.asarray(
             [
-                basis_settings.df
-                * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs)
+                basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs)
                 for _args, _kwargs in zip(args_list, kwargs_list)
             ]
         ).T
@@ -1858,9 +1813,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
             links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
 
-            ltts = self.orbits.get_light_travel_times(tiled_times, links).reshape(
-                len(t_arr), 6
-            )
+            ltts = self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6)
 
             self.time_indices = self.xp.arange(len(t_arr), dtype=self.xp.int32)
 
@@ -1893,9 +1846,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.use_splines,
         ]
 
-        self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(
-            *self.pycppsensmat_args
-        )
+        self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
 
         self._init_basis_settings()
 
@@ -1977,9 +1928,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         tf = transfer_functions[0]
 
         dips_indices = [
-            self._find_dips_with_percentage(
-                tf[t_idx], mask_percentage=self.mask_percentage
-            )
+            self._find_dips_with_percentage(tf[t_idx], mask_percentage=self.mask_percentage)
             for t_idx in range(self.num_times)
         ]
 
@@ -2012,9 +1961,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         if self.use_splines:
             assert knots_position_all is not None and knots_amplitude_all is not None
-            splines_out = self.spline_interpolant(
-                freqs, knots_position_all, knots_amplitude_all
-            )
+            splines_out = self.spline_interpolant(freqs, knots_position_all, knots_amplitude_all)
             splines_in_isi_oms = splines_out[0]
             spline_in_testmass = splines_out[1]
         else:
@@ -2156,9 +2103,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def _setup_det_and_inv(self):
         """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
-        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(
-            self.sens_mat, flatten=True
-        )
+        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(self.sens_mat, flatten=True)
         self.invC, self.detC = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
 
     def _inverse_det_wrapper(
@@ -2203,9 +2148,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             inverse_matrix: Inverted sensitivity matrix. Shape (3, 3, ...)
             det: Determinant of the sensitivity matrix. Shape (...)
         """
-        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(
-            matrix_in, flatten=True
-        )
+        c00, c11, c22, c01, c02, c12 = self._extract_matrix_elements(matrix_in, flatten=True)
         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
         return inverse_matrix, det
 

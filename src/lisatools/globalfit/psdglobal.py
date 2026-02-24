@@ -37,9 +37,7 @@ class PlaceHolder(Move):
 
     def propose(self, model, state):
         accepted = np.zeros(state.log_like.shape)
-        self.temperature_control.swaps_accepted = np.zeros(
-            self.temperature_control.ntemps - 1
-        )
+        self.temperature_control.swaps_accepted = np.zeros(self.temperature_control.ntemps - 1)
         return state, accepted
 
 
@@ -264,9 +262,7 @@ class UpdateNewResidualsPSD(Update):
         update_dict = {
             "cc_A": last_sample.branches["psd"].coords[0, :, 0, :2].copy(),
             "cc_E": last_sample.branches["psd"].coords[0, :, 0, 2:].copy(),
-            "cc_foreground_params": last_sample.branches["galfor"]
-            .coords[0, :, 0, :]
-            .copy(),
+            "cc_foreground_params": last_sample.branches["galfor"].coords[0, :, 0, :].copy(),
             "cc_ll": last_sample.log_like[0].copy(),
             "cc_lp": last_sample.log_prior[0].copy(),
             "last_state": last_sample,
@@ -304,9 +300,7 @@ class UpdateNewResidualsPSD(Update):
 
         gb_params_old = sampler._priors["all_models_together"].gb_params.copy()
         walker_inds_old = sampler._priors["all_models_together"].walker_inds.copy()
-        walker_inds_map_old = sampler._priors[
-            "all_models_together"
-        ].walker_inds_map.copy()
+        walker_inds_map_old = sampler._priors["all_models_together"].walker_inds_map.copy()
         gb_inds_old = sampler._priors["all_models_together"].gb_inds.copy()
 
         if self.verbose:
@@ -317,9 +311,7 @@ class UpdateNewResidualsPSD(Update):
         # need new prior
         gb_inds_generate = generated_info["gb_inds"]
         gb_nleaves_max = new_info.gb_info["cc_params"].shape[1]
-        sampler._priors["all_models_together"].gb_params = new_info.gb_info[
-            "cc_params"
-        ][
+        sampler._priors["all_models_together"].gb_params = new_info.gb_info["cc_params"][
             gb_inds_generate
         ]  # [new_info.gb_info["cc_inds"][gb_inds_generate]]
         sampler._priors["all_models_together"].walker_inds = np.repeat(
@@ -356,9 +348,7 @@ class UpdateNewResidualsPSD(Update):
         prev_logP = prev_logp + prev_logl  # ALWAYS COLD CHAIN SO beta = 1
 
         # factors = 0.0
-        accept = (logP - prev_logP) > np.log(
-            sampler.get_model().random.rand(*logl[0].shape)
-        )
+        accept = (logP - prev_logP) > np.log(sampler.get_model().random.rand(*logl[0].shape))
         # TODO: this was not right in the end. Need to think about more.
         # so adding this:
         accept[:] = True
@@ -373,15 +363,11 @@ class UpdateNewResidualsPSD(Update):
         sampler.log_like_fn.args[1][0][~accept] = old_data_0[~accept]
         sampler.log_like_fn.args[1][1][~accept] = old_data_1[~accept]
 
-        sampler._priors["all_models_together"].gb_params[~accept] = gb_params_old[
+        sampler._priors["all_models_together"].gb_params[~accept] = gb_params_old[~accept]
+        sampler._priors["all_models_together"].walker_inds[~accept] = walker_inds_old[~accept]
+        sampler._priors["all_models_together"].walker_inds_map[~accept] = walker_inds_map_old[
             ~accept
         ]
-        sampler._priors["all_models_together"].walker_inds[~accept] = walker_inds_old[
-            ~accept
-        ]
-        sampler._priors["all_models_together"].walker_inds_map[~accept] = (
-            walker_inds_map_old[~accept]
-        )
         sampler._priors["all_models_together"].gb_inds[~accept] = gb_inds_old[~accept]
 
         xp.get_default_memory_pool().free_all_blocks()
@@ -459,9 +445,7 @@ def run_psd_pe(gpu, comm, head_rank):
         last_sample = psd_info["last_state"]
     else:
         coords_psd = (
-            prior_wrap["all_models_together"]
-            .psd_prior["psd"]
-            .rvs(size=(ntemps_pe, nwalkers_pe, 1))
+            prior_wrap["all_models_together"].psd_prior["psd"].rvs(size=(ntemps_pe, nwalkers_pe, 1))
         )
         inds_psd = np.ones(coords_psd.shape[:-1], dtype=bool)
         coords_galfor = (
@@ -483,9 +467,7 @@ def run_psd_pe(gpu, comm, head_rank):
     walker_vals = np.tile(np.arange(nwalkers_pe), (ntemps_pe, 1))
 
     supps_base_shape = (ntemps_pe, nwalkers_pe)
-    supps = BranchSupplimental(
-        {"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True
-    )
+    supps = BranchSupplimental({"walker_inds": walker_vals}, base_shape=supps_base_shape, copy=True)
 
     check = prior_wrap["all_models_together"].logpdf(
         last_sample.branches_coords, last_sample.branches_inds, supps=supps
@@ -496,9 +478,7 @@ def run_psd_pe(gpu, comm, head_rank):
     if hasattr(last_sample, "betas") and last_sample.betas is not None:
         betas = last_sample.betas
     else:
-        betas = make_ladder(
-            sum(list(psd_info["pe_info"]["ndims"].values())), ntemps=ntemps_pe
-        )
+        betas = make_ladder(sum(list(psd_info["pe_info"]["ndims"].values())), ntemps=ntemps_pe)
 
         last_sample.betas = betas
 

@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Optional, Tuple
 
 import numpy as np
+
 # imports
 from fastlisaresponse import ResponseWrapper
 from few.waveform import GenerateEMRIWaveform

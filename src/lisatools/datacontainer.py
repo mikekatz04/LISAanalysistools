@@ -20,8 +20,7 @@ import dataclasses
 from . import detector as lisa_models
 from .domains import *
 from .sensitivity import SensitivityMatrix
-from .stochastic import (FittedHyperbolicTangentGalacticForeground,
-                         StochasticContribution)
+from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticContribution
 from .utils.constants import *
 from .utils.utility import AET, get_array_module
 
@@ -63,9 +62,7 @@ class DataResidualArray:
 
         else:
             if not isinstance(data_res_in, DomainBase):
-                assert isinstance(data_res_in, np.ndarray) or isinstance(
-                    data_res_in, cp.ndarray
-                )
+                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
 
                 xp = get_array_module(data_res_in)
                 data_res_in = xp.atleast_2d(data_res_in)
@@ -74,9 +71,7 @@ class DataResidualArray:
                         "If inputing a basic array, must put in the input_signal_domain argument."
                     )
                 assert isinstance(input_signal_domain, DomainSettingsBase)
-                data_res_in = input_signal_domain.associated_class(
-                    data_res_in, input_signal_domain
-                )
+                data_res_in = input_signal_domain.associated_class(data_res_in, input_signal_domain)
 
             input_signal_domain = data_res_in.settings
 
@@ -315,17 +310,23 @@ class DataResidualArray:
                     inds_list = inds
 
             elif isinstance(ax, plt.Axes):
-                assert inds is not None and (
-                    isinstance(inds, tuple) or isinstance(inds, int)
-                )
+                assert inds is not None and (isinstance(inds, tuple) or isinstance(inds, int))
                 ax = [ax]
                 inds_list = [inds]
 
         elif fig is not None:
             raise NotImplementedError
-        
-        _f_arr = self.settings.f_arr.get() if isinstance(self.settings.f_arr, cp.ndarray) else self.settings.f_arr
-        _data_res_arr = self.data_res_arr.arr.get() if isinstance(self.data_res_arr.arr, cp.ndarray) else self.data_res_arr.arr
+
+        _f_arr = (
+            self.settings.f_arr.get()
+            if isinstance(self.settings.f_arr, cp.ndarray)
+            else self.settings.f_arr
+        )
+        _data_res_arr = (
+            self.data_res_arr.arr.get()
+            if isinstance(self.data_res_arr.arr, cp.ndarray)
+            else self.data_res_arr.arr
+        )
 
         for i, ax_tmp in zip(inds_list, ax):
             plot_in = np.abs(_data_res_arr[i])

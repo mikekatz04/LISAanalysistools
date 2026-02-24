@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
-from astropy.coordinates import SkyCoord
-import astropy.units as u   
-
+import astropy.units as u
 import numpy as np
+from astropy.coordinates import SkyCoord
 from eryn.utils import TransformContainer
 
-from lisatools.diagnostic import (covariance, plot_covariance_contour,
-                                  plot_covariance_corner)
+from lisatools.diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
 
 from ..detector import LISAModel
 from ..diagnostic import snr as snr_func
@@ -324,9 +322,7 @@ class GBCalculationController(CalculationController):
         params[2] = params[2] / 1e-18
 
         if params[3] != 0.0:
-            raise NotImplementedError(
-                "This class has not been implemented for fddot != 0 yet."
-            )
+            raise NotImplementedError("This class has not been implemented for fddot != 0 yet.")
 
         params[5] = np.cos(params[5])
         params[8] = np.sin(params[8])
@@ -478,10 +474,11 @@ class EMRICalculationController(CalculationController):
 
         return params[deriv_inds], cov
 
+
 def icrs_to_ecliptic(ra, dec):
     """Convert ICRS coordinates (ra, dec) to ecliptic coordinates (lambda, beta)."""
 
-    icrs_coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
+    icrs_coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame="icrs")
     ecliptic_coord = icrs_coord.barycentrictrueecliptic
 
     lambda_ecl = ecliptic_coord.lon.rad

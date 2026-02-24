@@ -11,9 +11,7 @@ import seaborn as sns
 from lisatools.globalfit.hdfbackend import GFHDFBackend
 
 
-def set_plotting_style(
-    background_color: str = "white", front_color: str = "black"
-) -> None:
+def set_plotting_style(background_color: str = "white", front_color: str = "black") -> None:
     """
     Set the plotting style for matplotlib.
 
@@ -27,13 +25,9 @@ def set_plotting_style(
 
     # text settings
     mpl.rcParams["text.usetex"] = True  # Use LaTeX for text rendering
-    mpl.rcParams["text.latex.preamble"] = (
-        r"\usepackage{amsmath}"  # Use AMS math package
-    )
+    mpl.rcParams["text.latex.preamble"] = r"\usepackage{amsmath}"  # Use AMS math package
     mpl.rcParams["font.family"] = "serif"  # Use serif font for text
-    mpl.rcParams["font.serif"] = [
-        "Computer Modern Roman"
-    ]  # Use Computer Modern font for LaTeX
+    mpl.rcParams["font.serif"] = ["Computer Modern Roman"]  # Use Computer Modern font for LaTeX
     mpl.rcParams["font.weight"] = "medium"
 
     # set colors
@@ -179,9 +173,7 @@ def plot_loglikelihood(reader, discard=0, save_dir="./"):
     )
 
     # Initialize a grid of plots with an Axes for each walker
-    grid = sns.FacetGrid(
-        df, col="walker", hue="walker", palette="tab20c", col_wrap=9, height=1.5
-    )
+    grid = sns.FacetGrid(df, col="walker", hue="walker", palette="tab20c", col_wrap=9, height=1.5)
 
     # Draw a line plot to show the trajectory of each random walk
     grid.map(plt.plot, "step", r"$\Delta \log\mathcal{L}$", marker=".")
@@ -225,11 +217,7 @@ def base_branch_plots(
         C = chainconsumer.ChainConsumer()
         C.add_chain(chain=chainconsumer.Chain(samples=df, name=f"{key} posterior"))
         if truths is not None:
-            C.add_truth(
-                chainconsumer.Truth(
-                    location=dict(zip(labels, truths)), name="Injection"
-                )
-            )
+            C.add_truth(chainconsumer.Truth(location=dict(zip(labels, truths)), name="Injection"))
 
         plot_config = {
             "serif": True,
@@ -286,9 +274,7 @@ def produce_emri_plots(chain=None, reader=None, discard=0, save_dir="./", truths
     if chain is None:
         chain = reader.get_chain(discard=discard)["emri"][:, 0]
 
-    base_branch_plots(
-        chain, key="emri", labels=labels, save_dir=save_dir, truths=truths
-    )
+    base_branch_plots(chain, key="emri", labels=labels, save_dir=save_dir, truths=truths)
 
 
 def produce_psd_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
@@ -389,9 +375,7 @@ if __name__ == "__main__":
     logl = reader.get_log_like(discard=discard)[:, 0]
     breakpoint()
     walkers_keep = np.where((logl > 0.9 * np.max(logl)).all(axis=0))[0]
-    print(
-        f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut."
-    )
+    print(f"Keeping {len(walkers_keep)} walkers out of {logl.shape[1]} based on loglikelihood cut.")
 
     # produce_mbh_plots(reader=reader, discard=0, save_dir='./')
     chain = reader.get_chain(discard=discard)["psd"][:, 0, walkers_keep]

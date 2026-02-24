@@ -21,9 +21,7 @@ class Recipe:
         self.recipe.append({"name": name, "adjust": adjust_fn, "status": False})
 
     def to_file(self):
-        _tmp = {
-            recipe_step["name"]: recipe_step["status"] for recipe_step in self.recipe
-        }
+        _tmp = {recipe_step["name"]: recipe_step["status"] for recipe_step in self.recipe}
         return _tmp
 
     def __next__(self):
@@ -63,9 +61,7 @@ class Recipe:
 
             if self._current_iter >= len(self.recipe):
                 return True
-            self._current_recipe_step["adjust"].setup_run(
-                iteration, last_sample, sampler
-            )
+            self._current_recipe_step["adjust"].setup_run(iteration, last_sample, sampler)
 
         return False
 

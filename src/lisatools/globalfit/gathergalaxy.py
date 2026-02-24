@@ -114,17 +114,13 @@ class GBGrouping:
         for i, group in enumerate(self.unique_groups):
             inds_group = self.groups == group
 
-            ind_median = np.argsort(self.params[inds_group, 1])[
-                int(inds_group.sum() / 2)
-            ]
+            ind_median = np.argsort(self.params[inds_group, 1])[int(inds_group.sum() / 2)]
             median_sources[i] = self.params[inds_group][ind_median]
         return median_sources
 
     @property
     def median_sources_in(self) -> np.ndarray:
-        return self.current_info.gb_info["transform"].both_transforms(
-            self.median_sources
-        )
+        return self.current_info.gb_info["transform"].both_transforms(self.median_sources)
 
     @property
     def min_sources(self) -> np.ndarray:
@@ -202,24 +198,18 @@ class GBGrouping:
         # 1: removes -1 assigned groups
         return uni, uni_length
 
-    def get_overlap(
-        self, params_base_in: np.ndarray, params_check_in: np.ndarray
-    ) -> np.ndarray:
+    def get_overlap(self, params_base_in: np.ndarray, params_check_in: np.ndarray) -> np.ndarray:
         fake_data_swap = [[self.fake_data[0]], [self.fake_data[1]]]
         psd_in_swap = [[self.psd[0]], [self.psd[1]]]
 
         overlap = np.zeros(params_base_in.shape[0])
-        N = xp.asarray(
-            get_N(params_base_in[:, 0], params_base_in[:, 1], YEAR, oversample=4)
-        )
+        N = xp.asarray(get_N(params_base_in[:, 0], params_base_in[:, 1], YEAR, oversample=4))
 
         batch_size = int(1e7)
 
         batch_inds = np.arange(0, params_base_in.shape[0], batch_size)
         if batch_inds[-1] != params_base_in.shape[0] - 1:
-            batch_inds = np.concatenate(
-                [batch_inds, np.array([params_base_in.shape[0] - 1])]
-            )
+            batch_inds = np.concatenate([batch_inds, np.array([params_base_in.shape[0] - 1])])
 
         self.gb.gpus = [xp.cuda.runtime.getDevice()]
         for stind, endind in zip(batch_inds[:-1], batch_inds[1:]):
@@ -418,12 +408,8 @@ class GBGrouping:
         base_ind = np.concatenate(base_ind, axis=0)
         check_params = np.concatenate(check_params, axis=0)
         check_ind = np.concatenate(check_ind, axis=0)
-        base_params_in = self.current_info.gb_info["transform"].both_transforms(
-            base_params
-        )
-        check_params_in = self.current_info.gb_info["transform"].both_transforms(
-            check_params
-        )
+        base_params_in = self.current_info.gb_info["transform"].both_transforms(base_params)
+        check_params_in = self.current_info.gb_info["transform"].both_transforms(check_params)
         overlap = self.get_overlap(base_params_in, check_params_in)
 
         self.groups[original_inds_base] = (
@@ -520,9 +506,7 @@ class GBGrouping:
         median_inds = median_inds[self.groups[median_inds] != -1]
 
         med_params = self.params[median_inds]
-        med_params_in = self.current_info.gb_info["transform"].both_transforms(
-            med_params
-        )
+        med_params_in = self.current_info.gb_info["transform"].both_transforms(med_params)
 
         median_f = med_params_in[:, 1]
 
@@ -532,10 +516,7 @@ class GBGrouping:
         check_params_in = []
         for i in range(med_params_in.shape[0]):
             inds = np.where(
-                (
-                    np.abs(median_f - med_params_in[i, 1])
-                    < 20 * self.current_info.general_info["df"]
-                )
+                (np.abs(median_f - med_params_in[i, 1]) < 20 * self.current_info.general_info["df"])
                 & (median_f != med_params_in[i, 1])
             )[0]
             check_inds.append(inds)
@@ -568,9 +549,7 @@ class GBGrouping:
         if final_consolidation:
             # assert (overlap > 0.9).sum() == 0
             further_consider = (
-                (overlap > 0.75)
-                & (overlap < 0.9)
-                & (self.groups[median_inds[check_inds]] != -1)
+                (overlap > 0.75) & (overlap < 0.9) & (self.groups[median_inds[check_inds]] != -1)
             )
             num_check = further_consider.sum()
             print("start", self.ngroups)
@@ -604,14 +583,12 @@ class GBGrouping:
                     int(smaller_group.shape[0] / 2)
                 ]
 
-                smaller_group_in = self.current_info.gb_info[
-                    "transform"
-                ].both_transforms(
+                smaller_group_in = self.current_info.gb_info["transform"].both_transforms(
                     np.tile(smaller_group_median, (larger_group.shape[0], 1))
                 )
-                larger_group_in = self.current_info.gb_info[
-                    "transform"
-                ].both_transforms(larger_group)
+                larger_group_in = self.current_info.gb_info["transform"].both_transforms(
+                    larger_group
+                )
 
                 base_tmp.append(smaller_group_in)
                 base_inds_tmp.append(np.repeat(base_group, smaller_group_in.shape[0]))
@@ -635,13 +612,9 @@ class GBGrouping:
                     if base_inds_keep[i] == check_inds_keep[i]:
                         continue
                     self.groups[self.groups == check_inds_keep[i]] = base_inds_keep[i]
-                    base_inds_keep[base_inds_keep == check_inds_keep[i]] = (
-                        base_inds_keep[i]
-                    )
+                    base_inds_keep[base_inds_keep == check_inds_keep[i]] = base_inds_keep[i]
                     # must be last
-                    check_inds_keep[check_inds_keep == check_inds_keep[i]] = (
-                        base_inds_keep[i]
-                    )
+                    check_inds_keep[check_inds_keep == check_inds_keep[i]] = base_inds_keep[i]
 
         self.reset_groups_to_range()
 
@@ -770,9 +743,7 @@ class GBGrouping:
                 #         print("PROGRESS", jj, len(base_inds))
 
             inds_still_going[:] = False
-            median_group_inds = self.get_group_median_inds(
-                all_samples_in, assigned_groups
-            )
+            median_group_inds = self.get_group_median_inds(all_samples_in, assigned_groups)
             inds_still_going[np.asarray(median_group_inds)] = True
             # inds_still_going[assigned_groups == -1] = True
 
@@ -784,9 +755,7 @@ class GBGrouping:
             inds_still_going[np.in1d(assigned_groups, groups_complete)] = False
 
             new_group_number = np.unique(assigned_groups).shape[0]
-            new_multi_group_number = (
-                np.unique(assigned_groups, return_counts=True)[1] > 1
-            ).sum()
+            new_multi_group_number = (np.unique(assigned_groups, return_counts=True)[1] > 1).sum()
             print(
                 iteration,
                 self.group_indicator,
@@ -866,10 +835,7 @@ class GBGrouping:
         other_sort = np.argsort(other_median_f)
 
         inds_other_into_this = (
-            np.searchsorted(
-                this_median_f[this_sort], other_median_f[other_sort], side="right"
-            )
-            - 1
+            np.searchsorted(this_median_f[this_sort], other_median_f[other_sort], side="right") - 1
         )
 
         tmp = inds_other_into_this
@@ -890,10 +856,7 @@ class GBGrouping:
         other_groups = other_group.groups[other_group_median_inds][other_sort]
 
         closest_ind = np.argmin(
-            np.abs(
-                other_source[:, 1][:, None]
-                - np.array([source_down[:, 1], source_up[:, 1]]).T
-            ),
+            np.abs(other_source[:, 1][:, None] - np.array([source_down[:, 1], source_up[:, 1]]).T),
             axis=-1,
         )
         closest_group = np.take_along_axis(
@@ -918,9 +881,7 @@ class GBGrouping:
         check_inds = []
         base_params_in = []
         check_params_in = []
-        for i, shos in zip(
-            other_group_median_inds[other_sort], still_here_other_source
-        ):
+        for i, shos in zip(other_group_median_inds[other_sort], still_here_other_source):
             inds = np.where(
                 np.abs(this_median_f[this_sort] - shos[1])
                 < 20 * self.current_info.general_info["df"]
@@ -950,9 +911,7 @@ class GBGrouping:
         for fix_base_i in fix_base:
             overlap_fix_base_i = overlap_2_keep[base_inds_keep == fix_base_i]
             inds_fix = np.where(base_inds_keep == fix_base_i)[0]
-            inds_remove = inds_fix[
-                np.delete(np.arange(len(inds_fix)), overlap_fix_base_i.argmax())
-            ]
+            inds_remove = inds_fix[np.delete(np.arange(len(inds_fix)), overlap_fix_base_i.argmax())]
             bpi_keep = np.delete(bpi_keep, inds_remove, axis=0)
             cpi_keep = np.delete(cpi_keep, inds_remove, axis=0)
             base_inds_keep = np.delete(base_inds_keep, inds_remove, axis=0)
@@ -972,9 +931,7 @@ class GBGrouping:
                     self.get_group(best_group)
                 )
                 tmp_tmp = other_group_median_inds[other_sort][base_ind_i]
-                base_group_in = np.tile(
-                    other_group.params_in[tmp_tmp], (test_group_in.shape[0], 1)
-                )
+                base_group_in = np.tile(other_group.params_in[tmp_tmp], (test_group_in.shape[0], 1))
                 overlap_here = self.get_overlap(base_group_in, test_group_in)
                 if np.any(overlap_here > 0.9):
                     other_new_groups[base_ind_i] = best_group
@@ -1056,9 +1013,7 @@ def para_func(i, assigned_groups, bg, cg):
     return [inds_tmp, base_out]
 
 
-def gather_gb_samples_cat(
-    current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1
-):
+def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
 
     gb = GBGPU(use_gpu=True)
     xp.cuda.runtime.setDevice(gpu)
@@ -1096,15 +1051,11 @@ def gather_gb_samples_cat(
             time.sleep(10.0)
             current_try += 1
             if current_try > max_tries:
-                raise BlockingIOError(
-                    "Tried to read in data file many times, but to no avail."
-                )
+                raise BlockingIOError("Tried to read in data file many times, but to no avail.")
 
     gb_samples = gb_samples.reshape(-1, gb_samples.shape[-2], gb_samples.shape[-1])
     gb_inds = gb_inds.reshape(-1, gb_inds.shape[-1])
-    gb_sample_inds = np.repeat(
-        np.arange(gb_inds.shape[0])[:, None], gb_inds.shape[1], axis=1
-    )
+    gb_sample_inds = np.repeat(np.arange(gb_inds.shape[0])[:, None], gb_inds.shape[1], axis=1)
 
     transform_fn = current_info.gb_info["transform"]
 
@@ -1231,17 +1182,13 @@ def gather_gb_samples_cat(
     gb.gpus = old_gpus
     optimal_snr_check = gb.h_h.real.get() ** (1 / 2)
 
-    gbs_check = gbs_check_in[optimal_snr_check > 7.0][
-        :, np.array([0, 1, 2, 4, 5, 6, 7, 8])
-    ]
+    gbs_check = gbs_check_in[optimal_snr_check > 7.0][:, np.array([0, 1, 2, 4, 5, 6, 7, 8])]
 
     gbs_check[:, 1] *= 1e3
     gbs_check[:, 4] = np.cos(gbs_check[:, 4])
     gbs_check[:, 7] = np.sin(gbs_check[:, 7])
 
-    inj_input_params = np.concatenate(
-        [groups.params[groups.groups != -1].copy(), gbs_check]
-    )
+    inj_input_params = np.concatenate([groups.params[groups.groups != -1].copy(), gbs_check])
     inj_input_samples = np.concatenate(
         [groups.sample[groups.groups != -1], -np.ones(gbs_check.shape[0], dtype=int)]
     )
@@ -1268,9 +1215,7 @@ def gather_gb_samples_cat(
         group_indicator=-1,
         original_sample_count=samples_keep * 36,
     )
-    gb_check_groups.group_based_on_sample(
-        -1, store_best_overlap=True, remove_grouped=False
-    )
+    gb_check_groups.group_based_on_sample(-1, store_best_overlap=True, remove_grouped=False)
 
     print("save injection comparison")
 
@@ -1313,9 +1258,7 @@ def gather_gb_samples_cat(
         "Confidence",
     ]
 
-    injection_check_out_dict = {
-        key: tmp for key, tmp in zip(keys, injection_check_out.T)
-    }
+    injection_check_out_dict = {key: tmp for key, tmp in zip(keys, injection_check_out.T)}
     df_inj_check = pd.DataFrame(injection_check_out_dict)
     df_inj_check.to_hdf(
         current_info.general_info["file_information"]["file_store_dir"]
@@ -1511,9 +1454,7 @@ def gather_gb_samples(
 
         first_sample = gb_samples[random_samples[samp_i]].reshape(-1, 8)
         first_sample_snrs = gb_snrs[random_samples[samp_i]].flatten()
-        inds_keep_i = np.delete(
-            np.arange(gb_samples.shape[0]), random_samples[: samp_i + 1]
-        )
+        inds_keep_i = np.delete(np.arange(gb_samples.shape[0]), random_samples[: samp_i + 1])
         gb_samples_in = gb_samples[inds_keep_i]
         # gb_inds_tmp not gb_inds because we adjust that overtime
         # to reflect binaries already taken
@@ -1549,10 +1490,7 @@ def gather_gb_samples(
         binaries_for_test = np.concatenate(binaries_for_test, axis=0)
         binaries_base_sample = np.concatenate(binaries_base_sample, axis=0)
         band_inds = (
-            np.searchsorted(
-                band_edges.get(), binaries_for_test[:, 1] / 1e3, side="right"
-            )
-            - 1
+            np.searchsorted(band_edges.get(), binaries_for_test[:, 1] / 1e3, side="right") - 1
         )
 
         N_vals = band_N_vals[band_inds]
@@ -1565,9 +1503,7 @@ def gather_gb_samples(
 
         inds_split = np.arange(0, binaries_for_test.shape[0] + batch_size, batch_size)
         ll_diff = np.zeros(binaries_for_test.shape[0])
-        for jjj, (start_ind, end_ind) in enumerate(
-            zip(inds_split[:-1], inds_split[1:])
-        ):
+        for jjj, (start_ind, end_ind) in enumerate(zip(inds_split[:-1], inds_split[1:])):
             waveform_kwargs["N"] = xp.asarray(N_vals[start_ind:end_ind])
 
             binaries_for_test_batch_in = transform_fn.both_transforms(
@@ -1577,9 +1513,7 @@ def gather_gb_samples(
                 binaries_base_sample[start_ind:end_ind]
             )
             if fd[0] != 0.0:
-                raise NotImplementedError(
-                    "Need to work on if start_freq_ind is not zero."
-                )
+                raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             assert "start_freq_ind" in waveform_kwargs
             _ = gb.swap_likelihood_difference(
@@ -1617,9 +1551,7 @@ def gather_gb_samples(
             uni_sample_i, uni_sample_index, uni_sample_count = np.unique(
                 keep_map_back[0][:], return_counts=True, return_index=True
             )
-            group_test = mismatch[uni_sample_index] < np.abs(
-                1.0 - overlap_lim
-            )  # .get()
+            group_test = mismatch[uni_sample_index] < np.abs(1.0 - overlap_lim)  # .get()
             keep_group_test = uni_sample_index[group_test]
             num_grouping = group_test.sum()
             if num_grouping == 0:
@@ -1657,9 +1589,7 @@ def gather_gb_samples(
                 breakpoint()
             if not np.any(
                 np.all(
-                    ((gb_snrs_in > snr_lim_second_cut) & gb_inds_in)[keep_map_back][
-                        keep_group_test
-                    ]
+                    ((gb_snrs_in > snr_lim_second_cut) & gb_inds_in)[keep_map_back][keep_group_test]
                 )
             ):
                 breakpoint()
@@ -1700,9 +1630,7 @@ def gather_gb_samples(
             ] = 1e100
 
         _inds1 = diffs_min.argmin(axis=-1)
-        inds2 = np.take_along_axis(diffs_min, _inds1[:, :, None], axis=-1)[
-            :, :, 0
-        ].argmin(axis=0)
+        inds2 = np.take_along_axis(diffs_min, _inds1[:, :, None], axis=-1)[:, :, 0].argmin(axis=0)
         inds1 = _inds1.T[(np.arange(len(inds2)), inds2)]
         diffs_min_final = diffs_min[(inds2, np.arange(len(inds2)), inds1)]
         assert np.all(diffs_min_final == diffs_min.min(axis=(0, 2)))
@@ -1728,9 +1656,7 @@ def gather_gb_samples(
         new_group_map = np.concatenate(new_group_map, axis=0)
         old_group_map = np.concatenate(old_group_map, axis=0)
 
-        band_inds = (
-            np.searchsorted(band_edges.get(), base_bins[:, 1] / 1e3, side="right") - 1
-        )
+        band_inds = np.searchsorted(band_edges.get(), base_bins[:, 1] / 1e3, side="right") - 1
         N_vals = band_N_vals[band_inds]
 
         batch_size = int(1e7)
@@ -1743,17 +1669,13 @@ def gather_gb_samples(
         ll_diff = np.zeros(base_bins.shape[0])
         snr1 = np.zeros(base_bins.shape[0])
         snr2 = np.zeros(base_bins.shape[0])
-        for jjj, (start_ind, end_ind) in enumerate(
-            zip(inds_split[:-1], inds_split[1:])
-        ):
+        for jjj, (start_ind, end_ind) in enumerate(zip(inds_split[:-1], inds_split[1:])):
             waveform_kwargs["N"] = xp.asarray(N_vals[start_ind:end_ind])
 
             base_bins_in = transform_fn.both_transforms(base_bins[start_ind:end_ind])
             test_bins_in = transform_fn.both_transforms(test_bins[start_ind:end_ind])
             if fd[0] != 0.0:
-                raise NotImplementedError(
-                    "Need to work on if start_freq_ind is not zero."
-                )
+                raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             _ = gb.swap_likelihood_difference(
                 base_bins_in,

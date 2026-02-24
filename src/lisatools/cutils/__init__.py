@@ -8,8 +8,12 @@ import typing
 from typing import Optional, Sequence, TypeVar, Union
 
 from gpubackendtools.exceptions import *
-from gpubackendtools.gpubackendtools import (BackendMethods, CpuBackend,
-                                             Cuda11xBackend, Cuda12xBackend)
+from gpubackendtools.gpubackendtools import (
+    BackendMethods,
+    CpuBackend,
+    Cuda11xBackend,
+    Cuda12xBackend,
+)
 
 from ..utils.exceptions import *
 
@@ -62,9 +66,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             import lisatools_backend_cpu.pycppdetector
 
         except (ModuleNotFoundError, ImportError) as e:
-            raise BackendUnavailableException(
-                "'cpu' backend could not be imported."
-            ) from e
+            raise BackendUnavailableException("'cpu' backend could not be imported.") from e
 
         numpy = LISAToolsCpuBackend.check_numpy()
 
@@ -97,9 +99,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             # import lisatools_backend_cuda11x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
-            raise BackendUnavailableException(
-                "'cuda11x' backend could not be imported."
-            ) from e
+            raise BackendUnavailableException("'cuda11x' backend could not be imported.") from e
 
         try:
             import cupy
@@ -137,9 +137,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             # import lisatools_backend_cuda12x.psd
 
         except (ModuleNotFoundError, ImportError) as e:
-            raise BackendUnavailableException(
-                "'cuda12x' backend could not be imported."
-            ) from e
+            raise BackendUnavailableException("'cuda12x' backend could not be imported.") from e
 
         try:
             import cupy

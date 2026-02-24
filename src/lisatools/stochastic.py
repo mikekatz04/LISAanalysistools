@@ -84,9 +84,7 @@ class StochasticContributionContainer:
 
     """
 
-    def __init__(
-        self, stochastic_contribution_dict: dict[StochasticContribution]
-    ) -> None:
+    def __init__(self, stochastic_contribution_dict: dict[StochasticContribution]) -> None:
         self.stochastic_contribution_dict = stochastic_contribution_dict
 
     @property
@@ -102,9 +100,7 @@ class StochasticContributionContainer:
         assert isinstance(stochastic_contribution_dict, dict)
         for key, value in stochastic_contribution_dict.items():
             if not isinstance(value, StochasticContribution):
-                raise ValueError(
-                    f"Stochastic model {key} is not of type StochasticContribution."
-                )
+                raise ValueError(f"Stochastic model {key} is not of type StochasticContribution.")
         self._stochastic_contribution_dict = stochastic_contribution_dict
 
     def get_Sh(
@@ -126,9 +122,7 @@ class StochasticContributionContainer:
         Sh_out = np.zeros_like(f)
         for key in params_dict:
             stochastic_contrib = self.stochastic_contribution_dict[key]
-            Sh_out += stochastic_contrib.get_Sh(
-                f, params_dict[key], **(kwargs_dict.get(key, {}))
-            )
+            Sh_out += stochastic_contrib.get_Sh(f, params_dict[key], **(kwargs_dict.get(key, {})))
         return Sh_out
 
     def __setitem__(self, key: str | int | tuple, val: StochasticContribution) -> None:
@@ -234,9 +228,7 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
     Tmax = 10 * YRSID_SI
 
     @classmethod
-    def specific_Sh_function(
-        cls, f: float | np.ndarray, Tobs: float
-    ) -> float | np.ndarray:
+    def specific_Sh_function(cls, f: float | np.ndarray, Tobs: float) -> float | np.ndarray:
         """Fitted hyperbolic tangent model 1 for the Galaxy foreground noise.
 
         This class fits the parameters for :class:`HyperbolicTangentGalacticForeground`
@@ -259,9 +251,7 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
         """
 
         if Tobs > cls.Tmax:
-            raise ValueError(
-                "Tobs is greater than the maximum allowable fit which is 10 years."
-            )
+            raise ValueError("Tobs is greater than the maximum allowable fit which is 10 years.")
 
         # Interpolate
         tck1 = interpolate.splrep(cls.Xobs, cls.Slope1, s=0, k=1)

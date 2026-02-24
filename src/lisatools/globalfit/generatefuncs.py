@@ -26,10 +26,7 @@ class GetMBHTemplates:
 
     def __call__(self, current_state, mbh_info, general_info):
 
-        if (
-            "use_gpu" in self.initialization_kwargs
-            and self.initialization_kwargs["use_gpu"]
-        ):
+        if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
             use_gpu = True
         else:
@@ -43,16 +40,12 @@ class GetMBHTemplates:
 
         freqs = xp.asarray(general_info["fd"])
 
-        out = np.zeros(
-            (mbh_params.shape[0], 3, general_info["fd"].shape[0]), dtype=complex
-        )
+        out = np.zeros((mbh_params.shape[0], 3, general_info["fd"].shape[0]), dtype=complex)
 
         for i in range(mbh_params.shape[0]):
             for leaf in range(mbh_params.shape[1]):
                 mbh_params_in = mbh_info["transform"].both_transforms(
-                    mbh_params[i, leaf : leaf + 1].reshape(
-                        -1, mbh_info["pe_info"]["ndim"]
-                    )
+                    mbh_params[i, leaf : leaf + 1].reshape(-1, mbh_info["pe_info"]["ndim"])
                 )
 
                 AET = mbh_gen(
@@ -83,19 +76,14 @@ class GetMBHTemplates:
 
 class GetEMRITemplates:
 
-    def __init__(
-        self, initialization_kwargs, runtime_kwargs, start_freq_ind, end_freq_ind
-    ):
+    def __init__(self, initialization_kwargs, runtime_kwargs, start_freq_ind, end_freq_ind):
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
         self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
 
     def __call__(self, current_state, emri_info, general_info):
 
-        if (
-            "use_gpu" in self.initialization_kwargs
-            and self.initialization_kwargs["use_gpu"]
-        ):
+        if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
             use_gpu = True
         else:
@@ -110,23 +98,17 @@ class GetEMRITemplates:
         freqs = xp.asarray(general_info["fd"])
 
         # TODO: adjust for AET/XYZ rather than AE
-        out = np.zeros(
-            (emri_params.shape[0], 2, general_info["fd"].shape[0]), dtype=complex
-        )
+        out = np.zeros((emri_params.shape[0], 2, general_info["fd"].shape[0]), dtype=complex)
 
         for i in range(emri_params.shape[0]):
             for leaf in range(emri_params.shape[1]):
                 emri_params_in = emri_info["transform"].both_transforms(
-                    emri_params[i, leaf : leaf + 1].reshape(
-                        -1, emri_info["pe_info"]["ndim"]
-                    )
+                    emri_params[i, leaf : leaf + 1].reshape(-1, emri_info["pe_info"]["ndim"])
                 )
 
                 for emri_params_in_i in emri_params_in:
                     AET_t = emri_gen(*emri_params_in_i, **self.runtime_kwargs)
-                    tmp1 = xp.fft.rfft(AET_t, axis=-1)[
-                        :, self.start_freq_ind : self.end_freq_ind
-                    ]
+                    tmp1 = xp.fft.rfft(AET_t, axis=-1)[:, self.start_freq_ind : self.end_freq_ind]
                     assert tmp1.shape[0] == freqs.shape[0]
 
                     if use_gpu:
@@ -157,10 +139,7 @@ class GetGBTemplates:
 
         gb_gen = GBGPU(**self.initialization_kwargs)
 
-        use_gpu = (
-            "use_gpu" in self.initialization_kwargs
-            and self.initialization_kwargs["use_gpu"]
-        )
+        use_gpu = "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]
 
         if use_gpu:
             xp = cp
@@ -176,9 +155,9 @@ class GetGBTemplates:
         gb_params_flat = gb_params[gb_inds]
 
         group_index = xp.asarray(
-            np.repeat(
-                np.arange(nwalkers)[:, None], repeats=gb_params.shape[1], axis=-1
-            )[gb_inds].astype(np.int32)
+            np.repeat(np.arange(nwalkers)[:, None], repeats=gb_params.shape[1], axis=-1)[
+                gb_inds
+            ].astype(np.int32)
         )
 
         gb_params_in = gb_info["transform"].both_transforms(gb_params_flat)
@@ -259,9 +238,7 @@ class GenerateCurrentState:
         info_dict = {}
         n_gen_check_it = []
         if include_mbhs:
-            A_mbh, E_mbh, prior_vals = general_info["source_info"]["mbh"][
-                "get_templates"
-            ](
+            A_mbh, E_mbh, prior_vals = general_info["source_info"]["mbh"]["get_templates"](
                 current_state,
                 general_info["source_info"]["mbh"],
                 general_info["general"],
@@ -358,9 +335,7 @@ class GenerateCurrentState:
                 ):
                     # less available than needed
                     # randomly pick with replacement
-                    inds_keep = np.random.choice(
-                        np.arange(n_gen_check), n_gen, replace=True
-                    )
+                    inds_keep = np.random.choice(np.arange(n_gen_check), n_gen, replace=True)
                     info_dict[which]["walker_inds"] = inds_keep.copy()
 
                 # rest is in fix_val_in_gen
@@ -370,9 +345,7 @@ class GenerateCurrentState:
                 elif n_gen_check > n_gen:
                     # more available than needed
                     # randomly pick
-                    inds_keep = np.random.choice(
-                        np.arange(n_gen_check), n_gen, replace=False
-                    )
+                    inds_keep = np.random.choice(np.arange(n_gen_check), n_gen, replace=False)
                     info_dict[which]["walker_inds"] = inds_keep.copy()
 
                 elif n_gen_check < n_gen:
@@ -384,9 +357,7 @@ class GenerateCurrentState:
                         n_gen_curr = len(inds_keep)
                         while n_gen_curr < n_gen:
                             if n_gen_curr + n_gen_check < n_gen:
-                                inds_keep = np.concatenate(
-                                    [inds_keep, np.arange(n_gen_check)]
-                                )
+                                inds_keep = np.concatenate([inds_keep, np.arange(n_gen_check)])
 
                             else:
                                 # randomly choose remaining additions
@@ -403,15 +374,11 @@ class GenerateCurrentState:
                     elif less_fill_style == "random":
                         # less available than needed
                         # randomly pick with replacement
-                        inds_keep = np.random.choice(
-                            np.arange(n_gen_check), n_gen, replace=True
-                        )
+                        inds_keep = np.random.choice(np.arange(n_gen_check), n_gen, replace=True)
                         info_dict[which]["walker_inds"] = inds_keep.copy()
 
                     else:
-                        raise ValueError(
-                            "less_fill_style must be in ['random', 'better_marg']"
-                        )
+                        raise ValueError("less_fill_style must be in ['random', 'better_marg']")
 
                     n_gen_curr = len(inds_keep)
 
@@ -506,9 +473,7 @@ class GenerateCurrentState:
             output["total_prior_val"] = total_prior_val
         if include_ll or include_source_only_ll:
             if not include_psd:
-                warnings.warn(
-                    "If requesting ll and/or inner product, include_psd must be True."
-                )
+                warnings.warn("If requesting ll and/or inner product, include_psd must be True.")
                 include_psd = True
             else:
                 if include_source_only_ll and not include_ll:

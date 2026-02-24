@@ -3,6 +3,7 @@ from typing import Any, Optional, Tuple
 
 import numpy as np
 from bbhx.waveformbuild import BBHWaveformFD
+
 # imports
 from fastlisaresponse import ResponseWrapper
 
@@ -11,8 +12,8 @@ from ...utils.constants import *
 from ..waveformbase import SNRWaveform, TDWaveformBase
 
 try:
-    import phentax
     import jax.numpy as jnp
+    import phentax
 
     phentax_available = True
 except (ImportError, ModuleNotFoundError):
@@ -123,7 +124,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
     Args:
         waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
         Tobs: Observation time in years.
-        start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls. 
+        start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls.
         ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
         *args: Additional positional arguments forwarded to :class:`TDWaveformBase`.
         **kwargs: Additional keyword arguments forwarded to :class:`TDWaveformBase`.
@@ -154,7 +155,6 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
 
         self.start_freq = start_freq
         self.ref_freq = ref_freq
-
 
     def wave_gen(
         self,

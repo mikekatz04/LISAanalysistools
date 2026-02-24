@@ -70,9 +70,7 @@ class UpdateNewResidualsMBH(Update):
 
         nwalkers_pe = last_sample.log_like.shape[1]
 
-        assert np.all(
-            new_info.mbh_info["cc_params"] == last_sample.branches["mbh"].coords[0]
-        )
+        assert np.all(new_info.mbh_info["cc_params"] == last_sample.branches["mbh"].coords[0])
 
         generated_info = new_info.get_data_psd(
             n_gen_in=nwalkers_pe, return_prior_val=True, fix_val_in_gen=["mbh"]
@@ -116,9 +114,7 @@ class UpdateNewResidualsMBH(Update):
         logP = logl + logp
 
         # factors = 0.0
-        accept = (logP - prev_logP) > np.log(
-            sampler.get_model().random.rand(*logP.shape)
-        )
+        accept = (logP - prev_logP) > np.log(sampler.get_model().random.rand(*logP.shape))
         # TODO: this was not right in the end. Need to think about more.
         # so adding this:
         accept[:] = True
@@ -204,11 +200,7 @@ def run_mbh_pe(gpu, comm, head_rank):
     for i in range(data_fin.shape[1]):
         start_ll_check[i] = (
             (
-                -1
-                / 2
-                * 4
-                * df
-                * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i])
+                -1 / 2 * 4 * df * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i])
                 - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))
             )
             .get()

@@ -107,9 +107,7 @@ if HAS_NUMBA:
         return t * Sgal
 
     @cuda.jit(device=True, inline=True)
-    def _noisepsd_xx_device(
-        f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2=False
-    ):
+    def _noisepsd_xx_device(f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2=False):
         """Diagonal noise PSD for XYZ (TDI 1.5)."""
         x = 2.0 * math.pi * f * LISA_L / CLIGHT
         sinx = math.sin(x)
@@ -128,9 +126,7 @@ if HAS_NUMBA:
         return total_noise + sgal
 
     @cuda.jit(device=True, inline=True)
-    def _noisecsd_xy_device(
-        f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2=False
-    ):
+    def _noisecsd_xy_device(f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2=False):
         """Off-diagonal CSD for XYZ (TDI 1.5)."""
         x = 2.0 * math.pi * f * LISA_L / CLIGHT
         sinx = math.sin(x)
@@ -281,12 +277,8 @@ if HAS_NUMBA:
             tm_noise, isi_oms_noise = _lisanoises_device(f, Soms_d_sq, Sa_a_sq)
 
             # Compute covariance elements
-            diag = _noisepsd_xx_device(
-                f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2
-            )
-            off = _noisecsd_xy_device(
-                f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2
-            )
+            diag = _noisepsd_xx_device(f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2)
+            off = _noisecsd_xy_device(f, tm_noise, isi_oms_noise, Amp, alpha, sl1, kn, sl2, tdi2)
 
             # Invert 3x3 covariance analytically
             c00, c01, c02, c11, c12, c22, logdet = _inv_logdet_3x3_symmetric(diag, off)
@@ -335,9 +327,7 @@ if HAS_NUMBA:
 
         # Write block result
         if tid == 0:
-            like_contrib[psd_i * num_blocks + bid] = (
-                -0.5 * like_vals[0] - logdet_vals[0]
-            )
+            like_contrib[psd_i * num_blocks + bid] = -0.5 * like_vals[0] - logdet_vals[0]
 
     @cuda.jit
     def _reduce_blocks_kernel(
@@ -604,9 +594,7 @@ def noisecsd_xy(
     return total_noise
 
 
-def build_xyz_covariance(
-    f_arr, Soms_d_all, Sa_a_all, Amp_all, alpha_all, sl1_all, kn_all, sl2_all
-):
+def build_xyz_covariance(f_arr, Soms_d_all, Sa_a_all, Amp_all, alpha_all, sl1_all, kn_all, sl2_all):
     """Build 3×3 noise covariance matrices for XYZ channels.
 
     Args:
@@ -745,9 +733,7 @@ def psd_likelihood_xyz_cupy(
     # breakpoint()
 
     # Invert covariance and get log determinants
-    inv_cov, logdet = invert_covariance_batch(
-        cov
-    )  # (num_psds, Nfreq, 3, 3), (num_psds, Nfreq)
+    inv_cov, logdet = invert_covariance_batch(cov)  # (num_psds, Nfreq, 3, 3), (num_psds, Nfreq)
 
     num_psds = len(data_index_all)
 
@@ -768,12 +754,10 @@ def psd_likelihood_xyz_cupy(
         (3 * data_indices * data_length)[:, None] + xp.arange(data_length)[None, :]
     ).reshape(-1)
     Y_indices = (
-        ((3 * data_indices + 1) * data_length)[:, None]
-        + xp.arange(data_length)[None, :]
+        ((3 * data_indices + 1) * data_length)[:, None] + xp.arange(data_length)[None, :]
     ).reshape(-1)
     Z_indices = (
-        ((3 * data_indices + 2) * data_length)[:, None]
-        + xp.arange(data_length)[None, :]
+        ((3 * data_indices + 2) * data_length)[:, None] + xp.arange(data_length)[None, :]
     ).reshape(-1)
 
     d_X = data[X_indices].reshape(-1, data_length)  # (num_psds, Nfreq)
@@ -796,9 +780,7 @@ def psd_likelihood_xyz_cupy(
 
     # Second: d^H @ (C^{-1} @ d)  (complex conjugate dot product)
     # For real covariance, this is just real part of d* @ inv_cov @ d
-    quad = xp.einsum(
-        "...i,...i->...", d_vec.conj(), inv_cov_d
-    ).real  # (num_psds, Nfreq)
+    quad = xp.einsum("...i,...i->...", d_vec.conj(), inv_cov_d).real  # (num_psds, Nfreq)
 
     # Sum over frequencies
     inner_sum = (4.0 * df * quad).sum(axis=1)  # (num_psds,)
@@ -923,12 +905,10 @@ def psd_likelihood_xyz_cupy_optimized(
         (3 * data_indices * data_length)[:, None] + xp.arange(data_length)[None, :]
     ).reshape(-1)
     Y_indices = (
-        ((3 * data_indices + 1) * data_length)[:, None]
-        + xp.arange(data_length)[None, :]
+        ((3 * data_indices + 1) * data_length)[:, None] + xp.arange(data_length)[None, :]
     ).reshape(-1)
     Z_indices = (
-        ((3 * data_indices + 2) * data_length)[:, None]
-        + xp.arange(data_length)[None, :]
+        ((3 * data_indices + 2) * data_length)[:, None] + xp.arange(data_length)[None, :]
     ).reshape(-1)
 
     d_X = data[X_indices].reshape(-1, data_length)  # (num_psds, Nfreq)
@@ -952,9 +932,7 @@ def psd_likelihood_xyz_cupy_optimized(
 
     # Second: d^H @ (C^{-1} @ d)  (complex conjugate dot product)
     # For real covariance, this is just real part of d* @ inv_cov @ d
-    quad = xp.einsum(
-        "...i,...i->...", d_vec.conj(), inv_cov_d
-    ).real  # (num_psds, Nfreq)
+    quad = xp.einsum("...i,...i->...", d_vec.conj(), inv_cov_d).real  # (num_psds, Nfreq)
 
     # Sum over frequencies
     inner_sum = (4.0 * df * quad).sum(axis=1)  # (num_psds,)

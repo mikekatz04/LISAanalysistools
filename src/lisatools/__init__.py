@@ -6,8 +6,8 @@ try:
     from lisatools._version import __version_tuple__
 
 except ModuleNotFoundError:
-    from importlib.metadata import (PackageNotFoundError,  # pragma: no cover
-                                    version)
+    from importlib.metadata import PackageNotFoundError  # pragma: no cover
+    from importlib.metadata import version
 
     try:
         __version__ = version(__name__)
@@ -27,12 +27,10 @@ try:
 except (ModuleNotFoundError, ImportError):
     _is_editable = False
 
-from gpubackendtools import (Globals, get_backend, get_first_backend,
-                             has_backend)
+from gpubackendtools import Globals, get_backend, get_first_backend, has_backend
 
 from . import cutils, utils
-from .cutils import (LISAToolsCpuBackend, LISAToolsCuda11xBackend,
-                     LISAToolsCuda12xBackend)
+from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend
 
 add_backends = {
     "lisatools_cpu": LISAToolsCpuBackend,

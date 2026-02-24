@@ -23,9 +23,9 @@ def tukey(N, alpha, xp=None):
     n = xp.arange(int(xp.ceil(N / 2.0)))
     in_window_edge = n < alpha * N / 2
 
-    tmp = (in_window_edge) * 1.0 / 2.0 * (
-        1.0 - xp.cos(2.0 * np.pi * n / (alpha * N))
-    ) + (~in_window_edge) * 1.0
+    tmp = (in_window_edge) * 1.0 / 2.0 * (1.0 - xp.cos(2.0 * np.pi * n / (alpha * N))) + (
+        ~in_window_edge
+    ) * 1.0
     tukey_out = xp.zeros(N, dtype=float)
     # TODO: check this works for odd functions
     tukey_out[: tmp.shape[0]] = tmp
@@ -80,14 +80,10 @@ def generate_noise_fd(
 
     """
     if not isinstance(N, int):
-        raise ValueError(
-            f"N must be an integer. See documentation for more information."
-        )
+        raise ValueError(f"N must be an integer. See documentation for more information.")
 
     if not isinstance(df, float):
-        raise ValueError(
-            f"N must be an integer. See documentation for more information."
-        )
+        raise ValueError(f"N must be an integer. See documentation for more information.")
 
     if func is None:
         # TODO: make this better
@@ -100,8 +96,7 @@ def generate_noise_fd(
     norm = 0.5 * (1.0 / df) ** 0.5
     psd = func(freqs, *sensitivity_args, **sensitivity_kwargs)
     noise_realization = psd ** (1 / 2) * (
-        np.random.normal(0, norm, len(freqs))
-        + 1j * np.random.normal(0, norm, len(freqs))
+        np.random.normal(0, norm, len(freqs)) + 1j * np.random.normal(0, norm, len(freqs))
     )
     return noise_realization
 
@@ -197,16 +192,11 @@ def get_groups_from_band_structure(
     if f0_2 is not None:
         assert f0_2.shape == f0.shape
         band_indices_2 = xp.searchsorted(band_edges, f0_2.flatten()).reshape(shape) - 1
-        band_indices_2_sorted = xp.take_along_axis(
-            band_indices_2, inds_band_indices, axis=-1
-        )
+        band_indices_2_sorted = xp.take_along_axis(band_indices_2, inds_band_indices, axis=-1)
 
         # very important: ensures the proposed new point is not further than 1 band away.
         diff = 1 if num_groups_base > 2 else 0
-        keep = (
-            np.abs(band_indices_2_sorted.flatten() - band_indices_sorted.flatten())
-            <= diff
-        )
+        keep = np.abs(band_indices_2_sorted.flatten() - band_indices_sorted.flatten()) <= diff
         if fix_f_test is not None:
             keep[fix_f_test.flatten()] = False
         remove = ~keep
@@ -252,9 +242,7 @@ def get_groups_from_band_structure(
 
     # special indexing method
     band_indices_sorted_special = (
-        band_indices_sorted.flatten()[keep]
-        + int(1e12) * temp_inds
-        + int(1e6) * walker_inds
+        band_indices_sorted.flatten()[keep] + int(1e12) * temp_inds + int(1e6) * walker_inds
     )
 
     # get the unique special indicators
@@ -290,9 +278,7 @@ def get_groups_from_band_structure(
     groups_even_odd = xp.sum(groups_even_odd_tmp, axis=0)
 
     groups_out = -2 * xp.ones_like(f0, dtype=int)
-    groups_out[(temp_inds, walker_inds, inds_band_indices.flatten()[keep])] = (
-        groups_even_odd
-    )
+    groups_out[(temp_inds, walker_inds, inds_band_indices.flatten()[keep])] = groups_even_odd
 
     groups_out[bad] = -1
 

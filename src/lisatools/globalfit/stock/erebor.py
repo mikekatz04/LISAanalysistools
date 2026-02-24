@@ -44,9 +44,7 @@ class GBSettings(Settings):
     end_freq: float = 0.025
     oversample: int = 4
     extra_buffer: int = 5
-    start_resample_iter: Optional[int] = (
-        -1,
-    )  # -1 so that it starts right at the start of PE
+    start_resample_iter: Optional[int] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
@@ -207,9 +205,7 @@ class GBSetup(Setup, GBSettings):
         band_edges_in_reverse_order = [self.end_freq]
         band_N_vals_reverse_order = []
         # determines N from high_Frequency edge of sub-band
-        current_N = get_N(
-            1e-30, self.end_freq, self.Tobs, oversample=self.oversample
-        ).item()
+        current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
         band_N_vals_reverse_order.append(current_N)
 
         current_freq = self.end_freq
@@ -217,9 +213,7 @@ class GBSetup(Setup, GBSettings):
         while current_freq > self.start_freq:
             current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df
             band_edges_in_reverse_order.append(current_freq)
-            current_N = get_N(
-                1e-30, current_freq, self.Tobs, oversample=self.oversample
-            ).item()
+            current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
             band_N_vals_reverse_order.append(current_N)
             last_freq = current_freq
         band_edges_in_reverse_order.append(
@@ -240,6 +234,7 @@ class GBSetup(Setup, GBSettings):
 
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
+
 
 def gpc_to_mpc(x):
     """
@@ -315,12 +310,12 @@ class MBHSetup(Setup):
                 "s2z",
                 "dist",
                 "phi_ref",
-                #"f_ref",
+                # "f_ref",
                 "cos_iota",
                 "psi",
                 "lam",
                 "sin_beta",
-                #"psi",
+                # "psi",
                 "t_plunge",
             ]
 
@@ -334,7 +329,7 @@ class MBHSetup(Setup):
             }
 
             # for transforms
-            #mbh_fill_dict = {"f_ref": 0.0}
+            # mbh_fill_dict = {"f_ref": 0.0}
             mbh_fill_dict = {}
 
             self.transform = TransformContainer(
@@ -345,9 +340,7 @@ class MBHSetup(Setup):
             )
 
         if self.periodic is None:
-            self.periodic = {
-                "mbh": {"phi_ref": 2 * np.pi, "lam": 2 * np.pi, "psi": np.pi}
-            }
+            self.periodic = {"mbh": {"phi_ref": 2 * np.pi, "lam": 2 * np.pi, "psi": np.pi}}
 
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
@@ -455,9 +448,7 @@ class EMRISettings(Settings):
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None  # AS here only for the starting state
     info_matrix_gen: Optional[Any] = None  # todo change name to info matrix or smth
-    fill_values: np.ndarray = dataclasses.field(
-        default_factory=lambda: np.array([1.0, 0.0])
-    )
+    fill_values: np.ndarray = dataclasses.field(default_factory=lambda: np.array([1.0, 0.0]))
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 10

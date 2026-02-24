@@ -63,8 +63,7 @@ class MultiGPUDataHolder:
         ]
 
         self.gpus_for_each_data = [
-            np.full_like(gpu_split, gpu)
-            for gpu_split, gpu in zip(self.gpu_splits, self.gpus)
+            np.full_like(gpu_split, gpu) for gpu_split, gpu in zip(self.gpu_splits, self.gpus)
         ]
         self.mempool = xp.get_default_memory_pool()
 
@@ -278,9 +277,9 @@ class MultiGPUDataHolder:
         return self.ntemps * self.nwalkers * self.data_length
 
     def get_mapped_indices(self, inds_in):
-        if (
-            not isinstance(inds_in, np.ndarray) and not isinstance(inds_in, xp.ndarray)
-        ) or ((inds_in.dtype != np.int64 and inds_in.dtype != xp.int32)):
+        if (not isinstance(inds_in, np.ndarray) and not isinstance(inds_in, xp.ndarray)) or (
+            (inds_in.dtype != np.int64 and inds_in.dtype != xp.int32)
+        ):
             raise ValueError("inds_in input must be a numpy array of np.int64.")
 
         if isinstance(inds_in, np.ndarray):
@@ -397,9 +396,7 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.setDevice(return_to_main)
         xp.cuda.runtime.deviceSynchronize()
 
-    def add_templates_from_arrays_to_residuals(
-        self, A_vals_in, E_vals_in, overall_inds=None
-    ):
+    def add_templates_from_arrays_to_residuals(self, A_vals_in, E_vals_in, overall_inds=None):
 
         if overall_inds is None:
             overall_inds = np.arange(self.ntemps * self.nwalkers)
@@ -564,9 +561,7 @@ class MultiGPUDataHolder:
         # et = time.perf_counter()
         # print("fill", et - st)
 
-    def set_lisasens_vals(
-        self, lisasens_params, overall_inds=None, foreground_params=None
-    ):
+    def set_lisasens_vals(self, lisasens_params, overall_inds=None, foreground_params=None):
 
         if overall_inds is None:
             overall_inds = np.arange(self.ntemps * self.nwalkers)
@@ -723,44 +718,42 @@ class MultiGPUDataHolder:
         gpu_i = 0
 
         # remove injected data + previous templates
-        self.channel1_data[gpu_i][
-            : self.nwalkers * self.data_length
-        ] -= self.channel1_base_data[gpu_i][:]
-        self.channel1_data[gpu_i][
-            self.nwalkers * self.data_length :
-        ] -= self.channel1_base_data[gpu_i][:]
+        self.channel1_data[gpu_i][: self.nwalkers * self.data_length] -= self.channel1_base_data[
+            gpu_i
+        ][:]
+        self.channel1_data[gpu_i][self.nwalkers * self.data_length :] -= self.channel1_base_data[
+            gpu_i
+        ][:]
 
-        self.channel2_data[gpu_i][
-            : self.nwalkers * self.data_length
-        ] -= self.channel2_base_data[gpu_i][:]
-        self.channel2_data[gpu_i][
-            self.nwalkers * self.data_length :
-        ] -= self.channel2_base_data[gpu_i][:]
+        self.channel2_data[gpu_i][: self.nwalkers * self.data_length] -= self.channel2_base_data[
+            gpu_i
+        ][:]
+        self.channel2_data[gpu_i][self.nwalkers * self.data_length :] -= self.channel2_base_data[
+            gpu_i
+        ][:]
 
         # change injected data + other templates in base
         self.channel1_base_data[gpu_i][:] = xp.asarray(data[0].flatten())
         self.channel2_base_data[gpu_i][:] = xp.asarray(data[1].flatten())
 
         # re-add to channel data
-        self.channel1_data[gpu_i][
-            : self.nwalkers * self.data_length
-        ] += self.channel1_base_data[gpu_i][:]
-        self.channel1_data[gpu_i][
-            self.nwalkers * self.data_length :
-        ] += self.channel1_base_data[gpu_i][:]
+        self.channel1_data[gpu_i][: self.nwalkers * self.data_length] += self.channel1_base_data[
+            gpu_i
+        ][:]
+        self.channel1_data[gpu_i][self.nwalkers * self.data_length :] += self.channel1_base_data[
+            gpu_i
+        ][:]
 
-        self.channel2_data[gpu_i][
-            : self.nwalkers * self.data_length
-        ] += self.channel2_base_data[gpu_i][:]
-        self.channel2_data[gpu_i][
-            self.nwalkers * self.data_length :
-        ] += self.channel2_base_data[gpu_i][:]
+        self.channel2_data[gpu_i][: self.nwalkers * self.data_length] += self.channel2_base_data[
+            gpu_i
+        ][:]
+        self.channel2_data[gpu_i][self.nwalkers * self.data_length :] += self.channel2_base_data[
+            gpu_i
+        ][:]
 
         return
 
-    def get_inner_product(
-        self, *args, overall_inds=None, band_edge_inds=None, **kwargs
-    ):
+    def get_inner_product(self, *args, overall_inds=None, band_edge_inds=None, **kwargs):
         reshape = False
         if overall_inds is None:
             reshape = True
@@ -771,9 +764,7 @@ class MultiGPUDataHolder:
         if band_edge_inds is None:
             inner_term = np.zeros_like(overall_inds, dtype=float)
         else:
-            inner_term = np.zeros(
-                (overall_inds.shape[0], band_edge_inds.shape[0] - 1), dtype=float
-            )
+            inner_term = np.zeros((overall_inds.shape[0], band_edge_inds.shape[0] - 1), dtype=float)
 
         data_tmp1 = [None for _ in self.gpus]
         data_tmp2 = [None for _ in self.gpus]
@@ -820,12 +811,8 @@ class MultiGPUDataHolder:
                             self.df
                             * 4
                             * xp.sum(
-                                data_tmp1[gpu_i].conj()
-                                * data_tmp1[gpu_i]
-                                / psd_tmp1[gpu_i]
-                                + data_tmp2[gpu_i].conj()
-                                * data_tmp2[gpu_i]
-                                / psd_tmp2[gpu_i],
+                                data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
+                                + data_tmp2[gpu_i].conj() * data_tmp2[gpu_i] / psd_tmp2[gpu_i],
                             ).real.item()
                         )
 
@@ -834,12 +821,8 @@ class MultiGPUDataHolder:
                             self.df
                             * 4
                             * xp.cumsum(
-                                data_tmp1[gpu_i].conj()
-                                * data_tmp1[gpu_i]
-                                / psd_tmp1[gpu_i]
-                                + data_tmp2[gpu_i].conj()
-                                * data_tmp2[gpu_i]
-                                / psd_tmp2[gpu_i],
+                                data_tmp1[gpu_i].conj() * data_tmp1[gpu_i] / psd_tmp1[gpu_i]
+                                + data_tmp2[gpu_i].conj() * data_tmp2[gpu_i] / psd_tmp2[gpu_i],
                             ).real[band_edge_inds]
                         )
                         inner_here_tmp[1:] -= inner_here_tmp[:-1]
@@ -884,9 +867,7 @@ class MultiGPUDataHolder:
         return inner_term
 
     def get_ll(self, *args, include_psd_info=False, overall_inds=None, **kwargs):
-        inner_product = self.get_inner_product(
-            *args, overall_inds=overall_inds, **kwargs
-        )
+        inner_product = self.get_inner_product(*args, overall_inds=overall_inds, **kwargs)
         ll_out = -1 / 2 * inner_product
 
         if include_psd_info:
@@ -913,9 +894,7 @@ class MultiGPUDataHolder:
     def restore_base_injections(self):
         return_to_main = xp.cuda.runtime.getDevice()
         if self.base_injections is None or self.base_psd is None:
-            raise ValueError(
-                "Must give base_injections and base_psd kwarg to __init__ to restore."
-            )
+            raise ValueError("Must give base_injections and base_psd kwarg to __init__ to restore.")
 
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):
@@ -941,12 +920,8 @@ class MultiGPUDataHolder:
             self.df
             * 4
             * np.sum(
-                self.base_injections[0].conj()
-                * self.base_injections[0]
-                / self.base_psd[0]
-                + self.base_injections[1].conj()
-                * self.base_injections[1]
-                / self.base_psd[1],
+                self.base_injections[0].conj() * self.base_injections[0] / self.base_psd[0]
+                + self.base_injections[1].conj() * self.base_injections[1] / self.base_psd[1],
             )
         )
         return inner_out
@@ -963,14 +938,9 @@ class MultiGPUDataHolder:
             ]:
                 key_2 = f"channel{chan + 1}_{key}"
                 out[key_2] = []
-                for gpu_i, (gpu, gpu_split_tmp) in enumerate(
-                    zip(self.gpus, self.gpu_splits)
-                ):
+                for gpu_i, (gpu, gpu_split_tmp) in enumerate(zip(self.gpus, self.gpu_splits)):
                     out[key_2].append(
-                        getattr(self, key_2)[gpu_i]
-                        .get()
-                        .copy()
-                        .reshape(-1, self.data_length)
+                        getattr(self, key_2)[gpu_i].get().copy().reshape(-1, self.data_length)
                     )
 
         return out
@@ -1018,9 +988,7 @@ if __name__ == "__main__":
 
     check1 = mg.get_mapped_indices(np.arange(len(mg.overall_indices_flat)))
 
-    mg.map = np.random.choice(
-        mg.overall_indices_flat, len(mg.overall_indices_flat), replace=False
-    )
+    mg.map = np.random.choice(mg.overall_indices_flat, len(mg.overall_indices_flat), replace=False)
 
     check2 = mg.get_mapped_indices(np.arange(len(mg.overall_indices_flat)))
 

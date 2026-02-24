@@ -8,8 +8,10 @@ import typing
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
+
 # get_ipython().run_line_magic('matplotlib', 'inline')
 from numpy import pi
+
 # rem I need to remind myself which of these I use
 from scipy.integrate import cumulative_simpson as cumulative_simpson_scipy
 from scipy.interpolate import CubicSpline, interp1d, make_interp_spline
@@ -32,9 +34,7 @@ def alpha_to_tf(alpha, npts, fmin, fmax):
     kappa = 0.5 * (np.log(fmax / fmin))
     y = np.linspace(-1.0e0, 1.0e0, num=npts, endpoint=True)
     nterms = np.size(alpha)
-    basis_funcs = np.zeros(
-        [npts, nterms]
-    )  # these are the Chebyshev polys (of 2nd kind)
+    basis_funcs = np.zeros([npts, nterms])  # these are the Chebyshev polys (of 2nd kind)
     y0 = (y + 2.0) ** 0.0
     basis_funcs[:, 0] = y0
     y1 = 2 * y
@@ -141,9 +141,7 @@ def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
             d = np.diff(x, axis=axis)
 
         if d.shape[axis] != y.shape[axis] - 1:
-            raise ValueError(
-                "If given, length of x along axis must be the " "same as y."
-            )
+            raise ValueError("If given, length of x along axis must be the " "same as y.")
 
     nd = len(y.shape)
     slice1 = tupleset((slice(None),) * nd, axis, slice(1, None))
@@ -312,19 +310,14 @@ def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
             "If given, shape of `x` must be the same as `y` or 1-D with "
             "the same length as `y` along `axis`."
         )
-        if not (
-            x.shape == original_shape
-            or (x.ndim == 1 and len(x) == original_shape[axis])
-        ):
+        if not (x.shape == original_shape or (x.ndim == 1 and len(x) == original_shape[axis])):
             raise ValueError(message)
 
         x = np.broadcast_to(x, y.shape) if x.ndim == 1 else np.swapaxes(x, axis, -1)
         dx = np.diff(x, axis=-1)
         if np.any(dx <= 0):
             raise ValueError("Input x must be strictly increasing.")
-        res = _cumulatively_sum_simpson_integrals(
-            y, dx, _cumulative_simpson_unequal_intervals
-        )
+        res = _cumulatively_sum_simpson_integrals(y, dx, _cumulative_simpson_unequal_intervals)
 
     else:
         dx = _ensure_float_array(dx)
@@ -338,9 +331,7 @@ def cumulative_simpson(y, *, x=None, dx=1.0, axis=-1, initial=None):
             raise ValueError(message)
         dx = np.broadcast_to(dx, final_dx_shape)
         dx = np.swapaxes(dx, axis, -1)
-        res = _cumulatively_sum_simpson_integrals(
-            y, dx, _cumulative_simpson_equal_intervals
-        )
+        res = _cumulatively_sum_simpson_integrals(y, dx, _cumulative_simpson_equal_intervals)
 
     if initial is not None:
         initial = _ensure_float_array(initial)
@@ -445,9 +436,7 @@ class ChebyshevWave:
         self.dw = 2.0 / (self.npts - 1)
         self.midpt = (self.npts - 1) // 2
 
-    def __call__(
-        self, *alpha_in: np.ndarray | list
-    ) -> typing.Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, *alpha_in: np.ndarray | list) -> typing.Tuple[np.ndarray, np.ndarray]:
 
         alpha = np.asarray(alpha_in).T
         squeeze = alpha.ndim == 1

@@ -5,6 +5,7 @@ import cupy as cp
 import numpy as np
 from eryn.ensemble import EnsembleSampler
 from eryn.moves import RedBlueMove, StretchMove
+
 # from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 
@@ -20,6 +21,7 @@ from ...sensitivity import AET1SensitivityMatrix
 from ...utils.constants import *
 from ...utils.parallelbase import LISAToolsParallelModule
 from ...utils.utility import tukey
+
 # from eryn.state import State
 from ..state import GFState
 from .addremovemove import ResidualAddOneRemoveOneMove
@@ -46,9 +48,9 @@ def search_likelihood_wrap(
 ):
     x_in = transform_fn.both_transforms(x)
 
-    data_index = noise_index = (
-        np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1
-    ).astype(np.int32)
+    data_index = noise_index = (np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1).astype(
+        np.int32
+    )
     # wave_gen.amp
 
     wave_gen.amp_phase_gen.initial_t_val = initial_t_vals[data_index][:, None]
@@ -86,9 +88,7 @@ class MBHSpecialMove(
         **kwargs,
     ):
 
-        LISAToolsParallelModule.__init__(
-            self, *args, force_backend=force_backend, **kwargs
-        )
+        LISAToolsParallelModule.__init__(self, *args, force_backend=force_backend, **kwargs)
         RedBlueMove.__init__(self, **kwargs)
         ResidualAddOneRemoveOneMove.__init__(self, *args, **kwargs)
         self.force_backend_base = self.backend.name.split("_")[-1]
@@ -118,10 +118,7 @@ class MBHSpecialMove(
 
         acs_all = model.analysis_container_arr
 
-        _moves = [
-            (move_i, weight_i)
-            for move_i, weight_i in zip(self.moves, self.move_weights)
-        ]
+        _moves = [(move_i, weight_i) for move_i, weight_i in zip(self.moves, self.move_weights)]
         max_logl_walker = np.argmax(acs_all.likelihood()).item()
 
         data = acs_all.data_shaped[0][max_logl_walker].copy()
@@ -154,9 +151,7 @@ class MBHSpecialMove(
         df = acs_all.df
         dt = acs_all[0].data_res_arr.dt
         # TODO: do we want to rerun search after much of the fitting?
-        while (
-            not self.finished_search
-        ):  # will not enter once search has finished for this run
+        while not self.finished_search:  # will not enter once search has finished for this run
             # TODO: adjust these moves?
 
             ntemps = 10
@@ -283,8 +278,8 @@ class MBHSpecialMove(
 
             # check = analysis.calculate_signal_likelihood(*inj_params_in, source_only=True, waveform_kwargs=tmp_kwargs)
 
-            from bbhx.likelihood import (HeterodynedLikelihood, Likelihood,
-                                         NewHeterodynedLikelihood)
+            from bbhx.likelihood import HeterodynedLikelihood, Likelihood, NewHeterodynedLikelihood
+
             # priors
             from eryn.prior import ProbDistContainer, uniform_dist
 
@@ -323,9 +318,7 @@ class MBHSpecialMove(
             from eryn.utils import PeriodicContainer
 
             # sampler treats periodic variables by wrapping them properly
-            periodic_mbh = PeriodicContainer(
-                {"mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}}
-            )
+            periodic_mbh = PeriodicContainer({"mbh": {5: 2 * np.pi, 7: 2 * np.pi, 9: np.pi}})
 
             inner_moves = [
                 (SkyMove(which="both"), 0.02),
@@ -381,9 +374,7 @@ class MBHSpecialMove(
 
                 start_state = State({"mbh": start_points})
 
-            stop_fn = SearchConvergeStopping(
-                n_iters=30, diff=1.0, verbose=True, start_iteration=0
-            )
+            stop_fn = SearchConvergeStopping(n_iters=30, diff=1.0, verbose=True, start_iteration=0)
             sampler = EnsembleSampler(
                 nwalkers,
                 {"mbh": 11},
@@ -420,9 +411,7 @@ class MBHSpecialMove(
             print("start like", acs.likelihood(source_only=True).max())
             # check_params = np.load("check_params.npy")[None, :]
             # start_like4 = search_likelihood_wrap(mbh_params_best[None, :], *like_args)
-            final_state = sampler.run_mcmc(
-                start_state, nsteps, thin_by=50, progress=True
-            )
+            final_state = sampler.run_mcmc(start_state, nsteps, thin_by=50, progress=True)
             print("End like:", sampler.get_log_like().max())
 
             full_kwargs["phase_marginalize"] = True
@@ -441,15 +430,11 @@ class MBHSpecialMove(
             assert np.allclose(_ll_check, new_ll)
 
             # NEED THIS TO GET ADJUSTED PHASE FROM MAXIMIZATION
-            coords_post_like[:, 5] = (
-                coords_post_like[:, 5] + 1.0 / 2.0 * phase_change.get()
-            )
+            coords_post_like[:, 5] = coords_post_like[:, 5] + 1.0 / 2.0 * phase_change.get()
             # TODO: make option / DECIDE ABOUT THIS
             self.snr_det_lim = 30.0
 
-            keep_it = np.any(
-                (opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim)
-            )
+            keep_it = np.any((opt_snr > self.snr_det_lim) & (det_snr > self.snr_det_lim))
 
             if keep_it:
                 # get current highest leaf in MBH store
@@ -460,18 +445,14 @@ class MBHSpecialMove(
                 new_coords = coords_post_like[new_ll_keep]
                 new_ll_here = new_ll[new_ll_keep]
 
-                old_tmrg = state.branches["mbh"].coords[state.branches["mbh"].inds][
-                    :, -1
-                ]
+                old_tmrg = state.branches["mbh"].coords[state.branches["mbh"].inds][:, -1]
 
                 new_tmrg = new_coords[:, -1]
                 # HOWEVER: we still want to remove this from the search residual even if it is a repeat
                 # TODO: reload from tmp_file? make an option so that it will not repeat the repeats
                 # -1 here is the max likelihood
                 AET_remove_params = new_coords[-1][None, :]
-                AET_remove_params_in = self.transform_fn.both_transforms(
-                    AET_remove_params
-                )
+                AET_remove_params_in = self.transform_fn.both_transforms(AET_remove_params)
                 self.waveform_gen.amp_phase_gen.initial_t_val = 0.0
                 AET_remove = self.waveform_gen(
                     *AET_remove_params_in.T,
@@ -495,9 +476,7 @@ class MBHSpecialMove(
                 if not any_same:
                     # store to file and global state
                     state.branches["mbh"].inds[:, :, next_leaf] = True
-                    state.branches["mbh"].coords[:, :, next_leaf] = new_coords[
-                        None, :, :
-                    ]
+                    state.branches["mbh"].coords[:, :, next_leaf] = new_coords[None, :, :]
                     self.file_backend.save_step(state, _accepted)
 
                 # only adjusting data here
@@ -508,15 +487,10 @@ class MBHSpecialMove(
 
             else:
 
-                if np.any(
-                    state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet
-                ):
+                if np.any(state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet):
                     # remove the cold chain parameters from their respective residual.
                     inds_remove = np.arange(state.branches["mbh"].shape[2])[
-                        (
-                            state.branches["mbh"].inds[0, 0, :]
-                            & bool_leaves_not_filled_yet
-                        )
+                        (state.branches["mbh"].inds[0, 0, :] & bool_leaves_not_filled_yet)
                     ]
                     for leaf_remove in inds_remove:
                         CHANNELS_remove_params = (
@@ -546,9 +520,7 @@ class MBHSpecialMove(
 
     def propose(self, model, state):
         __doc__ = ResidualAddOneRemoveOneMove.propose.__doc__
-        assert np.all(
-            state.branches["mbh"].nleaves[0, 0] == state.branches["mbh"].nleaves
-        )
+        assert np.all(state.branches["mbh"].nleaves[0, 0] == state.branches["mbh"].nleaves)
         if self.finished_search and state.branches["mbh"].nleaves[0, 0] == 0:
             print("No MBHs in sampler. Skipping proposal.")
             ntemps, nwalkers = state.branches["mbh"].shape[:2]

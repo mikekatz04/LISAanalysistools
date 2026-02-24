@@ -27,9 +27,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
         include_gbs=False, include_mbhs=False, include_lisasens=False, only_max_ll=True
     )  # , include_ll=True, include_source_only_ll=True)
     psd = xp.asarray(generated_info["psd"])
-    output_information = gather_gb_samples_cat(
-        current_info, gb_reader, psd, gpu, **kwargs
-    )
+    output_information = gather_gb_samples_cat(current_info, gb_reader, psd, gpu, **kwargs)
 
     info_together = np.concatenate(
         [
@@ -43,9 +41,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
 
     # keep only
     info_together = info_together[output_information.confidence >= 0.25]
-    kept_groups = np.unique(
-        output_information.groups[output_information.confidence >= 0.25]
-    )
+    kept_groups = np.unique(output_information.groups[output_information.confidence >= 0.25])
 
     median_inds_out = np.zeros(kept_groups.shape[0], dtype=int)
     for i, group in enumerate(kept_groups):
@@ -86,8 +82,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
     df_main = df.iloc[median_inds_out]
 
     name_index = [
-        f"EREBOR_GB_{year_val}_{month_val}_{day_val}_{i:08d}"
-        for i in range(df_main.shape[0])
+        f"EREBOR_GB_{year_val}_{month_val}_{day_val}_{i:08d}" for i in range(df_main.shape[0])
     ]
 
     chain_file_index = 0
@@ -95,9 +90,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
     chain_file_list = []
     for i in range(len(name_index)):
         chain_file_list.append(
-            current_info.general_info["file_information"]["gb_all_chain_file"].split(
-                "/"
-            )[-1][:-3]
+            current_info.general_info["file_information"]["gb_all_chain_file"].split("/")[-1][:-3]
             + f"_{chain_file_index:04d}.h5"
         )
 
@@ -114,9 +107,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
         complevel=9,
     )
 
-    dirname = os.path.dirname(
-        current_info.general_info["file_information"]["gb_main_chain_file"]
-    )
+    dirname = os.path.dirname(current_info.general_info["file_information"]["gb_main_chain_file"])
     if dirname[-1] != "/":
         dirname += "/"
 
@@ -141,9 +132,7 @@ def build_gb_catalog(current_info, gpu, **kwargs):
         zip(name_index, median_inds_out, chain_file_list)
     ):
         sub_df = df[df["Group ID"].astype(int) == int(df.iloc[index]["Group ID"])]
-        sub_df.to_hdf(
-            dirname + store_file, sub_df_name + "_chain", mode="a", complevel=9
-        )
+        sub_df.to_hdf(dirname + store_file, sub_df_name + "_chain", mode="a", complevel=9)
         if (i + 1) % 100 == 0:
             print(f"Sub hdf: {i + 1} of {len(median_inds_out)}")
 
@@ -192,15 +181,12 @@ def build_mbh_catalog(current_info, gpu, **kwargs):
     day_val = datetime.now().day
 
     name_index = [
-        f"EREBOR_MBH_{year_val}_{month_val}_{day_val}_{i + 1:04d}"
-        for i in range(mbh_leaves)
+        f"EREBOR_MBH_{year_val}_{month_val}_{day_val}_{i + 1:04d}" for i in range(mbh_leaves)
     ]
     output_for_main = []
     for leaf_i in range(mbh_leaves):
 
-        mbh_samples = mbh_reader.get_chain(**kwargs)["mbh"][:, 0, :, leaf_i].reshape(
-            -1, mbh_ndim
-        )
+        mbh_samples = mbh_reader.get_chain(**kwargs)["mbh"][:, 0, :, leaf_i].reshape(-1, mbh_ndim)
 
         df = pd.DataFrame({key: item for key, item in zip(samp_keys, mbh_samples.T)})
 
@@ -214,9 +200,7 @@ def build_mbh_catalog(current_info, gpu, **kwargs):
 
         # sky transform
         # TODO: Jacobian?
-        df["Ecliptic Latitude (L-Frame)"] = np.arcsin(
-            df["sin ecliptic latitude (L-Frame)"]
-        )
+        df["Ecliptic Latitude (L-Frame)"] = np.arcsin(df["sin ecliptic latitude (L-Frame)"])
         tL, lamL, betaL, psiL = (
             df["Detector Merger Time"],
             df["Ecliptic Longitude (L-frame)"],
@@ -241,8 +225,7 @@ def build_mbh_catalog(current_info, gpu, **kwargs):
 
         # determine median merger time
         median_merger_time_detector_ind_keep = np.argsort(df["Detector Merger Time"])[
-            int(len(df["Detector Merger Time"]) / 2)
-            + int(len(df["Detector Merger Time"]) % 2)
+            int(len(df["Detector Merger Time"]) / 2) + int(len(df["Detector Merger Time"]) % 2)
         ]
 
         median_merger = df.iloc[median_merger_time_detector_ind_keep]
@@ -285,9 +268,7 @@ def build_mbh_catalog(current_info, gpu, **kwargs):
 catalog_generate_funcs = {"gb": build_gb_catalog, "mbh": build_mbh_catalog}
 
 
-def build_catalog(
-    current_info, gpu=None, catalogs=["gb", "mbh"], cat_kwargs={}, **kwargs
-):
+def build_catalog(current_info, gpu=None, catalogs=["gb", "mbh"], cat_kwargs={}, **kwargs):
 
     if isinstance(catalogs, str):
         catalogs = [catalogs]
@@ -296,6 +277,4 @@ def build_catalog(
         if catalog_type not in cat_kwargs:
             cat_kwargs[catalog_type] = {}
 
-        catalog_generate_funcs[catalog_type](
-            current_info, gpu, **cat_kwargs[catalog_type]
-        )
+        catalog_generate_funcs[catalog_type](current_info, gpu, **cat_kwargs[catalog_type])

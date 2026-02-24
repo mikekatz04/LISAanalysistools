@@ -9,9 +9,7 @@ def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit"):
     logger = logging.getLogger(name)
     logger.setLevel(level)
     if len(logger.handlers) < 2:
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - " "%(levelname)s - %(message)s"
-        )
+        formatter = logging.Formatter("%(asctime)s - %(name)s - " "%(levelname)s - %(message)s")
         if filename:
             rfhandler = logging.FileHandler(filename)
             logger.addHandler(rfhandler)

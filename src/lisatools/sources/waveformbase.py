@@ -11,8 +11,14 @@ except ImportError:
 from fastlisaresponse import pyResponseTDI
 from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
 
-from ..domains import (DomainBase, DomainBaseArray, FDSettings, TDSettings,
-                       TDSignal, get_stft_settings)
+from ..domains import (
+    DomainBase,
+    DomainBaseArray,
+    FDSettings,
+    TDSettings,
+    TDSignal,
+    get_stft_settings,
+)
 from ..utils.utility import tukey
 
 
@@ -107,9 +113,7 @@ class TDWaveformBase(ABC):
 
     def wave_gen(
         self, *args, **kwargs
-    ) -> Tuple[
-        np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray
-    ]:
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Generate the waveform for a single source.
 
         Returns:
@@ -186,7 +190,6 @@ class TDWaveformBase(ABC):
             tdis = tdis[:, start_ind:]
             t_arr = t_arr[start_ind:]
 
-
         td_settings = TDSettings(
             t0=float(shifted_t_arr[0]),
             dt=self.dt,
@@ -233,7 +236,7 @@ class TDWaveformBase(ABC):
                 f"'WDM' is not supported yet. Got: {output_domain}."
             )
         return td_signal.transform(out_settings, window=window)
-    
+
     def pad_td_signal_for_stft(self, td_signal: TDSignal, domain_kwargs: dict) -> TDSignal:
         """
         Pad a TDSignal with zeros if the initial timepoint would not be aligned with the STFT grid used for the data.
@@ -242,21 +245,19 @@ class TDWaveformBase(ABC):
             td_signal: Input TDSignal to be padded if necessary.
             domain_kwargs: Keyword arguments for deriving the STFTSettings, used to determine the STFT grid.
         """
-        nperseg = round( domain_kwargs['big_dt'] / td_signal.settings.dt)
+        nperseg = round(domain_kwargs["big_dt"] / td_signal.settings.dt)
         # now check if there is a integer number of nperseg samples between td_signal.settings.t0 and self.data_t0
         n_samples_to_data_t0 = round((self.data_t0 - td_signal.settings.t0) / td_signal.settings.dt)
         if n_samples_to_data_t0 % nperseg == 0:
             # already aligned, no padding needed
             return td_signal
-        
+
         else:
             # need to pad with zeros at the beginning of the signal
             n_pad = nperseg - (n_samples_to_data_t0 % nperseg)
             # print(f"Padding TDSignal with {n_pad} zeros to align with STFT grid.")
             pad_width = [(0, 0)] * len(td_signal.outer_shape) + [(n_pad, 0)]
-            padded_arr = self.xp.pad(
-                td_signal.arr, pad_width, mode="constant", constant_values=0
-            )
+            padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant", constant_values=0)
             padded_settings = TDSettings(
                 t0=td_signal.settings.t0 - n_pad * td_signal.settings.dt,
                 dt=td_signal.settings.dt,
@@ -281,9 +282,7 @@ class TDWaveformBase(ABC):
         batching natively), then optionally projects all signals onto a common STFT
         grid when ``self.force_uniform_stft`` is True.
         """
-        times_batch, mask_batch, hplus_batch, hcross_batch = self.wave_gen_batch(
-            *args, **kwargs
-        )
+        times_batch, mask_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
 
         Nbatch = times_batch.shape[0]
         td_signals: List[TDSignal] = []
@@ -297,8 +296,12 @@ class TDWaveformBase(ABC):
 
             td_signals.append(
                 self._apply_response_single(
-                    t_arr_i, hplus_i, hcross_i,
-                    float(ra[i]), float(dec[i]), float(merger_time[i]),
+                    t_arr_i,
+                    hplus_i,
+                    hcross_i,
+                    float(ra[i]),
+                    float(dec[i]),
+                    float(merger_time[i]),
                 )
             )
 
@@ -334,9 +337,7 @@ class TDWaveformBase(ABC):
 
         # Derive a common STFTSettings from the global time grid.
         ref_t_arr = self.xp.arange(N_global) * self.dt + waveform_t0_global
-        common_settings = get_stft_settings(
-            ref_t_arr, **domain_kwargs, force_backend=self.backend
-        )
+        common_settings = get_stft_settings(ref_t_arr, **domain_kwargs, force_backend=self.backend)
         nperseg = common_settings.get_nperseg(self.dt)
         window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
@@ -347,9 +348,7 @@ class TDWaveformBase(ABC):
 
             # pad_width: keep all outer dims (channels) intact, pad only the time axis.
             pad_width = [(0, 0)] * len(td_sig.outer_shape) + [(left_pad, right_pad)]
-            padded_arr = self.xp.pad(
-                td_sig.arr, pad_width, mode="constant", constant_values=0
-            )
+            padded_arr = self.xp.pad(td_sig.arr, pad_width, mode="constant", constant_values=0)
             padded_settings = TDSettings(
                 waveform_t0=waveform_t0_global, dt=self.dt, N=N_global, force_backend=self.backend
             )
@@ -398,13 +397,11 @@ class TDWaveformBase(ABC):
                 domain_kwargs=domain_kwargs,
                 **kwargs,
             )
-        
+
         else:
             # Single-source path.
             t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
 
-            td_signal = self._apply_response_single(
-                t_arr, h_plus, h_cross, ra, dec, merger_time
-            )
-            
+            td_signal = self._apply_response_single(t_arr, h_plus, h_cross, ra, dec, merger_time)
+
             return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)

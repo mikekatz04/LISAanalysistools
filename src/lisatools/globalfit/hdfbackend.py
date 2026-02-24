@@ -51,9 +51,7 @@ def save_to_backend_asynchronously_and_plot(
         if ((i + 1) % backup_iter) == 0:
             print("copy to backup file")
             # copy to backup file
-            shutil.copy(
-                gb_reader.filename, gb_reader.filename[:-3] + "_running_backup_copy.h5"
-            )
+            shutil.copy(gb_reader.filename, gb_reader.filename[:-3] + "_running_backup_copy.h5")
 
         i += 1
     return
@@ -99,10 +97,7 @@ class GFHDFBackend(eryn_HDFBackend):
             existing_keys = set()
             try:
                 with self.open() as f:
-                    if (
-                        self.name in f
-                        and "sub_backend" in f[self.name]
-                    ):
+                    if self.name in f and "sub_backend" in f[self.name]:
                         existing_keys = set(f[self.name]["sub_backend"].keys())
             except Exception:
                 pass
@@ -127,10 +122,7 @@ class GFHDFBackend(eryn_HDFBackend):
             existing_keys = set()
             try:
                 with self.open() as f:
-                    if (
-                        self.name in f
-                        and "sub_backend" in f[self.name]
-                    ):
+                    if self.name in f and "sub_backend" in f[self.name]:
                         existing_keys = set(f[self.name]["sub_backend"].keys())
             except Exception:
                 pass
@@ -228,9 +220,7 @@ class GFHDFBackend(eryn_HDFBackend):
 
         else:
             state = args[0]
-            self.comm.send(
-                {"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank
-            )
+            self.comm.send({"save_args": args, "save_kwargs": kwargs}, dest=self.save_plot_rank)
 
     def get_a_sample(self, it):
         """Access a sample in the chain
@@ -247,15 +237,11 @@ class GFHDFBackend(eryn_HDFBackend):
         """
         if (not self.initialized) or self.iteration <= 0:
             raise AttributeError(
-                "you must run the sampler with "
-                "'store == True' before accessing the "
-                "results"
+                "you must run the sampler with " "'store == True' before accessing the " "results"
             )
 
         tmp_state = super().get_a_sample(it)
-        state = GFState(
-            tmp_state, sub_state_bases=self.sub_state_bases, is_eryn_state_input=True
-        )
+        state = GFState(tmp_state, sub_state_bases=self.sub_state_bases, is_eryn_state_input=True)
 
         # open for appending in with statement
         if self.sub_backend is not None:
@@ -293,9 +279,7 @@ class GFHDFBackend(eryn_HDFBackend):
             order = []
             keys = []
             for key in f[self.name]["recipe"]:
-                _recipe[key] = {
-                    key: val for key, val in f["mcmc"]["recipe"][key].attrs.items()
-                }
+                _recipe[key] = {key: val for key, val in f["mcmc"]["recipe"][key].attrs.items()}
                 order.append(_recipe[key]["order num"])
                 keys.append(key)
 
@@ -335,11 +319,10 @@ class GFHDFBackend(eryn_HDFBackend):
             recipe_step_group = recipe_group[step_name]
             recipe_step_group.attrs["status"] = True
 
+
 class GBHDFBackend(eryn_HDFBackend):
 
-    def reset(
-        self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs
-    ):
+    def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
         if num_bands is None or band_edges is None:
             raise ValueError("Must provide num_bands and band_edges kwargs.")
 
@@ -486,9 +469,7 @@ class GBHDFBackend(eryn_HDFBackend):
         # check if initialized
         if not self.initialized:
             raise AttributeError(
-                "You must run the sampler with "
-                "'store == True' before accessing the "
-                "results"
+                "You must run the sampler with " "'store == True' before accessing the " "results"
             )
 
         if name != "band_info":
@@ -516,9 +497,7 @@ class GBHDFBackend(eryn_HDFBackend):
 
                     gb_group = g["sub_backend"]["gb"]
                     v_all = {
-                        key: gb_group[key][slice_vals]
-                        for key in gb_group
-                        if key != "band_edges"
+                        key: gb_group[key][slice_vals] for key in gb_group if key != "band_edges"
                     }
                     v_all["band_edges"] = gb_group["band_edges"][:]
                     successful = True
@@ -675,9 +654,7 @@ class MBHHDFBackend(eryn_HDFBackend):
         # check if initialized
         if not self.initialized:
             raise AttributeError(
-                "You must run the sampler with "
-                "'store == True' before accessing the "
-                "results"
+                "You must run the sampler with " "'store == True' before accessing the " "results"
             )
 
         if name != "betas_all":
@@ -830,9 +807,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
         # check if initialized
         if not self.initialized:
             raise AttributeError(
-                "You must run the sampler with "
-                "'store == True' before accessing the "
-                "results"
+                "You must run the sampler with " "'store == True' before accessing the " "results"
             )
 
         if name != "betas_all":

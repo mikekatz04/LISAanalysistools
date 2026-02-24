@@ -64,9 +64,9 @@ def search_likelihood_wrap(
 ):
     x_in = transform_fn.both_transforms(x)
 
-    data_index = noise_index = (
-        np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1
-    ).astype(np.int32)
+    data_index = noise_index = (np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1).astype(
+        np.int32
+    )
     # wave_gen.amp
 
     wave_gen.amp_phase_gen.initial_t_val = initial_t_vals[data_index][:, None]
@@ -91,9 +91,7 @@ def search_likelihood_wrap(
 
 
 # function call
-def run_mbh_search(
-    gpu, settings, rank, time_split, total_time_splits, best_points, num_run
-):
+def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_points, num_run):
 
     cp.cuda.runtime.setDevice(gpu)
 
@@ -145,11 +143,7 @@ def run_mbh_search(
     )[time_split]
 
     start_here = split_inds[0] - 1 if split_inds[0] > 0 else 0
-    end_here = (
-        split_inds[-1] + 1
-        if split_inds[-1] < num_t_ref_bins - 1
-        else num_t_ref_bins - 1
-    )
+    end_here = split_inds[-1] + 1 if split_inds[-1] < num_t_ref_bins - 1 else num_t_ref_bins - 1
     num_here = end_here - start_here + 1
 
     t_ref_lims_here = t_ref_lims[start_here : end_here + 1]
@@ -177,23 +171,17 @@ def run_mbh_search(
         fd_tmp = np.fft.rfftfreq(len(X), dt)
         fd_tmp[0] = fd_tmp[1]
 
-        psd_tmp = get_sensitivity(
-            fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1
-        )
+        psd_tmp = get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1)
 
         # last_ll = -1/2 * 4 * settings["general"]["df"] * np.sum((Af.conj() * Af + Ef.conj() * Ef) / psd_tmp)
 
         for i in range(len(best_points)):
 
-            psd_tmp = get_sensitivity(
-                fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1
-            )
+            psd_tmp = get_sensitivity(fd_tmp, sens_fn="noisepsd_AE", model="sangria", includewd=1)
 
             remove_point = best_points[i : i + 1]
 
-            remove_point_in = transform_fn.both_transforms(
-                remove_point, return_transpose=True
-            )
+            remove_point_in = transform_fn.both_transforms(remove_point, return_transpose=True)
 
             # get XYZ
             data_channels_AET = wave_gen(
@@ -374,9 +362,9 @@ def run_mbh_search(
 
     current_start_points = start_params.copy()
     ndim = mbh_info["pe_info"]["ndim"]
-    ll_vals = search_likelihood_wrap(
-        current_start_points.reshape(-1, ndim), *like_args
-    ).reshape(ntemps, nwalkers)
+    ll_vals = search_likelihood_wrap(current_start_points.reshape(-1, ndim), *like_args).reshape(
+        ntemps, nwalkers
+    )
 
     cp.get_default_memory_pool().free_all_blocks()
 
@@ -413,9 +401,7 @@ def run_mbh_search(
         cp.get_default_memory_pool().free_all_blocks()
         print(f"iteration {iteration} start")
         if iteration > 0:
-            mbh_injection_params = out.branches_coords["mbh"][
-                0, np.argmax(out.log_like[0]), 0
-            ]
+            mbh_injection_params = out.branches_coords["mbh"][0, np.argmax(out.log_like[0]), 0]
 
             factor = 1e-5
             cov = np.ones(ndim) * 1e-3
@@ -433,10 +419,7 @@ def run_mbh_search(
                 while np.any(fix):
                     tmp[fix] = (
                         mbh_injection_params[None, :]
-                        * (
-                            1.0
-                            + factor * cov * np.random.randn(nwalkers * ntemps, ndim)
-                        )
+                        * (1.0 + factor * cov * np.random.randn(nwalkers * ntemps, ndim))
                     )[fix]
 
                     tmp[:, 5] = tmp[:, 5] % (2 * np.pi)
@@ -488,10 +471,7 @@ def run_mbh_search(
     det_snr = (wave_gen.d_h / (wave_gen.h_h ** (1 / 2))).max()
     print("Found:", mbh_best, opt_snr, det_snr)
 
-    if (
-        opt_snr < mbh_info["search_info"]["snr_lim"]
-        or det_snr < mbh_info["search_info"]["snr_lim"]
-    ):
+    if opt_snr < mbh_info["search_info"]["snr_lim"] or det_snr < mbh_info["search_info"]["snr_lim"]:
         finished_this_split = True
     else:
         finished_this_split = False
@@ -512,9 +492,7 @@ def run_mbh_search(
 
 
 class ParallelMBHSearchControl:
-    def __init__(
-        self, settings, comm, gpus, head_rank=0, max_num_per_gpu=2, verbose=False
-    ):
+    def __init__(self, settings, comm, gpus, head_rank=0, max_num_per_gpu=2, verbose=False):
         self.comm = comm
         self.rank = comm.Get_rank()
         self.num_procs = comm.Get_size()
@@ -525,14 +503,11 @@ class ParallelMBHSearchControl:
 
         self.time_splits = settings["mbh"]["search_info"]["time_splits"]
         self.output_points_file = (
-            settings["general"]["file_information"]["fp_mbh_search_base"]
-            + "_output.pickle"
+            settings["general"]["file_information"]["fp_mbh_search_base"] + "_output.pickle"
         )
 
         self.total_procs_max = len(gpus) * max_num_per_gpu
-        self.proc_inds = np.delete(
-            np.arange(0, self.total_procs_max + 1), self.head_rank
-        )
+        self.proc_inds = np.delete(np.arange(0, self.total_procs_max + 1), self.head_rank)
 
         if os.path.exists(self.output_points_file):
             with open(self.output_points_file, "rb") as fp:
@@ -577,14 +552,10 @@ class ParallelMBHSearchControl:
                     self.output_points_info["best_points"].append(mbh_best)
 
                 self.output_points_info["num_run_per_split"][time_split] += 1
-                self.output_points_info["still_running"][
-                    time_split
-                ] = not finished_this_split
+                self.output_points_info["still_running"][time_split] = not finished_this_split
 
                 with open(self.output_points_file, "wb") as fp:
-                    pickle.dump(
-                        self.output_points_info, fp, protocol=pickle.HIGHEST_PROTOCOL
-                    )
+                    pickle.dump(self.output_points_info, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
                 current_status[i] = False
                 current_time_segment_status[time_split] = False
@@ -629,9 +600,7 @@ class ParallelMBHSearchControl:
         for proc_i in self.proc_inds:
             self.comm.send({"complete": True}, dest=proc_i)
 
-    def run_single_search(
-        self, gpu, best_points, time_split, total_time_splits, num_run
-    ):
+    def run_single_search(self, gpu, best_points, time_split, total_time_splits, num_run):
 
         print(f"Starting: split {time_split} for run number {num_run}")
         new_output_points, new_best_point, finished_this_split = run_mbh_search(
@@ -664,14 +633,12 @@ class ParallelMBHSearchControl:
             total_time_splits = incoming_dict["total_splits"]
             num_run = incoming_dict["num_run"]
 
-            new_output_points, new_best_point, finished_this_split = (
-                self.run_single_search(
-                    gpu_check["gpu"],
-                    best_points,
-                    time_split,
-                    total_time_splits,
-                    num_run,
-                )
+            new_output_points, new_best_point, finished_this_split = self.run_single_search(
+                gpu_check["gpu"],
+                best_points,
+                time_split,
+                total_time_splits,
+                num_run,
             )
 
             print(f"send before receive: split {time_split} for run number {num_run}")
@@ -694,10 +661,7 @@ class ParallelMBHSearchControl:
 
         # testing
         if testing_time_split is not None:
-            assert (
-                isinstance(testing_time_split, int)
-                and testing_time_split < self.time_splits
-            )
+            assert isinstance(testing_time_split, int) and testing_time_split < self.time_splits
             cp.cuda.runtime.setDevice(self.gpus[0])
             output_points, mbh_best = run_mbh_search(
                 self.gpus[0],
@@ -727,9 +691,7 @@ class ParallelMBHSearchControl:
 
                 for i in range(len(current_status)):
                     if not current_status[i]:
-                        self.launch_search_process(
-                            i, current_status, current_time_segment_status
-                        )
+                        self.launch_search_process(i, current_status, current_time_segment_status)
 
                 if not np.any(self.output_points_info["still_running"]):
                     run = False
@@ -824,9 +786,7 @@ class ParallelMBHSearchControl:
                     4
                     * df
                     * np.sum(
-                        data_channels_AET[j].conj()
-                        * data_channels_AET[j]
-                        / psd[None, :],
+                        data_channels_AET[j].conj() * data_channels_AET[j] / psd[None, :],
                         axis=(1, 2),
                     )
                 )
@@ -834,9 +794,7 @@ class ParallelMBHSearchControl:
                     4
                     * df
                     * np.sum(
-                        (noise + data_channels_AET[i]).conj()
-                        * data_channels_AET[j]
-                        / psd[None, :],
+                        (noise + data_channels_AET[i]).conj() * data_channels_AET[j] / psd[None, :],
                         axis=(1, 2),
                     )
                 )
@@ -857,9 +815,7 @@ class ParallelMBHSearchControl:
                     4
                     * df
                     * np.sum(
-                        data_channels_AET[i].conj()
-                        * data_channels_AET[i]
-                        / psd[None, :],
+                        data_channels_AET[i].conj() * data_channels_AET[i] / psd[None, :],
                         axis=(1, 2),
                     )
                 )
@@ -867,9 +823,7 @@ class ParallelMBHSearchControl:
                     4
                     * df
                     * np.sum(
-                        data_channels_AET[j].conj()
-                        * data_channels_AET[j]
-                        / psd[None, :],
+                        data_channels_AET[j].conj() * data_channels_AET[j] / psd[None, :],
                         axis=(1, 2),
                     )
                 )
@@ -877,16 +831,12 @@ class ParallelMBHSearchControl:
                     4
                     * df
                     * np.sum(
-                        data_channels_AET[i].conj()
-                        * data_channels_AET[j]
-                        / psd[None, :],
+                        data_channels_AET[i].conj() * data_channels_AET[j] / psd[None, :],
                         axis=(1, 2),
                     )
                 )
 
-                normalized_noise_weighted_corr = (
-                    np.abs(c_d).real / np.sqrt(c_c * d_d).real
-                )
+                normalized_noise_weighted_corr = np.abs(c_d).real / np.sqrt(c_c * d_d).real
 
                 if normalized_noise_weighted_corr > 0.25 and i != j:
                     # print(i, j, normalized_noise_weighted_corr, best_points[i, -1], best_points[j, -1])
@@ -909,8 +859,6 @@ class ParallelMBHSearchControl:
         self.output_points_info["best_points_pruned"] = best_points_pruned
 
         # backup file
-        shutil.copy(
-            self.output_points_file, self.output_points_file[:-7] + "_backup.pickle"
-        )
+        shutil.copy(self.output_points_file, self.output_points_file[:-7] + "_backup.pickle")
         with open(self.output_points_file, "wb") as fp:
             pickle.dump(self.output_points_info, fp, protocol=pickle.HIGHEST_PROTOCOL)

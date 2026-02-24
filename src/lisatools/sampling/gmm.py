@@ -13,6 +13,7 @@ from scipy.special import logsumexp as logsumexp_cpu
 
 try:
     import cupy as cp
+
     # cp.cuda.runtime.setDevice(7)
     from cupyx.scipy.special import logsumexp as logsumexp_gpu
 except (ModuleNotFoundError, ImportError) as e:
@@ -365,9 +366,7 @@ def _estimate_gaussian_covariances_full(resp, X, nk, means, reg_covar, xp=None):
         xp = np
 
     n_groups, n_components, n_features = means.shape
-    covariances = xp.empty(
-        (n_groups, n_components, n_features, n_features), dtype=X.dtype
-    )
+    covariances = xp.empty((n_groups, n_components, n_features, n_features), dtype=X.dtype)
     tmp0 = xp.repeat(xp.arange(n_groups), n_features)
     tmp2 = xp.tile(xp.arange(n_features), (n_groups,))
     tmp3 = tmp2.copy()
@@ -543,9 +542,7 @@ def _compute_precision_cholesky(covariances, covariance_type, xp=None):
         for i in range(n_features):
             eye[:, i, i] = 1.0
 
-        precisions_chol = xp.empty(
-            (n_groups, n_components, n_features, n_features), dtype=dtype
-        )
+        precisions_chol = xp.empty((n_groups, n_components, n_features, n_features), dtype=dtype)
         for k in range(n_components):
             covariance = covariances[:, k]
             try:
@@ -660,9 +657,7 @@ def _compute_log_det_cholesky(matrix_chol, covariance_type, n_features, xp=None)
     if covariance_type == "full":
         n_groups, n_components, _, _ = matrix_chol.shape
         log_det_chol = xp.sum(
-            xp.log(
-                matrix_chol.reshape(n_groups, n_components, -1)[:, :, :: n_features + 1]
-            ),
+            xp.log(matrix_chol.reshape(n_groups, n_components, -1)[:, :, :: n_features + 1]),
             axis=-1,
         )
 
@@ -714,9 +709,7 @@ def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type, xp=N
     # corresponds to the negative half of the determinant of the full precision
     # matrix.
     # In short: det(precision_chol) = - det(precision) / 2
-    log_det = _compute_log_det_cholesky(
-        precisions_chol, covariance_type, n_features, xp=xp
-    )
+    log_det = _compute_log_det_cholesky(precisions_chol, covariance_type, n_features, xp=xp)
 
     if covariance_type == "full":
         log_prob = xp.empty((n_groups, n_samples, n_components), dtype=X.dtype)
@@ -757,10 +750,7 @@ def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type, xp=N
         )
     # Since we are using the precision of the Cholesky decomposition,
     # `- 0.5 * log_det_precision` becomes `+ log_det_precision_chol`
-    return (
-        -0.5 * (n_features * xp.log(2 * np.pi).astype(X.dtype) + log_prob)
-        + log_det[:, None, :]
-    )
+    return -0.5 * (n_features * xp.log(2 * np.pi).astype(X.dtype) + log_prob) + log_det[:, None, :]
 
 
 def draw_multinomial_vec(n_samples, weights, random_state, xp=None):
@@ -780,19 +770,14 @@ def draw_multinomial_vec(n_samples, weights, random_state, xp=None):
         pass
 
     component = (
-        searchsorted2d_vec(
-            cumulative_weights, draw, side="right", xp=xp, **extra_kwargs
-        )
-        - 1
+        searchsorted2d_vec(cumulative_weights, draw, side="right", xp=xp, **extra_kwargs) - 1
     ).reshape(draw.shape)
 
-    component_tmp = (n_components + 1) * xp.repeat(
-        xp.arange(n_groups), n_samples
-    ).reshape(n_groups, n_samples)
-    counts = xp.zeros((n_groups, n_components), dtype=int)
-    uni, uni_counts = xp.unique(
-        (component + component_tmp).flatten(), return_counts=True
+    component_tmp = (n_components + 1) * xp.repeat(xp.arange(n_groups), n_samples).reshape(
+        n_groups, n_samples
     )
+    counts = xp.zeros((n_groups, n_components), dtype=int)
+    uni, uni_counts = xp.unique((component + component_tmp).flatten(), return_counts=True)
     group = uni // (n_components + 1)
     comp = uni % (n_components + 1)
     counts[group, comp] = uni_counts
@@ -1072,14 +1057,15 @@ class GaussianMixtureModel:
 
     def _print_verbose_msg_init_end(self, lb, init_has_converged):
         """Print verbose message on the end of iteration."""
-        converged_msg = f"converged {init_has_converged.sum()} out of {init_has_converged.shape[0]}."
+        converged_msg = (
+            f"converged {init_has_converged.sum()} out of {init_has_converged.shape[0]}."
+        )
         if self.verbose == 1:
             print(f"Initialization {converged_msg}.")
         elif self.verbose >= 2:
             t = time() - self._init_prev_time
             print(
-                f"Initialization {converged_msg}. time lapse {t:.5f}s\t lower bound"
-                f" {lb:.5f}."
+                f"Initialization {converged_msg}. time lapse {t:.5f}s\t lower bound" f" {lb:.5f}."
             )
 
     def _check_parameters(self, X):
@@ -1092,9 +1078,7 @@ class GaussianMixtureModel:
 
         if self.means_init is not None:
             raise NotImplementedError
-            self.means_init = _check_means(
-                self.means_init, self.n_components, n_features
-            )
+            self.means_init = _check_means(self.means_init, self.n_components, n_features)
 
         if self.precisions_init is not None:
 
@@ -1123,9 +1107,7 @@ class GaussianMixtureModel:
         # If all the initial parameters are all provided, then there is no need to run
         # the initialization.
         compute_resp = (
-            self.weights_init is None
-            or self.means_init is None
-            or self.precisions_init is None
+            self.weights_init is None or self.means_init is None or self.precisions_init is None
         )
         if compute_resp:
             # super()._initialize_parameters(X, random_state)
@@ -1150,9 +1132,7 @@ class GaussianMixtureModel:
             raise NotImplementedError
             resp = self.xp.zeros((n_samples, self.n_components), dtype=X.dtype)
             label = (
-                cluster.KMeans(
-                    n_clusters=self.n_components, n_init=1, random_state=random_state
-                )
+                cluster.KMeans(n_clusters=self.n_components, n_init=1, random_state=random_state)
                 .fit(X)
                 .labels_
             )
@@ -1165,15 +1145,9 @@ class GaussianMixtureModel:
             # resp /= resp.sum(axis=1)[:, self.xp.newaxis]
             resp /= resp.sum(axis=-11)[:, :, self.xp.newaxis]
         elif self.init_params == "random_from_data":
-            resp = self.xp.zeros(
-                (n_groups, n_samples, self.n_components), dtype=X.dtype
-            )
-            indices = random_state.choice(
-                n_samples, size=self.n_components, replace=False
-            )
-            tmp2 = self.xp.tile(
-                self.xp.arange(self.n_components), (n_groups, 1)
-            ).flatten()
+            resp = self.xp.zeros((n_groups, n_samples, self.n_components), dtype=X.dtype)
+            indices = random_state.choice(n_samples, size=self.n_components, replace=False)
+            tmp2 = self.xp.tile(self.xp.arange(self.n_components), (n_groups, 1)).flatten()
             tmp1 = self.xp.tile(indices, (n_groups, 1)).flatten()
             tmp0 = self.xp.repeat(self.xp.arange(n_groups), indices.shape[0])
             resp[(tmp0, tmp1, tmp2)] = 1
@@ -1360,9 +1334,7 @@ class GaussianMixtureModel:
         else:
             weights = self.weights_.reshape(1, -1) / self.weights_.sum()
             means = self.means_.reshape((1, -1) + self.means_.shape[-1:])
-            covariances = self.covariances_.reshape(
-                (1, -1) + self.covariances_.shape[-2:]
-            )
+            covariances = self.covariances_.reshape((1, -1) + self.covariances_.shape[-2:])
             n_components = self.weights_.shape[0] * self.n_components
             # new_precisions_cholesky = self.gmm.precisions_cholesky_.reshape((1, -1) + self.gmm.precisions_cholesky_.shape[-2:])
 
@@ -1421,9 +1393,7 @@ class GaussianMixtureModel:
         else:
             X = self.xp.vstack(
                 [
-                    mean
-                    + rng.standard_normal(size=(sample, n_features))
-                    * self.xp.sqrt(covariance)
+                    mean + rng.standard_normal(size=(sample, n_features)) * self.xp.sqrt(covariance)
                     for (mean, covariance, sample) in zip(
                         self.means_, self.covariances_, n_samples_comp
                     )
@@ -1525,9 +1495,7 @@ class GaussianMixtureModel:
         self.converged_ = self.xp.full(n_groups, False)
         self.weights_ = self.xp.zeros((n_groups, self.n_components))
         self.means_ = self.xp.zeros((n_groups, self.n_components, n_features))
-        self.covariances_ = self.xp.zeros(
-            (n_groups, self.n_components, n_features, n_features)
-        )
+        self.covariances_ = self.xp.zeros((n_groups, self.n_components, n_features, n_features))
         self.precisions_cholesky_ = self.xp.zeros(
             (n_groups, self.n_components, n_features, n_features)
         )
@@ -1556,18 +1524,14 @@ class GaussianMixtureModel:
 
                     self._m_step(X, log_resp, converged=converged)
 
-                    lower_bound[~converged] = self._compute_lower_bound(
-                        log_resp, log_prob_norm
-                    )
+                    lower_bound[~converged] = self._compute_lower_bound(log_resp, log_prob_norm)
                     current_lower_bounds.append(lower_bound)
 
                     change = lower_bound[~converged] - prev_lower_bound[~converged]
                     self._print_verbose_msg_iter_end(n_iter, change)
 
                     conv = self.xp.abs(change) < self.tol
-                    change_converge_status = self.xp.arange(len(converged))[~converged][
-                        conv
-                    ]
+                    change_converge_status = self.xp.arange(len(converged))[~converged][conv]
                     best_n_iter[~converged] = n_iter
 
                     converged[change_converge_status] = True
@@ -1576,9 +1540,7 @@ class GaussianMixtureModel:
 
                 self._print_verbose_msg_init_end(lower_bound, converged)
 
-                adjust = (lower_bound > max_lower_bound) | (
-                    max_lower_bound == -self.xp.inf
-                )
+                adjust = (lower_bound > max_lower_bound) | (max_lower_bound == -self.xp.inf)
                 if self.xp.any(adjust):
                     inds_adjust = self.xp.arange(converged.shape[0])[adjust]
 
@@ -1723,16 +1685,12 @@ class GaussianMixtureModel:
             # for k, prec_chol in enumerate(self.precisions_cholesky_):
             for k in range(self.precisions_cholesky_.shape[1]):
                 prec_chol = self.precisions_cholesky_[:, k]
-                self.precisions_[:, k] = self.xp.einsum(
-                    "ijk,ilk->ijl", prec_chol, prec_chol
-                )
+                self.precisions_[:, k] = self.xp.einsum("ijk,ilk->ijl", prec_chol, prec_chol)
                 # self.precisions_[k] = self.xp.dot(prec_chol, prec_chol.T)
 
         elif self.covariance_type == "tied":
             raise NotImplementedError
-            self.precisions_ = self.xp.dot(
-                self.precisions_cholesky_, self.precisions_cholesky_.T
-            )
+            self.precisions_ = self.xp.dot(self.precisions_cholesky_, self.precisions_cholesky_.T)
         else:
             raise NotImplementedError
             self.precisions_ = self.precisions_cholesky_**2
@@ -1774,9 +1732,7 @@ class GaussianMixtureModel:
         bic : float
             The lower the better.
         """
-        return -2 * self.score(X) * X.shape[1] + self._n_parameters() * np.log(
-            X.shape[1]
-        )
+        return -2 * self.score(X) * X.shape[1] + self._n_parameters() * np.log(X.shape[1])
 
     def general_way_logpdf(self, X, flat=True):
 
@@ -2049,9 +2005,7 @@ def vec_fit_gmm_min_bic(
         minimum_bic_i[update_main_with_min_bic] = comp_i
         min_bic[update_main_with_min_bic] = bic[below_min_bic]
 
-        for main_update_i, here_update_i in zip(
-            update_main_with_min_bic, update_here_with_min_bic
-        ):
+        for main_update_i, here_update_i in zip(update_main_with_min_bic, update_here_with_min_bic):
             main_update_i = main_update_i.item()
             here_update_i = here_update_i.item()
             _weights = gmm.gmm.weights_[here_update_i]
@@ -2079,9 +2033,7 @@ def vec_fit_gmm_min_bic(
         if use_gpu:
             cp.get_default_memory_pool().free_all_blocks()
         if verbose:
-            print(
-                f"{comp_i} components: {converged.sum()} converged out of {converged.shape[0]}."
-            )
+            print(f"{comp_i} components: {converged.sum()} converged out of {converged.shape[0]}.")
 
     if use_gpu:
         cp.get_default_memory_pool().free_all_blocks()
@@ -2111,9 +2063,7 @@ def vec_fit_gmm_min_bic(
 
 
 if __name__ == "__main__":
-    samples_tmp = np.load("samples_examples.npy")[
-        :, :, :, np.array([0, 1, 2, 4, 6, 7])
-    ]  # [:1]
+    samples_tmp = np.load("samples_examples.npy")[:, :, :, np.array([0, 1, 2, 4, 6, 7])]  # [:1]
     samples_tmp = samples_tmp.reshape(samples_tmp.shape[0], -1, samples_tmp.shape[-1])
     full_gmm = vec_fit_gmm_min_bic(samples_tmp, use_gpu=True, verbose=True)
     samp_gen = full_gmm.rvs(size=(int(1e6),))

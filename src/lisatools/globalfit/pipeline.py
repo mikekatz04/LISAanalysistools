@@ -8,10 +8,12 @@ from bbhx.waveformbuild import BBHWaveformFD
 from eryn.backends import HDFBackend
 from gbgpu.gbgpu import GBGPU
 
-from lisatools.sampling.stopping import (GBBandLogLConvergeStopping,
-                                         MPICommunicateStopping,
-                                         NLeavesSearchStopping,
-                                         SearchConvergeStopping)
+from lisatools.sampling.stopping import (
+    GBBandLogLConvergeStopping,
+    MPICommunicateStopping,
+    NLeavesSearchStopping,
+    SearchConvergeStopping,
+)
 
 from ..sensitivity import get_sensitivity
 from .galaxyglobal import fit_each_leaf, run_gb_bulk_search, run_gb_pe
@@ -88,15 +90,13 @@ class InitialMBHMixSegment(GlobalFitSegment):
         other_ranks = [self.mpi_controller.psd_rank]
 
         # had to go after initialization of mpi because it needs the ranks
-        stop_fn = SearchConvergeStopping(
-            **self.current_info.mbh_info["pe_info"]["stop_kwargs"]
-        )
-        self.current_info.mbh_info["pe_info"]["stopping_function"] = (
-            MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        stop_fn = SearchConvergeStopping(**self.current_info.mbh_info["pe_info"]["stop_kwargs"])
+        self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(
+            stopper_rank, other_ranks, stop_fn=stop_fn
         )
 
-        self.current_info.psd_info["pe_info"]["stopping_function"] = (
-            MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.psd_info["pe_info"]["stopping_function"] = MPICommunicateStopping(
+            stopper_rank, other_ranks, stop_fn=None
         )
 
         self.mpi_controller.run_global_fit(
@@ -154,17 +154,17 @@ class InitialGBSearchSegment(GlobalFitSegment):
         stop_fn = NLeavesSearchStopping(
             **self.current_info.gb_info["pe_info"]["stop_search_kwargs"]
         )
-        self.current_info.gb_info["pe_info"]["stopping_function"] = (
-            MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=stop_fn)
+        self.current_info.gb_info["pe_info"]["stopping_function"] = MPICommunicateStopping(
+            stopper_rank, other_ranks, stop_fn=stop_fn
         )
-        self.current_info.psd_info["pe_info"]["stopping_function"] = (
-            MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.psd_info["pe_info"]["stopping_function"] = MPICommunicateStopping(
+            stopper_rank, other_ranks, stop_fn=None
         )
-        self.current_info.gb_info["search_info"]["stopping_function"] = (
-            MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.gb_info["search_info"]["stopping_function"] = MPICommunicateStopping(
+            stopper_rank, other_ranks, stop_fn=None
         )
-        self.current_info.mbh_info["pe_info"]["stopping_function"] = (
-            MPICommunicateStopping(stopper_rank, other_ranks, stop_fn=None)
+        self.current_info.mbh_info["pe_info"]["stopping_function"] = MPICommunicateStopping(
+            stopper_rank, other_ranks, stop_fn=None
         )
 
         self.mpi_controller.run_global_fit(

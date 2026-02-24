@@ -17,8 +17,7 @@ except (ModuleNotFoundError, ImportError):
 
 from . import domains
 from .datacontainer import DataResidualArray
-from .sensitivity import (SensitivityMatrix, SensitivityMatrixBase,
-                          get_sensitivity)
+from .sensitivity import SensitivityMatrix, SensitivityMatrixBase, get_sensitivity
 from .utils.utility import get_array_module
 
 
@@ -84,9 +83,7 @@ def inner_product(
     nchannels = sig1.nchannels
 
     if sig1.data_shape != sig2.data_shape:
-        raise ValueError(
-            "The two signals are two different lengths. Must be the same length."
-        )
+        raise ValueError("The two signals are two different lengths. Must be the same length.")
 
     # Detect batch dimensions.
     # After normalization, arr1/arr2 always have shape (nbatch, nchannels, *basis_shape).
@@ -130,9 +127,7 @@ def inner_product(
         assert psd.shape[0] == psd.shape[1] == nchannels
         for i in range(nchannels):
             for j in range(nchannels):
-                operational_sets.append(
-                    dict(factor=1.0, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
-                )
+                operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=j, psd_ind=(i, j)))
 
     elif len(psd.channel_shape) == 1:
         assert psd.shape[0] == nchannels
@@ -163,9 +158,7 @@ def inner_product(
 
         # Sum over all axes except batch (axis 0) → shape (nbatch,)
         sum_axes = tuple(range(1, y.ndim))
-        out += (
-            op_set["factor"] * 4 * xp.sum(y, axis=sum_axes) * psd.differential_component
-        )
+        out += op_set["factor"] * 4 * xp.sum(y, axis=sum_axes) * psd.differential_component
 
     # normalize the inner product
     normalization_value = 1.0
@@ -455,9 +448,7 @@ def h_var_p_eps(
 
     if parameter_transforms is not None:
         # transform
-        params_p_eps = parameter_transforms.transform_base_parameters(
-            params_p_eps[None, :]
-        )[0]
+        params_p_eps = parameter_transforms.transform_base_parameters(params_p_eps[None, :])[0]
 
     args_in = tuple(params_p_eps) + tuple(waveform_args)
     dh = waveform_model(*args_in, **waveform_kwargs)
@@ -720,9 +711,7 @@ def plot_covariance_corner(
     try:
         import corner
     except ModuleNotFoundError:
-        raise ValueError(
-            "Attempting to plot using the corner module, but it is not installed."
-        )
+        raise ValueError("Attempting to plot using the corner module, but it is not installed.")
 
     # generate fake samples from the covariance distribution
     samp = np.random.multivariate_normal(params, cov, size=nsamp)
@@ -878,9 +867,7 @@ def cutler_vallisneri_bias(
         deriv_inds = np.arange(len(params))
 
     if info_mat is not None and input_diagnostics is not None:
-        warnings.warn(
-            "Provided info_mat and input_diagnostics kwargs. Ignoring info_mat."
-        )
+        warnings.warn("Provided info_mat and input_diagnostics kwargs. Ignoring info_mat.")
 
     # adjust parameters to waveform basis
     params_in = parameter_transforms.transform_base_parameters(params.copy())
@@ -928,9 +915,7 @@ def cutler_vallisneri_bias(
         h_approx = list(h_approx)
 
     assert len(h_approx) == len(h_true)
-    assert np.all(
-        np.asarray([len(h_approx[i]) == len(h_true[i]) for i in range(len(h_true))])
-    )
+    assert np.all(np.asarray([len(h_approx[i]) == len(h_true[i]) for i in range(len(h_true))]))
 
     # difference in the waveforms
     diff = [h_true[i] - h_approx[i] for i in range(len(h_approx))]

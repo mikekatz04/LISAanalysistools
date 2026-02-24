@@ -11,9 +11,7 @@ def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=Non
     fig2, ax2 = plt.subplots(1, 1)
     samples_list = []
     for i in range(num_leaves):
-        mbh_samp = mbh_reader.get_chain(discard=discard)["mbh"][:, 0, :, i].reshape(
-            -1, 11
-        )
+        mbh_samp = mbh_reader.get_chain(discard=discard)["mbh"][:, 0, :, i].reshape(-1, 11)
         if i == 0:
             print("num mbh samples:", mbh_samp.shape[0])
         # best_fit = np.abs(mbh_samp[:, -1].mean() - mbhbs_in[:, -1]).argmin()
@@ -74,9 +72,9 @@ def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=Non
 def produce_sky_plot(current_info, save_file=None, fig=None):
 
     ll_gb_ind_max = current_info.gb_info["cc_ll"].argmax()
-    gb_lam, gb_sinbeta = current_info.gb_info["cc_params"][
-        ll_gb_ind_max, :, np.array([6, 7])
-    ][:, current_info.gb_info["cc_inds"][ll_gb_ind_max, :]]
+    gb_lam, gb_sinbeta = current_info.gb_info["cc_params"][ll_gb_ind_max, :, np.array([6, 7])][
+        :, current_info.gb_info["cc_inds"][ll_gb_ind_max, :]
+    ]
 
     gb_lam_rad = gb_lam - np.pi  #  * 180. / np.pi - 180.0
     gb_beta_rad = np.arcsin(gb_sinbeta)  #  * 180 / np.pi
@@ -174,9 +172,7 @@ def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
     plt.close()
 
 
-def make_current_plot(
-    current_info, save_file=None, add_mbhs=False, add_gbs=False, **kwargs
-):
+def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=False, **kwargs):
     generated_info_0 = current_info.get_data_psd(
         only_max_ll=True, include_gbs=False, include_mbhs=False, **kwargs
     )
@@ -187,9 +183,7 @@ def make_current_plot(
         2 * current_info.general_info["df"] * np.abs(generated_info_0["data"][0]) ** 2,
     )
 
-    print(
-        "nleaves:", current_info.gb_info["reader"].get_nleaves()["gb"][-1].mean(axis=-1)
-    )
+    print("nleaves:", current_info.gb_info["reader"].get_nleaves()["gb"][-1].mean(axis=-1))
 
     if add_gbs:
         generated_info_gb = current_info.get_data_psd(

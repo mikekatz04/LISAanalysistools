@@ -8,6 +8,7 @@ import numpy as np
 from eryn.moves import Move, StretchMove, TemperatureControl
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
+
 # from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 
@@ -23,14 +24,14 @@ logger = logging.getLogger(__name__)
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     """
     Move that handles adding and removing sources to and from the residuals stored in the analysis container array.
-    This is done by first removing the contribution of the current sources in the cold chain from the residual, 
+    This is done by first removing the contribution of the current sources in the cold chain from the residual,
     then proposing new sources for this leaf, and then adding back in the contribution of the new sources to the residual.
     This way we can make sure that the likelihoods are computed correctly for each proposed source and that the likelihoods are consistent with the current state of the residuals in the analysis container array.
 
     Args:
         branch_name: name of the branch that this move will operate on.
         coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
-        waveform_gen: function that generates the waveforms for the sources given their coordinates. 
+        waveform_gen: function that generates the waveforms for the sources given their coordinates.
         waveform_gen_kwargs: keyword arguments for the waveform generator function.
         waveform_like_kwargs: keyword arguments for the likelihood computation function.
         acs: analysis container array that contains the residuals and other information needed for the likelihood computation.
@@ -204,9 +205,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # that make it here
         ll = np.full_like(data_index.get(), -1e300, dtype=float)
 
-        for i, (coords_in_now, data_index_now) in enumerate(
-            zip(coords_in, data_index.get())
-        ):
+        for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index.get())):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
                 waveform_kwargs=self.waveform_like_kwargs,
@@ -220,11 +219,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
         """
-        Compute the log likelihood for the given coordinates and data index for use in fancy swapping. 
+        Compute the log likelihood for the given coordinates and data index for use in fancy swapping.
         This is needed because when permuting the coordinates during tempering, we need to recompute the likelihood against the new set of residuals and covariance matrix.
 
         Args:
-            x: Dictionary of coordinates of the sources for which we want to compute the likelihood. 
+            x: Dictionary of coordinates of the sources for which we want to compute the likelihood.
                 The coordinates are expected to be in the shape (ntemps, nwalkers, nleaves_max, ndim).
             supps: supplimental information for the likelihood computation. #todo add
             branch_supps: Branch supplimental. #todo add
@@ -233,17 +232,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ll: likelihood for the given coordinates and data index. Shape is (ntemps, nwalkers).
             blobs: blobs for the given coordinates and data index. Default is None.
         """
-        assert (
-            x[self.branch_name].ndim == 4
-            and x[self.branch_name].shape[1] == self.nwalkers
-        )
+        assert x[self.branch_name].ndim == 4 and x[self.branch_name].shape[1] == self.nwalkers
         # shape is (nwalkers, 1 (nleaves_max), ndim)
         ntemps = x[self.branch_name].shape[0]
 
         coords = x[self.branch_name].reshape(-1, x[self.branch_name].shape[-1])
-        data_index_in = (
-            xp.tile(xp.arange(self.nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
-        )
+        data_index_in = xp.tile(xp.arange(self.nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
 
         coords_in = self.transform_fn.both_transforms(coords)
 
@@ -276,9 +270,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.check_add_skip_swap_info(state)
 
         # mapping information
-        temp_inds_base = np.repeat(
-            np.arange(self.ntemps)[:, None], self.nwalkers, axis=-1
-        )
+        temp_inds_base = np.repeat(np.arange(self.ntemps)[:, None], self.nwalkers, axis=-1)
         walker_inds_base = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
 
         # randomize order
@@ -298,14 +290,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # fill this temperature control with temperatures from current state
             temperature_control_here = self.temperature_controls[leaf]
 
-            temperature_control_here.betas[:] = new_state.sub_states[
-                self.branch_name
-            ].betas_all[leaf][
+            temperature_control_here.betas[:] = new_state.sub_states[self.branch_name].betas_all[
+                leaf
+            ][
                 : self.ntemps
             ]  # as: make sure only local ntemps are used
-            ntemps_full = (
-                new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
-            )
+            ntemps_full = new_state.sub_states[self.branch_name].betas_all[leaf].shape[0]
 
             ndim = new_state.branches[self.branch_name].coords.shape[-1]
 
@@ -324,9 +314,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             old_coords_in = self.transform_fn.both_transforms(old_coords)
 
             data_index_in = (
-                xp.tile(xp.arange(self.nwalkers), (self.ntemps, 1))
-                .flatten()
-                .astype(xp.int32)
+                xp.tile(xp.arange(self.nwalkers), (self.ntemps, 1)).flatten().astype(xp.int32)
             )
             # TODO: fix this
             # prev_logl = self.waveform_gen.get_direct_ll(fd, data_residuals.flatten(), psd.flatten(), self.df, *old_coords_in.T, noise_index=noise_index, data_index=data_index, **self.waveform_kwargs).reshape((ntemps, nwalkers)).real.get()
@@ -402,24 +390,18 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     else:
                         q, factors = move_here.get_proposal(s, model.random)
 
-                    new_points = q[self.branch_name].reshape(
-                        (self.ntemps, nwalkers_here, ndim)
-                    )
+                    new_points = q[self.branch_name].reshape((self.ntemps, nwalkers_here, ndim))
 
                     # Compute prior of the proposed position
                     # new_inds_prior is adjusted if product-space is used
-                    logp = self.priors[self.branch_name].logpdf(
-                        new_points.reshape(-1, ndim)
-                    )
+                    logp = self.priors[self.branch_name].logpdf(new_points.reshape(-1, ndim))
 
                     new_points_in = self.transform_fn.both_transforms(
                         new_points.reshape(-1, ndim)[~np.isinf(logp)]
                     )
 
                     # Compute the lnprobs of the proposed position.
-                    data_index = xp.asarray(
-                        walker_inds_here[~np.isinf(logp)].astype(np.int32)
-                    )
+                    data_index = xp.asarray(walker_inds_here[~np.isinf(logp)].astype(np.int32))
                     # noise_index = walker_inds_here[~np.isinf(logp)].astype(np.int32)
 
                     # self.waveform_gen.d_d = xp.asarray(d_d_store[(temp_inds_here[~np.isinf(logp)], walker_inds_here[~np.isinf(logp)])])
@@ -438,35 +420,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     logl = logl.reshape(self.ntemps, nwalkers_here)
 
                     logp = logp.reshape(self.ntemps, nwalkers_here)
-                    prev_logp_here = prev_logp[inds == split].reshape(
-                        self.ntemps, nwalkers_here
-                    )
+                    prev_logp_here = prev_logp[inds == split].reshape(self.ntemps, nwalkers_here)
 
-                    prev_logl_here = prev_logl[inds == split].reshape(
-                        self.ntemps, nwalkers_here
-                    )
+                    prev_logl_here = prev_logl[inds == split].reshape(self.ntemps, nwalkers_here)
 
-                    prev_logP_here = (
-                        temperature_control_here.compute_log_posterior_tempered(
-                            prev_logl_here, prev_logp_here
-                        )
+                    prev_logP_here = temperature_control_here.compute_log_posterior_tempered(
+                        prev_logl_here, prev_logp_here
                     )
-                    logP = temperature_control_here.compute_log_posterior_tempered(
-                        logl, logp
-                    )
+                    logP = temperature_control_here.compute_log_posterior_tempered(logl, logp)
 
                     lnpdiff = factors + logP - prev_logP_here
 
-                    keep = lnpdiff > np.log(
-                        model.random.rand(self.ntemps, nwalkers_here)
-                    )
+                    keep = lnpdiff > np.log(model.random.rand(self.ntemps, nwalkers_here))
 
                     temp_inds_update = temp_inds_here[keep.flatten()]
                     walker_inds_update = walker_inds_here[keep.flatten()]
 
-                    accepted[: self.ntemps][
-                        (temp_inds_update, walker_inds_update)
-                    ] = True
+                    accepted[: self.ntemps][(temp_inds_update, walker_inds_update)] = True
 
                     # update state informatoin
                     new_state.branches[self.branch_name].coords[
@@ -477,15 +447,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         )
                     ] = new_points[keep].reshape(len(temp_inds_update), ndim)
 
-                    prev_logl[(temp_inds_update, walker_inds_update)] = logl[
-                        keep
-                    ].flatten()
-                    prev_logp[(temp_inds_update, walker_inds_update)] = logp[
-                        keep
-                    ].flatten()
-                    prev_logP[(temp_inds_update, walker_inds_update)] = logP[
-                        keep
-                    ].flatten()
+                    prev_logl[(temp_inds_update, walker_inds_update)] = logl[keep].flatten()
+                    prev_logp[(temp_inds_update, walker_inds_update)] = logp[keep].flatten()
+                    prev_logP[(temp_inds_update, walker_inds_update)] = logP[keep].flatten()
 
                 # acceptance tracking
                 self.accepted += accepted
@@ -522,9 +486,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     prev_logP.copy(),
                     prev_logl.copy(),
                     prev_logp.copy(),
-                    branch_supps={
-                        self.branch_name: None
-                    },  # TODO: adjust this to be flexible
+                    branch_supps={self.branch_name: None},  # TODO: adjust this to be flexible
                     fancy_swap=fancy_swap,
                     compute_log_like=compute_log_like,
                     permute_here=True,
@@ -532,9 +494,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                 temperature_control_here.adapt_temps()
 
-                new_state.branches_coords[self.branch_name][:, :, leaf] = (
-                    coords_for_swap[self.branch_name][:, :, 0]
-                )
+                new_state.branches_coords[self.branch_name][:, :, leaf] = coords_for_swap[
+                    self.branch_name
+                ][:, :, 0]
 
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
@@ -566,9 +528,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         current_lp = (
             self.priors[self.branch_name]
-            .logpdf(
-                new_state.branches[self.branch_name].coords[0, :, :].reshape(-1, ndim)
-            )
+            .logpdf(new_state.branches[self.branch_name].coords[0, :, :].reshape(-1, ndim))
             .reshape(new_state.branches[self.branch_name].shape[1:-1])
             .sum(axis=-1)
         )
@@ -588,9 +548,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # this really does not matter
             self.temperature_control = self.temperature_controls[0]
 
-        self.temperature_control.swaps_accepted = self.temperature_controls[
-            0
-        ].swaps_accepted
+        self.temperature_control.swaps_accepted = self.temperature_controls[0].swaps_accepted
 
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
         # breakpoint()

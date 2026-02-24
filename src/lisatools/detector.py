@@ -320,9 +320,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             arr_tmp = arr.reshape(self.size_base, -1)
             arr_out_tmp = np.zeros((len(x_new), arr_tmp.shape[-1]))
             for i in range(arr_tmp.shape[-1]):
-                arr_out_tmp[:, i] = interpolate.CubicSpline(x_orig, arr_tmp[:, i])(
-                    x_new
-                )
+                arr_out_tmp[:, i] = interpolate.CubicSpline(x_orig, arr_tmp[:, i])(x_new)
             arr_out = arr_out_tmp.reshape((len(x_new),) + arr.shape[1:])
             setattr(self, "_" + which, arr_out)
 
@@ -336,21 +334,23 @@ class Orbits(LISAToolsParallelModule, ABC):
 
         # prepare cpp class args to load when needed
         if make_cpp:
-            self.pycppdetector_args = [  # duplicate ltts and positions informations when using the more general c++ class
-                0.0,
-                dt,
-                len(self.t),
-                0.0,
-                dt,
-                len(self.t),
-                self.xp.asarray(self.n.flatten().copy()),
-                self.xp.asarray(self.ltt.flatten().copy()),
-                self.xp.asarray(self.x.flatten().copy()),
-                self.xp.asarray(ll),
-                self.xp.asarray(lsr),
-                self.xp.asarray(lse),
-                self.armlength,
-            ]
+            self.pycppdetector_args = (
+                [  # duplicate ltts and positions informations when using the more general c++ class
+                    0.0,
+                    dt,
+                    len(self.t),
+                    0.0,
+                    dt,
+                    len(self.t),
+                    self.xp.asarray(self.n.flatten().copy()),
+                    self.xp.asarray(self.ltt.flatten().copy()),
+                    self.xp.asarray(self.x.flatten().copy()),
+                    self.xp.asarray(ll),
+                    self.xp.asarray(lsr),
+                    self.xp.asarray(lse),
+                    self.armlength,
+                ]
+            )
             self.dt = dt
         else:
             self.pycppdetector_args = None
@@ -404,9 +404,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     def _check_configured(self) -> None:
         if not self.configured:
-            raise ValueError(
-                "Cannot request property. Need to use configure() method first."
-            )
+            raise ValueError("Cannot request property. Need to use configure() method first.")
 
     def get_light_travel_times(
         self, t: float | np.ndarray, link: int | np.ndarray
@@ -500,9 +498,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             return output.squeeze()
         return output
 
-    def get_normal_unit_vec(
-        self, t: float | np.ndarray, link: int | np.ndarray
-    ) -> np.ndarray:
+    def get_normal_unit_vec(self, t: float | np.ndarray, link: int | np.ndarray) -> np.ndarray:
         """Compute link normal vector as a function of time.
 
         Computes with the c++ backend.
@@ -551,9 +547,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         )
 
         # prep outputs
-        output = self.xp.array(
-            [normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]
-        ).T
+        output = self.xp.array([normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]).T
         if squeeze:
             return output.squeeze()
         return output
@@ -899,16 +893,12 @@ class L1Orbits(Orbits):
         for isc in range(3):  # 3 spacecraft
             for icoord in range(3):  # x, y, z
                 # Cubic spline interpolation
-                cs = interpolate.CubicSpline(
-                    self.sc_t_base, self.x_base[:, isc, icoord]
-                )
+                cs = interpolate.CubicSpline(self.sc_t_base, self.x_base[:, isc, icoord])
                 pos_splines[isc][icoord] = cs
                 pos_interpolated[:, isc, icoord] = cs(t_arr)
 
                 # interpolate velocities as well
-                cs = interpolate.CubicSpline(
-                    self.sc_t_base, self.v_base[:, isc, icoord]
-                )
+                cs = interpolate.CubicSpline(self.sc_t_base, self.v_base[:, isc, icoord])
                 vel_interpolated[:, isc, icoord] = cs(t_arr)
 
         # Calculate unit vectors
@@ -1169,9 +1159,7 @@ if jax_here:
                 Light travel time(s)
             """
             if not self.configured:
-                raise RuntimeError(
-                    "Must call configure() before get_light_travel_times()"
-                )
+                raise RuntimeError("Must call configure() before get_light_travel_times()")
 
             squeeze_t = jnp.isscalar(t)
             squeeze_link = jnp.isscalar(link)
@@ -1510,12 +1498,8 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
             tmi_oms_noise = self.tmi_oms_level**2 * f**0
 
             tm_noise = (self.tm_noise_level**2) * (1 + (0.4e-3 / f) ** 2)
-            rfi_backlink_noise = self.rfi_backlink_noise_level**2 * (
-                1.0 + (2.0e-3 / f) ** 4
-            )
-            tmi_backlink_noise = self.tmi_backlink_noise_level**2 * (
-                1.0 + (2.0e-3 / f) ** 4
-            )
+            rfi_backlink_noise = self.rfi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
+            tmi_backlink_noise = self.tmi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
 
         elif method == "old":
             isi_oms_noise = self.isi_oms_level**2 * f**0
@@ -1523,12 +1507,8 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
             tmi_oms_noise = self.tmi_oms_level**2 * f**0
 
             tm_noise = (self.tm_noise_level**2) * (1 + (0.4e-3 / f) ** 2)
-            rfi_backlink_noise = self.rfi_backlink_noise_level**2 * (
-                1.0 + (2.0e-3 / f) ** 4
-            )
-            tmi_backlink_noise = self.tmi_backlink_noise_level**2 * (
-                1.0 + (2.0e-3 / f) ** 4
-            )
+            rfi_backlink_noise = self.rfi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
+            tmi_backlink_noise = self.tmi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
 
         if unit == "displacement":
             return CurrentNoises(
@@ -1551,9 +1531,7 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
                 unit,
             )
         else:
-            raise ValueError(
-                "unit kwarg must be 'displacement' or 'relative_frequency'."
-            )
+            raise ValueError("unit kwarg must be 'displacement' or 'relative_frequency'.")
 
 
 # defaults

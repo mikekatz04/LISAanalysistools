@@ -157,9 +157,7 @@ class AllSetupInfoTransfer:
 
                 setattr(self, key, tmp_out)
 
-            elif isinstance(setup_1, SetupInfoTransfer) and isinstance(
-                setup_2, SetupInfoTransfer
-            ):
+            elif isinstance(setup_1, SetupInfoTransfer) and isinstance(setup_2, SetupInfoTransfer):
                 if key == "name":
                     self.setup_names = [setup_1.name, setup_2.name]
                     continue

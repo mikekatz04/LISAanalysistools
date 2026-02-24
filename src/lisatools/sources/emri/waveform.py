@@ -10,6 +10,7 @@ from few.waveform import GenerateEMRIWaveform
 from lisatools.detector import EqualArmlengthOrbits
 
 from ...detector import EqualArmlengthOrbits
+
 # imports
 from ..waveformbase import AETTDIWaveform
 
@@ -57,9 +58,7 @@ class EMRITDIWaveform(AETTDIWaveform):
         index_beta = 7
 
         for key in default_response_kwargs:
-            response_kwargs[key] = response_kwargs.get(
-                key, default_response_kwargs[key]
-            )
+            response_kwargs[key] = response_kwargs.get(key, default_response_kwargs[key])
         gen_wave = GenerateEMRIWaveform(
             *emri_waveform_args,
             sum_kwargs=dict(pad_output=True),

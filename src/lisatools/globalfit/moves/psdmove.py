@@ -8,6 +8,7 @@ from eryn.model import Model
 from eryn.moves import RedBlueMove, StretchMove
 from eryn.state import State as eryn_State
 from eryn.utils.transform import TransformContainer
+
 # from ..utils import new_sens_mat
 from tqdm import tqdm
 
@@ -33,9 +34,7 @@ def psd_log_like_ae(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
     # TODO: better way so avoid order issues?
     psd_pars = x[0]
     if len(x) == 1:
-        galfor_pars = np.tile(
-            np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1)
-        )
+        galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
     else:
         galfor_pars = x[1]
 
@@ -93,9 +92,7 @@ def psd_log_like_ae(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
     return ll.get()
 
 
-def psd_log_like_xyz(
-    x, freqs, data, df, data_length, supps=None, tdi2=False, **sens_kwargs
-):
+def psd_log_like_xyz(x, freqs, data, df, data_length, supps=None, tdi2=False, **sens_kwargs):
     if supps is None:
         raise ValueError("Must provide supps to identify the data streams.")
 
@@ -104,9 +101,7 @@ def psd_log_like_xyz(
     # TODO: better way so avoid order issues?
     psd_pars = x[0]
     if len(x) == 1:
-        galfor_pars = np.tile(
-            np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1)
-        )
+        galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
     else:
         galfor_pars = x[1]
 
@@ -186,9 +181,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             psd_pars = x[0]
 
         if len(x) == 1:
-            galfor_pars = np.tile(
-                np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1)
-            )
+            galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
         else:
             if self.galfor_transform_fn is not None:
                 galfor_pars = self.galfor_transform_fn.both_transforms(x[1])
@@ -251,22 +244,16 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         return ll.get()
 
-    def compute_log_like(
-        self, coords, inds=None, logp=None, supps=None, branch_supps=None
-    ):
+    def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
         if logp is None:
-            logp = self.compute_log_prior(
-                coords, inds=inds, supps=supps, branch_supps=branch_supps
-            )
+            logp = self.compute_log_prior(coords, inds=inds, supps=supps, branch_supps=branch_supps)
 
         assert logp is not None
         logl = np.full_like(logp, -1e300)
 
         logp_keep = ~np.isinf(logp)
         if not np.any(logp_keep):
-            warnings.warn(
-                "All points entering likelihood have a log prior of minus inf."
-            )
+            warnings.warn("All points entering likelihood have a log prior of minus inf.")
             return logl, None
         psd_coords = coords["psd"][logp_keep][:, 0]
         if "galfor" in coords:
@@ -405,9 +392,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             if key in state.branches_coords
         }
 
-        tmp_state = GFState(
-            tmp_branches_coords, copy=True, supplemental=state.supplemental
-        )
+        tmp_state = GFState(tmp_branches_coords, copy=True, supplemental=state.supplemental)
 
         # ensuring it is up to date. Should not change anything.
         # eryn_state_in = eryn_State(state.branches_coords, inds=state.branches_inds, supplemental=state.supplemental, branch_supplemental=state.branches_supplemental, betas=state.betas, log_like=state.log_like, log_prior=state.log_prior, copy=True)
@@ -446,9 +431,7 @@ class PSDMove(GlobalFitMove, StretchMove):
             tmp_state, accepted = self.run_move_max_likelihood(tmp_model, tmp_state)
 
         else:
-            tmp_state, accepted = self.run_move_for_loop(
-                tmp_model, tmp_state, self.num_repeats
-            )
+            tmp_state, accepted = self.run_move_for_loop(tmp_model, tmp_state, self.num_repeats)
 
         # CHECK THIS STATE SETUP
         new_state = GFState(state, copy=True)

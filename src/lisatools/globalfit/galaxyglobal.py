@@ -6,6 +6,7 @@ from copy import deepcopy
 import cupy as xp
 import numpy as np
 from gbgpu.gbgpu import GBGPU
+
 # from lisatools.globalfit.moves import GBSpecialStretchMove
 from gbgpu.utils.utility import get_fdot
 
@@ -20,9 +21,12 @@ from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.state import BranchSupplemental
 
-from lisatools.sampling.prior import (AmplitudeFromSNR,
-                                      FullGaussianMixtureModel, GBPriorWrap,
-                                      SNRPrior)
+from lisatools.sampling.prior import (
+    AmplitudeFromSNR,
+    FullGaussianMixtureModel,
+    GBPriorWrap,
+    SNRPrior,
+)
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
 
 warnings.filterwarnings("ignore")
@@ -67,8 +71,7 @@ from eryn.utils import PeriodicContainer
 from eryn.utils.utility import groups_from_inds
 
 from lisatools.diagnostic import inner_product
-from lisatools.utils.utility import (get_groups_from_band_structure,
-                                     searchsorted2d_vec)
+from lisatools.utils.utility import get_groups_from_band_structure, searchsorted2d_vec
 
 
 class PlaceHolder(Move):
@@ -77,9 +80,7 @@ class PlaceHolder(Move):
 
     def propose(self, model, state):
         accepted = np.zeros(state.log_like.shape)
-        self.temperature_control.swaps_accepted = np.zeros(
-            self.temperature_control.ntemps - 1
-        )
+        self.temperature_control.swaps_accepted = np.zeros(self.temperature_control.ntemps - 1)
         return state, accepted
 
 
@@ -103,9 +104,7 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
-    def __init__(
-        self, mgh, gb, comm, head_rank, gpu_priors, last_prior_vals, verbose=False
-    ):
+    def __init__(self, mgh, gb, comm, head_rank, gpu_priors, last_prior_vals, verbose=False):
         self.mgh = mgh
         self.comm = comm
         self.head_rank = head_rank
@@ -180,9 +179,7 @@ class UpdateNewResiduals(Update):
             .transpose(1, 0, 2)
         )
 
-        per_source_lp_old = np.zeros_like(
-            last_sample.branches["gb"].inds, dtype=np.float64
-        )
+        per_source_lp_old = np.zeros_like(last_sample.branches["gb"].inds, dtype=np.float64)
         walker_inds_old = (
             np.repeat(np.arange(nwalkers_pe)[:, None], ntemps_pe * nleaves_max, axis=-1)
             .reshape(nwalkers_pe, ntemps_pe, nleaves_max)
@@ -252,11 +249,7 @@ class UpdateNewResiduals(Update):
 
         new_lp_gbs = per_source_lp.sum(axis=-1)
         # add priors from other parts of global fit
-        logp = (
-            new_lp_gbs[0]
-            + generated_info["psd_prior_vals"]
-            + generated_info["mbh_prior_vals"]
-        )
+        logp = new_lp_gbs[0] + generated_info["psd_prior_vals"] + generated_info["mbh_prior_vals"]
         logl = self.mgh.get_ll(include_psd_info=True)
 
         # all in the cold chain (beta = 1)
@@ -264,9 +257,7 @@ class UpdateNewResiduals(Update):
         logP = logl + logp
 
         # factors = 0.0 TODO: fix detailed balance here?
-        accept = (logP - prev_logP) > np.log(
-            sampler.get_model().random.rand(*logP.shape)
-        )
+        accept = (logP - prev_logP) > np.log(sampler.get_model().random.rand(*logP.shape))
         # TODO: this was not right in the end. Need to think about more.
         # so adding this:
         accept[:] = True
@@ -294,9 +285,7 @@ class UpdateNewResiduals(Update):
 
         out_data = [keep_data[f"channel{i + 1}_base_data"][0].copy() for i in range(2)]
         out_psd = [keep_data[f"channel{i + 1}_psd"][0].copy() for i in range(2)]
-        out_lisasens = [
-            keep_data[f"channel{i + 1}_lisasens"][0].copy() for i in range(2)
-        ]
+        out_lisasens = [keep_data[f"channel{i + 1}_lisasens"][0].copy() for i in range(2)]
 
         # needs to leave out gbs
         self.mgh.sub_in_data_and_psd(out_data, out_psd, out_lisasens)
@@ -351,9 +340,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
     if not hasattr(last_sample, "band_info"):
         band_temps = np.tile(np.asarray(betas), (len(band_edges) - 1, 1))
-        last_sample.initialize_band_information(
-            nwalkers_pe, ntemps_pe, band_edges, band_temps
-        )
+        last_sample.initialize_band_information(nwalkers_pe, ntemps_pe, band_edges, band_temps)
         if adjust_temps:
             last_sample.band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
 
@@ -470,17 +457,13 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
         # last_sample.branches["gb"].coords[last_sample.branches["gb"].inds, 0] = coords_fix[:, 0]
 
-        coords_out_gb = last_sample.branches["gb"].coords[
-            0, last_sample.branches["gb"].inds[0]
-        ]
+        coords_out_gb = last_sample.branches["gb"].coords[0, last_sample.branches["gb"].inds[0]]
 
         walker_inds = np.repeat(np.arange(nwalkers_pe)[:, None], nleaves_max, axis=-1)[
             last_sample.branches["gb"].inds[0]
         ]
 
-        check = priors["gb"].logpdf(
-            coords_out_gb, psds=lisasens[0], walker_inds=walker_inds
-        )
+        check = priors["gb"].logpdf(coords_out_gb, psds=lisasens[0], walker_inds=walker_inds)
 
         if np.any(np.isinf(check)):
             raise ValueError("Starting priors are inf.")
@@ -493,9 +476,9 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
         band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
 
-        walker_vals = np.tile(np.arange(nwalkers_pe), (nleaves_max, 1)).transpose(
-            (1, 0)
-        )[last_sample.branches["gb"].inds[0]]
+        walker_vals = np.tile(np.arange(nwalkers_pe), (nleaves_max, 1)).transpose((1, 0))[
+            last_sample.branches["gb"].inds[0]
+        ]
 
         data_index_1 = ((band_inds % 2) + 0) * nwalkers_pe + walker_vals
 
@@ -538,9 +521,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
     N_vals_in = np.zeros((ntemps_pe, nwalkers_pe, nleaves_max), dtype=int)
 
     if state_mix.branches["gb"].inds.sum() > 0:
-        f_in = (
-            state_mix.branches["gb"].coords[state_mix.branches["gb"].inds][:, 1] / 1e3
-        )
+        f_in = state_mix.branches["gb"].coords[state_mix.branches["gb"].inds][:, 1] / 1e3
         band_inds_in[state_mix.branches["gb"].inds] = (
             np.searchsorted(band_edges, f_in, side="right") - 1
         )
@@ -871,9 +852,7 @@ def fit_gmm(samples, comm, comm_info):
 
         while np.any(~gmm_complete):
             time.sleep(0.1)
-            if current_send_arg_index >= len(args_tmp) and np.all(
-                ~np.asarray(current_status)
-            ):
+            if current_send_arg_index >= len(args_tmp) and np.all(~np.asarray(current_status)):
                 current_send_arg_index = 0
 
             outer_iteration += 1
@@ -1044,23 +1023,15 @@ def fit_each_leaf(rank, curr, gather_rank, comm):
             keep_mix.means_,
             keep_mix.covariances_,
             np.array(
-                [
-                    np.linalg.inv(keep_mix.covariances_[i])
-                    for i in range(len(keep_mix.weights_))
-                ]
+                [np.linalg.inv(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]
             ),
             np.array(
-                [
-                    np.linalg.det(keep_mix.covariances_[i])
-                    for i in range(len(keep_mix.weights_))
-                ]
+                [np.linalg.det(keep_mix.covariances_[i]) for i in range(len(keep_mix.weights_))]
             ),
             sample_mins,
             sample_maxs,
         ]
-        comm.send(
-            {"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank
-        )
+        comm.send({"output": output_list, "rank": rank, "arg": arg_index}, dest=gather_rank)
     return
 
 
@@ -1112,14 +1083,10 @@ def run_iterative_subtraction_mcmc(
     while xp.any(fix):
         tmp = priors_good.rvs(size=int((fix.flatten() == True).sum()))
         new_points[fix == True] = tmp
-        fix = xp.any(xp.isinf(new_points), axis=-1) | xp.any(
-            xp.isnan(new_points), axis=-1
-        )
+        fix = xp.any(xp.isinf(new_points), axis=-1) | xp.any(xp.isnan(new_points), axis=-1)
 
     # TODO: fix fs stuff
-    prev_logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(
-        new_points.shape[:-1]
-    )
+    prev_logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
     assert not xp.any(xp.isinf(prev_logp))
     new_points_with_fs = new_points.copy()
 
@@ -1184,9 +1151,7 @@ def run_iterative_subtraction_mcmc(
     old_points = new_points.copy()
 
     best_logl = prev_logl.max(axis=(0, 1))
-    best_logl_ind = prev_logl.reshape(ntemps * nwalkers, len(band_inds_here)).argmax(
-        axis=0
-    )
+    best_logl_ind = prev_logl.reshape(ntemps * nwalkers, len(band_inds_here)).argmax(axis=0)
 
     best_logl_coords = old_points.reshape(ntemps * nwalkers, len(band_inds_here), ndim)[
         (best_logl_ind, xp.arange(len(band_inds_here)))
@@ -1253,9 +1218,7 @@ def run_iterative_subtraction_mcmc(
                 .reshape(ntemps, num_still_going_here, int(nwalkers / 2), -1)
                 .transpose(0, 2, 1, 3)
             )
-            logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(
-                new_points.shape[:-1]
-            )
+            logp = priors_good.logpdf(new_points.reshape(-1, ndim)).reshape(new_points.shape[:-1])
 
             # TODO: make sure factors are reshaped properly
             factors = factors.reshape(logp.shape)
@@ -1317,15 +1280,9 @@ def run_iterative_subtraction_mcmc(
             lnpdiff = factors + logP - prev_logP_here
             keep = lnpdiff > xp.asarray(xp.log(xp.random.rand(*logP.shape)))
 
-            prev_logp[temps_here[keep], walkers_here[keep], bands_here[keep]] = logp[
-                keep
-            ]
-            prev_logl[temps_here[keep], walkers_here[keep], bands_here[keep]] = logl[
-                keep
-            ]
-            old_points[temps_here[keep], walkers_here[keep], bands_here[keep]] = (
-                new_points[keep]
-            )
+            prev_logp[temps_here[keep], walkers_here[keep], bands_here[keep]] = logp[keep]
+            prev_logl[temps_here[keep], walkers_here[keep], bands_here[keep]] = logl[keep]
+            old_points[temps_here[keep], walkers_here[keep], bands_here[keep]] = new_points[keep]
 
         original_snr_params = new_points_with_fs[:, :, :, 0].copy()
 
@@ -1343,12 +1300,8 @@ def run_iterative_subtraction_mcmc(
             dbeta = bi1 - bi
 
             # permute the indices for the walkers in each temperature to randomize swap positions
-            iperm = shuffle_along_axis(
-                xp.tile(xp.arange(nwalkers), (num_still_going_here, 1)), -1
-            )
-            i1perm = shuffle_along_axis(
-                xp.tile(xp.arange(nwalkers), (num_still_going_here, 1)), -1
-            )
+            iperm = shuffle_along_axis(xp.tile(xp.arange(nwalkers), (num_still_going_here, 1)), -1)
+            i1perm = shuffle_along_axis(xp.tile(xp.arange(nwalkers), (num_still_going_here, 1)), -1)
 
             # random draw that produces log of the acceptance fraction
             raccept = xp.log(xp.random.uniform(size=(num_still_going_here, nwalkers)))
@@ -1359,9 +1312,7 @@ def run_iterative_subtraction_mcmc(
 
             temp_swap_i = np.full_like(walker_swap_i, i)
             temp_swap_i1 = np.full_like(walker_swap_i1, i - 1)
-            band_swap = xp.repeat(
-                xp.arange(len(still_going_here))[still_going_here], nwalkers
-            )
+            band_swap = xp.repeat(xp.arange(len(still_going_here))[still_going_here], nwalkers)
 
             paccept = dbeta[:, None] * (
                 prev_logl[(temp_swap_i, walker_swap_i, band_swap)].reshape(
@@ -1383,35 +1334,23 @@ def run_iterative_subtraction_mcmc(
             temp_swap_i1_keep = temp_swap_i1[sel.flatten()]
             walker_swap_i1_keep = walker_swap_i1[sel.flatten()]
 
-            coords_tmp_i = old_points[
-                (temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)
-            ].copy()
-            logl_tmp_i = prev_logl[
-                (temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)
-            ].copy()
-            logp_tmp_i = prev_logp[
-                (temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)
-            ].copy()
+            coords_tmp_i = old_points[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)].copy()
+            logl_tmp_i = prev_logl[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)].copy()
+            logp_tmp_i = prev_logp[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)].copy()
 
-            old_points[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = (
-                old_points[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)]
-            )
-            prev_logl[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = (
-                prev_logl[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)]
-            )
-            prev_logp[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = (
-                prev_logp[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)]
-            )
+            old_points[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = old_points[
+                (temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)
+            ]
+            prev_logl[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = prev_logl[
+                (temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)
+            ]
+            prev_logp[(temp_swap_i_keep, walker_swap_i_keep, band_swap_keep)] = prev_logp[
+                (temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)
+            ]
 
-            old_points[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = (
-                coords_tmp_i
-            )
-            prev_logl[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = (
-                logl_tmp_i
-            )
-            prev_logp[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = (
-                logp_tmp_i
-            )
+            old_points[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = coords_tmp_i
+            prev_logl[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = logl_tmp_i
+            prev_logp[(temp_swap_i1_keep, walker_swap_i1_keep, band_swap_keep)] = logp_tmp_i
         # print(prev_logl.max(axis=(1, 2)))
 
         # print(time.perf_counter() - st)
@@ -1421,9 +1360,7 @@ def run_iterative_subtraction_mcmc(
         betas1 = betas[:, still_going_here].copy()
 
         # Modulate temperature adjustments with a hyperbolic decay.
-        decay = temperature_control.adaptation_lag / (
-            prop_i + temperature_control.adaptation_lag
-        )
+        decay = temperature_control.adaptation_lag / (prop_i + temperature_control.adaptation_lag)
         kappa = decay / temperature_control.adaptation_time
 
         # Construct temperature adjustments.
@@ -1444,9 +1381,9 @@ def run_iterative_subtraction_mcmc(
         # print(new_best_logl - best_logl, best_logl)
         best_logl[improvement] = new_best_logl[improvement]
 
-        best_logl_ind = prev_logl.reshape(
-            ntemps * nwalkers, len(band_inds_here)
-        ).argmax(axis=0)[improvement]
+        best_logl_ind = prev_logl.reshape(ntemps * nwalkers, len(band_inds_here)).argmax(axis=0)[
+            improvement
+        ]
         best_logl_coords[improvement] = old_points.reshape(
             ntemps * nwalkers, len(band_inds_here), ndim
         )[(best_logl_ind, xp.arange(len(band_inds_here))[improvement])]
@@ -1465,9 +1402,7 @@ def run_iterative_subtraction_mcmc(
             psds=lisasens_in[0][None, :],
         )[0].reshape(best_binaries_coords_with_fs.shape[:-1])
 
-        best_logl_points_in = transform_fn.both_transforms(
-            best_binaries_coords_with_fs, xp=xp
-        )
+        best_logl_points_in = transform_fn.both_transforms(best_binaries_coords_with_fs, xp=xp)
 
         best_logl_check = xp.asarray(
             gb.get_ll(
@@ -1494,23 +1429,17 @@ def run_iterative_subtraction_mcmc(
             iter_count[:] = 0
             collect_sample_check_iter += 1
             if collect_sample_check_iter % thin_by == 0:
-                coords_with_fs = old_points.transpose(2, 0, 1, 3)[
-                    still_going_here, 0, :
-                ].copy()
+                coords_with_fs = old_points.transpose(2, 0, 1, 3)[still_going_here, 0, :].copy()
                 coords_with_fs[:, :, 1] = (
                     f0_maxs[band_inds_here[still_going_here]]
                     - f0_mins[band_inds_here][still_going_here]
-                )[:, None] * coords_with_fs[:, :, 1] + f0_mins[
-                    band_inds_here[still_going_here]
-                ][
+                )[:, None] * coords_with_fs[:, :, 1] + f0_mins[band_inds_here[still_going_here]][
                     :, None
                 ]
                 coords_with_fs[:, :, 2] = (
                     fdot_maxs[band_inds_here[still_going_here]]
                     - fdot_mins[band_inds_here][still_going_here]
-                )[:, None] * coords_with_fs[:, :, 2] + fdot_mins[
-                    band_inds_here[still_going_here]
-                ][
+                )[:, None] * coords_with_fs[:, :, 2] + fdot_mins[band_inds_here[still_going_here]][
                     :, None
                 ]
                 coords_with_fs[:, :, 0] = amp_transform(
@@ -1549,26 +1478,18 @@ def run_iterative_subtraction_mcmc(
                 cov[1] = 1e-8
 
                 still_going_start_like = xp.ones(best_logl_coords.shape[0], dtype=bool)
-                starting_points = np.zeros(
-                    (best_logl_coords.shape[0], nwalkers * ntemps, ndim)
-                )
+                starting_points = np.zeros((best_logl_coords.shape[0], nwalkers * ntemps, ndim))
 
                 iter_check = 0
                 max_iter = 10000
                 while np.any(still_going_start_like) and iter_check < max_iter:
                     num_still_going_start_like = still_going_start_like.sum().item()
 
-                    start_like = np.zeros(
-                        (num_still_going_start_like, nwalkers * ntemps)
-                    )
+                    start_like = np.zeros((num_still_going_start_like, nwalkers * ntemps))
 
                     logp = np.full_like(start_like, -np.inf)
-                    tmp = xp.zeros(
-                        (num_still_going_start_like, ntemps * nwalkers, ndim)
-                    )
-                    fix = xp.ones(
-                        (num_still_going_start_like, ntemps * nwalkers), dtype=bool
-                    )
+                    tmp = xp.zeros((num_still_going_start_like, ntemps * nwalkers, ndim))
+                    fix = xp.ones((num_still_going_start_like, ntemps * nwalkers), dtype=bool)
                     while xp.any(fix):
                         tmp[fix] = (
                             gen_points[still_going_start_like, :]
@@ -1585,9 +1506,7 @@ def run_iterative_subtraction_mcmc(
                         tmp[:, :, 3] = tmp[:, :, 3] % (2 * np.pi)
                         tmp[:, :, 5] = tmp[:, :, 5] % (np.pi)
                         tmp[:, :, 6] = tmp[:, :, 6] % (2 * np.pi)
-                        logp = priors_good.logpdf(tmp.reshape(-1, ndim)).reshape(
-                            tmp.shape[:-1]
-                        )
+                        logp = priors_good.logpdf(tmp.reshape(-1, ndim)).reshape(tmp.shape[:-1])
 
                         fix = xp.isinf(logp)
                         if xp.all(fix):
@@ -1614,9 +1533,7 @@ def run_iterative_subtraction_mcmc(
                         psds=lisasens_in[0][None, :],
                     )[0].reshape(new_points_with_fs.shape[:-1])
 
-                    lp_factors = np.log(
-                        original_snr_params / new_points_with_fs[:, :, 0]
-                    )
+                    lp_factors = np.log(original_snr_params / new_points_with_fs[:, :, 0])
                     logp += lp_factors
                     new_points_in = transform_fn.both_transforms(
                         new_points_with_fs.reshape(-1, ndim), xp=xp
@@ -1632,21 +1549,19 @@ def run_iterative_subtraction_mcmc(
                         )
                     ).reshape(new_points_with_fs.shape[:-1])
 
-                    old_points[:, :, still_going_start_like, :] = tmp.transpose(
-                        1, 0, 2
-                    ).reshape(ntemps, nwalkers, -1, ndim)
+                    old_points[:, :, still_going_start_like, :] = tmp.transpose(1, 0, 2).reshape(
+                        ntemps, nwalkers, -1, ndim
+                    )
                     prev_logl[:, :, still_going_start_like] = start_like.T.reshape(
                         ntemps, nwalkers, -1
                     )
-                    prev_logp[:, :, still_going_start_like] = logp.T.reshape(
-                        ntemps, nwalkers, -1
-                    )
+                    prev_logp[:, :, still_going_start_like] = logp.T.reshape(ntemps, nwalkers, -1)
                     # fix any nans that may come up
                     start_like[xp.isnan(start_like)] = -1e300
 
-                    update = xp.arange(still_going_start_like.shape[0])[
-                        still_going_start_like
-                    ][xp.std(start_like, axis=-1) > 15.0]
+                    update = xp.arange(still_going_start_like.shape[0])[still_going_start_like][
+                        xp.std(start_like, axis=-1) > 15.0
+                    ]
                     still_going_start_like[update] = False
 
                     iter_check += 1
@@ -1834,9 +1749,7 @@ def run_iterative_subtraction_mcmc(
     # return starting_points
 
 
-def refit_gmm(
-    current_info, gpu, comm, comm_info, gb_reader, data, psd, number_samples_keep
-):
+def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_samples_keep):
     print("GATHER")
     samples_gathered = gather_gb_samples(
         current_info, gb_reader, psd, gpu, samples_keep=number_samples_keep, thin_by=20
@@ -1845,9 +1758,7 @@ def refit_gmm(
     return fit_gmm(samples_gathered, comm, comm_info)
 
 
-def run_gb_bulk_search(
-    gpu, curr, comm, comm_info, head_rank, num_search, split_remainder
-):
+def run_gb_bulk_search(gpu, curr, comm, comm_info, head_rank, num_search, split_remainder):
     gpus = [gpu]
     xp.cuda.runtime.setDevice(gpus[0])
 
@@ -1869,13 +1780,10 @@ def run_gb_bulk_search(
         search_split_remainder = split_remainder - 1
         num_search_for_search = num_search - 1
         assert search_split_remainder >= 0
-        assert (
-            num_search_for_search > 0 and search_split_remainder < num_search_for_search
-        )
+        assert num_search_for_search > 0 and search_split_remainder < num_search_for_search
 
         band_inds_running[
-            np.arange(len(band_inds_running)) % num_search_for_search
-            == search_split_remainder
+            np.arange(len(band_inds_running)) % num_search_for_search == search_split_remainder
         ] = True
 
     print(
@@ -1955,12 +1863,8 @@ def run_gb_bulk_search(
             if split_remainder == 0:
                 if (
                     os.path.exists(curr.backend.filename)
-                    and curr.backend.iteration
-                    > curr.gb_info["pe_info"]["start_resample_iter"]
-                    and (
-                        run_counter % curr.gb_info["pe_info"]["iter_count_per_resample"]
-                    )
-                    == 0
+                    and curr.backend.iteration > curr.gb_info["pe_info"]["start_resample_iter"]
+                    and (run_counter % curr.gb_info["pe_info"]["iter_count_per_resample"]) == 0
                 ):
                     gmm_samples_refit = refit_gmm(
                         curr,

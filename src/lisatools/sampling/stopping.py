@@ -116,9 +116,7 @@ class SearchConvergeStopping(Stopping):
 
 class GBBandLogLConvergeStopping(Stopping):
 
-    def __init__(
-        self, fd, band_edges, n_iters=30, diff=1.0, verbose=False, start_iteration=0
-    ):
+    def __init__(self, fd, band_edges, n_iters=30, diff=1.0, verbose=False, start_iteration=0):
         self.band_edge_inds = np.searchsorted(fd, band_edges, side="right") - 1
         self.num_bands = self.band_edge_inds.shape[0] - 1
         self.converged = np.zeros(self.num_bands, dtype=bool)
@@ -163,9 +161,7 @@ class GBBandLogLConvergeStopping(Stopping):
 
 
 class SearchConvergeStopping2(Stopping):
-    def __init__(
-        self, n_iters=30, diff=0.1, verbose=False, start_iteration=0, iter_back_check=-1
-    ):
+    def __init__(self, n_iters=30, diff=0.1, verbose=False, start_iteration=0, iter_back_check=-1):
         self.n_iters = n_iters
         self.iters_consecutive = 0
         self.past_like_best = -np.inf
@@ -206,8 +202,7 @@ class SearchConvergeStopping2(Stopping):
 
         # spread in stored values is below difference
         third_check = (
-            np.asarray(self.back_check).max() - np.asarray(self.back_check).min()
-            < self.diff
+            np.asarray(self.back_check).max() - np.asarray(self.back_check).min() < self.diff
         )
 
         update = (
@@ -292,9 +287,7 @@ class MPICommunicateStopping(Stopping):
     def __call__(self, *args, **kwargs):
 
         if not hasattr(self, "comm"):
-            raise ValueError(
-                "Must add comm via add_comm method before __call__ is used."
-            )
+            raise ValueError("Must add comm via add_comm method before __call__ is used.")
 
         if not hasattr(self, "rank"):
             self.rank = self.comm.Get_rank()

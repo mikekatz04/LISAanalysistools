@@ -142,9 +142,7 @@ class GBState(eryn_State):
 
         band_group = h5_group.create_group("gb_sub_state")
 
-        band_group.create_dataset(
-            "band_edges", data=self.band_info["band_edges"], **h5_kwargs
-        )
+        band_group.create_dataset("band_edges", data=self.band_info["band_edges"], **h5_kwargs)
         num_bands = self.band_info["num_bands"]
         band_group.attrs["num_bands"] = num_bands
 
@@ -248,7 +246,7 @@ class MBHState(eryn_State):
             self.num_mbhs = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_mbhs = possible_state['mbh'].shape[-2]
+            self.num_mbhs = possible_state["mbh"].shape[-2]
 
     @property
     def reset_kwargs(self):
@@ -268,7 +266,7 @@ class EMRIState(eryn_State):
             self.num_emris = betas_all.shape[0] if betas_all is not None else 20
         else:
             self.betas_all = betas_all
-            self.num_emris = possible_state['emri'].shape[-2]
+            self.num_emris = possible_state["emri"].shape[-2]
 
     @property
     def reset_kwargs(self):
@@ -341,17 +339,13 @@ class AllGFBranchInfo:
             "branch_state",
             "branch_backend",
         ]:
-            if isinstance(branch_1, AllGFBranchInfo) and isinstance(
-                branch_2, AllGFBranchInfo
-            ):
+            if isinstance(branch_1, AllGFBranchInfo) and isinstance(branch_2, AllGFBranchInfo):
                 if key == "name":
                     self.branch_names = branch_1.branch_names + branch_2.name
                     continue
                 setattr(self, key, {**getattr(branch_1, key), **getattr(branch_2, key)})
 
-            elif isinstance(branch_1, GFBranchInfo) and isinstance(
-                branch_2, GFBranchInfo
-            ):
+            elif isinstance(branch_1, GFBranchInfo) and isinstance(branch_2, GFBranchInfo):
                 if key == "name":
                     self.branch_names = [branch_1.name, branch_2.name]
                     continue
