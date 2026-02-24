@@ -39,6 +39,101 @@ class PERecipeStep(RecipeStep):
         return False
 
 
+def scatter_around_injection(state, branch_name, injection_params, spread,
+                             reverse_transform=None, betas=None):
+    """
+    Initialize branch coordinates by scattering walkers around injection parameters.
+
+    For each leaf, draws coordinates from a multivariate Gaussian centered on
+    the (transformed) injection parameters.  Higher-temperature chains receive
+    proportionally wider scatter when ``betas`` is provided.  Initialized
+    leaves are marked as active (``inds = True``).
+
+    The function modifies ``state`` in-place, so it can be called from
+    ``setup_recipe`` (before MCMC) or from a ``RecipeStep.setup_run``
+    (between recipe phases).
+
+    Parameters
+    ----------
+    state : GFState
+        Sampler state to modify in-place.
+    branch_name : str
+        Name of the branch to initialize (e.g. ``"mbh"``, ``"emri"``).
+    injection_params : ndarray
+        True source parameters in the **physical** (waveform) basis.
+        Shape ``(ndim_phys,)`` for a single leaf, or
+        ``(nleaves, ndim_phys)`` for multiple leaves.
+    spread : float, ndarray
+        Controls the width of the Gaussian scatter (in sampling basis).
+
+        * *scalar* -- isotropic standard deviation for every parameter.
+        * *1-D array* ``(ndim,)`` -- per-parameter standard deviations.
+        * *2-D array* ``(ndim, ndim)`` -- full covariance matrix
+          (shared across leaves).
+        * *3-D array* ``(nleaves, ndim, ndim)`` -- per-leaf covariance
+          matrices.
+    reverse_transform : callable, optional
+        Converts a single parameter vector from physical basis to
+        sampling basis: ``(ndim_phys,) -> (ndim_sampling,)``.
+        If *None*, ``injection_params`` are assumed to already be in
+        the sampling basis.
+    betas : ndarray of shape ``(ntemps,)``, optional
+        Inverse-temperature ladder.  When provided the covariance for
+        temperature index *t* is scaled by ``1 / betas[t]`` so that
+        hotter chains start with a wider scatter.
+    """
+    coords = state.branches[branch_name].coords
+    ntemps, nwalkers, nleaves_max, ndim = coords.shape
+
+    injection_params = np.atleast_2d(np.asarray(injection_params, dtype=float))
+
+    # Physical → sampling basis
+    if reverse_transform is not None:
+        injection_sampling = np.array(
+            [reverse_transform(p) for p in injection_params]
+        )
+    else:
+        injection_sampling = injection_params
+
+    nleaves_init = injection_sampling.shape[0]
+    assert nleaves_init <= nleaves_max, (
+        f"More injection leaves ({nleaves_init}) than nleaves_max ({nleaves_max})"
+    )
+    assert injection_sampling.shape[-1] == ndim, (
+        f"Injection ndim ({injection_sampling.shape[-1]}) != branch ndim ({ndim})"
+    )
+
+    # Build covariance matrix/matrices
+    spread = np.asarray(spread, dtype=float)
+    if spread.ndim == 0:
+        cov = spread.item() ** 2 * np.eye(ndim)
+        covs = np.tile(cov, (nleaves_init, 1, 1))
+    elif spread.ndim == 1:
+        cov = np.diag(spread ** 2)
+        covs = np.tile(cov, (nleaves_init, 1, 1))
+    elif spread.ndim == 2:
+        covs = np.tile(spread, (nleaves_init, 1, 1))
+    elif spread.ndim == 3:
+        assert spread.shape == (nleaves_init, ndim, ndim)
+        covs = spread
+    else:
+        raise ValueError(f"spread must be scalar, 1-D, 2-D, or 3-D; got shape {spread.shape}")
+
+    for leaf in range(nleaves_init):
+        center = injection_sampling[leaf]
+        leaf_cov = covs[leaf]
+        for t in range(ntemps):
+            if betas is not None:
+                scaled_cov = leaf_cov / max(betas[t], 1e-10)
+            else:
+                scaled_cov = leaf_cov
+
+            draws = np.random.multivariate_normal(center, scaled_cov, size=nwalkers)
+            coords[t, :, leaf] = draws
+
+        state.branches[branch_name].inds[:, :, leaf] = True
+
+
 def build_psd_moves(engine_info, curr, acs, priors, *, num_repeats=60, Tmax=1e6):
     """Build PSD search and PE moves.
 
