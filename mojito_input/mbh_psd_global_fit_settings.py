@@ -13,42 +13,19 @@ except (ModuleNotFoundError, ImportError) as e:
 
 from lisatools.detector import L1Orbits
 from lisatools.utils.constants import *
-#from gbgpu.utils.utility import get_fdot
 from eryn.state import BranchSupplemental
-from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
-from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
-# from global_fit_input.global_fit_settings import get_global_fit_settings
+from lisatools.globalfit.run import CurrentInfoGlobalFit
+from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, MBHSetup, MBHSettings
 
-from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
-from lisatools.globalfit.state import MBHState, EMRIState, GBState
-
-#from bbhx.utils.transform import *
-
-from lisatools.globalfit.generatefuncs import *
-from lisatools.utils.utility import AET
-from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
-
-from lisatools.globalfit.stock.erebor import (
-    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings
-)
 
 from eryn.prior import uniform_dist
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
 
-from eryn.moves import StretchMove
-from lisatools.sampling.moves.skymodehop import SkyMove
-
 from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, MBHSpecialMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
-from lisatools.globalfit.galaxyglobal import make_gmm
-from lisatools.globalfit.moves import GlobalFitMove
-from lisatools.utils.utility import tukey
+from lisatools.globalfit.moves import GFCombineMove
 
 
-# import few
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 
 from eryn.utils.updates import Update
@@ -65,16 +42,16 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors)
 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
 
     # now do the black holes (WIP)
     _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state)
-    # TODO: add mbh recipe components
+    mbh_pe_moves = GFCombineMove(moves=[mbh_pe_move, psd_pe_move], share_temperature_control=False)
+    recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_moves]), name="mbh+psd pe")
 
     
 #######################
-##### SETTINGS ###########
-###############
+##### SETTINGS ########
+#######################
 
 def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     
@@ -229,7 +206,6 @@ def get_global_fit_settings(copy_settings_file=False):
 
     general_setup = get_general_erebor_settings()
 
-    # file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
     if copy_settings_file:
         shutil.copy(__file__, general_setup.file_store_dir + general_setup.base_file_name + "_" + __file__.split("/")[-1])
 
