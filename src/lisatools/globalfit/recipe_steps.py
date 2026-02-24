@@ -1,3 +1,8 @@
+from lisatools.globalfit.run import CurrentInfoGlobalFit
+import logging
+from lisatools.globalfit.engine import Setup
+from typing import Callable
+from lisatools.analysiscontainer import AnalysisContainerArray
 import numpy as np
 
 try:
@@ -10,6 +15,7 @@ from eryn.moves.tempering import TemperatureControl, make_ladder
 from lisatools.globalfit.moves import PSDMove, ResidualAddOneRemoveOneMove
 from lisatools.globalfit.recipe import RecipeStep
 
+logger = logging.getLogger(__name__)
 
 class SearchRecipeStep(RecipeStep):
     """Recipe step that completes immediately (one-shot search/initialisation)."""
@@ -39,8 +45,13 @@ class PERecipeStep(RecipeStep):
         return False
 
 
-def scatter_around_injection(state, branch_name, injection_params, spread,
-                             reverse_transform=None, betas=None):
+def scatter_around_injection(state: GFState, 
+                             branch_name: str, 
+                             injection_params: np.ndarray, 
+                             spread: float | np.ndarray, 
+                             reverse_transform: Callable | None=None, 
+                             betas: np.ndarray | None=None
+                             ):
     """
     Initialize branch coordinates by scattering walkers around injection parameters.
 
@@ -133,8 +144,36 @@ def scatter_around_injection(state, branch_name, injection_params, spread,
 
         state.branches[branch_name].inds[:, :, leaf] = True
 
+def subtract_initial_signal(acs: AnalysisContainerArray,
+                            state: GFState,
+                            wave_gen: Callable,
+                            source_name: str,
+                            source_info: Setup
+                            ):
+    
+    if np.any(inds := state.branches_inds[source_name][0]):
+        logger.info(f"Subtracting initial signals for {source_name}")
+        counter = 0
+        for leaf in range(inds.shape[-1]):
+            if inds[0, leaf]:
+                assert np.all(inds[:, leaf])
+                inj_coords = state.branches_coords[source_name][0, :, leaf]
+                inj_coords_in = source_info.transform.both_transforms(inj_coords)
+                signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
+                acs.add_signal_to_residual(signals_in)
+                counter += 1
+        logger.info(f"Subtracted {counter} initial signals for {source_name}")
+    else:
+        logger.info(f"No initial signals for {source_name}")
 
-def build_psd_moves(engine_info, curr, acs, priors, *, num_repeats=60, Tmax=1e6):
+def build_psd_moves(engine_info: Setup, 
+                    curr: CurrentInfoGlobalFit, 
+                    acs: AnalysisContainerArray, 
+                    priors: dict, 
+                    *, 
+                    num_repeats: int=60, 
+                    Tmax: float=1e6
+                    )-> tuple[PSDMove, PSDMove]:
     """Build PSD search and PE moves.
 
     Both moves share the same ``acs``, ``priors``, and
@@ -187,8 +226,12 @@ def build_psd_moves(engine_info, curr, acs, priors, *, num_repeats=60, Tmax=1e6)
 
     return psd_search_move, psd_pe_move
 
+def build_mbh_moves_phenom(curr: CurrentInfoGlobalFit, 
+                           acs: AnalysisContainerArray, 
+                           priors: dict, 
+                           state: GFState
+                           )-> tuple[PhenomTHMTDIWaveform, ResidualAddOneRemoveOneMove]:
 
-def build_mbh_moves_phenom(curr, acs, priors, state):
     """Build MBH PE move using ``PhenomTHMTDIWaveform`` + ``ResidualAddOneRemoveOneMove``.
 
     Sets ``state.sub_states['mbh'].betas_all`` as a side effect.
@@ -217,15 +260,7 @@ def build_mbh_moves_phenom(curr, acs, priors, state):
 
     wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
 
-    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
-        for leaf in range(mbh_inds.shape[-1]):
-            if mbh_inds[0, leaf]:
-                assert np.all(mbh_inds[:, leaf])
-                inj_coords = state.branches_coords["mbh"][0, :, leaf]
-                inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
-                signals_in = wave_gen(*inj_coords_in.T, **mbh_info.waveform_kwargs)
-                breakpoint()
-                acs.add_signal_to_residual(signals_in)
+    subtract_initial_signal(acs, state, wave_gen, "mbh", mbh_info)
 
     betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
