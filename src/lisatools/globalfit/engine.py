@@ -24,11 +24,17 @@ from lisatools.detector import EqualArmlengthOrbits, Orbits
 
 from ..analysiscontainer import AnalysisContainerArray
 from ..detector import LISAModel, sangria
-from ..sensitivity import (AE1SensitivityMatrix, AE2SensitivityMatrix,
-                           AET2SensitivityMatrix, XYZ1SensitivityMatrix,
-                           XYZ2SensitivityMatrix, XYZSensitivityBackend)
+from ..sensitivity import (
+    AE1SensitivityMatrix,
+    AE2SensitivityMatrix,
+    AET2SensitivityMatrix,
+    XYZ1SensitivityMatrix,
+    XYZ2SensitivityMatrix,
+    XYZSensitivityBackend,
+)
 from ..utils.utility import AET, detrend, tukey
 from .preprocessing import BaseProcessingStep
+
 
 @dataclasses.dataclass
 class RankInfo:
@@ -43,9 +49,7 @@ class Setup:
         self.settings = settings_holder
 
         # had a better way to do this but it stopped allowing for pickle
-        self._settings_names = [
-            field.name for field in dataclasses.fields(self._settings_class)
-        ]
+        self._settings_names = [field.name for field in dataclasses.fields(self._settings_class)]
         self._settings_args_names = [
             field.name
             for field in dataclasses.fields(self._settings_class)
@@ -58,16 +62,11 @@ class Setup:
             field.name
             for field in dataclasses.fields(self._settings_class)
             if (
-                field.default != dataclasses.MISSING
-                or field.default_factory != dataclasses.MISSING
+                field.default != dataclasses.MISSING or field.default_factory != dataclasses.MISSING
             )
         ]  # kwargs
-        _args = tuple(
-            [getattr(settings_holder, key) for key in self._settings_args_names]
-        )
-        _kwargs = {
-            key: getattr(settings_holder, key) for key in self._settings_kwargs_names
-        }
+        _args = tuple([getattr(settings_holder, key) for key in self._settings_args_names])
+        _kwargs = {key: getattr(settings_holder, key) for key in self._settings_kwargs_names}
         self._settings_class.__init__(self, *_args, **_kwargs)
         self.init_df()
 
@@ -83,6 +82,8 @@ class Setup:
     def init_df(self):
         self.Tobs = int(self.Tobs / self.dt) * self.dt
         self.df = 1.0 / self.Tobs
+
+
 @dataclasses.dataclass
 class Settings:
     Tobs: float = None
@@ -155,9 +156,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
     @property
     def main_file_path(self) -> str:
-        return (
-            self.file_store_dir + self.base_file_name + "_" + self.main_file_key + ".h5"
-        )
+        return self.file_store_dir + self.base_file_name + "_" + self.main_file_key + ".h5"
 
     # def __getattr__(self, attr: str) -> typing.Any:
     #     if hasattr(self.gb_settings, attr):
@@ -171,7 +170,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # if self.data_input_path is None:
         #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
-        self.force_backend = "cuda12x" if self.gpus is not None else 'cpu'
+        self.force_backend = "cuda12x" if self.gpus is not None else "cpu"
         self.init_data_information()
 
     def init_orbit_information(self):
@@ -181,9 +180,7 @@ class GeneralSetup(Setup, GeneralSettings):
         else:
             if self.gpu_orbits is None and self.force_backend == "cuda12x":
                 # TODO: make better
-                raise ValueError(
-                    "If adding orbits, make sure to duplicate into GPU orbits."
-                )
+                raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
     def init_data_information(self):
 
@@ -204,9 +201,7 @@ class GeneralSetup(Setup, GeneralSettings):
         default_preprocess_kwargs = dict(
             do_detrend=False,
             highpass_kwargs=dict(cutoff=5e-5, order=2, zero_phase=True),
-            trim_kwargs=dict(
-                duration=200 * 3600, is_percent=False, trimming_type="from_each_end"
-            ),
+            trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
             Tobs=self.Tobs,
         )
 
@@ -214,6 +209,9 @@ class GeneralSetup(Setup, GeneralSettings):
             preprocess_kwargs = default_preprocess_kwargs
         else:
             preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
+
+        # now extract `normalize` if present
+        normalize_window = preprocess_kwargs.pop("normalize", False)
 
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
@@ -225,7 +223,9 @@ class GeneralSetup(Setup, GeneralSettings):
 
             if self.stft_dt is None:
                 raise ValueError("Must provide `stft_dt` for stft basis domain.")
-            self.basis_kwargs = dict(big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq)
+            self.basis_kwargs = dict(
+                big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq
+            )
 
             domain_settings = get_stft_settings(
                 times=times,
@@ -241,22 +241,16 @@ class GeneralSetup(Setup, GeneralSettings):
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
 
-            self.basis_kwargs=dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
+            self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
 
-            domain_settings = FDSettings(
-                **self.basis_kwargs, force_backend=self.force_backend
-            )
+            domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
             window = tukey(Nt, alpha=self.tukey_alpha)
 
-
-
         else:
-            raise NotImplementedError(
-                f"Basis domain {self.basis_domain} not implemented."
-            )
+            raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
 
         self.input_data_residual_array, orbits = data_processor.pour(
-            settings=domain_settings, window=window, return_orbits=True
+            settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
 
         # use logger to output domain info

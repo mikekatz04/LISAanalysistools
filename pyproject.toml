@@ -103,6 +103,10 @@ local_scheme = "node-and-date"
 version_file = "src/lisatools/_version.py"
 
 [[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
 name = "gitlab-esa-commons"
 url = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/simple"
 
@@ -179,3 +183,4 @@ report.omit = [
 
 [tool.uv.sources]
 mojito = { index = "gitlab-esa-commons" }
+lisaconstants = { index = "pypi" }

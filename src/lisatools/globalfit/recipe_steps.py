@@ -1,9 +1,9 @@
-from lisatools.globalfit.run import CurrentInfoGlobalFit
 import logging
-from lisatools.globalfit.engine import Setup
 from typing import Callable
-from lisatools.analysiscontainer import AnalysisContainerArray
+
 import numpy as np
+
+from lisatools.analysiscontainer import AnalysisContainerArray
 
 try:
     import cupy as cp
@@ -12,10 +12,15 @@ except (ModuleNotFoundError, ImportError):
 
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
-from lisatools.globalfit.moves import PSDMove, ResidualAddOneRemoveOneMove
-from lisatools.globalfit.recipe import RecipeStep
+from ..sources.bbh.waveform import PhenomTHMTDIWaveform
+from .engine import Setup
+from .moves import PSDMove, ResidualAddOneRemoveOneMove
+from .recipe import RecipeStep
+from .run import CurrentInfoGlobalFit
+from .state import GFState
 
 logger = logging.getLogger(__name__)
+
 
 class SearchRecipeStep(RecipeStep):
     """Recipe step that completes immediately (one-shot search/initialisation)."""
@@ -45,13 +50,14 @@ class PERecipeStep(RecipeStep):
         return False
 
 
-def scatter_around_injection(state: GFState, 
-                             branch_name: str, 
-                             injection_params: np.ndarray, 
-                             spread: float | np.ndarray, 
-                             reverse_transform: Callable | None=None, 
-                             betas: np.ndarray | None=None
-                             ):
+def scatter_around_injection(
+    state: GFState,
+    branch_name: str,
+    injection_params: np.ndarray,
+    spread: float | np.ndarray,
+    reverse_transform: Callable | None = None,
+    betas: np.ndarray | None = None,
+):
     """
     Initialize branch coordinates by scattering walkers around injection parameters.
 
@@ -100,19 +106,17 @@ def scatter_around_injection(state: GFState,
 
     # Physical → sampling basis
     if reverse_transform is not None:
-        injection_sampling = np.array(
-            [reverse_transform(p) for p in injection_params]
-        )
+        injection_sampling = np.array([reverse_transform(p) for p in injection_params])
     else:
         injection_sampling = injection_params
 
     nleaves_init = injection_sampling.shape[0]
-    assert nleaves_init <= nleaves_max, (
-        f"More injection leaves ({nleaves_init}) than nleaves_max ({nleaves_max})"
-    )
-    assert injection_sampling.shape[-1] == ndim, (
-        f"Injection ndim ({injection_sampling.shape[-1]}) != branch ndim ({ndim})"
-    )
+    assert (
+        nleaves_init <= nleaves_max
+    ), f"More injection leaves ({nleaves_init}) than nleaves_max ({nleaves_max})"
+    assert (
+        injection_sampling.shape[-1] == ndim
+    ), f"Injection ndim ({injection_sampling.shape[-1]}) != branch ndim ({ndim})"
 
     # Build covariance matrix/matrices
     spread = np.asarray(spread, dtype=float)
@@ -120,7 +124,7 @@ def scatter_around_injection(state: GFState,
         cov = spread.item() ** 2 * np.eye(ndim)
         covs = np.tile(cov, (nleaves_init, 1, 1))
     elif spread.ndim == 1:
-        cov = np.diag(spread ** 2)
+        cov = np.diag(spread**2)
         covs = np.tile(cov, (nleaves_init, 1, 1))
     elif spread.ndim == 2:
         covs = np.tile(spread, (nleaves_init, 1, 1))
@@ -144,13 +148,15 @@ def scatter_around_injection(state: GFState,
 
         state.branches[branch_name].inds[:, :, leaf] = True
 
-def subtract_initial_signal(acs: AnalysisContainerArray,
-                            state: GFState,
-                            wave_gen: Callable,
-                            source_name: str,
-                            source_info: Setup
-                            ):
-    
+
+def subtract_initial_signal(
+    acs: AnalysisContainerArray,
+    state: GFState,
+    wave_gen: Callable,
+    source_name: str,
+    source_info: Setup,
+):
+
     if np.any(inds := state.branches_inds[source_name][0]):
         logger.info(f"Subtracting initial signals for {source_name}")
         counter = 0
@@ -166,14 +172,16 @@ def subtract_initial_signal(acs: AnalysisContainerArray,
     else:
         logger.info(f"No initial signals for {source_name}")
 
-def build_psd_moves(engine_info: Setup, 
-                    curr: CurrentInfoGlobalFit, 
-                    acs: AnalysisContainerArray, 
-                    priors: dict, 
-                    *, 
-                    num_repeats: int=60, 
-                    Tmax: float=1e6
-                    )-> tuple[PSDMove, PSDMove]:
+
+def build_psd_moves(
+    engine_info: Setup,
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    *,
+    num_repeats: int = 60,
+    Tmax: float = 1e6,
+) -> tuple[PSDMove, PSDMove]:
     """Build PSD search and PE moves.
 
     Both moves share the same ``acs``, ``priors``, and
@@ -218,7 +226,9 @@ def build_psd_moves(engine_info: Setup,
         temperature_control=temperature_control,
     )
 
-    psd_search_move = PSDMove(acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs)
+    psd_search_move = PSDMove(
+        acs, priors, max_logl_mode=True, name="psd search move", **psd_move_kwargs
+    )
     psd_pe_move = PSDMove(acs, priors, max_logl_mode=False, name="psd pe move", **psd_move_kwargs)
 
     psd_search_move.accepted = np.zeros((ntemps, nwalkers))
@@ -226,12 +236,10 @@ def build_psd_moves(engine_info: Setup,
 
     return psd_search_move, psd_pe_move
 
-def build_mbh_moves_phenom(curr: CurrentInfoGlobalFit, 
-                           acs: AnalysisContainerArray, 
-                           priors: dict, 
-                           state: GFState
-                           )-> tuple[PhenomTHMTDIWaveform, ResidualAddOneRemoveOneMove]:
 
+def build_mbh_moves_phenom(
+    curr: CurrentInfoGlobalFit, acs: AnalysisContainerArray, priors: dict, state: GFState
+) -> tuple[PhenomTHMTDIWaveform, ResidualAddOneRemoveOneMove]:
     """Build MBH PE move using ``PhenomTHMTDIWaveform`` + ``ResidualAddOneRemoveOneMove``.
 
     Sets ``state.sub_states['mbh'].betas_all`` as a side effect.

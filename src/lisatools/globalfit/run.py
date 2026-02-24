@@ -24,8 +24,7 @@ from eryn.state import State as eryn_State
 from eryn.utils.plot import PlotContainer
 
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from .engine import (EngineInfo, GeneralSetup, GlobalFitEngine,
-                     GlobalFitSettings)
+from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import init_logger
 from .moves import GFCombineMove, GlobalFitMove
@@ -87,17 +86,13 @@ class CurrentInfoGlobalFit:
     @property
     def nleaves_max(self) -> typing.Dict[str, int]:
         """Maximum number of leaves for each branch."""
-        _nleaves_max = {
-            name: self.source_info[name].nleaves_max for name in self.branch_names
-        }
+        _nleaves_max = {name: self.source_info[name].nleaves_max for name in self.branch_names}
         return _nleaves_max
 
     @property
     def nleaves_min(self) -> typing.Dict[str, int]:
         """Minimum number of leaves for each branch."""
-        _nleaves_min = {
-            name: self.source_info[name].nleaves_min for name in self.branch_names
-        }
+        _nleaves_min = {name: self.source_info[name].nleaves_min for name in self.branch_names}
         return _nleaves_min
 
     @property
@@ -109,9 +104,7 @@ class CurrentInfoGlobalFit:
     @property
     def branch_states(self) -> typing.Dict[str, eryn_State]:
         """Branch state objects for each branch."""
-        _branch_states = {
-            name: self.source_info[name].branch_state for name in self.branch_names
-        }
+        _branch_states = {name: self.source_info[name].branch_state for name in self.branch_names}
         return _branch_states
 
     @property
@@ -177,10 +170,7 @@ class GlobalFit:
         comm: MPI communicator for parallel processing.
     """
 
-    def __init__(self, 
-                 curr: CurrentInfoGlobalFit, 
-                 comm: MPI.Comm
-                 ):
+    def __init__(self, curr: CurrentInfoGlobalFit, comm: MPI.Comm):
         """Main class for managing the global fit MCMC sampling run.
 
         Coordinates MPI processes, GPU assignments, and the MCMC sampling workflow
@@ -218,9 +208,7 @@ class GlobalFit:
         name = "GlobalFit"
         self.logger = init_logger(filename="global_fit.log", level=level, name=name)
 
-    def load_info(self, 
-                  priors: typing.Dict[str, typing.Any]
-                  ) -> GFState:
+    def load_info(self, priors: typing.Dict[str, typing.Any]) -> GFState:
         """
         Load or initialize the MCMC state from backend or priors.
 
@@ -246,9 +234,7 @@ class GlobalFit:
 
         elif self.curr.general_info.past_file_for_start is not None:
             # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
-            if not os.path.exists(
-                (file_for_restart := self.curr.general_info.past_file_for_start)
-            ):
+            if not os.path.exists((file_for_restart := self.curr.general_info.past_file_for_start)):
                 raise ValueError(
                     f"past_file_for_start ({file_for_restart}) was added but it does not exist."
                 )
@@ -262,9 +248,7 @@ class GlobalFit:
 
             # TODO: adjust this so it is automated
             state.sub_states["gb"].initialized = False
-            band_temps = np.zeros(
-                (len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps)
-            )
+            band_temps = np.zeros((len(self.curr.source_info["gb"].band_edges) - 1, self.ntemps))
             state.sub_states["gb"].initialize_band_information(
                 self.nwalkers,
                 self.ntemps,
@@ -299,14 +283,10 @@ class GlobalFit:
                 inds["emri"][:] = True
                 self.logger.debug("initializing emri inds to true")
 
-                self.logger.debug(
-                    "override emri starting coords to be close to the injection"
-                )
+                self.logger.debug("override emri starting coords to be close to the injection")
                 factor = 1e-5
 
-                coords["emri"] = self.curr.source_info[
-                    "emri"
-                ].injection + factor * np.random.randn(
+                coords["emri"] = self.curr.source_info["emri"].injection + factor * np.random.randn(
                     self.ntemps, self.nwalkers, self.engine_info.nleaves_max["emri"]
                 )
 
@@ -335,9 +315,7 @@ class GlobalFit:
 
         return state
 
-    def setup_acs(self, 
-                  state: GFState
-                  ) -> AnalysisContainerArray:
+    def setup_acs(self, state: GFState) -> AnalysisContainerArray:
         """
         Set up AnalysisContainerArray for likelihood computations.
 
@@ -382,9 +360,7 @@ class GlobalFit:
 
             # sens_AE[0] = psd[0][w]
             # sens_AE[1] = psd[1][w]
-            acs_tmp.append(
-                AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here))
-            )
+            acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here)))
 
         gpus = self.curr.general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
@@ -403,8 +379,7 @@ class GlobalFit:
                 source_info["get_templates"](state, source_info, self.curr.general_info)
             )
 
-            acs.add_signal_to_r
-            esidual(
+            acs.add_signal_to_residual(
                 templates_tmp
             )  # no need to adjust data index or start_freq_ind as it is taken care of
 
@@ -470,9 +445,7 @@ class GlobalFit:
                         "periodic" in self.curr.source_info[name]
                         and self.curr.source_info[name]["periodic"] is not None
                     ):
-                        for key, value in self.curr.source_info[name][
-                            "periodic"
-                        ].items():
+                        for key, value in self.curr.source_info[name]["periodic"].items():
                             periodic[key] = value
 
                 from .stock.erebor import Setup
@@ -562,7 +535,6 @@ class GlobalFit:
             self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood(complex=False)
-            print("initial log likes:", state.log_like)
 
             like_mix = BasicResidualacsLikelihood(acs)
 
@@ -627,9 +599,7 @@ class GlobalFit:
 
             rank_instructions = {}
             print("NEED TO FIX")
-            for (
-                move_tmp
-            ) in []:  # setup_info_all.in_model_moves + setup_info_all.rj_moves:
+            for move_tmp in []:  # setup_info_all.in_model_moves + setup_info_all.rj_moves:
                 if isinstance(move_tmp, tuple) or isinstance(move_tmp, list):
                     move_tmp = move_tmp[0]
 
@@ -641,14 +611,10 @@ class GlobalFit:
 
                 for move in moves_list:
                     if not isinstance(move, GlobalFitMove):
-                        raise ValueError(
-                            "All moves must be a subclass of GlobalFitMove."
-                        )
+                        raise ValueError("All moves must be a subclass of GlobalFitMove.")
 
                     move.comm = self.comm
-                    if len(move.gpus) > 0 or (
-                        move.ranks_needed > 0 and not move.ranks_initialized
-                    ):
+                    if len(move.gpus) > 0 or (move.ranks_needed > 0 and not move.ranks_initialized):
                         if len(move.gpus) > 0:
                             assert move.ranks_needed > 0
 
@@ -726,13 +692,11 @@ class GlobalFit:
             self.recipe.backend = backend
             backend.add_recipe(self.recipe)
 
-            state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False)[None, :]
+            state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False, complex=False)[None, :]
             state.log_prior = np.zeros_like(
                 state.log_like
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
-            self.recipe.setup_first_recipe_step(
-                sampler_mix.iteration, state, sampler_mix
-            )
+            self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
             sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
@@ -852,9 +816,7 @@ class MPIControlGlobalFit:
         for gpu_assign in self.all_gpu_assignments:
             assert gpu_assign in self.gpus
 
-    def run_global_fit(
-        self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True
-    ):
+    def run_global_fit(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
         """Execute the global fit workflow with specified components.
 
         Coordinates the execution of different global fit components (PSD estimation,
@@ -891,9 +853,7 @@ class MPIControlGlobalFit:
                 time.sleep(1)
 
         elif self.rank == self.main_rank:
-            fin = run_main_function(
-                self.main_gpu, self.comm, self.head_rank, self.run_results_rank
-            )
+            fin = run_main_function(self.main_gpu, self.comm, self.head_rank, self.run_results_rank)
 
         elif self.run_results_update and self.rank == self.run_results_rank:
             save_to_backend_asynchronously_and_plot(

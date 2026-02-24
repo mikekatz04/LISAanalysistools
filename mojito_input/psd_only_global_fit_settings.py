@@ -105,13 +105,16 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "psd_separate_5th_try"
+    base_file_name = "psd_separate_6th_try"
     file_store_dir = head_dir + "mojito_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [2]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
+    # Restrict JAX to only see the target GPU — must be set before JAX backend init
+    import jax
+    jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
     # few.get_backend('cuda12x')
     nwalkers = 20
     ntemps = 4
@@ -127,9 +130,9 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  do_plots=True,
                                 )
     
-    preprocess_kwargs = dict(plot_folder=file_store_dir)
+    preprocess_kwargs = dict(plot_folder=file_store_dir, normalize=True)
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, force_backend='cuda12x', mask_percentage=0.02)
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,

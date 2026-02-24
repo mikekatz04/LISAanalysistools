@@ -28,9 +28,7 @@ logger.setLevel(level)
 if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setLevel(level)
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     # * Prevent duplicate messages*
@@ -110,8 +108,7 @@ def _apply_filter(
 
     if filter_type not in filter_funcs:
         raise ValueError(
-            f"Unknown filter type: {filter_type}. "
-            f"Choose from {list(filter_funcs.keys())}"
+            f"Unknown filter type: {filter_type}. " f"Choose from {list(filter_funcs.keys())}"
         )
 
     sos = filter_funcs[filter_type](order, Wn, btype=btype, fs=fs, output="sos")
@@ -134,18 +131,12 @@ def _apply_filter(
             c="gray",
             alpha=0.5,
         )
-        plt.plot(
-            filtered_data[0, ::decimate_factor], label="Filtered X channel", c="blue"
-        )
+        plt.plot(filtered_data[0, ::decimate_factor], label="Filtered X channel", c="blue")
         plt.xlabel("Sample Index")
         plt.ylabel("Strain")
-        plt.title(
-            f"Signal {btype.capitalize()} Filtering ({filter_type}, order={order})"
-        )
+        plt.title(f"Signal {btype.capitalize()} Filtering ({filter_type}, order={order})")
         plt.legend()
-        plt.savefig(
-            os.path.join(kwargs.get("plot_folder", "."), f"{btype}_filter_signal.png")
-        )
+        plt.savefig(os.path.join(kwargs.get("plot_folder", "."), f"{btype}_filter_signal.png"))
         plt.close()
 
     return filtered_data
@@ -205,9 +196,7 @@ class L1DataLoader:
         self.verbose = verbose
 
         if self.verbose:
-            logger.info(
-                f"L1DataLoader initialized with data folder: {self.data_folder}"
-            )
+            logger.info(f"L1DataLoader initialized with data folder: {self.data_folder}")
             logger.info(f"Source types to load: {self.source_types}")
             logger.info(f"Source IDs: {self.source_ids}")
 
@@ -296,14 +285,10 @@ class L1DataLoader:
             if not isinstance(ids, list):
                 ids = [ids]
             if len(ids) == 0:
-                raise ValueError(
-                    f"No source IDs provided for source type '{source_type}'."
-                )
+                raise ValueError(f"No source IDs provided for source type '{source_type}'.")
 
             binary_params = h5py.File(
-                os.path.join(
-                    self.catalogues_folder, self.catalogues_map.get(source_type)
-                ),
+                os.path.join(self.catalogues_folder, self.catalogues_map.get(source_type)),
                 "r",
             )["Binaries"]
 
@@ -336,19 +321,13 @@ class L1DataLoader:
                         tdi_times = _tdi_times
                         tdi_fs = _tdi_fs
 
-                        orbits = self.orbits_class(
-                            file_path, **(self.orbits_kwargs or {})
-                        )
+                        orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
                         orbits.configure(linear_interp_setup=True)
 
                     else:
                         xyz += _xyz
-                        assert (
-                            tdi_dt == _tdi_dt
-                        ), "Time steps do not match between files."
-                        assert (
-                            tdi_fs == _tdi_fs
-                        ), "Sampling frequencies do not match between files."
+                        assert tdi_dt == _tdi_dt, "Time steps do not match between files."
+                        assert tdi_fs == _tdi_fs, "Sampling frequencies do not match between files."
                         assert (
                             tdi_times == _tdi_times
                         ).all(), "Time arrays do not match between files."
@@ -662,8 +641,7 @@ class SignalProcessor:
         elif trimming_type == "discard_from_start":
             if trim_samples >= self.N:
                 raise ValueError(
-                    f"Cannot trim {duration}s from {self.T}s data. "
-                    f"Trim exceeds data length."
+                    f"Cannot trim {duration}s from {self.T}s data. " f"Trim exceeds data length."
                 )
             if self.verbose:
                 logger.info(
@@ -680,9 +658,7 @@ class SignalProcessor:
                     f"Keep duration exceeds data length."
                 )
             if self.verbose:
-                logger.info(
-                    f"Keeping first {duration}s ({trim_samples} samples) of the data."
-                )
+                logger.info(f"Keeping first {duration}s ({trim_samples} samples) of the data.")
 
             trimmed_data = self.data[:, :trim_samples]
             trimmed_times = self.times[:trim_samples]
@@ -816,7 +792,7 @@ class BaseProcessingStep(SignalProcessor):
                     f"Requested observation time Tobs={Tobs}s exceeds total data duration T={self.T}s. No trimming applied."
                 )
                 Tobs = self.T
-            
+
             _, _ = self.trim(
                 duration=Tobs,
                 is_percent=False,
@@ -824,14 +800,14 @@ class BaseProcessingStep(SignalProcessor):
                 filename="science_data.png",
                 **kwargs,
             )
-        
+
         xp = get_array_module(self.data)
 
         settings = TDSettings(
             t0=self.times[0],
             dt=self.dt,
             N=self.N,
-            force_backend='cpu' if xp is np else 'gpu',
+            force_backend="cpu" if xp is np else "gpu",
             # xp = get_array_module(self.data)
         )
         self.td_signal = TDSignal(arr=self.data, settings=settings)
@@ -842,6 +818,7 @@ class BaseProcessingStep(SignalProcessor):
         self,
         settings: DomainSettingsBase,
         window: Optional[np.ndarray | str] = None,
+        normalize: bool = False,
         return_orbits: bool = False,
     ) -> DataResidualArray | tuple[DataResidualArray, Orbits]:
         """
@@ -850,6 +827,7 @@ class BaseProcessingStep(SignalProcessor):
         Args:
             settings (DomainSettingsBase): Settings for the domain.
             window (Optional[np.ndarray | str], optional): Window to apply to the data. Defaults to None.
+            normalize (bool, optional): Whether to normalize the data with the window. Defaults to False.
             return_orbits (bool, optional): Whether to return the orbits instance along with the domain. Defaults to False.
 
         Returns:
@@ -863,7 +841,18 @@ class BaseProcessingStep(SignalProcessor):
             window=window,
         )
 
-        # result = self.td_signal.transform(new_domain=settings, window=window)
+        if window is not None and normalize:
+            if isinstance(window, str):
+                raise NotImplementedError(
+                    "Normalization with string-specified windows is not implemented yet."
+                )
+
+            logger.info("Normalizing data with window norm.")
+            window_norm = np.sum(window**2)
+            N = window.shape[0]
+            factor = float(np.sqrt(window_norm / N))
+            data_residual_array.data_res_arr.arr *= factor
+            logger.info(f"Applied normalization factor to the frequency domain data: {factor:.3e}")
 
         if return_orbits:
             return data_residual_array, self.orbits
@@ -898,9 +887,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
 
         times, fs, data_xyz, orbits = self.load_data()
 
-        BaseProcessingStep.__init__(
-            self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots
-        )
+        BaseProcessingStep.__init__(self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots)
 
         self.orbits = orbits
 
@@ -927,8 +914,6 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
 
         times, fs, data_xyz, _ = self.load_data()
 
-        BaseProcessingStep.__init__(
-            self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots
-        )
+        BaseProcessingStep.__init__(self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots)
 
         self.orbits = None  # no orbital information available in Sangria files
