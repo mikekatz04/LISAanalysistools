@@ -15,7 +15,7 @@ __all__ = ["GlobalFitInfo", "GlobalFitEngine"]
 
 import typing
 
-from eryn.backends import backend as eryn_Backend
+from eryn.backends import Backend as eryn_Backend
 from eryn.prior import ProbDistContainer
 from eryn.state import State as eryn_State
 from eryn.utils.transform import TransformContainer
@@ -29,8 +29,6 @@ from ..sensitivity import (AE1SensitivityMatrix, AE2SensitivityMatrix,
                            XYZ2SensitivityMatrix, XYZSensitivityBackend)
 from ..utils.utility import AET, detrend, tukey
 from .preprocessing import BaseProcessingStep
-from .utils import NewSensitivityMatrix
-
 
 @dataclasses.dataclass
 class RankInfo:
