@@ -31,7 +31,7 @@ from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralS
 from eryn.utils.updates import Update
 
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves, build_mbh_moves_phenom
+from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves, build_mbh_moves_phenom, scatter_around_injection, mbh_catalogue_to_sampling_basis
 
 from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
 
@@ -43,7 +43,28 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
-    # now do the black holes (WIP)
+    # Initialize MBH walkers from catalogue injection parameters
+    catalogue = getattr(curr.general_info, 'catalogue', {})
+    mbh_catalogue = catalogue.get('MBHB', {})
+    if mbh_catalogue:
+        mbh_info = curr.source_info["mbh"]
+        injection_params_list = []
+        for source_id in sorted(mbh_catalogue.keys()):
+            entry = mbh_catalogue[source_id]
+            sampling_params = mbh_catalogue_to_sampling_basis(entry)
+            injection_params_list.append(sampling_params)
+
+        injection_params = np.array(injection_params_list)
+
+        # Per-parameter spread for the Gaussian scatter
+        spread = np.array([1e-5, 1e-5, 1e-4, 1e-4, 1e-3, 1e-2, 1e-4, 1e-3, 1e-3, 1e-4, 1e-1])
+
+        scatter_around_injection(
+            state, "mbh", injection_params, spread,
+        )
+
+    # todo test this 
+    
     _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state)
     mbh_pe_moves = GFCombineMove(moves=[mbh_pe_move, psd_pe_move], share_temperature_control=False)
     recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_moves]), name="mbh+psd pe")

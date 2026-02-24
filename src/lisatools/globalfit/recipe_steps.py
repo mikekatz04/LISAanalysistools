@@ -10,9 +10,11 @@ try:
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
+from bbhx.utils.transform import SSB_to_LISA
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
 from ..sources.bbh.waveform import PhenomTHMTDIWaveform
+from ..sources.utils import icrs_to_ecliptic
 from .engine import Setup
 from .moves import PSDMove, ResidualAddOneRemoveOneMove
 from .recipe import RecipeStep
@@ -146,7 +148,58 @@ def scatter_around_injection(
             draws = np.random.multivariate_normal(center, scaled_cov, size=nwalkers)
             coords[t, :, leaf] = draws
 
-        state.branches[branch_name].inds[:, :, leaf] = True
+        state.branches[branch_name].inds[:, :, leaf] = True  # todo check this. unsure this is the right way to access the indices
+
+
+def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
+    """Convert a single Mojito MBHB catalogue entry to MBH sampling basis.
+
+    The sampling basis is:
+    ``[logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
+
+    Parameters
+    ----------
+    catalogue_entry : dict
+        Dictionary of catalogue parameters for one MBHB source, as
+        stored by ``L1DataLoader.catalogue['MBHB'][source_id]``.
+
+    Returns
+    -------
+    np.ndarray
+        Parameter vector of shape ``(11,)`` in the MBH sampling basis
+        (LISA frame for sky/time parameters).
+    """
+    m1 = float(catalogue_entry["PrimaryMassSSBFrame"])
+    m2 = float(catalogue_entry["SecondaryMassSSBFrame"])
+
+    # Ensure m1 >= m2
+    if m2 > m1:
+        m1, m2 = m2, m1
+
+    logM = np.log(m1 + m2)
+    q = m2 / m1
+
+    s1z = float(catalogue_entry["PrimarySpinCompZ"])
+    s2z = float(catalogue_entry["SecondarySpinCompZ"])
+    dist = float(catalogue_entry["LuminosityDistance"]) / 1e3  # Mpc -> Gpc
+    phi_ref = float(catalogue_entry["PhaseReferenceSourceFrame"]) % (2 * np.pi)
+    cos_iota = np.cos(float(catalogue_entry["InclinationAngle"]))
+
+    # Sky coordinates: ICRS -> ecliptic -> SSB -> LISA
+    ra = float(catalogue_entry["RightAscension"])
+    dec = float(catalogue_entry["Declination"])
+    lam_ecl, beta_ecl = icrs_to_ecliptic(ra, dec)
+
+    psi_ssb = float(catalogue_entry["PolarisationAngle"])
+    t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
+
+    t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
+
+    lam_L = lam_L % (2 * np.pi)
+    psi_L = psi_L % np.pi
+    sin_beta_L = np.sin(beta_L)
+
+    return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
 
 
 def subtract_initial_signal(

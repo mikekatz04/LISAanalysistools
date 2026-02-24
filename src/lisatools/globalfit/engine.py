@@ -128,6 +128,7 @@ class GeneralSettings(Settings):
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
+    catalogue: typing.Optional[dict] = None
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
 
@@ -149,10 +150,6 @@ class GeneralSetup(Setup, GeneralSettings):
         self.logger = init_logger(filename="gb_setup.log", level=level, name=name)
 
         self.init_setup()
-
-    @property
-    def data_length(self) -> int:
-        return len(self.A_inj)
 
     @property
     def main_file_path(self) -> str:
@@ -200,7 +197,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
         default_preprocess_kwargs = dict(
             do_detrend=False,
-            highpass_kwargs=dict(cutoff=5e-5, order=2, zero_phase=True),
+            highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
             trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
             Tobs=self.Tobs,
         )
@@ -214,9 +211,8 @@ class GeneralSetup(Setup, GeneralSettings):
         normalize_window = preprocess_kwargs.pop("normalize", False)
 
         times, _ = data_processor.process(**preprocess_kwargs)
-        dt = data_processor.td_signal.settings.dt
-        Nt = len(times)
         self.data_t0 = float(times[0])
+        self.catalogue = getattr(data_processor, 'catalogue', {})
 
         if self.basis_domain == "stft":
             from ..domains import get_stft_settings
@@ -238,6 +234,8 @@ class GeneralSetup(Setup, GeneralSettings):
         elif self.basis_domain == "fd":
             from ..domains import FDSettings
 
+            dt = data_processor.td_signal.settings.dt
+            Nt = len(times)
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
 
