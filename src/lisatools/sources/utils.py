@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
+from astropy.coordinates import SkyCoord
+import astropy.units as u   
+
 import numpy as np
 from eryn.utils import TransformContainer
 
@@ -474,3 +477,14 @@ class EMRICalculationController(CalculationController):
         )
 
         return params[deriv_inds], cov
+
+def icrs_to_ecliptic(ra, dec):
+    """Convert ICRS coordinates (ra, dec) to ecliptic coordinates (lambda, beta)."""
+
+    icrs_coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
+    ecliptic_coord = icrs_coord.barycentrictrueecliptic
+
+    lambda_ecl = ecliptic_coord.lon.rad
+    beta_ecl = ecliptic_coord.lat.rad
+
+    return lambda_ecl, beta_ecl
