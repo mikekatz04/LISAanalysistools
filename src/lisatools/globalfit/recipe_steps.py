@@ -101,7 +101,7 @@ def scatter_around_injection(
         temperature index *t* is scaled by ``1 / betas[t]`` so that
         hotter chains start with a wider scatter.
     """
-    coords = state.branches[branch_name].coords
+    coords = state.branches_coords[branch_name]
     ntemps, nwalkers, nleaves_max, ndim = coords.shape
 
     injection_params = np.atleast_2d(np.asarray(injection_params, dtype=float))
@@ -148,7 +148,7 @@ def scatter_around_injection(
             draws = np.random.multivariate_normal(center, scaled_cov, size=nwalkers)
             coords[t, :, leaf] = draws
 
-        state.branches[branch_name].inds[:, :, leaf] = True  # todo check this. unsure this is the right way to access the indices
+        state.branches_inds[branch_name][:, :, leaf] = True
 
 
 def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
