@@ -44,6 +44,7 @@ dependencies = [
   "mojito",
   "astropy",
   "scikit-learn",
+  "cudakima"
 ]
 
 
