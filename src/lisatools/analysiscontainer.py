@@ -399,6 +399,7 @@ class AnalysisContainer:
         source_only: bool = False,
         waveform_kwargs: Optional[dict] = {},
         data_res_arr_kwargs: Optional[dict] = {},
+        propagate_data_res_kwargs: bool = True,
         transform_fn: Optional[TransformContainer] = None,
         signal_gen: Optional[callable] = None,
         **kwargs: dict,
@@ -411,7 +412,7 @@ class AnalysisContainer:
             source_only: If ``True`` return the source-only Likelihood (leave out noise part).
             waveform_kwargs: Keyword arguments to pass to waveform generator.
             data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
-                This can be used if any transforms are desired prior to the Likelihood computation. If it is not input,
+                This can be used if any transforms are desired prior to the Likelihood computation. If it is not input and ``propagate_data_res_kwargs`` is ``True``,
                 the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.
             transform_fn: Transform information for signal parameters if they
                 are entered on a basis other than the waveform basis.
@@ -423,7 +424,7 @@ class AnalysisContainer:
 
         """
 
-        if data_res_arr_kwargs == {}:
+        if data_res_arr_kwargs == {} and propagate_data_res_kwargs:
             data_res_arr_kwargs = self.data_res_arr.init_kwargs
 
         if transform_fn is not None:
@@ -795,7 +796,8 @@ class AnalysisContainerArray:
                 _tmp_output = _tmp
 
             if i == 0:
-                output = np.zeros(self.acs_total_entries, dtype=_tmp_output.dtype)
+                _type = _tmp_output.dtype if hasattr(_tmp_output, "dtype") else type(_tmp_output)
+                output = np.zeros(self.acs_total_entries, dtype=_type)
 
             output[i] = _tmp_output
 

@@ -204,12 +204,13 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # in general with current setup it should only be points in the prior
         # that make it here
         ll = np.full_like(data_index.get(), -1e300, dtype=float)
-
+        
         for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index.get())):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
-                waveform_kwargs=self.waveform_like_kwargs,
+                waveform_kwargs=self.waveform_gen_kwargs,
                 signal_gen=self.waveform_gen,
+                **self.waveform_like_kwargs,
             )
 
         return ll

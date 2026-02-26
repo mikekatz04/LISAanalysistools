@@ -49,12 +49,11 @@ class DataResidualArray:
     def __init__(
         self,
         data_res_in: List[np.ndarray] | np.ndarray | DataResidualArray,
-        signal_domain: Optional[SignalSettingsBase] = None,
-        input_signal_domain: Optional[SignalSettingsBase] = None,
+        signal_domain: Optional[DomainSettingsBase] = None,
+        input_signal_domain: Optional[DomainSettingsBase] = None,
         window: np.ndarray | cp.ndarray | None = None,
         **kwargs: dict,
     ) -> None:
-
         self.data_res_in_orig_input = data_res_in
         if isinstance(data_res_in, DataResidualArray):
             for key, item in data_res_in.__dict__.items():
@@ -85,7 +84,7 @@ class DataResidualArray:
                 else:
                     # default is same domain
                     signal_domain = input_signal_domain
-
+             
             if signal_domain == input_signal_domain:
                 self.data_res_arr = data_res_in
             else:

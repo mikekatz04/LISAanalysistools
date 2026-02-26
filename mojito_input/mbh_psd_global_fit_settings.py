@@ -57,7 +57,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         injection_params = np.array(injection_params_list)
 
         # Per-parameter spread for the Gaussian scatter
-        spread = np.array([1e-5, 1e-5, 1e-4, 1e-4, 1e-3, 1e-2, 1e-4, 1e-3, 1e-3, 1e-4, 1e-1])
+        spread = 1e-2
 
         scatter_around_injection(
             state, "mbh", injection_params, spread,
@@ -94,7 +94,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         sampling_frequency=1.0/general_set.dt,
         tdi='2nd generation',
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits,
-        order=30
+        order=40
     )
 
     waveform_init_kwargs = dict(
@@ -126,7 +126,8 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         waveform_kwargs=waveform_runtime_kwargs,
         nleaves_max=1,
         nleaves_min=1,
-        ndim=11
+        ndim=11,
+        num_prop_repeats=5,
     )
 
     return MBHSetup(mbh_settings)
@@ -161,16 +162,16 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     source_ids = [18]
     
-    Tobs = 9. * YRSID_SI / 12.0
+    Tobs = 5. * YRSID_SI / 12.0
     dt = 2.5
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_psd_separate_1st_try"
+    base_file_name = "mbh_psd_separate_2nd_try"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [5]
+    gpus = [2]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -178,12 +179,12 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 10
+    ntemps = 2
 
     tukey_alpha = 0.05
 
     basis_domain = "stft"
-    stft_dt = 6 * 3600.0  # hours
+    stft_dt = 8 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['noise', 'mbhb'],
@@ -203,7 +204,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=1e-5,
+        start_freq=5e-5,
         end_freq=1e-1,
         basis_domain=basis_domain,
         stft_dt=stft_dt,

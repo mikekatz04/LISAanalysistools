@@ -211,6 +211,8 @@ class GeneralSetup(Setup, GeneralSettings):
         normalize_window = preprocess_kwargs.pop("normalize", False)
 
         times, _ = data_processor.process(**preprocess_kwargs)
+        dt = data_processor.td_signal.settings.dt
+        Nt = len(times)
         self.data_t0 = float(times[0])
         self.catalogue = getattr(data_processor, 'catalogue', {})
 
@@ -234,8 +236,6 @@ class GeneralSetup(Setup, GeneralSettings):
         elif self.basis_domain == "fd":
             from ..domains import FDSettings
 
-            dt = data_processor.td_signal.settings.dt
-            Nt = len(times)
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
 

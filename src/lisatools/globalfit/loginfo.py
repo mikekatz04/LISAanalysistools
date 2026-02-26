@@ -6,8 +6,15 @@ import sys
 
 def init_logger(filename=None, level=logging.DEBUG, name="GlobalFit"):
     """Initialize a logger."""
+    logging.basicConfig(
+        level=logging.WARNING,
+        stream=sys.stdout,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    logging.getLogger("lisatools").setLevel(level)
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    logger.propagate = False
     if len(logger.handlers) < 2:
         formatter = logging.Formatter("%(asctime)s - %(name)s - " "%(levelname)s - %(message)s")
         if filename:

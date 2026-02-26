@@ -35,7 +35,6 @@ class DomainSettingsBase(LISAToolsParallelModule):
     force_backend: str = None
 
     def __init__(self, force_backend: str = None):
-        self.force_backend = force_backend
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @classmethod
@@ -137,7 +136,7 @@ class TDSettings(DomainSettingsBase):
 
     @property
     def kwargs(self) -> dict:
-        return dict(force_backend=self.force_backend)
+        return dict(force_backend=self.backend_name.split("_")[-1])
 
     @property
     def args(self) -> tuple:
@@ -154,7 +153,7 @@ class TDSettings(DomainSettingsBase):
     def __repr__(self) -> str:
         return (
             f"TDSettings(t0={self.t0}, N={self.N}, dt={self.dt}, "
-            f"force_backend={self.force_backend})"
+            f"backend={self.backend_name.split('_')[-1]})"
         )
 
     def __eq__(self, value):
@@ -211,7 +210,7 @@ class TDSettings(DomainSettingsBase):
         new_N = (stop - start) // step
         new_t0 = self.t0 + start * self.dt
 
-        return TDSettings(new_t0, new_N, self.dt, force_backend=self.force_backend)
+        return TDSettings(new_t0, new_N, self.dt, force_backend=self.backend_name.split("_")[-1])
 
 
 class TDSignal(DomainBase, TDSettings):
@@ -222,6 +221,12 @@ class TDSignal(DomainBase, TDSettings):
     @property
     def settings(self) -> TDSettings:
         return TDSettings(*self.args, **self.kwargs)
+
+    def __repr__(self) -> str:
+        return (
+            f"TDSignal(t0={self.t0}, N={self.N}, dt={self.dt}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
 
     def fft(self, settings=None, window=None):
         xp = get_array_module(self.arr)
@@ -240,7 +245,7 @@ class TDSignal(DomainBase, TDSettings):
             fd_settings = FDSettings(
                 fd_arr.shape[-1],
                 df,
-                force_backend=self.force_backend,
+                force_backend=self.backend_name.split("_")[-1],
             )
 
         return FDSignal(fd_arr[..., fd_settings.active_slice], fd_settings)
@@ -373,7 +378,7 @@ class FDSettings(DomainSettingsBase):
         return dict(
             min_freq=self.min_freq,
             max_freq=self.max_freq,
-            force_backend=self.force_backend,
+            force_backend=self.backend_name.split("_")[-1],
         )
 
     @property
@@ -394,7 +399,7 @@ class FDSettings(DomainSettingsBase):
         return (
             f"FDSettings(N={self.N}, df={self.df}, "
             f"min_freq={self.min_freq}, max_freq={self.max_freq}, "
-            f"force_backend={self.force_backend})"
+            f"backend={self.backend_name.split('_')[-1]})"
         )
 
     def __eq__(self, value):
@@ -456,6 +461,13 @@ class FDSignal(FDSettings, DomainBase):
     def settings(self) -> FDSettings:
         return FDSettings(*self.args, **self.kwargs)
 
+    def __repr__(self) -> str:
+        return (
+            f"FDSignal(N={self.N}, df={self.df}, "
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
+
     def ifft(self, settings=None, window=None):
         xp = get_array_module(self.arr)
         if window is None:
@@ -470,7 +482,7 @@ class FDSignal(FDSettings, DomainBase):
             assert isinstance(settings, TDSettings)
             assert settings.dt == dt
 
-        td_settings = TDSettings(t0=0.0, N=N, dt=dt, force_backend=self.force_backend)
+        td_settings = TDSettings(t0=0.0, N=N, dt=dt, force_backend=self.backend_name.split("_")[-1])
         return TDSignal(td_arr, td_settings)
 
     def get_fd_window_for_wdm(self, settings):
@@ -611,7 +623,7 @@ class STFTSettings(DomainSettingsBase):
     def __repr__(self):
         return (
             f"STFTSettings(t0={self.t0}, dt={self.dt}, df={self.df}, NT={self.NT}, NF={self.NF}, "
-            f"min_freq={self.min_freq}, max_freq={self.max_freq}, force_backend={self.force_backend})"
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, backend={self.backend_name.split('_')[-1]})"
         )
 
     @staticmethod
@@ -682,7 +694,7 @@ class STFTSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
-            min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.force_backend
+            min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.backend_name.split("_")[-1]
         )
 
     @property
@@ -815,7 +827,7 @@ class STFTSettings(DomainSettingsBase):
             NF=new_NF,
             min_freq=new_min_freq,
             max_freq=new_max_freq,
-            force_backend=self.force_backend,
+            force_backend=self.backend_name.split("_")[-1],
         )
 
 
@@ -863,6 +875,12 @@ class STFTSignal(STFTSettings, DomainBase):
     @property
     def settings(self) -> STFTSettings:
         return STFTSettings(*self.args, **self.kwargs)
+
+    def __repr__(self) -> str:
+        return (
+            f"STFTSignal(t0={self.t0}, dt={self.dt}, df={self.df}, NT={self.NT}, NF={self.NF}, "
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, backend={self.backend_name.split('_')[-1]})"
+        )
 
     def plot(self, channel=0, ax=None, **kwargs):
         if ax is None:
@@ -1037,7 +1055,7 @@ class WDMSettings(DomainSettingsBase):
         return (
             f"WDMSettings(Tobs={self.Tobs}, dt={self.data_dt}, t0={self.t0}, "
             f"NT={self.NT}, NF={self.NF}, oversample={self.oversample}, "
-            f"force_backend={self.force_backend})"
+            f"backend={self.backend_name.split('_')[-1]})"
         )
 
     @staticmethod
@@ -1076,6 +1094,13 @@ class WDMSignal(WDMSettings, DomainBase):
     @property
     def settings(self) -> WDMSettings:
         return WDMSettings(*self.args, **self.kwargs)
+
+    def __repr__(self) -> str:
+        return (
+            f"WDMSignal(Tobs={self.Tobs}, dt={self.data_dt}, t0={self.t0}, "
+            f"NT={self.NT}, NF={self.NF}, oversample={self.oversample}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
 
     def wdm_to_fd(self, settings=None, window=None):
         raise NotImplementedError

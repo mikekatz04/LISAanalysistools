@@ -20,6 +20,7 @@ from ..domains import (
     get_stft_settings,
 )
 from ..utils.utility import tukey
+from ..utils.parallelbase import LISAToolsParallelModule
 
 
 class AETTDIWaveform(ABC):
@@ -60,7 +61,7 @@ class SNRWaveform(ABC):
         return None
 
 
-class TDWaveformBase(ABC):
+class TDWaveformBase(LISAToolsParallelModule):
     """
     Base class for a waveform built in the time domain.
 
@@ -89,7 +90,13 @@ class TDWaveformBase(ABC):
         tukey_alpha: float = 0.01,
         force_backend: str = "cpu",
         force_uniform_stft: bool = False,
+        ra_index: int = -3,
+        dec_index: int = -2,
+        merger_time_index: int = -1,
+        num_remove: int = 3,
     ) -> None:
+        
+        super().__init__(force_backend=force_backend)
 
         self.waveform_t0 = waveform_t0
         self.data_t0 = data_t0 if data_t0 is not None else waveform_t0
@@ -100,16 +107,19 @@ class TDWaveformBase(ABC):
 
         num_points = int(self.Tobs / self.dt)
         response_kwargs["num_pts"] = num_points
-        response_kwargs["force_backend"] = force_backend
-        self.backend = force_backend
 
-        self.response = pyResponseTDI(**response_kwargs)
+        self.response = pyResponseTDI(**response_kwargs, force_backend=force_backend)
         self.buffer_time = buffer_time
+
+        self.ra_index = ra_index
+        self.dec_index = dec_index
+        self.merger_time_index = merger_time_index
+        self.num_remove = num_remove   
 
     @property
     def xp(self):
         """Array module used for calculations."""
-        return self.response.xp
+        return self.backend.xp
 
     def wave_gen(
         self, *args, **kwargs
@@ -189,12 +199,12 @@ class TDWaveformBase(ABC):
             shifted_t_arr = shifted_t_arr[start_ind:]
             tdis = tdis[:, start_ind:]
             t_arr = t_arr[start_ind:]
-
+                
         td_settings = TDSettings(
             t0=float(shifted_t_arr[0]),
             dt=self.dt,
             N=int(shifted_t_arr.shape[-1]),
-            force_backend=self.backend,
+            force_backend=self.backend_name.split("_")[-1],
         )
         return TDSignal(arr=tdis, settings=td_settings)
 
@@ -214,6 +224,9 @@ class TDWaveformBase(ABC):
         Returns:
             Signal in the requested output domain.
         """
+        backend = self.backend_name.split("_")[-1]  # extract 'cpu' or 'cuda12x' from backend name
+        output_domain = output_domain.upper()  # allow case-insensitive domain names
+
         if output_domain == "TD":
             return td_signal
 
@@ -221,13 +234,13 @@ class TDWaveformBase(ABC):
             # Derive STFT settings from the signal's own time grid.
             td_signal = self.pad_td_signal_for_stft(td_signal, domain_kwargs)
             out_settings = get_stft_settings(
-                td_signal.settings.t_arr, **domain_kwargs, force_backend=self.backend
+                td_signal.settings.t_arr, **domain_kwargs, force_backend=backend
             )
             nperseg = out_settings.get_nperseg(td_signal.settings.dt)
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
-            out_settings = FDSettings(**domain_kwargs, force_backend=self.backend)
+            out_settings = FDSettings(**domain_kwargs, force_backend=backend)
             window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
 
         else:
@@ -262,7 +275,7 @@ class TDWaveformBase(ABC):
                 t0=td_signal.settings.t0 - n_pad * td_signal.settings.dt,
                 dt=td_signal.settings.dt,
                 N=td_signal.settings.N + n_pad,
-                force_backend=self.backend,
+                force_backend=self.backend_name.split("_")[-1],
             )
             return TDSignal(arr=padded_arr, settings=padded_settings)
 
@@ -357,12 +370,51 @@ class TDWaveformBase(ABC):
 
         return DomainBaseArray(signals)
 
+    def _extract_sky_params(
+        self,
+        args: tuple,
+        ra: float | np.ndarray | None,
+        dec: float | np.ndarray | None,
+        merger_time: float | np.ndarray | None,
+    ) -> tuple:
+        """Split sky/response params from the positional argument tuple.
+
+        If ``ra``, ``dec`` and ``merger_time`` are all ``None`` **and** the
+        positional ``args`` contain at least ``n_sky_params`` extra entries
+        beyond what ``wave_gen`` expects, the last ``n_sky_params`` values are
+        peeled off and returned as ``(ra, dec, merger_time)``.
+
+        This allows callers to pass the *full* parameter vector positionally
+        (``wave_gen(*params)``) without needing to know which indices
+        correspond to sky/response parameters.
+
+        Returns:
+            ``(waveform_args, ra, dec, merger_time)``
+        """
+        if ra is None and dec is None and merger_time is None:
+            n = self.num_remove
+            if len(args) < n:
+                raise TypeError(
+                    f"TDWaveformBase.__call__() requires 'ra', 'dec', and "
+                    f"'merger_time' either as keyword arguments or as the "
+                    f"last {n} positional arguments."
+                )
+            
+            ra = args[self.ra_index]
+            dec = args[self.dec_index]
+            merger_time = args[self.merger_time_index]
+
+            wf_args = args[: -n] if n > 0 else args
+            
+            return wf_args, ra, dec, merger_time
+        return args, ra, dec, merger_time
+
     def __call__(
         self,
         *args,
-        ra: float | np.ndarray,
-        dec: float | np.ndarray,
-        merger_time: float | np.ndarray,
+        ra: float | np.ndarray = None,
+        dec: float | np.ndarray = None,
+        merger_time: float | np.ndarray = None,
         output_domain: str = "TD",
         domain_kwargs: dict = None,
         **kwargs,
@@ -374,8 +426,18 @@ class TDWaveformBase(ABC):
         is invoked and a :class:`DomainBaseArray` is returned.  For scalar ``ra`` the
         single-source path is used and a :class:`DomainBase` is returned.
 
+        Sky/response parameters (``ra``, ``dec``, ``merger_time``) can be
+        passed either as explicit keyword arguments **or** as the last
+        ``n_sky_params`` positional arguments.  The latter allows the common
+        calling convention ``wave_gen(*full_param_vector, **kwargs)`` used
+        throughout the global-fit pipeline.
+
         Args:
             *args: Arguments for the wave_gen / wave_gen_batch method.
+                When ``ra``/``dec``/``merger_time`` are not given as keywords,
+                the last 3 positional arguments are interpreted as
+                ``(ra, dec, merger_time)`` and the remaining ones are
+                forwarded to ``wave_gen``.
             ra: Right ascension in radians.  Scalar for single source, 1-D array for batch.
             dec: Declination in radians.  Same shape as ``ra``.
             merger_time: Time of merger in seconds.  Same shape as ``ra``.
@@ -387,6 +449,8 @@ class TDWaveformBase(ABC):
             Signal in the specified output domain.  A single :class:`DomainBase` for
             scalar ``ra``, a :class:`DomainBaseArray` for array ``ra``.
         """
+        args, ra, dec, merger_time = self._extract_sky_params(args, ra, dec, merger_time)
+
         if np.ndim(ra) >= 1:
             return self._call_batched(
                 *args,

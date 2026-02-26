@@ -13,7 +13,6 @@ except (ModuleNotFoundError, ImportError):
 from bbhx.utils.transform import SSB_to_LISA
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
-from ..sources.bbh.waveform import PhenomTHMTDIWaveform
 from ..sources.utils import icrs_to_ecliptic
 from .engine import Setup
 from .moves import PSDMove, ResidualAddOneRemoveOneMove
@@ -105,7 +104,6 @@ def scatter_around_injection(
     ntemps, nwalkers, nleaves_max, ndim = coords.shape
 
     injection_params = np.atleast_2d(np.asarray(injection_params, dtype=float))
-
     # Physical → sampling basis
     if reverse_transform is not None:
         injection_sampling = np.array([reverse_transform(p) for p in injection_params])
@@ -209,7 +207,7 @@ def subtract_initial_signal(
     source_name: str,
     source_info: Setup,
 ):
-
+    
     if np.any(inds := state.branches_inds[source_name][0]):
         logger.info(f"Subtracting initial signals for {source_name}")
         counter = 0
@@ -221,7 +219,7 @@ def subtract_initial_signal(
                 signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
                 acs.add_signal_to_residual(signals_in)
                 counter += 1
-        logger.info(f"Subtracted {counter} initial signals for {source_name}")
+        logger.debug(f"Subtracted {counter} initial signals for {source_name}")
     else:
         logger.info(f"No initial signals for {source_name}")
 
@@ -292,7 +290,7 @@ def build_psd_moves(
 
 def build_mbh_moves_phenom(
     curr: CurrentInfoGlobalFit, acs: AnalysisContainerArray, priors: dict, state: GFState
-) -> tuple[PhenomTHMTDIWaveform, ResidualAddOneRemoveOneMove]:
+) -> tuple[Callable, ResidualAddOneRemoveOneMove]:
     """Build MBH PE move using ``PhenomTHMTDIWaveform`` + ``ResidualAddOneRemoveOneMove``.
 
     Sets ``state.sub_states['mbh'].betas_all`` as a side effect.
@@ -334,7 +332,7 @@ def build_mbh_moves_phenom(
         wave_gen,
         # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs
-        mbh_info.waveform_kwargs.copy(),  # waveform_like_kwargs
+        dict(propagate_data_res_kwargs=False),  # waveform_like_kwargs
         acs,
         mbh_info.num_prop_repeats,
         mbh_info.transform,
