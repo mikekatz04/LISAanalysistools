@@ -137,8 +137,6 @@ def inner_product(
     else:
         raise ValueError("PSD channel_shape must be 1D or 2D.")
 
-    func = (lambda x: x) if complex else xp.real
-
     # Accumulate inner product.
     # arr[:, ch] always yields (nbatch, *basis_shape) thanks to the normalization above.
     out = 0.0
@@ -154,11 +152,16 @@ def inner_product(
             temp2 = temp2[..., ind_start:]
             inv_psd_tmp = inv_psd_tmp[..., ind_start:]
 
-        y = func(temp1.conj() * temp2) * inv_psd_tmp
+        y = (temp1.conj() * temp2) * inv_psd_tmp
 
         # Sum over all axes except batch (axis 0) → shape (nbatch,)
         sum_axes = tuple(range(1, y.ndim))
         out += op_set["factor"] * 4 * xp.sum(y, axis=sum_axes) * psd.differential_component
+
+    # Apply real-part extraction after full accumulation so that imaginary
+    # contributions from off-diagonal cross-spectral terms cancel properly.
+    if not complex:
+        out = xp.real(out)
 
     # normalize the inner product
     normalization_value = 1.0
@@ -216,6 +219,8 @@ def inner_product(
             pass
         if complex:
             out = np.complex128(out)
+        else:
+            out = float(out.real) if hasattr(out, 'real') else float(out)
 
     return out
 
