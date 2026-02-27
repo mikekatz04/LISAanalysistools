@@ -232,12 +232,14 @@ class AnalysisContainer:
         fmin, fmax = templ_settings.f_arr[0], templ_settings.f_arr[-1]
 
         slices = data_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
+        
         sliced_data_res_arr = DataResidualArray(
             self.data_res_arr.data_res_arr.get_array_slice(slices)
         )
         sliced_sens_mat = self.sens_mat.get_slice(slices)
 
         templ_slice = templ_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
+        
         sliced_template = DataResidualArray(template.data_res_arr.get_array_slice(templ_slice))
 
         return sliced_data_res_arr, sliced_template, sliced_sens_mat
