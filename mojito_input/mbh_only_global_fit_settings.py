@@ -57,7 +57,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         injection_params = np.array(injection_params_list)
 
         # Per-parameter spread for the Gaussian scatter
-        spread = 1e-2
+        spread = 1e-5
 
         scatter_around_injection(
             state, "mbh", injection_params, spread,
@@ -127,7 +127,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=1,
         nleaves_min=1,
         ndim=11,
-        num_prop_repeats=5,
+        num_prop_repeats=20,
     )
 
     return MBHSetup(mbh_settings)
@@ -168,7 +168,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_separate_1st_try"
+    base_file_name = "mbh_separate_fd_1st_try"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [5]
@@ -178,12 +178,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
 
     backend="cuda12x" if gpus is not None else "cpu"
-    nwalkers = 20
+    nwalkers = 15
     ntemps = 2
 
     tukey_alpha = 0.01
 
-    basis_domain = "stft"
+    basis_domain = "fd"
     stft_dt = 8 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,

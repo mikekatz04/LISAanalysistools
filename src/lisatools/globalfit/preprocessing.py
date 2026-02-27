@@ -233,8 +233,17 @@ class L1DataLoader:
         """
         params = {}
         for key in group.keys():
-            params[key] = group[key][binary_id][()]
-
+            try:
+                ds = group[key]
+                if ds.dtype.kind == "O":  # object type (e.g. variable-length strings)
+                    val = ds[binary_id]
+                    if isinstance(val, bytes):
+                        val = val.decode()
+                else:
+                    val = ds[binary_id][()]
+                params[key] = val
+            except Exception as e:
+                raise e
         return params
 
     def _open(self, file_path: str) -> MojitoL1File:
@@ -851,7 +860,7 @@ class BaseProcessingStep(SignalProcessor):
             window_norm = np.sum(window**2)
             N = window.shape[0]
             factor = float(np.sqrt(window_norm / N))
-            data_residual_array.data_res_arr.arr *= factor
+            data_residual_array.data_res_arr.arr /= factor
             logger.info(f"Applied normalization factor to the frequency domain data: {factor:.3e}")
 
         if return_orbits:

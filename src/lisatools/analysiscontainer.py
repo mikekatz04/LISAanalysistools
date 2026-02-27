@@ -658,8 +658,7 @@ class AnalysisContainerArray:
             elif isinstance(gpus, int):
                 xp.cuda.runtime.setDevice(gpus)
         else:
-            xp = np
-        # xp = get_array_module(acs.flatten()[0].data_res_arr[0])
+            self.xp = xp = np
 
         ac_tmp = acs.flatten()[0]
         self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[: -len(ac_tmp.sens_mat.data_shape)]
@@ -762,7 +761,7 @@ class AnalysisContainerArray:
                 ac.sens_mat.invC.flatten()
             )
             ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(
-                self.shape_sens + (self.m, self.n)
+                self.shape_sens + self.end_shape
             )
 
             # TODO: add check to make sure changes are made inline along with protections
