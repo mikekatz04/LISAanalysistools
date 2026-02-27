@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections import namedtuple
-from os import times
+import os
 from typing import Optional
 
 import h5py
@@ -158,6 +158,9 @@ class GeneralSetup(Setup, GeneralSettings):
     # def __getattr__(self, attr: str) -> typing.Any:
     #     if hasattr(self.gb_settings, attr):
     #         return getattr(self.gb_settings, attr)
+    @property
+    def artifacts_file_dir(self) -> str:
+        return self.file_store_dir + self.base_file_name + "_artifacts/"
 
     def init_setup(self):
         if self.file_store_dir is None:
@@ -168,6 +171,12 @@ class GeneralSetup(Setup, GeneralSettings):
         #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
         self.force_backend = "cuda12x" if self.gpus is not None else "cpu"
+        self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
+        self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
+        if not os.path.exists(self.artifacts_file_dir):
+            os.makedirs(self.artifacts_file_dir)
+            self.logger.debug(f"Created artifacts directory")
+                          
         self.init_data_information()
 
     def init_orbit_information(self):
@@ -196,6 +205,7 @@ class GeneralSetup(Setup, GeneralSettings):
             )
 
         default_preprocess_kwargs = dict(
+            plot_folder=self.artifacts_file_dir,
             do_detrend=False,
             highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
             trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
@@ -207,6 +217,9 @@ class GeneralSetup(Setup, GeneralSettings):
         else:
             preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
 
+        # output the preprocess kwargs to the logger for transparency
+        for key, value in preprocess_kwargs.items():
+            self.logger.debug(f"Preprocess setting: {key} = {value}")
         # now extract `normalize` if present
         normalize_window = preprocess_kwargs.pop("normalize", False)
 
@@ -232,6 +245,11 @@ class GeneralSetup(Setup, GeneralSettings):
             )
             nperseg = domain_settings.get_nperseg(dt)
             window = tukey(nperseg, alpha=self.tukey_alpha)
+            plot_kwargs_list = [
+                dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
+                dict(channel=0, plot_type="fd", time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
+                dict(channel=0, plot_type="td", freq_bin=0, filename=self.artifacts_file_dir + "td_data.png"),
+                ]
 
         elif self.basis_domain == "fd":
             from ..domains import FDSettings
@@ -243,6 +261,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
             window = tukey(Nt, alpha=self.tukey_alpha)
+            plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
 
         else:
             raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
@@ -250,6 +269,9 @@ class GeneralSetup(Setup, GeneralSettings):
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
+        
+        for plot_kwargs_here in plot_kwargs_list:
+            _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
 
         # use logger to output domain info
 

@@ -590,7 +590,40 @@ class FDSignal(FDSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
+    def plot(self, 
+             channel: int = 0, 
+             ax: plt.Axes | None = None, 
+             filename: Optional[str] = None,
+             **kwargs) -> plt.Axes:
+        """
+        Plot the squared amplitude of the FD signal for a given channel.
 
+        Args:
+            channel: The channel index to visualize.
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.  
+            filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
+            **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
+        
+        Returns:
+            The matplotlib Axes object containing the plot.
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+
+        ax.loglog(f_arr, np.abs(arr_here) ** 2, **kwargs)
+
+        ax.set_title(f"Frequency Spectrum for Channel {channel}")
+        ax.set_xlabel("Frequency")
+        ax.set_ylabel("Magnitude")
+        ax.set_xlim(self.min_freq, self.max_freq)
+        if filename is not None:
+            plt.savefig(filename, bbox_inches="tight")
+        return ax
+        
 class STFTSettings(DomainSettingsBase):
     t0: float
     dt: float
@@ -882,7 +915,7 @@ class STFTSignal(STFTSettings, DomainBase):
             f"min_freq={self.min_freq}, max_freq={self.max_freq}, backend={self.backend_name.split('_')[-1]})"
         )
 
-    def plot(self, channel=0, ax=None, **kwargs):
+    def _plot_stft(self, channel=0, ax=None, **kwargs):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -900,6 +933,73 @@ class STFTSignal(STFTSettings, DomainBase):
         ax.set_ylabel("Frequency")
         ax.set_ylim(self.min_freq, self.max_freq)
         plt.colorbar(cb, ax=ax, label="Magnitude")
+        return ax
+
+    def _plot_fd(self, channel=0, ax=None, time_bin=0, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+
+        ax.loglog(f_arr, np.abs(arr_here[time_bin]) ** 2, **kwargs)
+
+        ax.set_title(f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})")
+        ax.set_xlabel("Frequency")
+        ax.set_ylabel("Magnitude")
+        ax.set_xlim(self.min_freq, self.max_freq)
+        return ax
+    
+    def _plot_td(self, channel=0, ax=None, freq_bin=0, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        t_arr = self.t_arr if get_array_module(self.t_arr) == np else self.t_arr.get()
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+
+        ax.plot(t_arr, arr_here[:, freq_bin].real, label="real part", **kwargs)
+        ax.plot(t_arr, arr_here[:, freq_bin].imag, label="imag part", **kwargs)
+
+        ax.legend()
+        ax.set_title(f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Magnitude")
+        return ax
+    
+    def plot(self, 
+             channel: int = 0, 
+             ax: plt.Axes | None = None, 
+             plot_type: str = "stft", 
+             filename: Optional[str] = None,
+             **kwargs) -> plt.Axes:
+        """
+        Visualize the STFT signal in either the time-frequency domain (stft), frequency domain (fd), or time domain (td).
+
+        Args:
+            channel: The channel index to visualize.
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.
+            plot_type: The type of plot to create. Must be one of 'stft', 'fd', or 'td'. 'stft' will create a time
+                vs frequency plot of the magnitude squared of the STFT coefficients. 'fd' will create a log-log plot of the magnitude squared of the STFT coefficients for a single time bin. 'td' will create a plot of the magnitude squared of the real and imaginary parts of the STFT coefficients for a single frequency bin.
+            filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
+            **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
+        
+        Returns:
+            The matplotlib Axes object containing the plot.
+        """
+        if plot_type == "stft":
+            ax = self._plot_stft(channel=channel, ax=ax, **kwargs)
+        elif plot_type == "fd":
+            ax = self._plot_fd(channel=channel, ax=ax, **kwargs)
+        elif plot_type == "td":
+            ax = self._plot_td(channel=channel, ax=ax, **kwargs)
+        else:
+            raise ValueError(f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'.")
+
+        if filename is not None:
+            plt.savefig(filename, bbox_inches="tight")
+
         return ax
 
 
