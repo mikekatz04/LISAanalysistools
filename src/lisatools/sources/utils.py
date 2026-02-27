@@ -475,13 +475,20 @@ class EMRICalculationController(CalculationController):
         return params[deriv_inds], cov
 
 
-def icrs_to_ecliptic(ra, dec):
-    """Convert ICRS coordinates (ra, dec) to ecliptic coordinates (lambda, beta)."""
+def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, float]:
+    """
+    Convert ICRS coordinates and angles, (psi, ra, dec) to ecliptic coordinates (psi_ecliptic, lambda, beta)."""
+    eps = 0.40909263366002024 # obliquity of the ecliptic at J2000 in radians
 
-    icrs_coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame="icrs")
-    ecliptic_coord = icrs_coord.barycentrictrueecliptic
+    coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
+    ecliptic_coord = coord.barycentrictrueecliptic
 
-    lambda_ecl = ecliptic_coord.lon.rad
-    beta_ecl = ecliptic_coord.lat.rad
+    lambd = ecliptic_coord.lon.rad
+    beta = ecliptic_coord.lat.rad
 
-    return lambda_ecl, beta_ecl
+    cosdeltapsi = 1./np.cos(dec) * (-np.sin(eps)*np.sin(beta)*np.sin(lambd) + np.cos(eps)*np.cos(beta))
+    sindeltapsi = -1./np.cos(dec) * np.sin(eps)*np.cos(lambd)
+    deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
+    psi_ecliptic = psi - deltapsi
+
+    return psi_ecliptic, lambd, beta
