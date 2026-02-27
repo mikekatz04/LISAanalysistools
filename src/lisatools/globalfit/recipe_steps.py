@@ -4,6 +4,7 @@ from typing import Callable
 import numpy as np
 
 from lisatools.analysiscontainer import AnalysisContainerArray
+from lisatools.datacontainer import DataResidualArray
 
 try:
     import cupy as cp
@@ -186,15 +187,17 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     # Sky coordinates: ICRS -> ecliptic -> SSB -> LISA
     ra = float(catalogue_entry["RightAscension"])
     dec = float(catalogue_entry["Declination"])
-    lam_ecl, beta_ecl = icrs_to_ecliptic(ra, dec)
-
-    psi_ssb = float(catalogue_entry["PolarisationAngle"])
+    psi_icrs = float(catalogue_entry["PolarisationAngle"])
+    psi_ssb, lam_ecl, beta_ecl = icrs_to_ecliptic(psi_icrs, ra, dec)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
+    logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
+    
     t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
-
+    
     lam_L = lam_L % (2 * np.pi)
     psi_L = psi_L % np.pi
+    logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
     sin_beta_L = np.sin(beta_L)
 
     return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
@@ -217,6 +220,9 @@ def subtract_initial_signal(
                 inj_coords = state.branches_coords[source_name][0, :, leaf]
                 inj_coords_in = source_info.transform.both_transforms(inj_coords)
                 signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
+                for w in range(len(signals_in)):
+                    ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
+                    logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}")
                 acs.add_signal_to_residual(signals_in)
                 counter += 1
         logger.debug(f"Subtracted {counter} initial signals for {source_name}")

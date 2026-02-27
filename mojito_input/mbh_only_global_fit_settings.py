@@ -39,9 +39,9 @@ from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
 
-    psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors)
+    # psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors)
 
-    recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
     # Initialize MBH walkers from catalogue injection parameters
     catalogue = getattr(curr.general_info, 'catalogue', {})
@@ -66,8 +66,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     # todo test this 
     
     _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state)
-    mbh_pe_moves = GFCombineMove(moves=[mbh_pe_move, psd_pe_move], share_temperature_control=False)
-    recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_moves]), name="mbh+psd pe")
+    #mbh_pe_moves = GFCombineMove(moves=[mbh_pe_move, psd_pe_move], share_temperature_control=False)
+    recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_move]), name="mbh pe")
 
     
 #######################
@@ -168,10 +168,10 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_psd_separate_3rd_try"
+    base_file_name = "mbh_separate_1st_try"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [2]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -181,13 +181,13 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 20
     ntemps = 2
 
-    tukey_alpha = 0.05
+    tukey_alpha = 0.01
 
     basis_domain = "stft"
     stft_dt = 8 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
-                                 source_types=['noise', 'mbhb'],
+                                 source_types=['mbhb'],
                                  source_ids=dict(mbhb=source_ids),
                                  verbose=True,
                                  do_plots=True,
@@ -195,7 +195,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
                                 )
     
-    preprocess_kwargs = dict()
+    preprocess_kwargs = {}
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
@@ -277,7 +277,7 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "mbh": mbh_setup,
-            "psd": psd_setup,
+            # "psd": psd_setup,
             # "emri": all_emri_info,
         },
         general_info=general_setup,

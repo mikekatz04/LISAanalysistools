@@ -130,7 +130,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  do_plots=True,
                                 )
     
-    preprocess_kwargs = dict(plot_folder=file_store_dir, normalize=True)
+    preprocess_kwargs = dict(normalize=True)
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
