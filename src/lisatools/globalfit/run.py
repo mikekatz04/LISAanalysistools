@@ -649,9 +649,7 @@ class GlobalFit:
 
             plot_container = PlotContainer(
                 plots=["base", "tempering"],
-                parent_folder=self.curr.general_info.main_file_path.replace(
-                    "parameter_estimation_main.h5", "diagnostics/"
-                ),
+                parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.1,
             )
