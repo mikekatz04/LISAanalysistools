@@ -437,7 +437,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             }
 
             // Likelihood Accumulation
-            double term = -0.5 * (4.0 * differential_component * Q + log(std::abs(det)));
+            double term = -0.5 * 4.0 * differential_component * Q - log(std::abs(det));
             // Kahan Summation
             double y = term - compensation[tid];
             double t = like_vals[tid] + y;

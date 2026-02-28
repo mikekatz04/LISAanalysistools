@@ -2134,7 +2134,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d
         
         smoothed_matrix = matrix_in.copy()
-        mask = self.dips_mask.reshape(self.num_times, self.num_freqs)
+        mask = self.dips_mask.reshape(self.num_times, self.num_freqs).squeeze()  # shape (num_times, num_freqs). if num_times=1, this will be (num_freqs,)
         _smoothed = filter_func(matrix_in, sigma=sigma, axis=-1)
 
         smoothed_matrix[..., mask] = _smoothed[..., mask]
