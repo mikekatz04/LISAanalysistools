@@ -56,8 +56,11 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
         injection_params = np.array(injection_params_list)
 
+        # Store injection truths for diagnostic plots
+        curr.source_info["mbh"].injection = injection_params
+
         # Per-parameter spread for the Gaussian scatter
-        spread = 1e-2
+        spread = 1e-3
 
         scatter_around_injection(
             state, "mbh", injection_params, spread,
@@ -127,7 +130,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=1,
         nleaves_min=1,
         ndim=11,
-        num_prop_repeats=5,
+        num_prop_repeats=40,
     )
 
     return MBHSetup(mbh_settings)
@@ -144,13 +147,15 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
                 r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
             }
     priors = {"psd": ProbDistContainer(priors_psd)}
+    injection = np.array([15e-12, 3e-15]) # for diagnostic plots
 
     psd_settings = PSDSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
         priors=priors,
-        ndim=2
+        ndim=2,
+        injection=injection
     )
 
     return PSDSetup(psd_settings)
@@ -168,10 +173,10 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_psd_separate_3rd_try"
+    base_file_name = "mbh_psd_separate_4th_try"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [2]
+    gpus = [1]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -179,7 +184,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 2
+    ntemps = 3
 
     tukey_alpha = 0.05
 
@@ -278,7 +283,6 @@ def get_global_fit_settings(copy_settings_file=False):
         source_info={
             "mbh": mbh_setup,
             "psd": psd_setup,
-            # "emri": all_emri_info,
         },
         general_info=general_setup,
         rank_info=rank_info,

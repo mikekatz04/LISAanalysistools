@@ -136,29 +136,6 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     return MBHSetup(mbh_settings)
 
 
-
-def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
-    
-    # waveform kwargs
-    initialize_kwargs_psd = dict()
-
-    priors_psd = {
-                r'$S_{\rm oms}$': uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
-            }
-    priors = {"psd": ProbDistContainer(priors_psd)}
-
-    psd_settings = PSDSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs_psd,
-        priors=priors,
-        ndim=2
-    )
-
-    return PSDSetup(psd_settings)
-
-
 def get_general_erebor_settings() -> GeneralSetup:
        # limits on parameters
     # now with negative fdots
@@ -174,14 +151,14 @@ def get_general_erebor_settings() -> GeneralSetup:
     base_file_name = "mbh_separate_fd_1st_try"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [5]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
     jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
 
     backend="cuda12x" if gpus is not None else "cpu"
-    nwalkers = 15
+    nwalkers = 20
     ntemps = 2
 
     tukey_alpha = 0.01
@@ -261,16 +238,6 @@ def get_global_fit_settings(copy_settings_file=False):
 
 
     mbh_setup = get_mbh_erebor_settings(general_setup)
-    
-
-    ##################################
-    ##################################
-    ###  PSD Settings  ###############
-    ##################################
-    ##################################
-
-
-    psd_setup = get_psd_erebor_settings(general_setup)
 
     ##############
     ## READ OUT ##

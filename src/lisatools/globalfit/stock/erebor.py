@@ -640,6 +640,7 @@ class PSDSettings(Settings):
     nleaves_min: int = 1
     ndim: int = 4
     transform_fn: TransformContainer = None
+    injection: Optional[np.ndarray] = None 
 
 
 class PSDSetup(Setup):
