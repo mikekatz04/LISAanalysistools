@@ -1235,7 +1235,7 @@ class WDMSignal(WDMSettings, DomainBase):
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         if window is None:
-            window = xp.ones(self.arr.shape, dtype=float)
+            window = self.xp.ones(self.arr.shape, dtype=float)
 
         if isinstance(new_domain, TDSettings):
             return self.wdm_to_fd(settings=None, window=None).ifft(

@@ -60,7 +60,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["mbh"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = 1e-3
+        spread = 1e-4
 
         scatter_around_injection(
             state, "mbh", injection_params, spread,
@@ -173,10 +173,10 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_psd_separate_4th_try"
+    base_file_name = "mbh_psd_separate_4th_try_without_tempering_alpha_0.01"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [1]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -184,9 +184,9 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 3
+    ntemps = 1
 
-    tukey_alpha = 0.05
+    tukey_alpha = 0.01
 
     basis_domain = "stft"
     stft_dt = 8 * 3600.0  # hours
@@ -200,7 +200,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
                                 )
     
-    preprocess_kwargs = dict()
+    preprocess_kwargs = dict(normalize=True)
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
