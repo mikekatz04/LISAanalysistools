@@ -56,6 +56,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
         injection_params = np.array(injection_params_list)
 
+        # Store injection truths for diagnostic plots
+        curr.source_info["mbh"].injection = injection_params
+
         # Per-parameter spread for the Gaussian scatter
         spread = 1e-5
 

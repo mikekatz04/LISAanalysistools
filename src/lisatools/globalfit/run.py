@@ -158,6 +158,14 @@ class CurrentInfoGlobalFit:
         """GPU assignment information."""
         return self.current_info.general_info.gpu_assignments
 
+    def get_truths_dict(self) -> dict:
+        """Collect injection truths from all source setups for PlotContainer."""
+        return {
+            name: setup.injection
+            for name, setup in self.source_info.items()
+            if hasattr(setup, 'injection') and setup.injection is not None
+        }
+
 
 class GlobalFit:
     """Main class for managing the global fit MCMC sampling run.
@@ -652,6 +660,7 @@ class GlobalFit:
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.1,
+                truths=self.curr.get_truths_dict(),
             )
 
             sampler_mix = GlobalFitEngine(

@@ -257,6 +257,7 @@ class MBHSettings(Settings):
     inner_moves: Optional[typing.List[Move]] = None
     num_prop_repeats: Optional[int] = 200
     mbh_search_file_key: Optional[str] = "_mbh_search_tmp_file"
+    injection: Optional[np.ndarray] = None
 
 
 class MBHSetup(Setup):
