@@ -418,6 +418,19 @@ wheels = [
 ]
 
 [[package]]
+name = "cudakima"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numba" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/74/e7844bd452041fd679fd185f02cda793477783a9379d4e46406dc1f6d08a/cudakima-0.2.3.tar.gz", hash = "sha256:c9bc21532777d686e0c99fa0467c88e1796cb60875f12d8e7b552e49e07ab2d7", size = 662188, upload-time = "2026-02-26T08:20:58.162Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/42/7cd62bda7091e8ac140a4d7379d852a38c8e364c74a07066e81db50ed31e/cudakima-0.2.3-py3-none-any.whl", hash = "sha256:5cb7e3e593bcc9d1f26ec53a23c7db3e8c92c7cdea7f12c7929727fce96e66ea", size = 14424, upload-time = "2026-02-26T08:20:56.635Z" },
+]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1068,6 +1081,7 @@ name = "lisaanalysistools"
 source = { editable = "." }
 dependencies = [
     { name = "astropy" },
+    { name = "cudakima" },
     { name = "h5py" },
     { name = "jsonschema" },
     { name = "lisaconstants" },
@@ -1129,6 +1143,7 @@ requires-dist = [
     { name = "corner", marker = "extra == 'doc'" },
     { name = "corner", marker = "extra == 'sampling'" },
     { name = "corner", marker = "extra == 'testing'" },
+    { name = "cudakima" },
     { name = "eryn", marker = "extra == 'sampling'" },
     { name = "eryn", marker = "extra == 'testing'" },
     { name = "fastlisaresponse", marker = "extra == 'sampling'" },
