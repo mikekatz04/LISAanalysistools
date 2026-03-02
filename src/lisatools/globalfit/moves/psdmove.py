@@ -373,7 +373,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         return new_state, accepted
 
     def run_move_for_loop(self, model, state, num_repeats):
-        for i in tqdm(range(num_repeats)):
+        for i in tqdm(range(num_repeats), desc="psd update"):
             state, accepted = self.run_move(i, model, state)
         return state, accepted
 

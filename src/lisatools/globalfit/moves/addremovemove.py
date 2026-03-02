@@ -327,7 +327,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            logger.debug(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
+            # logger.debug(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
 
             prev_logp = (
                 self.priors[self.branch_name]
@@ -341,7 +341,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # fix this need to compute prev_logl for all walkers
             xp.get_default_memory_pool().free_all_blocks()
-            for repeat in tqdm(range(self.num_repeats), desc=f"Branch {self.branch_name}, leaf {leaf}"):
+            for repeat in tqdm(range(self.num_repeats), desc=f"{self.branch_name} update, leaf {leaf}"):
 
                 # pick move
                 move_here = self.moves[
@@ -463,10 +463,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     ].copy()[:, :, None]
                 }
 
-                # TODO: make adjustable rate of fancy swaps
-                # fancy_swap = (repeat % 20 == 0)
                 fancy_swap = (repeat % self.permute_every == 0)
-
+                if fancy_swap:
+                    logger.debug(f"Permuting walkers before swap.")
                 compute_log_like = self.log_like_for_fancy_swaping
 
                 # TODO: check permute make sure it is okay
