@@ -41,6 +41,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         inner_moves: list of moves and their corresponding weights to be used for proposing new sources for the leaf.
         Tmax: maximum temperature for the temperature control.
         betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
+        permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
         **kwargs: additional keyword arguments for the Move class.
     """
 
@@ -58,6 +59,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         inner_moves: list,
         Tmax: float = np.inf,
         betas_all: np.ndarray = None,
+        permute_every: int = 20,
         **kwargs,
     ):
 
@@ -78,9 +80,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         move_weights = [move[1] for move in inner_moves]
         self.moves = moves_tmp
         self.move_weights = move_weights
-        # self.df = acs.df
-        # # get data frequency array on gpu
-        # self.fd = xp.asarray(acs.f_arr)
 
         self.temperature_controls = [None for _ in range(self.nleaves_max)]
         for i in range(self.nleaves_max):
@@ -99,6 +98,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 Tmax=Tmax,
                 skip_swap_branches=None,  # will fill in after first run through move
             )
+        
+        self.permute_every = permute_every
 
     def check_add_skip_swap_info(self, state):
 
@@ -254,8 +255,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return output, None  # AS: match psd? I'm not sure
 
     def propose(self, model, state):
-        logger.debug("PROPOSING")
-        logger.debug("------" * 20)
 
         self.setup(model, state)
         tic = time.time()
@@ -277,8 +276,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # randomize order
         leaves_random_order = np.random.permutation(np.arange(self.nleaves_max))
         for leaf in leaves_random_order:
-            logger.debug(f"Processing leaf {leaf}")
-
             # guard against leaves with False
             assert np.all(
                 state.branches[self.branch_name].inds[0, 0, leaf]
@@ -344,7 +341,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             # fix this need to compute prev_logl for all walkers
             xp.get_default_memory_pool().free_all_blocks()
-            for repeat in tqdm(range(self.num_repeats)):
+            for repeat in tqdm(range(self.num_repeats), desc=f"Branch {self.branch_name}, leaf {leaf}"):
 
                 # pick move
                 move_here = self.moves[
@@ -468,7 +465,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                 # TODO: make adjustable rate of fancy swaps
                 # fancy_swap = (repeat % 20 == 0)
-                fancy_swap = False
+                fancy_swap = (repeat % self.permute_every == 0)
 
                 compute_log_like = self.log_like_for_fancy_swaping
 
@@ -490,7 +487,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     branch_supps={self.branch_name: None},  # TODO: adjust this to be flexible
                     fancy_swap=fancy_swap,
                     compute_log_like=compute_log_like,
-                    permute_here=True,
+                    permute_here=fancy_swap,
                 )
 
                 temperature_control_here.adapt_temps()

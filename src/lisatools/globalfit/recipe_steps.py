@@ -6,11 +6,6 @@ import numpy as np
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
 
-try:
-    import cupy as cp
-except (ModuleNotFoundError, ImportError):
-    import numpy as cp
-
 from bbhx.utils.transform import SSB_to_LISA
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
@@ -237,6 +232,7 @@ def build_psd_moves(
     priors: dict,
     *,
     num_repeats: int = 60,
+    permute_every: int = 50,
     Tmax: float = 1e6,
 ) -> tuple[PSDMove, PSDMove]:
     """Build PSD search and PE moves.
@@ -277,6 +273,7 @@ def build_psd_moves(
 
     psd_move_kwargs = dict(
         num_repeats=num_repeats,
+        permute_every=permute_every,
         live_dangerously=True,
         psd_transform_fn=psd_info.transform_fn,
         sensitivity_backend=general_info.sensitivity_backend,
@@ -295,8 +292,12 @@ def build_psd_moves(
 
 
 def build_mbh_moves_phenom(
-    curr: CurrentInfoGlobalFit, acs: AnalysisContainerArray, priors: dict, state: GFState
-) -> tuple[Callable, ResidualAddOneRemoveOneMove]:
+    curr: CurrentInfoGlobalFit, 
+    acs: AnalysisContainerArray, 
+    priors: dict, 
+    state: GFState,
+    permute_every: int = 20,
+    ) -> tuple[Callable, ResidualAddOneRemoveOneMove]:
     """Build MBH PE move using ``PhenomTHMTDIWaveform`` + ``ResidualAddOneRemoveOneMove``.
 
     Sets ``state.sub_states['mbh'].betas_all`` as a side effect.
@@ -346,7 +347,7 @@ def build_mbh_moves_phenom(
         mbh_info.inner_moves,
     )
 
-    mbh_pe_move = ResidualAddOneRemoveOneMove(*mbh_move_args, betas_all=betas_all)
+    mbh_pe_move = ResidualAddOneRemoveOneMove(*mbh_move_args, betas_all=betas_all, permute_every=permute_every)
     mbh_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     return wave_gen, mbh_pe_move

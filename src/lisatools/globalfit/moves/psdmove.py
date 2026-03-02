@@ -140,6 +140,22 @@ def psd_log_like_xyz(x, freqs, data, df, data_length, supps=None, tdi2=False, **
 
 
 class PSDMove(GlobalFitMove, StretchMove):
+    """
+    Move for sampling over PSD parameters. Can also include galactic foreground parameters if desired. 
+
+    Args:
+        acs: AnalysisContainerArray containing the data and sensitivity information.
+        priors: dictionary of priors for the parameters.
+        *args: additional arguments for the Move class.
+        num_repeats: number of times to repeat the move before returning.
+        max_logl_mode: if True, will keep running the move until the maximum log likelihood does not change for a certain number of checks. This is useful for finding the maximum likelihood point.
+        psd_kwargs: additional keyword arguments for the psd_log_like function.
+        sensitivity_backend: instance of XYZSensitivityBackend to use for computing the likelihood.
+        psd_transform_fn: TransformContainer for transforming the PSD parameters. 
+        galfor_transform_fn: TransformContainer for transforming the galactic foreground parameters.
+        permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
+        **kwargs: additional keyword arguments for the Move class.
+    """
     def __init__(
         self,
         acs: AnalysisContainerArray,
@@ -151,6 +167,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         sensitivity_backend: XYZSensitivityBackend = None,
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
+        permute_every: int = 20,
         **kwargs,
     ):
 
@@ -166,6 +183,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.sensitivity_backend = sensitivity_backend
         self.psd_transform_fn = psd_transform_fn
         self.galfor_transform_fn = galfor_transform_fn
+
+        self.permute_every = permute_every
 
     def psd_log_like(self, x, data, supps=None, **sens_kwargs):
         """ """
@@ -320,8 +339,7 @@ class PSDMove(GlobalFitMove, StretchMove):
     def run_move(self, move_i, model, state):
         new_state, accepted = super(PSDMove, self).propose(model, state)
 
-        # TODO: make adjustable
-        if move_i % 50 == 0:
+        if move_i % self.permute_every == 0:
             x = new_state.branches_coords
             logl = new_state.log_like
             logp = new_state.log_prior
