@@ -1,3 +1,6 @@
+import logging 
+logger = logging.getLogger(__name__)
+
 class Recipe:
     def __init__(self):
         self.recipe = []
@@ -67,12 +70,21 @@ class Recipe:
 
 
 class RecipeStep:
+    """
+    Abstract class for a recipe step. Each recipe step needs to have a setup function and a stopping function, that define how the sampler behaves during that step.
 
+    Args:
+        moves (list, optional): List of moves to use during this recipe step. Defaults to None.
+        weights (list, optional): List of weights for the moves. Defaults to None.
+    """
     def __init__(self, moves=None, weights=None):
         if moves is not None:
             self.moves = moves
             if weights is not None:
                 self.weights = weights
+
+    def __repr__(self):
+        return f"RecipeStep with moves: {self.moves} and weights: {self.weights}"
 
     @property
     def moves(self):
@@ -99,3 +111,17 @@ class RecipeStep:
 
     def stopping_function(self, iteration, last_sample, sampler):
         raise NotImplementedError
+
+class BaseRecipeStep(RecipeStep):
+    """Base class for recipe steps."""
+    def __init__(self, *args, moves=None, weights=None, **kwargs):
+        super().__init__(moves=moves, weights=weights)
+
+    def setup_run(self, iteration, last_sample, sampler):
+        for move in self.moves:
+            if sampler.periodic is not None and move.periodic is None:
+                logger.debug(f"Setting periodicity of move {move} to {sampler.periodic}")
+                move.periodic = sampler.periodic
+
+        sampler.moves = self.moves
+        sampler.weights = self.weights
