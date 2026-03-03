@@ -100,6 +100,22 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
         
         self.permute_every = permute_every
+        
+        # make sure to propagate the periodic information to the inner moves if it is included in kwargs
+        if 'periodic' in kwargs:
+            self.periodic = kwargs['periodic']
+
+    @property
+    def periodic(self):
+        return self._periodic
+    
+    @periodic.setter
+    def periodic(self, periodic):
+        self._periodic = periodic
+        if periodic is not None:
+            for tmp_move in self.moves:
+                if tmp_move.periodic is None:
+                    tmp_move.periodic = periodic
 
     def check_add_skip_swap_info(self, state):
 
