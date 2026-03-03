@@ -67,7 +67,7 @@ class GBSetup(Setup, GBSettings):
 
         level = logging.DEBUG
         name = "GBSetup"
-        self.logger = init_logger(filename="gb_setup.log", level=level, name=name)
+        self.logger = init_logger(filename="gb_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
 
         self.init_setup()
 
@@ -268,7 +268,7 @@ class MBHSetup(Setup):
 
         level = logging.DEBUG
         name = "MBHSetup"
-        self.logger = init_logger(filename="mbh_setup.log", level=level, name=name)
+        self.logger = init_logger(filename="mbh_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
 
         self.init_setup()
 
@@ -464,7 +464,7 @@ class EMRISetup(Setup):
 
         level = logging.DEBUG
         name = "EMRISetup"
-        self.logger = init_logger(filename="emri_setup.log", level=level, name=name)
+        self.logger = init_logger(filename="emri_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
 
         self.init_setup()
 
@@ -651,7 +651,7 @@ class PSDSetup(Setup):
 
         level = logging.DEBUG
         name = "PSDSetup"
-        self.logger = init_logger(filename="psd_setup.log", level=level, name=name)
+        self.logger = init_logger(filename="psd_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
 
         self.init_setup()
 
@@ -716,7 +716,7 @@ class GalForSetup(Setup):
 
         level = logging.DEBUG
         name = "GalForSetup"
-        self.logger = init_logger(filename="galfor_setup.log", level=level, name=name)
+        self.logger = init_logger(filename="galfor_setup.log", level=level, name=name, log_dir=getattr(self, 'log_dir', None))
 
         self.init_setup()
 

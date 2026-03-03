@@ -99,6 +99,7 @@ class Settings:
     other_tempering_kwargs: Optional[dict] = None
     branch_state: Optional[eryn_State] = None
     branch_backend: Optional[eryn_Backend] = None
+    log_dir: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -147,7 +148,10 @@ class GeneralSetup(Setup, GeneralSettings):
 
         level = logging.DEBUG
         name = "GeneralSetup"
-        self.logger = init_logger(filename="gb_setup.log", level=level, name=name)
+        # Ensure artifacts dir exists before creating log file handler
+        if not os.path.exists(self.artifacts_file_dir):
+            os.makedirs(self.artifacts_file_dir)
+        self.logger = init_logger(filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir)
 
         self.init_setup()
 
