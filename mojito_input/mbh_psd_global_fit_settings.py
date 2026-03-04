@@ -131,6 +131,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_min=1,
         ndim=11,
         num_prop_repeats=40,
+        log_dir=general_set.file_store_dir
     )
 
     return MBHSetup(mbh_settings)
@@ -155,7 +156,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         initialize_kwargs=initialize_kwargs_psd,
         priors=priors,
         ndim=2,
-        injection=injection
+        injection=injection,
+        log_dir=general_set.file_store_dir
     )
 
     return PSDSetup(psd_settings)

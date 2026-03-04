@@ -226,6 +226,10 @@ class GeneralSetup(Setup, GeneralSettings):
             self.logger.debug(f"Preprocess setting: {key} = {value}")
         # now extract `normalize` if present
         normalize_window = preprocess_kwargs.pop("normalize", False)
+        
+        if normalize_window:
+            self.logger.warning("Window normalization is turned off for now, setting `normalize_window` to False.")
+            normalize_window = False
 
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
@@ -270,6 +274,9 @@ class GeneralSetup(Setup, GeneralSettings):
         else:
             raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
 
+        # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
+        # self.logger.debug(f"Window factor for normalization: {window_factor}")
+
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
@@ -299,6 +306,7 @@ class GeneralSetup(Setup, GeneralSettings):
             orbits=self.gpu_orbits,
             settings=domain_settings,
             force_backend=self.force_backend,
+            window_factor=window_factor,
             **self.sensitivity_init_kwargs,
         )
 
