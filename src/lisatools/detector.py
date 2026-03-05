@@ -39,7 +39,8 @@ class Orbits(LISAToolsParallelModule, ABC):
         filename: File name. File should be in the style of LISAOrbits
         armlength: Armlength of detector.
         force_backend: If ``gpu`` or ``cuda``, use a gpu.
-        
+        t0: Initial time.
+
     """
 
     def __init__(
@@ -47,12 +48,14 @@ class Orbits(LISAToolsParallelModule, ABC):
         filename: str,
         armlength: Optional[float] = 2.5e9,
         force_backend: Optional[str] = None,
+        t0: Optional[float] = 0.0,
         **kwargs
     ) -> None:
         
         # TODO: should we make it compute armlength.
         self.filename = filename
         self.armlength = armlength
+        self.t0 = t0
         self._setup()
         self.configured = False
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
@@ -161,7 +164,7 @@ class Orbits(LISAToolsParallelModule, ABC):
     def t_base(self) -> np.ndarray:
         """Time array from file."""
         with self.open() as f:
-            t_base = np.arange(self.size_base) * self.dt_base
+            t_base = self.t0 + np.arange(self.size_base) * self.dt_base
         return t_base
 
     @property
@@ -288,7 +291,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             dt = LINEAR_INTERP_TIMESTEP
             Tobs = self.t_base[-1]
             Nobs = int(Tobs / dt)
-            t_arr = np.arange(Nobs) * dt
+            t_arr = self.t0 + np.arange(Nobs) * dt
             if t_arr[-1] < self.t_base[-1]:
                 t_arr = np.concatenate([t_arr, self.t_base[-1:]])
         elif t_arr is not None:
@@ -302,7 +305,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             make_cpp = True
             Tobs = self.t_base[-1]
             Nobs = int(Tobs / dt)
-            t_arr = np.arange(Nobs) * dt
+            t_arr = self.t0 + np.arange(Nobs) * dt
             if t_arr[-1] < self.t_base[-1]:
                 t_arr = np.concatenate([t_arr, self.t_base[-1:]])
 
@@ -336,10 +339,10 @@ class Orbits(LISAToolsParallelModule, ABC):
         # prepare cpp class args to load when needed
         if make_cpp:
             self.pycppdetector_args = [ # duplicate ltts and positions informations when using the more general c++ class
-                0.,
+                self.t0,
                 dt,
                 len(self.t),
-                0., 
+                self.t0, 
                 dt,
                 len(self.t),
                 self.xp.asarray(self.n.flatten().copy()),
