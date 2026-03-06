@@ -303,7 +303,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all,
     double *spline_in_isi_oms_all, double *spline_in_testmass_all,
     double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds, 
-    XYZSensitivityMatrix &sensitivity_matrix)
+    XYZSensitivityMatrix *sensitivity_matrix)
 {
     int tid;
 #ifdef __CUDACC__ 
@@ -400,7 +400,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             double spline_in_testmass = spline_in_testmass_all[psd_i * num_freqs + f_idx];
 
             // Get noise covariance matrix for this (time, frequency) pair
-            sensitivity_matrix.get_noise_covariance(
+            sensitivity_matrix->get_noise_covariance(
                 f, time_index,
                 Soms_d_in, Sa_a_in,
                 Amp, alpha, slope_1, f_knee, slope_2,
@@ -562,7 +562,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        differential_component, num_freqs, num_times, dips_mask, num_psds, *dev_ptr);
+        differential_component, num_freqs, num_times, dips_mask, num_psds, dev_ptr);
         
     gpuErrchk(cudaGetLastError());
     
@@ -580,7 +580,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
+        differential_component, num_freqs, num_times, dips_mask, num_psds, this);
 #endif
 }
 
@@ -717,7 +717,7 @@ void get_noise_tfs_kernel(double *frequencies, int *time_indices,
                           double *oms_yy_arr, cmplx *oms_yz_arr, double *oms_zz_arr,
                           double *tm_xx_arr, cmplx *tm_xy_arr, cmplx *tm_xz_arr,
                           double *tm_yy_arr, cmplx *tm_yz_arr, double *tm_zz_arr,
-                          int num_freqs, int num_times, XYZSensitivityMatrix &sensitivity_matrix)
+                          int num_freqs, int num_times, XYZSensitivityMatrix *sensitivity_matrix)
 {
     int start, end, increment;
     int start_time, end_time, increment_time;
@@ -747,12 +747,12 @@ void get_noise_tfs_kernel(double *frequencies, int *time_indices,
             double oms_xx, oms_yy, oms_zz, tm_xx, tm_yy, tm_zz;
             cmplx oms_xy, oms_xz, oms_yz, tm_xy, tm_xz, tm_yz;
 
-            sensitivity_matrix.get_noise_tfs(f,
-                                             &oms_xx, &oms_xy, &oms_xz,
-                                             &oms_yy, &oms_yz, &oms_zz,
-                                             &tm_xx, &tm_xy, &tm_xz,
-                                             &tm_yy, &tm_yz, &tm_zz,
-                                             time_index);
+            sensitivity_matrix->get_noise_tfs(f,
+                                              &oms_xx, &oms_xy, &oms_xz,
+                                              &oms_yy, &oms_yz, &oms_zz,
+                                              &tm_xx, &tm_xy, &tm_xz,
+                                              &tm_yy, &tm_yz, &tm_zz,
+                                              time_index);
             // Store results in output arrays
             int idx = t_idx * num_freqs + i; // Layout: time-major
             oms_xx_arr[idx] = oms_xx;
@@ -790,7 +790,7 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(double *freqs,
                                                       oms_yy_arr, oms_yz_arr, oms_zz_arr,
                                                       tm_xx_arr, tm_xy_arr, tm_xz_arr,
                                                       tm_yy_arr, tm_yz_arr, tm_zz_arr,
-                                                      num_freqs, num_times, *sensitivity_matrix_gpu);
+                                                      num_freqs, num_times, sensitivity_matrix_gpu);
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(sensitivity_matrix_gpu));
@@ -800,7 +800,7 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(double *freqs,
                         oms_yy_arr, oms_yz_arr, oms_zz_arr, 
                         tm_xx_arr, tm_xy_arr, tm_xz_arr,
                         tm_yy_arr, tm_yz_arr, tm_zz_arr,
-                        num_freqs, num_times, *this);
+                        num_freqs, num_times, this);
 #endif // __CUDACC__
 }
 
@@ -853,7 +853,7 @@ void get_noise_covariance_kernel(
     double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
     double *c11_arr, cmplx *c12_arr, double *c22_arr,
     int num_freqs, int num_times,
-    XYZSensitivityMatrix &sensitivity_matrix)
+    XYZSensitivityMatrix *sensitivity_matrix)
 {
     // Memory layout: output[t_idx * num_freqs + f_idx]
     // Frequencies are the fast-varying dimension for coalesced access
@@ -893,7 +893,7 @@ void get_noise_covariance_kernel(
             spline_in_testmass = spline_in_testmass_arr[f_idx];
             spline_in_isi_oms = spline_in_isi_oms_arr[f_idx];
 
-            sensitivity_matrix.get_noise_covariance(
+            sensitivity_matrix->get_noise_covariance(
                 f, time_index,
                 Soms_d_in, Sa_a_in,
                 Amp, alpha, slope_1, f_knee, slope_2,
@@ -936,7 +936,7 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
         num_freqs, num_times,
-        *sensitivity_matrix_gpu
+        sensitivity_matrix_gpu
     );
     
     cudaDeviceSynchronize();
@@ -951,7 +951,7 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
         num_freqs, num_times,
-        *this
+        this
     );
 #endif
 }
