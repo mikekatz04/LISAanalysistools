@@ -1,5 +1,5 @@
-#ifndef __L1DETECTOR_HPP__
-#define __L1DETECTOR_HPP__
+#ifndef __DETECTOR_HPP__
+#define __DETECTOR_HPP__
 
 #include "gbt_global.h"
 #include "cuda_complex.hpp"
@@ -191,5 +191,5 @@ public:
     void dealloc() {};
 };
 
-#endif // __L1DETECTOR_HPP__
+#endif // __DETECTOR_HPP__
     
