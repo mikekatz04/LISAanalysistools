@@ -3,6 +3,7 @@
 
 #include "Detector.hpp"
 #include "PSD.hpp"
+#include "domains.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -191,5 +192,126 @@ public:
     };
 };
 
+
+// STFTDomain / FDDomain Python wrappers
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+#define STFTDomainWrap STFTDomainWrapGPU
+#define FDDomainWrap FDDomainWrapGPU
+#else
+#define STFTDomainWrap STFTDomainWrapCPU
+#define FDDomainWrap FDDomainWrapCPU
+#endif
+
+class STFTDomainWrap {
+public:
+    STFTDomain *domain;
+
+    STFTDomainWrap(int num_times, int num_freqs, int num_channels,
+                   double t0, double f_min, double f_max,
+                   double dt, double df,
+                   array_type<std::complex<double>> data_arr,
+                   array_type<std::complex<double>> invC_arr,
+                   int num_data, int num_noise, int tdi_type)
+    {
+        cmplx *data_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(data_arr, "data", 1, 1));
+        cmplx *invC_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(invC_arr, "invC", 1, 1));
+
+        domain = new STFTDomain(num_times, num_freqs, num_channels,
+                                t0, f_min, f_max, dt, df,
+                                data_ptr, invC_ptr,
+                                num_data, num_noise, tdi_type);
+    }
+
+    ~STFTDomainWrap() {
+        delete domain;
+    }
+
+    void compute_likelihood_terms(
+        array_type<std::complex<double>> d_h_out,
+        array_type<std::complex<double>> h_h_out,
+        array_type<std::complex<double>> template_vals,
+        array_type<double> start_times,
+        array_type<double> start_freqs,
+        int num_binaries,
+        array_type<int> data_index,
+        array_type<int> noise_index,
+        int n_t_template,
+        int n_f_template)
+    {
+        cmplx *d_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1));
+        cmplx *h_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1));
+        cmplx *tmpl_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(template_vals, "template_vals", 1, 1));
+        double *st_ptr = return_pointer_and_check_length(start_times, "start_times", num_binaries, 1);
+        double *sf_ptr = return_pointer_and_check_length(start_freqs, "start_freqs", num_binaries, 1);
+        int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
+        int *ni_ptr = return_pointer_and_check_length(noise_index, "noise_index", num_binaries, 1);
+
+        domain->compute_likelihood_terms_wrap(
+            d_h_ptr, h_h_ptr, tmpl_ptr,
+            st_ptr, sf_ptr,
+            num_binaries,
+            di_ptr, ni_ptr,
+            n_t_template, n_f_template);
+    }
+};
+
+class FDDomainWrap {
+public:
+    FDDomain *domain;
+
+    FDDomainWrap(int num_freqs, int num_channels,
+                 double f_min, double f_max, double df,
+                 array_type<std::complex<double>> data_arr,
+                 array_type<std::complex<double>> invC_arr,
+                 int num_data, int num_noise, int tdi_type)
+    {
+        cmplx *data_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(data_arr, "data", 1, 1));
+        cmplx *invC_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(invC_arr, "invC", 1, 1));
+
+        domain = new FDDomain(num_freqs, num_channels,
+                              f_min, f_max, df,
+                              data_ptr, invC_ptr,
+                              num_data, num_noise, tdi_type);
+    }
+
+    ~FDDomainWrap() {
+        delete domain;
+    }
+
+    void compute_likelihood_terms(
+        array_type<std::complex<double>> d_h_out,
+        array_type<std::complex<double>> h_h_out,
+        array_type<std::complex<double>> template_vals,
+        array_type<double> start_freqs,
+        int num_binaries,
+        array_type<int> data_index,
+        array_type<int> noise_index,
+        int n_f_template)
+    {
+        cmplx *d_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1));
+        cmplx *h_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1));
+        cmplx *tmpl_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(template_vals, "template_vals", 1, 1));
+        double *sf_ptr = return_pointer_and_check_length(start_freqs, "start_freqs", num_binaries, 1);
+        int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
+        int *ni_ptr = return_pointer_and_check_length(noise_index, "noise_index", num_binaries, 1);
+
+        domain->compute_likelihood_terms_wrap(
+            d_h_ptr, h_h_ptr, tmpl_ptr,
+            sf_ptr,
+            num_binaries,
+            di_ptr, ni_ptr,
+            n_f_template);
+    }
+};
 
 #endif // __BINDING_HPP__

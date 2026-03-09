@@ -24,7 +24,7 @@ except (ModuleNotFoundError, ImportError):
     CUPY_AVAILABLE = False
 
 import dataclasses
-
+from .domaincomputation import STFTComputationGroup, FDComputationGroup 
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module, tukey
@@ -369,9 +369,17 @@ class FDSettings(DomainSettingsBase):
     def get_associated_class():
         return FDSignal
 
+    @staticmethod
+    def get_associated_group():
+        return FDComputationGroup
+
     @property
     def associated_class(self):
         return self.get_associated_class()
+    
+    @property
+    def associated_group(self):
+        return self.get_associated_group()
 
     @property
     def kwargs(self) -> dict:
@@ -663,9 +671,17 @@ class STFTSettings(DomainSettingsBase):
     def get_associated_class():
         return STFTSignal
 
+    @staticmethod
+    def get_associated_group():
+        return STFTComputationGroup
+    
     @property
     def associated_class(self):
         return self.get_associated_class()
+    
+    @property
+    def associated_group(self):
+        return self.get_associated_group()
 
     @property
     def basis_shape(self) -> tuple:

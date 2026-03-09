@@ -37,11 +37,13 @@
 #define FDSettings FDSettingsGPU
 #define STFTDomain STFTDomainGPU
 #define FDDomain FDDomainGPU
+#define STFTFresnel STFTFresnelGPU
 #else
 #define STFTSettings STFTSettingsCPU
 #define FDSettings FDSettingsCPU
 #define STFTDomain STFTDomainCPU
 #define FDDomain FDDomainCPU
+#define STFTFresnel STFTFresnelCPU
 #endif
 
 // TDI channel configuration types
@@ -67,13 +69,14 @@ public:
     double f_max;     ///< Physical maximum frequency of the grid [Hz]
     double dt;        ///< Time-bin spacing [s]
     double df;        ///< Frequency-bin spacing [Hz]
+    double diff_comp; ///< Differential component for inner products (= df)
 
     CUDA_CALLABLE_MEMBER
     STFTSettings(int num_times_, int num_freqs_, int num_channels_,
                  double t0_, double f_min_, double f_max_,
                  double dt_, double df_)
         : num_times(num_times_), num_freqs(num_freqs_), num_channels(num_channels_),
-          t0(t0_), f_min(f_min_), f_max(f_max_), dt(dt_), df(df_) {}
+          t0(t0_), f_min(f_min_), f_max(f_max_), dt(dt_), df(df_), diff_comp(df_) {}
 };
 
 /**
@@ -370,6 +373,32 @@ public:
         int *noise_index_all,
         int n_f_template
         );
+};
+
+class STFTFresnel : public STFTSettings {
+public:
+    CUDA_CALLABLE_MEMBER
+    STFTFresnel(int num_times_, int num_freqs_, int num_channels_,
+               double t0_, double f_min_, double f_max_,
+               double dt_, double df_)
+        : STFTSettings(num_times_, num_freqs_, num_channels_, t0_, f_min_, f_max_, dt_, df_) {};
+    
+    CUDA_DEVICE
+    void get_amp_phase(double *amp, double *phase, cmplx z);
+    CUDA_DEVICE
+    double get_zeta(double f, double f0, double fdot0);
+    CUDA_DEVICE
+    double get_v(double t, double f, double t0, double f0, double fdot0);
+    CUDA_DEVICE
+    double get_auxiliary_f(double x);
+    CUDA_DEVICE
+    double get_auxiliary_g(double x);
+    CUDA_DEVICE
+    void get_fresnel_integrals(double *C, double *S, double x); // Fresnel integrals C(x) and S(x) returned in ints[0] and ints[1]
+    CUDA_DEVICE
+    cmplx get_fresnel_kernel(double f, double t0, double f0, double fdot0);
+    CUDA_DEVICE
+    cmplx get_fourier_value(double amp, double phase0, double f0, double fdot0, double t0, double f);
 };
 
 /** @brief First-pass kernel: partial (d|h) and (h|h) sums per CUDA block.

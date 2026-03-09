@@ -652,6 +652,111 @@ void FDDomain::compute_likelihood_terms_wrap(
         num_freqs_template
     );
 }
+
+/** 
+ * Fresnel computation block: compute the frequency domain representation of 
+ * signals that can be approximated as linear chirps in the time domain, at least locally within each STFT window. 
+ */
+CUDA_DEVICE
+void get_amp_phase(double *amp, double *phase, cmplx z)
+// extract amplitude and phase from complex input
+{
+    *amp = gcmplx::abs(z);
+    *phase = gcmplx::arg(z);
+}
+
+CUDA_DEVICE
+double STFTFresnel::get_zeta(double f, double f0, double fdot0)
+{
+    double zeta = (f0 - f) / fdot0;
+    return zeta;
+}
+
+CUDA_DEVICE
+double STFTFresnel::get_v(double t, double f, double t0, double f0, double fdot0)
+{
+    double zeta = get_zeta(f, f0, fdot0);
+    double v = std::sqrt(2.0 * std::abs(fdot0)) * (t - t0 + zeta); // todo: check for negative fdot0
+    return v;
+}
+
+CUDA_DEVICE
+double STFTFresnel::get_auxiliary_f(double x){
+    double f = (1.0 + 0.926 * x) / (2.0 + 1.792 * x + 3.104 * x * x);
+    return f;
+}
+
+CUDA_DEVICE
+double STFTFresnel::get_auxiliary_g(double x){
+    double g = 1.0 / (2.0 + 4.142 * x + 3.492 * x * x + 6.670 * x * x * x);
+    return g;
+}
+
+CUDA_DEVICE
+void STFTFresnel::get_fresnel_integrals(double *C, double *S, double x)
+{
+    double abs_x = std::abs(x);
+    double pi_x = M_PI * abs_x;
+    double half_pi_x2 = 0.5 * pi_x * abs_x;
+    double c_halfpix2 = std::cos(half_pi_x2);
+    double s_halfpix2 = std::sin(half_pi_x2);
+    double S_val, C_val;
+
+    double threshold = 6.0;
+
+    if (abs_x > threshold)
+    {
+        S_val = 0.5 - 1 / pi_x * c_halfpix2;
+        C_val = 0.5 + 1 / pi_x *s_halfpix2;
+    }
+    else
+    {
+        double f_x = get_auxiliary_f(abs_x);
+        double g_x = get_auxiliary_g(abs_x);
+        S_val = 0.5 - f_x * c_halfpix2 - g_x * s_halfpix2;
+        C_val = 0.5 + f_x * s_halfpix2 - g_x * c_halfpix2;
+    }
+
+    if (x < 0)
+    {
+        *C = -C_val; // Fresnel C integral
+        *S = -S_val; // Fresnel S integral
+    }
+    else
+    {
+        *C = C_val; // Fresnel C integral
+        *S = S_val; // Fresnel S integral
+    }
+}
+
+CUDA_DEVICE
+cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0, double fdot0)
+{
+    double v0 = get_v(t0, f, t0, f0, fdot0);
+    double t1 = t0 + dt; // End of the current STFT window. we are assuming that everything is correctly aligned with the stft grid
+    double v1 = get_v(t1, f, t0, f0, fdot0);
+
+    double C_0, S_0, C_1, S_1;
+    get_fresnel_integrals(&C_0, &S_0, v0);
+    get_fresnel_integrals(&C_1, &S_1, v1);
+
+    double delta_C = C_1 - C_0;
+    double delta_S = S_1 - S_0;
+    cmplx kernel = cmplx(delta_C, delta_S);
+    return kernel;
+}
+
+CUDA_DEVICE
+cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0, double fdot0, double t0, double f)
+{
+    cmplx kernel = get_fresnel_kernel(f, t0, f0, fdot0);
+    double amplitude = amp / std::sqrt(2.0 * std::abs(fdot0)); // todo: check for negative fdot0?
+    double zeta = get_zeta(f, f0, fdot0);
+    double phase = phase0 - M_PI * fdot0 * zeta * zeta;
+    
+    cmplx out = gcmplx::polar(amplitude, phase) * kernel;
+    return out;
+}
 /**
  * Pass-1 kernel: accumulate per-block partial sums of (d|h) and (h|h).
  *
@@ -769,11 +874,11 @@ void compute_likelihood_contributions_kernel(
         // Reduce all per-thread contributions within this block using CUB.
         // The factor 4 comes from the one-sided inner-product convention.
         CUDA_SYNC_THREADS;
-        cmplx d_h_red = 4.0 * block_reduce_cmplx(d_h_tmp);
+        cmplx d_h_red = 4.0 * domain->diff_comp * block_reduce_cmplx(d_h_tmp);
         // Must sync again: CUB's TempStorage must not be overwritten until
         // all threads have completed the first reduction.
         CUDA_SYNC_THREADS;
-        cmplx h_h_red = 4.0 * block_reduce_cmplx(h_h_tmp);
+        cmplx h_h_red = 4.0 * domain->diff_comp * block_reduce_cmplx(h_h_tmp);
         if (tid == 0)
         {
             // Store this block's partial sum; Pass 2 will reduce across blocks.
@@ -783,8 +888,8 @@ void compute_likelihood_contributions_kernel(
         CUDA_SYNC_THREADS;
         #else
         // CPU: num_blocks_x == 1, so write directly at index [bin].
-        d_h_contrib[bin] = 4.0 * d_h_tmp[0];
-        h_h_contrib[bin] = 4.0 * h_h_tmp[0];
+        d_h_contrib[bin] = 4.0 * domain->diff_comp * d_h_tmp[0];
+        h_h_contrib[bin] = 4.0 * domain->diff_comp * h_h_tmp[0];
         #endif
     }
 }
