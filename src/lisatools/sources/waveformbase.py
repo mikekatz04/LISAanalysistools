@@ -231,8 +231,8 @@ class TDWaveformBase(LISAToolsParallelModule):
             return td_signal
 
         elif output_domain == "STFT":
-            # Derive STFT settings from the signal's own time grid.
-            td_signal = self.pad_td_signal_for_stft(td_signal, domain_kwargs)
+            nperseg = round(domain_kwargs["big_dt"] / td_signal.settings.dt)
+            td_signal = self._pad_td_signal(td_signal, align_samples=nperseg)
             out_settings = get_stft_settings(
                 td_signal.settings.t_arr, **domain_kwargs, force_backend=backend
             )
@@ -240,6 +240,10 @@ class TDWaveformBase(LISAToolsParallelModule):
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
+            N_td_target = (domain_kwargs["N"] - 1) * 2
+            # align_samples=N_td_target forces t0 == data_t0 (the offset is always
+            # smaller than N_td_target, so the modulo absorbs the full gap).
+            td_signal = self._pad_td_signal(td_signal, align_samples=N_td_target, target_n=N_td_target)
             out_settings = FDSettings(**domain_kwargs, force_backend=backend)
             window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
 
@@ -250,34 +254,55 @@ class TDWaveformBase(LISAToolsParallelModule):
             )
         return td_signal.transform(out_settings, window=window)
 
-    def pad_td_signal_for_stft(self, td_signal: TDSignal, domain_kwargs: dict) -> TDSignal:
-        """
-        Pad a TDSignal with zeros if the initial timepoint would not be aligned with the STFT grid used for the data.
+    def _pad_td_signal(
+        self,
+        td_signal: TDSignal,
+        align_samples: int,
+        target_n: int = None,
+    ) -> TDSignal:
+        """Pad a TDSignal so its start is aligned with data_t0 and it reaches a target length.
+
+        Left-pads with zeros so that the number of samples between the (new) t0 and
+        data_t0 is an integer multiple of ``align_samples``.  For STFT this enforces
+        segment-boundary alignment (align_samples = nperseg); for FD pass the full
+        time-domain target length as ``align_samples`` so that the signal starts
+        exactly at data_t0.
+
+        Then, if ``target_n`` is given, right-pads with zeros so that the total number
+        of samples reaches ``target_n`` (ensuring the correct ``df`` after FFT).
 
         Args:
-            td_signal: Input TDSignal to be padded if necessary.
-            domain_kwargs: Keyword arguments for deriving the STFTSettings, used to determine the STFT grid.
+            td_signal: Input TDSignal (must already be on the dt grid of data_t0).
+            align_samples: Left-padding granularity.  The signal is extended so that
+                ``round((signal_t0 - data_t0) / dt)`` becomes divisible by this value.
+            target_n: If provided, right-pad to at least this many total samples.
         """
-        nperseg = round(domain_kwargs["big_dt"] / td_signal.settings.dt)
-        # now check if there is a integer number of nperseg samples between td_signal.settings.t0 and self.data_t0
-        n_samples_to_data_t0 = round((self.data_t0 - td_signal.settings.t0) / td_signal.settings.dt)
-        if n_samples_to_data_t0 % nperseg == 0:
-            # already aligned, no padding needed
+        dt = td_signal.settings.dt
+        n_to_data_t0 = round((td_signal.settings.t0 - self.data_t0) / dt)
+
+        # Left-pad: absorb the remainder so that the offset from data_t0
+        # becomes a multiple of align_samples.
+        n_left = n_to_data_t0 % align_samples
+
+        # Right-pad: reach target_n total samples.
+        n_right = 0
+        if target_n is not None:
+            new_n = td_signal.settings.N + n_left
+            if new_n < target_n:
+                n_right = target_n - new_n
+
+        if n_left == 0 and n_right == 0:
             return td_signal
 
-        else:
-            # need to pad with zeros at the beginning of the signal
-            n_pad = nperseg - (n_samples_to_data_t0 % nperseg)
-            # print(f"Padding TDSignal with {n_pad} zeros to align with STFT grid.")
-            pad_width = [(0, 0)] * len(td_signal.outer_shape) + [(n_pad, 0)]
-            padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant", constant_values=0)
-            padded_settings = TDSettings(
-                t0=td_signal.settings.t0 - n_pad * td_signal.settings.dt,
-                dt=td_signal.settings.dt,
-                N=td_signal.settings.N + n_pad,
-                force_backend=self.backend_name.split("_")[-1],
-            )
-            return TDSignal(arr=padded_arr, settings=padded_settings)
+        pad_width = [(0, 0)] * len(td_signal.outer_shape) + [(n_left, n_right)]
+        padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant", constant_values=0)
+        padded_settings = TDSettings(
+            t0=td_signal.settings.t0 - n_left * dt,
+            dt=dt,
+            N=td_signal.settings.N + n_left + n_right,
+            force_backend=self.backend_name.split("_")[-1],
+        )
+        return TDSignal(arr=padded_arr, settings=padded_settings)
 
     def _call_batched(
         self,
