@@ -240,7 +240,7 @@ class TDWaveformBase(LISAToolsParallelModule):
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
-            N_td_target = (domain_kwargs["N"] - 1) * 2
+            N_td_target = round(1 / (domain_kwargs["df"] * td_signal.settings.dt))
             # align_samples=N_td_target forces t0 == data_t0 (the offset is always
             # smaller than N_td_target, so the modulo absorbs the full gap).
             td_signal = self._pad_td_signal(td_signal, align_samples=N_td_target, target_n=N_td_target)

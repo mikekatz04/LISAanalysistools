@@ -149,10 +149,10 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_noiseless_periodic_without_norm"
+    base_file_name = "mbh_noiseless_fd"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [3]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -164,7 +164,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     tukey_alpha = 0.1
 
-    basis_domain = "stft"
+    basis_domain = "fd"
     stft_dt = 24 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
