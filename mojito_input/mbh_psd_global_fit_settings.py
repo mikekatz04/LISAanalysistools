@@ -190,16 +190,16 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     tukey_alpha = 0.1
 
-    basis_domain = "stft"
+    basis_domain = "stft" # "fd"
     stft_dt = 24 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
-                                 source_types=['noise', 'mbhb'],
+                                 source_types=['noise', 'mbhb'], #'vgb', 'gb'
                                  source_ids=dict(mbhb=source_ids),
                                  verbose=True,
                                  do_plots=True,
                                  orbits_class=L1Orbits,
-                                 orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
+                                 orbits_kwargs=dict(force_backend=backend, frame="ecliptic") #icrs
                                 )
     
     preprocess_kwargs = dict(normalize=False)
