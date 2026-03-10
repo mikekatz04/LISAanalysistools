@@ -4,11 +4,15 @@ likelihood computation of (d|h) and (h|h) inner products."""
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
 import numpy as np
 
-from .analysiscontainer import AnalysisContainerArray
-from .domains import STFTSettings, FDSettings
 from .utils.parallelbase import LISAToolsParallelModule
+
+if TYPE_CHECKING:
+    from .analysiscontainer import AnalysisContainerArray
+    from .domains import STFTSettings, FDSettings
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +38,8 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     ):
         super().__init__(force_backend=force_backend)
         self.tdi_type = tdi_type
-        assert settings in (STFTSettings, FDSettings), f"settings must be an instance of STFTSettings or FDSettings. No other domain is currently supported. Got {type(settings)}"
+        from .domains import STFTSettings, FDSettings
+        assert isinstance(settings, (STFTSettings, FDSettings)), f"settings must be an instance of STFTSettings or FDSettings. No other domain is currently supported. Got {type(settings)}"
 
         if acs is not None:
             self.extract_from_acs(acs, split_index)
@@ -61,15 +66,15 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     def extract_from_acs(self, acs: AnalysisContainerArray, split_index: int):
         """
         Extracts the necessary arrays and parameters from the given AnalysisContainerArray for the specified split index.
-    
-        """
 
+        """
+        self._acs = acs
+        self.split_index = split_index
         self.data_arr = acs.linear_data_arr[split_index]
-        self.invC_arr = acs.linear_invC_arr[split_index]
+        self.invC_arr = acs.linear_psd_arr[split_index]
         self.num_channels = acs.nchannels
-        num_acs = len(acs) # this works only if there is one split, I think?
-        self.num_data = num_acs
-        self.num_noise = num_acs
+        self.num_data = len(acs.gpu_splits[split_index])
+        self.num_noise = len(acs.gpu_splits[split_index])
         self.settings = acs.settings
 
     @property
@@ -135,9 +140,11 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     @property
     def pycpp_domain(self):
         if not hasattr(self, "_pycpp_domain"):
-            self._pycpp_domain = self.backend.FDDomainWrap(*self.domain_args)
-            logger.debug("Initialized FDDomainWrap with arguments: %s", self.domain_args)
+            self._pycpp_domain = self._create_pycpp_domain()
         return self._pycpp_domain
+
+    def _create_pycpp_domain(self):
+        raise NotImplementedError("Subclasses must implement _create_pycpp_domain")
 
 
     def compute_d_d_term(self, out=False, **kwargs):
@@ -160,10 +167,11 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 class STFTComputationGroup(BaseDomainComputationGroup):
     """Wraps C++ STFTDomainWrap for batched likelihood computation."""
     
-    def __init__(self, 
-                 *args, 
-                 settings: STFTSettings = None, 
+    def __init__(self,
+                 *args,
+                 settings: STFTSettings = None,
                  **kwargs):
+        from .domains import STFTSettings
         if settings is None or not isinstance(settings, STFTSettings):
             raise ValueError("settings must be an instance of STFTSettings for STFTComputationGroup.")
         super().__init__(*args, settings=settings, **kwargs)
@@ -173,20 +181,25 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         return [
             self.settings.NT,
             self.settings.NF,
-            self.acs.nchannels,
+            self.num_channels,
             self.settings.t0,
             self.settings.min_freq,
             self.settings.max_freq,
             self.settings.dt,
             self.settings.df,
-            self.data_arr, #todo: use the acs directly?
-            self.invC_arr, #todo: use the acs directly?
+            self.data_arr,
+            self.invC_arr,
             self.num_data,
             self.num_noise,
             self.backend.TDITypeDict[self.tdi_type],
         ]
-    
-    def compute_likelihood(
+
+    def _create_pycpp_domain(self):
+        domain = self.backend.STFTDomainWrap(*self.domain_args)
+        logger.debug("Initialized STFTDomainWrap with arguments: %s", self.domain_args)
+        return domain
+
+    def compute_likelihood_terms(
         self,
         template_vals,
         start_times,
@@ -200,17 +213,16 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         Parameters
         ----------
         template_vals : complex array
-            Shape ``(num_binaries, num_channels, n_t, n_f)`` for STFT or
-            ``(num_binaries, num_channels, n_f)`` for FD.
+            Shape ``(num_binaries, num_channels, n_t, n_f)``.
+        start_times : double array, shape ``(num_binaries,)``
         start_freqs : double array, shape ``(num_binaries,)``
         data_index : int array, shape ``(num_binaries,)``
         noise_index : int array, shape ``(num_binaries,)``
-        start_times : double array, shape ``(num_binaries,)``, optional
-            Required for STFT mode; ignored for FD.
 
         Returns
         -------
-        (d_h_out, h_h_out) : tuple of complex arrays, each shape ``(num_binaries,)``
+        d_h_out : complex array, shape ``(num_binaries,)``
+        h_h_out : complex array, shape ``(num_binaries,)``
         """
         num_binaries, _, num_times, num_freqs = template_vals.shape
 
@@ -218,10 +230,10 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         h_h_out = self.xp.zeros(num_binaries, dtype=self.xp.complex128)
 
         start_freqs = self.xp.ascontiguousarray(start_freqs, dtype=self.xp.float64)
+        start_times = self.xp.ascontiguousarray(start_times, dtype=self.xp.float64)
         data_index = self.xp.ascontiguousarray(data_index, dtype=self.xp.int32)
         noise_index = self.xp.ascontiguousarray(noise_index, dtype=self.xp.int32)
 
-        
         self.pycpp_domain.compute_likelihood_terms(
             d_h_out,
             h_h_out,
@@ -235,17 +247,38 @@ class STFTComputationGroup(BaseDomainComputationGroup):
             num_freqs,
         )
 
-        like_out = - 1. / 2. * (self.d_d + h_h_out - 2 * d_h_out).real
+        return d_h_out, h_h_out
+
+    def compute_likelihood(
+        self,
+        template_vals,
+        start_times,
+        start_freqs,
+        data_index,
+        noise_index,
+        **kwargs
+    ):
+        """Compute the log-likelihood for a batch of binaries.
+
+        Returns
+        -------
+        like_out : double array, shape ``(num_binaries,)``
+        """
+        d_h_out, h_h_out = self.compute_likelihood_terms(
+            template_vals, start_times, start_freqs, data_index, noise_index, **kwargs
+        )
+        like_out = -1. / 2. * (self.d_d + h_h_out - 2 * d_h_out).real
         return like_out
 
 class FDComputationGroup(BaseDomainComputationGroup):
     """
     Wraps C++ FDDomainWrap for batched likelihood computation.
     """
-    def __init__(self, 
-                 *args, 
-                 settings: FDSettings = None, 
+    def __init__(self,
+                 *args,
+                 settings: FDSettings = None,
                  **kwargs):
+        from .domains import FDSettings
         if settings is None or not isinstance(settings, FDSettings):
             raise ValueError("settings must be an instance of FDSettings for FDComputationGroup.")
         super().__init__(*args, settings=settings, **kwargs)
@@ -254,18 +287,23 @@ class FDComputationGroup(BaseDomainComputationGroup):
     def domain_args(self):
         return [
             self.settings.N,
-            self.acs.nchannels,
+            self.num_channels,
             self.settings.min_freq,
             self.settings.max_freq,
             self.settings.df,
-            self.data_arr, #todo: use the acs directly?
-            self.invC_arr, #todo: use the acs directly?
+            self.data_arr,
+            self.invC_arr,
             self.num_data,
             self.num_noise,
             self.backend.TDITypeDict[self.tdi_type],
         ]
-    
-    def compute_likelihood(
+
+    def _create_pycpp_domain(self):
+        domain = self.backend.FDDomainWrap(*self.domain_args)
+        logger.debug("Initialized FDDomainWrap with arguments: %s", self.domain_args)
+        return domain
+
+    def compute_likelihood_terms(
         self,
         template_vals,
         start_freqs,
@@ -278,17 +316,15 @@ class FDComputationGroup(BaseDomainComputationGroup):
         Parameters
         ----------
         template_vals : complex array
-            Shape ``(num_binaries, num_channels, n_t, n_f)`` for STFT or
-            ``(num_binaries, num_channels, n_f)`` for FD.
+            Shape ``(num_binaries, num_channels, n_f)``.
         start_freqs : double array, shape ``(num_binaries,)``
         data_index : int array, shape ``(num_binaries,)``
         noise_index : int array, shape ``(num_binaries,)``
-        start_times : double array, shape ``(num_binaries,)``, optional
-            Required for STFT mode; ignored for FD.
 
         Returns
         -------
-        (d_h_out, h_h_out) : tuple of complex arrays, each shape ``(num_binaries,)``
+        d_h_out : complex array, shape ``(num_binaries,)``
+        h_h_out : complex array, shape ``(num_binaries,)``
         """
         num_binaries, _, num_freqs = template_vals.shape
 
@@ -299,7 +335,6 @@ class FDComputationGroup(BaseDomainComputationGroup):
         data_index = self.xp.ascontiguousarray(data_index, dtype=self.xp.int32)
         noise_index = self.xp.ascontiguousarray(noise_index, dtype=self.xp.int32)
 
-        
         self.pycpp_domain.compute_likelihood_terms(
             d_h_out,
             h_h_out,
@@ -311,5 +346,24 @@ class FDComputationGroup(BaseDomainComputationGroup):
             num_freqs,
         )
 
-        like_out = - 1. / 2. * (self.d_d + h_h_out - 2 * d_h_out).real
+        return d_h_out, h_h_out
+
+    def compute_likelihood(
+        self,
+        template_vals,
+        start_freqs,
+        data_index,
+        noise_index,
+        **kwargs
+    ):
+        """Compute the log-likelihood for a batch of binaries.
+
+        Returns
+        -------
+        like_out : double array, shape ``(num_binaries,)``
+        """
+        d_h_out, h_h_out = self.compute_likelihood_terms(
+            template_vals, start_freqs, data_index, noise_index, **kwargs
+        )
+        like_out = -1. / 2. * (self.d_d + h_h_out - 2 * d_h_out).real
         return like_out

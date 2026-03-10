@@ -44,7 +44,7 @@ T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N
 {
     #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
         T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
-        
+
 #else
         py::buffer_info buf1 = input1.request();
 
@@ -56,6 +56,17 @@ T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N
         T* ptr1 = static_cast<T *>(buf1.ptr);
 #endif
         return ptr1;
+};
+
+template<typename T>
+T* return_pointer_no_check(array_type<T> input1)
+{
+    #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+        return static_cast<T *>(input1.get_compatible_typed_pointer());
+#else
+        py::buffer_info buf1 = input1.request();
+        return static_cast<T *>(buf1.ptr);
+#endif
 };
 
 
@@ -214,9 +225,9 @@ public:
                    int num_data, int num_noise, int tdi_type)
     {
         cmplx *data_ptr = reinterpret_cast<cmplx*>(
-            return_pointer_and_check_length(data_arr, "data", 1, 1));
+            return_pointer_no_check(data_arr));
         cmplx *invC_ptr = reinterpret_cast<cmplx*>(
-            return_pointer_and_check_length(invC_arr, "invC", 1, 1));
+            return_pointer_no_check(invC_arr));
 
         domain = new STFTDomain(num_times, num_freqs, num_channels,
                                 t0, f_min, f_max, dt, df,
@@ -245,7 +256,7 @@ public:
         cmplx *h_h_ptr = reinterpret_cast<cmplx*>(
             return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1));
         cmplx *tmpl_ptr = reinterpret_cast<cmplx*>(
-            return_pointer_and_check_length(template_vals, "template_vals", 1, 1));
+            return_pointer_no_check(template_vals));
         double *st_ptr = return_pointer_and_check_length(start_times, "start_times", num_binaries, 1);
         double *sf_ptr = return_pointer_and_check_length(start_freqs, "start_freqs", num_binaries, 1);
         int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
@@ -271,9 +282,9 @@ public:
                  int num_data, int num_noise, int tdi_type)
     {
         cmplx *data_ptr = reinterpret_cast<cmplx*>(
-            return_pointer_and_check_length(data_arr, "data", 1, 1));
+            return_pointer_no_check(data_arr));
         cmplx *invC_ptr = reinterpret_cast<cmplx*>(
-            return_pointer_and_check_length(invC_arr, "invC", 1, 1));
+            return_pointer_no_check(invC_arr));
 
         domain = new FDDomain(num_freqs, num_channels,
                               f_min, f_max, df,
@@ -300,7 +311,7 @@ public:
         cmplx *h_h_ptr = reinterpret_cast<cmplx*>(
             return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1));
         cmplx *tmpl_ptr = reinterpret_cast<cmplx*>(
-            return_pointer_and_check_length(template_vals, "template_vals", 1, 1));
+            return_pointer_no_check(template_vals));
         double *sf_ptr = return_pointer_and_check_length(start_freqs, "start_freqs", num_binaries, 1);
         int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
         int *ni_ptr = return_pointer_and_check_length(noise_index, "noise_index", num_binaries, 1);

@@ -122,7 +122,7 @@ public:
                cmplx *data_, cmplx *invC_,
                int num_data_, int num_noise_, int tdi_type_)
         : STFTSettings(num_times_, num_freqs_, num_channels_, t0_, f_min_, f_max_, dt_, df_),
-          data(data_), invC(invC_), num_data(num_data_), num_noise(num_noise_), tdi_type(tdi_type) {}
+          data(data_), invC(invC_), num_data(num_data_), num_noise(num_noise_), tdi_type(tdi_type_) {}
     // ----------------------------------------------------------------
     // Data indexing
     // ----------------------------------------------------------------

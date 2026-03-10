@@ -1,5 +1,6 @@
 #include "Detector.hpp"
 #include "PSD.hpp"
+#include "domains.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>

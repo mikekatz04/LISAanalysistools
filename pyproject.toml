@@ -182,6 +182,11 @@ report.omit = [
   "*/lisatools_backend_*/git_version.py",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
 [tool.uv.sources]
 mojito = { index = "gitlab-esa-commons" }
 lisaconstants = { index = "pypi" }
