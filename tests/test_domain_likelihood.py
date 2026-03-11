@@ -102,9 +102,9 @@ class TestFDAETDiagonal:
             force_backend=force_backend,
         )
 
-        start_freqs = np.array([f_min])
-        data_index = np.array([0], dtype=np.int32)
-        noise_index = np.array([0], dtype=np.int32)
+        start_freqs = xp.array([f_min])
+        data_index = xp.array([0], dtype=xp.int32)
+        noise_index = xp.array([0], dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
             template, data_index, noise_index, start_freqs,
@@ -114,8 +114,8 @@ class TestFDAETDiagonal:
         d_h_py = _python_inner_product_diag(data[0], template[0], invC[0], df, xp)
         h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df, xp)
 
-        np.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
-        np.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
+        xp.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
+        xp.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
 
 
 # =====================================================================
@@ -166,9 +166,9 @@ class TestFDXYZCross:
             force_backend=force_backend,
         )
 
-        start_freqs = np.array([f_min])
-        data_index = np.array([0], dtype=np.int32)
-        noise_index = np.array([0], dtype=np.int32)
+        start_freqs = xp.array([f_min])
+        data_index = xp.array([0], dtype=xp.int32)
+        noise_index = xp.array([0], dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
             template, data_index, noise_index, start_freqs
@@ -177,8 +177,8 @@ class TestFDXYZCross:
         d_h_py = _python_inner_product_cross(data[0], template[0], invC[0], df, xp)
         h_h_py = _python_inner_product_cross(template[0], template[0], invC[0], df, xp)
 
-        np.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
-        np.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
+        xp.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
+        xp.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
 
 
 # =====================================================================
@@ -251,10 +251,10 @@ class TestSTFTAET:
             force_backend=force_backend,
         )
 
-        start_freqs = np.array([start_freq])
-        start_times = np.array([start_time])
-        data_index = np.array([0], dtype=np.int32)
-        noise_index = np.array([0], dtype=np.int32)
+        start_freqs = xp.array([start_freq])
+        start_times = xp.array([start_time])
+        data_index = xp.array([0], dtype=xp.int32)
+        noise_index = xp.array([0], dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
             template, data_index, noise_index, start_freqs, start_times
@@ -264,8 +264,8 @@ class TestSTFTAET:
         d_h_py = _python_inner_product_diag_stft(data_sub, template[0], invC_sub, df, xp)
         h_h_py = _python_inner_product_diag_stft(template[0], template[0], invC_sub, df, xp)
 
-        np.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
-        np.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
+        xp.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
+        xp.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
 
 
 # =====================================================================
@@ -329,9 +329,9 @@ class TestMultiBinaryBatch:
             force_backend=force_backend,
         )
 
-        start_freqs = np.array([f_min + si * df for si in start_f_indices])
-        data_index = np.array(data_indices, dtype=np.int32)
-        noise_index = np.array(noise_indices, dtype=np.int32)
+        start_freqs = xp.array([f_min + si * df for si in start_f_indices])
+        data_index = xp.array(data_indices, dtype=xp.int32)
+        noise_index = xp.array(noise_indices, dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
             templates, data_index, noise_index, start_freqs
@@ -355,9 +355,9 @@ class TestMultiBinaryBatch:
 
             print(f"Binary {b}: Python d_h = {d_h_py}, h_h = {h_h_py}")
 
-            np.testing.assert_allclose(d_h_cpp[b], d_h_py, rtol=1e-10,
+            xp.testing.assert_allclose(d_h_cpp[b], d_h_py, rtol=1e-10,
                                        err_msg=f"d_h mismatch for binary {b}")
-            np.testing.assert_allclose(h_h_cpp[b], h_h_py, rtol=1e-10,
+            xp.testing.assert_allclose(h_h_cpp[b], h_h_py, rtol=1e-10,
                                        err_msg=f"h_h mismatch for binary {b}")
 
 
@@ -409,9 +409,9 @@ class TestFullLikelihood:
         d_d_py = _python_inner_product_diag(data[0], data[0], invC[0], df, xp)
         dcg.d_d = xp.array([d_d_py.real])
 
-        start_freqs = np.array([f_min])
-        data_index = np.array([0], dtype=np.int32)
-        noise_index = np.array([0], dtype=np.int32)
+        start_freqs = xp.array([f_min])
+        data_index = xp.array([0], dtype=xp.int32)
+        noise_index = xp.array([0], dtype=xp.int32)
 
         like_cpp = dcg.compute_likelihood(
             template, data_index, noise_index, start_freqs
@@ -422,7 +422,7 @@ class TestFullLikelihood:
         h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df, xp)
         like_py = -0.5 * (d_d_py + h_h_py - 2.0 * d_h_py).real
 
-        np.testing.assert_allclose(like_cpp[0], like_py, rtol=1e-10)
+        xp.testing.assert_allclose(like_cpp[0], like_py, rtol=1e-10)
 
 
 # =====================================================================
@@ -489,9 +489,9 @@ class TestMultiContainerDdSelection:
 
         dcg.d_d = xp.asarray(d_d)
 
-        start_freqs = np.full(num_binaries, f_min)
-        data_index = np.array(data_indices, dtype=np.int32)
-        noise_index = np.array(noise_indices, dtype=np.int32)
+        start_freqs = xp.full(num_binaries, f_min)
+        data_index = xp.array(data_indices, dtype=xp.int32)
+        noise_index = xp.array(noise_indices, dtype=xp.int32)
 
         like_cpp = dcg.compute_likelihood(
             templates, data_index, noise_index, start_freqs
@@ -505,7 +505,7 @@ class TestMultiContainerDdSelection:
             h_h_b = _python_inner_product_diag(templates[b], templates[b], invC[ni], df, xp)
             like_py = -0.5 * (d_d[di] + h_h_b - 2.0 * d_h_b).real
 
-            np.testing.assert_allclose(
+            xp.testing.assert_allclose(
                 like_cpp[b], like_py, rtol=1e-10,
                 err_msg=f"Likelihood mismatch for binary {b} (data_index={di})"
             )
