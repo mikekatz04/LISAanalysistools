@@ -135,3 +135,13 @@ if(LISATOOLS_WITH_GPU)
                                       binding.hpp)
 
 endif()
+
+# Generate lisatools_sources.cmake for downstream packages
+set(LISATOOLS_CU_SOURCE_NAMES "Detector.cu" "PSD.cu" "domains.cu")
+set(LISATOOLS_HEADER_NAMES "Detector.hpp" "PSD.hpp" "domains.hpp" "binding.hpp")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/lisatools_sources.cmake.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lisatools_sources.cmake"
+    @ONLY
+)

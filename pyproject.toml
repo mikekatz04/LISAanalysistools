@@ -144,6 +144,8 @@ sdist.include = [
   "src/lisatools/cutils/global.hpp",
   "src/lisatools/cutils/binding.cxx",
   "src/lisatools/cutils/binding.hpp",
+  "src/lisatools/cutils/lisatools_sources.cmake",
+  "src/lisatools/cutils/lisatools_sources.cmake.in",
 ]
 sdist.exclude = [
   ".devcontainer/",

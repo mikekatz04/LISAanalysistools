@@ -13,8 +13,13 @@ import pytest
 from lisatools.domaincomputation import FDComputationGroup, STFTComputationGroup
 from lisatools.domains import FDSettings, STFTSettings
 
+try:
+    import cupy as cp
+    backends = ["cpu", "gpu"]
+except ImportError:
+    backends = ["cpu"]
 
-def _python_inner_product_diag(sig1, sig2, invC, df):
+def _python_inner_product_diag(sig1, sig2, invC, df, xp=np):
     """Python reference: diagonal (AET) inner product.
 
     sig1, sig2: (num_channels, num_freqs) complex
@@ -22,10 +27,10 @@ def _python_inner_product_diag(sig1, sig2, invC, df):
 
     Returns complex scalar <sig1|sig2> = 4 * df * sum(conj(sig1) * invC * sig2).
     """
-    return 4.0 * df * np.sum(np.conj(sig1) * invC * sig2)
+    return 4.0 * df * xp.sum(xp.conj(sig1) * invC * sig2)
 
 
-def _python_inner_product_cross(sig1, sig2, invC, df):
+def _python_inner_product_cross(sig1, sig2, invC, df, xp=np):
     """Python reference: full-matrix (XYZ) inner product.
 
     sig1, sig2: (num_channels, num_freqs) complex
@@ -37,11 +42,11 @@ def _python_inner_product_cross(sig1, sig2, invC, df):
     result = 0.0 + 0.0j
     for i in range(num_channels):
         for j in range(num_channels):
-            result += np.sum(np.conj(sig1[i]) * invC[i, j] * sig2[j])
+            result += xp.sum(xp.conj(sig1[i]) * invC[i, j] * sig2[j])
     return 4.0 * df * result
 
 
-def _python_inner_product_diag_stft(sig1, sig2, invC, df):
+def _python_inner_product_diag_stft(sig1, sig2, invC, df, xp=np):
     """Python reference: diagonal STFT inner product.
 
     sig1, sig2: (num_channels, num_times, num_freqs) complex
@@ -49,22 +54,24 @@ def _python_inner_product_diag_stft(sig1, sig2, invC, df):
 
     Returns complex scalar.
     """
-    return 4.0 * df * np.sum(np.conj(sig1) * invC * sig2)
+    return 4.0 * df * xp.sum(xp.conj(sig1) * invC * sig2)
 
 
 # =====================================================================
 # Test 1: FD + AET diagonal — single binary
 # =====================================================================
 
-
+@pytest.mark.parametrize("force_backend", backends)
 class TestFDAETDiagonal:
-    def test_single_binary(self):
+    def test_single_binary(self, force_backend):
         rng = np.random.default_rng(42)
         num_channels = 2
         num_freqs = 1024
         df = 1.0 / 3600.0
         f_min = df  # start at df to avoid DC
         f_max = f_min + (num_freqs - 1) * df
+
+        xp = cp if force_backend == "gpu" else np
 
         # data: (1, num_channels, num_freqs) — 1 data instance
         data = (rng.standard_normal((1, num_channels, num_freqs))
@@ -78,7 +85,11 @@ class TestFDAETDiagonal:
         template = (rng.standard_normal((1, num_channels, num_freqs))
                     + 1j * rng.standard_normal((1, num_channels, num_freqs)))
 
-        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend="cpu")
+        template = xp.asarray(template)
+        data = xp.asarray(data)
+        invC = xp.asarray(invC)
+
+        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend=force_backend)
 
         dcg = FDComputationGroup(
             data_arr=data.ravel(),
@@ -88,7 +99,7 @@ class TestFDAETDiagonal:
             num_channels=num_channels,
             settings=settings,
             tdi_type="AET",
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
         start_freqs = np.array([f_min])
@@ -100,8 +111,8 @@ class TestFDAETDiagonal:
         )
 
         # Python reference
-        d_h_py = _python_inner_product_diag(data[0], template[0], invC[0], df)
-        h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df)
+        d_h_py = _python_inner_product_diag(data[0], template[0], invC[0], df, xp)
+        h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df, xp)
 
         np.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
         np.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
@@ -111,9 +122,9 @@ class TestFDAETDiagonal:
 # Test 2: FD + XYZ full covariance — single binary
 # =====================================================================
 
-
+@pytest.mark.parametrize("force_backend", backends)
 class TestFDXYZCross:
-    def test_single_binary(self):
+    def test_single_binary(self, force_backend):
         rng = np.random.default_rng(123)
         num_channels = 3
         num_freqs = 512
@@ -121,12 +132,14 @@ class TestFDXYZCross:
         f_min = df
         f_max = f_min + (num_freqs - 1) * df
 
+        xp = cp if force_backend == "gpu" else np
+
         # data: (1, 3, num_freqs)
         data = (rng.standard_normal((1, num_channels, num_freqs))
                 + 1j * rng.standard_normal((1, num_channels, num_freqs)))
 
         # invC: (1, 3, 3, num_freqs) — full cross-channel
-        # Build Hermitian positive-definite per freq bin
+        # Build Hermitian positive-definite per freq bin (in numpy, then transfer)
         invC = np.zeros((1, num_channels, num_channels, num_freqs), dtype=np.complex128)
         for f_idx in range(num_freqs):
             A = rng.standard_normal((num_channels, num_channels)) + 1j * rng.standard_normal((num_channels, num_channels))
@@ -136,7 +149,11 @@ class TestFDXYZCross:
         template = (rng.standard_normal((1, num_channels, num_freqs))
                     + 1j * rng.standard_normal((1, num_channels, num_freqs)))
 
-        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend="cpu")
+        data = xp.asarray(data)
+        invC = xp.asarray(invC)
+        template = xp.asarray(template)
+
+        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend=force_backend)
 
         dcg = FDComputationGroup(
             data_arr=data.ravel(),
@@ -146,7 +163,7 @@ class TestFDXYZCross:
             num_channels=num_channels,
             settings=settings,
             tdi_type="XYZ",
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
         start_freqs = np.array([f_min])
@@ -157,8 +174,8 @@ class TestFDXYZCross:
             template, data_index, noise_index, start_freqs
         )
 
-        d_h_py = _python_inner_product_cross(data[0], template[0], invC[0], df)
-        h_h_py = _python_inner_product_cross(template[0], template[0], invC[0], df)
+        d_h_py = _python_inner_product_cross(data[0], template[0], invC[0], df, xp)
+        h_h_py = _python_inner_product_cross(template[0], template[0], invC[0], df, xp)
 
         np.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
         np.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
@@ -169,8 +186,9 @@ class TestFDXYZCross:
 # =====================================================================
 
 
+@pytest.mark.parametrize("force_backend", backends)
 class TestSTFTAET:
-    def test_single_binary(self):
+    def test_single_binary(self, force_backend):
         rng = np.random.default_rng(77)
         num_channels = 2
         num_times = 8
@@ -180,6 +198,8 @@ class TestSTFTAET:
         t0 = 0.0
         f_min = df
         f_max = f_min + (num_freqs - 1) * df
+
+        xp = cp if force_backend == "gpu" else np
 
         # data: (1, num_channels, num_times, num_freqs)
         data = (rng.standard_normal((1, num_channels, num_times, num_freqs))
@@ -201,11 +221,23 @@ class TestSTFTAET:
         template = (rng.standard_normal((1, num_channels, n_t_template, n_f_template))
                     + 1j * rng.standard_normal((1, num_channels, n_t_template, n_f_template)))
 
+        # Python reference sub-grids (computed before transfer to GPU)
+        data_sub = data[0, :, start_t_idx:start_t_idx + n_t_template,
+                        start_f_idx:start_f_idx + n_f_template]
+        invC_sub = invC[0, :, start_t_idx:start_t_idx + n_t_template,
+                        start_f_idx:start_f_idx + n_f_template]
+
+        data = xp.asarray(data)
+        invC = xp.asarray(invC)
+        template = xp.asarray(template)
+        data_sub = xp.asarray(data_sub)
+        invC_sub = xp.asarray(invC_sub)
+
         settings = STFTSettings(
             t0=t0, dt=dt, df=df,
             NT=num_times, NF=num_freqs,
             min_freq=f_min, max_freq=f_max,
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
         dcg = STFTComputationGroup(
@@ -216,7 +248,7 @@ class TestSTFTAET:
             num_channels=num_channels,
             settings=settings,
             tdi_type="AET",
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
         start_freqs = np.array([start_freq])
@@ -229,12 +261,8 @@ class TestSTFTAET:
         )
 
         # Python reference: extract the sub-grid from data and invC
-        data_sub = data[0, :, start_t_idx:start_t_idx + n_t_template,
-                        start_f_idx:start_f_idx + n_f_template]
-        invC_sub = invC[0, :, start_t_idx:start_t_idx + n_t_template,
-                        start_f_idx:start_f_idx + n_f_template]
-        d_h_py = _python_inner_product_diag_stft(data_sub, template[0], invC_sub, df)
-        h_h_py = _python_inner_product_diag_stft(template[0], template[0], invC_sub, df)
+        d_h_py = _python_inner_product_diag_stft(data_sub, template[0], invC_sub, df, xp)
+        h_h_py = _python_inner_product_diag_stft(template[0], template[0], invC_sub, df, xp)
 
         np.testing.assert_allclose(d_h_cpp[0], d_h_py, rtol=1e-10)
         np.testing.assert_allclose(h_h_cpp[0], h_h_py, rtol=1e-10)
@@ -245,8 +273,9 @@ class TestSTFTAET:
 # =====================================================================
 
 
+@pytest.mark.parametrize("force_backend", backends)
 class TestMultiBinaryBatch:
-    def test_five_binaries(self):
+    def test_five_binaries(self, force_backend):
         rng = np.random.default_rng(999)
         num_channels = 2
         num_freqs = 256
@@ -256,6 +285,8 @@ class TestMultiBinaryBatch:
         num_data = 3
         num_noise = 2
         num_binaries = 5
+
+        xp = cp if force_backend == "gpu" else np
 
         # data: (num_data, num_channels, num_freqs)
         data = (rng.standard_normal((num_data, num_channels, num_freqs))
@@ -281,7 +312,11 @@ class TestMultiBinaryBatch:
                 + 1j * rng.standard_normal((num_channels, nf))
             )
 
-        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend="cpu")
+        data = xp.asarray(data)
+        invC = xp.asarray(invC)
+        templates = xp.asarray(templates)
+
+        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend=force_backend)
 
         dcg = FDComputationGroup(
             data_arr=data.ravel(),
@@ -291,7 +326,7 @@ class TestMultiBinaryBatch:
             num_channels=num_channels,
             settings=settings,
             tdi_type="AET",
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
         start_freqs = np.array([f_min + si * df for si in start_f_indices])
@@ -315,8 +350,8 @@ class TestMultiBinaryBatch:
             c_sub = invC[ni, :, sf:sf + max_nf]
             h_sub = templates[b]
 
-            d_h_py = _python_inner_product_diag(d_sub, h_sub, c_sub, df)
-            h_h_py = _python_inner_product_diag(h_sub, h_sub, c_sub, df)
+            d_h_py = _python_inner_product_diag(d_sub, h_sub, c_sub, df, xp)
+            h_h_py = _python_inner_product_diag(h_sub, h_sub, c_sub, df, xp)
 
             print(f"Binary {b}: Python d_h = {d_h_py}, h_h = {h_h_py}")
 
@@ -331,8 +366,9 @@ class TestMultiBinaryBatch:
 # =====================================================================
 
 
+@pytest.mark.parametrize("force_backend", backends)
 class TestFullLikelihood:
-    def test_likelihood_value(self):
+    def test_likelihood_value(self, force_backend):
         """Single container, single binary — d_d indexing is trivial."""
         rng = np.random.default_rng(2024)
         num_channels = 2
@@ -340,6 +376,8 @@ class TestFullLikelihood:
         df = 1.0 / 3600.0
         f_min = df
         f_max = f_min + (num_freqs - 1) * df
+
+        xp = cp if force_backend == "gpu" else np
 
         data = (rng.standard_normal((1, num_channels, num_freqs))
                 + 1j * rng.standard_normal((1, num_channels, num_freqs)))
@@ -350,7 +388,11 @@ class TestFullLikelihood:
         template = (rng.standard_normal((1, num_channels, num_freqs))
                     + 1j * rng.standard_normal((1, num_channels, num_freqs)))
 
-        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend="cpu")
+        data = xp.asarray(data)
+        invC = xp.asarray(invC)
+        template = xp.asarray(template)
+
+        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend=force_backend)
 
         dcg = FDComputationGroup(
             data_arr=data.ravel(),
@@ -360,12 +402,12 @@ class TestFullLikelihood:
             num_channels=num_channels,
             settings=settings,
             tdi_type="AET",
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
         # Manually set d_d (shape (num_data,) = (1,))
-        d_d_py = _python_inner_product_diag(data[0], data[0], invC[0], df)
-        dcg.d_d = np.array([d_d_py.real])
+        d_d_py = _python_inner_product_diag(data[0], data[0], invC[0], df, xp)
+        dcg.d_d = xp.array([d_d_py.real])
 
         start_freqs = np.array([f_min])
         data_index = np.array([0], dtype=np.int32)
@@ -376,8 +418,8 @@ class TestFullLikelihood:
         )
 
         # Python reference likelihood
-        d_h_py = _python_inner_product_diag(data[0], template[0], invC[0], df)
-        h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df)
+        d_h_py = _python_inner_product_diag(data[0], template[0], invC[0], df, xp)
+        h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df, xp)
         like_py = -0.5 * (d_d_py + h_h_py - 2.0 * d_h_py).real
 
         np.testing.assert_allclose(like_cpp[0], like_py, rtol=1e-10)
@@ -388,6 +430,7 @@ class TestFullLikelihood:
 # =====================================================================
 
 
+@pytest.mark.parametrize("force_backend", backends)
 class TestMultiContainerDdSelection:
     """Multiple containers, multiple binaries with repeated data_index.
 
@@ -395,7 +438,7 @@ class TestMultiContainerDdSelection:
     per-container array, even when len(data_index) >> num_data.
     """
 
-    def test_per_binary_d_d(self):
+    def test_per_binary_d_d(self, force_backend):
         rng = np.random.default_rng(7777)
         num_channels = 2
         num_freqs = 256
@@ -404,6 +447,8 @@ class TestMultiContainerDdSelection:
         f_max = f_min + (num_freqs - 1) * df
         num_data = 3
         num_noise = 3
+
+        xp = cp if force_backend == "gpu" else np
 
         # 3 distinct data containers and noise instances
         data = (rng.standard_normal((num_data, num_channels, num_freqs))
@@ -420,7 +465,16 @@ class TestMultiContainerDdSelection:
         templates = (rng.standard_normal((num_binaries, num_channels, num_freqs))
                      + 1j * rng.standard_normal((num_binaries, num_channels, num_freqs)))
 
-        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend="cpu")
+        # Compute d_d per container in numpy before transferring to device
+        d_d = np.zeros(num_data, dtype=np.float64)
+        for i in range(num_data):
+            d_d[i] = _python_inner_product_diag(data[i], data[i], invC[i], df).real
+
+        data = xp.asarray(data)
+        invC = xp.asarray(invC)
+        templates = xp.asarray(templates)
+
+        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend=force_backend)
 
         dcg = FDComputationGroup(
             data_arr=data.ravel(),
@@ -430,14 +484,10 @@ class TestMultiContainerDdSelection:
             num_channels=num_channels,
             settings=settings,
             tdi_type="AET",
-            force_backend="cpu",
+            force_backend=force_backend,
         )
 
-        # Compute d_d per container (shape (num_data,))
-        d_d = np.zeros(num_data, dtype=np.float64)
-        for i in range(num_data):
-            d_d[i] = _python_inner_product_diag(data[i], data[i], invC[i], df).real
-        dcg.d_d = d_d
+        dcg.d_d = xp.asarray(d_d)
 
         start_freqs = np.full(num_binaries, f_min)
         data_index = np.array(data_indices, dtype=np.int32)
@@ -451,8 +501,8 @@ class TestMultiContainerDdSelection:
         for b in range(num_binaries):
             di = data_indices[b]
             ni = noise_indices[b]
-            d_h_b = _python_inner_product_diag(data[di], templates[b], invC[ni], df)
-            h_h_b = _python_inner_product_diag(templates[b], templates[b], invC[ni], df)
+            d_h_b = _python_inner_product_diag(data[di], templates[b], invC[ni], df, xp)
+            h_h_b = _python_inner_product_diag(templates[b], templates[b], invC[ni], df, xp)
             like_py = -0.5 * (d_d[di] + h_h_b - 2.0 * d_h_b).real
 
             np.testing.assert_allclose(
