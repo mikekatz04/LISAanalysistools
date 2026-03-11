@@ -21,6 +21,29 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     One instance per GPU split.  Holds references to the linearized arrays
     to prevent GC from invalidating the C++ domain's pointers.
+
+    Parameters
+    ----------
+    acs : AnalysisContainerArray, optional
+        The AnalysisContainerArray containing the data and noise arrays. If not provided, the necessary arrays and parameters must be provided directly.
+    split_index : int, optional
+        The index of the GPU split to use from the AnalysisContainerArray. Only used if `acs` is provided. Default is 0.
+    data_arr : np.ndarray, optional
+        The linearized data array for the current split. Only used if `acs` is not provided.
+    invC_arr : np.ndarray, optional
+        The linearized inverse noise PSD array for the current split. Only used if `acs` is not provided.
+    num_data : int, optional
+        The number of data points for the current split. Only used if `acs` is not provided.
+    num_noise : int, optional
+        The number of noise points for the current split. Only used if `acs` is not provided.
+    num_channels : int, optional
+        The number of channels for the current split. Only used if `acs` is not provided.
+    settings : STFTSettings or FDSettings, optional
+        The settings for the domain computation. Must be an instance of STFTSettings for STFTComputationGroup or FDSettings for FDComputationGroup. Only used if `acs` is not provided.
+    tdi_type : str, optional
+        The TDI type to use for the likelihood computation. Default is "XYZ". Must be a key in the backend's TDITypeDict.
+    force_backend : str, optional   
+        If provided, forces the use of the specified backend. Must be one of the supported backends for the domain computation. Default is 'cpu'.   
     """
 
     def __init__(
@@ -66,6 +89,13 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     def extract_from_acs(self, acs: AnalysisContainerArray, split_index: int):
         """
         Extracts the necessary arrays and parameters from the given AnalysisContainerArray for the specified split index.
+
+        Parameters
+        ----------
+        acs : AnalysisContainerArray
+            The AnalysisContainerArray containing the data and noise arrays.
+        split_index : int
+            The index of the GPU split to use from the AnalysisContainerArray.
 
         """
         self._acs = acs
@@ -149,16 +179,30 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     def compute_d_d_term(self, out=False, **kwargs):
         """
-        Compute (d|d) term for the current data and noise arrays. We can use the AnalysisContainerArray method for this.
+        Compute (d|d) term for the containers in this split only.
 
         Parameters
         ----------
         out : bool, optional
             If True, return the computed (d|d) term. Otherwise, store it in the instance variable `self.d_d`. Default is False.
         **kwargs
-            Additional keyword arguments to pass to the `inner_product` method of the AnalysisContainerArray.
-        """ 
-        self.d_d = self.acs.inner_product(**kwargs)
+            Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
+
+        Notes
+        -----
+        The result ``self.d_d`` has shape ``(num_data,)`` — one value per
+        container in the split, indexed by intra-split index.
+        """
+        if self.acs is None:
+            raise ValueError("AnalysisContainerArray is not set. Cannot compute (d|d) term.")
+
+        split_container_ids = self.acs.gpu_splits[self.split_index]
+        d_d = self.xp.zeros(self.num_data, dtype=self.xp.float64)
+        for i, global_idx in enumerate(split_container_ids):
+            ac = self.acs.acs.flatten()[global_idx]
+            d_d[i] = ac.inner_product(**kwargs)
+        self.d_d = d_d
+
         if out:
             return self.d_d
 
@@ -267,7 +311,8 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         d_h_out, h_h_out = self.compute_likelihood_terms(
             template_vals, start_times, start_freqs, data_index, noise_index, **kwargs
         )
-        like_out = -1. / 2. * (self.d_d + h_h_out - 2 * d_h_out).real
+        d_d_per_binary = self.d_d[data_index]
+        like_out = -1. / 2. * (d_d_per_binary + h_h_out - 2 * d_h_out).real
         return like_out
 
 class FDComputationGroup(BaseDomainComputationGroup):
@@ -365,5 +410,6 @@ class FDComputationGroup(BaseDomainComputationGroup):
         d_h_out, h_h_out = self.compute_likelihood_terms(
             template_vals, start_freqs, data_index, noise_index, **kwargs
         )
-        like_out = -1. / 2. * (self.d_d + h_h_out - 2 * d_h_out).real
+        d_d_per_binary = self.d_d[data_index]
+        like_out = -1. / 2. * (d_d_per_binary + h_h_out - 2 * d_h_out).real
         return like_out

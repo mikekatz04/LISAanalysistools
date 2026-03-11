@@ -333,6 +333,7 @@ class TestMultiBinaryBatch:
 
 class TestFullLikelihood:
     def test_likelihood_value(self):
+        """Single container, single binary — d_d indexing is trivial."""
         rng = np.random.default_rng(2024)
         num_channels = 2
         num_freqs = 512
@@ -362,23 +363,99 @@ class TestFullLikelihood:
             force_backend="cpu",
         )
 
+        # Manually set d_d (shape (num_data,) = (1,))
+        d_d_py = _python_inner_product_diag(data[0], data[0], invC[0], df)
+        dcg.d_d = np.array([d_d_py.real])
+
         start_freqs = np.array([f_min])
         data_index = np.array([0], dtype=np.int32)
         noise_index = np.array([0], dtype=np.int32)
 
-        d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
+        like_cpp = dcg.compute_likelihood(
             template, start_freqs, data_index, noise_index
         )
-
-        # Compute d_d with Python
-        d_d_py = _python_inner_product_diag(data[0], data[0], invC[0], df)
-
-        # Full likelihood: -0.5 * (d_d + h_h - 2*d_h).real
-        like_cpp = -0.5 * (d_d_py + h_h_cpp[0] - 2.0 * d_h_cpp[0]).real
 
         # Python reference likelihood
         d_h_py = _python_inner_product_diag(data[0], template[0], invC[0], df)
         h_h_py = _python_inner_product_diag(template[0], template[0], invC[0], df)
         like_py = -0.5 * (d_d_py + h_h_py - 2.0 * d_h_py).real
 
-        np.testing.assert_allclose(like_cpp, like_py, rtol=1e-10)
+        np.testing.assert_allclose(like_cpp[0], like_py, rtol=1e-10)
+
+
+# =====================================================================
+# Test 6: Multi-container d_d selection — FD + AET
+# =====================================================================
+
+
+class TestMultiContainerDdSelection:
+    """Multiple containers, multiple binaries with repeated data_index.
+
+    Verifies that each binary selects the correct d_d value from the
+    per-container array, even when len(data_index) >> num_data.
+    """
+
+    def test_per_binary_d_d(self):
+        rng = np.random.default_rng(7777)
+        num_channels = 2
+        num_freqs = 256
+        df = 1.0 / 3600.0
+        f_min = df
+        f_max = f_min + (num_freqs - 1) * df
+        num_data = 3
+        num_noise = 3
+
+        # 3 distinct data containers and noise instances
+        data = (rng.standard_normal((num_data, num_channels, num_freqs))
+                + 1j * rng.standard_normal((num_data, num_channels, num_freqs)))
+        invC = np.abs(rng.standard_normal((num_noise, num_channels, num_freqs))) + 0.1
+        invC = invC.astype(np.complex128)
+
+        # 8 binaries — more than num_data, with repeated data_index values
+        # Simulates ntemps * nwalkers scenario
+        num_binaries = 8
+        data_indices = [0, 1, 2, 0, 1, 2, 0, 1]
+        noise_indices = [0, 0, 1, 1, 2, 2, 0, 1]
+
+        templates = (rng.standard_normal((num_binaries, num_channels, num_freqs))
+                     + 1j * rng.standard_normal((num_binaries, num_channels, num_freqs)))
+
+        settings = FDSettings(N=num_freqs, df=df, min_freq=f_min, max_freq=f_max, force_backend="cpu")
+
+        dcg = FDComputationGroup(
+            data_arr=data.ravel(),
+            invC_arr=invC.ravel(),
+            num_data=num_data,
+            num_noise=num_noise,
+            num_channels=num_channels,
+            settings=settings,
+            tdi_type="AET",
+            force_backend="cpu",
+        )
+
+        # Compute d_d per container (shape (num_data,))
+        d_d = np.zeros(num_data, dtype=np.float64)
+        for i in range(num_data):
+            d_d[i] = _python_inner_product_diag(data[i], data[i], invC[i], df).real
+        dcg.d_d = d_d
+
+        start_freqs = np.full(num_binaries, f_min)
+        data_index = np.array(data_indices, dtype=np.int32)
+        noise_index = np.array(noise_indices, dtype=np.int32)
+
+        like_cpp = dcg.compute_likelihood(
+            templates, start_freqs, data_index, noise_index
+        )
+
+        # Python reference: compute per-binary likelihood
+        for b in range(num_binaries):
+            di = data_indices[b]
+            ni = noise_indices[b]
+            d_h_b = _python_inner_product_diag(data[di], templates[b], invC[ni], df)
+            h_h_b = _python_inner_product_diag(templates[b], templates[b], invC[ni], df)
+            like_py = -0.5 * (d_d[di] + h_h_b - 2.0 * d_h_b).real
+
+            np.testing.assert_allclose(
+                like_cpp[b], like_py, rtol=1e-10,
+                err_msg=f"Likelihood mismatch for binary {b} (data_index={di})"
+            )
