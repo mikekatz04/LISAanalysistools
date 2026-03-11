@@ -32,7 +32,7 @@ from ..sensitivity import (
     XYZ2SensitivityMatrix,
     XYZSensitivityBackend,
 )
-from ..utils.utility import AET, detrend, tukey
+from ..utils.utility import AET, detrend, windowfun
 from .preprocessing import BaseProcessingStep
 
 
@@ -119,7 +119,8 @@ class GeneralSettings(Settings):
     backup_iter: int = None
     nwalkers: int = None
     ntemps: int = None
-    tukey_alpha: float = None
+    wintype: str = "tukey"
+    winalpha: float = None
     gpus: typing.List[int] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
@@ -244,7 +245,7 @@ class GeneralSetup(Setup, GeneralSettings):
                 force_backend=self.force_backend,
             )
             nperseg = domain_settings.get_nperseg(dt)
-            window = tukey(nperseg, alpha=self.tukey_alpha)
+            window, _ = windowfun(self.wintype, nperseg, alpha=self.winalpha)
             plot_kwargs_list = [
                 dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
                 dict(channel=0, plot_type="fd", time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
@@ -260,7 +261,7 @@ class GeneralSetup(Setup, GeneralSettings):
             self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
 
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
-            window = tukey(Nt, alpha=self.tukey_alpha)
+            window, _ = windowfun(self.wintype, Nt, alpha=self.winalpha)
             plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
 
         else:

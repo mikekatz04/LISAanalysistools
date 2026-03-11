@@ -102,15 +102,15 @@ def get_general_erebor_settings() -> GeneralSetup:
     Tobs = 1. * YRSID_SI / 12.0
     dt = 2.5
 
-    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
-    data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "psd_separate_factor2_1st_try"
-    file_store_dir = head_dir + "mojito_output/"
+    data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
+    base_file_name = "noise-only_spline-dev_v1"
+    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [3]
+    gpus = [cp.cuda.runtime.getDevice()]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -119,10 +119,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 20
     ntemps = 4
 
-    tukey_alpha = 0.05
+    winalpha = 0.1 # bh tryout
+    wintype = "bh92"
 
-    basis_domain = "stft"
-    stft_dt = 6 * 3600.0  # 8 hours
+    basis_domain = "stft" # fd
+    stft_dt = 24 * 3600.0  # how many hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['noise'],
@@ -132,7 +133,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     
     preprocess_kwargs = dict(normalize=True)
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
+    sensitivity_init_kwargs = dict(tdi_generation=2, 
+                                   mask_percentage=0.02,
+                                   use_splines=False)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
@@ -147,7 +150,8 @@ def get_general_erebor_settings() -> GeneralSetup:
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        winalpha=winalpha,
+        wintype=wintype,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
@@ -220,4 +224,4 @@ def get_global_fit_settings(copy_settings_file=False):
 
 if __name__ == "__main__":
     settings = get_global_fit_settings()
-    breakpoint()
+    # breakpoint()
