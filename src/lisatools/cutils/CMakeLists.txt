@@ -121,6 +121,7 @@ if(LISATOOLS_WITH_GPU)
   add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu domains.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
+  target_include_directories(lisaanalysistools_gpu_detector_gpu_static SYSTEM PUBLIC ${CUDAToolkit_INCLUDE_DIRS})
 
   # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
