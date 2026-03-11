@@ -1146,7 +1146,7 @@ if jax_here:
             if squeeze_t:
                 output = output.squeeze(axis=0)
 
-            return output.block_until_ready()
+            return output
 
         def get_light_travel_times(self, t, link):
             """Compute light travel times using JAX interpolation.
@@ -1175,7 +1175,7 @@ if jax_here:
             if squeeze_t:
                 output = output.squeeze(axis=0)
 
-            return output.block_until_ready()
+            return output
 
         def get_normal_unit_vec(self, t, link):
             """Compute normal unit vectors using JAX interpolation.
@@ -1204,7 +1204,7 @@ if jax_here:
             if squeeze_t:
                 output = output.squeeze(axis=0)
 
-            return output.block_until_ready()
+            return output
 
         def tree_flatten(self):
             # Collect children (JAX arrays)

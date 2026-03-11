@@ -116,7 +116,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     import jax
     jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
     # few.get_backend('cuda12x')
-    nwalkers = 20
+    nwalkers = 30
     ntemps = 4
 
     winalpha = 0.1 # bh tryout
@@ -143,7 +143,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
         start_freq=1e-4,
-        end_freq=1e-1,
+        end_freq=1e-2,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=103209,

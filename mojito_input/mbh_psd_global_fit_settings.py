@@ -39,7 +39,7 @@ from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
 
-    psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors)
+    psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, permute_every=50)
 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
@@ -60,7 +60,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["mbh"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = 1e-4
+        spread = np.array([1e-4, 1e-4, 1e-4, 1e-4, 1e-3, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2])
 
         scatter_around_injection(
             state, "mbh", injection_params, spread,
@@ -68,7 +68,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     # todo test this 
     
-    _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state)
+    _, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=40)
     mbh_pe_moves = GFCombineMove(moves=[mbh_pe_move, psd_pe_move], share_temperature_control=False)
     recipe.add_recipe_component(PERecipeStep(moves=[mbh_pe_moves]), name="mbh+psd pe")
 
@@ -131,6 +131,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_min=1,
         ndim=11,
         num_prop_repeats=40,
+        log_dir=general_set.file_store_dir
     )
 
     return MBHSetup(mbh_settings)
@@ -155,7 +156,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         initialize_kwargs=initialize_kwargs_psd,
         priors=priors,
         ndim=2,
-        injection=injection
+        injection=injection,
+        log_dir=general_set.file_store_dir
     )
 
     return PSDSetup(psd_settings)
@@ -167,13 +169,13 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     source_ids = [18]
     
-    Tobs = 5. * YRSID_SI / 12.0
+    Tobs = 4. * YRSID_SI / 12.0
     dt = 2.5
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_psd_separate_4th_try_without_tempering_alpha_0.01"
+    base_file_name = "mbh_psd_separate_fd"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [3]
@@ -184,23 +186,23 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 1
+    ntemps = 3
 
-    tukey_alpha = 0.01
+    tukey_alpha = 0.1
 
-    basis_domain = "stft"
-    stft_dt = 8 * 3600.0  # hours
+    basis_domain = "fd" # "fd"
+    stft_dt = 24 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
-                                 source_types=['noise', 'mbhb'],
+                                 source_types=['noise', 'mbhb'], #'vgb', 'gb'
                                  source_ids=dict(mbhb=source_ids),
                                  verbose=True,
                                  do_plots=True,
                                  orbits_class=L1Orbits,
-                                 orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
+                                 orbits_kwargs=dict(force_backend=backend, frame="ecliptic") #icrs
                                 )
     
-    preprocess_kwargs = dict(normalize=True)
+    preprocess_kwargs = dict(normalize=False)
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
@@ -210,7 +212,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
         start_freq=5e-5,
-        end_freq=1e-1,
+        end_freq=1e-2,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=103209,

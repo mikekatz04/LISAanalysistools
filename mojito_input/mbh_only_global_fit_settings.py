@@ -130,7 +130,8 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=1,
         nleaves_min=1,
         ndim=11,
-        num_prop_repeats=20,
+        num_prop_repeats=40,
+        log_dir=general_set.file_store_dir
     )
 
     return MBHSetup(mbh_settings)
@@ -142,13 +143,13 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     source_ids = [18]
     
-    Tobs = 5. * YRSID_SI / 12.0
+    Tobs = 4. * YRSID_SI / 12.0
     dt = 2.5
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_separate_fd_1st_try"
+    base_file_name = "mbh_noiseless_fd"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
@@ -159,15 +160,15 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 2
+    ntemps = 3
 
-    tukey_alpha = 0.01
+    tukey_alpha = 0.1
 
     basis_domain = "fd"
-    stft_dt = 8 * 3600.0  # hours
+    stft_dt = 24 * 3600.0  # hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
-                                 source_types=['mbhb'],
+                                 source_types=['mbhb',],
                                  source_ids=dict(mbhb=source_ids),
                                  verbose=True,
                                  do_plots=True,
@@ -175,7 +176,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
                                 )
     
-    preprocess_kwargs = {}
+    preprocess_kwargs = dict(normalize=False)
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
@@ -185,7 +186,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
         start_freq=5e-5,
-        end_freq=1e-1,
+        end_freq=1e-2,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=103209,

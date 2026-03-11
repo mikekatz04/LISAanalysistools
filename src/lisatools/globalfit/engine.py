@@ -99,6 +99,7 @@ class Settings:
     other_tempering_kwargs: Optional[dict] = None
     branch_state: Optional[eryn_State] = None
     branch_backend: Optional[eryn_Backend] = None
+    log_dir: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -148,7 +149,10 @@ class GeneralSetup(Setup, GeneralSettings):
 
         level = logging.DEBUG
         name = "GeneralSetup"
-        self.logger = init_logger(filename="gb_setup.log", level=level, name=name)
+        # Ensure artifacts dir exists before creating log file handler
+        if not os.path.exists(self.artifacts_file_dir):
+            os.makedirs(self.artifacts_file_dir)
+        self.logger = init_logger(filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir)
 
         self.init_setup()
 
@@ -208,7 +212,7 @@ class GeneralSetup(Setup, GeneralSettings):
         default_preprocess_kwargs = dict(
             plot_folder=self.artifacts_file_dir,
             do_detrend=False,
-            highpass_kwargs=dict(cutoff=5e-5, order=2, zero_phase=True),
+            highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
             trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
             Tobs=self.Tobs,
         )
@@ -223,6 +227,10 @@ class GeneralSetup(Setup, GeneralSettings):
             self.logger.debug(f"Preprocess setting: {key} = {value}")
         # now extract `normalize` if present
         normalize_window = preprocess_kwargs.pop("normalize", False)
+        
+        if normalize_window:
+            self.logger.warning("Window normalization is turned off for now, setting `normalize_window` to False.")
+            normalize_window = False
 
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
@@ -266,6 +274,9 @@ class GeneralSetup(Setup, GeneralSettings):
 
         else:
             raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
+
+        # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
+        # self.logger.debug(f"Window factor for normalization: {window_factor}")
 
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True

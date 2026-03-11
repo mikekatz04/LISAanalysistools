@@ -26,7 +26,7 @@ from eryn.utils.plot import PlotContainer
 from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
-from .loginfo import init_logger
+from .loginfo import dump_settings, init_logger, setup_root_file_handler
 from .moves import GFCombineMove, GlobalFitMove
 from .recipe import Recipe
 from .state import GFState
@@ -214,7 +214,12 @@ class GlobalFit:
 
         level = logging.DEBUG
         name = "GlobalFit"
-        self.logger = init_logger(filename="global_fit.log", level=level, name=name)
+        artifacts_dir = self.curr.general_info.artifacts_file_dir
+        setup_root_file_handler(artifacts_dir, level=level)
+        self.logger = init_logger(filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir)
+
+        if self.rank == self.main_rank:
+            dump_settings(self.curr.settings_dict, artifacts_dir)
 
     def load_info(self, priors: typing.Dict[str, typing.Any]) -> GFState:
         """
@@ -704,6 +709,7 @@ class GlobalFit:
                 state.log_like
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
+
             sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

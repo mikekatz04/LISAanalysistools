@@ -12,36 +12,25 @@ from eryn.moves.tempering import TemperatureControl, make_ladder
 from ..sources.utils import icrs_to_ecliptic
 from .engine import Setup
 from .moves import PSDMove, ResidualAddOneRemoveOneMove
-from .recipe import RecipeStep
+from .recipe import RecipeStep, BaseRecipeStep
 from .run import CurrentInfoGlobalFit
 from .state import GFState
 
 logger = logging.getLogger(__name__)
 
 
-class SearchRecipeStep(RecipeStep):
-    """Recipe step that completes immediately (one-shot search/initialisation)."""
-
-    def __init__(self, *args, moves=None, weights=None, **kwargs):
-        super().__init__(moves=moves, weights=weights)
-
-    def setup_run(self, iteration, last_sample, sampler):
-        sampler.moves = self.moves
-        sampler.weights = self.weights
+class SearchRecipeStep(BaseRecipeStep):
+    """
+    Recipe step that completes immediately (one-shot search/initialisation). 
+    Used when the stopping criterion is embedded in the move.
+    """
 
     def stopping_function(self, *args, **kwargs):
         return True
 
 
-class PERecipeStep(RecipeStep):
+class PERecipeStep(BaseRecipeStep):
     """Recipe step that runs indefinitely (ongoing parameter estimation)."""
-
-    def __init__(self, *args, moves=None, weights=None, **kwargs):
-        super().__init__(moves=moves, weights=weights)
-
-    def setup_run(self, iteration, last_sample, sampler):
-        sampler.moves = self.moves
-        sampler.weights = self.weights
 
     def stopping_function(self, *args, **kwargs):
         return False
