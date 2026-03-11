@@ -757,6 +757,90 @@ cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0, doubl
     cmplx out = gcmplx::polar(amplitude, phase) * kernel;
     return out;
 }
+
+// ============================================================
+// Batched Fresnel Fourier-value kernel (map, not reduce)
+// ============================================================
+
+/**
+ * @brief Compute Fresnel-based Fourier values for a batch of binaries.
+ *
+ * This is a map kernel: each thread computes one (binary, freq) output
+ * element independently — no shared memory or reduction needed.
+ *
+ * @param output   Output array, shape [num_binaries * num_freqs]
+ * @param fresnel  Pointer to STFTFresnel object (device copy on GPU)
+ * @param amps     Amplitude per binary [num_binaries]
+ * @param phase0s  Initial phase per binary [num_binaries]
+ * @param f0s      Reference frequency per binary [num_binaries]
+ * @param fdot0s   Frequency derivative per binary [num_binaries]
+ * @param t0s      Reference time per binary [num_binaries]
+ * @param freqs    Evaluation frequencies [num_binaries * num_freqs]
+ * @param num_binaries  Number of sources in the batch
+ * @param num_freqs     Number of frequency points per source
+ */
+CUDA_KERNEL
+void compute_fourier_values_kernel(
+    cmplx *output,
+    STFTFresnel *fresnel,
+    double *amps,
+    double *phase0s,
+    double *f0s,
+    double *fdot0s,
+    double *t0s,
+    double *freqs,
+    int num_binaries,
+    int num_freqs)
+{
+#ifdef __CUDACC__
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_binaries * num_freqs;
+    if (tid >= total) return;
+    int bin = tid / num_freqs;
+    int f_idx = tid % num_freqs;
+#else
+    for (int bin = 0; bin < num_binaries; bin++) {
+    for (int f_idx = 0; f_idx < num_freqs; f_idx++) {
+#endif
+
+    output[bin * num_freqs + f_idx] = fresnel->get_fourier_value(
+        amps[bin], phase0s[bin], f0s[bin], fdot0s[bin], t0s[bin],
+        freqs[bin * num_freqs + f_idx]);
+
+#ifndef __CUDACC__
+    }}  // close CPU loops
+#endif
+}
+
+/**
+ * Host wrapper: launch the batched Fresnel kernel for a batch of binaries.
+ */
+void STFTFresnel::compute_fourier_values_wrap(
+    cmplx *output, double *amps, double *phase0s,
+    double *f0s, double *fdot0s, double *t0s,
+    double *freqs, int num_binaries, int num_freqs)
+{
+#ifdef __CUDACC__
+    int total = num_binaries * num_freqs;
+    int num_blocks = (total + NUM_THREADS - 1) / NUM_THREADS;
+
+    STFTFresnel *dev_ptr;
+    gpuErrchk(cudaMalloc(&dev_ptr, sizeof(STFTFresnel)));
+    gpuErrchk(cudaMemcpy(dev_ptr, this, sizeof(STFTFresnel), cudaMemcpyHostToDevice));
+
+    compute_fourier_values_kernel<<<num_blocks, NUM_THREADS>>>(
+        output, dev_ptr, amps, phase0s, f0s, fdot0s, t0s,
+        freqs, num_binaries, num_freqs);
+
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(dev_ptr));
+#else
+    compute_fourier_values_kernel(
+        output, this, amps, phase0s, f0s, fdot0s, t0s,
+        freqs, num_binaries, num_freqs);
+#endif
+}
+
 /**
  * Pass-1 kernel: accumulate per-block partial sums of (d|h) and (h|h).
  *

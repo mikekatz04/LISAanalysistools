@@ -399,7 +399,19 @@ public:
     cmplx get_fresnel_kernel(double f, double t0, double f0, double fdot0);
     CUDA_DEVICE
     cmplx get_fourier_value(double amp, double phase0, double f0, double fdot0, double t0, double f);
+
+    void compute_fourier_values_wrap(
+        cmplx *output, double *amps, double *phase0s,
+        double *f0s, double *fdot0s, double *t0s,
+        double *freqs, int num_binaries, int num_freqs);
 };
+
+CUDA_KERNEL
+void compute_fourier_values_kernel(
+    cmplx *output, STFTFresnel *fresnel,
+    double *amps, double *phase0s,
+    double *f0s, double *fdot0s, double *t0s,
+    double *freqs, int num_binaries, int num_freqs);
 
 /** @brief First-pass kernel: partial (d|h) and (h|h) sums per CUDA block.
  *

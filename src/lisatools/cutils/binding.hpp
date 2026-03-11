@@ -208,9 +208,11 @@ public:
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #define STFTDomainWrap STFTDomainWrapGPU
 #define FDDomainWrap FDDomainWrapGPU
+#define STFTFresnelWrap STFTFresnelWrapGPU
 #else
 #define STFTDomainWrap STFTDomainWrapCPU
 #define FDDomainWrap FDDomainWrapCPU
+#define STFTFresnelWrap STFTFresnelWrapCPU
 #endif
 
 class STFTDomainWrap {
@@ -322,6 +324,46 @@ public:
             num_binaries,
             di_ptr, ni_ptr,
             n_f_template);
+    }
+};
+
+class STFTFresnelWrap {
+public:
+    STFTFresnel *fresnel;
+
+    STFTFresnelWrap(int num_times, int num_freqs, int num_channels,
+                    double t0, double f_min, double f_max,
+                    double dt, double df)
+    {
+        fresnel = new STFTFresnel(num_times, num_freqs, num_channels,
+                                  t0, f_min, f_max, dt, df);
+    }
+
+    ~STFTFresnelWrap() { delete fresnel; }
+
+    void compute_fourier_values(
+        array_type<std::complex<double>> output,
+        array_type<double> amps,
+        array_type<double> phase0s,
+        array_type<double> f0s,
+        array_type<double> fdot0s,
+        array_type<double> t0s,
+        array_type<double> freqs,
+        int num_binaries,
+        int num_freqs)
+    {
+        cmplx *out_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(output, "output", num_binaries * num_freqs, 1));
+        double *amp_ptr = return_pointer_and_check_length(amps, "amps", num_binaries, 1);
+        double *ph_ptr = return_pointer_and_check_length(phase0s, "phase0s", num_binaries, 1);
+        double *f0_ptr = return_pointer_and_check_length(f0s, "f0s", num_binaries, 1);
+        double *fd_ptr = return_pointer_and_check_length(fdot0s, "fdot0s", num_binaries, 1);
+        double *t0_ptr = return_pointer_and_check_length(t0s, "t0s", num_binaries, 1);
+        double *freq_ptr = return_pointer_and_check_length(freqs, "freqs", num_binaries * num_freqs, 1);
+
+        fresnel->compute_fourier_values_wrap(
+            out_ptr, amp_ptr, ph_ptr, f0_ptr, fd_ptr, t0_ptr,
+            freq_ptr, num_binaries, num_freqs);
     }
 };
 

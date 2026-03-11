@@ -408,6 +408,18 @@ void domains_part(py::module &m) {
          py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
     .def("compute_likelihood_terms", &FDDomainWrap::compute_likelihood_terms,
          "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (FD).");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapGPU")
+#else
+    py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapCPU")
+#endif
+    .def(py::init<int, int, int, double, double, double, double, double>(),
+         py::arg("num_times"), py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("t0"), py::arg("f_min"), py::arg("f_max"),
+         py::arg("dt"), py::arg("df"))
+    .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
+         "Compute Fresnel-based Fourier values for a batch of binaries.");
 }
 
 
