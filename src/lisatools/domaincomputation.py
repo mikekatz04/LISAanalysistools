@@ -13,6 +13,10 @@ from .utils.parallelbase import LISAToolsParallelModule
 if TYPE_CHECKING:
     from .analysiscontainer import AnalysisContainerArray
     from .domains import STFTSettings, FDSettings
+    try:
+        import cupy as cp
+    except (ModuleNotFoundError, ImportError):
+        import numpy as cp
 
 logger = logging.getLogger(__name__)
 
@@ -22,28 +26,27 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     One instance per GPU split.  Holds references to the linearized arrays
     to prevent GC from invalidating the C++ domain's pointers.
 
-    Parameters
-    ----------
-    acs : AnalysisContainerArray, optional
-        The AnalysisContainerArray containing the data and noise arrays. If not provided, the necessary arrays and parameters must be provided directly.
-    split_index : int, optional
-        The index of the GPU split to use from the AnalysisContainerArray. Only used if `acs` is provided. Default is 0.
-    data_arr : np.ndarray, optional
-        The linearized data array for the current split. Only used if `acs` is not provided.
-    invC_arr : np.ndarray, optional
-        The linearized inverse noise PSD array for the current split. Only used if `acs` is not provided.
-    num_data : int, optional
-        The number of data points for the current split. Only used if `acs` is not provided.
-    num_noise : int, optional
-        The number of noise points for the current split. Only used if `acs` is not provided.
-    num_channels : int, optional
-        The number of channels for the current split. Only used if `acs` is not provided.
-    settings : STFTSettings or FDSettings, optional
-        The settings for the domain computation. Must be an instance of STFTSettings for STFTComputationGroup or FDSettings for FDComputationGroup. Only used if `acs` is not provided.
-    tdi_type : str, optional
-        The TDI type to use for the likelihood computation. Default is "XYZ". Must be a key in the backend's TDITypeDict.
-    force_backend : str, optional   
-        If provided, forces the use of the specified backend. Must be one of the supported backends for the domain computation. Default is 'cpu'.   
+    Args:
+        acs : AnalysisContainerArray, optional
+            The AnalysisContainerArray containing the data and noise arrays. If not provided, the necessary arrays and Args: must be provided directly.
+        split_index : int, optional
+            The index of the GPU split to use from the AnalysisContainerArray. Only used if `acs` is provided. Default is 0.
+        data_arr : np.ndarray, optional
+            The linearized data array for the current split. Only used if `acs` is not provided.
+        invC_arr : np.ndarray, optional
+            The linearized inverse noise PSD array for the current split. Only used if `acs` is not provided.
+        num_data : int, optional
+            The number of data points for the current split. Only used if `acs` is not provided.
+        num_noise : int, optional
+            The number of noise points for the current split. Only used if `acs` is not provided.
+        num_channels : int, optional
+            The number of channels for the current split. Only used if `acs` is not provided.
+        settings : STFTSettings or FDSettings, optional
+            The settings for the domain computation. Must be an instance of STFTSettings for STFTComputationGroup or FDSettings for FDComputationGroup. Only used if `acs` is not provided.
+        tdi_type : str, optional
+            The TDI type to use for the likelihood computation. Default is "XYZ". Must be a key in the backend's TDITypeDict.
+        force_backend : str, optional   
+            If provided, forces the use of the specified backend. Must be one of the supported backends for the domain computation. Default is 'cpu'.   
     """
 
     def __init__(
@@ -77,7 +80,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
                 settings,
             ]:
                 if param is None:
-                    raise ValueError("All parameters must be provided if acs is not given.")
+                    raise ValueError("All Args: must be provided if acs is not given.")
         # Keep references alive so the C++ pointers remain valid. We do not copy to always point to the same memory.
             self.data_arr = data_arr
             self.invC_arr = invC_arr
@@ -88,15 +91,13 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     def extract_from_acs(self, acs: AnalysisContainerArray, split_index: int):
         """
-        Extracts the necessary arrays and parameters from the given AnalysisContainerArray for the specified split index.
+        Extracts the necessary arrays and Args: from the given AnalysisContainerArray for the specified split index.
 
-        Parameters
-        ----------
-        acs : AnalysisContainerArray
-            The AnalysisContainerArray containing the data and noise arrays.
-        split_index : int
-            The index of the GPU split to use from the AnalysisContainerArray.
-
+        Args:
+            acs : AnalysisContainerArray
+                The AnalysisContainerArray containing the data and noise arrays.
+            split_index : int
+                The index of the GPU split to use from the AnalysisContainerArray.
         """
         self._acs = acs
         self.split_index = split_index
@@ -181,13 +182,15 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         """
         Compute (d|d) term for the containers in this split only.
 
-        Parameters
-        ----------
-        out : bool, optional
-            If True, return the computed (d|d) term. Otherwise, store it in the instance variable `self.d_d`. Default is False.
-        **kwargs
-            Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
+        Args:
+            out : bool, optional
+                If True, return the computed (d|d) term. Otherwise, store it in the instance variable `self.d_d`. Default is False.
+            **kwargs
+                Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
 
+        Returns:
+            If `out` is True, returns a double array of shape ``(num_data,)`` containing the (d|d) term for each container in the split. Otherwise, returns None and stores the result in `self.d_d`.
+                
         Notes
         -----
         The result ``self.d_d`` has shape ``(num_data,)`` — one value per
@@ -205,6 +208,60 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
         if out:
             return self.d_d
+        
+    def compute_likelihood_terms(
+        self, 
+        template_vals: np.ndarray | cp.ndarray,
+        data_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray,
+        start_freqs: np.ndarray | cp.ndarray,
+        **kwargs
+        ) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Compute the inner products :math:`\\langle d | h\\rangle` and :math:`\\langle h | h\\rangle` for the input set of binaries.
+
+        Args:
+            *args: positional arguments
+        """
+        raise NotImplementedError("The `compute_likelihood_terms` method must be implemented by subclasses")
+
+    def compute_likelihood(
+        self,
+        template_vals: np.ndarray | cp.ndarray,
+        data_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray,
+        start_freqs: np.ndarray | cp.ndarray,
+        start_times: np.ndarray | cp.ndarray = None,
+        **kwargs
+    ) -> np.ndarray | cp.ndarray:
+        """
+        Compute the log-likelihood for a batch of binaries.
+
+        Args:
+            template_vals : complex array
+                Shape ``(num_binaries, num_channels, n_t, n_f)`` for STFT or ``(num_binaries, num_channels, n_f)`` for FD.
+            data_index : int array, shape ``(num_binaries,)``
+            noise_index : int array, shape ``(num_binaries,)``
+            start_freqs : double array, shape ``(num_binaries,)``
+            start_times : double array, shape ``(num_binaries,)``, optional
+                 Only used for STFT. If not provided, defaults to None.
+            **kwargs: additional keyword arguments to pass to the `compute_likelihood_terms` method. Kept for future extensibility.
+
+        Returns:
+            like_out : double array, shape ``(num_binaries,)``
+        """
+        d_h_out, h_h_out = self.compute_likelihood_terms(
+            template_vals=template_vals, 
+            data_index=data_index, 
+            noise_index=noise_index, 
+            start_freqs=start_freqs, 
+            start_times=start_times,
+            **kwargs
+        )
+        
+        d_d_per_binary = self.d_d[data_index]
+        like_out = -1. / 2. * (d_d_per_binary + h_h_out - 2 * d_h_out).real
+        return like_out
 
 
 
@@ -245,28 +302,27 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
     def compute_likelihood_terms(
         self,
-        template_vals,
-        start_times,
-        start_freqs,
-        data_index,
-        noise_index,
+        template_vals: np.ndarray | cp.ndarray,
+        data_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray,
+        start_freqs: np.ndarray | cp.ndarray,
+        start_times: np.ndarray | cp.ndarray,
         **kwargs
-    ):
-        """Compute (d|h) and (h|h) for a batch of binaries.
+    ) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Compute (d|h) and (h|h) for a batch of binaries.
 
-        Parameters
-        ----------
-        template_vals : complex array
-            Shape ``(num_binaries, num_channels, n_t, n_f)``.
-        start_times : double array, shape ``(num_binaries,)``
-        start_freqs : double array, shape ``(num_binaries,)``
-        data_index : int array, shape ``(num_binaries,)``
-        noise_index : int array, shape ``(num_binaries,)``
+        Args:
+            template_vals : complex array
+                Shape ``(num_binaries, num_channels, n_t, n_f)``.
+            data_index : int array, shape ``(num_binaries,)``
+            noise_index : int array, shape ``(num_binaries,)``
+            start_freqs : double array, shape ``(num_binaries,)``
+            start_times : double array, shape ``(num_binaries,)``
 
-        Returns
-        -------
-        d_h_out : complex array, shape ``(num_binaries,)``
-        h_h_out : complex array, shape ``(num_binaries,)``
+        Returns:
+            d_h_out : complex array, shape ``(num_binaries,)``
+            h_h_out : complex array, shape ``(num_binaries,)``
         """
         num_binaries, _, num_times, num_freqs = template_vals.shape
 
@@ -292,28 +348,6 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         )
 
         return d_h_out, h_h_out
-
-    def compute_likelihood(
-        self,
-        template_vals,
-        start_times,
-        start_freqs,
-        data_index,
-        noise_index,
-        **kwargs
-    ):
-        """Compute the log-likelihood for a batch of binaries.
-
-        Returns
-        -------
-        like_out : double array, shape ``(num_binaries,)``
-        """
-        d_h_out, h_h_out = self.compute_likelihood_terms(
-            template_vals, start_times, start_freqs, data_index, noise_index, **kwargs
-        )
-        d_d_per_binary = self.d_d[data_index]
-        like_out = -1. / 2. * (d_d_per_binary + h_h_out - 2 * d_h_out).real
-        return like_out
 
 class FDComputationGroup(BaseDomainComputationGroup):
     """
@@ -350,26 +384,25 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
     def compute_likelihood_terms(
         self,
-        template_vals,
-        start_freqs,
-        data_index,
-        noise_index,
+        template_vals: np.ndarray | cp.ndarray,
+        data_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray,
+        start_freqs: np.ndarray | cp.ndarray,
         **kwargs
-    ):
-        """Compute (d|h) and (h|h) for a batch of binaries.
+    ) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Compute (d|h) and (h|h) for a batch of binaries.
 
-        Parameters
-        ----------
-        template_vals : complex array
-            Shape ``(num_binaries, num_channels, n_f)``.
-        start_freqs : double array, shape ``(num_binaries,)``
-        data_index : int array, shape ``(num_binaries,)``
-        noise_index : int array, shape ``(num_binaries,)``
+        Args:
+            template_vals : complex array
+                Shape ``(num_binaries, num_channels, n_f)``.
+            data_index : int array, shape ``(num_binaries,)``
+            noise_index : int array, shape ``(num_binaries,)``
+            start_freqs : double array, shape ``(num_binaries,)``
 
-        Returns
-        -------
-        d_h_out : complex array, shape ``(num_binaries,)``
-        h_h_out : complex array, shape ``(num_binaries,)``
+        Returns:
+            d_h_out : complex array, shape ``(num_binaries,)``
+            h_h_out : complex array, shape ``(num_binaries,)``
         """
         num_binaries, _, num_freqs = template_vals.shape
 
@@ -392,24 +425,3 @@ class FDComputationGroup(BaseDomainComputationGroup):
         )
 
         return d_h_out, h_h_out
-
-    def compute_likelihood(
-        self,
-        template_vals,
-        start_freqs,
-        data_index,
-        noise_index,
-        **kwargs
-    ):
-        """Compute the log-likelihood for a batch of binaries.
-
-        Returns
-        -------
-        like_out : double array, shape ``(num_binaries,)``
-        """
-        d_h_out, h_h_out = self.compute_likelihood_terms(
-            template_vals, start_freqs, data_index, noise_index, **kwargs
-        )
-        d_d_per_binary = self.d_d[data_index]
-        like_out = -1. / 2. * (d_d_per_binary + h_h_out - 2 * d_h_out).real
-        return like_out
