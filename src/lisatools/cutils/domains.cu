@@ -54,6 +54,7 @@
 #include "domains.hpp"
 
 #ifdef __CUDACC__
+#include <cub/cub.cuh> // CUB block-level primitives for efficient intra-block reductions
 /// Number of CUDA threads per block for likelihood kernels.
 /// Must be a power of two for CUB/tree reductions.
 #define NUM_THREADS 128
@@ -96,7 +97,8 @@ cmplx block_reduce_cmplx(cmplx *array) {
     CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
     // Synchronise before reading: ensures all threads have written their element.
     CUDA_SYNC_THREADS;
-    cmplx thread_data = array[threadIdx.x];
+    int tid = threadIdx.x;
+    cmplx thread_data = array[tid];
     cmplx output = BlockReduce(temp_storage).Reduce(thread_data, ComplexSum());
     return output;
 }
@@ -590,7 +592,7 @@ void STFTDomain::compute_likelihood_terms_wrap(
             data_index_all,
             noise_index_all,
             num_times_template,
-            num_freqs_template,
+            num_freqs_template
         );
         // Pass 2: reduce partial sums across blocks for each binary.
         dim3 reduce_grid_dim(1, num_binaries, 1);  // one block per binary
