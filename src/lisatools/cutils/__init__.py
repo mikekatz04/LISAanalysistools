@@ -25,6 +25,7 @@ class LISAToolsBackendMethods(BackendMethods):
     SensitivityMatrixWrap: object
     STFTDomainWrap: object
     FDDomainWrap: object
+    STFTFresnelWrap: object
     TDITypeDict: object
     check_orbits: typing.Callable[(...), None]
     psd_likelihood: typing.Callable[(...), None]
@@ -41,6 +42,7 @@ class LISAToolsBackend:
     compute_logpdf: typing.Callable[(...), None]
     STFTDomainWrap: object
     FDDomainWrap: object
+    STFTFresnelWrap: object
     TDITypeDict: object
 
     def __init__(self, lisatools_backend_methods):
@@ -56,6 +58,7 @@ class LISAToolsBackend:
         self.compute_logpdf = lisatools_backend_methods.compute_logpdf
         self.STFTDomainWrap = lisatools_backend_methods.STFTDomainWrap
         self.FDDomainWrap = lisatools_backend_methods.FDDomainWrap
+        self.STFTFresnelWrap = lisatools_backend_methods.STFTFresnelWrap
         self.TDITypeDict = lisatools_backend_methods.TDITypeDict
 
 
@@ -93,6 +96,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             compute_logpdf=lisatools_backend_cpu.pycppdetector.compute_logpdf,
             STFTDomainWrap=lisatools_backend_cpu.pycppdetector.STFTDomainWrapCPU,
             FDDomainWrap=lisatools_backend_cpu.pycppdetector.FDDomainWrapCPU,
+            STFTFresnelWrap=lisatools_backend_cpu.pycppdetector.STFTFresnelWrapCPU,
             TDITypeDict=tdi_tmp,
             xp=numpy,
         )
@@ -140,6 +144,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             compute_logpdf=lisatools_backend_cuda11x.pycppdetector.compute_logpdf,
             STFTDomainWrap=lisatools_backend_cuda11x.pycppdetector.STFTDomainWrapGPU,
             FDDomainWrap=lisatools_backend_cuda11x.pycppdetector.FDDomainWrapGPU,
+            STFTFresnelWrap=lisatools_backend_cuda11x.pycppdetector.STFTFresnelWrapGPU,
             TDITypeDict=tdi_tmp,
             xp=cupy,
         )
@@ -186,6 +191,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             compute_logpdf=lisatools_backend_cuda12x.pycppdetector.compute_logpdf,
             STFTDomainWrap=lisatools_backend_cuda12x.pycppdetector.STFTDomainWrapGPU,
             FDDomainWrap=lisatools_backend_cuda12x.pycppdetector.FDDomainWrapGPU,
+            STFTFresnelWrap=lisatools_backend_cuda12x.pycppdetector.STFTFresnelWrapGPU,
             TDITypeDict=tdi_tmp,
             xp=cupy,
         )
