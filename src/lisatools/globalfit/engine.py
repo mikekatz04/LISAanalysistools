@@ -306,7 +306,6 @@ class GeneralSetup(Setup, GeneralSettings):
             orbits=self.gpu_orbits,
             settings=domain_settings,
             force_backend=self.force_backend,
-            window_factor=window_factor,
             **self.sensitivity_init_kwargs,
         )
 

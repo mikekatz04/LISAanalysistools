@@ -239,7 +239,7 @@ class TDSignal(DomainBase, TDSettings):
 
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            assert settings.df == df
+            assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
             fd_settings = settings
         else:
             fd_settings = FDSettings(
