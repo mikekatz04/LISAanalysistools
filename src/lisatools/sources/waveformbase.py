@@ -469,3 +469,45 @@ class TDWaveformBase(LISAToolsParallelModule):
             td_signal = self._apply_response_single(t_arr, h_plus, h_cross, ra, dec, merger_time)
 
             return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)
+
+
+class TDIOnFlyWaveformBase(LISAToolsParallelModule):
+    """
+    Base class for a waveform that computes the LISA response with the "tdi on the fly" method.
+
+    Args:
+        waveform_t0: Initial time for the waveform in seconds. It will be added to the sampled merger time to get the absolute time for the waveform generation.
+        dt: float,
+        Tobs: float,
+        data_t0: float = None,
+        tukey_alpha: float = 0.01,
+        force_backend: str = "cpu",        
+    """
+    def __init__(
+        self,
+        waveform_t0: float,
+        dt: float,
+        Tobs: float,
+        data_t0: float = None,
+        tukey_alpha: float = 0.01,
+        force_backend: str = "cpu",
+    ) -> None:
+        super().__init__(force_backend=force_backend)
+
+        self.waveform_t0 = waveform_t0
+        self.data_t0 = data_t0 if data_t0 is not None else waveform_t0
+        self.dt = dt
+        self.Tobs = Tobs * YRSID_SI
+        self.tukey_alpha = tukey_alpha
+
+    def amp_phase_gen(
+        self, *args, **kwargs
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Generate amplitude and phase arrays for each mode of a batch of sources.
+
+        Returns:
+            Tuple of (t_arr, amp, phase).
+
+        """
+        raise NotImplementedError("amp_phase_gen method must be implemented in subclass.")
