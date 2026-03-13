@@ -1171,9 +1171,15 @@ class SensitivityMatrix:
                 self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
             )
             invC[self.detC == 0.0] = 1e-100
-            
+            print("HAHA", invC.shape, transpose_shape, basis_axes, mat_axes)
             # switch them after they were effectively switched above
-            self.invC = invC.transpose(transpose_shape)
+
+            full_shape_rev = tuple(range(len(invC.shape)))
+
+            basis_axes_rev = full_shape_rev[:len(self.data_shape)]
+            mat_axes_rev = full_shape_rev[len(self.data_shape):]
+            transpose_shape_rev = mat_axes_rev + basis_axes_rev
+            self.invC = invC.transpose(transpose_shape_rev)
 
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
