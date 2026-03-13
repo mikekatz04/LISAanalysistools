@@ -39,7 +39,7 @@ class DomainSettingsBase(LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls):
-        return ["lisatools" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_slice(self, index: tuple) -> DomainSettingsBase:
         raise NotImplementedError("get_slice needs to be implemented for this signal type.")

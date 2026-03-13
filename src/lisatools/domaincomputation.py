@@ -99,7 +99,6 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             split_index : int
                 The index of the GPU split to use from the AnalysisContainerArray.
         """
-        self._acs = acs
         self.split_index = split_index
         self.data_arr = acs.linear_data_arr[split_index]
         self.invC_arr = acs.linear_psd_arr[split_index]
@@ -108,12 +107,22 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         self.num_noise = len(acs.gpu_splits[split_index])
         self.settings = acs.settings
 
+        # Store references to the containers in this split for (d|d) computation.
+        # Do NOT wrap them in a new AnalysisContainerArray — that would call
+        # reset_linear_data_arr / reset_linear_psd_arr, rebinding each AC's
+        # internal ._arr to a new buffer and breaking the C++ pointer contract.
+        all_acs = acs.acs.flatten()
+        split_container_ids = acs.gpu_splits[split_index]
+        self.split_acs = [all_acs[i] for i in split_container_ids]
+
     @property
-    def acs(self):
-        return self._acs
-    @acs.setter
-    def acs(self, value):
-        self._acs = value
+    def split_acs(self) -> list:
+        if not hasattr(self, "_split_acs"):
+            raise ValueError("Split ACs have not been set. Call extract_from_acs first.")
+        return self._split_acs
+    @split_acs.setter
+    def split_acs(self, value: list):
+        self._split_acs = value
 
     @property
     def data_arr(self):
@@ -190,30 +199,29 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
         Returns:
             If `out` is True, returns a double array of shape ``(num_data,)`` containing the (d|d) term for each container in the split. Otherwise, returns None and stores the result in `self.d_d`.
-                
+
         Notes
         -----
         The result ``self.d_d`` has shape ``(num_data,)`` — one value per
         container in the split, indexed by intra-split index.
         """
-        if self.acs is None:
-            raise ValueError("AnalysisContainerArray is not set. Cannot compute (d|d) term.")
+        if not hasattr(self, "_split_acs") or self._split_acs is None:
+            raise ValueError("Split ACs are not set. Cannot compute (d|d) term. "
+                             "Provide an AnalysisContainerArray to extract_from_acs first.")
 
-        split_container_ids = self.acs.gpu_splits[self.split_index]
         d_d = self.xp.zeros(self.num_data, dtype=self.xp.float64)
-        for i, global_idx in enumerate(split_container_ids):
-            ac = self.acs.acs.flatten()[global_idx]
+        for i, ac in enumerate(self._split_acs):
             d_d[i] = ac.inner_product(**kwargs)
         self.d_d = d_d
 
         if out:
-            return self.d_d
+            return self.d_d.copy()
         
     def compute_likelihood_terms(
         self, 
-        template_vals: np.ndarray | cp.ndarray,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
+        template_vals: np.ndarray | cp.ndarray,
         start_freqs: np.ndarray | cp.ndarray,
         **kwargs
         ) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
@@ -227,9 +235,9 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     def compute_likelihood(
         self,
-        template_vals: np.ndarray | cp.ndarray,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
+        template_vals: np.ndarray | cp.ndarray,
         start_freqs: np.ndarray | cp.ndarray,
         start_times: np.ndarray | cp.ndarray = None,
         **kwargs
@@ -251,9 +259,9 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             like_out : double array, shape ``(num_binaries,)``
         """
         d_h_out, h_h_out = self.compute_likelihood_terms(
-            template_vals=template_vals, 
             data_index=data_index, 
             noise_index=noise_index, 
+            template_vals=template_vals, 
             start_freqs=start_freqs, 
             start_times=start_times,
             **kwargs
@@ -302,9 +310,9 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
     def compute_likelihood_terms(
         self,
-        template_vals: np.ndarray | cp.ndarray,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
+        template_vals: np.ndarray | cp.ndarray,
         start_freqs: np.ndarray | cp.ndarray,
         start_times: np.ndarray | cp.ndarray,
         **kwargs
@@ -384,9 +392,9 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
     def compute_likelihood_terms(
         self,
-        template_vals: np.ndarray | cp.ndarray,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
+        template_vals: np.ndarray | cp.ndarray,
         start_freqs: np.ndarray | cp.ndarray,
         **kwargs
     ) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:

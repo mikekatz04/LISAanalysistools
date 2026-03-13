@@ -107,7 +107,7 @@ class TestFDAETDiagonal:
         noise_index = xp.array([0], dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
-            template, data_index, noise_index, start_freqs,
+            data_index, noise_index, template, start_freqs,
         )
 
         # Python reference
@@ -171,7 +171,7 @@ class TestFDXYZCross:
         noise_index = xp.array([0], dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
-            template, data_index, noise_index, start_freqs
+            data_index, noise_index, template, start_freqs
         )
 
         d_h_py = _python_inner_product_cross(data[0], template[0], invC[0], df, xp)
@@ -257,7 +257,7 @@ class TestSTFTAET:
         noise_index = xp.array([0], dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
-            template, data_index, noise_index, start_freqs, start_times
+            data_index, noise_index, template, start_freqs, start_times
         )
 
         # Python reference: extract the sub-grid from data and invC
@@ -334,7 +334,7 @@ class TestMultiBinaryBatch:
         noise_index = xp.array(noise_indices, dtype=xp.int32)
 
         d_h_cpp, h_h_cpp = dcg.compute_likelihood_terms(
-            templates, data_index, noise_index, start_freqs
+            data_index, noise_index, templates, start_freqs
         )
         print("C++ d_h:", d_h_cpp)
         print("C++ h_h:", h_h_cpp)
@@ -414,7 +414,7 @@ class TestFullLikelihood:
         noise_index = xp.array([0], dtype=xp.int32)
 
         like_cpp = dcg.compute_likelihood(
-            template, data_index, noise_index, start_freqs
+            data_index, noise_index, template, start_freqs
         )
 
         # Python reference likelihood
@@ -494,7 +494,7 @@ class TestMultiContainerDdSelection:
         noise_index = xp.array(noise_indices, dtype=xp.int32)
 
         like_cpp = dcg.compute_likelihood(
-            templates, data_index, noise_index, start_freqs
+            data_index, noise_index, templates, start_freqs
         )
 
         # Python reference: compute per-binary likelihood
