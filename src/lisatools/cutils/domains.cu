@@ -660,7 +660,7 @@ void FDDomain::compute_likelihood_terms_wrap(
  * signals that can be approximated as linear chirps in the time domain, at least locally within each STFT window. 
  */
 CUDA_DEVICE
-void get_amp_phase(double *amp, double *phase, cmplx z)
+void STFTFresnel::get_amp_phase(double *amp, double *phase, cmplx z)
 // extract amplitude and phase from complex input
 {
     *amp = gcmplx::abs(z);
