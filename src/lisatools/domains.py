@@ -135,13 +135,17 @@ class TDSignal(DomainBase, TDSettings):
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         df = 1 / (self.N * self.dt)
-        
+
+        fd_arr = self.xp.fft.rfft(self.arr * window)
         if settings is not None:
             assert isinstance(settings, FDSettings)
             assert settings.df == df
-
-        fd_arr = self.xp.fft.rfft(self.arr * window)
-        fd_settings = FDSettings(fd_arr.shape[-1], df, force_backend=self.backend)
+            assert settings.N == fd_arr.shape[-1]
+            fd_settings = settings
+        
+        else:
+            fd_settings = FDSettings(fd_arr.shape[-1], df, force_backend=self.backend)
+        
         return FDSignal(fd_arr, fd_settings)
 
     def stft(self, settings=None, window=None):
@@ -290,24 +294,37 @@ class TDSignal(DomainBase, TDSettings):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-
+# TODO: dataclass setup?
 @dataclasses.dataclass
 class FDSettings(DomainSettingsBase):
     N: int
     df: float
     ind_min : Optional[int] = None 
     ind_max : Optional[int] = None
+    frequency_layer_mask: Optional[np.ndarray] = None
 
     def __init__(self,
         N: int,
         df: float,
         ind_min : Optional[int] = None,
         ind_max : Optional[int] = None,
+        frequency_layer_mask: Optional[np.ndarray] = None,
         **kwargs,
     ):
         self.N, self.df = N, df
         self.ind_min, self.ind_max = ind_min, ind_max
+        self.frequency_layer_mask = frequency_layer_mask
         super().__init__(**kwargs)
+
+    @property
+    def frequency_layer_mask(self) -> Optional[np.ndarray]:
+        return self._frequency_layer_mask
+
+    @frequency_layer_mask.setter
+    def frequency_layer_mask(self, frequency_layer_mask: Optional[np.ndarray]):
+        if frequency_layer_mask is not None:
+            assert len(frequency_layer_mask) == self.N, "Frequency layer mask must have length equal to N."
+        self._frequency_layer_mask = frequency_layer_mask
 
     @property
     def differential_component(self) -> float:
@@ -335,8 +352,8 @@ class FDSettings(DomainSettingsBase):
     
     @property
     def kwargs(self) -> dict:
-        return dict(ind_min=self.ind_min_actual, ind_max=self.ind_max_actual, force_backend=self.force_backend)
-    
+        return dict(ind_min=self.ind_min_actual, ind_max=self.ind_max_actual, force_backend=self.force_backend, frequency_layer_mask=self.frequency_layer_mask)
+
     @property
     def args(self) -> tuple:
         return (self.N, self.df)  
@@ -351,6 +368,20 @@ class FDSettings(DomainSettingsBase):
     
     def __eq__(self, value):
         return (value.N == self.N) and (value.df == self.df)
+    
+    def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
+        if self.frequency_layer_mask is None:
+            return arr
+        elif arr.ndim == 1:
+            return arr[self.frequency_layer_mask]
+        elif arr.ndim > 1:
+            assert arr.shape[-1] == self.frequency_layer_mask.shape[0], "Last dimension of arr must match length of frequency_layer_mask."
+            dims_transpose = tuple(np.roll(np.arange(arr.ndim)))
+            _arr = arr.transpose(dims_transpose)
+            new_arr = _arr[self.frequency_layer_mask]
+            dims_back = tuple(np.roll(np.arange(arr.ndim), -1))
+            new_arr = new_arr.transpose(dims_back)
+            return new_arr
 
     @property
     def total_terms(self) -> int:
@@ -558,6 +589,7 @@ class WDMSettings(DomainSettingsBase):
         dt: float,
         oversample: int = 16,
         window: Optional[np.ndarray] = None,
+        frequency_layer_mask: Optional[np.ndarray] = None,
         **kwargs
     ):
 
@@ -567,6 +599,9 @@ class WDMSettings(DomainSettingsBase):
         self.NT = int(self.xp.ceil(Tobs/WAVELET_DURATION).astype(int))
         self.NF = int(WAVELET_DURATION/dt)
         self.data_dt = dt
+        self.frequency_layer_mask = frequency_layer_mask
+        if frequency_layer_mask is not None:
+            raise NotImplementedError("frequency_layer_mask for wdm is not implemented yet.")
 
         self.df = WAVELET_BANDWIDTH
         self.dt = WAVELET_DURATION

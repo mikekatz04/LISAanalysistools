@@ -149,11 +149,25 @@ def inner_product(
     # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
         factor = op_set["factor"]
-
         temp1 = sig1[op_set["sig1_ind"]]
         temp2 = sig2[op_set["sig2_ind"]]
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
 
+        if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") or hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
+            if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") and hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
+                if sig1.data_res_arr.frequency_layer_mask is not None and sig2.data_res_arr.frequency_layer_mask is not None:
+                    if not np.array_equal(sig1.data_res_arr.frequency_layer_mask, sig2.data_res_arr.frequency_layer_mask):
+                        raise ValueError("If both signals have a frequency layer mask, they must be the same.")
+                func_apply = sig1.data_res_arr.apply_frequency_layer_mask
+            elif hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") and sig1.data_res_arr.frequency_layer_mask is not None:
+                func_apply = sig1.data_res_arr.apply_frequency_layer_mask
+            elif hasattr(sig2.data_res_arr, "apply_frequency_layer_mask") and sig2.data_res_arr.frequency_layer_mask is not None:
+                func_apply = sig2.data_res_arr.apply_frequency_layer_mask
+
+            temp1 = func_apply(temp1)
+            temp2 = func_apply(temp2)
+            inv_psd_tmp = func_apply(inv_psd_tmp)  # should be the same for sig1 and sig2 if they have the method
+        
         # fix nan in first spot if it is there
         if inv_psd_tmp.ndim == 1:
             ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
@@ -170,11 +184,11 @@ def inner_product(
 
         else:
             raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")
-        
-        breakpoint()
+
         y = (
             func(sig_component_1.conj() * sig_component_2) * inv_psd_component
         )  # assumes right summation rule
+
         # switching to summation for comp to other domains
         tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
         # y = (
