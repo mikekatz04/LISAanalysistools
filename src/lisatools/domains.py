@@ -32,6 +32,7 @@ import dataclasses
 class DomainSettingsBase(LISAToolsParallelModule):
     force_backend: str = None
     def __init__(self, force_backend: str = None):
+        self.force_backend = force_backend
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @classmethod

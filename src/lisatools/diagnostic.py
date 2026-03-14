@@ -170,7 +170,8 @@ def inner_product(
 
         else:
             raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")
-        print(sig_component_1.shape, sig_component_2.shape, inv_psd_component.shape)
+        
+        breakpoint()
         y = (
             func(sig_component_1.conj() * sig_component_2) * inv_psd_component
         )  # assumes right summation rule
