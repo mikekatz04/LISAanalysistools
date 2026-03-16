@@ -1,26 +1,39 @@
+from __future__ import annotations
+
 from abc import ABC
-from typing import List, Tuple
+import logging
+from typing import TYPE_CHECKING, List, Tuple
 
 import numpy as np
 
-try:
-    import cupy as cp
-except ImportError:
-    import numpy as cp
+if TYPE_CHECKING:
+    try:
+        import cupy as cp
+    except (ImportError, ModuleNotFoundError):
+        import numpy as cp
+
+    from gpubackendtools.interpolate import CubicSplineInterpolant
+    from lisatools.detector import Orbits
 
 from fastlisaresponse import pyResponseTDI
-from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
+from fastlisaresponse.tdiconfig import TDIConfig
+from fastlisaresponse.tdionfly import TDTDIonTheFly
 
 from ..domains import (
+    DomainSettingsBase,
     DomainBase,
     DomainBaseArray,
     FDSettings,
     TDSettings,
     TDSignal,
+    STFTSettings,
     get_stft_settings,
 )
-from ..utils.utility import tukey
+from ..utils.constants import YRSID_SI
 from ..utils.parallelbase import LISAToolsParallelModule
+from ..utils.utility import tukey
+
+logger = logging.getLogger(__name__)
 
 
 class AETTDIWaveform(ABC):
@@ -95,7 +108,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         merger_time_index: int = -1,
         num_remove: int = 3,
     ) -> None:
-        
+
         super().__init__(force_backend=force_backend)
 
         self.waveform_t0 = waveform_t0
@@ -114,7 +127,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         self.ra_index = ra_index
         self.dec_index = dec_index
         self.merger_time_index = merger_time_index
-        self.num_remove = num_remove   
+        self.num_remove = num_remove
 
     @property
     def xp(self):
@@ -199,7 +212,7 @@ class TDWaveformBase(LISAToolsParallelModule):
             shifted_t_arr = shifted_t_arr[start_ind:]
             tdis = tdis[:, start_ind:]
             t_arr = t_arr[start_ind:]
-                
+
         td_settings = TDSettings(
             t0=float(shifted_t_arr[0]),
             dt=self.dt,
@@ -243,7 +256,9 @@ class TDWaveformBase(LISAToolsParallelModule):
             N_td_target = round(1 / (domain_kwargs["df"] * td_signal.settings.dt))
             # align_samples=N_td_target forces t0 == data_t0 (the offset is always
             # smaller than N_td_target, so the modulo absorbs the full gap).
-            td_signal = self._pad_td_signal(td_signal, align_samples=N_td_target, target_n=N_td_target)
+            td_signal = self._pad_td_signal(
+                td_signal, align_samples=N_td_target, target_n=N_td_target
+            )
             out_settings = FDSettings(**domain_kwargs, force_backend=backend)
             window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
 
@@ -424,13 +439,13 @@ class TDWaveformBase(LISAToolsParallelModule):
                     f"'merger_time' either as keyword arguments or as the "
                     f"last {n} positional arguments."
                 )
-            
+
             ra = args[self.ra_index]
             dec = args[self.dec_index]
             merger_time = args[self.merger_time_index]
 
-            wf_args = args[: -n] if n > 0 else args
-            
+            wf_args = args[:-n] if n > 0 else args
+
             return wf_args, ra, dec, merger_time
         return args, ra, dec, merger_time
 
@@ -496,9 +511,9 @@ class TDWaveformBase(LISAToolsParallelModule):
             return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)
 
 
-class TDIOnFlyWaveformBase(LISAToolsParallelModule):
+class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     """
-    Base class for a waveform that computes the LISA response with the "tdi on the fly" method.
+    Base class for a time domain waveform that computes the LISA response with the "tdi on the fly" method.
 
     Args:
         waveform_t0: Initial time for the waveform in seconds. It will be added to the sampled merger time to get the absolute time for the waveform generation.
@@ -506,33 +521,498 @@ class TDIOnFlyWaveformBase(LISAToolsParallelModule):
         Tobs: float,
         data_t0: float = None,
         tukey_alpha: float = 0.01,
-        force_backend: str = "cpu",        
+        force_backend: str = "cpu",
     """
+
     def __init__(
         self,
         waveform_t0: float,
-        dt: float,
-        Tobs: float,
-        data_t0: float = None,
+        data_settings: TDSettings,
+        tdi_generation: str = "2nd generation",
+        sampling_frequency: float = 0.4,
+        orbits: Orbits = None,
+        zero_inclination: bool = False,
         tukey_alpha: float = 0.01,
+        stft_dt: float = None,
+        freq_min: float = 0.0,
+        freq_max: float = 1.0,
         force_backend: str = "cpu",
     ) -> None:
         super().__init__(force_backend=force_backend)
 
         self.waveform_t0 = waveform_t0
-        self.data_t0 = data_t0 if data_t0 is not None else waveform_t0
-        self.dt = dt
-        self.Tobs = Tobs * YRSID_SI
+        self.domain_settings = data_settings
         self.tukey_alpha = tukey_alpha
+        self.tdi_config = TDIConfig(tdi_generation=tdi_generation, force_backend=force_backend)
 
-    def amp_phase_gen(
-        self, *args, **kwargs
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self.sampling_frequency = sampling_frequency
+        self.orbits = orbits
+        self.zero_inclination = zero_inclination
+
+        if stft_dt is None:
+            logger.info(
+                "No stft timestep provided. The waveform will be transformed in the frequency domain"
+            )
+            self.transform_to_domain = self.fft
+            self.nperseg = None
+            self.num_ll_args = 2  # fd_signal and starting frequencies
+
+        else:
+            assert self.dt <= stft_dt
+            nperseg = round(stft_dt / self.dt)
+
+            assert (
+                abs(nperseg * self.dt - stft_dt) < 1e-10 * stft_dt
+            ), f"stft_dt={stft_dt} must be an integer multiple of dt={self.dt}"
+
+            logger.info(
+                f"STFT timestep set to {stft_dt}. This corresponds to {nperseg} points per time segment"
+            )
+            self.nperseg = nperseg
+            self.transform_to_domain = self.stft
+            self.num_ll_args = 3  # stft signal, start freqs and start times
+
+        self.freq_min = freq_min
+        self.freq_max = freq_max
+
+    @property
+    def max_length(self) -> int:
+        """maximum number of evaluation time points that can be stored in a gpu register"""
+        return 2000
+
+    @property
+    def tdi_buffer_time(self) -> float:
+        """Buffer time in seconds to ensure proper TDI response calculation at the boundaries."""
+        return 500.0
+
+    @property
+    def dt(self):
+        """Time step in seconds."""
+        return self.domain_settings.dt
+
+    @property
+    def Tobs(self):
+        """Observation time in seconds."""
+        return self.domain_settings.N * self.domain_settings.dt
+
+    @property
+    def data_t0(self):
+        """Start time of the data in seconds."""
+        return self.domain_settings.t0
+
+    @property
+    def data_times_array(self):
+        """Complete time array on which the data live."""
+        return self.domain_settings.t_arr
+
+    @property
+    def xp(self):
+        """Array module used for calculations."""
+        return self.backend.xp
+
+    @property
+    def tdi_config(self):
+        """TDI configuration for on-the-fly response generation."""
+        return self._tdi_config
+
+    @tdi_config.setter
+    def tdi_config(self, config: TDIConfig):
+        """Set the TDI configuration"""
+        self._tdi_config = config
+
+    @property
+    def orbits(self):
+        """Orbits object for on-the-fly response generation."""
+        return self._orbits
+
+    @orbits.setter
+    def orbits(self, orbits: Orbits):
+        """Set the Orbits object."""
+        assert (
+            orbits is not None
+        ), "Orbits object must be provided for on-the-fly response generation."
+
+        if not orbits.configured:
+            orbits.configure(linear_interp_setup=True)
+        self._orbits = orbits
+
+    @property
+    def sampling_frequency(self):
+        """Sampling frequency for the on-the-fly response generation."""
+        return self._sampling_frequency
+
+    @sampling_frequency.setter
+    def sampling_frequency(self, fs: float):
+        """Set the sampling frequency for the on-the-fly response generation."""
+        assert fs > 0, "Sampling frequency must be positive."
+        self._sampling_frequency = fs
+
+    @property
+    def freq_min(self):
+        return self._freq_min
+
+    @freq_min.setter
+    def freq_min(self, value: float):
+        self._freq_min = value
+
+    @property
+    def freq_max(self):
+        return self._freq_max
+
+    @freq_max.setter
+    def freq_max(self, value: float):
+        self._freq_max = value
+
+    @property
+    def nperseg(self):
+        return self._nperseg
+
+    @nperseg.setter
+    def nperseg(self, value: float):
+        self._nperseg = value
+
+    @property
+    def analysis_domain(self) -> str:
+        if self.nperseg:
+            return "STFT"
+        else:
+            return "FD"
+
+    def get_output_settings(self, eval_times: np.ndarray | cp.ndarray) -> DomainSettingsBase:
+        """
+        Get the settings for the output domain based on the evaluation times and the chosen analysis domain (STFT or FD).
+        """
+        if self.analysis_domain == "STFT":
+            return get_stft_settings(
+                eval_times,
+                big_dt=self.nperseg * self.dt,
+                min_freq=self.freq_min,
+                max_freq=self.freq_max,
+                force_backend=self.backend_name.split("_")[-1],
+            )
+        else:
+            return FDSettings(
+                df=1 / (eval_times.shape[-1] * self.dt),
+                min_freq=self.freq_min,
+                max_freq=self.freq_max,
+                force_backend=self.backend_name.split("_")[-1],
+            )
+
+    def get_grid_time(self, times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+        """
+        For a given array of times, compute the closest points on the grid defined by the data time step.
+
+        Args:
+            times (Array): Array of times to be projected on the grid. Shape: (num_times,).
+
+        Returns:
+            Times on the target grid.  Shape: (num_times,).
+        """
+        dt = self.dt
+        t0 = self.data_t0
+        return t0 + self.xp.round((times - t0) / dt) * dt
+
+    def get_amp_phase(
+        self,
+        *args,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        **kwargs,
+    ) -> Tuple[np.ndarray | cp.ndarray, CubicSplineInterpolant, CubicSplineInterpolant]:
         """
         Generate amplitude and phase arrays for each mode of a batch of sources.
+        Interpolate the amplitude and phase of each mode with a CubicSplineInterpolant to be then fed to the TDI on the fly response generator.
+        Returns also the time array
 
         Returns:
             Tuple of (t_arr, amp, phase).
 
         """
         raise NotImplementedError("amp_phase_gen method must be implemented in subclass.")
+
+    def process_amp_phase(
+        self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Process the amplitude and phase arrays to be fed to the TDI on-the-fly response generator.
+
+        Parameters
+        ----------
+        amp: Amplitude array of shape (Nbatch, num_modes, num_times).
+        phase: Phase array of shape (Nbatch, num_modes, num_times).
+
+        Returns
+        -------
+        Tuple of (processed_amp, processed_phase).
+        """
+
+        raise NotImplementedError("process_amp_phase method must be implemented in subclass.")
+
+    def stack_parameter(self, param: np.ndarray, num_modes: int) -> np.ndarray | cp.ndarray:
+        """
+        Stack a parameter array for use in the TDI on-the-fly response generator.
+        Given a parameter array of shape (Nbatch,), stack it to shape (Nbatch * num_modes,) by repeating each entry num_modes times. This is needed to match the expected input shape for the TDI on-the-fly response generator when using multiple modes per source.
+        """
+        param = self.xp.asarray(param)
+        return self.xp.repeat(param, num_modes)
+
+    def get_evaluation_times(self, input_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+        """
+        Get the time array on which to evaluate the TDI on-the-fly response. By default, this uses the same as the input time array from the amplitude and phase generation, but subclasses can override this method to define a different evaluation grid if needed (e.g. a regular grid).
+        """
+        delta_t = self.xp.diff(input_times, axis=-1)
+
+        start_buffer = int(self.tdi_buffer_time / delta_t[:, 0])
+        end_buffer = int(self.tdi_buffer_time / delta_t[:, -1])
+
+        evaluation_times = input_times[:, start_buffer:-end_buffer][:, -self.max_length :]
+
+        return evaluation_times
+
+    def get_dense_times(self, eval_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+        """
+        Get a dense time array on which to evaluate the TDI on-the-fly response. This can be used to ensure that the output response is sampled on a regular grid, even if the input amplitude and phase arrays are sampled irregularly.
+        """
+        # consider using powers of 2.
+        if self.analysis_domain == "FD":
+            num_sub = eval_times.shape[0]
+            return self.xp.repeat(self.data_times_array[None, :], num_sub, axis=0)
+
+        # for the STFT case, we want to define a regular grid for each source that covers the time range of the input eval_times for that source, with a spacing of self.dt. This ensures that the output STFT is sampled on a regular grid, even if the input eval_times are not.
+        # get the start and end times from the evaluation times
+        start_times = self.get_grid_time(eval_times[:, 0])
+        end_times = self.get_grid_time(eval_times[:, -1])
+
+        num_times = max(int((end_times - start_times) / self.dt) + 1)
+        # make sure num_times is a multiple of nperseg for the STFT case
+        num_times = int(np.ceil(num_times / self.nperseg) * self.nperseg)
+
+        return start_times[:, None] + self.xp.arange(num_times)[None, :] * self.dt
+
+    def fft(
+        self, times_in: np.ndarray | cp.ndarray, signal_in: np.ndarray | cp.ndarray
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Transform the time domain data to the FT basis with the chosen settings.
+
+        Args:
+            times_in (Array): Time grid of the input signal with shape `(num_binaries, num_times)`. Ignored here but included in the signature for consistency with the `stft` method.
+            signal_in (Array): Time domain input signal with shape `(num_binaries, num_times)`
+
+        Returns:
+            signal_out (Array): The transformed signal with shape `(num_binaries, num_freqs)`
+            start_freqs (Array): Starting frequencies to be fed to the likelihood calculation Shape: `(num_binaries,)`
+        """
+        # for the moment we are gonna evaluate the likelihood on the same frequency support for every source
+        num_binaries = signal_in.shape[0]
+        n = signal_in.shape[-1]
+        window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
+
+        signal_fd = self.xp.fft.rfft(signal_in * window, axis=-1) * self.dt
+        freqs = self.xp.fft.rfftfreq(n)
+
+        keep = (freqs >= self.freq_min) and (freqs <= self.freq_max)
+        signal_out = signal_fd[..., keep]
+
+        start_freqs = np.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
+
+        return signal_out, start_freqs
+
+    def stft(
+        self,
+        times_in: np.ndarray | cp.ndarray,
+        signal_in: np.ndarray | cp.ndarray,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Transform the time domain data to the STFT basis with the chosen settings.
+
+        Args:
+            times_in (Array): Time grid of the input signal with shape `(num_binaries, num_times)`
+            signal_in (Array): Time domain input signal with shape `(num_binaries, num_times)`
+
+        Returns:
+            signal_out (Array): The transformed signal with shape `(num_binaries, num_stft_times, num_freqs)`
+            start_freqs (Array): Starting frequencies to be fed to the likelihood calculation Shape: `(num_binaries,)`
+            start_times (Array): Starting times to be fed to the likelihood calculation Shape: `(num_binaries,)`
+        """
+
+        num_binaries, num_channels = signal_in.shape[:2]
+        signal_in = signal_in.reshape(
+            num_binaries, num_channels, -1, self.nperseg
+        )  # (num_binaries, num_channels, num_segments, num_times_per_segment)
+        start_times = times_in[:, 0]
+        dt = (
+            times_in[0, 1] - times_in[0, 0]
+        )  # here the time grid is dense for every source, so we can just take the first one to compute dt
+
+        signal_out, start_freqs = self.fft(times_in, signal_in)
+
+        return signal_out, start_freqs, start_times
+
+    def compute_tdi_channels(
+        self,
+        *args,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        **kwargs,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Generate the on-the-fly response for a batch of sources, and return the computed TDI channels.
+
+        Args:
+            *args: positional arguments for the amplitude and phase generation method.
+            inclination (Array): Inclination angles for the sources, shape (Nbatch,). If `self.zero_inclination`, this will be set to zero when passed to the response to avoid double-counting the spherical harmonic contribution.
+            psi (Array): Polarization angles for the sources, shape (Nbatch,).
+            ra (Array): Right ascension for the sources, shape (Nbatch,).
+            dec (Array): Declination for the sources, shape (Nbatch,).
+            **kwargs: keyword arguments for the amplitude and phase generation method.
+
+        Returns:
+            Tuple of (dense_times, tdi_channels) where `dense_times` has shape (Nbatch, num_times) and `tdi_channels` has shape (Nbatch, num_TDI_channels, num_times).
+        """
+
+        # step 1: generate the amplitude and phase arrays for each mode of each source:
+        input_times, input_amplitudes, input_phases = self.get_amp_phase(
+            *args, inclination, psi, ra, dec, **kwargs
+        )  # todo fixup?
+
+        input_amplitudes, input_phases = self.process_amp_phase(input_amplitudes, input_phases)
+
+        num_binaries, num_modes = input_amplitudes.shape[:2]
+        num_sub = num_binaries * num_modes
+
+        input_amplitudes = input_amplitudes.reshape(num_sub, -1)
+        input_phases = input_phases.reshape(num_sub, -1)
+        input_times = input_times.reshape(num_sub, -1)
+
+        # step 2: Define the time array on which we are gonna evaluate the respone.
+        evaluation_times = self.get_evaluation_times(input_times)
+
+        tdi_generator = TDTDIonTheFly(
+            evaluation_times,
+            input_amplitudes,
+            input_phases,
+            sampling_frequency=self.sampling_frequency,
+            num_sub=num_sub,
+            t_input=input_times,
+            tdi_config=self.tdi_config,
+            orbits=self.orbits,
+            force_backend=self.backend_name.split("_")[-1],
+        )
+
+        # step 3: locate and repeat the sky parameters, polarization and inclination
+        if self.zero_inclination:
+            inclination_in = self.xp.zeros(num_sub)
+        else:
+            inclination_in = self.stack_parameter(inclination, num_modes)
+        psi_in = self.stack_parameter(psi, num_modes)
+        ra_in = self.stack_parameter(ra, num_modes)
+        dec_in = self.stack_parameter(dec, num_modes)
+
+        # step 4: generate the TDI on-the-fly response for each source and mode
+        tdi_spline = tdi_generator(inclination_in, psi_in, ra_in, dec_in, return_spline=True)
+
+        # step 5: get the desired dense time array on which to evaluate the response
+        dense_times = self.get_dense_times(
+            evaluation_times
+        )  # shape nbinaries * num_modes, num_times
+
+        # step 6: evaluate the TDI response on the dense time array
+        tdi_out = tdi_spline.eval_tdi(dense_times, error_out_of_bounds=False).reshape(
+            num_binaries, num_modes, self.tdi_config.nchannels, -1
+        )
+
+        tdi_channels = self.xp.sum(
+            tdi_out, axis=1
+        )  # sum over modes to get the total response for each binary
+        dense_times = dense_times.reshape(num_binaries, num_modes, -1)[
+            :, 0
+        ]  # reshape and take the time array from the first mode (all modes share the same time array)
+
+        return dense_times, tdi_channels
+
+    def __call__(
+        self,
+        *args,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        **kwargs,
+    ) -> (
+        Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]
+        | Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]
+    ):
+        """
+        Generate the on-the-fly response for a batch of sources and transform it to the desired domain.
+
+        Args:
+            *args: Arguments for the amplitude and phase generation method.
+            inclination: Inclination angles for the sources, shape (Nbatch,).
+            psi: Polarization angles for the sources, shape (Nbatch,).
+            ra: Right ascension for the sources, shape (Nbatch,).
+            dec: Declination for the sources, shape (Nbatch,).
+            **kwargs: Keyword arguments for the amplitude and phase generation method.
+
+        Returns:
+            If self.transform_to_domain is self.fft: Tuple of (signal_out, start_freqs) where signal_out has shape (Nbatch, num_freqs) and start_freqs has shape (Nbatch,).
+            If self.transform_to_domain is self.stft: Tuple of (signal_out, start_freqs, start_times) where signal_out has shape (Nbatch, num_stft_times, num_freqs), start_freqs has shape (Nbatch,), and start_times has shape (Nbatch,).
+        """
+
+        dense_times, tdi_channels = self.compute_tdi_channels(
+            *args, inclination=inclination, psi=psi, ra=ra, dec=dec, **kwargs
+        )
+
+        return self.transform_to_domain(dense_times, tdi_channels)
+
+    def get_signals_for_residuals(
+        self,
+        *args,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        **kwargs,
+    ) -> List[DomainBase]:
+        """
+        Generate the on-the-fly response for a batch of sources and return the domain wrapped signals for residual operations.
+
+        Args:
+            *args: Arguments for the amplitude and phase generation method.
+            inclination: Inclination angles for the sources, shape (Nbatch,).
+            psi: Polarization angles for the sources, shape (Nbatch,).
+            ra: Right ascension for the sources, shape (Nbatch,).
+            dec: Declination for the sources, shape (Nbatch,).
+            **kwargs: Keyword arguments for the amplitude and phase generation method.
+
+        Returns:
+            List of DomainBase objects containing the signals for each source, transformed to the desired output domain.
+        """
+
+        dense_times, tdi_channels = self.compute_tdi_channels(
+            *args, inclination=inclination, psi=psi, ra=ra, dec=dec, **kwargs
+        )
+
+        window_n = dense_times.shape[-1] if self.nperseg is None else self.nperseg
+        window = tukey(window_n, alpha=self.tukey_alpha, xp=self.xp)
+
+        signals_out = []
+        for i in range(tdi_channels.shape[0]):
+            td_signal = TDSignal(
+                arr=tdi_channels[i],
+                settings=TDSettings(
+                    t0=dense_times[i, 0],
+                    dt=self.dt,
+                    N=dense_times.shape[-1],
+                    force_backend=self.backend_name.split("_")[-1],
+                ),
+            )
+
+            output_domain = self.get_output_settings(dense_times[i])
+            signals_out.append(td_signal.transform(new_window=output_domain, window=window))
+
+        return signals_out
