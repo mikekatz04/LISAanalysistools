@@ -187,7 +187,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         Returns:
             TDSignal with the TDI response applied.
         """
-        shifted_t_arr = (t_arr + merger_time + self.waveform_t0).copy()
+        shifted_t_arr = t_arr + merger_time + self.waveform_t0
         self.response.num_pts = shifted_t_arr.shape[-1]
 
         strain = h_plus + 1j * h_cross
@@ -343,9 +343,9 @@ class TDWaveformBase(LISAToolsParallelModule):
         for i in range(Nbatch):
             mask_i = mask_batch[i]
 
-            t_arr_i = self.xp.asarray(times_batch[i][mask_i])
-            hplus_i = self.xp.asarray(hplus_batch[i][mask_i])
-            hcross_i = self.xp.asarray(hcross_batch[i][mask_i])
+            t_arr_i = times_batch[i][mask_i]
+            hplus_i = hplus_batch[i][mask_i]
+            hcross_i = hcross_batch[i][mask_i]
 
             td_signals.append(
                 self._apply_response_single(
@@ -527,7 +527,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def __init__(
         self,
         waveform_t0: float,
-        data_settings: TDSettings,
+        data_td_settings: TDSettings,
         tdi_config: str | TDIConfig = "2nd generation",
         sampling_frequency: float = 0.4,
         orbits: Orbits = None,
@@ -541,7 +541,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         super().__init__(force_backend=force_backend)
 
         self.waveform_t0 = waveform_t0
-        self.domain_settings = data_settings
+        self.domain_settings = data_td_settings
         self.tukey_alpha = tukey_alpha
         if isinstance(tdi_config, str):
             self.tdi_config = TDIConfig(tdi_generation=tdi_config, force_backend=force_backend)
@@ -718,16 +718,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def get_amp_phase(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, CubicSplineInterpolant, CubicSplineInterpolant]:
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
         Generate amplitude and phase arrays for each mode of a batch of sources.
-        Interpolate the amplitude and phase of each mode with a CubicSplineInterpolant to be then fed to the TDI on the fly response generator.
-        Returns also the time array
+        Returns also the time array.
 
         Returns:
             Tuple of (t_arr, amp, phase).
@@ -761,9 +756,16 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         param = self.xp.asarray(param)
         return self.xp.repeat(param, num_modes)
 
-    def get_evaluation_times(self, input_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+    def get_evaluation_times(self, input_times: np.ndarray | cp.ndarray, num_modes: int) -> np.ndarray | cp.ndarray:
         """
         Get the time array on which to evaluate the TDI on-the-fly response. By default, this uses the same as the input time array from the amplitude and phase generation, but subclasses can override this method to define a different evaluation grid if needed (e.g. a regular grid).
+
+        Args:
+            input_times (Array): times used for amp/phase generation, shape (num_binaries, num_times)
+            num_modes (int): number of modes to repeat the times array by.
+
+        Returns:
+            evaluation times of shape (num_binaries * num_modes, num_eval_times).
         """
         delta_t = self.xp.diff(input_times, axis=-1)
 
@@ -772,7 +774,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         evaluation_times = input_times[:, start_buffer:-end_buffer][:, -self.max_length :]
 
-        return evaluation_times
+        return self.xp.repeat(evaluation_times, num_modes, axis=0)
 
     def get_dense_times(self, eval_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
         """
@@ -814,9 +816,9 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
 
         signal_fd = self.xp.fft.rfft(signal_in * window, axis=-1) * self.dt
-        freqs = self.xp.fft.rfftfreq(n)
+        freqs = self.xp.fft.rfftfreq(n, d=self.dt)
 
-        keep = (freqs >= self.freq_min) and (freqs <= self.freq_max)
+        keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
         signal_out = signal_fd[..., keep]
 
         start_freqs = np.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
@@ -857,10 +859,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def compute_tdi_channels(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
+        inclination: np.ndarray | cp.ndarray,
+        psi: np.ndarray | cp.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
@@ -872,6 +875,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             psi (Array): Polarization angles for the sources, shape (Nbatch,).
             ra (Array): Right ascension for the sources, shape (Nbatch,).
             dec (Array): Declination for the sources, shape (Nbatch,).
+            merger_time (Array): merger time with respect to `waveform_t0`, shape (Nbatch,).
             **kwargs: keyword arguments for the amplitude and phase generation method.
 
         Returns:
@@ -885,6 +889,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         input_amplitudes, input_phases = self.process_amp_phase(input_amplitudes, input_phases)
 
+        input_times = (
+            input_times + merger_time + self.waveform_t0
+        )  # add the waveform t0 to get the absolute time for the TDI response generation
+
         num_binaries, num_modes = input_amplitudes.shape[:2]
         num_sub = num_binaries * num_modes
 
@@ -893,7 +901,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         input_times = input_times.reshape(num_sub, -1)
 
         # step 2: Define the time array on which we are gonna evaluate the respone.
-        evaluation_times = self.get_evaluation_times(input_times)
+        evaluation_times = self.get_evaluation_times(input_times, num_modes)
 
         tdi_generator = TDTDIonTheFly(
             evaluation_times,
@@ -941,10 +949,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def __call__(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
+        inclination: np.ndarray | cp.ndarray,
+        psi: np.ndarray | cp.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
         **kwargs,
     ) -> (
         Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]
@@ -967,7 +976,13 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         """
 
         dense_times, tdi_channels = self.compute_tdi_channels(
-            *args, inclination=inclination, psi=psi, ra=ra, dec=dec, **kwargs
+            *args,
+            inclination=inclination,
+            psi=psi,
+            ra=ra,
+            dec=dec,
+            merger_time=merger_time,
+            **kwargs,
         )
 
         return self.transform_to_domain(dense_times, tdi_channels)
@@ -975,10 +990,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def get_signals_for_residuals(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
+        inclination: np.ndarray | cp.ndarray,
+        psi: np.ndarray | cp.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
         **kwargs,
     ) -> List[DomainBase]:
         """
@@ -997,7 +1013,13 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         """
 
         dense_times, tdi_channels = self.compute_tdi_channels(
-            *args, inclination=inclination, psi=psi, ra=ra, dec=dec, **kwargs
+            *args,
+            inclination=inclination,
+            psi=psi,
+            ra=ra,
+            dec=dec,
+            merger_time=merger_time,
+            **kwargs,
         )
 
         window_n = dense_times.shape[-1] if self.nperseg is None else self.nperseg
