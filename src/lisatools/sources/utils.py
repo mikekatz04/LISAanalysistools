@@ -475,20 +475,97 @@ class EMRICalculationController(CalculationController):
         return params[deriv_inds], cov
 
 
-def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, float]:
+def icrs_to_ecliptic(
+    psi: float | np.ndarray,
+    ra: float | np.ndarray,
+    dec: float | np.ndarray,
+) -> Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
     """
-    Convert ICRS coordinates and angles, (psi, ra, dec) to ecliptic coordinates (psi_ecliptic, lambda, beta)."""
-    eps = 0.40909263366002024 # obliquity of the ecliptic at J2000 in radians
+    Convert ICRS angles (psi, ra, dec) to ecliptic coordinates
+    (psi_ecliptic, lambda, beta).
 
-    coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
+    Inputs are broadcast following NumPy rules. If all inputs are scalar,
+    scalar outputs are returned.
+    """
+    eps = 0.40909263366002024  # obliquity of the ecliptic at J2000 in radians
+
+    psi_arr = np.asarray(psi, dtype=float)
+    ra_arr = np.asarray(ra, dtype=float)
+    dec_arr = np.asarray(dec, dtype=float)
+    scalar_output = psi_arr.ndim == 0 and ra_arr.ndim == 0 and dec_arr.ndim == 0
+    psi_arr, ra_arr, dec_arr = np.broadcast_arrays(psi_arr, ra_arr, dec_arr)
+
+    coord = SkyCoord(ra=ra_arr * u.rad, dec=dec_arr * u.rad, frame="icrs")
     ecliptic_coord = coord.barycentrictrueecliptic
 
-    lambd = ecliptic_coord.lon.rad
-    beta = ecliptic_coord.lat.rad
+    lambd = np.asarray(ecliptic_coord.lon.rad)
+    beta = np.asarray(ecliptic_coord.lat.rad)
 
-    cosdeltapsi = 1./np.cos(dec) * (-np.sin(eps)*np.sin(beta)*np.sin(lambd) + np.cos(eps)*np.cos(beta))
-    sindeltapsi = -1./np.cos(dec) * np.sin(eps)*np.cos(lambd)
+    cos_dec = np.cos(dec_arr)
+    eps_cos_dec = np.finfo(float).eps
+    safe_cos_dec = np.where(
+        np.abs(cos_dec) < eps_cos_dec,
+        np.copysign(eps_cos_dec, cos_dec),
+        cos_dec,
+    )
+    inv_cos_dec = 1.0 / safe_cos_dec
+
+    cosdeltapsi = inv_cos_dec * (
+        -np.sin(eps) * np.sin(beta) * np.sin(lambd) + np.cos(eps) * np.cos(beta)
+    )
+    sindeltapsi = -inv_cos_dec * np.sin(eps) * np.cos(lambd)
     deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-    psi_ecliptic = psi - deltapsi
+    psi_ecliptic = psi_arr - deltapsi
+
+    if scalar_output:
+        return float(psi_ecliptic), float(lambd), float(beta)
 
     return psi_ecliptic, lambd, beta
+
+def ecliptic_to_icrs(
+        psi_ecliptic: float | np.ndarray,
+        lambd: float | np.ndarray,
+        beta: float | np.ndarray
+) -> Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]:
+    """
+    Convert ecliptic coordinates (psi_ecliptic, lambda, beta) to ICRS angles
+    (psi, ra, dec).
+
+    Inputs are broadcast following NumPy rules. If all inputs are scalar,
+    scalar outputs are returned.
+    """
+    
+    eps = 0.40909263366002024  # obliquity of the ecliptic at J2000 in radians
+
+    psi_ecliptic_arr = np.asarray(psi_ecliptic, dtype=float)
+    lambd_arr = np.asarray(lambd, dtype=float)
+    beta_arr = np.asarray(beta, dtype=float)
+    scalar_output = psi_ecliptic_arr.ndim == 0 and lambd_arr.ndim == 0 and beta_arr.ndim == 0
+    psi_ecliptic_arr, lambd_arr, beta_arr = np.broadcast_arrays(psi_ecliptic_arr, lambd_arr, beta_arr)
+
+    coord = SkyCoord(lon=lambd_arr * u.rad, lat=beta_arr * u.rad, frame="barycentrictrueecliptic")
+    icrs_coord = coord.icrs
+
+    ra = np.asarray(icrs_coord.ra.rad)
+    dec = np.asarray(icrs_coord.dec.rad)
+
+    cos_beta = np.cos(beta_arr)
+    eps_cos_beta = np.finfo(float).eps
+    safe_cos_beta = np.where(
+        np.abs(cos_beta) < eps_cos_beta,
+        np.copysign(eps_cos_beta, cos_beta),
+        cos_beta,
+    )
+    inv_cos_beta = 1.0 / safe_cos_beta
+
+    cosdeltapsi = inv_cos_beta * (
+        -np.sin(eps) * np.sin(dec) * np.sin(ra) + np.cos(eps) * np.cos(dec)
+    )
+    sindeltapsi = -inv_cos_beta * np.sin(eps) * np.cos(ra)
+    deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
+    psi = psi_ecliptic_arr + deltapsi
+
+    if scalar_output:
+        return float(psi), float(ra), float(dec)
+
+    return psi, ra, dec

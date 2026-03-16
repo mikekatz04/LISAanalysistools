@@ -24,7 +24,8 @@ except (ModuleNotFoundError, ImportError):
     CUPY_AVAILABLE = False
 
 import dataclasses
-from .domaincomputation import STFTComputationGroup, FDComputationGroup 
+
+from .domaincomputation import FDComputationGroup, STFTComputationGroup
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module, tukey
@@ -239,7 +240,9 @@ class TDSignal(DomainBase, TDSettings):
 
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
+            assert (
+                settings.df == df
+            ), f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
             fd_settings = settings
         else:
             fd_settings = FDSettings(
@@ -376,7 +379,7 @@ class FDSettings(DomainSettingsBase):
     @property
     def associated_class(self):
         return self.get_associated_class()
-    
+
     @property
     def associated_group(self):
         return self.get_associated_group()
@@ -598,20 +601,18 @@ class FDSignal(FDSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-    def plot(self, 
-             channel: int = 0, 
-             ax: plt.Axes | None = None, 
-             filename: Optional[str] = None,
-             **kwargs) -> plt.Axes:
+    def plot(
+        self, channel: int = 0, ax: plt.Axes | None = None, filename: Optional[str] = None, **kwargs
+    ) -> plt.Axes:
         """
         Plot the squared amplitude of the FD signal for a given channel.
 
         Args:
             channel: The channel index to visualize.
-            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.  
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.
             filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
             **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
-        
+
         Returns:
             The matplotlib Axes object containing the plot.
         """
@@ -631,7 +632,8 @@ class FDSignal(FDSettings, DomainBase):
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight")
         return ax
-        
+
+
 class STFTSettings(DomainSettingsBase):
     t0: float
     dt: float
@@ -674,11 +676,11 @@ class STFTSettings(DomainSettingsBase):
     @staticmethod
     def get_associated_group():
         return STFTComputationGroup
-    
+
     @property
     def associated_class(self):
         return self.get_associated_class()
-    
+
     @property
     def associated_group(self):
         return self.get_associated_group()
@@ -743,7 +745,9 @@ class STFTSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
-            min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.backend_name.split("_")[-1]
+            min_freq=self.min_freq,
+            max_freq=self.max_freq,
+            force_backend=self.backend_name.split("_")[-1],
         )
 
     @property
@@ -961,12 +965,14 @@ class STFTSignal(STFTSettings, DomainBase):
 
         ax.loglog(f_arr, np.abs(arr_here[time_bin]) ** 2, **kwargs)
 
-        ax.set_title(f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})")
+        ax.set_title(
+            f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})"
+        )
         ax.set_xlabel("Frequency")
         ax.set_ylabel("Magnitude")
         ax.set_xlim(self.min_freq, self.max_freq)
         return ax
-    
+
     def _plot_td(self, channel=0, ax=None, freq_bin=0, **kwargs):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
@@ -979,17 +985,21 @@ class STFTSignal(STFTSettings, DomainBase):
         ax.plot(t_arr, arr_here[:, freq_bin].imag, label="imag part", **kwargs)
 
         ax.legend()
-        ax.set_title(f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})")
+        ax.set_title(
+            f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})"
+        )
         ax.set_xlabel("Time")
         ax.set_ylabel("Magnitude")
         return ax
-    
-    def plot(self, 
-             channel: int = 0, 
-             ax: plt.Axes | None = None, 
-             plot_type: str = "stft", 
-             filename: Optional[str] = None,
-             **kwargs) -> plt.Axes:
+
+    def plot(
+        self,
+        channel: int = 0,
+        ax: plt.Axes | None = None,
+        plot_type: str = "stft",
+        filename: Optional[str] = None,
+        **kwargs,
+    ) -> plt.Axes:
         """
         Visualize the STFT signal in either the time-frequency domain (stft), frequency domain (fd), or time domain (td).
 
@@ -1000,7 +1010,7 @@ class STFTSignal(STFTSettings, DomainBase):
                 vs frequency plot of the magnitude squared of the STFT coefficients. 'fd' will create a log-log plot of the magnitude squared of the STFT coefficients for a single time bin. 'td' will create a plot of the magnitude squared of the real and imaginary parts of the STFT coefficients for a single frequency bin.
             filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
             **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
-        
+
         Returns:
             The matplotlib Axes object containing the plot.
         """
@@ -1011,7 +1021,9 @@ class STFTSignal(STFTSettings, DomainBase):
         elif plot_type == "td":
             ax = self._plot_td(channel=channel, ax=ax, **kwargs)
         else:
-            raise ValueError(f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'.")
+            raise ValueError(
+                f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'."
+            )
 
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight")

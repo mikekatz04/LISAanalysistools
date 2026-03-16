@@ -749,10 +749,10 @@ cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0, double fdo
 }
 
 CUDA_DEVICE
-cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0, double fdot0, double t0, double f)
+cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0, double fdot0, double t0, double f, double window_factor)
 {
     cmplx kernel = get_fresnel_kernel(f, t0, f0, fdot0);
-    double amplitude = amp / std::sqrt(2.0 * std::abs(fdot0)); // todo: check for negative fdot0?
+    double amplitude = window_factor * amp / std::sqrt(2.0 * std::abs(fdot0)); // todo: check for negative fdot0?
     double zeta = get_zeta(f, f0, fdot0);
     double phase = phase0 - M_PI * fdot0 * zeta * zeta;
     
@@ -778,6 +778,7 @@ cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0, doubl
  * @param fdot0s   Frequency derivative per binary [num_binaries]
  * @param t0s      Reference time per binary [num_binaries]
  * @param freqs    Evaluation frequencies [num_binaries * num_freqs]
+ * @param window_factor  Pre-computed window factor to apply to all outputs. this should be \sum w_i / N_window, where w_i are the window weights for the current STFT window and N_window is the number of time bins in the window.
  * @param num_binaries  Number of sources in the batch
  * @param num_freqs     Number of frequency points per source
  */
@@ -791,6 +792,7 @@ void compute_fourier_values_kernel(
     double *fdot0s,
     double *t0s,
     double *freqs,
+    double window_factor,
     int num_binaries,
     int num_freqs)
 {
@@ -807,7 +809,7 @@ void compute_fourier_values_kernel(
 
     output[bin * num_freqs + f_idx] = fresnel->get_fourier_value(
         amps[bin], phase0s[bin], f0s[bin], fdot0s[bin], t0s[bin],
-        freqs[bin * num_freqs + f_idx]);
+        freqs[bin * num_freqs + f_idx], window_factor);
 
 #ifndef __CUDACC__
     }}  // close CPU loops
@@ -820,7 +822,7 @@ void compute_fourier_values_kernel(
 void STFTFresnel::compute_fourier_values_wrap(
     cmplx *output, double *amps, double *phase0s,
     double *f0s, double *fdot0s, double *t0s,
-    double *freqs, int num_binaries, int num_freqs)
+    double *freqs, double window_factor, int num_binaries, int num_freqs)
 {
 #ifdef __CUDACC__
     int total = num_binaries * num_freqs;
@@ -832,14 +834,14 @@ void STFTFresnel::compute_fourier_values_wrap(
 
     compute_fourier_values_kernel<<<num_blocks, NUM_THREADS>>>(
         output, dev_ptr, amps, phase0s, f0s, fdot0s, t0s,
-        freqs, num_binaries, num_freqs);
+        freqs, window_factor, num_binaries, num_freqs);
 
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaFree(dev_ptr));
 #else
     compute_fourier_values_kernel(
         output, this, amps, phase0s, f0s, fdot0s, t0s,
-        freqs, num_binaries, num_freqs);
+        freqs, window_factor, num_binaries, num_freqs);
 #endif
 }
 

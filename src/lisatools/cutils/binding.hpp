@@ -349,6 +349,7 @@ public:
         array_type<double> fdot0s,
         array_type<double> t0s,
         array_type<double> freqs,
+        double window_factor,
         int num_binaries,
         int num_freqs)
     {
@@ -363,7 +364,7 @@ public:
 
         fresnel->compute_fourier_values_wrap(
             out_ptr, amp_ptr, ph_ptr, f0_ptr, fd_ptr, t0_ptr,
-            freq_ptr, num_binaries, num_freqs);
+            freq_ptr, window_factor, num_binaries, num_freqs);
     }
 };
 

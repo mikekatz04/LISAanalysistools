@@ -528,7 +528,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         self,
         waveform_t0: float,
         data_settings: TDSettings,
-        tdi_generation: str = "2nd generation",
+        tdi_config: str | TDIConfig = "2nd generation",
         sampling_frequency: float = 0.4,
         orbits: Orbits = None,
         zero_inclination: bool = False,
@@ -543,7 +543,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         self.waveform_t0 = waveform_t0
         self.domain_settings = data_settings
         self.tukey_alpha = tukey_alpha
-        self.tdi_config = TDIConfig(tdi_generation=tdi_generation, force_backend=force_backend)
+        if isinstance(tdi_config, str):
+            self.tdi_config = TDIConfig(tdi_generation=tdi_config, force_backend=force_backend)
+        else:
+            self.tdi_config = tdi_config
 
         self.sampling_frequency = sampling_frequency
         self.orbits = orbits
