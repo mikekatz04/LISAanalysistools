@@ -42,6 +42,7 @@ dependencies = [
   #@DEPS_CUPYCUDA@,
   #@DEPS_LISATOOLSCORE@,
   "mojito",
+  "mojito-processor",
   "astropy",
   "scikit-learn",
   "cudakima"
@@ -110,6 +111,10 @@ url = "https://pypi.org/simple"
 [[tool.uv.index]]
 name = "gitlab-esa-commons"
 url = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/simple"
+
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
 
 [tool.scikit-build]
 wheel.packages = ["src/lisatools"]
@@ -185,3 +190,4 @@ report.omit = [
 [tool.uv.sources]
 mojito = { index = "gitlab-esa-commons" }
 lisaconstants = { index = "pypi" }
+mojito-processor = { index = "testpypi" }  # TODO: switch to pypi once published there

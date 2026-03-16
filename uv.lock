@@ -1087,6 +1087,7 @@ dependencies = [
     { name = "lisaconstants" },
     { name = "matplotlib" },
     { name = "mojito" },
+    { name = "mojito-processor" },
     { name = "multispline" },
     { name = "numba" },
     { name = "numpy" },
@@ -1157,6 +1158,7 @@ requires-dist = [
     { name = "lisaconstants", specifier = "==2.0.2", index = "https://pypi.org/simple" },
     { name = "matplotlib" },
     { name = "mojito", index = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/simple" },
+    { name = "mojito-processor", index = "https://test.pypi.org/simple/" },
     { name = "mpi4py", marker = "extra == 'sampling'" },
     { name = "multispline" },
     { name = "mypy", marker = "extra == 'dev'" },
@@ -1413,6 +1415,21 @@ dependencies = [
 sdist = { url = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/files/b779fe5fc2350ea250fb566fd185a6213699804632c3479650c9ab9ee53b5231/mojito-0.3.1.tar.gz", hash = "sha256:b779fe5fc2350ea250fb566fd185a6213699804632c3479650c9ab9ee53b5231" }
 wheels = [
     { url = "https://gitlab.esa.int/api/v4/groups/29349/-/packages/pypi/files/567ccaa77b8371547d6d98cd86dc855b67cb9f59b3c96a60d12b4c2fe15585fc/mojito-0.3.1-py3-none-any.whl", hash = "sha256:567ccaa77b8371547d6d98cd86dc855b67cb9f59b3c96a60d12b4c2fe15585fc" },
+]
+
+[[package]]
+name = "mojito-processor"
+version = "0.2.2"
+source = { registry = "https://test.pypi.org/simple/" }
+dependencies = [
+    { name = "h5py" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://test-files.pythonhosted.org/packages/db/4b/949399a32c218a426880e093dbefe725f4e76b9e2074abbf21139cc53510/mojito_processor-0.2.2.tar.gz", hash = "sha256:5be0c00bfe8eb87b55a74ba40c2f022aebff1fef40d98c6331997b855f84e478", size = 485535, upload-time = "2026-02-21T01:34:18.716Z" }
+wheels = [
+    { url = "https://test-files.pythonhosted.org/packages/e2/95/c10d5f2bc36b40de2b1414897469fd3598eaa38c4a17743bae290eb15225/mojito_processor-0.2.2-py3-none-any.whl", hash = "sha256:b8815df15e9535a97e795ac1821bde7dd351c1fb6e43b08def608e704253890b", size = 17241, upload-time = "2026-02-21T01:34:16.737Z" },
 ]
 
 [[package]]
