@@ -1171,7 +1171,6 @@ class SensitivityMatrix:
                 self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
             )
             invC[self.detC == 0.0] = 1e-100
-            print("HAHA", invC.shape, transpose_shape, basis_axes, mat_axes)
             # switch them after they were effectively switched above
 
             full_shape_rev = tuple(range(len(invC.shape)))
