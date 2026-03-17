@@ -122,6 +122,10 @@ class GeneralSettings(Settings):
     ntemps: int = None
     wintype: str = "tukey"
     winalpha: float = None
+    use_splines: bool = False, 
+    nknots: int = None,
+    lowerbound: float = None, 
+    upperbound: float = None,
     gpus: typing.List[int] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])

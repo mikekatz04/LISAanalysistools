@@ -355,6 +355,7 @@ class GlobalFit:
             data_res_arr = deepcopy(self.curr.general_info.input_data_residual_array)
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
+                
                 psd_params = state.branches_coords["psd"][0, w, 0]
                 # need to generalize for other stochastic functions
                 if "galfor" in state.branches_coords.keys():

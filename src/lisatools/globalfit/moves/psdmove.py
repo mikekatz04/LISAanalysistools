@@ -201,6 +201,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         # TODO: better way so avoid order issues?
         if self.psd_transform_fn is not None:
             psd_pars = self.psd_transform_fn.both_transforms(x[0])
+            breakpoint()
         else:
             psd_pars = x[0]
 
@@ -212,8 +213,13 @@ class PSDMove(GlobalFitMove, StretchMove):
             else:
                 galfor_pars = x[1]
 
+        
+
         data_index_all = cp.asarray(wi).astype(np.int32)
         # ll = cp.zeros(psd_pars.shape[0])
+        
+        # HERE >
+        
         Soms_d_in_all = cp.asarray(psd_pars[:, 0])
         Sa_a_in_all = cp.asarray(psd_pars[:, 1])
 
