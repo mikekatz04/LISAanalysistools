@@ -41,6 +41,7 @@ from .stochastic import (
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
+from eryn.utils import TransformContainer
 
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
@@ -2311,7 +2312,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return smoothed_matrix
 
     def __call__(
-        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None
+        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None, transform_fn: TransformContainer = None
     ) -> XYZSensitivityBackend:
         """
         Update the internal sensitivity matrix with new noise parameters and return to be used in a AnalysisContainer.
@@ -2329,11 +2330,13 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.name = name
 
         if self.use_splines:
-            breakpoint()
-            # todo add a container for the noise
-            spline_params = psd_params[2:]
-            spline_knots_position = spline_params[::2]
-            spline_knots_amplitude = spline_params[1::2]
+            if transform_fn is None:
+                raise ValueError("A transform container is needed when using splines for fitting the noise.")
+            spline_params = transform_fn.both_transforms(psd_params, copy=True, return_transpose=False)
+            spline_knots_position = spline_params[3::2]
+            spline_knots_amplitude = spline_params[2:-1:2]
+            Soms_d = spline_params[0]
+            Sa_a = spline_params[1]
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
