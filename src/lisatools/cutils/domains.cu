@@ -52,6 +52,7 @@
  */
 
 #include "domains.hpp"
+#include <iostream>
 
 #ifdef __CUDACC__
 #include <cub/cub.cuh> // CUB block-level primitives for efficient intra-block reductions
@@ -744,7 +745,8 @@ cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0, double fdo
 
     double delta_C = C_1 - C_0;
     double delta_S = S_1 - S_0;
-    cmplx kernel = cmplx(delta_C, delta_S);
+    cmplx kernel = (fdot0 >= 0.0) ? cmplx(delta_C, delta_S) : cmplx(delta_C, -delta_S);
+
     return kernel;
 }
 
