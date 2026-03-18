@@ -47,17 +47,6 @@ set_property(
   STRINGS "AUTO" "ON" "OFF" "ONLY" "BARE"
 )
 
-# LISATOOLS_CUDA_ARCH will be passed as the CUDA_ARCHITECTURES property for the CUDA
-# backend if it is compiled. See the documentation of CUDA_ARCHITECTURES:
-# https://cmake.org/cmake/help/latest/prop_tgt/CUDA_ARCHITECTURES.html
-# setting the cuda_arch for specific devices 
-# set(
-#   LISATOOLS_CUDA_ARCH "70;75;80;86;90"
-#   CACHE STRING "CUDA Architecture targetted for LISATOOLS compilation (see doc of \
-#           CMAKE_CUDA_ARCHITECTURES)."
-# )
-# see fix below
-
 set(
   LISATOOLS_MARCH "native"
   CACHE STRING "Value of the -march compiler option if supported by compiler"
@@ -128,9 +117,10 @@ if(_LISATOOLS_WITH_GPU)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
 
-  # For cuda13x and upwards cuda_arch <= 70 (v100) is not supported anymore. The code below takes 
-  # that into consideration, while still being agnostic to the cuda version usage. The following 
-  # checks if CUDAToolkit_VERSION is less than 13.0 --> full default arch. Otherwise, without 70.
+  # LISATOOLS_CUDA_ARCH will be passed as the CUDA_ARCHITECTURES property for the CUDA
+  # backend if it is compiled. See the documentation of CUDA_ARCHITECTURES:
+  # https://cmake.org/cmake/help/latest/prop_tgt/CUDA_ARCHITECTURES.html
+  # For cuda13x and upwards cuda_arch <= 70 (v100) is not supported anymore.
   set(DEFAULT_ARCHS "70;75;80;86;90")
   set(FILTERED_ARCHS "")
 
