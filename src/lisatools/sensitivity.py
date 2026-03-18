@@ -1965,7 +1965,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         if self.use_splines:
             assert knots_position_all is not None and knots_amplitude_all is not None
-            breakpoint()
             splines_out = self.spline_interpolant(xp.log10(freqs), knots_position_all, knots_amplitude_all)
             splines_in_isi_oms = splines_out[0]
             spline_in_testmass = splines_out[1]
@@ -2332,11 +2331,15 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if self.use_splines:
             if transform_fn is None:
                 raise ValueError("A transform container is needed when using splines for fitting the noise.")
-            spline_params = transform_fn.both_transforms(psd_params, copy=True, return_transpose=False)
-            spline_knots_position = spline_params[3::2]
-            spline_knots_amplitude = spline_params[2:-1:2]
-            Soms_d = spline_params[0]
-            Sa_a = spline_params[1]
+            spline_params = transform_fn.both_transforms(psd_params, copy=True, return_transpose=False) 
+            spline_params = cp.atleast_2d( spline_params )
+            spline_knots_position = spline_params[:,3::2]
+            spline_knots_amplitude = spline_params[:,2:-1:2]
+            half = spline_knots_position.shape[1] // 2
+            spline_knots_amplitude = cp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
+            spline_knots_position = cp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
+            Soms_d = spline_params[:,0].squeeze()
+            Sa_a = spline_params[:,1].squeeze()
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
