@@ -355,16 +355,15 @@ class GlobalFit:
             data_res_arr = deepcopy(self.curr.general_info.input_data_residual_array)
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
-                
                 psd_params = state.branches_coords["psd"][0, w, 0]
                 # need to generalize for other stochastic functions
                 if "galfor" in state.branches_coords.keys():
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
                 else:
                     galfor_params = None
-
                 sens_here = self.curr.general_info.sensitivity_backend(
-                    f"walker_{w}", psd_params, galfor_params=galfor_params
+                    f"walker_{w}", psd_params, transform_fn=self.curr.source_info["psd"].transform_fn, 
+                                               galfor_params=galfor_params
                 )
             else:
                 # TODO: update this
@@ -382,6 +381,7 @@ class GlobalFit:
         # breakpoint()
 
         for name, source_info in self.curr.source_info.items():
+            breakpoint()
             if name not in self.curr.engine_info.branch_names:
                 continue
 
