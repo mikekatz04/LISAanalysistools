@@ -219,7 +219,7 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         xp_mask = self.xp.asarray(mask)
         out_times = self.xp.asarray(times)[xp_mask]
         out_hplus = self.xp.asarray(hplus)[xp_mask]
-        out_hcross = self.xp.asarray(hcross)[xp_mask]
+        out_hcross = self.xp.asarray(hcross)[xp_mask]        
 
         return (
             out_times,
@@ -498,18 +498,18 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase):
                 ``compute_strain_components_amp_phase``.
         """
 
-        super().compute_tdi_channels(
-            m1,
-            m2,
-            s1z,
-            s2z,
-            distance,
-            phi_ref,
-            inclination=inclination,
-            psi=psi,
-            ra=ra,
-            dec=dec,
-            merger_time=merger_time,
-            ref_freq=ref_freq,
-            start_freq=start_freq,
-        )
+        return super().compute_tdi_channels(
+                        m1,
+                        m2,
+                        s1z,
+                        s2z,
+                        distance,
+                        phi_ref,
+                        inclination=inclination,
+                        psi=psi,
+                        ra=ra,
+                        dec=dec,
+                        merger_time=merger_time,
+                        ref_freq=ref_freq,
+                        start_freq=start_freq,
+                    )
