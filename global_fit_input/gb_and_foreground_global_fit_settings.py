@@ -2,16 +2,22 @@ import h5py
 import numpy as np
 import shutil
 
+GPU_BACKEND = "cuda13x"
 try:
+    import lisatools
+    lisatools.get_backend("lisatools_" + GPU_BACKEND)
     import cupy as cp
     gpu_available = True
-except (ModuleNotFoundError, ImportError) as e:
+    print("gpus are available and running on " + GPU_BACKEND)
+except:
     import numpy as cp
-    gpu_available = True
+    gpu_available = False
+    print("STATUS: either cupy could not be imported or gpu backends were not found... \nWARNING: switching to cpus and numpy.")
+    
 
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
-from lisatools.detector import EqualArmlengthOrbits
+from lisatools.detector import EqualArmlengthOrbits, L1Orbits
 from eryn.moves import TemperatureControl
 from lisatools.utils.constants import *
 from gbgpu.utils.utility import get_fdot
@@ -24,7 +30,7 @@ from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
 from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
 from lisatools.globalfit.state import MBHState, EMRIState, GBState
 
-from bbhx.utils.transform import *
+# from bbhx.utils.transform import *
 
 from lisatools.globalfit.generatefuncs import *
 from lisatools.utils.utility import AET
@@ -59,10 +65,11 @@ def f_ms_to_s(x):
 
 from eryn.utils.updates import Update
 
+from lisatools.globalfit.preprocessing import L1ProcessingStep
 from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
-from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
+from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 
 ################
 
@@ -159,10 +166,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     from gbgpu.gbgpu import GBGPU
     import gbgpu 
 
-    _gb_backend = gbgpu.get_backend("cuda12x")
+    _gb_backend = gbgpu.get_backend(curr.general_info.gpu_backend)
     _gb_backend.set_cuda_device(gpus[0])
 
-    gb = GBGPU(force_backend="cuda12x")
+    gb = GBGPU(force_backend=curr.general_info.gpu_backend)
    
     gb.gpus = gpus
     nwalkers = curr.general_info.nwalkers
@@ -410,7 +417,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=general_info.random_seed,
-        force_backend="cuda12x",
+        force_backend=curr.general_info.gpu_backend,
         nfriends=nwalkers,
         **gb_info.group_proposal_kwargs
     )
@@ -504,15 +511,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
 
 def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
-       # limits on parameters
     delta_safe = 1e-5
-    # now with negative fdots
     
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 10.0
     A_lims = [7e-26, 1e-19]
-    f0_lims = [0.05e-3, 2.5e-2]  # TODO: this upper limit leads to an issue at 23 mHz where there is no source?
+    f0_lims = [0.05e-3, 2.5e-2]  # TODO: check validity for mojioto
     
     m_chirp_lims = [0.001, 1.0]
     fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
@@ -524,11 +526,12 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     lam_lims = [0.0, 2 * np.pi]
     beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
 
+    start_freq = 0.0001 #? Should we get this from general_set?
     end_freq = 0.025
-    start_freq = 0.0001
     oversample = 4
     extra_buffer = 5
-    initialize_kwargs = dict(force_backend="cuda12x")
+    start_freq_ind = 0
+    initialize_kwargs = dict(force_backend=general_set.gpu_backend)
 
     gb_settings = GBSettings(
         A_lims=A_lims,
@@ -540,36 +543,65 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         psi_lims=psi_lims,
         lam_lims=lam_lims,
         beta_lims=beta_lims,
-        start_freq_ind=general_set.start_freq_ind,
+        start_freq=start_freq,
+        end_freq=end_freq,
+        oversample=oversample,
+        extra_buffer=extra_buffer,
+        # Start_resample_iter, Iter_count_per_resample, !group_proposal_kwargs (handled later?)
+        start_freq_ind=start_freq_ind,
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
+        # Transform, Priors, Periodic (handled later!)
         nleaves_max=8000,
         nleaves_min=0,
         ndim=8
+        #* !Betas, !Other_tempering_kwargs, !Branch_state, !Branch_backend, Log_dir (handled later?)
     )
 
     gb_setup = GBSetup(gb_settings)
     return gb_setup
 
 
-def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
+# def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     
+#     # waveform kwargs
+#     initialize_kwargs_psd = dict()
+
+#     from lisatools.utils.constants import YRSID_SI
+#     Tobs = YRSID_SI
+#     dt = 10.0
+
+#     psd_settings = PSDSettings(
+#         Tobs=general_set.Tobs,
+#         dt=general_set.dt,
+#         initialize_kwargs=initialize_kwargs_psd,
+#     )
+
+#     return PSDSetup(psd_settings)
+def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
+    # TODO change for foreground inclusion, see below
     # waveform kwargs
     initialize_kwargs_psd = dict()
 
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 10.0
+    priors_psd = {
+                r'$S_{\rm oms}$': uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
+                r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
+            }
+    priors = {"psd": ProbDistContainer(priors_psd)}
+    injection = np.array([15e-12, 3e-15]) # for diagnostic plots
 
     psd_settings = PSDSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
+        priors=priors,
+        ndim=2,
+        injection=injection,
+        log_dir=general_set.file_store_dir
     )
 
     return PSDSetup(psd_settings)
-
 
 
 def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
@@ -596,50 +628,63 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
-    Tobs = 2. * YRSID_SI / 12.0
+    Tobs = 4. * YRSID_SI / 12.0
     dt = 10.0
 
-    ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
-    base_file_name = "gb_and_foreground_separate_1st_try"
-    file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
-
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
-
+    # ldc_source_file = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/LDC2_sangria_training_v2.h5"
+    # base_file_name = "testing_1"
+    # file_store_dir = "/sps/lisaf/crondeel/Erebor_dev/gf_outputs"
+    head_dir = "/sps/lisaf/crondeel/github_repos/LISAanalysistools/"
+    data_input_path = "/sps/lisaf/crondeel/Erebor_dev/_data_sets"
+    base_file_name = "gb_foreground_testing"
+    file_store_dir = "/sps/lisaf/crondeel/Erebor_dev/gf_outputs"
+    
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
     nwalkers = 36
     ntemps = 24
 
-    tukey_alpha = 0.05
+    tukey_alpha = 0.1
+    
+    basis_domain = "fd"
+    
+    processor_init_kwargs = dict(L1_folder=data_input_path,
+                                 source_types=['noise', 'gb'], # 'mbhb', 'vgb',
+                                 verbose=True,
+                                 do_plots=True,
+                                 orbits_class=L1Orbits,
+                                 orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic") #icrs
+                                )
+    
+    preprocess_kwargs = dict(normalize=False)
 
-    orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
+
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        data_input_path=ldc_source_file,
-        orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        start_freq_ind=0,
-        end_freq_ind=None,
+        start_freq=5e-5,
+        end_freq=1e-2,
+        basis_domain=basis_domain,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        winalpha=tukey_alpha,
+        gpu_backend=GPU_BACKEND,
         gpus=gpus,
-        remove_from_data=["mbhb"],
+        data_processor=L1ProcessingStep,
+        processor_init_kwargs=processor_init_kwargs,
+        preprocess_kwargs=preprocess_kwargs,
+        sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
     general_setup = GeneralSetup(general_settings)
     return general_setup
 
-
-from lisatools.globalfit.engine import RankInfo
 
 def get_global_fit_settings(copy_settings_file=False):
 

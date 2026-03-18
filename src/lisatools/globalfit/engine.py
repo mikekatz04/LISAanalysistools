@@ -122,6 +122,7 @@ class GeneralSettings(Settings):
     ntemps: int = None
     wintype: str = "tukey"
     winalpha: float = None
+    gpu_backend: str = "cuda12x"
     gpus: typing.List[int] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
@@ -175,7 +176,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # if self.data_input_path is None:
         #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
-        self.force_backend = "cuda12x" if self.gpus is not None else "cpu" #! TODO Fix for generic cuda backend
+        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu" 
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
         if not os.path.exists(self.artifacts_file_dir):
@@ -187,9 +188,9 @@ class GeneralSetup(Setup, GeneralSettings):
     def init_orbit_information(self):
         if self.orbits is None:
             self.orbits = EqualArmlengthOrbits()
-            self.gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+            self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.gpu_backend)
         else:
-            if self.gpu_orbits is None and self.force_backend == "cuda12x":
+            if self.gpu_orbits is None and self.force_backend == self.gpu_backend:
                 # TODO: make better
                 raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
@@ -292,11 +293,11 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if orbits is not None:
             self.orbits = orbits
-            if self.force_backend == "cuda12x":
+            if self.force_backend == self.gpu_backend:
                 self.gpu_orbits = data_processor.orbits_class(
                     filename=orbits.filename,
                     armlength=orbits.armlength,
-                    force_backend="cuda12x",
+                    force_backend=self.gpu_backend,
                 )
             # self.gpu_orbits.configure()
 
