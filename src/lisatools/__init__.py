@@ -30,12 +30,13 @@ except (ModuleNotFoundError, ImportError):
 from gpubackendtools import Globals, get_backend, get_first_backend, has_backend
 
 from . import cutils, utils
-from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend
+from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend, LISAToolsCuda13xBackend
 
 add_backends = {
     "lisatools_cpu": LISAToolsCpuBackend,
     "lisatools_cuda11x": LISAToolsCuda11xBackend,
     "lisatools_cuda12x": LISAToolsCuda12xBackend,
+    "lisatools_cuda13x": LISAToolsCuda13xBackend,
 }
 
 Globals().backends_manager.add_backends(add_backends)

@@ -175,7 +175,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # if self.data_input_path is None:
         #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
-        self.force_backend = "cuda12x" if self.gpus is not None else "cpu"
+        self.force_backend = "cuda12x" if self.gpus is not None else "cpu" #! TODO Fix for generic cuda backend
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
         if not os.path.exists(self.artifacts_file_dir):
