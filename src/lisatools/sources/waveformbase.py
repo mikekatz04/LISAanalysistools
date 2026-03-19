@@ -555,7 +555,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         self.domain_settings = data_td_settings
         self.tukey_alpha = tukey_alpha
         if isinstance(tdi_config, str):
-            self.tdi_config = TDIConfig(tdi_generation=tdi_config, force_backend=force_backend)
+            self.tdi_config = TDIConfig(tdi=tdi_config, force_backend=force_backend)
         else:
             self.tdi_config = tdi_config
 
@@ -931,6 +931,14 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             Tuple of (dense_times, tdi_channels) where `dense_times` has shape (Nbatch, num_times) and `tdi_channels` has shape (Nbatch, num_TDI_channels, num_times).
         """
 
+        # Ensure all inputs are at least 1-D for batch processing
+        args = tuple(self.xp.atleast_1d(self.xp.asarray(a)) for a in args)
+        inclination = self.xp.atleast_1d(self.xp.asarray(inclination))
+        psi = self.xp.atleast_1d(self.xp.asarray(psi))
+        ra = self.xp.atleast_1d(self.xp.asarray(ra))
+        dec = self.xp.atleast_1d(self.xp.asarray(dec))
+        merger_time = self.xp.atleast_1d(self.xp.asarray(merger_time))
+
         # step 1: generate the amplitude and phase arrays for each mode of each source:
         input_times, input_amplitudes, input_phases = self.get_amp_phase(
             *args, inclination, psi, ra, dec, **kwargs
@@ -958,7 +966,9 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         # now padd with 500 seconds on each side
         padded_times, padded_amplitudes, padded_phases = self.pad(input_times, input_amplitudes, input_phases)
-
+        print('post padding')
+        breakpoint()
+    
         tdi_generator = TDTDIonTheFly(
             evaluation_times,
             padded_amplitudes,
@@ -1005,11 +1015,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def __call__(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray,
-        psi: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray,
-        dec: np.ndarray | cp.ndarray,
-        merger_time: np.ndarray | cp.ndarray,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        merger_time: np.ndarray | cp.ndarray = None,
         **kwargs,
     ) -> (
         Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]
@@ -1020,16 +1030,22 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         Args:
             *args: Arguments for the amplitude and phase generation method.
+                The last 5 positional arguments can be (inclination, psi, ra, dec, merger_time)
+                if not provided as keyword arguments.
             inclination: Inclination angles for the sources, shape (Nbatch,).
             psi: Polarization angles for the sources, shape (Nbatch,).
             ra: Right ascension for the sources, shape (Nbatch,).
             dec: Declination for the sources, shape (Nbatch,).
+            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
             **kwargs: Keyword arguments for the amplitude and phase generation method.
 
         Returns:
             If self.transform_to_domain is self.fft: Tuple of (signal_out, start_freqs) where signal_out has shape (Nbatch, num_freqs) and start_freqs has shape (Nbatch,).
             If self.transform_to_domain is self.stft: Tuple of (signal_out, start_freqs, start_times) where signal_out has shape (Nbatch, num_stft_times, num_freqs), start_freqs has shape (Nbatch,), and start_times has shape (Nbatch,).
         """
+
+        if inclination is None:
+            *args, inclination, psi, ra, dec, merger_time = args
 
         dense_times, tdi_channels = self.compute_tdi_channels(
             *args,
@@ -1046,11 +1062,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     def get_signals_for_residuals(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray,
-        psi: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray,
-        dec: np.ndarray | cp.ndarray,
-        merger_time: np.ndarray | cp.ndarray,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        merger_time: np.ndarray | cp.ndarray = None,
         **kwargs,
     ) -> List[DomainBase]:
         """
@@ -1058,15 +1074,21 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         Args:
             *args: Arguments for the amplitude and phase generation method.
+                The last 5 positional arguments can be (inclination, psi, ra, dec, merger_time)
+                if not provided as keyword arguments.
             inclination: Inclination angles for the sources, shape (Nbatch,).
             psi: Polarization angles for the sources, shape (Nbatch,).
             ra: Right ascension for the sources, shape (Nbatch,).
             dec: Declination for the sources, shape (Nbatch,).
+            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
             **kwargs: Keyword arguments for the amplitude and phase generation method.
 
         Returns:
             List of DomainBase objects containing the signals for each source, transformed to the desired output domain.
         """
+
+        if inclination is None:
+            *args, inclination, psi, ra, dec, merger_time = args
 
         dense_times, tdi_channels = self.compute_tdi_channels(
             *args,

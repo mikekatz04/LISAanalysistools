@@ -309,8 +309,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase):
     def __init__(
         self,
         waveform_kwargs: dict,
-        Tobs: float = 1.0,
-        coarse_grain: bool = True,
+        Tobs: float,
         start_freq: float = None,
         ref_freq: float = None,
         *args: Any,
@@ -325,11 +324,10 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase):
         super().__init__(
             *args,
             **kwargs,
-            Tobs=Tobs,
         )
 
         self.waveform = phentax.waveform.IMRPhenomTHM(
-            T=self.Tobs, coarse_grain=coarse_grain, **waveform_kwargs
+            T=Tobs, **waveform_kwargs
         )
 
         self.start_freq = start_freq
