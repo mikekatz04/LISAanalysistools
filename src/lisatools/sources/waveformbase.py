@@ -193,14 +193,15 @@ class TDWaveformBase(LISAToolsParallelModule):
             TDSignal with the TDI response applied.
         """
         shifted_t_arr = t_arr + merger_time + self.waveform_t0
-        self.response.num_pts = shifted_t_arr.shape[-1]
-
+        N_original = shifted_t_arr.shape[-1]
         # add 500 seconds to the end to prevent problems with the response
         pad_length = int(self.tdi_buffer_time / self.dt)
 
         shifted_t_arr = self.xp.concatenate([shifted_t_arr, shifted_t_arr[-1] + self.dt * self.xp.arange(1, pad_length + 1)])
         h_plus = self.xp.pad(h_plus, (0, pad_length), mode='edge')
         h_cross = self.xp.pad(h_cross, (0, pad_length), mode='edge')
+
+        self.response.num_pts = shifted_t_arr.shape[-1]
     
         strain = h_plus + 1j * h_cross
 
@@ -212,6 +213,10 @@ class TDWaveformBase(LISAToolsParallelModule):
         # Zero out the samples affected by the TDI boundary artefacts.
         tdis[:, : self.response.tdi_start_ind] = 0.0
         tdis[:, -self.response.tdi_start_ind :] = 0.0
+
+        # now go back to the unpadded length
+        shifted_t_arr = shifted_t_arr[:N_original]
+        tdis = tdis[:, :N_original]
 
         # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
 
@@ -264,13 +269,31 @@ class TDWaveformBase(LISAToolsParallelModule):
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
-            N_td_target = round(1 / (domain_kwargs["df"] * td_signal.settings.dt))
-            # align_samples=N_td_target forces t0 == data_t0 (the offset is always
-            # smaller than N_td_target, so the modulo absorbs the full gap).
-            td_signal = self._pad_td_signal(
-                td_signal, align_samples=N_td_target, target_n=N_td_target
-            )
             out_settings = FDSettings(**domain_kwargs, force_backend=backend)
+
+            # Trim leading/trailing zeros so the Tukey taper covers the actual
+            # signal boundary, not the zeroed-out TDI edge-artifact region.
+            # Without this, the step from 0→signal sits in the flat window region
+            # and causes spectral leakage (dense oscillatory artifacts in FD).
+            arr = td_signal.arr
+            sig_power = self.xp.sum(self.xp.abs(arr), axis=tuple(range(arr.ndim - 1)))
+            nonzero = sig_power > 0
+            first = int(self.xp.argmax(nonzero))
+            last = arr.shape[-1] - int(self.xp.argmax(nonzero[::-1]))
+            if first > 0 or last < arr.shape[-1]:
+                print(f"[FD trim] original N={arr.shape[-1]}, first={first}, last={last}, trimmed N={last-first}")
+                td_signal = TDSignal(
+                    arr=arr[..., first:last],
+                    settings=TDSettings(
+                        t0=td_signal.settings.t0 + first * td_signal.settings.dt,
+                        dt=td_signal.settings.dt,
+                        N=last - first,
+                        force_backend=backend,
+                    ),
+                )
+            else:
+                print(f"[FD trim] no trimming needed, N={arr.shape[-1]}")
+
             window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
 
         else:
@@ -705,8 +728,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
                 force_backend=self.backend_name.split("_")[-1],
             )
         else:
+            data_N = self.domain_settings.N
             return FDSettings(
-                df=1 / (eval_times.shape[-1] * self.dt),
+                N=data_N // 2 + 1,
+                df=1 / (data_N * self.dt),
                 min_freq=self.freq_min,
                 max_freq=self.freq_max,
                 force_backend=self.backend_name.split("_")[-1],
@@ -792,9 +817,9 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         Get a dense time array on which to evaluate the TDI on-the-fly response. This can be used to ensure that the output response is sampled on a regular grid, even if the input amplitude and phase arrays are sampled irregularly.
         """
         # consider using powers of 2.
-        if self.analysis_domain == "FD":
-            num_sub = eval_times.shape[0]
-            return self.xp.repeat(self.data_times_array[None, :], num_sub, axis=0)
+        # if self.analysis_domain == "FD":
+        #     num_sub = eval_times.shape[0]
+        #     return self.xp.repeat(self.data_times_array[None, :], num_sub, axis=0)
 
         # for the STFT case, we want to define a regular grid for each source that covers the time range of the input eval_times for that source, with a spacing of self.dt. This ensures that the output STFT is sampled on a regular grid, even if the input eval_times are not.
         # get the start and end times from the evaluation times
@@ -802,8 +827,9 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         end_times = self.get_grid_time(eval_times[:, -1])
 
         num_times = int(self.xp.max((end_times - start_times) / self.dt) + 1)
-        # make sure num_times is a multiple of nperseg for the STFT case
-        num_times = int(np.ceil(num_times / self.nperseg) * self.nperseg)
+        if self.analysis_domain == 'STFT':
+            # make sure num_times is a multiple of nperseg for the STFT case
+            num_times = int(np.ceil(num_times / self.nperseg) * self.nperseg)
 
         return start_times[:, None] + self.xp.arange(num_times)[None, :] * self.dt
 
@@ -825,9 +851,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         num_binaries = signal_in.shape[0]
         n = signal_in.shape[-1]
         window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
-
-        signal_fd = self.xp.fft.rfft(signal_in * window, axis=-1) * self.dt
-        freqs = self.xp.fft.rfftfreq(n, d=self.dt)
+        
+        n_fft = self.domain_settings.N
+        signal_fd = self.xp.fft.rfft(signal_in * window, n=n_fft, axis=-1) * self.dt
+        freqs = self.xp.fft.rfftfreq(n_fft, d=self.dt)
 
         keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
         signal_out = signal_fd[..., keep]
@@ -966,8 +993,6 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         # now padd with 500 seconds on each side
         padded_times, padded_amplitudes, padded_phases = self.pad(input_times, input_amplitudes, input_phases)
-        print('post padding')
-        breakpoint()
     
         tdi_generator = TDTDIonTheFly(
             evaluation_times,
@@ -1116,6 +1141,6 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             )
 
             output_domain = self.get_output_settings(dense_times[i])
-            signals_out.append(td_signal.transform(new_window=output_domain, window=window))
+            signals_out.append(td_signal.transform(new_domain=output_domain, window=window))
 
         return signals_out
