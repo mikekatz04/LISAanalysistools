@@ -234,17 +234,15 @@ class TDSignal(DomainBase, TDSettings):
         if window is None:
             window = xp.ones(self.arr.shape, dtype=float)
 
-        df = 1 / (self.N * self.dt)
-
-        fd_arr = xp.fft.rfft(self.arr * window) * self.dt
-
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            assert (
-                settings.df == df
-            ), f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
+            # Derive FFT size from target df — zero-pads if target df is finer
+            n_fft = round(1 / (settings.df * self.dt))
+            fd_arr = xp.fft.rfft(self.arr * window, n=n_fft) * self.dt
             fd_settings = settings
         else:
+            fd_arr = xp.fft.rfft(self.arr * window) * self.dt
+            df = 1 / (self.N * self.dt)
             fd_settings = FDSettings(
                 fd_arr.shape[-1],
                 df,
