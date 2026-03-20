@@ -132,7 +132,7 @@ class TDWaveformBase(LISAToolsParallelModule):
     @property
     def tdi_buffer_time(self) -> float:
         """Buffer time in seconds to ensure proper TDI response calculation at the boundaries."""
-        return 500.0
+        return 600.0
 
     @property
     def xp(self):
@@ -195,11 +195,21 @@ class TDWaveformBase(LISAToolsParallelModule):
         shifted_t_arr = t_arr + merger_time + self.waveform_t0
         N_original = shifted_t_arr.shape[-1]
         # add 500 seconds to the end to prevent problems with the response
-        pad_length = int(self.tdi_buffer_time / self.dt)
+        
+        #shifted_t_arr = self.xp.concatenate([shifted_t_arr, shifted_t_arr[-1] + self.dt * self.xp.arange(1, pad_length + 1)])
+        # h_plus = self.xp.pad(h_plus, (0, pad_length), mode='edge')
+        # h_cross = self.xp.pad(h_cross, (0, pad_length), mode='edge')
 
-        shifted_t_arr = self.xp.concatenate([shifted_t_arr, shifted_t_arr[-1] + self.dt * self.xp.arange(1, pad_length + 1)])
-        h_plus = self.xp.pad(h_plus, (0, pad_length), mode='edge')
-        h_cross = self.xp.pad(h_cross, (0, pad_length), mode='edge')
+        # pad both sides with zeros by num_pad
+        num_pad = int(self.buffer_time / self.dt)
+
+        shifted_t_arr = self.xp.concatenate([
+            shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
+            shifted_t_arr, 
+            shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1)])
+
+        h_plus = self.xp.pad(h_plus, (num_pad, num_pad), mode='edge')
+        h_cross = self.xp.pad(h_cross, (num_pad, num_pad), mode='edge')
 
         self.response.num_pts = shifted_t_arr.shape[-1]
     
@@ -210,13 +220,13 @@ class TDWaveformBase(LISAToolsParallelModule):
         )
         tdis = self.xp.array(self.response.get_tdi_delays())
 
-        # Zero out the samples affected by the TDI boundary artefacts.
-        tdis[:, : self.response.tdi_start_ind] = 0.0
-        tdis[:, -self.response.tdi_start_ind :] = 0.0
+        # # Zero out the samples affected by the TDI boundary artefacts.
+        # tdis[:, : num_pad] = 0.0
+        # tdis[:, -num_pad :] = 0.0
 
-        # now go back to the unpadded length
-        shifted_t_arr = shifted_t_arr[:N_original]
-        tdis = tdis[:, :N_original]
+        # trim the invalid points 
+        tdis = tdis[:, num_pad:-num_pad]
+        shifted_t_arr = shifted_t_arr[num_pad:-num_pad]
 
         # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
 
@@ -605,12 +615,12 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
     @property
     def max_length(self) -> int:
         """maximum number of evaluation time points that can be stored in a gpu register"""
-        return 2000
+        return 20_000
 
     @property
     def tdi_buffer_time(self) -> float:
         """Buffer time in seconds to ensure proper TDI response calculation at the boundaries."""
-        return 500.0
+        return 600.0
 
     @property
     def dt(self):
@@ -912,8 +922,8 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         left_dt = self.xp.max(delta_t[:, 0])
         right_dt = self.xp.max(delta_t[:, -1])
 
-        pad_length_left = int(self.tdi_buffer_time / left_dt)
-        pad_length_right = int(self.tdi_buffer_time / right_dt)
+        pad_length_left = max(int(self.tdi_buffer_time / left_dt), 1)
+        pad_length_right = max(int(self.tdi_buffer_time / right_dt), 1)
 
         padded_times = self.xp.concatenate(
             [
@@ -990,7 +1000,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         # now padd with 500 seconds on each side
         padded_times, padded_amplitudes, padded_phases = self.pad(input_times, input_amplitudes, input_phases)
-    
+
         tdi_generator = TDTDIonTheFly(
             evaluation_times,
             padded_amplitudes,
