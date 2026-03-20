@@ -236,12 +236,15 @@ class TDSignal(DomainBase, TDSettings):
 
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            # Derive FFT size from target df — zero-pads if target df is finer
             n_fft = round(1 / (settings.df * self.dt))
-            fd_arr = xp.fft.rfft(self.arr * window, n=n_fft) * self.dt
+            assert self.N == n_fft, (
+                f"Signal length ({self.N}) != target FFT length ({n_fft}). "
+                f"Caller must pre-pad the signal."
+            )
+            fd_arr = xp.fft.rfft(self.arr * window, axis=-1) * self.dt
             fd_settings = settings
         else:
-            fd_arr = xp.fft.rfft(self.arr * window) * self.dt
+            fd_arr = xp.fft.rfft(self.arr * window, axis=-1) * self.dt
             df = 1 / (self.N * self.dt)
             fd_settings = FDSettings(
                 fd_arr.shape[-1],
