@@ -269,32 +269,22 @@ class TDWaveformBase(LISAToolsParallelModule):
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
-            out_settings = FDSettings(**domain_kwargs, force_backend=backend)
-
-            # Trim leading/trailing zeros so the Tukey taper covers the actual
-            # signal boundary, not the zeroed-out TDI edge-artifact region.
-            # Without this, the step from 0→signal sits in the flat window region
-            # and causes spectral leakage (dense oscillatory artifacts in FD).
-            arr = td_signal.arr
-            sig_power = self.xp.sum(self.xp.abs(arr), axis=tuple(range(arr.ndim - 1)))
-            nonzero = sig_power > 0
-            first = int(self.xp.argmax(nonzero))
-            last = arr.shape[-1] - int(self.xp.argmax(nonzero[::-1]))
-            if first > 0 or last < arr.shape[-1]:
-                print(f"[FD trim] original N={arr.shape[-1]}, first={first}, last={last}, trimmed N={last-first}")
-                td_signal = TDSignal(
-                    arr=arr[..., first:last],
-                    settings=TDSettings(
-                        t0=td_signal.settings.t0 + first * td_signal.settings.dt,
-                        dt=td_signal.settings.dt,
-                        N=last - first,
-                        force_backend=backend,
-                    ),
-                )
-            else:
-                print(f"[FD trim] no trimming needed, N={arr.shape[-1]}")
-
+            # Window at natural signal length FIRST (matches on-the-fly fft() path)
             window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
+            windowed_signal = TDSignal(
+                arr=td_signal.arr * window,
+                settings=td_signal.settings,
+            )
+
+            # Then pad the windowed signal (extends with clean zeros)
+            N_td_target = round(1 / (domain_kwargs["df"] * td_signal.settings.dt))
+            windowed_signal = self._pad_td_signal(
+                windowed_signal, align_samples=1, target_n=N_td_target
+            )
+
+            out_settings = FDSettings(**domain_kwargs, force_backend=backend)
+            # Signal is pre-windowed — pass None so fft() uses ones
+            return windowed_signal.transform(out_settings, window=None)
 
         else:
             raise ValueError(
@@ -851,9 +841,16 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         num_binaries = signal_in.shape[0]
         n = signal_in.shape[-1]
         window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
-        
+
         n_fft = self.domain_settings.N
-        signal_fd = self.xp.fft.rfft(signal_in * window, n=n_fft, axis=-1) * self.dt
+        windowed = signal_in * window
+
+        # Explicit zero-padding — window covers signal, zeros extend after
+        if n < n_fft:
+            pad_width = [(0, 0)] * (windowed.ndim - 1) + [(0, n_fft - n)]
+            windowed = self.xp.pad(windowed, pad_width, mode="constant")
+
+        signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
         freqs = self.xp.fft.rfftfreq(n_fft, d=self.dt)
 
         keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
@@ -1125,9 +1122,6 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             **kwargs,
         )
 
-        window_n = dense_times.shape[-1] if self.nperseg is None else self.nperseg
-        window = tukey(window_n, alpha=self.tukey_alpha, xp=self.xp)
-
         signals_out = []
         for i in range(tdi_channels.shape[0]):
             td_signal = TDSignal(
@@ -1141,6 +1135,35 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             )
 
             output_domain = self.get_output_settings(dense_times[i])
-            signals_out.append(td_signal.transform(new_domain=output_domain, window=window))
+
+            if isinstance(output_domain, FDSettings):
+                # Window at natural signal length FIRST (matches on-the-fly fft() path)
+                natural_n = td_signal.settings.N
+                window = tukey(natural_n, alpha=self.tukey_alpha, xp=self.xp)
+                windowed_arr = td_signal.arr * window
+
+                # Then pad the windowed signal to target FFT length
+                n_fft = round(1 / (output_domain.df * td_signal.settings.dt))
+                n_pad = n_fft - natural_n
+                if n_pad > 0:
+                    pad_width = [(0, 0)] * (windowed_arr.ndim - 1) + [(0, n_pad)]
+                    windowed_arr = self.xp.pad(windowed_arr, pad_width, mode="constant")
+
+                td_signal = TDSignal(
+                    arr=windowed_arr,
+                    settings=TDSettings(
+                        t0=td_signal.settings.t0,
+                        dt=self.dt,
+                        N=n_fft,
+                        force_backend=self.backend_name.split("_")[-1],
+                    ),
+                )
+                # Signal is pre-windowed — pass None so fft() uses ones
+                signals_out.append(td_signal.transform(new_domain=output_domain, window=None))
+            else:
+                # STFT case — window is per-segment, handled by stft() internally
+                window_n = self.nperseg
+                window = tukey(window_n, alpha=self.tukey_alpha, xp=self.xp)
+                signals_out.append(td_signal.transform(new_domain=output_domain, window=window))
 
         return signals_out
