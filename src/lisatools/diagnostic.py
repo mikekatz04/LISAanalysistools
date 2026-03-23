@@ -186,7 +186,7 @@ def inner_product(
             raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")
 
         y = (
-            func(sig_component_1.conj() * sig_component_2) * inv_psd_component
+            func(sig_component_1.conj() * sig_component_2 * inv_psd_component)
         )  # assumes right summation rule
 
         # switching to summation for comp to other domains

@@ -1466,26 +1466,26 @@ def get_sensitivity(
         PSD = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
     elif isinstance(basis_settings, domains.WDMSettings):
         if kwargs_list is None:
-            kwargs_list = [kwargs for _ in range(basis_settings.NT)]
+            kwargs_list = [kwargs for _ in range(basis_settings.Nt)]
         else:
             assert isinstance(kwargs_list, list)
-            assert len(kwargs_list) == basis_settings.NT
+            assert len(kwargs_list) == basis_settings.Nt
             for tmp in kwargs_list:
                 if not isinstance(tmp, dict):
                     raise ValueError("Value in kwargs_list is not a dictionary. Must be a dictionary.")
             
         if args_list is None:
-            args_list = [args for _ in range(basis_settings.NT)]
+            args_list = [args for _ in range(basis_settings.Nt)]
         else:
             assert isinstance(args_list, list)
-            assert len(args_list) == basis_settings.NT
+            assert len(args_list) == basis_settings.Nt
             for tmp in args_list:
                 if not isinstance(tmp, tuple) and not isinstance(tmp, list):
                     raise ValueError("Value in args_list is not a tuple. Must be a tuple.")
             
         xp = get_array_module(basis_settings.f_arr)
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        PSD = xp.asarray([basis_settings.df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
+        PSD = xp.asarray([basis_settings.layer_df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
 
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")

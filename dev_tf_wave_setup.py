@@ -1,23 +1,31 @@
 import numpy as np
 from scipy import signal
 from lisatools.domains import *
+import matplotlib.pyplot as plt
+import numpy as np
 
+# Ensure LaTeX is disabled
+plt.rcParams['text.usetex'] = False
 
-dt = 10.0
-nperseg = 1024
-big_dt = nperseg * dt
+dt = 5.0
 
-N = 999936 # int(1e6 / nperseg) * nperseg
+Nf = 1536
+Nt = 10
+N =  Nf * Nt # int(1e6 / nperseg) * nperseg
 t_arr = np.arange(N) * dt
 phi0 = 0.782340988
 f0 = 3.9e-3
 wave = 1e-22 * np.sin(2 * np.pi * f0 * t_arr + phi0)
 y = np.tile(wave, (3, 1))
 
-big_df = 1 / big_dt
 
 df = 1. / (N * dt)
-td = TDSignal(y, TDSettings(N, dt))
+
+wdm_set = WDMSettings(Nf, Nt, dt, force_backend="cpu")
+
+y[:, 0] = 1.0
+y[:, 1:] = 0.0
+td = TDSignal(y, TDSettings(N, dt, force_backend="cpu"))
 # fd = FDSignal(np.fft.rfft(y), FDSettings(df))
 # stft = STFTSignal(signal.stft(y, fs=(1 / dt), nperseg=nperseg), STFTSettings(big_dt, big_df))
 # from scipy.signal.windows import tukey
@@ -25,14 +33,22 @@ td = TDSignal(y, TDSettings(N, dt))
 # new_td = fd.transform(TDSettings(dt))
 
 Tobs = N * dt
-wdm_set = WDMSettings(Tobs, dt)
 
-fd_from_td = td.fft()
+# wdm_set.frequency_layer_mask = ((wdm_set.f_arr >= 5e-5) &(wdm_set.f_arr <= 25e-3))
+
+fd_from_td = td.fft(apply_dt=False)
+
 fd_set = fd_from_td.settings
 wdm_from_fd = fd_from_td.transform(wdm_set)
-wdm_from_td = td.transform(wdm_set)
-fd_from_wdm = wdm_from_td.transform(fd_set)
-td_from_td = wdm_from_fd.transform(fd_set)
+
+olitas_check = np.genfromtxt("olitas_wdm_impulse.dat")
+
+# wdm_from_td = td.transform(wdm_set)
+
+
+fd_from_wdm = wdm_from_fd.transform(fd_set)
+breakpoint()
+# td_from_td = wdm_from_fd.transform(fd_set)
 
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.detector import sangria

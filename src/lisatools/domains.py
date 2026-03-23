@@ -130,13 +130,14 @@ class TDSignal(DomainBase, TDSettings):
     def settings(self) -> TDSettings:
         return TDSettings(*self.args, **self.kwargs)
 
-    def fft(self, settings=None, window=None):
+    def fft(self, settings=None, window=None, apply_dt=True):
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         df = 1 / (self.N * self.dt)
 
-        fd_arr = self.xp.fft.rfft(self.arr * window)
+        factor = 1.0 if not apply_dt else self.dt
+        fd_arr = self.xp.fft.rfft(self.arr * window) * factor
         if settings is not None:
             assert isinstance(settings, FDSettings)
             assert settings.df == df
@@ -217,13 +218,13 @@ class TDSignal(DomainBase, TDSettings):
 #     int k
     
 #     //total data size
-#     int ND = wdm->NT*wdm->NF
+#     int ND = wdm->Nt*wdm->Nf
     
 #     //windowed data packets
 #     *wdata = double_vector(wdm->N)
 
 #     //wavelet wavepacket transform of the signal
-#     **wave = double_matrix(wdm->NT,wdm->NF)
+#     **wave = double_matrix(wdm->Nt,wdm->Nf)
     
 #     //normalization factor
 #     fac = M_SQRT2*sqrt(wdm->cadence)/wdm->norm
@@ -232,12 +233,12 @@ class TDSignal(DomainBase, TDSettings):
 #     fac *= sqrt(wdm->cadence)/2
         
 #     //do the wavelet transform by convolving data w/ window and FFT
-#     for(int i=0 i<wdm->NT i++)
+#     for(int i=0 i<wdm->Nt i++)
 #     {
         
 #         for(int j=0 j<wdm->N j++)
 #         {
-#             int n = i*wdm->NF - wdm->N/2 + j
+#             int n = i*wdm->Nf - wdm->N/2 + j
 #             if(n < 0)   n += ND  // periodically wrap the data
 #             if(n >= ND) n -= ND  // periodically wrap the data
 #             wdata[j] = data[n] * wdm->window[j]  // apply the window
@@ -247,7 +248,7 @@ class TDSignal(DomainBase, TDSettings):
 
 #         //unpack Fourier transform
 #         wave[i][0] = wdata[0]
-#         for(int j=1 j<wdm->NF j++)
+#         for(int j=1 j<wdm->Nf j++)
 #         {
 #             int n = j*wdm->oversample
 #             if((i+j)%2 ==0)
@@ -258,9 +259,9 @@ class TDSignal(DomainBase, TDSettings):
 #     }
     
 #     //replace data vector with wavelet transform mapped from pixel to index
-#     for(int i=0 i<wdm->NT i++)
+#     for(int i=0 i<wdm->Nt i++)
 #     {
-#         for(int j=0 j<wdm->NF j++)
+#         for(int j=0 j<wdm->Nf j++)
 #         {
 #             //get index number k for tf pixel {i,j}
 #             wavelet_pixel_to_index(wdm,i,j,&k)
@@ -271,7 +272,7 @@ class TDSignal(DomainBase, TDSettings):
 #     }
     
 #     free_double_vector(wdata)
-#     free_double_matrix(wave,wdm->NT)
+#     free_double_matrix(wave,wdm->Nt)
 # }
 
 #         breakpoint()
@@ -427,26 +428,26 @@ class FDSignal(FDSettings, DomainBase):
         N = self.settings.N
 
         # solve for window
-        N = (settings.NF+1)
+        N = (settings.Nf+1)
 
         # mini wavelet structure for basis covering just N layers
-        T = settings.dt*settings.NT
+        T = settings.dt*settings.Nt
         domega = 2 * np.pi / T
 
         window = self.xp.zeros(self.N, dtype=complex)
 
         # wdm window function
-        for i in range(0, int(settings.NT / 2)):  # (i=0; i<=wdm->NT/2; i++)
+        for i in range(0, int(settings.Nt / 2)):  # (i=0; i<=wdm->Nt/2; i++)
             omega = i*domega
             window[i] = settings.phitilde(omega)
     
         raise NotImplementedError
     
         # normalize
-        # for(i=-wdm->NT/2; i<= wdm->NT/2; i++) norm += window[abs(i)]*window[abs(i)];
+        # for(i=-wdm->Nt/2; i<= wdm->Nt/2; i++) norm += window[abs(i)]*window[abs(i)];
         # norm = sqrt(norm/wdm_temp->cadence);
         
-        # for(i=0; i<=wdm->NT/2; i++) window[i] /= norm;
+        # for(i=0; i<=wdm->Nt/2; i++) window[i] /= norm;
         
         # free(wdm_temp);
         
@@ -455,38 +456,63 @@ class FDSignal(FDSettings, DomainBase):
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
 
-        # phif = phitilde_vec_norm(settings.NF, settings.NT, 4.0)
-        m = self.xp.repeat(self.xp.arange(0, settings.NF)[:, None], settings.NT, axis=-1)
-        n = self.xp.tile(self.xp.arange(settings.NT), (settings.NF, 1))
-        
+        # phif = phitilde_vec_norm(settings.Nf, settings.Nt, 4.0)
+        m = self.xp.repeat(self.xp.arange(0, settings.Nf)[:, None], settings.Nt, axis=-1)
+        n = self.xp.tile(self.xp.arange(settings.Nt), (settings.Nf, 1))
 
+        m_special = self.xp.repeat(self.xp.arange(0, settings.Nf + 1)[:, None], settings.Nt - 1, axis=-1)
+        
         # removed zero frequency and mirrored
-        k = settings.get_shift_map(m)
+        # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
+        k = settings.get_shift_map(m_special)
+        k = self.xp.concatenate([self.xp.zeros((k.shape[0], 1), dtype=int), k], axis=1)
+        
+        k[-1] -= 1
 
-        base_window = settings.window[:-1]  # TODO: compared to Tyson's code he does i=-N/2; i<N/2; i++
-        dc_window = settings.dc_layer_window
+        keep_dc_layer = (k[0] >= 0)
+        keep_dc_layer[0] = False
+        keep_nyquist_layer = (k[-1] < self.N - 1)
+        keep_nyquist_layer[0] = False
+
+
+        # multiply by  2 / settings.layer_df for forward transform
+        base_window = settings.window[:] * 2 / settings.Nf  
+        dc_window = settings.dc_layer_window * 2 / settings.Nf
         # TODO: check if this is right?!?!
-        max_freq_window = settings.max_freq_layer_window
+        max_freq_window = settings.max_freq_layer_window * 2 / settings.Nf
 
-        # k[0] += int(settings.NT / 2)
-        # k[-1] -= int(settings.NT / 2)
+        k_in = k.copy()
+
+        # this to make indexing work
+        k[0, ~keep_dc_layer] = 0
+        k[-1, ~keep_nyquist_layer] = 0
+
+        assert np.sum(keep_dc_layer) == int(settings.Nt / 2)
+        assert np.sum(keep_nyquist_layer) == int(settings.Nt / 2)
+
         # it is 2 because the max frequency would be at 1, but it removes that (?)
-        assert k.max().item() == self.N - 2
-        tmp = self.arr[:, k]
-        
-        tmp[:, 1:-1] *= base_window[None, None, :]
-        # tmp[0] *= dc_window
-        # tmp[-1] *= max_freq_window
+        before_ifft = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
+        before_ifft = self.arr[:, k]
+        before_ifft[:, 0, ~keep_dc_layer] = 0.0
+        before_ifft[:, -1, ~keep_nyquist_layer] = 0.0
+        before_ifft[:, :, 0] = 0.0
+        before_ifft2 = before_ifft.copy()
 
-        after_ifft = self.xp.fft.ifft(tmp, axis=-1)
+        before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
+        before_ifft[:, 0, 1:] *= dc_window
+        before_ifft[:, -1, 1:] *= max_freq_window
+
+        after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
         
-        is_m_plus_n_even = ((m + n) % 2 == 0)
-        _new_arr = self.xp.zeros((self.nchannels, settings.NF, settings.NT), dtype=float)
-        _new_arr[:, is_m_plus_n_even] = self.xp.sqrt(2) * self.xp.real(after_ifft)[:, is_m_plus_n_even]
-        _new_arr[:, (~is_m_plus_n_even)] = (-1) ** ((m * n)[(~is_m_plus_n_even)] + 1) * self.xp.sqrt(2) * self.xp.imag(after_ifft)[:, (~is_m_plus_n_even)]
+        is_m_plus_n_even = (((m + n) % 2 == 0)) 
+        _new_arr = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
+        _new_arr[:, is_m_plus_n_even] = self.xp.real(after_ifft)[:, :-1][:, is_m_plus_n_even]
+        _new_arr[:, (~is_m_plus_n_even)] = (-1) ** (m[(~is_m_plus_n_even)]) * self.xp.imag(after_ifft)[:, :-1][:, (~is_m_plus_n_even)]
         
-        # TODO: need to fix top and bottom layer
-        _new_arr[:, self.xp.array([0, -1])] = 0.0
+        # Robbie says this is okay
+        _new_arr[:, 0, 0::2] = np.real(after_ifft[:, 0, 0::2]) * np.sqrt(2.)
+        _new_arr[:, 0, 1::2] = np.real(after_ifft[:, -1, 0::2]) * np.sqrt(2.)
+        
         if return_transpose_time_axis_first:
             output = _new_arr.transpose(0, 2, 1).copy()
         else:
@@ -517,18 +543,18 @@ class FDSignal(FDSettings, DomainBase):
 class STFTSettings(DomainSettingsBase):
     dt: float
     df: float 
-    NT: int
-    NF: int
+    Nt: int
+    Nf: int
 
     def __init__(self, 
         dt: float,
         df: float, 
-        NT: int,
-        NF: int,
+        Nt: int,
+        Nf: int,
         **kwargs
     ):
         self.dt, self.df = dt, df
-        self.NT, self.NF = NT, NF
+        self.Nt, self.Nf = Nt, Nf
         super().__init__(**kwargs)
     
     @staticmethod
@@ -541,21 +567,21 @@ class STFTSettings(DomainSettingsBase):
     
     @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.NT) * self.dt
+        return self.xp.arange(self.Nt) * self.dt
 
     @property
     def f_arr(self) -> np.ndarray:
-        return self.xp.arange(self.NF) * self.df
+        return self.xp.arange(self.Nf) * self.df
     
     @property
     def f_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.NF + 1) * self.df
+        return self.xp.arange(self.Nf + 1) * self.df
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.NT + 1) * self.dt
+        return self.xp.arange(self.Nt + 1) * self.dt
 
     def __eq__(self, value):
-        return (value.NT == self.NT) and (value.NF == self.NF) and (value.dt == self.dt) and (value.df == self.df)
+        return (value.Nt == self.Nt) and (value.Nf == self.Nf) and (value.dt == self.dt) and (value.df == self.df)
 
 class STFTSignal(STFTSettings, DomainBase):
     def __init__(self, arr, settings: STFTSettings):
@@ -572,7 +598,7 @@ class STFTSignal(STFTSettings, DomainBase):
     
     @property
     def total_terms(self) -> int:
-        return self.NT * self.NF
+        return self.Nt * self.Nf
 
 
 WAVELET_BANDWIDTH = 6.51041666666667e-5
@@ -585,90 +611,100 @@ class WDMSettings(DomainSettingsBase):
 
     def __init__(
         self,
-        Tobs: float, 
+        Nf: float, 
+        Nt: float,
         dt: float,
         oversample: int = 16,
         window: Optional[np.ndarray] = None,
+        dc_layer_window: Optional[np.ndarray] = None,
+        max_freq_layer_window: Optional[np.ndarray] = None,
+        norm: Optional[float] = None, 
+        omega: Optional[np.ndarray] = None,
         frequency_layer_mask: Optional[np.ndarray] = None,
         **kwargs
     ):
 
-
         DomainSettingsBase.__init__(self, **kwargs)
-        self.Tobs = Tobs
-        self.NT = int(self.xp.ceil(Tobs/WAVELET_DURATION).astype(int))
-        self.NF = int(WAVELET_DURATION/dt)
+        self.Nt = Nt
+        self.Nf = Nf
         self.data_dt = dt
+        self.N = self.Nt * self.Nf
+        self.data_dt = dt
+        self.Tobs = self.N * self.data_dt
         self.frequency_layer_mask = frequency_layer_mask
-        if frequency_layer_mask is not None:
-            raise NotImplementedError("frequency_layer_mask for wdm is not implemented yet.")
-
-        self.df = WAVELET_BANDWIDTH
-        self.dt = WAVELET_DURATION
+        self.layer_dt = self.Nf * self.data_dt
+        self.layer_df = 1. / (2. * self.Nf * self.data_dt)
+        self.Nthalf = int(self.Nt / 2)
         self.oversample = oversample
 
-        self.cadence = WAVELET_DURATION/self.NF
-        self.Omega = np.pi/self.cadence
-        self.dOmega = self.Omega/self.NF
-        self.domega = 2 * np.pi / self.Tobs
-        self.inv_root_dOmega = 1.0/np.sqrt(self.dOmega)
-        self.B = self.Omega / (2 * self.NF)
-        self.A = (self.dOmega-self.B)/2.0
+        self.dOmega = 2 * np.pi * self.layer_df
+        self.A = 0.0
+        self.WAVELET_FILTER_CONSTANT = 6  # window roll-off parameter
         
-        self.BW = (self.A+self.B)/np.pi
-
-        self.N = self.oversample * 2 * self.NF
-        self.T = self.N * self.cadence
         if window is None:
             self.setup_window()
         else:
-            assert len(window) == self.NT + 1
+            assert norm is not None, "Must provide norm if providing window."
+            assert omega is not None, "Must provide omega if providing window."
+            assert dc_layer_window is not None, "Must provide dc_layer_window if providing window."
+            assert max_freq_layer_window is not None, "Must provide max_freq_layer_window if providing window."
+            assert len(window) == self.Nt - 1
             self.window = window
-            T = self.dt * self.NT
-            domega = 2 * np.pi / T
-            self.omega = (self.xp.arange(self.NT + 1) - int(self.NT / 2)) * domega
-            self.norm = np.sqrt(self.N * self.cadence / self.dOmega)
+            self.dc_layer_window = dc_layer_window
+            self.max_freq_layer_window = max_freq_layer_window
+            self.norm = norm
+            self.omega = omega
+
+    @property
+    def frequency_layer_mask(self) -> Optional[np.ndarray]:
+        return self._frequency_layer_mask
+
+    @frequency_layer_mask.setter
+    def frequency_layer_mask(self, frequency_layer_mask: Optional[np.ndarray]):
+        if frequency_layer_mask is not None:
+            assert len(frequency_layer_mask) == self.Nf, "Frequency layer mask must have length equal to N."
+        self._frequency_layer_mask = frequency_layer_mask
    
     def __eq__(self, value):
-        return (value.NT == self.NT) and (value.NF == self.NF) and (value.dt == self.dt) and (value.df == self.df)
+        return (value.Nt == self.Nt) and (value.Nf == self.Nf) and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) and (value.data_dt == self.data_dt)
 
     @property
     def basis_shape(self) -> tuple:
-        return (self.NF, self.NT)
+        return (self.Nf, self.Nt)
     
     @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.NT) * self.dt
+        return self.xp.arange(self.Nt) * self.dt
 
     @property
     def f_arr(self) -> np.ndarray:
-        return self.xp.arange(self.NF) * self.df
+        return self.xp.arange(self.Nf) * self.layer_df
     
     @property
     def f_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.NF + 1) * self.df
+        return self.xp.arange(self.Nf + 1) * self.layer_df
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.NT + 1) * self.dt
+        return self.xp.arange(self.Nt + 1) * self.dt
 
-    def phitilde(self, omega):
-        insDOM = self.inv_root_dOmega
+    def phitilde(self, omega, dOmega):
+        insDOM = 1. / np.sqrt(dOmega)
         A = self.A
-        B = self.B
-        
+        B = dOmega - 2 * A
+
         z = self.xp.zeros(omega.shape[0])
         beta_inc_calc = (np.abs(omega) >= A) & (np.abs(omega) <= A+B)
         x = (np.abs(omega[beta_inc_calc])-A)/B
-        y = special.betainc(WAVELET_FILTER_CONSTANT, WAVELET_FILTER_CONSTANT, x)
+        y = special.betainc(self.WAVELET_FILTER_CONSTANT, self.WAVELET_FILTER_CONSTANT, x)
         z[beta_inc_calc] = insDOM*np.cos(y*np.pi/2.0)
         z[(np.abs(omega) < A)] = insDOM
         #breakpoint()
         return z
     
     def wavelet(self, N: int, in_fd: Optional[bool] = True) -> np.ndarray:
-
-        # NT * NF is even 
-        # assert (self.NT * self.NF) % 2 == 0
+        raise NotImplementedError
+        # Nt * Nf is even 
+        # assert (self.Nt * self.Nf) % 2 == 0
         base_window = self.window[:-1]
         omega_N = (self.xp.arange(self.N) - int(self.N / 2)) * self.domega
         wavelet_N = 1 / np.sqrt(2.) * self.phitilde(omega_N)
@@ -678,10 +714,10 @@ class WDMSettings(DomainSettingsBase):
         else:
             return self.xp.fft.ifft(wavelet_N) / self.norm
         breakpoint()
-        wavelets_rfft = self.xp.zeros((len(m), int((self.NT * self.NF) / 2 + 1)))
+        wavelets_rfft = self.xp.zeros((len(m), int((self.Nt * self.Nf) / 2 + 1)))
 
         self.xp.put_along_axis(wavelets_rfft, k, base_window * 1 / np.sqrt(2.), axis=-1)
-        freq = self.xp.fft.fftshift(self.xp.fft.fftfreq(self.NT * self.NF, self.data_dt))
+        freq = self.xp.fft.fftshift(self.xp.fft.fftfreq(self.Nt * self.Nf, self.data_dt))
         wavelets_fft = self.xp.exp(-1j * 2 * np.pi * freq[None, :] * n[:, None] * self.dt) * self.xp.concatenate([wavelets_rfft[:, ::-1][:, :-1], wavelets_rfft[:, :-1]], axis=-1)
         if in_fd:
             return wavelets_fft
@@ -696,30 +732,38 @@ class WDMSettings(DomainSettingsBase):
             m_in = m
         else:
             raise ValueError("m must be 1D or 2D array.")
-        return (m_in - 1) * int(self.NT / 2) + self.xp.arange(self.NT)[None, :]
+
+        return m_in * int(self.Nt / 2) + self.xp.arange( -int(self.Nt / 2) + 1,  int(self.Nt / 2))[None, :]
         
-    def setup_window(self):
+    def window_norm(self) -> float:
+        dOmega_s = np.pi / self.Nf
+        (2 * np.pi) / self.N 
+    def setup_window(self):  # , forward: bool= True):
 
         # *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
         # zero frequency
         # REAL(DX,0) =  wdm->inv_root_dOmega
         # IMAG(DX,0) =  0.0
-        T = self.dt * self.NT
-        domega = 2 * np.pi / T
-        self.omega = omega = (self.xp.arange(self.NT + 1) - int(self.NT / 2)) * domega
-        window = self.phitilde(omega)
+        T = self.data_dt * self.N
+        dOmega_s = np.pi / self.Nf
+        self.omega = omega =  2 * np.pi / self.N * (self.xp.arange(self.Nt - 1) - int(self.Nt / 2) + 1)
+        phif = self.phitilde(omega, dOmega_s)
+        self.norm = np.sqrt((np.sum(phif ** 2)) * 2. / self.N)
+        self.window = phif / self.norm
 
-        self.norm = np.sqrt(self.N * self.cadence / self.dOmega)
-        self.window = window / self.norm
+        # we apply this outside the window setup so the window is the same for forward and backward
+        # if forward:
+        #     self.window *= 2. / self.Nf
+
         assert 0.0 in omega
 
         self.ind_middle = self.xp.argwhere(omega == 0.0).squeeze().item()
 
-        omega_for_edge_layers = self.xp.concatenate([omega[self.ind_middle:], domega * (self.ind_middle + self.xp.arange(1, omega[:self.ind_middle].shape[0]))])
-        assert (self.xp.diff(omega_for_edge_layers).min() > 0.0) and self.xp.allclose(self.xp.diff(omega_for_edge_layers).max(), domega)
-        self.dc_layer_window = np.sqrt(2) * self.phitilde(omega_for_edge_layers)
-        self.max_freq_layer_window = self.dc_layer_window[::-1]
-        
+        self.dc_layer_window = self.window.copy()
+        self.dc_layer_window[self.ind_middle] /= 2.0
+        self.max_freq_layer_window = self.window.copy()
+        self.max_freq_layer_window[self.ind_middle] /= 2.0
+
     @staticmethod
     def get_associated_class():
         return WDMSignal
@@ -731,12 +775,19 @@ class WDMSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
-            oversample=self.oversample, window=self.window, force_backend=self.force_backend
+            oversample=self.oversample, 
+            window=self.window, 
+            dc_layer_window=self.dc_layer_window,
+            max_freq_layer_window=self.max_freq_layer_window,
+            norm=self.norm, 
+            omega=self.omega, 
+            frequency_layer_mask=self.frequency_layer_mask, 
+            force_backend=self.force_backend
         )
     
     @property
     def args(self) -> tuple:
-        return (self.Tobs, self.data_dt)   
+        return (self.Nf, self.Nt, self.data_dt)   
     
     @property
     def differential_component(self) -> float:
@@ -744,7 +795,24 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def total_terms(self) -> int:
-        return self.NT * self.NF
+        return self.Nt * self.Nf
+    
+    def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
+        if self.frequency_layer_mask is None:
+            return arr
+        elif arr.ndim == 1:
+            raise ValueError("arr must be at least 2D to apply frequency layer mask.")
+        elif arr.ndim == 2:
+            return arr[self.frequency_layer_mask]
+        elif arr.ndim > 2:
+            raise NotImplementedError
+            assert arr.shape[-2] == self.frequency_layer_mask.shape[0], "Last dimension of arr must match length of frequency_layer_mask."
+            dims_transpose = tuple(np.roll(np.arange(arr.ndim)))
+            _arr = arr.transpose(dims_transpose)
+            new_arr = _arr[self.frequency_layer_mask]
+            dims_back = tuple(np.roll(np.arange(arr.ndim), -1))
+            new_arr = new_arr.transpose(dims_back)
+            return new_arr
 
 class WDMSignal(WDMSettings, DomainBase):
     def __init__(self, arr, settings: WDMSettings):
@@ -756,29 +824,119 @@ class WDMSignal(WDMSettings, DomainBase):
         return WDMSettings(*self.args, **self.kwargs)
     
     def wdm_to_fd(self, settings=None, window=None):
-        raise NotImplementedError
-        phif = phitilde_vec_norm(self.NT, self.NF, 4.0)
-
-        # determine FD parameters
-        total_pixels = self.NT * self.NF
-        Tobs = total_pixels * self.data_dt
-        df = 1 / Tobs
-        N = int((total_pixels / 2 + 1) if total_pixels % 2 == 0 else ((total_pixels + 1) / 2))
-        check_settings = FDSettings(N, df, force_backend=self.backend)
         
-        if settings is not None:
-            if check_settings != settings:
-                breakpoint()
-                raise ValueError("Entered FD settings do not correspond to valid transform. Better to leave them blank if possible.")
+        if settings is None:
+            _tmp_fd = np.fft.rfftfreq(self.N, self.data_dt)
+            Nfd = len(_tmp_fd)
+            df = _tmp_fd[1] - _tmp_fd[0]
+            settings = FDSettings(Nfd, df, force_backend=self.backend)
+
         else:
-            settings = check_settings
-            
-        # Perform the inverse transform
-        new_arr = self.xp.zeros((self.nchannels, settings.N), dtype=complex)
+            Nfd = len(_tmp_fd := np.fft.rfftfreq(self.N, self.data_dt))
+            df = _tmp_fd[1] - _tmp_fd[0]
+            assert settings.N == Nfd
+            assert settings.df == df
 
-        for i in range(self.nchannels):
-            new_arr[i] = inverse_wavelet_freq_helper(self.arr[i], phif, self.NF, self.NT)
+        base_window = self.window.copy()
 
+        m = self.xp.repeat(self.xp.arange(0, self.Nf)[:, None], self.Nt, axis=-1)
+        n = self.xp.tile(self.xp.arange(self.Nt), (self.Nf, 1))
+
+        m_special = self.xp.repeat(self.xp.arange(0, self.Nf + 1)[:, None], self.Nt - 1, axis=-1)
+        
+        _new_arr = self.arr.copy()
+
+
+        # we are going to try to write this as the reverse of the forward
+       
+        after_ifft = self.xp.zeros((self.nchannels, self.Nf + 1, self.Nt), dtype=complex)
+
+        is_m_plus_n_even = (((m + n) % 2 == 0))[None, :]
+        # _new_arr = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
+        # _new_arr[:, is_m_plus_n_even] = self.xp.real(after_ifft)[:, :-1][:, is_m_plus_n_even]
+        # _new_arr[:, (~is_m_plus_n_even)] = (-1) ** (m[(~is_m_plus_n_even)]) * self.xp.imag(after_ifft)[:, :-1][:, (~is_m_plus_n_even)]
+        
+        # # Robbie says this is okay
+        # _new_arr[:, 0, 0::2] = np.real(after_ifft[:, 0, 0::2]) * np.sqrt(2.)
+        # _new_arr[:, 0, 1::2] = np.real(after_ifft[:, -1, 0::2]) * np.sqrt(2.)
+        _n_arr = np.arange(0, self.Nt)
+        after_ifft[:, 1:-1] = (_new_arr[:, 1:] * (is_m_plus_n_even[:, 1:])) + (1j * _new_arr[:, 1:] * (~is_m_plus_n_even[:, 1:]) * (-1.) ** (-m[None, 1:]))
+        after_ifft[:, 0, :] = _new_arr[:, 0, ((2 * _n_arr) % self.Nt)] / np.sqrt(2.)
+        after_ifft[:, -1, :] = _new_arr[:, 0, ((2 * _n_arr) % self.Nt) + 1] / np.sqrt(2.)
+        
+        before_ifft = self.xp.fft.fft(after_ifft, axis=-1)
+
+        # leave out 2 / self.layer_df for reverse transform
+        base_window = self.window[:]  # * 2 / self.layer_df  
+        dc_window = self.dc_layer_window  # * 2 / self.layer_df
+        # TODO: check if this is right?!?!
+        max_freq_window = self.max_freq_layer_window  # * 2 / settings.layer_df
+        
+        back_before_ifft = before_ifft.copy()
+        
+        keep_roll = ((_x := np.arange(self.Nf + 1)) % 2 == 0) & (_x != 0) & (_x != self.Nf)
+        # roll ifft
+        before_ifft[:, keep_roll] = np.roll(before_ifft[:, keep_roll], self.Nthalf, axis=-1)
+        before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
+        before_ifft[:, 1:-1, 0] = 0.0  # set DC component to zero
+
+        # dc window
+        fft_result_keep_dc = (np.arange(self.Nt) % self.Nt)[0::2]
+        window_keep_dc = base_window[self.Nthalf - 1:]  # right half of window
+        before_ifft[:, 0, fft_result_keep_dc] *= window_keep_dc
+
+        # nyquist window
+        fft_result_keep_ny = (np.arange(self.Nt + 1) % self.Nt)[0::2][1:]
+        window_keep_ny = base_window[:self.Nthalf]  # left half of window
+        before_ifft[:, -1, fft_result_keep_ny] *= window_keep_ny
+
+        # before_ifft = self.arr[:, k]
+        output_arr = self.xp.zeros((self.nchannels, settings.N), dtype=complex)
+
+        k = self.get_shift_map(m_special)
+        k = self.xp.concatenate([-self.xp.ones((k.shape[0], 1), dtype=int), k], axis=1)
+        
+        # to match Robbie/Tyson implementation
+        fft_result_keep_ny = (np.arange(self.Nt + 1) % self.Nt)[0::2][1:]
+        k[0] = -1
+        k[0, 0::2] = np.arange(self.Nthalf)
+
+        k[-1] = -1
+        k[-1, 0::2] = np.roll(np.arange(settings.N - self.Nthalf, settings.N), 1)
+
+        for j in range(self.nchannels):
+            for k_i, val in zip(k.flatten(), before_ifft[j].flatten()):
+                if k_i >= 0 and k_i < settings.N:
+                    output_arr[j, k_i] += val
+
+        return FDSignal(output_arr, settings)
+        breakpoint()
+        prefactors = self.xp.zeros((self.nchannels, self.Nf + 1, self.Nt), dtype=complex)
+        is_m_plus_n_even = (((m + n) % 2 == 0))[None, :]
+        prefactors[:, 1:-1] = self.arr[:, 1:] * is_m_plus_n_even[:, 1:] - 1j * self.arr[:, 1:] * (~is_m_plus_n_even)[:, 1:]
+        
+        # dc layer
+        prefactors[:, 0] = self.arr[:, 0, (2*(n[0])) % self.Nt+0] / np.sqrt(2.)
+        prefactors[:, -1] = self.arr[:, 0, (2*(n[-1])) % self.Nt+1] / np.sqrt(2.)
+
+        Nthalf = int(self.Nt / 2)
+        after_fft = self.xp.fft.ifft(prefactors, axis=-1)
+
+        after_fft_with_window = after_fft[:, :, 1:] * base_window[None, None, :]
+        
+        k = self.get_shift_map(m_special)[:, :Nthalf]  # center - Nthalf + self.xp.arange(0, self.Nt)[None, :    ]
+
+        # this makes the indexing work for  the first piece
+        assert len(_tmp_2_k := ((_tmp_k := np.unique(k))[(_tmp_k >= 0) & (_tmp_k < self.N)])) == settings.N
+        assert self.xp.all(_tmp_2_k == self.xp.arange(settings.N))
+
+        keep_k = (k >= 0)
+        pre_transform = after_fft_with_window[:, :, 1:Nthalf + 1]
+
+        new_arr = pre_transform[:, keep_k]
+
+        assert new_arr.shape[-1] == settings.N
+        assert new_arr.shape == (self.nchannels, settings.N)
         return FDSignal(new_arr, settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
@@ -847,7 +1005,7 @@ class WDMLookupTable(WDMSettings):
         # there is some overlap. The wavelet pixels are of width
         # DOM/PI, except for the first and last which have width
         # half that
-        ref_layer = int(self.NF/2)
+        ref_layer = int(self.Nf/2)
     
         f0 = ref_layer * self.df
         self.fdot_vals = (self.xp.arange(fdot_steps) - int(fdot_steps / 2)) * fdot_step
@@ -905,21 +1063,21 @@ def get_available_domains() -> List[DomainSettingsBase]:
 #         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
 
 #         if isinstance(models, LISAModel) or isinstance(models, ExtendedLISAModel):
-#             models = [models for _ in range(self.NT)]
+#             models = [models for _ in range(self.Nt)]
 
 #         for _tmp in models:
 #             assert isinstance(_tmp, LISAModel) or isinstance(_tmp, ExtendedLISAModel)
 
 #         if psd_kwargs is None:
-#             psd_kwargs = [{} for _ in range(self.NT)]
+#             psd_kwargs = [{} for _ in range(self.Nt)]
 #         elif isinstance(psd_kwargs, dict):
-#             psd_kwargs = [psd_kwargs for _ in range(self.NT)]
+#             psd_kwargs = [psd_kwargs for _ in range(self.Nt)]
 
 #         for _tmp in psd_kwargs:
 #             assert isinstance(_tmp, dict)
 
 #         assert isinstance(models, list) and isinstance(psd_kwargs, list)
-#         assert len(models) == len(psd_kwargs) == self.NT
+#         assert len(models) == len(psd_kwargs) == self.Nt
 
 #         sens_mats = [base_sens_mat(settings.f_arr, model=model, **kwargs) for model, kwargs in zip(models, psd_kwargs)]
 #         self.models = models
