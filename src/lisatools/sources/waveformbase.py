@@ -822,9 +822,13 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         #     return self.xp.repeat(self.data_times_array[None, :], num_sub, axis=0)
 
         # for the STFT case, we want to define a regular grid for each source that covers the time range of the input eval_times for that source, with a spacing of self.dt. This ensures that the output STFT is sampled on a regular grid, even if the input eval_times are not.
-        # get the start and end times from the evaluation times
-        start_times = self.get_grid_time(eval_times[:, 0])
-        end_times = self.get_grid_time(eval_times[:, -1])
+        # get the start and end times from the evaluation times, snapped to
+        # the data grid.  Use ceil/floor so the dense grid stays strictly
+        # within the spline domain defined by eval_times.
+        t0 = self.data_t0
+        dt = self.dt
+        start_times = t0 + self.xp.ceil((eval_times[:, 0] - t0) / dt) * dt
+        end_times = t0 + self.xp.floor((eval_times[:, -1] - t0) / dt) * dt
 
         num_times = int(self.xp.max((end_times - start_times) / self.dt) + 1)
         if self.analysis_domain == 'STFT':
