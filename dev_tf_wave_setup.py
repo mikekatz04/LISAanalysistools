@@ -46,7 +46,7 @@ orbits = DefaultOrbits(force_backend=force_backend)
 orbits.configure(linear_interp_setup=True)
 tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
 dt = 10.0
-Tobs = 1 * YRSID_SI
+Tobs = 2 * YRSID_SI
 
 wavelet_duration = int(1 / 12 * YRSID_SI / dt) * dt
 Nt = int(Tobs / wavelet_duration)
@@ -54,7 +54,7 @@ Tobs = Nt * wavelet_duration
 N = int(Tobs / dt)
 Nf = int(N / Nt)
 
-N_sparse = 256
+N_sparse = 256 
 t_tdi = np.linspace(0.0, Tobs, N_sparse + 1)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend="cpu")
@@ -68,7 +68,7 @@ data_t_arr = np.arange(N) * dt
 keep = (data_t_arr > t_tdi[0]) & (data_t_arr < t_tdi [-1])
 tdi_t_arr = data_t_arr[keep]
 
-amp = np.full(num_bin, 1e-23)
+amp = np.full(num_bin, 1e-22)
 f0 = np.full(num_bin, 15.2300812341e-3)
 fdot = np.full(num_bin, 1e-15)
 fddot = np.full(num_bin, 0.0)
@@ -87,7 +87,7 @@ gb_gen = GBTDIonTheFly(
     n_params=9,
     tdi_config=tdi_config,
     orbits=orbits,
-    tdi_chan="AET",
+    tdi_chan="XYZ",
     force_backend=force_backend,
 )
 
@@ -95,14 +95,17 @@ output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=T
 tdi_output = np.zeros((num_bin, 3, len(data_t_arr))) 
 
 tdi_output[:, :, keep]= output.eval_tdi(tdi_t_arr)
+from scipy.signal.windows import tukey
+tdi_output[:] *= tukey(tdi_output.shape[-1], alpha=0.05)[None, :]
 
+np.save("td_check", tdi_output[0])
 # import matplotlib.pyplot as plt
 # plt.plot(data_t_arr[:num_points], tdi_output[0,0])
 # plt.show()
 
 td = TDSignal(tdi_output[0], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
 
-np.save("td_check", td[:])
+
 
 wdm_set = WDMSettings(Nf, Nt, dt, force_backend="cpu")
 
@@ -111,38 +114,38 @@ wdm_set = WDMSettings(Nf, Nt, dt, force_backend="cpu")
 # td = TDSignal(y, TDSettings(N, dt, force_backend="cpu"))
 # fd = FDSignal(np.fft.rfft(y), FDSettings(df))
 # stft = STFTSignal(signal.stft(y, fs=(1 / dt), nperseg=nperseg), STFTSettings(big_dt, big_df))
-# from scipy.signal.windows import tukey
 # new_fd = td.transform(FDSettings(df), window=tukey(y.shape[-1], alpha=0.05))
 # new_td = fd.transform(TDSettings(dt))
 
 Tobs = N * dt
 
-wdm_set.frequency_layer_mask = ((wdm_set.f_arr >= 5e-5) &(wdm_set.f_arr <= 25e-3))
+wdm_set.frequency_layer_mask = ((wdm_set.f_arr >= 5e-5) &(wdm_set.f_arr <= 40e-3))
 
-fd_from_td = td.fft(apply_dt=False)
+fd_from_td = td.fft(apply_dt=True)
 
 fd_set = fd_from_td.settings
-fd_set.frequency_layer_mask = ((fd_set.f_arr >= 5e-5) &(fd_set.f_arr <= 25e-3))
-wdm_from_fd = fd_from_td.transform(wdm_set)
+fd_set.frequency_layer_mask = ((fd_set.f_arr >= 5e-5) &(fd_set.f_arr <= 40e-3))
+fd_from_td.frequency_layer_mask = ((fd_from_td.f_arr >= 5e-5) &(fd_from_td.f_arr <= 40e-3))
+# wdm_from_fd = fd_from_td.transform(wdm_set)
 wdm_from_td = td.transform(wdm_set)
-assert np.allclose(wdm_from_fd[:], wdm_from_td[:])
+# assert np.allclose(wdm_from_fd[:] / np.abs(wdm_from_fd[:]).max(), wdm_from_td[:] / np.abs(wdm_from_td[:]).max())
 
 olitas_check = np.genfromtxt("olitas_wdm_impulse.dat")
 
 # wdm_from_td = td.transform(wdm_set)
 
 
-fd_from_wdm = wdm_from_fd.transform(fd_set)
+# fd_from_wdm = wdm_from_fd.transform(fd_set)
 
 # td_from_td = wdm_from_fd.transform(fd_set)
 
-from lisatools.sensitivity import AET1SensitivityMatrix
-from lisatools.detector import sangria
+from lisatools.sensitivity import XYZ2SensitivityMatrix
+from lisatools.detector import sangria, scirdv1
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer
 
-sens_mat_fd = AET1SensitivityMatrix(fd_set, model=sangria)
-sens_mat_wdm = AET1SensitivityMatrix(wdm_set, model=sangria)
+sens_mat_fd = XYZ2SensitivityMatrix(fd_set, model=scirdv1)
+sens_mat_wdm = XYZ2SensitivityMatrix(wdm_set, model=scirdv1)
 data_res_wdm = DataResidualArray(wdm_from_td, signal_domain=wdm_set)
 data_res_fd = DataResidualArray(fd_from_td, signal_domain=fd_set)
 

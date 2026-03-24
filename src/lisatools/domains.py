@@ -792,7 +792,7 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def differential_component(self) -> float:
-        return 1.0
+        return self.data_dt / 2.
     
     @property
     def total_terms(self) -> int:

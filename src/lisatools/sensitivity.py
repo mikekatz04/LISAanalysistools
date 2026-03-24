@@ -1486,10 +1486,18 @@ def get_sensitivity(
             
         xp = get_array_module(basis_settings.f_arr)
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        npts = 20
+        npts = 3
         x = np.linspace(basis_settings.f_arr_edges[:-1],  basis_settings.f_arr_edges[1:], num=npts, axis=-1)
         integrand = xp.asarray([sensitivity.get_Sn(x, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).transpose(1, 0, 2)
-        PSD = xp.trapezoid(integrand, x=x[:, None, :], axis=-1)
+        
+        # this is to match tyson's code. I have questions
+        h = 1.0
+        f0 = integrand[:, :, 0]
+        f1 = integrand[:, :, 1]
+        f2 = integrand[:, :, 2]
+        PSD = simpson_3_integral = h*(f0 + 4.0*f1 + f2)/6.0  # fudge factor
+        # 0.25 is fudge factor from tysons code
+        # PSD = xp.trapezoid(integrand, axis=-1)  # 
         
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")

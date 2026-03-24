@@ -123,7 +123,7 @@ def inner_product(
             #     )
             # TODO: this could be faster?
             for j in range(psd.shape[1]):  # i, psd.shape[1]):
-                factor = 1.0  if i == j else -1.0  # 2.0
+                factor = 1.0  #  if i == j else -1.0  # 2.0
                 operational_sets.append(
                     dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )
@@ -198,10 +198,8 @@ def inner_product(
         # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
         # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
         tmp.append(tmp_out)
-        
         out += tmp_out
 
-    breakpoint()
     tmp = xp.asarray(tmp)
     # normalize the inner produce
     normalization_value = 1.0
