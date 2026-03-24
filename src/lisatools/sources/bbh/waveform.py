@@ -416,17 +416,17 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase):
         start_freq = start_freq if start_freq is not None else self.start_freq
 
         times, mask, amplitude, phase = self.waveform.compute_strain_components_amp_phase(
-            m1,
-            m2,
-            s1z,
-            s2z,
-            distance,
-            phi_ref,
-            ref_freq,
-            start_freq,
-            inclination,
-            psi,
-            delta_t=self.dt,
+            jnp.asarray(m1),
+            jnp.asarray(m2),
+            jnp.asarray(s1z),
+            jnp.asarray(s2z),
+            jnp.asarray(distance),
+            jnp.asarray(phi_ref),
+            jnp.asarray(ref_freq),
+            jnp.asarray(start_freq),
+            jnp.asarray(inclination),
+            jnp.asarray(psi),
+            delta_t=jnp.asarray(self.dt),
         )
         amplitude.block_until_ready()  # ensure all outputs are ready before moving to self.xp
 

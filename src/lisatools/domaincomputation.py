@@ -117,6 +117,9 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         split_container_ids = acs.gpu_splits[split_index]
         self.split_acs = [all_acs[i] for i in split_container_ids]
 
+    def __repr__(self):
+        return f"BaseDomainComputationGroup with split index {self.split_index} and TDI type {self.tdi_type}"
+
     @property
     def xp(self):
         return self.backend.xp
@@ -246,6 +249,9 @@ class STFTComputationGroup(BaseDomainComputationGroup):
                 "settings must be an instance of STFTSettings for STFTComputationGroup."
             )
         super().__init__(*args, settings=settings, **kwargs)
+
+    def __repr__(self):
+        return super().__repr__() + f" with STFT settings: {self.settings}"
 
     @property
     def domain_args(self):

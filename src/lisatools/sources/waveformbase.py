@@ -614,8 +614,11 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
     @property
     def max_length(self) -> int:
-        """maximum number of evaluation time points that can be stored in a gpu register"""
-        return 20_000
+        """
+        maximum number of evaluation time points that can be stored in a gpu register. 
+        These may not be enough in some regions of the parameter space
+        """
+        return 2_000
 
     @property
     def tdi_buffer_time(self) -> float:
@@ -827,8 +830,9 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         # within the spline domain defined by eval_times.
         t0 = self.data_t0
         dt = self.dt
-        start_times = t0 + self.xp.ceil((eval_times[:, 0] - t0) / dt) * dt
-        end_times = t0 + self.xp.floor((eval_times[:, -1] - t0) / dt) * dt
+        segment_dt = self.nperseg * dt if self.analysis_domain == "STFT" else dt
+        start_times = t0 + self.xp.ceil((eval_times[:, 0] - t0) / segment_dt) * segment_dt
+        end_times = t0 + self.xp.floor((eval_times[:, -1] - t0) / segment_dt) * segment_dt
 
         num_times = int(self.xp.max((end_times - start_times) / self.dt) + 1)
         if self.analysis_domain == 'STFT':
@@ -860,17 +864,19 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         windowed = signal_in * window
 
         # Explicit zero-padding — window covers signal, zeros extend after
-        if n < n_fft:
+        if (n < n_fft) and self.analysis_domain == "FD":
             pad_width = [(0, 0)] * (windowed.ndim - 1) + [(0, n_fft - n)]
             windowed = self.xp.pad(windowed, pad_width, mode="constant")
 
+            n = n_fft
+
         signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
-        freqs = self.xp.fft.rfftfreq(n_fft, d=self.dt)
+        freqs = self.xp.fft.rfftfreq(n, d=self.dt)
 
         keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
         signal_out = signal_fd[..., keep]
 
-        start_freqs = np.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
+        start_freqs = self.xp.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
 
         return signal_out, start_freqs
 
