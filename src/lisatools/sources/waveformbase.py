@@ -279,22 +279,16 @@ class TDWaveformBase(LISAToolsParallelModule):
             window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
 
         elif output_domain == "FD":
-            # Window at natural signal length FIRST (matches on-the-fly fft() path)
-            window = tukey(td_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
-            windowed_signal = TDSignal(
-                arr=td_signal.arr * window,
-                settings=td_signal.settings,
-            )
-
-            # Then pad the windowed signal (extends with clean zeros)
+            # Pad to full data length FIRST, then window at that length.
+            # This matches the data-side processing (tukey(N_data) → FFT).
             N_td_target = round(1 / (domain_kwargs["df"] * td_signal.settings.dt))
-            windowed_signal = self._pad_td_signal(
-                windowed_signal, align_samples=1, target_n=N_td_target
+            padded_signal = self._pad_td_signal(
+                td_signal, align_samples=1, target_n=N_td_target
             )
 
+            window = tukey(padded_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
             out_settings = FDSettings(**domain_kwargs, force_backend=backend)
-            # Signal is pre-windowed — pass None so fft() uses ones
-            return windowed_signal.transform(out_settings, window=None)
+            return padded_signal.transform(out_settings, window=window)
 
         else:
             raise ValueError(
@@ -858,17 +852,21 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         # for the moment we are gonna evaluate the likelihood on the same frequency support for every source
         num_binaries = signal_in.shape[0]
         n = signal_in.shape[-1]
-        window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
 
         n_fft = self.domain_settings.N
-        windowed = signal_in * window
 
-        # Explicit zero-padding — window covers signal, zeros extend after
+        # Left-pad to place signal at correct position within observation,
+        # then right-pad to reach full data length. This ensures the Tukey
+        # taper falls on zeros, not on the signal (matching data-side processing).
         if (n < n_fft) and self.analysis_domain == "FD":
-            pad_width = [(0, 0)] * (windowed.ndim - 1) + [(0, n_fft - n)]
-            windowed = self.xp.pad(windowed, pad_width, mode="constant")
-
+            n_left = round((float(times_in[0, 0]) - self.domain_settings.t0) / self.dt)
+            n_right = n_fft - n - n_left
+            pad_width = [(0, 0)] * (signal_in.ndim - 1) + [(n_left, n_right)]
+            signal_in = self.xp.pad(signal_in, pad_width, mode="constant")
             n = n_fft
+
+        window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
+        windowed = signal_in * window
 
         signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
         freqs = self.xp.fft.rfftfreq(n, d=self.dt)
@@ -1157,22 +1155,24 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             output_domain = self.get_output_settings(dense_times[i])
 
             if isinstance(output_domain, FDSettings):
-                # Window at natural signal length FIRST (matches on-the-fly fft() path)
+                # Left-pad + right-pad to place signal at correct position
+                # within observation, then window at full data length.
                 natural_n = td_signal.settings.N
-                window = tukey(natural_n, alpha=self.tukey_alpha, xp=self.xp)
-                windowed_arr = td_signal.arr * window
-
-                # Then pad the windowed signal to target FFT length
                 n_fft = round(1 / (output_domain.df * td_signal.settings.dt))
-                n_pad = n_fft - natural_n
-                if n_pad > 0:
-                    pad_width = [(0, 0)] * (windowed_arr.ndim - 1) + [(0, n_pad)]
-                    windowed_arr = self.xp.pad(windowed_arr, pad_width, mode="constant")
+
+                n_left = round((td_signal.settings.t0 - self.domain_settings.t0) / self.dt)
+                n_right = n_fft - natural_n - n_left
+
+                pad_width = [(0, 0)] * (td_signal.arr.ndim - 1) + [(n_left, n_right)]
+                padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant")
+
+                window = tukey(n_fft, alpha=self.tukey_alpha, xp=self.xp)
+                windowed_arr = padded_arr * window
 
                 td_signal = TDSignal(
                     arr=windowed_arr,
                     settings=TDSettings(
-                        t0=td_signal.settings.t0,
+                        t0=self.domain_settings.t0,
                         dt=self.dt,
                         N=n_fft,
                         force_backend=self.backend_name.split("_")[-1],
