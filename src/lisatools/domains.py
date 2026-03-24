@@ -174,7 +174,7 @@ class TDSignal(DomainBase, TDSettings):
         assert isinstance(settings, WDMSettings)
 
         # go to frequency domain then wavelets
-        return self.fft(settings=None, window=window).transform(settings)
+        return self.fft(settings=None, window=window, apply_dt=False).transform(settings)
 
 # static void wavelet_window_time(struct Wavelets *wdm)
 # {
@@ -285,7 +285,7 @@ class TDSignal(DomainBase, TDSettings):
             return self.settings.associated_class(self.arr * window, self.settings)
         
         elif isinstance(new_domain, FDSettings):
-            return self.fft(settings=new_domain, window=window)
+            return self.fft(settings=new_domain, window=window, apply_dt=True)
         
         elif isinstance(new_domain, STFTSettings):
             return self.stft(settings=new_domain, window=window)
@@ -407,12 +407,13 @@ class FDSignal(FDSettings, DomainBase):
     def settings(self) -> FDSettings:
         return FDSettings(*self.args, **self.kwargs)
 
-    def ifft(self, settings=None, window=None):
+    def ifft(self, settings=None, window=None, apply_dt=True):
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         Tobs = 1 / self.df
-        td_arr = self.xp.fft.irfft(self.arr * window)
+        factor = 1.0 if not apply_dt else self.dt
+        td_arr = self.xp.fft.irfft(self.arr * window) / factor
         N = td_arr.shape[-1]
         dt = Tobs / N
         assert N == int(Tobs / dt)
@@ -528,7 +529,7 @@ class FDSignal(FDSettings, DomainBase):
             return self.settings.associated_class(self.arr * window, self.settings)
         
         elif isinstance(new_domain, TDSettings):
-            return self.ifft(settings=new_domain, window=window)
+            return self.ifft(settings=new_domain, window=window, apply_dt=True)
         
         elif isinstance(new_domain, STFTSettings):
             raise NotImplementedError
@@ -904,6 +905,7 @@ class WDMSignal(WDMSettings, DomainBase):
         k[-1] = -1
         k[-1, 0::2] = np.roll(np.arange(settings.N - self.Nthalf, settings.N), 1)
 
+        # TODO: vectorize
         for j in range(self.nchannels):
             for k_i, val in zip(k.flatten(), before_ifft[j].flatten()):
                 if k_i >= 0 and k_i < settings.N:
@@ -944,13 +946,13 @@ class WDMSignal(WDMSettings, DomainBase):
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         if isinstance(new_domain, TDSettings):
-            return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window)
+            return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window, apply_dt=False)
         
         elif isinstance(new_domain, FDSettings):
             return self.wdm_to_fd(settings=new_domain, window=window)
         
         elif isinstance(new_domain, STFTSettings):
-            return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None).stft(settings=new_domain, window=window)
+            return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None, apply_dt=False).stft(settings=new_domain, window=window)
         
         elif isinstance(new_domain, WDMSettings):
             if new_domain == self.settings:

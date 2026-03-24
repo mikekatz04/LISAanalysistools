@@ -7,25 +7,108 @@ import numpy as np
 # Ensure LaTeX is disabled
 plt.rcParams['text.usetex'] = False
 
-dt = 5.0
+# dt = 5.0
 
-Nf = 1536
-Nt = 10
-N =  Nf * Nt # int(1e6 / nperseg) * nperseg
-t_arr = np.arange(N) * dt
-phi0 = 0.782340988
-f0 = 3.9e-3
-wave = 1e-22 * np.sin(2 * np.pi * f0 * t_arr + phi0)
-y = np.tile(wave, (3, 1))
+# Nf = 1536
+# Nt = 100
+# N =  Nf * Nt # int(1e6 / nperseg) * nperseg
+# t_arr = np.arange(N) * dt
+# phi0 = 0.782340988
+# f0 = 3.9e-3
+# wave = 1e-24 * np.sin(2 * np.pi * f0 * t_arr + phi0)
+# y = np.tile(wave, (3, 1))
 
 
-df = 1. / (N * dt)
+# df = 1. / (N * dt)
+
+from fastlisaresponse.tdionfly import GBTDIonTheFly
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+try:
+    import cupy as cp
+except (ImportError, ModuleNotFoundError) as e:
+    pass
+
+from fastlisaresponse.tdionfly import GBTDIonTheFly
+from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.detector import DefaultOrbits
+from lisatools.utils.constants import *
+
+from lisatools.domains import WAVELET_DURATION, TDSignal, TDSettings, FDSignal, FDSettings, WDMSignal, WDMSettings, WDMLookupTable
+from fastlisaresponse.gbcomps import GBWDMComputations
+
+
+force_backend = "cpu"
+
+orbits = DefaultOrbits(force_backend=force_backend)
+orbits.configure(linear_interp_setup=True)
+tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
+dt = 10.0
+Tobs = 1 * YRSID_SI
+
+wavelet_duration = int(1 / 12 * YRSID_SI / dt) * dt
+Nt = int(Tobs / wavelet_duration)
+Tobs = Nt * wavelet_duration
+N = int(Tobs / dt)
+Nf = int(N / Nt)
+
+N_sparse = 256
+t_tdi = np.linspace(0.0, Tobs, N_sparse + 1)[1:-1]
+
+wdm_settings = WDMSettings(Nf, Nt, dt, force_backend="cpu")
+# wdm_lookup_table = WDMLookupTable(wdm_settings, 50, 20, 3)
+
+# gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
+
+num_bin = 1
+
+data_t_arr = np.arange(N) * dt
+keep = (data_t_arr > t_tdi[0]) & (data_t_arr < t_tdi [-1])
+tdi_t_arr = data_t_arr[keep]
+
+amp = np.full(num_bin, 1e-23)
+f0 = np.full(num_bin, 15.2300812341e-3)
+fdot = np.full(num_bin, 1e-15)
+fddot = np.full(num_bin, 0.0)
+phi0 = np.full(num_bin, 0.892342342342)
+inc = np.full(num_bin, 1.2309804223)
+psi = np.full(num_bin, 3.00908098)
+lam = np.full(num_bin, 4.827342308)
+beta = np.full(num_bin, -0.50923423)
+
+gb_gen = GBTDIonTheFly(
+    t_tdi, 
+    Tobs,
+    0.0,
+    1. / dt,
+    num_bin,
+    n_params=9,
+    tdi_config=tdi_config,
+    orbits=orbits,
+    tdi_chan="AET",
+    force_backend=force_backend,
+)
+
+output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+tdi_output = np.zeros((num_bin, 3, len(data_t_arr))) 
+
+tdi_output[:, :, keep]= output.eval_tdi(tdi_t_arr)
+
+# import matplotlib.pyplot as plt
+# plt.plot(data_t_arr[:num_points], tdi_output[0,0])
+# plt.show()
+
+td = TDSignal(tdi_output[0], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
+
+np.save("td_check", td[:])
 
 wdm_set = WDMSettings(Nf, Nt, dt, force_backend="cpu")
 
-y[:, 0] = 1.0
-y[:, 1:] = 0.0
-td = TDSignal(y, TDSettings(N, dt, force_backend="cpu"))
+# y[:, 0] = 1.0
+# y[:, 1:] = 0.0
+# td = TDSignal(y, TDSettings(N, dt, force_backend="cpu"))
 # fd = FDSignal(np.fft.rfft(y), FDSettings(df))
 # stft = STFTSignal(signal.stft(y, fs=(1 / dt), nperseg=nperseg), STFTSettings(big_dt, big_df))
 # from scipy.signal.windows import tukey
@@ -34,12 +117,15 @@ td = TDSignal(y, TDSettings(N, dt, force_backend="cpu"))
 
 Tobs = N * dt
 
-# wdm_set.frequency_layer_mask = ((wdm_set.f_arr >= 5e-5) &(wdm_set.f_arr <= 25e-3))
+wdm_set.frequency_layer_mask = ((wdm_set.f_arr >= 5e-5) &(wdm_set.f_arr <= 25e-3))
 
 fd_from_td = td.fft(apply_dt=False)
 
 fd_set = fd_from_td.settings
+fd_set.frequency_layer_mask = ((fd_set.f_arr >= 5e-5) &(fd_set.f_arr <= 25e-3))
 wdm_from_fd = fd_from_td.transform(wdm_set)
+wdm_from_td = td.transform(wdm_set)
+assert np.allclose(wdm_from_fd[:], wdm_from_td[:])
 
 olitas_check = np.genfromtxt("olitas_wdm_impulse.dat")
 
@@ -47,18 +133,21 @@ olitas_check = np.genfromtxt("olitas_wdm_impulse.dat")
 
 
 fd_from_wdm = wdm_from_fd.transform(fd_set)
-breakpoint()
+
 # td_from_td = wdm_from_fd.transform(fd_set)
 
-from lisatools.sensitivity import XYZ2SensitivityMatrix
+from lisatools.sensitivity import AET1SensitivityMatrix
 from lisatools.detector import sangria
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer
 
-sens_mat_fd = XYZ2SensitivityMatrix(fd_set, model=sangria)
-sens_mat_wdm = XYZ2SensitivityMatrix(wdm_set, model=sangria)
-data_res = DataResidualArray(wdm_from_td, signal_domain=wdm_set)
+sens_mat_fd = AET1SensitivityMatrix(fd_set, model=sangria)
+sens_mat_wdm = AET1SensitivityMatrix(wdm_set, model=sangria)
+data_res_wdm = DataResidualArray(wdm_from_td, signal_domain=wdm_set)
+data_res_fd = DataResidualArray(fd_from_td, signal_domain=fd_set)
 
-analysis = AnalysisContainer(data_res, sens_mat_wdm)
-ll = analysis.likelihood()
+analysis_wdm = AnalysisContainer(data_res_wdm, sens_mat_wdm)
+analysis_fd = AnalysisContainer(data_res_fd, sens_mat_fd)
+ip_wdm = analysis_wdm.inner_product()
+ip_fd = analysis_fd.inner_product()
 breakpoint()

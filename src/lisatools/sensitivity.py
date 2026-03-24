@@ -1155,11 +1155,12 @@ class SensitivityMatrix:
         xp = get_array_module(self.sens_mat)
 
         # setup detC
-        if self.sens_mat.ndim < 3:
+        if len(self.channel_shape) == 1:
             self.detC = xp.prod(self.sens_mat, axis=0)
             self.invC = 1 / self.sens_mat
 
         else:
+            assert len(self.channel_shape) == 2
             full_shape = tuple(range(len(self.sens_mat.shape)))
 
             basis_axes = full_shape[-len(self.data_shape):]
@@ -1485,8 +1486,11 @@ def get_sensitivity(
             
         xp = get_array_module(basis_settings.f_arr)
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        PSD = xp.asarray([basis_settings.layer_df * sensitivity.get_Sn(basis_settings.f_arr, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).T
-
+        npts = 20
+        x = np.linspace(basis_settings.f_arr_edges[:-1],  basis_settings.f_arr_edges[1:], num=npts, axis=-1)
+        integrand = xp.asarray([sensitivity.get_Sn(x, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).transpose(1, 0, 2)
+        PSD = xp.trapezoid(integrand, x=x[:, None, :], axis=-1)
+        
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")
     
