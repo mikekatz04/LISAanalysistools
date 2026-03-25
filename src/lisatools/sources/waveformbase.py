@@ -103,10 +103,10 @@ class TDWaveformBase(LISAToolsParallelModule):
         tukey_alpha: float = 0.01,
         force_backend: str = "cpu",
         force_uniform_stft: bool = False,
-        ra_index: int = -3,
-        dec_index: int = -2,
-        merger_time_index: int = -1,
-        num_remove: int = 3,
+        # ra_index: int = -3,
+        # dec_index: int = -2,
+        # merger_time_index: int = -1,
+        # num_remove: int = 3,
     ) -> None:
 
         super().__init__(force_backend=force_backend)
@@ -123,11 +123,10 @@ class TDWaveformBase(LISAToolsParallelModule):
 
         self.response = pyResponseTDI(**response_kwargs, force_backend=force_backend)
         self.buffer_time = buffer_time
-
-        self.ra_index = ra_index
-        self.dec_index = dec_index
-        self.merger_time_index = merger_time_index
-        self.num_remove = num_remove
+        # self.ra_index = ra_index
+        # self.dec_index = dec_index
+        # self.merger_time_index = merger_time_index
+        # self.num_remove = num_remove
 
     @property
     def tdi_buffer_time(self) -> float:
@@ -216,7 +215,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         strain = h_plus + 1j * h_cross
 
         self.response.get_projections(
-            strain, lam=ra, beta=dec, t0=shifted_t_arr[0], t_buffer=self.buffer_time
+            strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time
         )
         tdis = self.xp.array(self.response.get_tdi_delays())
 
@@ -438,44 +437,44 @@ class TDWaveformBase(LISAToolsParallelModule):
 
         return DomainBaseArray(signals)
 
-    def _extract_sky_params(
-        self,
-        args: tuple,
-        ra: float | np.ndarray | None,
-        dec: float | np.ndarray | None,
-        merger_time: float | np.ndarray | None,
-    ) -> tuple:
-        """Split sky/response params from the positional argument tuple.
+    # def _extract_sky_params(
+    #     self,
+    #     args: tuple,
+    #     ra: float | np.ndarray | None,
+    #     dec: float | np.ndarray | None,
+    #     merger_time: float | np.ndarray | None,
+    # ) -> tuple:
+    #     """Split sky/response params from the positional argument tuple.
 
-        If ``ra``, ``dec`` and ``merger_time`` are all ``None`` **and** the
-        positional ``args`` contain at least ``n_sky_params`` extra entries
-        beyond what ``wave_gen`` expects, the last ``n_sky_params`` values are
-        peeled off and returned as ``(ra, dec, merger_time)``.
+    #     If ``ra``, ``dec`` and ``merger_time`` are all ``None`` **and** the
+    #     positional ``args`` contain at least ``n_sky_params`` extra entries
+    #     beyond what ``wave_gen`` expects, the last ``n_sky_params`` values are
+    #     peeled off and returned as ``(ra, dec, merger_time)``.
 
-        This allows callers to pass the *full* parameter vector positionally
-        (``wave_gen(*params)``) without needing to know which indices
-        correspond to sky/response parameters.
+    #     This allows callers to pass the *full* parameter vector positionally
+    #     (``wave_gen(*params)``) without needing to know which indices
+    #     correspond to sky/response parameters.
 
-        Returns:
-            ``(waveform_args, ra, dec, merger_time)``
-        """
-        if ra is None and dec is None and merger_time is None:
-            n = self.num_remove
-            if len(args) < n:
-                raise TypeError(
-                    f"TDWaveformBase.__call__() requires 'ra', 'dec', and "
-                    f"'merger_time' either as keyword arguments or as the "
-                    f"last {n} positional arguments."
-                )
+    #     Returns:
+    #         ``(waveform_args, ra, dec, merger_time)``
+    #     """
+    #     if ra is None and dec is None and merger_time is None:
+    #         n = self.num_remove
+    #         if len(args) < n:
+    #             raise TypeError(
+    #                 f"TDWaveformBase.__call__() requires 'ra', 'dec', and "
+    #                 f"'merger_time' either as keyword arguments or as the "
+    #                 f"last {n} positional arguments."
+    #             )
 
-            ra = args[self.ra_index]
-            dec = args[self.dec_index]
-            merger_time = args[self.merger_time_index]
+    #         ra = args[self.ra_index]
+    #         dec = args[self.dec_index]
+    #         merger_time = args[self.merger_time_index]
 
-            wf_args = args[:-n] if n > 0 else args
+    #         wf_args = args[:-n] if n > 0 else args
 
-            return wf_args, ra, dec, merger_time
-        return args, ra, dec, merger_time
+    #         return wf_args, ra, dec, merger_time
+    #     return args, ra, dec, merger_time
 
     def __call__(
         self,
@@ -517,7 +516,9 @@ class TDWaveformBase(LISAToolsParallelModule):
             Signal in the specified output domain.  A single :class:`DomainBase` for
             scalar ``ra``, a :class:`DomainBaseArray` for array ``ra``.
         """
-        args, ra, dec, merger_time = self._extract_sky_params(args, ra, dec, merger_time)
+        # args, ra, dec, merger_time = self._extract_sky_params(args, ra, dec, merger_time)
+        if ra is None or dec is None or merger_time is None:
+            *args, ra, dec, merger_time = args
 
         if np.ndim(ra) >= 1:
             return self._call_batched(
@@ -586,7 +587,6 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             )
             self.transform_to_domain = self.fft
             self.nperseg = None
-            self.num_ll_args = 2  # fd_signal and starting frequencies
 
         else:
             assert self.dt <= stft_dt
@@ -601,7 +601,6 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             )
             self.nperseg = nperseg
             self.transform_to_domain = self.stft
-            self.num_ll_args = 3  # stft signal, start freqs and start times
 
         self.freq_min = freq_min
         self.freq_max = freq_max
@@ -820,8 +819,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         # for the STFT case, we want to define a regular grid for each source that covers the time range of the input eval_times for that source, with a spacing of self.dt. This ensures that the output STFT is sampled on a regular grid, even if the input eval_times are not.
         # get the start and end times from the evaluation times, snapped to
-        # the data grid.  Use ceil/floor so the dense grid stays strictly
-        # within the spline domain defined by eval_times.
+        # the data grid.  Use ceil for start / floor for end so the dense
+        # grid stays strictly within the spline domain defined by
+        # eval_times — avoids out-of-bounds spline evaluation which would
+        # zero-fill and create spectral leakage in the STFT.
         t0 = self.data_t0
         dt = self.dt
         segment_dt = self.nperseg * dt if self.analysis_domain == "STFT" else dt
