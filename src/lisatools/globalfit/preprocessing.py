@@ -11,7 +11,7 @@ from typing import Optional
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-from mojito import MojitoL1File
+from mojito.reader import MojitoL1File
 from scipy import signal
 from tqdm import tqdm
 
@@ -286,10 +286,11 @@ class L1DataLoader:
         for source_type in self.source_types:
 
             subfolder = os.path.join(self.data_folder, source_type, "L1")
-            ids = self.source_ids.get(source_type, [])
 
             if source_type in ["GB", "VGB"]:
                 ids = [0]  # only one file for GB/VGB
+            else:
+                ids = self.source_ids.get(source_type, [])            
 
             if not isinstance(ids, list):
                 ids = [ids]

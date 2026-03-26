@@ -18,37 +18,40 @@ import logging
 from eryn.backends import HDFBackend as eryn_Backend
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
-from eryn.state import State as eryn_State
+from eryn.state import State as ErynState
+from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
 from lisatools.utils.utility import AET, detrend, tukey
+from lisatools.utils.constants import YRSID_SI, PC_SI
 
-from ..engine import Settings, Setup
+from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
 
 
-# TODO: better way than None?
 @dataclasses.dataclass
 class GBSettings(Settings):
-    A_lims: typing.List[float, float] = None
-    f0_lims: typing.List[float, float] = None
-    m_chirp_lims: typing.List[float, float] = None
-    fdot_lims: typing.List[float, float] = None
-    phi0_lims: typing.List[float, float] = None
-    iota_lims: typing.List[float, float] = None
-    psi_lims: typing.List[float, float] = None
-    lam_lims: typing.List[float, float] = None
-    beta_lims: typing.List[float, float] = None
+    A_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    f0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    m_chirp_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    fdot_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    iota_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    psi_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    lam_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    beta_lims: typing.List[float] = dataclasses.field(default_factory=list)
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
     oversample: int = 4
     extra_buffer: int = 5
-    start_resample_iter: Optional[int] = (-1,)  # -1 so that it starts right at the start of PE
+    start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
-
+    t0: Optional[float] = 0.0
+    tdi_setup: Optional[str] = "XYZ" # other options are AET and AE. 
+    use_tdi2: Optional[bool] = True
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -113,14 +116,12 @@ class GBSetup(Setup, GBSettings):
             # TODO: change to scaled linear in amplitude!?!
             priors_gb = {
                 input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                input_basis[1]: uniform_dist(
-                    *(np.asarray(self.f0_lims) * 1e3)
-                ),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
-                input_basis[2]: uniform_dist(*self.fdot_lims),
-                input_basis[3]: uniform_dist(*self.phi0_lims),
+                input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
+                input_basis[2]: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
+                input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
                 input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
-                input_basis[5]: uniform_dist(*self.psi_lims),
-                input_basis[6]: uniform_dist(*self.lam_lims),
+                input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                input_basis[6]: uniform_dist(self.lam_lims[0], self.lam_lims[1]),
                 input_basis[7]: uniform_dist(*np.sin(self.beta_lims)),
             }
 
@@ -150,7 +151,7 @@ class GBSetup(Setup, GBSettings):
                     5e2,
                 ]
             )
-            ntemps_pe = 24  # len(snrs_ladder)
+            ntemps_pe = 4  # len(snrs_ladder)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
             betas[-1] = 0.0001
@@ -168,10 +169,12 @@ class GBSetup(Setup, GBSettings):
             use_c_implementation=True,
             oversample=self.oversample,
             start_freq_ind=self.start_freq_ind,
+            tdi_channel_setup=self.tdi_setup,
+            tdi2=self.use_tdi2
         )
 
         if self.group_proposal_kwargs is None:
-            self.group_proposal_kwargs = dict(
+            self.group_proposal_kwargs: typing.Dict[str, Any] = dict(
                 n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=200
             )
 
@@ -194,7 +197,7 @@ class GBSetup(Setup, GBSettings):
     def init_band_structure(self):
         # band separation setup
 
-        if self.oversample is None and Tobs < YEAR / 2.0:
+        if self.oversample is None and self.Tobs < YRSID_SI / 2.0:
             self.oversample = 2
         elif self.oversample is None:
             self.oversample = 4
@@ -441,11 +444,11 @@ from ..state import EMRIState
 
 @dataclasses.dataclass
 class EMRISettings(Settings):
-    logm1_lims: typing.List[float, float] = None
-    m2_lims: typing.List[float, float] = None
-    a_lims: typing.List[float, float] = None
-    p0_lims: typing.List[float, float] = None
-    e0_lims: typing.List[float, float] = None
+    logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    m2_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    a_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    p0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    e0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None  # AS here only for the starting state
     info_matrix_gen: Optional[Any] = None  # todo change name to info matrix or smth
@@ -639,7 +642,7 @@ class PSDSettings(Settings):
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 4
-    transform_fn: TransformContainer = None
+    transform_fn: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None 
 
 
@@ -779,11 +782,11 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 
 
 if __name__ == "__main__":
-    general_set = get_general_erebor_settings()
-    gb_set = get_gb_erebor_settings(general_set)
-    mbh_set = get_mbh_erebor_settings(general_set)
-    psd_set = get_psd_erebor_settings(general_set)
-    galfor_set = get_galfor_erebor_settings(general_set)
+    # general_set = get_general_erebor_settings()
+    # gb_set = get_gb_erebor_settings(general_set)
+    # mbh_set = get_mbh_erebor_settings(general_set)
+    # psd_set = get_psd_erebor_settings(general_set)
+    # galfor_set = get_galfor_erebor_settings(general_set)
     breakpoint()
 
     # # mcmc info for main run

@@ -86,13 +86,13 @@ class Setup:
 
 @dataclasses.dataclass
 class Settings:
-    Tobs: float = None
-    dt: float = None
-    initialize_kwargs: dict = None
+    Tobs: float | None = None
+    dt: float | None = None
+    initialize_kwargs: dict | None = None
     transform: Optional[TransformContainer] = None
-    priors: Optional[ProbDistContainer] = None
+    priors: Optional[typing.Dict[str,ProbDistContainer]] = None
     periodic: Optional[dict] = None
-    nleaves_max: Optional[int] = None  # TODO: need to make higher
+    nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
     ndim: Optional[int] = None
     betas: Optional[np.ndarray] = None
@@ -104,27 +104,27 @@ class Settings:
 
 @dataclasses.dataclass
 class GeneralSettings(Settings):
-    Tobs: float = None
-    dt: float = None
-    file_store_dir: str = None
-    base_file_name: str = None
+    Tobs: float | None = None
+    dt: float | None = None
+    file_store_dir: str | None = None
+    base_file_name: str | None = None
     main_file_key: Optional[str] = "parameter_estimation_main"
     past_file_for_start: Optional[str] = None
-    orbits: Orbits = None
-    gpu_orbits: Orbits = None
+    orbits: Orbits | None = None
+    gpu_orbits: Orbits | None = None
     basis_domain: str = "stft"
-    start_freq: float = None
-    end_freq: float = None
-    stft_dt: float = None
-    random_seed: int = None
-    backup_iter: int = None
-    nwalkers: int = None
-    ntemps: int = None
+    start_freq: float | None = None
+    end_freq: float | None = None
+    stft_dt: float | None = None
+    random_seed: int | None = None
+    backup_iter: int | None = None
+    nwalkers: int | None = None
+    ntemps: int | None = None
     wintype: str = "tukey"
-    winalpha: float = None
+    winalpha: float | None = None
     gpu_backend: str = "cuda12x"
-    gpus: typing.List[int] = None
-    fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
+    gpus: typing.List[int] | None = None
+    fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
     # noise_model: Optional[LISAModel] = None
     data_processor: Optional[BaseProcessingStep] = None
@@ -278,11 +278,19 @@ class GeneralSetup(Setup, GeneralSettings):
 
         # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
         # self.logger.debug(f"Window factor for normalization: {window_factor}")
-
+        self.domain_settings = domain_settings
+        
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
+        self.input_data_residual_array.data_length = len(domain_settings.f_arr)
         
+        if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
+            self.input_data_residual_array._store_time_and_frequency_information(
+                df = domain_settings.df,
+                f_arr = domain_settings.f_arr
+            )
+
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
 

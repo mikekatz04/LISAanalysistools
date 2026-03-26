@@ -340,7 +340,7 @@ class GBHDFBackend(eryn_HDFBackend):
                 compression_opts=self.compression_opts,
             )
 
-            band_info.attrs["num_bands"] = len(band_edges)
+            band_info.attrs["num_bands"] = len(band_edges) - 1
 
             band_info.create_dataset(
                 "band_temps",

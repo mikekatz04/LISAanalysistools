@@ -5,9 +5,12 @@ import time
 import warnings
 from copy import deepcopy
 from inspect import Attribute
-from typing import Optional
+from types import ModuleType
+from typing import Optional, Union
 
 import numpy as np
+import numpy
+    
 from eryn.state import BranchSupplemental
 from gbgpu.utils.utility import get_N
 from scipy import stats
@@ -24,7 +27,7 @@ from .globalfitmove import GFCombineMove, GlobalFitMove
 
 try:
     import cupy as cp
-
+    import cupy
     gpu_available = True
 except ModuleNotFoundError:
     import numpy as cp
@@ -315,7 +318,7 @@ from eryn.utils import TransformContainer
 class Buffer(LISAToolsParallelModule):
 
     @property
-    def xp(self) -> object:
+    def xp(self) -> Union[ModuleType, numpy , cupy]:
         return self.backend.xp
 
     @classmethod
@@ -614,7 +617,7 @@ class Buffer(LISAToolsParallelModule):
             print(f"NOT KEEPING: {(~keep).sum()}")
 
         ll_diff = cp.full(keep.shape[0], -1e300)
-        # breakpoint()
+
         ll_diff[keep] = cp.asarray(
             self.gb.swap_likelihood_difference(
                 params_remove_in_keep,
@@ -837,7 +840,7 @@ def return_x(x):
 class BandSorter(LISAToolsParallelModule):
 
     @property
-    def xp(self) -> object:
+    def xp(self) -> Union[ModuleType, numpy , cupy]:
         return self.backend.xp
 
     @classmethod
@@ -1160,7 +1163,7 @@ class BandSorter(LISAToolsParallelModule):
 
         points_curr_tmp = self.main_band_sorter.coords[sources_now_map].copy()
         curr_special_band_inds = self.main_band_sorter.special_band_inds[sources_now_map].copy()
-
+        breakpoint()
         # sort these sources by band
         if inds_fill is None:
             inds_fill = cp.arange(num_band_preload)
@@ -1247,7 +1250,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     """
 
     @property
-    def xp(self) -> object:
+    def xp(self) -> Union[ModuleType, numpy , cupy]:
         return self.backend.xp
 
     def __init__(
@@ -1374,7 +1377,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.inds_freqs_sorted = self.xp.asarray(np.argsort(all_remaining_freqs))
         self.freqs_sorted = self.xp.asarray(np.sort(all_remaining_freqs))
         self.all_coords_sorted = self.xp.asarray(all_remaining_cords)[self.inds_freqs_sorted]
-        breakpoint()
+
         left_inds, right_inds = self.find_friends_init(all_temp_fs)
 
         start_inds = left_inds.copy().get()
@@ -1467,7 +1470,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         right_inds[right_inds > len(self.freqs_sorted) - 1] = len(self.freqs_sorted) - 1
 
         assert np.all(right_inds - left_inds == self.nfriends - 1)
-        breakpoint()
+
         assert (
             not np.any(right_inds < 0)
             and not np.any(right_inds > len(self.freqs_sorted) - 1)
@@ -1616,6 +1619,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             return
 
         factors_tmp = factor * cp.ones_like(subset.walker_inds[subset.inds], dtype=float)
+
         self.gb.generate_global_template(
             subset.coords_in[subset.inds],
             subset.walker_inds[subset.inds].astype(self.xp.int32),
@@ -3416,8 +3420,8 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
         self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
         ndim = branches["gb"].ndim
-        nwalkers = 40  # TODO: adjustable
-        ntemps = 10  # TODO: adjustable
+        nwalkers = 10  # TODO: adjustable
+        ntemps = 4  # TODO: adjustable
         ngroups = self.num_bands - 2  # TODO: is this always ok?
         priors = self.priors if not self.backend.uses_cuda else self.gpu_priors
 
@@ -3436,8 +3440,10 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         fdot_min = -fdot_max
 
         priors_in = priors["gb"].priors_in
-        priors_in[1] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
-        priors_in[2] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        # priors_in[1] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        # priors_in[2] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors_in["f0"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
+        priors_in["fdot"] = uniform_dist(0.0, 1.0, use_cupy=self.backend.uses_cupy)
         priors = {
             "gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
@@ -3528,6 +3534,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             return
 
         start_params_2 = np.tile(samples[-1][groups_running_now, None], (1, ntemps, 1, 1))
+        start_params_2[..., [0, 3, 4, 5]] = start_params[groups_running_now][..., [0, 3, 4, 5]]
 
         gibbs_sampling_setup_2 = np.ones(8, dtype=bool)
         gibbs_sampling_setup_2[np.array([3])] = False
@@ -3537,8 +3544,9 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             fdot_min[groups_running_now],
             fdot_max[groups_running_now],
         )
-
         ngroups_2 = groups_running_now.sum().item()
+        # prior_transform_fn_2.transform_from_prior_basis(start_params_2, self.xp.arange(ngroups_2))
+
         para_sampler_2 = ParaEnsembleSampler(
             ndim,
             nwalkers,
@@ -3615,9 +3623,9 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         rj_dist = ProbDistContainer(
             {
-                (0, 1, 2, 4, 6, 7): full_gmm,
-                3: uniform_dist(0.0, 2 * np.pi),
-                5: uniform_dist(0.0, np.pi),
+                ("A", "f0", "fdot", "cos_iota", "lam", "sin_beta"): full_gmm,
+                "phi0": uniform_dist(0.0, 2 * np.pi),
+                "psi": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
@@ -3709,10 +3717,10 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         # rj_dist = ProbDistContainer(
         #     {
-        #         (0, 1, 2, 4, 6, 7): full_gmm,
-        #         3: uniform_dist(0.0, 2 * np.pi),
-        #         5: uniform_dist(0.0, np.pi),
-        #     },
+            #     ("A", "f0", "fdot", "cos_iota", "lam", "sin_beta"): full_gmm,
+            #     "phi0": uniform_dist(0.0, 2 * np.pi),
+            #     "psi": uniform_dist(0.0, np.pi),
+            # },
         #     use_cupy=True
         # )
         # self.rj_proposal_distribution = {"gb": rj_dist}
@@ -3808,9 +3816,9 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         print("time:", time.perf_counter() - st)
         rj_dist = ProbDistContainer(
             {
-                (0, 1, 2, 4, 6, 7): full_gmm,
-                3: uniform_dist(0.0, 2 * np.pi),
-                5: uniform_dist(0.0, np.pi),
+                ("A", "f0", "fdot", "cos_iota", "lam", "sin_beta"): full_gmm,
+                "phi0": uniform_dist(0.0, 2 * np.pi),
+                "psi": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
