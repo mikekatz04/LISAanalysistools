@@ -48,6 +48,8 @@ Soth = (2.0e-12) ** 2  # m^2/Hz
 # Mass of Jupiter
 Mjup = 1.898e27
 
+EPS_RAD = PI / 180. * lc.OBLIQUITY
+
 #################
 # LISA constant #
 #################
