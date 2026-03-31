@@ -173,6 +173,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
         permute_every: int = 20,
+        tolerance: float = 0.0,
         **kwargs,
     ):
 
@@ -184,6 +185,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.num_repeats = num_repeats
         self.max_logl_mode = max_logl_mode
         self.starting_now = True
+        self.tolerance = tolerance
 
         self.sensitivity_backend = sensitivity_backend
         self.psd_transform_fn = psd_transform_fn
@@ -198,10 +200,8 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         wi = supps["walker_inds"]
 
-        # TODO: better way so avoid order issues?
         if self.psd_transform_fn is not None:
             psd_pars = self.psd_transform_fn.both_transforms(x[0])
-            breakpoint()
         else:
             psd_pars = x[0]
 
@@ -213,41 +213,53 @@ class PSDMove(GlobalFitMove, StretchMove):
             else:
                 galfor_pars = x[1]
 
-        
-
         data_index_all = cp.asarray(wi).astype(np.int32)
-        # ll = cp.zeros(psd_pars.shape[0])
         
         # HERE >
         
-        Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-        Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-
+        # spline_params = cp.atleast_2d( spline_params )
+        # spline_knots_position = spline_params[:,3::2]
+        # spline_knots_amplitude = spline_params[:,2:-1:2]
+        # half = spline_knots_position.shape[1] // 2
+        # spline_knots_amplitude = cp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
+        # spline_knots_position = cp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
         if self.sensitivity_backend.use_splines:
-            knots_positions = cp.asarray(psd_pars[:, 2::2])
-            knots_amplitudes = cp.asarray(psd_pars[:, 3::2])
-
+            Soms_d_in_all = cp.asarray(psd_pars[:, 0])
+            Sa_a_in_all = cp.asarray(psd_pars[:, 1])
+            knots_positions = cp.asarray(psd_pars[:,3::2])
+            knots_amplitudes = cp.asarray(psd_pars[:,2:-1:2])
+            half = knots_positions.shape[1] // 2 # Get the mid of the array 
             # put the 2 noise levels on the batch axis
-            n_knots = int(knots_positions.shape[1] / 2)
+            spline_knots_amplitude = cp.stack((knots_amplitudes[:, :half], knots_amplitudes[:, half:]))
+            spline_knots_position = cp.stack((knots_positions[:, :half], knots_positions[:, half:]))
 
-            oms_positions, oms_amplitudes = (
-                knots_positions[:, :n_knots],
-                knots_amplitudes[:, :n_knots],
-            )
-            testmass_positions, testmass_amplitudes = (
-                knots_positions[:, n_knots:],
-                knots_amplitudes[:, n_knots:],
-            )
+            # # put the 2 noise levels on the batch axis
+            # n_knots = int(knots_positions.shape[1] / 2)
 
-            knots_positions = cp.vstack([oms_positions, testmass_positions])
-            knots_amplitudes = cp.vstack([oms_amplitudes, testmass_amplitudes])
+            # oms_positions, oms_amplitudes = (
+            #     knots_positions[:, :n_knots],
+            #     knots_amplitudes[:, :n_knots],
+            # )
+            # testmass_positions, testmass_amplitudes = (
+            #     knots_positions[:, n_knots:],
+            #     knots_amplitudes[:, n_knots:],
+            # )
 
-            # now check if any knot position is not in ascending order
-            invalid_knots = cp.any(cp.diff(knots_positions, axis=1) < 0, axis=1)
+            # knots_positions = cp.vstack([oms_positions, testmass_positions])
+            # knots_amplitudes = cp.vstack([oms_amplitudes, testmass_amplitudes])
 
+            # Sort
+            sort_indices = cp.argsort(spline_knots_position, axis=2)
+            # Apply the same indices to both arrays
+            spline_knots_position = cp.take_along_axis(spline_knots_position, sort_indices, axis=2)
+            spline_knots_amplitude = cp.take_along_axis(spline_knots_amplitude, sort_indices, axis=2)
+            # now check if any knot position is not too close together
+            invalid_knots = cp.any(cp.diff(10**spline_knots_position, axis=2) < self.tolerance, axis=(0, 2))
         else:
-            knots_positions = None
-            knots_amplitudes = None
+            spline_knots_position = None
+            spline_knots_amplitude = None
+            Soms_d_in_all = cp.asarray(psd_pars[:, 0])
+            Sa_a_in_all = cp.asarray(psd_pars[:, 1])
             invalid_knots = cp.zeros(psd_pars.shape[0], dtype=bool)
 
         Amp_all = cp.asarray(galfor_pars[:, 0])
@@ -266,8 +278,8 @@ class PSDMove(GlobalFitMove, StretchMove):
             sl1_all,
             kn_all,
             sl2_all,
-            knots_positions,
-            knots_amplitudes,
+            spline_knots_position,
+            spline_knots_amplitude,
         )
 
         ll[invalid_knots] = -1e300
@@ -484,7 +496,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 galfor_params = None
 
             new_sens = self.sensitivity_backend(
-                f"walker_{w}", psd_params, galfor_params=galfor_params
+                f"walker_{w}", psd_params, galfor_params=galfor_params, transform_fn=self.psd_transform_fn, 
             )
             self.acs[w].sens_mat = new_sens
 

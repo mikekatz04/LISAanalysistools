@@ -2256,9 +2256,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             splines_weights = self.spline_interpolant(
                 xp.log10(self.f_arr), knots_position_all, knots_amplitude_all
             )
-
-            splines_weights_isi_oms = splines_weights[:num_psds].flatten()
-            splines_weights_testmass = splines_weights[num_psds:].flatten()
+            splines_weights_isi_oms = splines_weights[0].flatten()
+            splines_weights_testmass = splines_weights[1].flatten()
+            # splines_weights_isi_oms = splines_weights[:num_psds].flatten()
+            # splines_weights_testmass = splines_weights[num_psds:].flatten()
 
         else:
             splines_weights_isi_oms = xp.zeros(shape=(num_psds * self.num_freqs))
