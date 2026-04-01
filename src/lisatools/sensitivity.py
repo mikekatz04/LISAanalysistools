@@ -1167,11 +1167,31 @@ class SensitivityMatrix:
             mat_axes = full_shape[:-len(self.data_shape)]
             transpose_shape = basis_axes + mat_axes
             self.detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
-            invC = xp.zeros_like(self.sens_mat.transpose(transpose_shape))
-            invC[self.detC != 0.0] = xp.linalg.inv(
-                self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
-            )
-            invC[self.detC == 0.0] = 1e-100
+
+            tmp = self.sens_mat.transpose(transpose_shape).reshape((-1,) + self.channel_shape)
+            _invC = xp.zeros_like(tmp)
+            
+            batch = 100000
+            inds = np.arange(batch, tmp.shape[0], batch)
+            if inds[0] < tmp.shape[0]:
+                inds = np.concatenate([inds, np.array([tmp.shape[0]])])
+            inds_bad = []
+            for ind_st, ind_end in zip(inds[:-1], inds[1:]):
+                try:
+                    _invC[ind_st:ind_end] = xp.linalg.inv(tmp[ind_st:ind_end])
+                except np.linalg.LinAlgError:
+                    for i in range(ind_st, ind_end):
+                        try:
+                            _invC[i] = xp.linalg.inv(tmp[i])
+                        except np.linalg.LinAlgError:
+                            _invC[i] = 1e-100
+                            inds_bad.append(i)
+                # print(ind_st)
+
+            inds_bad = np.asarray(inds_bad)
+    
+            invC = _invC.reshape(self.data_shape + self.channel_shape)
+            
             # switch them after they were effectively switched above
 
             full_shape_rev = tuple(range(len(invC.shape)))
@@ -1231,6 +1251,8 @@ class SensitivityMatrix:
         if (ax is None and fig is None) or (
             ax is not None and (isinstance(ax, list) or isinstance(ax, np.ndarray))
         ):
+            if not isinstance(self.basis_settings, domains.FDSettings):
+                raise NotImplementedError("Needs to be frequency domain for automatic plotting.")
             if ax is None and fig is None:
                 outer_shape = self.shape[:-1]
                 if len(outer_shape) == 2:
@@ -1252,8 +1274,8 @@ class SensitivityMatrix:
             for i in range(np.prod(self.shape[:-1])):
                 plot_in = self.flatten()[i]
                 if char_strain:
-                    plot_in = np.sqrt(self.frequency_arr * plot_in)
-                ax[i].loglog(self.frequency_arr, plot_in, **kwargs)
+                    plot_in = np.sqrt(self.basis_settings.f_arr * plot_in)
+                ax[i].loglog(self.basis_settings.f_arr, plot_in, **kwargs)
 
         elif fig is not None:
             raise NotImplementedError
@@ -1265,8 +1287,8 @@ class SensitivityMatrix:
                 )
             plot_in = self.sens_mat[inds]
             if char_strain:
-                plot_in = np.sqrt(self.frequency_arr * plot_in)
-            ax.loglog(self.frequency_arr, plot_in, **kwargs)
+                plot_in = np.sqrt(self.basis_settings.f_arr * plot_in)
+            ax.loglog(self.basis_settings.f_arr, plot_in, **kwargs)
 
         else:
             raise ValueError(
@@ -1486,18 +1508,23 @@ def get_sensitivity(
             
         xp = get_array_module(basis_settings.f_arr)
         # equation for stationary noise (https://arxiv.org/pdf/2009.00043; eq. 19)
-        npts = 3
-        x = np.linspace(basis_settings.f_arr_edges[:-1],  basis_settings.f_arr_edges[1:], num=npts, axis=-1)
-        integrand = xp.asarray([sensitivity.get_Sn(x, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).transpose(1, 0, 2)
+        # npts = 3
+        # x = np.linspace(basis_settings.f_arr_edges[:-1],  basis_settings.f_arr_edges[1:], num=npts, axis=-1)
+        # integrand = xp.asarray([sensitivity.get_Sn(x, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).transpose(1, 0, 2)
         
-        # this is to match tyson's code. I have questions
-        h = 1.0
-        f0 = integrand[:, :, 0]
-        f1 = integrand[:, :, 1]
-        f2 = integrand[:, :, 2]
-        PSD = simpson_3_integral = h*(f0 + 4.0*f1 + f2)/6.0  # fudge factor
+        # # this is to match tyson's code. I have questions
+        # h = 1.0
+        # f0 = integrand[:, :, 0]
+        # f1 = integrand[:, :, 1]
+        # f2 = integrand[:, :, 2]
+        # PSD = simpson_3_integral = h*(f0 + 4.0*f1 + f2)/6.0
         # 0.25 is fudge factor from tysons code
-        # PSD = xp.trapezoid(integrand, axis=-1)  # 
+
+        npts_c = 20
+        f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
+        psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
+        psd_fd = domains.FDSignal(psd + 1j * 0.0, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
+        PSD = psd_fd.wdmtransform(settings=basis_settings, window_squared=True)[0]
         
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")

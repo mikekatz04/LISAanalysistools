@@ -45,7 +45,7 @@ force_backend = "cpu"
 orbits = DefaultOrbits(force_backend=force_backend)
 orbits.configure(linear_interp_setup=True)
 tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
-dt = 10.0
+dt = 2.5
 Tobs = 2 * YRSID_SI
 
 wavelet_duration = int(1 / 12 * YRSID_SI / dt) * dt
@@ -55,9 +55,10 @@ N = int(Tobs / dt)
 Nf = int(N / Nt)
 
 N_sparse = 256 
-t_tdi = np.linspace(0.0, Tobs, N_sparse + 1)[1:-1]
+t_tdi = np.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend="cpu")
+
 # wdm_lookup_table = WDMLookupTable(wdm_settings, 50, 20, 3)
 
 # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
@@ -92,8 +93,18 @@ gb_gen = GBTDIonTheFly(
 )
 
 output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+# FD 
+bin_i = int(f0[0] * Tobs) - int(output.t_arr.shape[-1] / 4)
+carrier_frequency = bin_i / Tobs
+
+heterodyned_phase = output.tdi_phase + output.phase_ref - 2 * np.pi * carrier_frequency * output.t_arr
+heterodyned_signal = -output.tdi_amp * np.sin(heterodyned_phase)
+gb_fd = np.fft.fftshift(np.fft.fft(heterodyned_signal, axis=-1))
+
+breakpoint()
 tdi_output = np.zeros((num_bin, 3, len(data_t_arr))) 
 
+# t_tdi = 
 tdi_output[:, :, keep]= output.eval_tdi(tdi_t_arr)
 from scipy.signal.windows import tukey
 tdi_output[:] *= tukey(tdi_output.shape[-1], alpha=0.05)[None, :]

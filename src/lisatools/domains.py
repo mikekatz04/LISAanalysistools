@@ -452,7 +452,7 @@ class FDSignal(FDSettings, DomainBase):
         
         # free(wdm_temp);
         
-    def wdmtransform(self, settings=None, window=None, return_transpose_time_axis_first: bool = False):
+    def wdmtransform(self, settings=None, window=None, return_transpose_time_axis_first: bool = False, window_squared: bool = False):
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
@@ -477,10 +477,11 @@ class FDSignal(FDSettings, DomainBase):
 
 
         # multiply by  2 / settings.layer_df for forward transform
-        base_window = settings.window[:] * 2 / settings.Nf  
-        dc_window = settings.dc_layer_window * 2 / settings.Nf
+        exponent = 1 if not window_squared else 2
+        base_window = (settings.window[:] * 2 / settings.Nf) ** exponent
+        dc_window = (settings.dc_layer_window * 2 / settings.Nf) ** exponent
         # TODO: check if this is right?!?!
-        max_freq_window = settings.max_freq_layer_window * 2 / settings.Nf
+        max_freq_window = (settings.max_freq_layer_window * 2 / settings.Nf) ** exponent
 
         k_in = k.copy()
 
@@ -792,8 +793,8 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def differential_component(self) -> float:
-        return self.data_dt / 2.
-    
+        return self.layer_df
+
     @property
     def total_terms(self) -> int:
         return self.Nt * self.Nf
