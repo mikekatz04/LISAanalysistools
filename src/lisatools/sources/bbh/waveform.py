@@ -124,8 +124,80 @@ class BBHSNRWaveform(SNRWaveform):
         else:
             return (AET[0], AET[1], AET[2])
 
+class PhenomTHMWaveformBase:
+    """
+    Base class for PhenomTHM waveforms.
 
-class PhenomTHMTDIWaveform(TDWaveformBase):
+        This class is not meant to be used directly, but it contains the common code for both :class:`PhenomTHMTDIWaveform` and :class:`PhenomTHMTDIOnFlyWaveform`. In particular, it contains the common code for handling the waveform generation and the reference and starting frequencies.
+    
+        Args:
+            waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
+            Tobs: Observation time in years.
+            start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls.
+            ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
+    """
+    def __init__(
+        self,
+        waveform_kwargs: dict,
+        Tobs: float,
+        start_freq: float = None,
+        ref_freq: float = None,
+    ) -> None:
+
+        if not phentax_available:
+            raise ImportError(
+                "PhenomTHM is not available. Please install phentax to use this waveform."
+            )
+
+        self.waveform = phentax.waveform.IMRPhenomTHM(T=Tobs, **waveform_kwargs)
+
+        self.start_freq = start_freq
+        self.ref_freq = ref_freq
+    
+    def trim_and_shift_times(
+        self, 
+        times: np.ndarray | cp.ndarray, 
+        mask: np.ndarray | cp.ndarray,
+    ) -> np.ndarray | cp.ndarray:
+        """
+        Shift and trim the time arrays for each source according to its mask, so that the resulting time arrays have the same shape (Nbatch, max_valid_times). the initial time points can be different across sources.
+
+        Args:
+            times (Array): Time arrays for each source, shape (Nbatch, Ntimes).
+            mask (Array): Boolean mask indicating valid time samples for each source, shape (Nbatch, Ntimes).
+
+        Returns:
+            Shifted time arrays, shape (Nbatch, max_valid_times).
+        """
+        valid_points = mask.sum(axis=1)  # number of valid time samples for each source
+        max_valid_points = int(
+            valid_points.max()
+        )  # maximum number of valid time samples across sources
+
+        # Trim to max_valid_points: removes time points unused by ALL sources
+        times_out = times[:, -max_valid_points:]
+
+        # Per-source count of remaining invalid points in the trimmed array
+        n_pad = max_valid_points - valid_points  # (Nbatch,)
+
+        # Position index in trimmed array
+        j = self.xp.arange(max_valid_points)  # (max_valid_points,)
+
+        # Identify invalid positions: position j is invalid for source i if j < n_pad[i]
+        is_invalid = j[None, :] < n_pad[:, None]  # (Nbatch, max_valid_points)
+
+        # First valid time per source (at index n_pad[i] in trimmed array)
+        batch_idx = self.xp.arange(times_out.shape[0])
+        first_valid_time = times_out[batch_idx, n_pad]  # (Nbatch,)
+
+        replacement_times = first_valid_time[:, None] - (n_pad[:, None] - j[None, :]) * self.dt
+
+        # Apply only to invalid positions (valid positions keep their original times)
+        times_out = self.xp.where(is_invalid, replacement_times, times_out)
+
+        return times_out  # shape (Nbatch, max_valid_points)
+
+class PhenomTHMTDIWaveform(TDWaveformBase, PhenomTHMWaveformBase):
     """
     Generate PhenomTHM waveforms with the TDI LISA Response.
 
@@ -148,22 +220,21 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         **kwargs: Any,
     ) -> None:
 
-        if not phentax_available:
-            raise ImportError(
-                "PhenomTHM is not available. Please install phentax to use this waveform."
-            )
-
-        super().__init__(
+        TDWaveformBase.__init__(
+            self,
             *args,
             **kwargs,
             Tobs=Tobs,
         )
+        PhenomTHMWaveformBase.__init__(
+            self,
+            waveform_kwargs=waveform_kwargs,
+            Tobs=Tobs,
+            start_freq=start_freq,
+            ref_freq=ref_freq,
+        )
 
-        self.waveform = phentax.waveform.IMRPhenomTHM(T=self.Tobs, **waveform_kwargs)
-
-        self.start_freq = start_freq
-        self.ref_freq = ref_freq
-
+        
     def wave_gen(
         self,
         m1: float,
@@ -263,8 +334,8 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
                 override, ``t_min``, ``t_ref``).
 
         Returns:
-            Tuple of (times_batch, mask_batch, h_plus_batch, h_cross_batch),
-            each of shape (Nbatch, Ntimes) as plain NumPy arrays.
+            Tuple of (times_batch, h_plus_batch, h_cross_batch),
+            each of shape (Nbatch, N_valid_times) as plain NumPy or Cupy arrays.
         """
 
         ref_freq = ref_freq if ref_freq is not None else self.ref_freq
@@ -285,18 +356,25 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
             **kwargs,
         )
         hcross.block_until_ready()  # ensure all outputs are ready before moving to self.xp
+        
+        times = self.xp.asarray(times).copy()
+        mask = self.xp.asarray(mask).copy()
+        hplus = self.xp.asarray(hplus).copy()
+        hcross = self.xp.asarray(hcross).copy()
 
         # Move to the target backend: zero-copy on GPU via __cuda_array_interface__,
         # host transfer on CPU. _call_batched will slice and re-wrap as needed.
+        times_out = self.trim_and_shift_times(times, mask)
+        num_keep = times_out.shape[-1]
+
         return (
-            self.xp.asarray(times),
-            self.xp.asarray(mask),
-            self.xp.asarray(hplus),
-            self.xp.asarray(hcross),
+            times_out,
+            hplus[:, -num_keep:],
+            hcross[:, -num_keep:],
         )
 
 
-class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase):
+class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
     """
     Generate PhenomTHM waveforms with the TDI LISA Response, on the fly.
 
@@ -316,64 +394,19 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase):
         **kwargs: Any,
     ) -> None:
 
-        if not phentax_available:
-            raise ImportError(
-                "PhenomTHM is not available. Please install phentax to use this waveform."
-            )
-
-        super().__init__(
+        TDTDIOnFlyWaveformBase.__init__(
             *args,
             **kwargs,
         )
 
-        self.waveform = phentax.waveform.IMRPhenomTHM(
-            T=Tobs, **waveform_kwargs
+        PhenomTHMWaveformBase.__init__(
+            self,
+            waveform_kwargs=waveform_kwargs,
+            Tobs=Tobs,
+            start_freq=start_freq,
+            ref_freq=ref_freq,
         )
-
-        self.start_freq = start_freq
-        self.ref_freq = ref_freq
-
-    def trim_and_shift_times(
-        self, times: np.ndarray | cp.ndarray, mask: np.ndarray | cp.ndarray
-    ) -> np.ndarray | cp.ndarray:
-        """
-        Shift the time arrays for each source to align with the tdi on fly conventions, as described in the docstring of :meth:`get_amp_phase`.
-
-        Args:
-            times (Array): Time arrays for each source, shape (Nbatch, Ntimes).
-            mask (Array): Boolean mask indicating valid time samples for each source, shape (Nbatch, Ntimes).
-
-        Returns:
-            Shifted time arrays, shape (Nbatch, max_valid_times).
-        """
-        valid_points = mask.sum(axis=1)  # number of valid time samples for each source
-        max_valid_points = int(
-            valid_points.max()
-        )  # maximum number of valid time samples across sources
-
-        # Trim to max_valid_points: removes time points unused by ALL sources
-        times_out = times[:, -max_valid_points:]
-
-        # Per-source count of remaining invalid points in the trimmed array
-        n_pad = max_valid_points - valid_points  # (Nbatch,)
-
-        # Position index in trimmed array
-        j = self.xp.arange(max_valid_points)  # (max_valid_points,)
-
-        # Identify invalid positions: position j is invalid for source i if j < n_pad[i]
-        is_invalid = j[None, :] < n_pad[:, None]  # (Nbatch, max_valid_points)
-
-        # First valid time per source (at index n_pad[i] in trimmed array)
-        batch_idx = self.xp.arange(times_out.shape[0])
-        first_valid_time = times_out[batch_idx, n_pad]  # (Nbatch,)
-
-        replacement_times = first_valid_time[:, None] - (n_pad[:, None] - j[None, :]) * self.dt
-
-        # Apply only to invalid positions (valid positions keep their original times)
-        times_out = self.xp.where(is_invalid, replacement_times, times_out)
-
-        return times_out  # shape (Nbatch, max_valid_points)
-
+        
     def get_amp_phase(
         self,
         m1: np.ndarray | cp.ndarray,
