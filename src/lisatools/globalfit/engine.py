@@ -231,10 +231,6 @@ class GeneralSetup(Setup, GeneralSettings):
             self.logger.debug(f"Preprocess setting: {key} = {value}")
         # now extract `normalize` if present
         normalize_window = preprocess_kwargs.pop("normalize", False)
-        
-        if normalize_window:
-            self.logger.warning("Window normalization is turned off for now, setting `normalize_window` to False.")
-            normalize_window = False
 
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt

@@ -363,7 +363,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         new_state, accepted = super(PSDMove, self).propose(model, state)
 
         if move_i % self.permute_every == 0:
-            logger.debug(f"Permuting walkers before swap")
             x = new_state.branches_coords
             logl = new_state.log_like
             logp = new_state.log_prior
@@ -420,7 +419,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 if changed_once:
                     num_so_far += 1
 
-            print(max_logl, num_so_far, num_checks)
+            # print(max_logl, num_so_far, num_checks)
             # breakpoint()
 
         return state, accepted
