@@ -36,6 +36,7 @@ from lisatools.globalfit.stock.erebor import (
 from eryn.prior import uniform_dist
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
+from scipy.stats import multivariate_normal
 
 from eryn.moves import StretchMove
 from lisatools.sampling.moves.skymodehop import SkyMove
@@ -78,11 +79,11 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     if general_set.use_splines: # [Somsi,Stmi, ...S, f oms internal S, f tm ... Somsn,Stmn ]
         priors_psd = {}
         for mdl in ["oms", "tm"]:
-            priors_psd[rf"$\log_{{10}}S_{{\rm {mdl}, i}}$"] = uniform_dist(general_set.lowerbound, general_set.upperbound)
+            priors_psd[rf"$\log_{{10}}S_{{\rm {mdl}, i}}$"] = multivariate_normal( 0.0, .1) # uniform_dist(general_set.lowerbound, general_set.upperbound)
             for nk in range(1, general_set.nknots-1):
-                priors_psd[rf"$\log_{{10}}S_{{\rm {mdl}, {nk}}}$"] = uniform_dist(general_set.lowerbound, general_set.upperbound) 
+                priors_psd[rf"$\log_{{10}}S_{{\rm {mdl}, {nk}}}$"] = multivariate_normal( 0.0, .1) # uniform_dist(general_set.lowerbound, general_set.upperbound) 
                 priors_psd[rf"$\log_{{10}}f_{{\rm {mdl}, {nk}}}$"] = uniform_dist(np.log10(general_set.start_freq), np.log10(general_set.end_freq))
-            priors_psd[rf"$\log_{{10}}S_{{\rm {mdl}, e}}$"] = uniform_dist(general_set.lowerbound, general_set.upperbound)
+            priors_psd[rf"$\log_{{10}}S_{{\rm {mdl}, e}}$"] = multivariate_normal( 0.0, .1) # uniform_dist(general_set.lowerbound, general_set.upperbound)
 
         noise_fill_dict = {
                 rf"$\log_{{10}}f_{{\rm oms, i}}$": np.log10(general_set.start_freq), 
@@ -130,14 +131,14 @@ def get_general_erebor_settings(use_splines=True) -> GeneralSetup:
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
-    Tobs = .1 * YRSID_SI / 12.0 # 1
+    Tobs = 1 * YRSID_SI / 12.0 # .1 * YRSID_SI / 12.0
     dt = 2.5
 
     head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
     base_file_name = "noise-only_spline-dev_v1"
-    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev/"
+    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev_longer/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
@@ -185,8 +186,8 @@ def get_general_erebor_settings(use_splines=True) -> GeneralSetup:
         wintype=wintype,
         use_splines=use_splines, 
         nknots=6,
-        lowerbound=-1, 
-        upperbound=1,
+        lowerbound=-.5, 
+        upperbound=.5,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
