@@ -89,7 +89,6 @@ class TDWaveformBase(LISAToolsParallelModule):
     force_uniform_stft: If True, batched calls in STFT mode will force all signals onto a common STFT grid
         spanning the union of all source time ranges. If False (default), each source retains its natural
         STFT grid derived from its own time range. Only relevant for batched calls with output_domain='STFT'.
-
     """
 
     def __init__(
@@ -103,10 +102,6 @@ class TDWaveformBase(LISAToolsParallelModule):
         tukey_alpha: float = 0.01,
         force_backend: str = "cpu",
         force_uniform_stft: bool = False,
-        # ra_index: int = -3,
-        # dec_index: int = -2,
-        # merger_time_index: int = -1,
-        # num_remove: int = 3,
     ) -> None:
 
         super().__init__(force_backend=force_backend)
@@ -123,10 +118,6 @@ class TDWaveformBase(LISAToolsParallelModule):
 
         self.response = pyResponseTDI(**response_kwargs, force_backend=force_backend)
         self.buffer_time = buffer_time
-        # self.ra_index = ra_index
-        # self.dec_index = dec_index
-        # self.merger_time_index = merger_time_index
-        # self.num_remove = num_remove
 
     @property
     def tdi_buffer_time(self) -> float:
@@ -151,7 +142,7 @@ class TDWaveformBase(LISAToolsParallelModule):
 
     def wave_gen_batch(
         self, *args, **kwargs
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray,  np.ndarray, np.ndarray]:
         """Generate waveforms for a batch of sources.
 
         Subclasses that support batched waveform generation should override this
@@ -159,9 +150,8 @@ class TDWaveformBase(LISAToolsParallelModule):
         ``_call_batched`` will apply per-source masking and the TDI response.
 
         Returns:
-            Tuple of (times_batch, mask_batch, h_plus_batch, h_cross_batch),
-            each of shape (Nbatch, Ntimes). ``mask_batch`` is a boolean array
-            selecting the valid (non-padded) time samples for each source.
+            Tuple of (times_batch, h_plus_batch, h_cross_batch),
+            each of shape (Nbatch, Ntimes).
 
         """
         raise NotImplementedError(
@@ -192,7 +182,6 @@ class TDWaveformBase(LISAToolsParallelModule):
             TDSignal with the TDI response applied.
         """
         shifted_t_arr = t_arr + merger_time + self.waveform_t0
-        N_original = shifted_t_arr.shape[-1]
         # add 500 seconds to the end to prevent problems with the response
         
         #shifted_t_arr = self.xp.concatenate([shifted_t_arr, shifted_t_arr[-1] + self.dt * self.xp.arange(1, pad_length + 1)])
@@ -218,10 +207,6 @@ class TDWaveformBase(LISAToolsParallelModule):
             strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time
         )
         tdis = self.xp.array(self.response.get_tdi_delays())
-
-        # # Zero out the samples affected by the TDI boundary artefacts.
-        # tdis[:, : num_pad] = 0.0
-        # tdis[:, -num_pad :] = 0.0
 
         # trim the invalid points 
         tdis = tdis[:, num_pad:-num_pad]
@@ -270,7 +255,16 @@ class TDWaveformBase(LISAToolsParallelModule):
 
         elif output_domain == "STFT":
             nperseg = round(domain_kwargs["big_dt"] / td_signal.settings.dt)
-            td_signal = self._pad_td_signal(td_signal, align_samples=nperseg)
+            
+            # We must right-pad to a multiple of nperseg, otherwise the STFT
+            # framing (NT = N // nperseg) will silently truncate the end of the 
+            # signal (which often contains the merger!)
+            n_to_data_t0 = round((td_signal.settings.t0 - self.data_t0) / td_signal.settings.dt)
+            n_left = n_to_data_t0 % nperseg
+            current_padded_len = td_signal.settings.N + n_left
+            target_n = current_padded_len + (nperseg - (current_padded_len % nperseg)) % nperseg
+            
+            td_signal = self._pad_td_signal(td_signal, align_samples=nperseg, target_n=target_n)
             out_settings = get_stft_settings(
                 td_signal.settings.t_arr, **domain_kwargs, force_backend=backend
             )
@@ -362,17 +356,18 @@ class TDWaveformBase(LISAToolsParallelModule):
         batching natively), then optionally projects all signals onto a common STFT
         grid when ``self.force_uniform_stft`` is True.
         """
-        times_batch, mask_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
+        #times_batch, mask_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
+        times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
 
-        Nbatch = times_batch.shape[0]
+        Nbatch, Ntimes = times_batch.shape
         td_signals: List[TDSignal] = []
 
         for i in range(Nbatch):
-            mask_i = mask_batch[i]
+            # mask_i = mask_batch[i]
 
-            t_arr_i = times_batch[i][mask_i]
-            hplus_i = hplus_batch[i][mask_i]
-            hcross_i = hcross_batch[i][mask_i]
+            t_arr_i = times_batch[i]#[mask_i]
+            hplus_i = hplus_batch[i]#[mask_i]
+            hcross_i = hcross_batch[i]#[mask_i]
 
             td_signals.append(
                 self._apply_response_single(
@@ -436,45 +431,6 @@ class TDWaveformBase(LISAToolsParallelModule):
             signals.append(padded_td.transform(common_settings, window=window))
 
         return DomainBaseArray(signals)
-
-    # def _extract_sky_params(
-    #     self,
-    #     args: tuple,
-    #     ra: float | np.ndarray | None,
-    #     dec: float | np.ndarray | None,
-    #     merger_time: float | np.ndarray | None,
-    # ) -> tuple:
-    #     """Split sky/response params from the positional argument tuple.
-
-    #     If ``ra``, ``dec`` and ``merger_time`` are all ``None`` **and** the
-    #     positional ``args`` contain at least ``n_sky_params`` extra entries
-    #     beyond what ``wave_gen`` expects, the last ``n_sky_params`` values are
-    #     peeled off and returned as ``(ra, dec, merger_time)``.
-
-    #     This allows callers to pass the *full* parameter vector positionally
-    #     (``wave_gen(*params)``) without needing to know which indices
-    #     correspond to sky/response parameters.
-
-    #     Returns:
-    #         ``(waveform_args, ra, dec, merger_time)``
-    #     """
-    #     if ra is None and dec is None and merger_time is None:
-    #         n = self.num_remove
-    #         if len(args) < n:
-    #             raise TypeError(
-    #                 f"TDWaveformBase.__call__() requires 'ra', 'dec', and "
-    #                 f"'merger_time' either as keyword arguments or as the "
-    #                 f"last {n} positional arguments."
-    #             )
-
-    #         ra = args[self.ra_index]
-    #         dec = args[self.dec_index]
-    #         merger_time = args[self.merger_time_index]
-
-    #         wf_args = args[:-n] if n > 0 else args
-
-    #         return wf_args, ra, dec, merger_time
-    #     return args, ra, dec, merger_time
 
     def __call__(
         self,
@@ -787,24 +743,77 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         """
         param = self.xp.asarray(param)
         return self.xp.repeat(param, num_modes)
+    
+    def get_tdi_buffers(self, delta_t: np.ndarray) -> Tuple[int, int, float, float]:
+        """
+        Get the number of buffer points to add at the beginning and end of the time array based on the TDI buffer time and the maximum time step in the input time array.
 
-    def get_evaluation_times(self, input_times: np.ndarray | cp.ndarray, num_modes: int) -> np.ndarray | cp.ndarray:
+        Args:
+            delta_t (Array): Array of time steps between consecutive time points, shape (num_binaries * num_modes, num_times - 1).
+        Returns:
+            Tuple of (start_buffer, end_buffer, left_dt, right_dt) in number of points and time steps.
+        """
+
+        left_dt = self.xp.min(delta_t[:, 0])
+        right_dt = self.xp.min(delta_t[:, -1])
+
+        start_buffer = max(int(self.tdi_buffer_time / left_dt), 1)
+        end_buffer = max(int(self.tdi_buffer_time / right_dt), 1)
+
+        return start_buffer, end_buffer, left_dt, right_dt
+    
+    def pad(
+            self, 
+            input_times: np.ndarray | cp.ndarray,
+            input_amplitudes: np.ndarray | cp.ndarray, 
+            input_phases: np.ndarray | cp.ndarray
+        ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Add a 500 s buffer at both sides to make sure that we can compute tdi on the times we are actually interested in.
+
+        Args:
+            input_times (Array): input time array, shape (num_binaries * num_modes, num_times)
+            input_amplitudes (Array): input amplitude array, shape (num_binaries * num_modes, num_times)
+            input_phases (Array): input phase array, shape (num_binaries * num_modes, num_times)
+
+        Returns:
+            Padded time, amplitude and phase arrays with shape (num_binaries * num_modes, num_times + 2 * buffer_length).
+        """
+        delta_t = self.xp.diff(input_times, axis=-1)
+        
+        pad_length_left, pad_length_right, left_dt, right_dt = self.get_tdi_buffers(delta_t)
+
+        padded_times = self.xp.concatenate(
+            [
+                input_times[:, 0:1] - self.xp.arange(pad_length_left, 0, -1) * left_dt,
+                input_times,
+                input_times[:, -1:] + self.xp.arange(1, pad_length_right + 1) * right_dt,
+            ],
+            axis=-1
+        )
+
+        padded_amplitudes = self.xp.pad(input_amplitudes, ((0, 0), (pad_length_left, pad_length_right)), mode="edge")
+        padded_phases = self.xp.pad(input_phases, ((0, 0), (pad_length_left, pad_length_right)), mode="edge")
+
+        return padded_times, padded_amplitudes, padded_phases
+
+    def get_evaluation_times(self, input_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
         """
         Get the time array on which to evaluate the TDI on-the-fly response. By default, this uses the same as the input time array from the amplitude and phase generation, but subclasses can override this method to define a different evaluation grid if needed (e.g. a regular grid).
 
         Args:
             input_times (Array): times used for amp/phase generation, shape (num_binaries  * num_modes, num_times)
-            num_modes (int): number of modes to repeat the times array by.
 
         Returns:
             evaluation times of shape (num_binaries * num_modes, num_eval_times).
         """
         delta_t = self.xp.diff(input_times, axis=-1)
 
-        start_buffer = int(self.tdi_buffer_time / self.xp.min(delta_t[:, 0]))
-        end_buffer = int(self.tdi_buffer_time / self.xp.min(delta_t[:, -1]))
+        start_buffer, end_buffer, left_dt, right_dt = self.get_tdi_buffers(delta_t)
 
-        evaluation_times = input_times[:, start_buffer:-end_buffer][:, -self.max_length :]
+        in_times = input_times[:, start_buffer:-end_buffer]
+        #evaluation_times = self.xp.concatenate([in_times[:, :1], in_times[:, -self.max_length :]], axis=-1)
+        evaluation_times = in_times[:, -self.max_length :]
 
         return evaluation_times
 
@@ -812,24 +821,18 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         """
         Get a dense time array on which to evaluate the TDI on-the-fly response. This can be used to ensure that the output response is sampled on a regular grid, even if the input amplitude and phase arrays are sampled irregularly.
         """
-        # consider using powers of 2.
-        # if self.analysis_domain == "FD":
-        #     num_sub = eval_times.shape[0]
-        #     return self.xp.repeat(self.data_times_array[None, :], num_sub, axis=0)
 
-        # for the STFT case, we want to define a regular grid for each source that covers the time range of the input eval_times for that source, with a spacing of self.dt. This ensures that the output STFT is sampled on a regular grid, even if the input eval_times are not.
-        # get the start and end times from the evaluation times, snapped to
-        # the data grid.  Use ceil for start / floor for end so the dense
-        # grid stays strictly within the spline domain defined by
-        # eval_times — avoids out-of-bounds spline evaluation which would
-        # zero-fill and create spectral leakage in the STFT.
         t0 = self.data_t0
         dt = self.dt
         segment_dt = self.nperseg * dt if self.analysis_domain == "STFT" else dt
-        start_times = t0 + self.xp.ceil((eval_times[:, 0] - t0) / segment_dt) * segment_dt
-        end_times = t0 + self.xp.floor((eval_times[:, -1] - t0) / segment_dt) * segment_dt
-
-        num_times = int(self.xp.max((end_times - start_times) / self.dt) + 1)
+        
+        # Use floor to ensure we don't truncate the start of the evaluation times,
+        # which is crucial for not cutting off SNR in STFT block segmentations.
+        start_times = t0 + self.xp.floor((eval_times[:, 0] - t0) / segment_dt) * segment_dt
+        
+        max_duration = self.xp.max(eval_times[:, -1] - start_times)
+        num_times = int(self.xp.ceil(max_duration / self.dt)) + 1
+        
         if self.analysis_domain == 'STFT':
             # make sure num_times is a multiple of nperseg for the STFT case
             num_times = int(np.ceil(num_times / self.nperseg) * self.nperseg)
@@ -902,51 +905,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             num_binaries, num_channels, -1, self.nperseg
         )  # (num_binaries, num_channels, num_segments, num_times_per_segment)
         start_times = times_in[:, 0]
-        dt = (
-            times_in[0, 1] - times_in[0, 0]
-        )  # here the time grid is dense for every source, so we can just take the first one to compute dt
 
         signal_out, start_freqs = self.fft(times_in, signal_in)
 
         return signal_out, start_freqs, start_times
-    
-    def pad(
-            self, 
-            input_times: np.ndarray | cp.ndarray,
-            input_amplitudes: np.ndarray | cp.ndarray, 
-            input_phases: np.ndarray | cp.ndarray
-        ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
-        """
-        Add a 500 s buffer at both sides to make sure that we can compute tdi on the times we are actually interested in.
-
-        Args:
-            input_times (Array): input time array, shape (num_binaries * num_modes, num_times)
-            input_amplitudes (Array): input amplitude array, shape (num_binaries * num_modes, num_times)
-            input_phases (Array): input phase array, shape (num_binaries * num_modes, num_times)
-
-        Returns:
-            Padded time, amplitude and phase arrays with shape (num_binaries * num_modes, num_times + 2 * buffer_length).
-        """
-        delta_t = self.xp.diff(input_times, axis=-1)
-        left_dt = self.xp.max(delta_t[:, 0])
-        right_dt = self.xp.max(delta_t[:, -1])
-
-        pad_length_left = max(int(self.tdi_buffer_time / left_dt), 1)
-        pad_length_right = max(int(self.tdi_buffer_time / right_dt), 1)
-
-        padded_times = self.xp.concatenate(
-            [
-                input_times[:, 0:1] - self.xp.arange(pad_length_left, 0, -1) * left_dt,
-                input_times,
-                input_times[:, -1:] + self.xp.arange(1, pad_length_right + 1) * right_dt,
-            ],
-            axis=-1
-        )
-
-        padded_amplitudes = self.xp.pad(input_amplitudes, ((0, 0), (pad_length_left, pad_length_right)), mode="edge")
-        padded_phases = self.xp.pad(input_phases, ((0, 0), (pad_length_left, pad_length_right)), mode="edge")
-
-        return padded_times, padded_amplitudes, padded_phases
 
     def compute_tdi_channels(
         self,
@@ -985,7 +947,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         # step 1: generate the amplitude and phase arrays for each mode of each source:
         input_times, input_amplitudes, input_phases = self.get_amp_phase(
             *args, inclination, psi, ra, dec, **kwargs
-        )  # todo fixup?
+        )
 
         input_amplitudes, input_phases = self.process_amp_phase(input_amplitudes, input_phases)
 
@@ -1005,7 +967,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         input_times = input_times.reshape(num_sub, -1)
 
         # step 2: Define the time array on which we are gonna evaluate the respone. it will be taken from the non padded one.
-        evaluation_times = self.get_evaluation_times(input_times, num_modes)
+        evaluation_times = self.get_evaluation_times(input_times)
 
         # now padd with 500 seconds on each side
         padded_times, padded_amplitudes, padded_phases = self.pad(input_times, input_amplitudes, input_phases)
@@ -1039,8 +1001,40 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             evaluation_times
         )  # shape nbinaries * num_modes, num_times
 
+        # step 5.5: extend TDI spline domain to safely taper the signal to zero.
+        # STFT boundary snapping in `get_dense_times` can expand the domain by thousands of 
+        # seconds. Anchoring the spline's immediate edges at zero ensures that out-of-bounds 
+        # evaluation flawlessly returns 0.0 without causing massive polynomial extrapolation ringing.
+        if self.analysis_domain == "STFT":
+            anchor_time_end = tdi_spline.x[:, -1:] + self.dt  # (num_sub, 1)
+            anchor_time_start = tdi_spline.x[:, 0:1] - self.dt
+
+            tdi_spline.x = self.xp.concatenate(
+                [anchor_time_start, tdi_spline.x, anchor_time_end], axis=-1
+            )
+            tdi_spline.tdi_amp = self.xp.concatenate(
+                [self.xp.zeros((num_sub, self.tdi_config.nchannels, 1)),
+                 tdi_spline._tdi_amp,
+                 self.xp.zeros((num_sub, self.tdi_config.nchannels, 1))],
+                axis=-1,
+            )
+            tdi_spline.tdi_phase = self.xp.concatenate(
+                [tdi_spline._tdi_phase[:, :, 0:1],
+                 tdi_spline._tdi_phase,
+                 tdi_spline._tdi_phase[:, :, -1:]],
+                axis=-1,
+            )
+            tdi_spline.phase_ref = self.xp.concatenate(
+                [tdi_spline._phase_ref[:, 0:1],
+                 tdi_spline._phase_ref,
+                 tdi_spline._phase_ref[:, -1:]],
+                axis=-1,
+            )
+
         # step 6: evaluate the TDI response on the dense time array
-        tdi_out = tdi_spline.eval_tdi(dense_times, error_out_of_bounds=False).reshape(
+        tdi_out_raw = tdi_spline.eval_tdi(dense_times, error_out_of_bounds=False)
+
+        tdi_out = tdi_out_raw.reshape(
             num_binaries, num_modes, self.tdi_config.nchannels, -1
         )
 
