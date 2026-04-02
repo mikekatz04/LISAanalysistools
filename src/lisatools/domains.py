@@ -147,7 +147,8 @@ class TDSignal(DomainBase, TDSettings):
         else:
             fd_settings = FDSettings(fd_arr.shape[-1], df, force_backend=self.backend)
         
-        return FDSignal(fd_arr, fd_settings)
+        fd_arr_in = fd_arr[..., fd_settings.ind_min:fd_settings.ind_max + 1]
+        return FDSignal(fd_arr_in, fd_settings)
 
     def stft(self, settings=None, window=None):
         if window is None:
@@ -301,47 +302,56 @@ class FDSettings(DomainSettingsBase):
     N: int
     df: float
     ind_min : Optional[int] = None 
-    ind_max : Optional[int] = None
-    frequency_layer_mask: Optional[np.ndarray] = None
-
+    ind_max : Optional[int] = None  # inclusive
+    
     def __init__(self,
         N: int,
         df: float,
         ind_min : Optional[int] = None,
         ind_max : Optional[int] = None,
-        frequency_layer_mask: Optional[np.ndarray] = None,
         **kwargs,
     ):
         self.N, self.df = N, df
         self.ind_min, self.ind_max = ind_min, ind_max
-        self.frequency_layer_mask = frequency_layer_mask
         super().__init__(**kwargs)
 
     @property
     def frequency_layer_mask(self) -> Optional[np.ndarray]:
-        return self._frequency_layer_mask
-
-    @frequency_layer_mask.setter
-    def frequency_layer_mask(self, frequency_layer_mask: Optional[np.ndarray]):
-        if frequency_layer_mask is not None:
-            assert len(frequency_layer_mask) == self.N, "Frequency layer mask must have length equal to N."
-        self._frequency_layer_mask = frequency_layer_mask
+        mask = self.xp.zeros(self.N, dtype=bool)
+        mask[self.f_ind_array] = True
+        return mask
+        
+    @property
+    def f_ind_array(self) -> np.ndarray:
+        return self.xp.arange(self.ind_min, self.ind_max + 1)
 
     @property
     def differential_component(self) -> float:
         return self.df
     
     @property
-    def ind_min_actual(self) -> int:
-        if self.ind_min is None:
-            return 0
-        return self.ind_min
+    def ind_min(self) -> int:
+        return self._ind_min
     
+    @ind_min.setter
+    def ind_min(self, ind_min: int):
+        if ind_min is None:
+            ind_min = 0
+        self._ind_min = ind_min
+
     @property
-    def ind_max_actual(self) -> int:
-        if self.ind_max is None:
-            return self.N - 1
-        return self.ind_max
+    def ind_max(self) -> int:
+        return self._ind_max
+    
+    @ind_max.setter
+    def ind_max(self, ind_max: int):
+        if ind_max is None:
+            ind_max = self.N - 1
+        self._ind_max = ind_max
+
+    @property
+    def clipped_N(self) -> int:
+        return self.ind_max - self.ind_min + 1
     
     @staticmethod
     def get_associated_class():
@@ -353,7 +363,7 @@ class FDSettings(DomainSettingsBase):
     
     @property
     def kwargs(self) -> dict:
-        return dict(ind_min=self.ind_min_actual, ind_max=self.ind_max_actual, force_backend=self.force_backend, frequency_layer_mask=self.frequency_layer_mask)
+        return dict(ind_min=self.ind_min, ind_max=self.ind_max, force_backend=self.force_backend)
 
     @property
     def args(self) -> tuple:
@@ -361,19 +371,20 @@ class FDSettings(DomainSettingsBase):
     
     @property
     def basis_shape(self) -> tuple:
-        return (self.N,)
+        return (self.clipped_N,)
     
     @property
     def f_arr(self) -> np.ndarray:
-        return self.xp.arange(self.N)[self.ind_min_actual:self.ind_max_actual + 1] * self.df
+        return self.f_ind_array * self.df
     
     def __eq__(self, value):
         return (value.N == self.N) and (value.df == self.df)
     
     def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
-        if self.frequency_layer_mask is None:
+        if self.frequency_layer_mask is None or arr.shape[-1] == self.clipped_N:
             return arr
-        elif arr.ndim == 1:
+
+        if arr.ndim == 1:
             return arr[self.frequency_layer_mask]
         elif arr.ndim > 1:
             assert arr.shape[-1] == self.frequency_layer_mask.shape[0], "Last dimension of arr must match length of frequency_layer_mask."
@@ -402,18 +413,31 @@ class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
         FDSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
+        assert arr.shape[-1] == self.clipped_N
 
     @property
     def settings(self) -> FDSettings:
         return FDSettings(*self.args, **self.kwargs)
 
+    def pad_array(self, arr: np.ndarray) -> np.ndarray:
+        assert arr.ndim == 2
+        _arr = np.pad(arr, ((0, 0), (self.ind_min - 1, self.N - 1 - self.ind_max)), mode="constant", constant_values=0.0)
+        return _arr
+
     def ifft(self, settings=None, window=None, apply_dt=True):
+
+        arr_in = self.arr.copy()
+        
+        if self.ind_min != 0 or self.ind_max != self.N - 1:
+            warnings.warn("Doing an ifft with a trimmed frequency domain array. Zero-padding.")
+            arr_in = self.pad_array(arr_in)
+
         if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
+            window = self.xp.ones(arr_in.shape, dtype=float)
 
         Tobs = 1 / self.df
         factor = 1.0 if not apply_dt else self.dt
-        td_arr = self.xp.fft.irfft(self.arr * window) / factor
+        td_arr = self.xp.fft.irfft(arr_in * window) / factor
         N = td_arr.shape[-1]
         dt = Tobs / N
         assert N == int(Tobs / dt)
@@ -492,9 +516,15 @@ class FDSignal(FDSettings, DomainBase):
         assert np.sum(keep_dc_layer) == int(settings.Nt / 2)
         assert np.sum(keep_nyquist_layer) == int(settings.Nt / 2)
 
+        arr_in = self.arr.copy()
+        
+        if self.ind_min != 0 or self.ind_max != self.N - 1:
+            warnings.warn("Doing an ifft with a trimmed frequency domain array. Zero-padding.")
+            arr_in = self.pad_array(arr_in)
+
         # it is 2 because the max frequency would be at 1, but it removes that (?)
         before_ifft = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
-        before_ifft = self.arr[:, k]
+        before_ifft = arr_in[:, k]
         before_ifft[:, 0, ~keep_dc_layer] = 0.0
         before_ifft[:, -1, ~keep_nyquist_layer] = 0.0
         before_ifft[:, :, 0] = 0.0

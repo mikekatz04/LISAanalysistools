@@ -276,6 +276,8 @@ class DataResidualArray:
 
 
         """
+
+        assert isinstance(self.data_res_arr.data_res_arr.settings, FDSettings)
         if ax is None and fig is None:
             nrows = 1
             ncols = self.shape[0]
@@ -303,6 +305,7 @@ class DataResidualArray:
         elif fig is not None:
             raise NotImplementedError
 
+        breakpoint()
         for i, ax_tmp in zip(inds_list, ax):
             plot_in = np.abs(self.data_res_arr[i])
             if char_strain:

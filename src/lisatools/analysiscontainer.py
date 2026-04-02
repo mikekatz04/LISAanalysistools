@@ -106,6 +106,7 @@ class AnalysisContainer:
             Matplotlib figure and axes object in a 2-tuple.
 
         """
+        assert isinstance(self.data_res_arr.data_res_arr.settings, domains.FDSettings)
         fig, ax = self.sens_mat.loglog(char_strain=True)
         if self.sens_mat.ndim == 3:
             # 3x3 most likely
@@ -113,18 +114,18 @@ class AnalysisContainer:
                 for j in range(i, self.sens_mat.shape[1]):
                     # char strain
                     ax[i * self.sens_mat.shape[1] + j].loglog(
-                        self.data_res_arr.f_arr,
-                        self.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
+                        self.data_res_arr.data_res_arr.f_arr,
+                        self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
                     )
                     ax[i * self.sens_mat.shape[1] + j].loglog(
-                        self.data_res_arr.f_arr,
-                        self.data_res_arr.f_arr * np.abs(self.data_res_arr[j]),
+                        self.data_res_arr.data_res_arr.f_arr,
+                        self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[j]),
                     )
         else:
             for i in range(self.sens_mat.shape[0]):
                 ax[i].loglog(
-                    self.data_res_arr.f_arr,
-                    self.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
+                    self.data_res_arr.data_res_arr.f_arr,
+                    self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
                 )
         return (fig, ax)
 
