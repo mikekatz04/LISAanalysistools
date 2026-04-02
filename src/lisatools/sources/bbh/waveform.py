@@ -395,6 +395,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
     ) -> None:
 
         TDTDIOnFlyWaveformBase.__init__(
+            self,
             *args,
             **kwargs,
         )

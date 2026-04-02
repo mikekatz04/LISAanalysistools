@@ -1,19 +1,22 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=too-many-arguments
+# pyling: diable=too-many-keywords-arguments
+# pylint: disable=too-many-instance-attributes
+# pylint: disable=too-many-instance-attributes, too-few-public-methods, too-many-locals
+# pylint: disable=too-many-positional-arguments, too-many-statements, line-too-long
+"""
+WaveformBase module
+
+This module defines the base wrappers for waveform generation, including the application of the LISA response.
+"""
+
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 import logging
 from typing import TYPE_CHECKING, List, Tuple
 
 import numpy as np
-
-if TYPE_CHECKING:
-    try:
-        import cupy as cp
-    except (ImportError, ModuleNotFoundError):
-        import numpy as cp
-
-    from gpubackendtools.interpolate import CubicSplineInterpolant
-    from lisatools.detector import Orbits
 
 from fastlisaresponse import pyResponseTDI
 from fastlisaresponse.tdiconfig import TDIConfig
@@ -26,12 +29,18 @@ from ..domains import (
     FDSettings,
     TDSettings,
     TDSignal,
-    STFTSettings,
     get_stft_settings,
 )
-from ..utils.constants import YRSID_SI
 from ..utils.parallelbase import LISAToolsParallelModule
 from ..utils.utility import tukey
+
+if TYPE_CHECKING:
+    try:
+        import cupy as cp
+    except (ImportError, ModuleNotFoundError):
+        import numpy as cp
+
+    from lisatools.detector import Orbits, EqualArmlengthOrbits
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +83,7 @@ class SNRWaveform(ABC):
         return None
 
 
-class TDWaveformBase(LISAToolsParallelModule):
+class TDWaveformBase(ABC, LISAToolsParallelModule):
     """
     Base class for a waveform built in the time domain.
 
@@ -82,7 +91,9 @@ class TDWaveformBase(LISAToolsParallelModule):
     waveform_t0: Initial time in seconds.
     dt: Time step in seconds.
     Tobs: Observation time in years.
-    data_t0: Optional initial time for the data. If None, defaults to waveform_t0. If provided, the output time arrays will be shifted so that the first sample corresponds to a integer multiple of dt after data_t0. This allows for proper alignment of the waveform with an external time grid (e.g. from a loader) when data_t0 is set to the same reference time as the loader.
+    data_t0: Optional initial time for the data. If None, defaults to waveform_t0.
+            If provided, the output time arrays will be shifted so that the first sample corresponds to a integer multiple of dt after data_t0.
+            This allows for proper alignment of the waveform with an external time grid (e.g. from a loader) when data_t0 is set to the same reference time as the loader.
     response_kwargs: Keyword arguments for the TDI response.
     buffer_time: Time in seconds to add as buffer to the TDI response to ensure proper calculation at the beginning and end of the signal.
     tukey_alpha: Alpha parameter for the Tukey window applied to the output signal. Only applied if settings_class is not None.
@@ -94,30 +105,62 @@ class TDWaveformBase(LISAToolsParallelModule):
     def __init__(
         self,
         waveform_t0: float,
-        dt: float,
-        Tobs: float,
-        data_t0: float = None,
-        response_kwargs: dict = None,
-        buffer_time: int = 600,
+        data_td_settings: TDSettings,
+        tdi_generation: str = "2nd generation",
+        tdi_channels: str = "XYZ",
+        sampling_frequency: float = 0.4,
+        orbits: Orbits = None,
         tukey_alpha: float = 0.01,
+        stft_dt: float = None,
+        freq_min: float = 1e-5,
+        freq_max: float = 1.0,
         force_backend: str = "cpu",
-        force_uniform_stft: bool = False,
     ) -> None:
 
-        super().__init__(force_backend=force_backend)
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
         self.waveform_t0 = waveform_t0
-        self.data_t0 = data_t0 if data_t0 is not None else waveform_t0
-        self.dt = dt
-        self.Tobs = Tobs * YRSID_SI
+        self.domain_settings = data_td_settings
         self.tukey_alpha = tukey_alpha
-        self.force_uniform_stft = force_uniform_stft
 
-        num_points = int(self.Tobs / self.dt)
-        response_kwargs["num_pts"] = num_points
+        self.tdi_config = TDIConfig(tdi=tdi_generation, force_backend=force_backend)
+        self.tdi_channels = tdi_channels
+        self.sampling_frequency = sampling_frequency
+        self.orbits = orbits
 
-        self.response = pyResponseTDI(**response_kwargs, force_backend=force_backend)
-        self.buffer_time = buffer_time
+        if stft_dt is None:
+            logger.info(
+                "No stft timestep provided. By default, the waveform will be transformed to the frequency domain"
+            )
+            self.transform_to_domain = self.fft
+            self.nperseg = None
+
+        else:
+            assert self.dt <= stft_dt
+            nperseg = round(stft_dt / self.dt)
+
+            assert (
+                abs(nperseg * self.dt - stft_dt) < 1e-10 * stft_dt
+            ), f"stft_dt={stft_dt} must be an integer multiple of dt={self.dt}"
+
+            logger.info(
+                f"STFT timestep set to {stft_dt}. This corresponds to {nperseg} points per time segment"
+            )
+            self.nperseg = nperseg
+            self.transform_to_domain = self.stft
+
+        self.freq_min = freq_min
+        self.freq_max = freq_max
+
+    @property
+    def force_backend(self) -> str:
+        """Name of the backend to be passed to other classes."""
+        return self.backend_name.split("_")[-1]
+
+    @property
+    def xp(self):
+        """Array module used for calculations."""
+        return self.backend.xp
 
     @property
     def tdi_buffer_time(self) -> float:
@@ -125,9 +168,483 @@ class TDWaveformBase(LISAToolsParallelModule):
         return 600.0
 
     @property
-    def xp(self):
-        """Array module used for calculations."""
-        return self.backend.xp
+    def dt(self):
+        """Time step in seconds."""
+        return self.domain_settings.dt
+
+    @property
+    def Tobs(self):
+        """Observation time in seconds."""
+        return self.domain_settings.N * self.domain_settings.dt
+
+    @property
+    def data_t0(self):
+        """Start time of the data in seconds."""
+        return self.domain_settings.t0
+
+    @property
+    def stft_t_arr(self):
+        """Time array for the STFT segments, if applicable."""
+        if self.nperseg:
+            return self.domain_settings.t_arr[:: self.nperseg]
+        else:
+            return None
+
+    @property
+    def data_times_array(self):
+        """Complete time array on which the data live."""
+        return self.domain_settings.t_arr
+
+    @property
+    def orbits(self):
+        """Orbits object for on-the-fly response generation."""
+        return self._orbits
+
+    @orbits.setter
+    def orbits(self, orbits: Orbits):
+        """Set the Orbits object."""
+
+        if orbits is None:
+            orbits = EqualArmlengthOrbits(force_backend=self.force_backend)
+            logger.warning("No Orbits object provided. Using default EqualArmlengthOrbits.")
+
+        if not orbits.configured:
+            orbits.configure(linear_interp_setup=True)
+        self._orbits = orbits
+
+    @property
+    def analysis_domain(self) -> str:
+        """The domain in which the waveform is transformed for likelihood evaluation. Currently, either 'STFT' or 'FD'."""
+        if self.nperseg:
+            return "STFT"
+        else:
+            return "FD"
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(waveform_t0={self.waveform_t0}, "
+            f"data_td_settings={self.domain_settings}, "
+            f"tdi_config={self.tdi_config}, "
+            f"sampling_frequency={self.sampling_frequency}, "
+            f"orbits={self.orbits}, "
+            f"tukey_alpha={self.tukey_alpha}, "
+            f"stft_dt={self.nperseg * self.dt if self.nperseg else None}, "
+            f"freq_min={self.freq_min}, "
+            f"freq_max={self.freq_max}, "
+            f"force_backend='{self.force_backend}')"
+        )
+
+    @abstractmethod
+    def compute_tdi_channels(
+        self, *args, **kwargs
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Time domain TDI channels computation. The output must be a tuple of (times, channels), where `times` can be a 1D array of shape (num_times,) or a 2D array of shape (num_bin, num_times) for batched generation, and `channels` is the corresponding TDI response with shape (num_channels, num_times) or (num_bin, num_channels, num_times) respectively."""
+
+        raise NotImplementedError("compute_tdi_channels method must be implemented in subclass.")
+
+    def get_grid_time(self, times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+        """
+        For a given array of times, compute the closest points on the grid defined by the data time step.
+
+        Args:
+            times (Array): Array of times to be projected on the grid. Shape: (num_times,).
+
+        Returns:
+            Times on the target grid.  Shape: (num_times,).
+        """
+        dt = self.dt
+        t0 = self.data_t0
+        return t0 + self.xp.round((times - t0) / dt) * dt
+
+    def get_output_settings(self, times: np.ndarray | cp.ndarray) -> DomainSettingsBase:
+        """
+        Get the settings for the output domain based on the evaluation times and the chosen analysis domain (STFT or FD).
+
+        Args:
+            times (Array): Array of evaluation times. Shape: (num_times,).
+
+        Returns:
+            DomainSettingsBase: The settings for the output domain.
+        """
+        if self.analysis_domain == "STFT":
+            return get_stft_settings(
+                times,
+                big_dt=self.nperseg * self.dt,
+                min_freq=self.freq_min,
+                max_freq=self.freq_max,
+                force_backend=self.force_backend,
+            )
+        elif self.analysis_domain == "FD":
+            data_N = self.domain_settings.N
+            return FDSettings(
+                N=data_N // 2 + 1,
+                df=1 / (data_N * self.dt),
+                min_freq=self.freq_min,
+                max_freq=self.freq_max,
+                force_backend=self.force_backend,
+            )
+
+        raise NotImplementedError(f"Unsupported analysis domain: {self.analysis_domain}")
+    
+    def find_bin_edges(self, times: np.ndarray | cp.ndarray) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        For a given array of times, compute the edges of the bins defined by the data time step that contain the times. This is used to determine the time segments for the STFT or the frequency bins for the FD transformation.
+
+        Args:
+            times (Array): Array of times. Shape: (num_times,) or (num_bin, num_times).
+        
+        Returns:
+            Tuple of (left_edges, grid_length) where left_edges are the edges of the bins containing the times, and grid_length is the number of bins spanned by the times.
+        """
+        times = self.xp.atleast_2d(times)
+
+        start_times = times[:, 0]
+        end_times = times[:, -1]   
+
+        if self.analysis_domain == 'STFT':
+            left_edges_i = self.xp.digitize(start_times, self.stft_t_arr)
+            right_edges_i = self.xp.digitize(end_times, self.stft_t_arr)
+            left_edges = self.stft_t_arr[left_edges_i - 1]
+
+            grid_length = (right_edges_i - left_edges_i + 1) * self.nperseg
+
+        elif self.analysis_domain == 'FD':
+            left_edges = self.xp.full(shape=start_times.shape, fill_value=self.data_t0)
+            grid_length = self.xp.full(shape=start_times.shape, fill_value=self.domain_settings.N)
+
+        return left_edges, grid_length
+    
+    def build_common_grid(self, times: np.ndarray | cp.ndarray, channels: np.ndarray | cp.ndarray) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        For a given array of times and corresponding channels, build a common grid for all sources based on the analysis domain (STFT or FD).
+
+        Args:
+            times (Array): Array of times. Shape: (num_bin, num_times).
+            channels (Array): Array of channels corresponding to the input times. Shape: (num_bin, num_channels, num_times).
+        Returns:
+            Tuple of (left_edges, padded_signals) where left_edges are the edges of the bins containing the times, and padded_signals is the array of channels padded to the common-size grid.
+        """
+        if len(channels.shape) == 2:
+            channels = channels[None, :, :] # add a batch dimension
+            times = times[None, :]
+
+        left_edges, grid_length = self.find_bin_edges(times)
+        num_bin = left_edges.shape[0]
+        max_grid_length = grid_length.max()
+        
+        # create a common grid
+        padded_signals = self.xp.zeros((channels.shape[:-1] + (max_grid_length,)), dtype=channels.dtype) # shape (num_bin, num_channels, max_grid_length)
+
+        # now use advanced indexing to place each signal in the correct position on the common grid
+        batch_indices = self.xp.arange(num_bin)[:, None, None]
+        channel_indices = self.xp.arange(channels.shape[1])[None, :, None]
+        grid_time_indices = ((times[:, None, :] - left_edges[:, None, None]) / self.dt).astype(int)
+        padded_signals[batch_indices, channel_indices, grid_time_indices] = channels
+
+        return left_edges, padded_signals
+
+    def _pad_td_signal(
+        self,
+        times: np.ndarray | cp.ndarray,
+        signals: np.ndarray | cp.ndarray,
+        align_samples: int,
+        target_n: int = None,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Pad time-domain arrays so the start is aligned with data_t0 and reaches a target length.
+
+        Accepts either a single source or a batch:
+
+        - Single:  ``times (num_times,)``,        ``signals (3, num_times)``
+        - Batched: ``times (num_bin, num_times)``, ``signals (num_bin, 3, num_times)``
+
+        Left-pads with zeros so that the number of samples between the (new) t0 and
+        data_t0 is an integer multiple of ``align_samples``.  For STFT this enforces
+        segment-boundary alignment (align_samples = nperseg); for FD pass align_samples=1
+        so that the signal starts exactly at data_t0.
+
+        Then, if ``target_n`` is given, right-pads with zeros so that the total number
+        of samples reaches ``target_n`` (ensuring the correct ``df`` after FFT).
+
+        For batched inputs all sources must produce the same ``n_left``; this is
+        guaranteed when callers have already snapped each source's time grid to integer
+        multiples of ``dt`` relative to ``data_t0``.
+
+        Args:
+            times: Time array, shape ``(num_times,)`` or ``(num_bin, num_times)``.
+            signals: Signal array, shape ``(3, num_times)`` or ``(num_bin, 3, num_times)``.
+            align_samples: Left-padding granularity.  The signal is extended so that
+                ``round((signal_t0 - data_t0) / dt)`` becomes divisible by this value.
+            target_n: If provided, right-pad to at least this many total samples.
+
+        Returns:
+            ``(padded_times, padded_signals)`` with the same leading dimensions as the inputs.
+        """
+        dt = self.dt
+
+        if times.ndim == 1:
+            n_to_data_t0 = round((float(times[0]) - self.data_t0) / dt)
+            n_left = n_to_data_t0 % align_samples
+        else:
+            n_to_data_t0 = self.xp.rint((times[:, 0] - self.data_t0) / dt).astype(int)
+            n_left_per_bin = n_to_data_t0 % align_samples
+            assert self.xp.all(n_left_per_bin == n_left_per_bin[0]), (
+                "Batched _pad_td_signal: sources produce different n_left values — "
+                "ensure time grids are snapped to the dt grid before padding."
+            )
+            n_left = int(n_left_per_bin[0])
+
+        N = times.shape[-1]
+        n_right = 0
+        if target_n is not None:
+            new_n = N + n_left
+            if new_n < target_n:
+                n_right = target_n - new_n
+
+        if n_left == 0 and n_right == 0:
+            return times, signals
+
+        # Pad signals on the last (time) axis, preserving all leading dims.
+        pad_width = [(0, 0)] * (signals.ndim - 1) + [(n_left, n_right)]
+        padded_signals = self.xp.pad(signals, pad_width, mode="constant", constant_values=0)
+
+        # Extend the time array.
+        if times.ndim == 1:
+            parts = []
+            if n_left > 0:
+                parts.append(times[0] - self.xp.arange(n_left, 0, -1) * dt)
+            parts.append(times)
+            if n_right > 0:
+                parts.append(times[-1] + self.xp.arange(1, n_right + 1) * dt)
+            padded_times = self.xp.concatenate(parts)
+        else:
+            parts = []
+            if n_left > 0:
+                parts.append(times[:, 0:1] - self.xp.arange(n_left, 0, -1)[None, :] * dt)
+            parts.append(times)
+            if n_right > 0:
+                parts.append(times[:, -1:] + self.xp.arange(1, n_right + 1)[None, :] * dt)
+            padded_times = self.xp.concatenate(parts, axis=-1)
+
+        return padded_times, padded_signals
+
+    def _td_to_output_domain(
+        self,
+        times_in: np.ndarray | cp.ndarray,
+        signal_in: np.ndarray | cp.ndarray,
+        output_domain: str = None,
+        domain_kwargs: dict = None,
+    ) -> DomainBase:
+        """Transform a time-domain signal to the specified output domain. If output_domain is None, defaults to self.analysis_domain.
+
+        Args:
+            times_in: Time array of the input TDSignal.
+            signal_in: Signal array of the input TDSignal.
+            output_domain: Target domain ('TD', 'STFT', or 'FD'). If None, defaults to self.analysis_domain.
+            domain_kwargs: Extra kwargs forwarded to the domain settings constructor. If None, it will be derived from the input times and self.analysis_domain.
+
+        Returns:
+            Signal in the requested output domain.
+        """
+        if len(times_in.shape) > 1:
+            raise NotImplementedError(
+                "Multi-dimensional time arrays are not supported yet. If going through the Domain interface, treat different sources separately."
+            )
+        if output_domain is not None:
+            output_domain = output_domain.upper()  # allow case-insensitive domain names
+            use_default_domain = False
+        else:
+            output_domain = self.analysis_domain.upper()
+            use_default_domain = True
+
+        t0_here = times_in[0]
+        dt_here = times_in[1] - times_in[0]
+
+        if output_domain == "TD":
+            return TDSignal(
+                arr=signal_in,
+                settings=TDSettings(
+                    t0=t0_here, dt=dt_here, N=times_in.shape[-1], force_backend=self.force_backend
+                ),
+            )
+
+        elif output_domain == "STFT":
+            nperseg = (
+                self.nperseg if use_default_domain else round(domain_kwargs["big_dt"] / dt_here)
+            )
+
+            # We must right-pad to a multiple of nperseg, otherwise the STFT
+            # framing (NT = N // nperseg) will silently truncate the end of the
+            # signal (which often contains the merger!)
+            n_to_data_t0 = round((t0_here - self.data_t0) / dt_here)
+            n_left = n_to_data_t0 % nperseg
+            current_padded_len = times_in.shape[-1] + n_left
+            target_n = current_padded_len + (nperseg - (current_padded_len % nperseg)) % nperseg
+
+            padded_times, padded_signal = self._pad_td_signal(
+                times_in, signal_in, align_samples=nperseg, target_n=target_n
+            )
+
+            if use_default_domain:
+                out_settings = self.get_output_settings(padded_times)
+            else:
+                out_settings = get_stft_settings(
+                    padded_times, **domain_kwargs, force_backend=self.force_backend
+                )
+
+            nperseg = out_settings.get_nperseg(dt_here)
+            window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
+
+        elif output_domain == "FD":
+            # Pad to full data length FIRST, then window at that length.
+            # This matches the data-side processing (tukey(N_data) → FFT).
+            if use_default_domain:
+                df = 1 / self.Tobs
+            else:
+                df = domain_kwargs["df"]
+            N_td_target = round(1 / (df * dt_here))
+            padded_times, padded_signal = self._pad_td_signal(
+                times_in, signal_in, align_samples=1, target_n=N_td_target
+            )
+
+            window = tukey(padded_times.shape[-1], alpha=self.tukey_alpha, xp=self.xp)
+            if use_default_domain:
+                out_settings = self.get_output_settings(padded_times)
+            else:
+                out_settings = FDSettings(**domain_kwargs, force_backend=self.force_backend)
+
+        else:
+            raise ValueError(
+                f"output_domain must be either 'TD', 'STFT', or 'FD'. "
+                f"'WDM' is not supported yet. Got: {output_domain}."
+            )
+
+        padded_td_signal = TDSignal(
+            arr=padded_signal,
+            settings=TDSettings(
+                t0=padded_times[0],
+                dt=dt_here,
+                N=padded_times.shape[-1],
+                force_backend=self.force_backend,
+            ),
+        )
+        return padded_td_signal.transform(out_settings, window=window)
+
+    def fft(
+        self, start_times: np.ndarray | cp.ndarray, signal_in: np.ndarray | cp.ndarray
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Transform pre-padded time domain data to the FD basis.
+
+        Signals must be pre-padded (via build_common_grid) before calling this
+        method — no inline padding is done here.
+
+        Args:
+            start_times (Array): Start time for each binary, shape `(num_binaries,)`.
+                Not used in the FD transform but kept for signature consistency with `stft`.
+            signal_in (Array): Time domain input signal with shape `(num_binaries, num_channels, num_times)`
+
+        Returns:
+            signal_out (Array): The transformed signal with shape `(num_binaries, num_channels, num_freqs)`
+            start_freqs (Array): Starting frequencies for the likelihood calculation, shape `(num_binaries,)`
+        """
+        num_binaries = signal_in.shape[0]
+        n = signal_in.shape[-1]
+
+        window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
+        windowed = signal_in * window
+
+        signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
+        freqs = self.xp.fft.rfftfreq(n, d=self.dt)
+
+        keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
+        signal_out = signal_fd[..., keep]
+
+        start_freqs = self.xp.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
+
+        return signal_out, start_freqs
+
+    def stft(
+        self,
+        start_times: np.ndarray | cp.ndarray,
+        signal_in: np.ndarray | cp.ndarray,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Transform pre-padded time domain data to the STFT basis.
+
+        Args:
+            start_times (Array): Start time for each binary, shape `(num_binaries,)`.
+            signal_in (Array): Time domain input signal with shape `(num_binaries, num_channels, num_times)`
+
+        Returns:
+            signal_out (Array): The transformed signal with shape `(num_binaries, num_channels, num_stft_times, num_freqs)`
+            start_freqs (Array): Starting frequencies for the likelihood calculation, shape `(num_binaries,)`
+            start_times (Array): Starting times for the likelihood calculation, shape `(num_binaries,)`
+        """
+        num_binaries, num_channels = signal_in.shape[:2]
+        signal_in = signal_in.reshape(
+            num_binaries, num_channels, -1, self.nperseg
+        )  # (num_binaries, num_channels, num_segments, num_times_per_segment)
+
+        signal_out, start_freqs = self.fft(start_times, signal_in)
+
+        return signal_out, start_freqs, start_times
+
+
+class TDPyResponseWaveformBase(TDWaveformBase):
+    """
+    Base class for a time-domain waveform that uses the `pyResponseTDI` class for the TDI response calculation.
+    """
+
+    def __init__(
+        self,
+        waveform_t0: float,
+        data_td_settings: TDSettings,
+        tdi_generation: str = "2nd generation",
+        tdi_channels: str = "XYZ",
+        sampling_frequency: float = 0.4,
+        orbits: Orbits = None,
+        order: int = 35,
+        tukey_alpha: float = 0.01,
+        stft_dt: float = None,
+        freq_min: float = 1e-5,
+        freq_max: float = 1.0,
+        signal_duration: float = None,
+        buffer_time: int = 5000,
+        force_uniform_stft: bool = False,
+        force_backend: str = "cpu",
+    ) -> None:
+
+        super().__init__(
+            waveform_t0=waveform_t0,
+            data_td_settings=data_td_settings,
+            tdi_generation=tdi_generation,
+            tdi_channels=tdi_channels,
+            sampling_frequency=sampling_frequency,
+            orbits=orbits,
+            tukey_alpha=tukey_alpha,
+            stft_dt=stft_dt,
+            freq_min=freq_min,
+            freq_max=freq_max,
+            force_backend=force_backend,
+        )
+
+        if signal_duration is None:
+            signal_duration = self.Tobs
+        self.force_uniform_stft = force_uniform_stft
+
+        num_points = int(signal_duration / self.dt)
+
+        self.response = pyResponseTDI(
+            sampling_frequency=sampling_frequency,
+            num_pts=num_points,
+            order=order,
+            orbits=orbits,
+            tdi=tdi_generation,
+            tdi_chan=tdi_channels,
+            force_backend=force_backend,
+        )
+
+        self.buffer_time = buffer_time
 
     def wave_gen(
         self, *args, **kwargs
@@ -140,9 +657,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         """
         raise NotImplementedError("wave_gen method must be implemented in subclass.")
 
-    def wave_gen_batch(
-        self, *args, **kwargs
-    ) -> Tuple[np.ndarray,  np.ndarray, np.ndarray]:
+    def wave_gen_batch(self, *args, **kwargs) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Generate waveforms for a batch of sources.
 
         Subclasses that support batched waveform generation should override this
@@ -167,7 +682,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         ra: float,
         dec: float,
         merger_time: float,
-    ) -> TDSignal:
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Apply the TDI response to a single source and return a TDSignal.
 
         Args:
@@ -179,28 +694,27 @@ class TDWaveformBase(LISAToolsParallelModule):
             merger_time: Time of merger in seconds (relative to waveform_t0).
 
         Returns:
-            TDSignal with the TDI response applied.
+            Tuple of (times, channels) where times is the time array after shifting and padding, and channels is the TDI response with shape (num_channels, num_times).
         """
         shifted_t_arr = t_arr + merger_time + self.waveform_t0
         # add 500 seconds to the end to prevent problems with the response
-        
-        #shifted_t_arr = self.xp.concatenate([shifted_t_arr, shifted_t_arr[-1] + self.dt * self.xp.arange(1, pad_length + 1)])
-        # h_plus = self.xp.pad(h_plus, (0, pad_length), mode='edge')
-        # h_cross = self.xp.pad(h_cross, (0, pad_length), mode='edge')
 
         # pad both sides with zeros by num_pad
         num_pad = int(self.buffer_time / self.dt)
 
-        shifted_t_arr = self.xp.concatenate([
-            shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
-            shifted_t_arr, 
-            shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1)])
+        shifted_t_arr = self.xp.concatenate(
+            [
+                shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
+                shifted_t_arr,
+                shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1),
+            ]
+        )
 
-        h_plus = self.xp.pad(h_plus, (num_pad, num_pad), mode='edge')
-        h_cross = self.xp.pad(h_cross, (num_pad, num_pad), mode='edge')
+        h_plus = self.xp.pad(h_plus, (num_pad, num_pad), mode="edge")
+        h_cross = self.xp.pad(h_cross, (num_pad, num_pad), mode="edge")
 
         self.response.num_pts = shifted_t_arr.shape[-1]
-    
+
         strain = h_plus + 1j * h_cross
 
         self.response.get_projections(
@@ -208,12 +722,11 @@ class TDWaveformBase(LISAToolsParallelModule):
         )
         tdis = self.xp.array(self.response.get_tdi_delays())
 
-        # trim the invalid points 
+        # trim the invalid points
         tdis = tdis[:, num_pad:-num_pad]
         shifted_t_arr = shifted_t_arr[num_pad:-num_pad]
 
         # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
-
         t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
         shifted_t_arr += t_arr_shift
 
@@ -223,122 +736,23 @@ class TDWaveformBase(LISAToolsParallelModule):
             shifted_t_arr = shifted_t_arr[start_ind:]
             tdis = tdis[:, start_ind:]
 
-        td_settings = TDSettings(
-            t0=float(shifted_t_arr[0]),
-            dt=self.dt,
-            N=int(shifted_t_arr.shape[-1]),
-            force_backend=self.backend_name.split("_")[-1],
-        )
-        return TDSignal(arr=tdis, settings=td_settings)
+        return shifted_t_arr, tdis
 
-    def _td_to_output_domain(
+    def _call_single(
         self,
-        td_signal: TDSignal,
-        output_domain: str,
-        domain_kwargs: dict,
-    ) -> DomainBase:
-        """Transform a TDSignal to the specified output domain.
+        *args,
+        ra: float,
+        dec: float,
+        merger_time: float,
+        **kwargs,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Handle single-source waveform generation and return a Tuple of times and channels."""
 
-        Args:
-            td_signal: Input time-domain signal.
-            output_domain: Target domain ('TD', 'STFT', or 'FD').
-            domain_kwargs: Extra kwargs forwarded to the domain settings constructor.
+        t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
 
-        Returns:
-            Signal in the requested output domain.
-        """
-        backend = self.backend_name.split("_")[-1]  # extract 'cpu' or 'cuda12x' from backend name
-        output_domain = output_domain.upper()  # allow case-insensitive domain names
+        times, channels = self._apply_response_single(t_arr, h_plus, h_cross, ra, dec, merger_time)
 
-        if output_domain == "TD":
-            return td_signal
-
-        elif output_domain == "STFT":
-            nperseg = round(domain_kwargs["big_dt"] / td_signal.settings.dt)
-            
-            # We must right-pad to a multiple of nperseg, otherwise the STFT
-            # framing (NT = N // nperseg) will silently truncate the end of the 
-            # signal (which often contains the merger!)
-            n_to_data_t0 = round((td_signal.settings.t0 - self.data_t0) / td_signal.settings.dt)
-            n_left = n_to_data_t0 % nperseg
-            current_padded_len = td_signal.settings.N + n_left
-            target_n = current_padded_len + (nperseg - (current_padded_len % nperseg)) % nperseg
-            
-            td_signal = self._pad_td_signal(td_signal, align_samples=nperseg, target_n=target_n)
-            out_settings = get_stft_settings(
-                td_signal.settings.t_arr, **domain_kwargs, force_backend=backend
-            )
-            nperseg = out_settings.get_nperseg(td_signal.settings.dt)
-            window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
-
-        elif output_domain == "FD":
-            # Pad to full data length FIRST, then window at that length.
-            # This matches the data-side processing (tukey(N_data) → FFT).
-            N_td_target = round(1 / (domain_kwargs["df"] * td_signal.settings.dt))
-            padded_signal = self._pad_td_signal(
-                td_signal, align_samples=1, target_n=N_td_target
-            )
-
-            window = tukey(padded_signal.settings.N, alpha=self.tukey_alpha, xp=self.xp)
-            out_settings = FDSettings(**domain_kwargs, force_backend=backend)
-            return padded_signal.transform(out_settings, window=window)
-
-        else:
-            raise ValueError(
-                f"output_domain must be either 'TD', 'STFT', or 'FD'. "
-                f"'WDM' is not supported yet. Got: {output_domain}."
-            )
-        return td_signal.transform(out_settings, window=window)
-
-    def _pad_td_signal(
-        self,
-        td_signal: TDSignal,
-        align_samples: int,
-        target_n: int = None,
-    ) -> TDSignal:
-        """Pad a TDSignal so its start is aligned with data_t0 and it reaches a target length.
-
-        Left-pads with zeros so that the number of samples between the (new) t0 and
-        data_t0 is an integer multiple of ``align_samples``.  For STFT this enforces
-        segment-boundary alignment (align_samples = nperseg); for FD pass the full
-        time-domain target length as ``align_samples`` so that the signal starts
-        exactly at data_t0.
-
-        Then, if ``target_n`` is given, right-pads with zeros so that the total number
-        of samples reaches ``target_n`` (ensuring the correct ``df`` after FFT).
-
-        Args:
-            td_signal: Input TDSignal (must already be on the dt grid of data_t0).
-            align_samples: Left-padding granularity.  The signal is extended so that
-                ``round((signal_t0 - data_t0) / dt)`` becomes divisible by this value.
-            target_n: If provided, right-pad to at least this many total samples.
-        """
-        dt = td_signal.settings.dt
-        n_to_data_t0 = round((td_signal.settings.t0 - self.data_t0) / dt)
-
-        # Left-pad: absorb the remainder so that the offset from data_t0
-        # becomes a multiple of align_samples.
-        n_left = n_to_data_t0 % align_samples
-
-        # Right-pad: reach target_n total samples.
-        n_right = 0
-        if target_n is not None:
-            new_n = td_signal.settings.N + n_left
-            if new_n < target_n:
-                n_right = target_n - new_n
-
-        if n_left == 0 and n_right == 0:
-            return td_signal
-
-        pad_width = [(0, 0)] * len(td_signal.outer_shape) + [(n_left, n_right)]
-        padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant", constant_values=0)
-        padded_settings = TDSettings(
-            t0=td_signal.settings.t0 - n_left * dt,
-            dt=dt,
-            N=td_signal.settings.N + n_left + n_right,
-            force_backend=self.backend_name.split("_")[-1],
-        )
-        return TDSignal(arr=padded_arr, settings=padded_settings)
+        return times, channels
 
     def _call_batched(
         self,
@@ -346,50 +760,47 @@ class TDWaveformBase(LISAToolsParallelModule):
         ra: np.ndarray,
         dec: np.ndarray,
         merger_time: np.ndarray,
-        output_domain: str,
-        domain_kwargs: dict,
         **kwargs,
-    ) -> DomainBaseArray:
-        """Handle batched waveform generation and return a DomainBaseArray.
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Handle batched waveform generation and return a Tuple of times and channels.
 
         Loops over the batch dimension for the TDI response (which does not support
         batching natively), then optionally projects all signals onto a common STFT
         grid when ``self.force_uniform_stft`` is True.
         """
-        #times_batch, mask_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
         times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
 
-        Nbatch, Ntimes = times_batch.shape
-        td_signals: List[TDSignal] = []
+        Nbatch = times_batch.shape[0]
+
+        all_times = []
+        all_channels = []
 
         for i in range(Nbatch):
-            # mask_i = mask_batch[i]
 
-            t_arr_i = times_batch[i]#[mask_i]
-            hplus_i = hplus_batch[i]#[mask_i]
-            hcross_i = hcross_batch[i]#[mask_i]
-
-            td_signals.append(
-                self._apply_response_single(
-                    t_arr_i,
-                    hplus_i,
-                    hcross_i,
-                    float(ra[i]),
-                    float(dec[i]),
-                    float(merger_time[i]),
-                )
+            times_i, channels_i = self._apply_response_single(
+                times_batch[i],
+                hplus_batch[i],
+                hcross_batch[i],
+                float(ra[i]),
+                float(dec[i]),
+                float(merger_time[i]),
             )
 
-        if output_domain == "TD":
-            return DomainBaseArray(td_signals)
+            all_times.append(times_i)
+            all_channels.append(channels_i)
 
-        if output_domain == "STFT" and self.force_uniform_stft:
-            return self._to_uniform_stft(td_signals, domain_kwargs)
+        return self.xp.stack(all_times), self.xp.stack(all_channels)
 
-        # Natural (non-uniform) path: transform each signal with its own settings.
-        return DomainBaseArray(
-            [self._td_to_output_domain(s, output_domain, domain_kwargs) for s in td_signals]
-        )
+        # if output_domain == "TD":
+        #     return DomainBaseArray(td_signals)
+
+        # if output_domain == "STFT" and self.force_uniform_stft:
+        #     return self._to_uniform_stft(td_signals, domain_kwargs)
+
+        # # Natural (non-uniform) path: transform each signal with its own settings.
+        # return DomainBaseArray(
+        #     [self._td_to_output_domain(s, output_domain, domain_kwargs) for s in td_signals]
+        # )
 
     def _to_uniform_stft(
         self,
@@ -432,14 +843,39 @@ class TDWaveformBase(LISAToolsParallelModule):
 
         return DomainBaseArray(signals)
 
+    def compute_tdi_channels(
+        self,
+        *args,
+        ra: float | np.ndarray = None,
+        dec: float | np.ndarray = None,
+        merger_time: float | np.ndarray = None,
+        **kwargs,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Time domain TDI channels computation. In the case of multiple sources, the TDI response is applied sequentially to each source and the results are stacked together.
+
+        Args:
+            *args: Arguments for the wave_gen / wave_gen_batch method.
+            ra: Right ascension in radians.  Scalar for single source, 1-D array for batch.
+            dec: Declination in radians.  Same shape as ``ra``.
+            merger_time: Time of merger in seconds.  Same shape as ``ra``.
+            **kwargs: Keyword arguments for the wave_gen / wave_gen_batch method.
+
+        Returns:
+            Tuple of (times, channels) where `times` is the time array after shifting and padding, and `channels` are the TDI variables with shape (num_channels, num_times) for single source or (num_bin, num_channels, num_times) for batch.
+        """
+        if ra is None or dec is None or merger_time is None:
+            *args, ra, dec, merger_time = args
+
+        if np.ndim(ra) >= 1:
+            return self._call_batched(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
+        return self._call_single(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
+
     def __call__(
         self,
         *args,
         ra: float | np.ndarray = None,
         dec: float | np.ndarray = None,
         merger_time: float | np.ndarray = None,
-        output_domain: str = "TD",
-        domain_kwargs: dict = None,
         **kwargs,
     ) -> DomainBase | DomainBaseArray:
         """
@@ -472,31 +908,55 @@ class TDWaveformBase(LISAToolsParallelModule):
             Signal in the specified output domain.  A single :class:`DomainBase` for
             scalar ``ra``, a :class:`DomainBaseArray` for array ``ra``.
         """
-        # args, ra, dec, merger_time = self._extract_sky_params(args, ra, dec, merger_time)
-        if ra is None or dec is None or merger_time is None:
-            *args, ra, dec, merger_time = args
 
-        if np.ndim(ra) >= 1:
-            return self._call_batched(
-                *args,
-                ra=ra,
-                dec=dec,
-                merger_time=merger_time,
-                output_domain=output_domain,
-                domain_kwargs=domain_kwargs,
-                **kwargs,
+        times, channels = self.compute_tdi_channels(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
+
+        left_edges, padded_signals = self.build_common_grid(times, channels)
+        return self.transform_to_domain(left_edges, padded_signals)
+
+    def get_signals_for_residuals(
+        self,
+        *args,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        merger_time: np.ndarray | cp.ndarray = None,
+        **kwargs,
+    ) -> DomainBaseArray:
+        """
+        Generate the on-the-fly response for a batch of sources and return the domain wrapped signals for residual operations.
+
+        Args:
+            *args: Arguments for the amplitude and phase generation method.
+                The last 5 positional arguments can be (inclination, psi, ra, dec, merger_time)
+                if not provided as keyword arguments.
+            inclination: Inclination angles for the sources, shape (Nbatch,).
+            psi: Polarization angles for the sources, shape (Nbatch,).
+            ra: Right ascension for the sources, shape (Nbatch,).
+            dec: Declination for the sources, shape (Nbatch,).
+            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
+            **kwargs: Keyword arguments for the amplitude and phase generation method.
+
+        Returns:
+            DomainBaseArray containing the signals for each source, transformed to the desired output domain.
+        """
+
+        times, channels = self.compute_tdi_channels(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
+
+        signals_out = []
+        for i in range(channels.shape[0]):
+            signals_out.append(
+                self._td_to_output_domain(
+                    times_in=times[i],
+                    signal_in=channels[i],
+                )
             )
 
-        else:
-            # Single-source path.
-            t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
-
-            td_signal = self._apply_response_single(t_arr, h_plus, h_cross, ra, dec, merger_time)
-
-            return self._td_to_output_domain(td_signal, output_domain, domain_kwargs)
+        return DomainBaseArray(signals_out)
 
 
-class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
+class TDTDIOnFlyWaveformBase(TDWaveformBase):
     """
     Base class for a time domain waveform that computes the LISA response with the "tdi on the fly" method.
 
@@ -513,195 +973,45 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         self,
         waveform_t0: float,
         data_td_settings: TDSettings,
-        tdi_config: str | TDIConfig = "2nd generation",
+        tdi_generation: str = "2nd generation",
+        tdi_channels: str = "XYZ",
         sampling_frequency: float = 0.4,
         orbits: Orbits = None,
-        zero_inclination: bool = False,
         tukey_alpha: float = 0.01,
         stft_dt: float = None,
         freq_min: float = 0.0,
         freq_max: float = 1.0,
+        zero_inclination: bool = False,
         force_backend: str = "cpu",
     ) -> None:
-        super().__init__(force_backend=force_backend)
+        
+        if tdi_channels != "XYZ":
+            raise NotImplementedError("Only XYZ channels are supported for TDI on-the-fly waveforms for now.")
+        
+        super().__init__(
+            waveform_t0=waveform_t0,
+            data_td_settings=data_td_settings,
+            tdi_generation=tdi_generation,
+            tdi_channels=tdi_channels,
+            sampling_frequency=sampling_frequency,
+            orbits=orbits,
+            tukey_alpha=tukey_alpha,
+            stft_dt=stft_dt,
+            freq_min=freq_min,
+            freq_max=freq_max,
+            force_backend=force_backend
+            )
 
-        self.waveform_t0 = waveform_t0
-        self.domain_settings = data_td_settings
-        self.tukey_alpha = tukey_alpha
-        if isinstance(tdi_config, str):
-            self.tdi_config = TDIConfig(tdi=tdi_config, force_backend=force_backend)
-        else:
-            self.tdi_config = tdi_config
-
-        self.sampling_frequency = sampling_frequency
-        self.orbits = orbits
         self.zero_inclination = zero_inclination
 
-        if stft_dt is None:
-            logger.info(
-                "No stft timestep provided. The waveform will be transformed in the frequency domain"
-            )
-            self.transform_to_domain = self.fft
-            self.nperseg = None
-
-        else:
-            assert self.dt <= stft_dt
-            nperseg = round(stft_dt / self.dt)
-
-            assert (
-                abs(nperseg * self.dt - stft_dt) < 1e-10 * stft_dt
-            ), f"stft_dt={stft_dt} must be an integer multiple of dt={self.dt}"
-
-            logger.info(
-                f"STFT timestep set to {stft_dt}. This corresponds to {nperseg} points per time segment"
-            )
-            self.nperseg = nperseg
-            self.transform_to_domain = self.stft
-
-        self.freq_min = freq_min
-        self.freq_max = freq_max
 
     @property
     def max_length(self) -> int:
         """
-        maximum number of evaluation time points that can be stored in a gpu register. 
+        maximum number of evaluation time points that can be stored in a gpu register.
         These may not be enough in some regions of the parameter space
         """
         return 2_000
-
-    @property
-    def tdi_buffer_time(self) -> float:
-        """Buffer time in seconds to ensure proper TDI response calculation at the boundaries."""
-        return 600.0
-
-    @property
-    def dt(self):
-        """Time step in seconds."""
-        return self.domain_settings.dt
-
-    @property
-    def Tobs(self):
-        """Observation time in seconds."""
-        return self.domain_settings.N * self.domain_settings.dt
-
-    @property
-    def data_t0(self):
-        """Start time of the data in seconds."""
-        return self.domain_settings.t0
-
-    @property
-    def data_times_array(self):
-        """Complete time array on which the data live."""
-        return self.domain_settings.t_arr
-
-    @property
-    def xp(self):
-        """Array module used for calculations."""
-        return self.backend.xp
-
-    @property
-    def tdi_config(self):
-        """TDI configuration for on-the-fly response generation."""
-        return self._tdi_config
-
-    @tdi_config.setter
-    def tdi_config(self, config: TDIConfig):
-        """Set the TDI configuration"""
-        self._tdi_config = config
-
-    @property
-    def orbits(self):
-        """Orbits object for on-the-fly response generation."""
-        return self._orbits
-
-    @orbits.setter
-    def orbits(self, orbits: Orbits):
-        """Set the Orbits object."""
-        assert (
-            orbits is not None
-        ), "Orbits object must be provided for on-the-fly response generation."
-
-        if not orbits.configured:
-            orbits.configure(linear_interp_setup=True)
-        self._orbits = orbits
-
-    @property
-    def sampling_frequency(self):
-        """Sampling frequency for the on-the-fly response generation."""
-        return self._sampling_frequency
-
-    @sampling_frequency.setter
-    def sampling_frequency(self, fs: float):
-        """Set the sampling frequency for the on-the-fly response generation."""
-        assert fs > 0, "Sampling frequency must be positive."
-        self._sampling_frequency = fs
-
-    @property
-    def freq_min(self):
-        return self._freq_min
-
-    @freq_min.setter
-    def freq_min(self, value: float):
-        self._freq_min = value
-
-    @property
-    def freq_max(self):
-        return self._freq_max
-
-    @freq_max.setter
-    def freq_max(self, value: float):
-        self._freq_max = value
-
-    @property
-    def nperseg(self):
-        return self._nperseg
-
-    @nperseg.setter
-    def nperseg(self, value: float):
-        self._nperseg = value
-
-    @property
-    def analysis_domain(self) -> str:
-        if self.nperseg:
-            return "STFT"
-        else:
-            return "FD"
-
-    def get_output_settings(self, eval_times: np.ndarray | cp.ndarray) -> DomainSettingsBase:
-        """
-        Get the settings for the output domain based on the evaluation times and the chosen analysis domain (STFT or FD).
-        """
-        if self.analysis_domain == "STFT":
-            return get_stft_settings(
-                eval_times,
-                big_dt=self.nperseg * self.dt,
-                min_freq=self.freq_min,
-                max_freq=self.freq_max,
-                force_backend=self.backend_name.split("_")[-1],
-            )
-        else:
-            data_N = self.domain_settings.N
-            return FDSettings(
-                N=data_N // 2 + 1,
-                df=1 / (data_N * self.dt),
-                min_freq=self.freq_min,
-                max_freq=self.freq_max,
-                force_backend=self.backend_name.split("_")[-1],
-            )
-
-    def get_grid_time(self, times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
-        """
-        For a given array of times, compute the closest points on the grid defined by the data time step.
-
-        Args:
-            times (Array): Array of times to be projected on the grid. Shape: (num_times,).
-
-        Returns:
-            Times on the target grid.  Shape: (num_times,).
-        """
-        dt = self.dt
-        t0 = self.data_t0
-        return t0 + self.xp.round((times - t0) / dt) * dt
 
     def get_amp_phase(
         self,
@@ -743,7 +1053,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         """
         param = self.xp.asarray(param)
         return self.xp.repeat(param, num_modes)
-    
+
     def get_tdi_buffers(self, delta_t: np.ndarray) -> Tuple[int, int, float, float]:
         """
         Get the number of buffer points to add at the beginning and end of the time array based on the TDI buffer time and the maximum time step in the input time array.
@@ -761,13 +1071,13 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         end_buffer = max(int(self.tdi_buffer_time / right_dt), 1)
 
         return start_buffer, end_buffer, left_dt, right_dt
-    
+
     def pad(
-            self, 
-            input_times: np.ndarray | cp.ndarray,
-            input_amplitudes: np.ndarray | cp.ndarray, 
-            input_phases: np.ndarray | cp.ndarray
-        ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self,
+        input_times: np.ndarray | cp.ndarray,
+        input_amplitudes: np.ndarray | cp.ndarray,
+        input_phases: np.ndarray | cp.ndarray,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
         Add a 500 s buffer at both sides to make sure that we can compute tdi on the times we are actually interested in.
 
@@ -780,7 +1090,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             Padded time, amplitude and phase arrays with shape (num_binaries * num_modes, num_times + 2 * buffer_length).
         """
         delta_t = self.xp.diff(input_times, axis=-1)
-        
+
         pad_length_left, pad_length_right, left_dt, right_dt = self.get_tdi_buffers(delta_t)
 
         padded_times = self.xp.concatenate(
@@ -789,11 +1099,15 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
                 input_times,
                 input_times[:, -1:] + self.xp.arange(1, pad_length_right + 1) * right_dt,
             ],
-            axis=-1
+            axis=-1,
         )
 
-        padded_amplitudes = self.xp.pad(input_amplitudes, ((0, 0), (pad_length_left, pad_length_right)), mode="edge")
-        padded_phases = self.xp.pad(input_phases, ((0, 0), (pad_length_left, pad_length_right)), mode="edge")
+        padded_amplitudes = self.xp.pad(
+            input_amplitudes, ((0, 0), (pad_length_left, pad_length_right)), mode="edge"
+        )
+        padded_phases = self.xp.pad(
+            input_phases, ((0, 0), (pad_length_left, pad_length_right)), mode="edge"
+        )
 
         return padded_times, padded_amplitudes, padded_phases
 
@@ -809,10 +1123,10 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         """
         delta_t = self.xp.diff(input_times, axis=-1)
 
-        start_buffer, end_buffer, left_dt, right_dt = self.get_tdi_buffers(delta_t)
+        start_buffer, end_buffer, _, _ = self.get_tdi_buffers(delta_t)
 
         in_times = input_times[:, start_buffer:-end_buffer]
-        #evaluation_times = self.xp.concatenate([in_times[:, :1], in_times[:, -self.max_length :]], axis=-1)
+        # evaluation_times = self.xp.concatenate([in_times[:, :1], in_times[:, -self.max_length :]], axis=-1)
         evaluation_times = in_times[:, -self.max_length :]
 
         return evaluation_times
@@ -825,90 +1139,19 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         t0 = self.data_t0
         dt = self.dt
         segment_dt = self.nperseg * dt if self.analysis_domain == "STFT" else dt
-        
+
         # Use floor to ensure we don't truncate the start of the evaluation times,
         # which is crucial for not cutting off SNR in STFT block segmentations.
         start_times = t0 + self.xp.floor((eval_times[:, 0] - t0) / segment_dt) * segment_dt
-        
+
         max_duration = self.xp.max(eval_times[:, -1] - start_times)
         num_times = int(self.xp.ceil(max_duration / self.dt)) + 1
-        
-        if self.analysis_domain == 'STFT':
+
+        if self.analysis_domain == "STFT":
             # make sure num_times is a multiple of nperseg for the STFT case
             num_times = int(np.ceil(num_times / self.nperseg) * self.nperseg)
 
         return start_times[:, None] + self.xp.arange(num_times)[None, :] * self.dt
-
-    def fft(
-        self, times_in: np.ndarray | cp.ndarray, signal_in: np.ndarray | cp.ndarray
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
-        """
-        Transform the time domain data to the FT basis with the chosen settings.
-
-        Args:
-            times_in (Array): Time grid of the input signal with shape `(num_binaries, num_times)`. Ignored here but included in the signature for consistency with the `stft` method.
-            signal_in (Array): Time domain input signal with shape `(num_binaries, num_times)`
-
-        Returns:
-            signal_out (Array): The transformed signal with shape `(num_binaries, num_freqs)`
-            start_freqs (Array): Starting frequencies to be fed to the likelihood calculation Shape: `(num_binaries,)`
-        """
-        # for the moment we are gonna evaluate the likelihood on the same frequency support for every source
-        num_binaries = signal_in.shape[0]
-        n = signal_in.shape[-1]
-
-        n_fft = self.domain_settings.N
-
-        # Left-pad to place signal at correct position within observation,
-        # then right-pad to reach full data length. This ensures the Tukey
-        # taper falls on zeros, not on the signal (matching data-side processing).
-        if (n < n_fft) and self.analysis_domain == "FD":
-            n_left = round((float(times_in[0, 0]) - self.domain_settings.t0) / self.dt)
-            n_right = n_fft - n - n_left
-            pad_width = [(0, 0)] * (signal_in.ndim - 1) + [(n_left, n_right)]
-            signal_in = self.xp.pad(signal_in, pad_width, mode="constant")
-            n = n_fft
-
-        window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
-        windowed = signal_in * window
-
-        signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
-        freqs = self.xp.fft.rfftfreq(n, d=self.dt)
-
-        keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
-        signal_out = signal_fd[..., keep]
-
-        start_freqs = self.xp.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
-
-        return signal_out, start_freqs
-
-    def stft(
-        self,
-        times_in: np.ndarray | cp.ndarray,
-        signal_in: np.ndarray | cp.ndarray,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
-        """
-        Transform the time domain data to the STFT basis with the chosen settings.
-
-        Args:
-            times_in (Array): Time grid of the input signal with shape `(num_binaries, num_times)`
-            signal_in (Array): Time domain input signal with shape `(num_binaries, num_times)`
-
-        Returns:
-            signal_out (Array): The transformed signal with shape `(num_binaries, num_stft_times, num_freqs)`
-            start_freqs (Array): Starting frequencies to be fed to the likelihood calculation Shape: `(num_binaries,)`
-            start_times (Array): Starting times to be fed to the likelihood calculation Shape: `(num_binaries,)`
-        """
-
-        num_binaries, num_channels = signal_in.shape[:2]
-        signal_in = signal_in.reshape(
-            num_binaries, num_channels, -1, self.nperseg
-        )  # (num_binaries, num_channels, num_segments, num_times_per_segment)
-        start_times = times_in[:, 0]
-
-        signal_out, start_freqs = self.fft(times_in, signal_in)
-
-        return signal_out, start_freqs, start_times
 
     def compute_tdi_channels(
         self,
@@ -970,7 +1213,9 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         evaluation_times = self.get_evaluation_times(input_times)
 
         # now padd with 500 seconds on each side
-        padded_times, padded_amplitudes, padded_phases = self.pad(input_times, input_amplitudes, input_phases)
+        padded_times, padded_amplitudes, padded_phases = self.pad(
+            input_times, input_amplitudes, input_phases
+        )
 
         tdi_generator = TDTDIonTheFly(
             evaluation_times,
@@ -981,7 +1226,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             t_input=padded_times,
             tdi_config=self.tdi_config,
             orbits=self.orbits,
-            force_backend=self.backend_name.split("_")[-1],
+            force_backend=self.force_backend,
         )
 
         # step 3: locate and repeat the sky parameters, polarization and inclination
@@ -1002,8 +1247,8 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         )  # shape nbinaries * num_modes, num_times
 
         # step 5.5: extend TDI spline domain to safely taper the signal to zero.
-        # STFT boundary snapping in `get_dense_times` can expand the domain by thousands of 
-        # seconds. Anchoring the spline's immediate edges at zero ensures that out-of-bounds 
+        # STFT boundary snapping in `get_dense_times` can expand the domain by thousands of
+        # seconds. Anchoring the spline's immediate edges at zero ensures that out-of-bounds
         # evaluation flawlessly returns 0.0 without causing massive polynomial extrapolation ringing.
         if self.analysis_domain == "STFT":
             anchor_time_end = tdi_spline.x[:, -1:] + self.dt  # (num_sub, 1)
@@ -1013,30 +1258,34 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
                 [anchor_time_start, tdi_spline.x, anchor_time_end], axis=-1
             )
             tdi_spline.tdi_amp = self.xp.concatenate(
-                [self.xp.zeros((num_sub, self.tdi_config.nchannels, 1)),
-                 tdi_spline._tdi_amp,
-                 self.xp.zeros((num_sub, self.tdi_config.nchannels, 1))],
+                [
+                    self.xp.zeros((num_sub, self.tdi_config.nchannels, 1)),
+                    tdi_spline._tdi_amp,
+                    self.xp.zeros((num_sub, self.tdi_config.nchannels, 1)),
+                ],
                 axis=-1,
             )
             tdi_spline.tdi_phase = self.xp.concatenate(
-                [tdi_spline._tdi_phase[:, :, 0:1],
-                 tdi_spline._tdi_phase,
-                 tdi_spline._tdi_phase[:, :, -1:]],
+                [
+                    tdi_spline._tdi_phase[:, :, 0:1],
+                    tdi_spline._tdi_phase,
+                    tdi_spline._tdi_phase[:, :, -1:],
+                ],
                 axis=-1,
             )
             tdi_spline.phase_ref = self.xp.concatenate(
-                [tdi_spline._phase_ref[:, 0:1],
-                 tdi_spline._phase_ref,
-                 tdi_spline._phase_ref[:, -1:]],
+                [
+                    tdi_spline._phase_ref[:, 0:1],
+                    tdi_spline._phase_ref,
+                    tdi_spline._phase_ref[:, -1:],
+                ],
                 axis=-1,
             )
 
         # step 6: evaluate the TDI response on the dense time array
         tdi_out_raw = tdi_spline.eval_tdi(dense_times, error_out_of_bounds=False)
 
-        tdi_out = tdi_out_raw.reshape(
-            num_binaries, num_modes, self.tdi_config.nchannels, -1
-        )
+        tdi_out = tdi_out_raw.reshape(num_binaries, num_modes, self.tdi_config.nchannels, -1)
 
         tdi_channels = self.xp.sum(
             tdi_out, axis=1
@@ -1092,7 +1341,8 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             **kwargs,
         )
 
-        return self.transform_to_domain(dense_times, tdi_channels)
+        left_edges, padded_channels = self.build_common_grid(dense_times, tdi_channels)
+        return self.transform_to_domain(left_edges, padded_channels)
 
     def get_signals_for_residuals(
         self,
@@ -1103,7 +1353,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
         dec: np.ndarray | cp.ndarray = None,
         merger_time: np.ndarray | cp.ndarray = None,
         **kwargs,
-    ) -> List[DomainBase]:
+    ) -> DomainBaseArray:
         """
         Generate the on-the-fly response for a batch of sources and return the domain wrapped signals for residual operations.
 
@@ -1119,7 +1369,7 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
             **kwargs: Keyword arguments for the amplitude and phase generation method.
 
         Returns:
-            List of DomainBase objects containing the signals for each source, transformed to the desired output domain.
+            DomainBaseArray containing the signals for each source, transformed to the desired output domain.
         """
 
         if inclination is None:
@@ -1137,48 +1387,47 @@ class TDTDIOnFlyWaveformBase(LISAToolsParallelModule):
 
         signals_out = []
         for i in range(tdi_channels.shape[0]):
-            td_signal = TDSignal(
-                arr=tdi_channels[i],
-                settings=TDSettings(
-                    t0=dense_times[i, 0],
-                    dt=self.dt,
-                    N=dense_times.shape[-1],
-                    force_backend=self.backend_name.split("_")[-1],
-                ),
+            signals_out.append(
+                self._td_to_output_domain(
+                    times_in=dense_times[i],
+                    signal_in=tdi_channels[i],
+                )
             )
 
-            output_domain = self.get_output_settings(dense_times[i])
+        return DomainBaseArray(signals_out)
 
-            if isinstance(output_domain, FDSettings):
-                # Left-pad + right-pad to place signal at correct position
-                # within observation, then window at full data length.
-                natural_n = td_signal.settings.N
-                n_fft = round(1 / (output_domain.df * td_signal.settings.dt))
+    #     output_domain = self.get_output_settings(dense_times[i])
 
-                n_left = round((td_signal.settings.t0 - self.domain_settings.t0) / self.dt)
-                n_right = n_fft - natural_n - n_left
+    #     if isinstance(output_domain, FDSettings):
+    #         # Left-pad + right-pad to place signal at correct position
+    #         # within observation, then window at full data length.
+    #         natural_n = td_signal.settings.N
+    #         n_fft = round(1 / (output_domain.df * td_signal.settings.dt))
 
-                pad_width = [(0, 0)] * (td_signal.arr.ndim - 1) + [(n_left, n_right)]
-                padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant")
+    #         n_left = round((td_signal.settings.t0 - self.domain_settings.t0) / self.dt)
+    #         n_right = n_fft - natural_n - n_left
 
-                window = tukey(n_fft, alpha=self.tukey_alpha, xp=self.xp)
-                windowed_arr = padded_arr * window
+    #         pad_width = [(0, 0)] * (td_signal.arr.ndim - 1) + [(n_left, n_right)]
+    #         padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant")
 
-                td_signal = TDSignal(
-                    arr=windowed_arr,
-                    settings=TDSettings(
-                        t0=self.domain_settings.t0,
-                        dt=self.dt,
-                        N=n_fft,
-                        force_backend=self.backend_name.split("_")[-1],
-                    ),
-                )
-                # Signal is pre-windowed — pass None so fft() uses ones
-                signals_out.append(td_signal.transform(new_domain=output_domain, window=None))
-            else:
-                # STFT case — window is per-segment, handled by stft() internally
-                window_n = self.nperseg
-                window = tukey(window_n, alpha=self.tukey_alpha, xp=self.xp)
-                signals_out.append(td_signal.transform(new_domain=output_domain, window=window))
+    #         window = tukey(n_fft, alpha=self.tukey_alpha, xp=self.xp)
+    #         windowed_arr = padded_arr * window
 
-        return signals_out
+    #         td_signal = TDSignal(
+    #             arr=windowed_arr,
+    #             settings=TDSettings(
+    #                 t0=self.domain_settings.t0,
+    #                 dt=self.dt,
+    #                 N=n_fft,
+    #                 force_backend=self.force_backend,
+    #             ),
+    #         )
+    #         # Signal is pre-windowed — pass None so fft() uses ones
+    #         signals_out.append(td_signal.transform(new_domain=output_domain, window=None))
+    #     else:
+    #         # STFT case — window is per-segment, handled by stft() internally
+    #         window_n = self.nperseg
+    #         window = tukey(window_n, alpha=self.tukey_alpha, xp=self.xp)
+    #         signals_out.append(td_signal.transform(new_domain=output_domain, window=window))
+
+    # return signals_out
