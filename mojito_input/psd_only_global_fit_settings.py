@@ -94,7 +94,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 
 def get_general_erebor_settings() -> GeneralSetup:
-       # limits on parameters
+    # limits on parameters
     delta_safe = 1e-5
     # now with negative fdots
     
@@ -105,8 +105,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
-    base_file_name = "noise-only_spline-dev_v1"
-    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev/"
+    base_file_name = "noise-only_tukey_new"
+    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/tukey_new/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
@@ -135,7 +135,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     sensitivity_init_kwargs = dict(tdi_generation=2, 
                                    mask_percentage=0.02,
-                                   use_splines=True)
+                                   use_splines=False)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
@@ -146,7 +146,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         end_freq=1e-2,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
-        random_seed=103209,
+        random_seed=12345,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
