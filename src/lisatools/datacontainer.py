@@ -305,7 +305,6 @@ class DataResidualArray:
         elif fig is not None:
             raise NotImplementedError
 
-        breakpoint()
         for i, ax_tmp in zip(inds_list, ax):
             plot_in = np.abs(self.data_res_arr[i])
             if char_strain:

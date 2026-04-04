@@ -59,8 +59,13 @@ t_tdi = np.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend="cpu")
 
-# wdm_lookup_table = WDMLookupTable(wdm_settings, 50, 20, 3)
-
+wdm_lookup_table = WDMLookupTable(wdm_settings, 50, 20, 3, store_path="./wdm_lookup_table.pkl")
+f_arr = np.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
+fdot_arr = np.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
+amp_arr = np.ones_like(f_arr)
+phase_arr = np.ones_like(f_arr)
+wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_arr, phase_arr, f_arr, fdot_arr, num_m_layers=2)
+breakpoint()
 # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
 
 num_bin = 1
@@ -94,14 +99,14 @@ gb_gen = GBTDIonTheFly(
 
 output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
 # FD 
-bin_i = int(f0[0] * Tobs) - int(output.t_arr.shape[-1] / 4)
-carrier_frequency = bin_i / Tobs
+# bin_i = int(f0[0] * Tobs) - int(output.t_arr.shape[-1] / 4)
+# carrier_frequency = bin_i / Tobs
 
-heterodyned_phase = output.tdi_phase + output.phase_ref - 2 * np.pi * carrier_frequency * output.t_arr
-heterodyned_signal = -output.tdi_amp * np.sin(heterodyned_phase)
-gb_fd = np.fft.fftshift(np.fft.fft(heterodyned_signal, axis=-1))
+# heterodyned_phase = output.tdi_phase + output.phase_ref - 2 * np.pi * carrier_frequency * output.t_arr
+# heterodyned_signal = -output.tdi_amp * np.sin(heterodyned_phase)
+# gb_fd = np.fft.fftshift(np.fft.fft(heterodyned_signal, axis=-1))
 
-breakpoint()
+# breakpoint()
 tdi_output = np.zeros((num_bin, 3, len(data_t_arr))) 
 
 # t_tdi = 

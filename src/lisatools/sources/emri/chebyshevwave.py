@@ -437,7 +437,7 @@ class ChebyshevWave:
         self.dw = 2.0/(self.npts-1)
         self.midpt = (self.npts-1)//2
 
-    def __call__(self, *alpha_in: np.ndarray | list) -> typing.Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, *alpha_in: np.ndarray | list, return_phase: bool = False) -> typing.Tuple[np.ndarray, np.ndarray]:
         
         alpha = np.asarray(alpha_in).T
         squeeze = (alpha.ndim == 1)
@@ -474,6 +474,13 @@ class ChebyshevWave:
         integrand -= const1[:, None]
         #integrand = integrand*exp_kappa_y*2.0*pi*kappa*kappa
         t = integrand*self.kappa
+
+        if return_phase:
+            phase = 2 * np.pi * t * f[None, :]
+            if squeeze:
+                return phase[0], f
+            return phase, f
+
         if squeeze:
             return t[0], f
         return t, f
@@ -550,19 +557,21 @@ if __name__ == "__main__":
     fmax = 0.008
     f,t = alpha_to_tf(alpha,npts,fmin,fmax)
     cheb_wave = ChebyshevWave(npts, fmin, fmax)
-    t1, f1 = cheb_wave(alpha)
-    # fig, (ax1, ax2) = plt.subplots(2, 1)
-    # ax1.plot(t.squeeze(), f.squeeze())
+    t1, f1 = cheb_wave(*alpha)
+    
+    plt.rcParams['text.usetex'] = False
+    #fig, (ax1, ax2) = plt.subplots(2, 1)
+    plt.plot(t.squeeze(), f.squeeze())
 
-    # ax1.plot(t1, f1, "--")
+    plt.plot(t1, f1, "--")
     # ax2.plot(t1.squeeze() - t.squeeze())
     
-    # print(t[(npts-1)//2]) #should be zero
-    # plt.show()
+    print(t[(npts-1)//2]) #should be zero
+    plt.show()
     # plt.close()
     # breakpoint()
 
-    cheb_xyz = ChebyshevXYZ(npts, fmin, fmax)
+    # cheb_xyz = ChebyshevXYZ(npts, fmin, fmax)
 
-    temp_xyz = cheb_xyz(alpha)
+    # temp_xyz = cheb_xyz(alpha)
     

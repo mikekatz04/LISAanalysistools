@@ -2,7 +2,8 @@ from __future__ import annotations
 import warnings
 from abc import ABC
 from typing import Any, Tuple, Optional, List
-
+import os
+import pickle
 import math
 import numpy as np
 
@@ -75,6 +76,29 @@ class DomainBase:
     def shape(self) -> tuple:
         return self.arr.shape
     
+    def __add__(self, other: DomainBase):
+        if not isinstance(other, DomainBase):
+            raise ValueError("Can only add another DomainBase object.")
+        if self.settings != other.settings:
+            raise ValueError("Can only add another DomainBase object with the same settings.")
+        return self.__class__(self.arr + other.arr, settings=self.settings)
+    
+    def __sub__(self, other: DomainBase):
+        if not isinstance(other, DomainBase):
+            raise ValueError("Can only subtract another DomainBase object.")
+        if self.settings != other.settings:
+            raise ValueError("Can only subtract another DomainBase object with the same settings.")
+        return self.__class__(self.arr - other.arr, settings=self.settings) 
+    
+    def __mul__(self, other: float):
+        if not isinstance(other, (int, float)):
+            raise ValueError("Can only multiply by a scalar.")
+        return self.__class__(self.arr * other, settings=self.settings)
+
+    def __truediv__(self, other: float):
+        if not isinstance(other, (int, float)):
+            raise ValueError("Can only divide by a scalar.")
+        return self.__class__(self.arr / other, settings=self.settings)
 
 class TDSettings(DomainSettingsBase):
     N: int
@@ -1022,66 +1046,159 @@ class WDMSignal(WDMSettings, DomainBase):
         return fig, ax
 
 class WDMLookupTable(WDMSettings):
-    def __init__(self, settings: WDMSettings, f_steps: int, fdot_steps: int, num_channel: int):
+    def __init__(self, settings: WDMSettings, f_steps: int, fdot_steps: int, num_channel: int, num_layers_diff: int=4, fdot_max: float= 0.1, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, sub_setting_full_time_layers: Optional[bool] = False):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
-        d_fdot = self.d_fdot = 0.1
-        fdot_step = self.df/self.T*d_fdot
+        # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
+
+        self.store_path = store_path
+        if sub_setting_full_time_layers:
+            time_layers = self.Nt
+        else:
+            time_layers = 6
+        self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
+        self.num_layers_diff = num_layers_diff
+        self.m_ref = int(self.sub_settings.Nf / 2)
+        self.n_ref = int(self.sub_settings.Nt / 2)
+        
+        self.f_ref = self.m_ref * self.sub_settings.layer_df
+        self.f_min = (self.m_ref - num_layers_diff) * self.sub_settings.layer_df
+        self.f_max = (self.m_ref + num_layers_diff) * self.sub_settings.layer_df
+
         self.f_steps = f_steps
         self.fdot_steps = fdot_steps
-        self.deltaf = self.BW/(self.f_steps)
-        self.num_channel = num_channel
-        
-        # The odd wavelets coefficienst can be obtained from the even.
-        # odd cosine = -even sine, odd sine = even cosine
-        # each wavelet covers a frequency band of width DW
-        # execept for the first and last wasvelets
-        # there is some overlap. The wavelet pixels are of width
-        # DOM/PI, except for the first and last which have width
-        # half that
-        ref_layer = int(self.Nf/2)
-    
-        f0 = ref_layer * self.df
-        self.fdot_vals = (self.xp.arange(fdot_steps) - int(fdot_steps / 2)) * fdot_step
+        self.f_vals = self.xp.linspace(self.f_min, self.f_max, f_steps)
+        self.f_vals_norm = self.f_vals - self.f_ref
+        self.delta_f = self.f_vals[1] - self.f_vals[0]
 
-        wave = self.wavelet(self.N, in_fd=False)
-        
-        self.f_scaled_vals = ((self.xp.arange(self.f_steps)-self.f_steps/2)+0.5)*self.deltaf
-        self.f_vals = f0 + self.f_scaled_vals
-        self.min_f_scaled = self.f_scaled_vals.min().item()
-        self.max_f_scaled = self.f_scaled_vals.max().item()
-        self.min_fdot = self.fdot_vals.min().item()
-        self.max_fdot = self.fdot_vals.max().item()
-        t = (self.xp.arange(self.N) - int(self.N/2)) * self.cadence
-        phase = 2 * np.pi * self.f_vals[:, None, None] * t[None, None, :] + np.pi * self.fdot_vals[None, :, None]* (t * t)[None, None, :]
-        
-        real_coeff = self.xp.sum(wave * self.xp.cos(phase)*self.cadence, axis=-1)  # TODO: trapz?
-        imag_coeff = self.xp.sum(wave * self.xp.sin(phase)*self.cadence, axis=-1)  
-        self.table = real_coeff + 1j * imag_coeff
+        self.fdot_max = fdot_max
+        self.fdot_vals = self.xp.linspace(-fdot_max, fdot_max, fdot_steps)
+        self.delta_fdot = self.fdot_vals[1] - self.fdot_vals[0]
+
+        self.points = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals, self.fdot_vals)]).T
+        self.norm_points = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals_norm, self.fdot_vals)]).T
+
+        run_table_gen = True
+        if store_path is not None:
+            if os.path.exists(self.store_path):
+                with open(self.store_path, "rb") as fp:
+                    check_input = pickle.load(fp)
+                if (
+                    check_input["basis_settings"] == self.sub_settings and
+                    check_input["f_steps"] == self.f_steps and
+                    check_input["fdot_steps"] == self.fdot_steps and
+                    check_input["delta_f"] == self.delta_f and
+                    check_input["delta_fdot"] == self.delta_fdot
+                ):
+                    run_table_gen = False
+                    self.table_sin = check_input["table_sin"]
+                    self.table_cos = check_input["table_cos"]
+
+        if run_table_gen:
+            self.t_ref = self.n_ref * self.sub_settings.layer_dt
+
+            total_f_fdot_vals = f_steps * fdot_steps
+            
+            _f_vals, _fdot_vals = self.points.T
+            t_vals = np.arange(self.sub_settings.N) * self.data_dt
+
+            t_diff = t_vals - self.t_ref
+
+            batches = np.arange(0, total_f_fdot_vals, batch_size_gen)
+            if batches[-1] < total_f_fdot_vals:
+                batches = np.append(batches, np.array([total_f_fdot_vals]))
+
+            _table_sin = self.xp.zeros((total_f_fdot_vals,))
+            _table_cos = self.xp.zeros((total_f_fdot_vals,))
+            self.tukey_window = signal.windows.tukey(self.sub_settings.N, alpha=0.05)
+            for st_batch, end_batch in zip(batches[:-1], batches[1:]):
+                inds = slice(st_batch, end_batch)
+                wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
+                wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
+                wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.tukey_window)
+                wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.tukey_window)
+
+                _table_sin[inds] = wave_sin_wdm[:, self.m_ref, self.n_ref] 
+                _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
+                print(inds)
+            self.table_sin = _table_sin.reshape((self.f_steps, self.fdot_steps)).copy()
+            self.table_cos = _table_cos.reshape((self.f_steps, self.fdot_steps)).copy()
+
+            if store_path is not None:
+                output_dict = {
+                    "basis_settings": self.sub_settings,
+                    "f_steps": self.f_steps,
+                    "fdot_steps": self.fdot_steps,
+                    "delta_f": self.delta_f,
+                    "delta_fdot": self.delta_fdot,
+                    "table_sin": self.table_sin,
+                    "table_cos": self.table_cos
+                }
+                with open(self.store_path, "wb") as fp:
+                    pickle.dump(output_dict, fp, pickle.HIGHEST_PROTOCOL)
 
     @property
-    def table(self) -> np.ndarray:
-        return self._table
+    def table_sin(self) -> np.ndarray:
+        return self._table_sin
     
-    @table.setter
-    def table(self, table: np.ndarray):
-        self._table = table
-        points = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals, self.fdot_vals)]).T
+    @property
+    def table_sin_interpolate(self) -> np.ndarray:
+        return self._table_sin_interpolate
+
+    @table_sin.setter
+    def table_sin(self, table_sin: np.ndarray):
+        self._table_sin = table_sin
+        self._table_sin_interpolate = self.build_interpolator(table_sin)
+
+    @property
+    def table_cos(self) -> np.ndarray:
+        return self._table_cos
+    
+    @property
+    def table_cos_interpolate(self) -> np.ndarray:
+        return self._table_cos_interpolate
+    
+    @table_cos.setter
+    def table_cos(self, table_cos: np.ndarray):
+        self._table_cos = table_cos
+        self._table_cos_interpolate = self.build_interpolator(table_cos)
+
+    @property
+    def settings(self) -> TDSettings:
+        return WDMSettings(*self.args, **self.kwargs)
+
+    def build_interpolator(self, table: np.ndarray):
         if self.backend.uses_cupy:
             interpolate = interpolate_gpu
         else:
             interpolate = interpolate_cpu
 
-        try:
-            self._interpolant = interpolate.LinearNDInterpolator(points, table.flatten(), rescale=True)
-        except AttributeError:
-            pass
+        return interpolate.LinearNDInterpolator(self.norm_points, table.flatten(), rescale=True)
 
-    def get_table_coeffs(self, f_arr: np.ndarray, fdot_arr: np.ndarray):
-        assert self.xp.all((f_arr > self.f_vals.min()) & (f_arr < self.f_vals.max()))
+    def get_table_coeffs(self, f_arr: np.ndarray, fdot_arr: np.ndarray, ms: np.ndarray):
+        # ms = (f_arr // self.layer_df).astype(int)
+        assert ms.max() <= self.Nf + 1
+        assert ms.min() >= 0
+        assert self.xp.all((f_arr >= 0.0) & (f_arr < self.f_arr.max()))
         assert self.xp.all((fdot_arr > self.fdot_vals.min()) & (fdot_arr < self.fdot_vals.max()))
-        return self._interpolant(self.xp.array([f_arr, fdot_arr]).T)
+        f_norm = f_arr - ms * self.layer_df
 
+        sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
+        cos_coeffs = self.table_cos_interpolate(f_norm, fdot_arr)
+        sin_coeffs[np.isnan(sin_coeffs)] = 0.0
+        cos_coeffs[np.isnan(cos_coeffs)] = 0.0
+        return (sin_coeffs, cos_coeffs)
 
+    def get_wdm_coeffs(self, amp_arr: np.ndarray, phi_arr: np.ndarray, f_arr: np.ndarray, fdot_arr: np.ndarray, num_m_layers: int = 1):
+        ms = (f_arr // self.layer_df).astype(int)
+        wdm_coeffs_out = np.zeros((amp_arr.shape[0], num_m_layers * 2 + 1))
+        m_map = -np.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
+        for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
+            ms_to_use = (ms + m_diff).astype(int)
+            keep_now = np.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
+            sin_coeffs, cos_coeffs = self.get_table_coeffs(f_arr[keep_now], fdot_arr[keep_now], ms_to_use[keep_now])
+            wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * np.sin(phi_arr[keep_now]) + cos_coeffs * np.cos(phi_arr[keep_now]))
+            m_map[keep_now, i] = ms_to_use[keep_now]
+        return wdm_coeffs_out, m_map
 __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]
 
 
