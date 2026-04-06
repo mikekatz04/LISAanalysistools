@@ -59,12 +59,12 @@ t_tdi = np.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend="cpu")
 
-wdm_lookup_table = WDMLookupTable(wdm_settings, 50, 20, 3, store_path="./wdm_lookup_table.pkl")
+wdm_lookup_table = WDMLookupTable(wdm_settings, 20, 20, 3, store_path="./wdm_lookup_table.pkl", sub_setting_full_time_layers=True)
 f_arr = np.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
 fdot_arr = np.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
 amp_arr = np.ones_like(f_arr)
 phase_arr = np.ones_like(f_arr)
-wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_arr, phase_arr, f_arr, fdot_arr, num_m_layers=2)
+wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_arr, phase_arr, f_arr, fdot_arr, num_m_layers=4)
 breakpoint()
 # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
 

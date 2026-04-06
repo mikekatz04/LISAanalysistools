@@ -1046,7 +1046,7 @@ class WDMSignal(WDMSettings, DomainBase):
         return fig, ax
 
 class WDMLookupTable(WDMSettings):
-    def __init__(self, settings: WDMSettings, f_steps: int, fdot_steps: int, num_channel: int, num_layers_diff: int=4, fdot_max: float= 0.1, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, sub_setting_full_time_layers: Optional[bool] = False):
+    def __init__(self, settings: WDMSettings, f_steps_per: int, fdot_steps: int, num_channel: int, num_layers_diff: int=10, fdot_max: float= 0.1, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, sub_setting_full_time_layers: Optional[bool] = False):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
 
@@ -1064,9 +1064,9 @@ class WDMLookupTable(WDMSettings):
         self.f_min = (self.m_ref - num_layers_diff) * self.sub_settings.layer_df
         self.f_max = (self.m_ref + num_layers_diff) * self.sub_settings.layer_df
 
-        self.f_steps = f_steps
+        self.f_steps = f_steps_per * (2 * num_layers_diff + 1)
         self.fdot_steps = fdot_steps
-        self.f_vals = self.xp.linspace(self.f_min, self.f_max, f_steps)
+        self.f_vals = self.xp.linspace(self.f_min, self.f_max, self.f_steps)
         self.f_vals_norm = self.f_vals - self.f_ref
         self.delta_f = self.f_vals[1] - self.f_vals[0]
 
@@ -1096,7 +1096,7 @@ class WDMLookupTable(WDMSettings):
         if run_table_gen:
             self.t_ref = self.n_ref * self.sub_settings.layer_dt
 
-            total_f_fdot_vals = f_steps * fdot_steps
+            total_f_fdot_vals = self.f_steps * fdot_steps
             
             _f_vals, _fdot_vals = self.points.T
             t_vals = np.arange(self.sub_settings.N) * self.data_dt
