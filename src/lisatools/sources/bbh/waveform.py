@@ -11,7 +11,7 @@ from fastlisaresponse import ResponseWrapper
 
 from ...domains import DomainSettingsBase
 from ...utils.constants import *
-from ..waveformbase import SNRWaveform, TDWaveformBase, TDTDIOnFlyWaveformBase
+from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
 
 try:
     import jax.numpy as jnp
@@ -197,7 +197,7 @@ class PhenomTHMWaveformBase:
 
         return times_out  # shape (Nbatch, max_valid_points)
 
-class PhenomTHMTDIWaveform(TDWaveformBase, PhenomTHMWaveformBase):
+class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
     """
     Generate PhenomTHM waveforms with the TDI LISA Response.
 
@@ -206,8 +206,8 @@ class PhenomTHMTDIWaveform(TDWaveformBase, PhenomTHMWaveformBase):
         Tobs: Observation time in years.
         start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls.
         ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
-        *args: Additional positional arguments forwarded to :class:`TDWaveformBase`.
-        **kwargs: Additional keyword arguments forwarded to :class:`TDWaveformBase`.
+        *args: Additional positional arguments forwarded to :class:`TDPyResponseWaveformBase`.
+        **kwargs: Additional keyword arguments forwarded to :class:`TDPyResponseWaveformBase`.
     """
 
     def __init__(
@@ -220,12 +220,12 @@ class PhenomTHMTDIWaveform(TDWaveformBase, PhenomTHMWaveformBase):
         **kwargs: Any,
     ) -> None:
 
-        TDWaveformBase.__init__(
+        TDPyResponseWaveformBase.__init__(
             self,
             *args,
             **kwargs,
-            Tobs=Tobs,
         )
+        
         PhenomTHMWaveformBase.__init__(
             self,
             waveform_kwargs=waveform_kwargs,

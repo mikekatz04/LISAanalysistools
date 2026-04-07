@@ -630,6 +630,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         if signal_duration is None:
             signal_duration = self.Tobs
+            
         self.force_uniform_stft = force_uniform_stft
 
         num_points = int(signal_duration / self.dt)
