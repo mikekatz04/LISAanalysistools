@@ -730,7 +730,7 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.Nt) * self.dt
+        return self.xp.arange(self.Nt) * self.data_dt
 
     @property
     def f_arr(self) -> np.ndarray:
@@ -741,7 +741,7 @@ class WDMSettings(DomainSettingsBase):
         return self.xp.arange(self.Nf + 1) * self.layer_df
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.Nt + 1) * self.dt
+        return self.xp.arange(self.Nt + 1) * self.data_dt
 
     def phitilde(self, omega, dOmega):
         insDOM = 1. / np.sqrt(dOmega)
@@ -774,7 +774,7 @@ class WDMSettings(DomainSettingsBase):
 
         self.xp.put_along_axis(wavelets_rfft, k, base_window * 1 / np.sqrt(2.), axis=-1)
         freq = self.xp.fft.fftshift(self.xp.fft.fftfreq(self.Nt * self.Nf, self.data_dt))
-        wavelets_fft = self.xp.exp(-1j * 2 * np.pi * freq[None, :] * n[:, None] * self.dt) * self.xp.concatenate([wavelets_rfft[:, ::-1][:, :-1], wavelets_rfft[:, :-1]], axis=-1)
+        wavelets_fft = self.xp.exp(-1j * 2 * np.pi * freq[None, :] * n[:, None] * self.data_dt) * self.xp.concatenate([wavelets_rfft[:, ::-1][:, :-1], wavelets_rfft[:, :-1]], axis=-1)
         if in_fd:
             return wavelets_fft
         else:
@@ -1024,7 +1024,8 @@ class WDMSignal(WDMSettings, DomainBase):
             
         # else:
         #     # fig and ax are None
-        fig, ax = plt.subplots(3, 1, sharex=True, sharey=True)
+        breakpoint()
+        fig, ax = plt.subplots(self.nchannels, 1, sharex=True, sharey=True)
         
         if "cmap" not in kwargs:
             kwargs["cmap"] = cm.RdBu
@@ -1057,7 +1058,7 @@ class WDMLookupTable(WDMSettings):
             time_layers = 6
         self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
         self.num_layers_diff = num_layers_diff
-        self.m_ref = int(self.sub_settings.Nf / 2)
+        self.m_ref = int(3e-3 / self.sub_settings.layer_df)  # int(self.sub_settings.Nf / 2)
         self.n_ref = int(self.sub_settings.Nt / 2)
         
         self.f_ref = self.m_ref * self.sub_settings.layer_df
@@ -1112,11 +1113,15 @@ class WDMLookupTable(WDMSettings):
             self.tukey_window = signal.windows.tukey(self.sub_settings.N, alpha=0.05)
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
                 inds = slice(st_batch, end_batch)
+                if np.any(_fdot_vals[inds] != 0.0):
+                    continue
+                
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.tukey_window)
                 wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.tukey_window)
-
+                
+                breakpoint()
                 _table_sin[inds] = wave_sin_wdm[:, self.m_ref, self.n_ref] 
                 _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
                 print(inds)

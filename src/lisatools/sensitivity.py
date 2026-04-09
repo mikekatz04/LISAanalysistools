@@ -1172,7 +1172,7 @@ class SensitivityMatrix:
             _invC = xp.zeros_like(tmp)
             
             batch = 100000
-            inds = np.arange(batch, tmp.shape[0], batch)
+            inds = np.arange(0, tmp.shape[0], batch)
             if inds[0] < tmp.shape[0]:
                 inds = np.concatenate([inds, np.array([tmp.shape[0]])])
             inds_bad = []
