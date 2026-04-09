@@ -1391,7 +1391,10 @@ class DomainBaseArray:
 
     """
 
-    def __init__(self, signals: List[DomainBase]) -> None:
+    def __init__(self, signals: List[DomainBase] | DomainBaseArray) -> None:
+        if isinstance(signals, DomainBaseArray):
+            signals = signals.signals
+            
         if not all(isinstance(s, DomainBase) for s in signals):
             raise TypeError("All elements of DomainBaseArray must be DomainBase instances.")
         self.signals = list(signals)

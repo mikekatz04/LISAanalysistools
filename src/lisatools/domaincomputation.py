@@ -49,6 +49,8 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             The TDI type to use for the likelihood computation. Default is "XYZ". Must be a key in the backend's TDITypeDict.
         force_backend : str, optional
             If provided, forces the use of the specified backend. Must be one of the supported backends for the domain computation. Default is 'cpu'.
+        device_id : int, optional
+            If using a GPU backend and multiple devices are available, specifies the device ID to use. Only used if `force_backend` is a GPU backend. Defaults to None for `cpu` usage.
     """
 
     def __init__(
@@ -63,6 +65,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         settings: STFTSettings | FDSettings = None,
         tdi_type: str = "XYZ",
         force_backend: str = "cpu",
+        device_id: int = None,
     ):
         super().__init__(force_backend=force_backend)
         self.tdi_type = tdi_type
@@ -80,6 +83,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
                 num_noise,
                 num_channels,
                 settings,
+                device_id
             ]:
                 if param is None:
                     raise ValueError("All Args: must be provided if acs is not given.")
@@ -90,6 +94,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             self.num_data = num_data
             self.num_noise = num_noise
             self.settings = settings
+            self.device_id = device_id
 
     def extract_from_acs(self, acs: AnalysisContainerArray, split_index: int):
         """
@@ -116,6 +121,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         all_acs = acs.acs.flatten()
         split_container_ids = acs.gpu_splits[split_index]
         self.split_acs = [all_acs[i] for i in split_container_ids]
+        self.device_id = acs.gpus[split_index]
 
     def __repr__(self):
         return f"BaseDomainComputationGroup with split index {self.split_index} and TDI type {self.tdi_type}"
@@ -400,3 +406,15 @@ class FDComputationGroup(BaseDomainComputationGroup):
         )
 
         return d_h_out, h_h_out
+
+
+class DomainComputationGroupArray:
+    """Helper class to manage multiple DomainComputationGroup instances for different splits."""
+
+    def __init__(self, 
+                 groups: list[BaseDomainComputationGroup]):
+        
+        self.groups = groups
+        self.gpus = [group.device_id for group in groups]
+
+    
