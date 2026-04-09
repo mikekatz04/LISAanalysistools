@@ -636,7 +636,7 @@ def icrs_to_ecliptic(
 
     cos_lambda = cos_dec * cos_ra / np.cos(beta)
     sin_lambda = (sin_dec * sin_eps + cos_dec * cos_eps * sin_ra) / np.cos(beta)
-    lambd = np.arctan2(sin_lambda, cos_lambda)
+    lambd = np.arctan2(sin_lambda, cos_lambda) % (2 * np.pi)
 
     if psi is not None:
         psi = np.asarray(psi, dtype=float)
@@ -720,7 +720,7 @@ def ecliptic_to_icrs(
 
     cos_ra = cos_beta * cos_lambda / np.cos(dec)
     sin_ra = (-sin_beta * sin_eps + cos_beta * cos_eps * sin_lambda) / np.cos(dec)
-    ra = np.arctan2(sin_ra, cos_ra)
+    ra = np.arctan2(sin_ra, cos_ra) % (2 * np.pi)
 
     if psi_ecliptic is not None:
         psi_ecliptic = np.asarray(psi_ecliptic, dtype=float)
