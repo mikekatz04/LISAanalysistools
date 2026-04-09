@@ -285,36 +285,40 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             )
 
         raise NotImplementedError(f"Unsupported analysis domain: {self.analysis_domain}")
-    
-    def find_bin_edges(self, times: np.ndarray | cp.ndarray) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+
+    def find_bin_edges(
+        self, times: np.ndarray | cp.ndarray
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
         For a given array of times, compute the edges of the bins defined by the data time step that contain the times. This is used to determine the time segments for the STFT or the frequency bins for the FD transformation.
 
         Args:
             times (Array): Array of times. Shape: (num_times,) or (num_bin, num_times).
-        
+
         Returns:
             Tuple of (left_edges, grid_length) where left_edges are the edges of the bins containing the times, and grid_length is the number of bins spanned by the times.
         """
         times = self.xp.atleast_2d(times)
 
         start_times = times[:, 0]
-        end_times = times[:, -1]   
+        end_times = times[:, -1]
 
-        if self.analysis_domain == 'STFT':
+        if self.analysis_domain == "STFT":
             left_edges_i = self.xp.digitize(start_times, self.stft_t_arr)
             right_edges_i = self.xp.digitize(end_times, self.stft_t_arr)
             left_edges = self.stft_t_arr[left_edges_i - 1]
 
             grid_length = (right_edges_i - left_edges_i + 1) * self.nperseg
 
-        elif self.analysis_domain == 'FD':
+        elif self.analysis_domain == "FD":
             left_edges = self.xp.full(shape=start_times.shape, fill_value=self.data_t0)
             grid_length = self.xp.full(shape=start_times.shape, fill_value=self.domain_settings.N)
 
         return left_edges, grid_length
-    
-    def build_common_grid(self, times: np.ndarray | cp.ndarray, channels: np.ndarray | cp.ndarray) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+
+    def build_common_grid(
+        self, times: np.ndarray | cp.ndarray, channels: np.ndarray | cp.ndarray
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
         For a given array of times and corresponding channels, build a common grid for all sources based on the analysis domain (STFT or FD).
 
@@ -325,15 +329,17 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             Tuple of (left_edges, padded_signals) where left_edges are the edges of the bins containing the times, and padded_signals is the array of channels padded to the common-size grid.
         """
         if len(channels.shape) == 2:
-            channels = channels[None, :, :] # add a batch dimension
+            channels = channels[None, :, :]  # add a batch dimension
             times = times[None, :]
 
         left_edges, grid_length = self.find_bin_edges(times)
         num_bin = left_edges.shape[0]
-        max_grid_length = grid_length.max()
-        
+        max_grid_length = int(grid_length.max())
+
         # create a common grid
-        padded_signals = self.xp.zeros((channels.shape[:-1] + (max_grid_length,)), dtype=channels.dtype) # shape (num_bin, num_channels, max_grid_length)
+        padded_signals = self.xp.zeros(
+            (channels.shape[:-1] + (max_grid_length,)), dtype=channels.dtype
+        )  # shape (num_bin, num_channels, max_grid_length)
 
         # now use advanced indexing to place each signal in the correct position on the common grid
         batch_indices = self.xp.arange(num_bin)[:, None, None]
@@ -457,7 +463,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             use_default_domain = True
 
         t0_here = times_in[0]
-        dt_here = times_in[1] - times_in[0]
+        dt_here = self.dt #float(times_in[2] - times_in[0])
 
         if output_domain == "TD":
             return TDSignal(
@@ -475,7 +481,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             # We must right-pad to a multiple of nperseg, otherwise the STFT
             # framing (NT = N // nperseg) will silently truncate the end of the
             # signal (which often contains the merger!)
-            n_to_data_t0 = round((t0_here - self.data_t0) / dt_here)
+
+            n_to_data_t0 = round(float((t0_here - self.data_t0) / dt_here))
             n_left = n_to_data_t0 % nperseg
             current_padded_len = times_in.shape[-1] + n_left
             target_n = current_padded_len + (nperseg - (current_padded_len % nperseg)) % nperseg
@@ -630,7 +637,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         if signal_duration is None:
             signal_duration = self.Tobs
-            
+
         self.force_uniform_stft = force_uniform_stft
 
         num_points = int(signal_duration / self.dt)
@@ -910,7 +917,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             scalar ``ra``, a :class:`DomainBaseArray` for array ``ra``.
         """
 
-        times, channels = self.compute_tdi_channels(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
+        times, channels = self.compute_tdi_channels(
+            *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs
+        )
 
         left_edges, padded_signals = self.build_common_grid(times, channels)
         return self.transform_to_domain(left_edges, padded_signals)
@@ -943,18 +952,24 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             DomainBaseArray containing the signals for each source, transformed to the desired output domain.
         """
 
-        times, channels = self.compute_tdi_channels(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
+        times, channels = self.compute_tdi_channels(
+            *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs
+        )
 
-        signals_out = []
-        for i in range(channels.shape[0]):
-            signals_out.append(
-                self._td_to_output_domain(
-                    times_in=times[i],
-                    signal_in=channels[i],
+        if len(times.shape) == 2:  # batched path
+
+            signals_out = []
+            for i in range(channels.shape[0]):
+                signals_out.append(
+                    self._td_to_output_domain(
+                        times_in=times[i],
+                        signal_in=channels[i],
+                    )
                 )
-            )
 
-        return DomainBaseArray(signals_out)
+            return DomainBaseArray(signals_out)
+
+        return self._td_to_output_domain(times_in=times, signal_in=channels)
 
 
 class TDTDIOnFlyWaveformBase(TDWaveformBase):
@@ -985,10 +1000,12 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         zero_inclination: bool = False,
         force_backend: str = "cpu",
     ) -> None:
-        
+
         if tdi_channels != "XYZ":
-            raise NotImplementedError("Only XYZ channels are supported for TDI on-the-fly waveforms for now.")
-        
+            raise NotImplementedError(
+                "Only XYZ channels are supported for TDI on-the-fly waveforms for now."
+            )
+
         super().__init__(
             waveform_t0=waveform_t0,
             data_td_settings=data_td_settings,
@@ -1000,11 +1017,10 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
             stft_dt=stft_dt,
             freq_min=freq_min,
             freq_max=freq_max,
-            force_backend=force_backend
-            )
+            force_backend=force_backend,
+        )
 
         self.zero_inclination = zero_inclination
-
 
     @property
     def max_length(self) -> int:
