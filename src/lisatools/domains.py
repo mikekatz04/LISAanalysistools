@@ -729,8 +729,12 @@ class WDMSettings(DomainSettingsBase):
         return (self.Nf, self.Nt)
     
     @property
+    def t_td_arr(self) -> np.ndarray:
+        return self.xp.arange(self.N) * self.data_dt
+    
+    @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.Nt) * self.data_dt
+        return self.xp.arange(self.Nt) * self.layer_dt
 
     @property
     def f_arr(self) -> np.ndarray:
@@ -741,7 +745,7 @@ class WDMSettings(DomainSettingsBase):
         return self.xp.arange(self.Nf + 1) * self.layer_df
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.Nt + 1) * self.data_dt
+        return self.xp.arange(self.Nt + 1) * self.layer_dt
 
     def phitilde(self, omega, dOmega):
         insDOM = 1. / np.sqrt(dOmega)
@@ -1047,15 +1051,16 @@ class WDMSignal(WDMSettings, DomainBase):
         return fig, ax
 
 class WDMLookupTable(WDMSettings):
-    def __init__(self, settings: WDMSettings, f_steps_per: int, fdot_steps: int, num_channel: int, num_layers_diff: int=10, fdot_max: float= 0.1, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, sub_setting_full_time_layers: Optional[bool] = False):
+    def __init__(self, settings: WDMSettings, f_steps_per: int, fdot_steps: int, num_channel: int, num_layers_diff: int=2, fdot_max: float= 0.1, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, time_layers: Optional[int] = None, td_window: Optional[np.ndarray] = None):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
 
         self.store_path = store_path
-        if sub_setting_full_time_layers:
+        if time_layers is None:
             time_layers = self.Nt
-        else:
-            time_layers = 6
+
+        assert isinstance(time_layers, int)
+        
         self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
         self.num_layers_diff = num_layers_diff
         self.m_ref = int(3e-3 / self.sub_settings.layer_df)  # int(self.sub_settings.Nf / 2)
@@ -1066,18 +1071,31 @@ class WDMLookupTable(WDMSettings):
         self.f_max = (self.m_ref + num_layers_diff) * self.sub_settings.layer_df
 
         self.f_steps = f_steps_per * (2 * num_layers_diff + 1)
+        if self.f_steps % 2 != 1:
+            self.f_steps += 1
+
         self.fdot_steps = fdot_steps
+        if self.fdot_steps % 2 != 1:
+            self.fdot_steps += 1
+
+        if fdot_max == 0.0:
+            self.run_fdot = False
+            self.fdot_steps = 1
+            self.fdot_vals = self.xp.array([0.0])
+            self.delta_fdot = 0.0
+
+        else:
+            self.run_fdot = True
+            self.fdot_vals = self.xp.linspace(-fdot_max, fdot_max, self.fdot_steps)
+            self.delta_fdot = self.fdot_vals[1] - self.fdot_vals[0]
+
+
         self.f_vals = self.xp.linspace(self.f_min, self.f_max, self.f_steps)
         self.f_vals_norm = self.f_vals - self.f_ref
         self.delta_f = self.f_vals[1] - self.f_vals[0]
 
         self.fdot_max = fdot_max
-        self.fdot_vals = self.xp.linspace(-fdot_max, fdot_max, fdot_steps)
-        self.delta_fdot = self.fdot_vals[1] - self.fdot_vals[0]
-
-        self.points = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals, self.fdot_vals)]).T
-        self.norm_points = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals_norm, self.fdot_vals)]).T
-
+        
         run_table_gen = True
         if store_path is not None:
             if os.path.exists(self.store_path):
@@ -1097,34 +1115,47 @@ class WDMLookupTable(WDMSettings):
         if run_table_gen:
             self.t_ref = self.n_ref * self.sub_settings.layer_dt
 
-            total_f_fdot_vals = self.f_steps * fdot_steps
+            total_f_fdot_vals = self.f_steps * self.fdot_steps
             
-            _f_vals, _fdot_vals = self.points.T
+            if self.run_fdot:
+                _f_vals, _fdot_vals = self.points.T
+            else:
+                _f_vals = self.points
+                _fdot_vals = np.zeros_like(_f_vals)
+
             t_vals = np.arange(self.sub_settings.N) * self.data_dt
 
             t_diff = t_vals - self.t_ref
 
+            if batch_size_gen == -1:
+                batch_size_gen = total_f_fdot_vals
+                
             batches = np.arange(0, total_f_fdot_vals, batch_size_gen)
             if batches[-1] < total_f_fdot_vals:
                 batches = np.append(batches, np.array([total_f_fdot_vals]))
 
             _table_sin = self.xp.zeros((total_f_fdot_vals,))
             _table_cos = self.xp.zeros((total_f_fdot_vals,))
-            self.tukey_window = signal.windows.tukey(self.sub_settings.N, alpha=0.05)
+            if td_window is None:
+                td_window = self.xp.ones_like(t_diff)
+
+            self.td_window = td_window
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
                 inds = slice(st_batch, end_batch)
-                if np.any(_fdot_vals[inds] != 0.0):
-                    continue
+                # if not np.allclose(_f_vals[inds], self.f_ref) or np.any(_fdot_vals[inds] != 0.0):
+                    # continue
                 
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
-                wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.tukey_window)
-                wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.tukey_window)
-                
-                breakpoint()
-                _table_sin[inds] = wave_sin_wdm[:, self.m_ref, self.n_ref] 
-                _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
+                wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
+                wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
+                try:
+                    _table_sin[inds] = wave_sin_wdm[:, self.m_ref, self.n_ref] 
+                    _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
+                except:
+                    breakpoint()
                 print(inds)
+                
             self.table_sin = _table_sin.reshape((self.f_steps, self.fdot_steps)).copy()
             self.table_cos = _table_cos.reshape((self.f_steps, self.fdot_steps)).copy()
 
@@ -1141,6 +1172,20 @@ class WDMLookupTable(WDMSettings):
                 with open(self.store_path, "wb") as fp:
                     pickle.dump(output_dict, fp, pickle.HIGHEST_PROTOCOL)
 
+    @property
+    def points(self) -> np.ndarray:
+        if self.run_fdot:
+            return self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals, self.fdot_vals)]).T
+        else:
+            return self.f_vals
+        
+    @property
+    def norm_points(self) -> np.ndarray:
+        if self.run_fdot:
+            return self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.f_vals_norm, self.fdot_vals)]).T
+        else:
+            return self.f_vals_norm
+        
     @property
     def table_sin(self) -> np.ndarray:
         return self._table_sin
@@ -1177,30 +1222,60 @@ class WDMLookupTable(WDMSettings):
         else:
             interpolate = interpolate_cpu
 
-        return interpolate.LinearNDInterpolator(self.norm_points, table.flatten(), rescale=True)
-
+        if self.run_fdot:
+            return interpolate.LinearNDInterpolator(self.norm_points, table.flatten(), rescale=True)
+        else:
+            return interpolate.interp1d(self.norm_points, table.flatten())
+        
     def get_table_coeffs(self, f_arr: np.ndarray, fdot_arr: np.ndarray, ms: np.ndarray):
         # ms = (f_arr // self.layer_df).astype(int)
         assert ms.max() <= self.Nf + 1
         assert ms.min() >= 0
-        assert self.xp.all((f_arr >= 0.0) & (f_arr < self.f_arr.max()))
-        assert self.xp.all((fdot_arr > self.fdot_vals.min()) & (fdot_arr < self.fdot_vals.max()))
+        assert self.xp.all((f_arr >= 0.0) & (f_arr <= self.f_arr.max()))
+        assert self.xp.all((fdot_arr >= self.fdot_vals.min()) & (fdot_arr <= self.fdot_vals.max()))
         f_norm = f_arr - ms * self.layer_df
 
-        sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
-        cos_coeffs = self.table_cos_interpolate(f_norm, fdot_arr)
+        if self.run_fdot:
+            sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
+            cos_coeffs = self.table_cos_interpolate(f_norm, fdot_arr)
+        else:
+            sin_coeffs = self.table_sin_interpolate(f_norm)
+            cos_coeffs = self.table_cos_interpolate(f_norm)
+        
         sin_coeffs[np.isnan(sin_coeffs)] = 0.0
         cos_coeffs[np.isnan(cos_coeffs)] = 0.0
         return (sin_coeffs, cos_coeffs)
 
-    def get_wdm_coeffs(self, amp_arr: np.ndarray, phi_arr: np.ndarray, f_arr: np.ndarray, fdot_arr: np.ndarray, num_m_layers: int = 1):
+    def get_wdm_coeffs(self, amp_arr: np.ndarray, phi_arr: np.ndarray, f_arr: np.ndarray, fdot_arr: np.ndarray, n_arr: np.ndarray, num_m_layers: int = 1):
         ms = (f_arr // self.layer_df).astype(int)
         wdm_coeffs_out = np.zeros((amp_arr.shape[0], num_m_layers * 2 + 1))
         m_map = -np.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
+        is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
             ms_to_use = (ms + m_diff).astype(int)
             keep_now = np.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
-            sin_coeffs, cos_coeffs = self.get_table_coeffs(f_arr[keep_now], fdot_arr[keep_now], ms_to_use[keep_now])
+            _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_arr[keep_now], fdot_arr[keep_now], ms_to_use[keep_now])
+            
+            is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0)) 
+
+            sin_coeffs = np.zeros_like(_sin_coeffs)
+            cos_coeffs = np.zeros_like(_cos_coeffs)
+            if is_m_ref_n_ref_even:
+                sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
+                cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
+
+                sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
+                cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
+
+            else:
+                print("Need to explicitly check this.")
+                sin_coeffs[is_m_plus_n_even] = -_cos_coeffs[is_m_plus_n_even]
+                cos_coeffs[is_m_plus_n_even] = _sin_coeffs[is_m_plus_n_even]
+
+                sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
+                cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
+            
+            # TODO: idk if this is right NEED TO CHECK
             wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * np.sin(phi_arr[keep_now]) + cos_coeffs * np.cos(phi_arr[keep_now]))
             m_map[keep_now, i] = ms_to_use[keep_now]
         return wdm_coeffs_out, m_map

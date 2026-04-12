@@ -38,7 +38,7 @@ from lisatools.utils.constants import *
 
 from lisatools.domains import WAVELET_DURATION, TDSignal, TDSettings, FDSignal, FDSettings, WDMSignal, WDMSettings, WDMLookupTable
 from fastlisaresponse.gbcomps import GBWDMComputations
-
+from scipy.signal.windows import tukey
 
 force_backend = "cpu"
 xp = np if force_backend == "cpu" else cp
@@ -49,7 +49,7 @@ dt = 2.5
 Tobs = 2 * YRSID_SI
 Nf = -1
 Nt = -1
-for tmp in np.linspace(3., 5, 1000):
+for tmp in np.linspace(4., 5, 1000):
     wavelet_duration = int(tmp / 365 * YRSID_SI / dt) * dt
     Nt = int(Tobs / wavelet_duration)
     Tobs = Nt * wavelet_duration
@@ -64,13 +64,33 @@ t_tdi = xp.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
 
-# wdm_lookup_table = WDMLookupTable(wdm_settings, 20, 3, 3, store_path="./wdm_lookup_table.pkl", sub_setting_full_time_layers=True)
-# f_arr = xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
+wdm_lookup_table = WDMLookupTable(wdm_settings, 100, 50, 3, store_path="./wdm_lookup_table.pkl", fdot_max=0.0, time_layers=8, batch_size_gen=200)
+f_arr = np.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
+#xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
 # fdot_arr = xp.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
-# amp_arr = xp.ones_like(f_arr)
-# phase_arr = xp.ones_like(f_arr)
-# wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_arr, phase_arr, f_arr, fdot_arr, num_m_layers=4)
-# breakpoint()
+
+t_wdm = wdm_settings.t_arr
+
+amp0 = 1e-22
+f0_check = 3e-3  # wdm_lookup_table.m_ref * wdm_settings.layer_df
+fdot0_check = 0.0
+phi0 = np.pi / 9.
+
+td_set = TDSettings(wdm_settings.N, dt, force_backend=force_backend)
+t_check = np.arange(wdm_settings.N) * dt
+wave_check = amp0 * np.sin(2 * np.pi * (f0_check * t_check + 1/2 * fdot0_check * t_check ** 2) + phi0)
+wave_check_wdm = TDSignal(wave_check[None, :], td_set).wdmtransform(wdm_settings, window=tukey(wdm_settings.N, alpha=0.0))
+phi_t = 2 * np.pi * (f0_check * t_wdm + 1/2 * fdot0_check * t_wdm ** 2) + phi0
+freq_t = f0_check + fdot0_check * t_wdm
+fdot_t = np.full_like(freq_t, fdot0_check)
+amp_t = amp0 * xp.ones_like(t_wdm)
+
+n_arr = np.arange(wdm_settings.Nt)
+wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=0)
+plt.plot(wave_check_wdm[0, wdm_lookup_table.m_ref], lw=3)
+plt.plot(wdm_coeffs.squeeze(), "--", lw=2)
+plt.show()
+breakpoint()
 # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
 
 num_bin = 1
