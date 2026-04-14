@@ -172,7 +172,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     ra = float(catalogue_entry["RightAscension"])
     dec = float(catalogue_entry["Declination"])
     psi_icrs = float(catalogue_entry["PolarisationAngle"])
-    psi_ssb, lam_ecl, beta_ecl = icrs_to_ecliptic(psi_icrs, ra, dec)
+    lam_ecl, beta_ecl, psi_ssb = icrs_to_ecliptic(ra, dec, psi_icrs)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
     logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
@@ -213,6 +213,8 @@ def subtract_initial_signal(
     else:
         logger.info(f"No initial signals for {source_name}")
 
+    print("coordinates post transform: ", inj_coords_in[0])
+    #breakpoint()
 
 def build_psd_moves(
     engine_info: Setup,
@@ -314,8 +316,8 @@ def build_mbh_moves_phenom(
     ntemps = curr.general_info.ntemps
 
     wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
-
-    subtract_initial_signal(acs, state, wave_gen, "mbh", mbh_info)
+    # breakpoint()
+    subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
     betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
@@ -325,7 +327,7 @@ def build_mbh_moves_phenom(
     mbh_move_args = (
         "mbh",  # branch_name
         coords_shape,
-        wave_gen,
+        wave_gen.get_signals_for_residuals,
         # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs
         dict(propagate_data_res_kwargs=False),  # waveform_like_kwargs

@@ -121,7 +121,12 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         all_acs = acs.acs.flatten()
         split_container_ids = acs.gpu_splits[split_index]
         self.split_acs = [all_acs[i] for i in split_container_ids]
-        self.device_id = acs.gpus[split_index]
+        self.device_id = acs.gpus[split_index] if acs.gpus is not None else None
+
+        if self.backend.name.split('_')[-1] == "cpu":
+            assert self.device_id == None, "CPU backend specified but device_id is not None. Please set device_id to None for CPU usage."
+        else:
+            assert self.device_id is not None, "GPU backend specified but device_id is None. Please provide a valid device_id for GPU usage."
 
     def __repr__(self):
         return f"BaseDomainComputationGroup with split index {self.split_index} and TDI type {self.tdi_type}"

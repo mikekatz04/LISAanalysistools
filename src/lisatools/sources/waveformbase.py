@@ -90,7 +90,6 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     Args:
     waveform_t0: Initial time in seconds.
     dt: Time step in seconds.
-    Tobs: Observation time in years.
     data_t0: Optional initial time for the data. If None, defaults to waveform_t0.
             If provided, the output time arrays will be shifted so that the first sample corresponds to a integer multiple of dt after data_t0.
             This allows for proper alignment of the waveform with an external time grid (e.g. from a loader) when data_t0 is set to the same reference time as the loader.
@@ -365,7 +364,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         Left-pads with zeros so that the number of samples between the (new) t0 and
         data_t0 is an integer multiple of ``align_samples``.  For STFT this enforces
-        segment-boundary alignment (align_samples = nperseg); for FD pass align_samples=1
+        segment-boundary alignment (align_samples = nperseg); for FD pass align_samples=target_n to align to the full FFT length.
         so that the signal starts exactly at data_t0.
 
         Then, if ``target_n`` is given, right-pads with zeros so that the total number
@@ -510,7 +509,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
                 df = domain_kwargs["df"]
             N_td_target = round(1 / (df * dt_here))
             padded_times, padded_signal = self._pad_td_signal(
-                times_in, signal_in, align_samples=1, target_n=N_td_target
+                times_in, signal_in, align_samples=N_td_target, target_n=N_td_target
             )
 
             window = tukey(padded_times.shape[-1], alpha=self.tukey_alpha, xp=self.xp)
@@ -927,8 +926,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def get_signals_for_residuals(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
         ra: np.ndarray | cp.ndarray = None,
         dec: np.ndarray | cp.ndarray = None,
         merger_time: np.ndarray | cp.ndarray = None,
@@ -939,10 +936,8 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         Args:
             *args: Arguments for the amplitude and phase generation method.
-                The last 5 positional arguments can be (inclination, psi, ra, dec, merger_time)
+                The last 3 positional arguments can be (ra, dec, merger_time)
                 if not provided as keyword arguments.
-            inclination: Inclination angles for the sources, shape (Nbatch,).
-            psi: Polarization angles for the sources, shape (Nbatch,).
             ra: Right ascension for the sources, shape (Nbatch,).
             dec: Declination for the sources, shape (Nbatch,).
             merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).

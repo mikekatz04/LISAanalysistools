@@ -101,6 +101,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     from lisatools.utils.constants import YRSID_SI
     Tobs = 1. * YRSID_SI / 12.0
     dt = 2.5
+    start_freq = 5e-5
+    end_freq = 1e-1
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
@@ -119,10 +121,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 30
     ntemps = 4
 
-    tukey_alpha = 0.1
-
     basis_domain = "stft"
     stft_dt = 8 * 3600.0  # 8 hours
+    window_taper_duration = 1 / start_freq
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['noise'],
@@ -130,7 +131,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  do_plots=True,
                                 )
     
-    preprocess_kwargs = dict(normalize=True)
+    preprocess_kwargs = dict(normalize=False)
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
@@ -139,15 +140,15 @@ def get_general_erebor_settings() -> GeneralSetup:
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=1e-4,
-        end_freq=1e-2,
+        start_freq=start_freq,
+        end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        window_taper_duration=window_taper_duration,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,

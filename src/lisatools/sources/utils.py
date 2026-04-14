@@ -654,7 +654,7 @@ def icrs_to_ecliptic(
         sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
 
         deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-        psi_ecliptic = psi - deltapsi
+        psi_ecliptic = (psi - deltapsi) % np.pi
 
         return out_fun(lambd), out_fun(beta), out_fun(psi_ecliptic)
 
@@ -738,7 +738,7 @@ def ecliptic_to_icrs(
         sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
 
         deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-        psi = psi_ecliptic + deltapsi
+        psi = (psi_ecliptic + deltapsi) % np.pi
 
         return out_fun(ra), out_fun(dec), out_fun(psi)
 

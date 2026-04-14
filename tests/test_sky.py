@@ -48,3 +48,10 @@ class TestSky:
         assert np.isclose(ra, ra_converted)
         assert np.isclose(dec, dec_converted)
 
+    def test_round_trip_with_psi(self):
+        # Test round trip with psi included
+        lon, lat, psi_ecl = icrs_to_ecliptic(ra, dec, psi_icrs)
+        ra_converted, dec_converted, psi_converted = ecliptic_to_icrs(lon, lat, psi_ecl)
+        assert np.isclose(ra, ra_converted)
+        assert np.isclose(dec, dec_converted)
+        assert np.isclose(psi_icrs, psi_converted)
