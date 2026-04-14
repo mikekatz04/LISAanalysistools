@@ -18,7 +18,7 @@ from tqdm import tqdm
 from ..datacontainer import DataResidualArray
 from ..detector import L1Orbits, Orbits
 from ..domains import DomainBase, DomainSettingsBase, TDSettings, TDSignal
-from ..utils.utility import detrend, get_array_module
+from ..utils.utility import get_array_module
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +386,7 @@ class SignalProcessor:
         """{'X': arr, 'Y': arr, 'Z': arr} -> ndarray (n_ch, N)"""
         return np.vstack([mp_data[ch] for ch in self._CHANNEL_NAMES if ch in mp_data])
 
-    def _filter_via_mp(self, *, low=None, high=None, order=6, filter_type="butterworth", zero_phase=True):
+    def _filter_via_mp(self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True):
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.filter(low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase)
         return self._from_mp_dict(mp.data)
@@ -413,7 +413,7 @@ class SignalProcessor:
         self,
         low: float,
         high: float,
-        order: int = 6,
+        order: int = 2,
         filter_type: str = "butterworth",
         zero_phase: bool = True,
         **kwargs,
@@ -428,7 +428,7 @@ class SignalProcessor:
         high : float
             Upper cutoff frequency in Hz
         order : int, optional
-            Filter order (default: 6)
+            Filter order (default: 2)
         filter_type : str, optional
             Filter type: 'butterworth', 'chebyshev1', 'chebyshev2', 'bessel'
             (default: 'butterworth')
@@ -451,7 +451,7 @@ class SignalProcessor:
     def lowpass_filter(
         self,
         cutoff: float,
-        order: int = 6,
+        order: int = 2,
         filter_type: str = "butterworth",
         zero_phase: bool = True,
         **kwargs,
@@ -464,7 +464,7 @@ class SignalProcessor:
         cutoff : float
             Cutoff frequency in Hz
         order : int, optional
-            Filter order (default: 6)
+            Filter order (default: 2)
         filter_type : str, optional
             Filter type (default: 'butterworth')
         zero_phase : bool, optional
@@ -486,7 +486,7 @@ class SignalProcessor:
     def highpass_filter(
         self,
         cutoff: float,
-        order: int = 6,
+        order: int = 2,
         filter_type: str = "butterworth",
         zero_phase: bool = True,
         **kwargs,
@@ -499,7 +499,7 @@ class SignalProcessor:
         cutoff : float
             Cutoff frequency in Hz
         order : int, optional
-            Filter order (default: 6)
+            Filter order (default: 2)
         filter_type : str, optional
             Filter type (default: 'butterworth')
         zero_phase : bool, optional
@@ -685,7 +685,6 @@ class BaseProcessingStep(SignalProcessor):
 
     def process(
         self,
-        do_detrend: bool = True,
         highpass_kwargs: dict = None,
         lowpass_kwargs: dict = None,
         bandpass_kwargs: dict = None,
@@ -698,7 +697,6 @@ class BaseProcessingStep(SignalProcessor):
         Apply preprocessing steps to the loaded data. for each step, if the corresponding kwargs is None, the step is skipped.
 
         Args:
-            do_detrend (bool, optional): Whether to detrend the data. Defaults to True.
             highpass_kwargs (dict, optional): Keyword arguments for highpass_filter method.
             lowpass_kwargs (dict, optional): Keyword arguments for lowpass_filter method.
             bandpass_kwargs (dict, optional): Keyword arguments for bandpass_filter method.
@@ -712,17 +710,6 @@ class BaseProcessingStep(SignalProcessor):
             tuple: Processed times and data arrays.
         """
         filtered = False
-
-        if do_detrend:
-            if self.verbose:
-                logger.info("Detrending data...")
-            _X = detrend(self.times, self.data[0])
-            _Y = detrend(self.times, self.data[1])
-            _Z = detrend(self.times, self.data[2])
-            self.data = np.vstack([_X, _Y, _Z])
-            assert (
-                self.data.shape[1] == self.times.shape[0]
-            ), "Data and times length mismatch after detrending."
 
         if highpass_kwargs is not None:
             if self.verbose:
