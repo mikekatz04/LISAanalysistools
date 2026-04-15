@@ -45,7 +45,8 @@ dependencies = [
   "mojito-processor",
   "astropy",
   "scikit-learn",
-  "cudakima"
+  "cudakima",
+  "install>=0.0.1",
 ]
 
 
