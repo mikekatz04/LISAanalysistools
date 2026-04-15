@@ -1752,6 +1752,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         use_splines: bool = False,
         force_backend: Optional[str] = "cpu",
         mask_percentage: Optional[float] = None,
+        window_values: Optional[np.ndarray | cp.ndarray] = None
     ):
 
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
@@ -1775,6 +1776,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
 
+        self.window_values = window_values
         self._setup()
 
     @property
@@ -1787,6 +1789,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "use_splines": self.use_splines,
             "force_backend": "cpu" if self.backend.xp == np else "gpu",
             "mask_percentage": self.mask_percentage,
+            "window_values": self.window_values
         }
 
     @property
@@ -1801,6 +1804,34 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     @time_indices.setter
     def time_indices(self, x):
         self._time_indices = x
+
+    def __deepcopy__(self, memo):
+        """Custom deepcopy to handle unpicklable backend objects."""
+        from copy import copy
+
+        # Create a new instance without calling __init__
+        cls = self.__class__
+        new_obj = cls.__new__(cls)
+
+        # Copy the memo to avoid infinite recursion
+        memo[id(self)] = new_obj
+
+        # Manually copy attributes
+        for key, value in self.__dict__.items():
+            if key in ("_backend", "pycpp_sensitivity_matrix"):
+                # Don't deepcopy backend objects - just reference
+                setattr(new_obj, key, value)
+            elif key == "orbits":
+                # Shallow copy orbits (share the same backend)
+                setattr(new_obj, key, copy(value))
+            elif key == "spline_interpolant":
+                # Shallow copy spline interpolant
+                setattr(new_obj, key, copy(value))
+            else:
+                # Deepcopy everything else
+                setattr(new_obj, key, deepcopy(value, memo))
+
+        return new_obj
 
     def get_averaged_ltts(self):
         # first, compute the average ltts and their differences.
@@ -1837,6 +1868,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         avg_ltts, delta_ltts = self.get_averaged_ltts()
 
+        self._setup_window()
+
         self.pycppsensmat_args = [
             self.xp.asarray(avg_ltts.flatten().copy()),
             self.xp.asarray(delta_ltts.flatten().copy()),
@@ -1844,39 +1877,27 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.orbits.armlength,
             self.tdi_generation,
             self.use_splines,
+            self.window_normalization,
         ]
 
         self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
 
         self._init_basis_settings()
 
-    def __deepcopy__(self, memo):
-        """Custom deepcopy to handle unpicklable backend objects."""
-        from copy import copy
+    def _setup_window(self):
+        """Setup window values for the c++ backend."""
+        if self.window_values is not None:
+            assert isinstance(self.window_values, np.ndarray) or isinstance(self.window_values, cp.ndarray)
+            assert self.window_values.ndim == 1
 
-        # Create a new instance without calling __init__
-        cls = self.__class__
-        new_obj = cls.__new__(cls)
+            self.window_values = self.xp.asarray(self.window_values)
 
-        # Copy the memo to avoid infinite recursion
-        memo[id(self)] = new_obj
-
-        # Manually copy attributes
-        for key, value in self.__dict__.items():
-            if key in ("_backend", "pycpp_sensitivity_matrix"):
-                # Don't deepcopy backend objects - just reference
-                setattr(new_obj, key, value)
-            elif key == "orbits":
-                # Shallow copy orbits (share the same backend)
-                setattr(new_obj, key, copy(value))
-            elif key == "spline_interpolant":
-                # Shallow copy spline interpolant
-                setattr(new_obj, key, copy(value))
-            else:
-                # Deepcopy everything else
-                setattr(new_obj, key, deepcopy(value, memo))
-
-        return new_obj
+            num_points = self.window_values.shape[0]
+            self.window_normalization = float(
+                self.xp.sum(self.window_values ** 2) / num_points
+            )
+        else:
+            self.window_normalization = 1.0
 
     def _init_basis_settings(self):
         """Initialize basis settings from domain settings."""

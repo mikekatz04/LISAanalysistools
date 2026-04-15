@@ -783,7 +783,6 @@ class BaseProcessingStep(SignalProcessor):
         self,
         settings: DomainSettingsBase,
         window: Optional[np.ndarray | str] = None,
-        normalize: bool = False,
         return_orbits: bool = False,
     ) -> DataResidualArray | tuple[DataResidualArray, Orbits]:
         """
@@ -792,7 +791,6 @@ class BaseProcessingStep(SignalProcessor):
         Args:
             settings (DomainSettingsBase): Settings for the domain.
             window (Optional[np.ndarray | str], optional): Window to apply to the data. Defaults to None.
-            normalize (bool, optional): Whether to normalize the data with the window. Defaults to False.
             return_orbits (bool, optional): Whether to return the orbits instance along with the domain. Defaults to False.
 
         Returns:
@@ -805,19 +803,6 @@ class BaseProcessingStep(SignalProcessor):
             input_signal_domain=self.td_signal.settings,
             window=window,
         )
-
-        if window is not None and normalize:
-            if isinstance(window, str):
-                raise NotImplementedError(
-                    "Normalization with string-specified windows is not implemented yet."
-                )
-
-            logger.info("Normalizing data with window norm.")
-            window_norm = np.sum(window**2)
-            N = window.shape[0]
-            factor = float(np.sqrt(window_norm / N))
-            data_residual_array.data_res_arr.arr /= factor
-            logger.info(f"Applied normalization factor to the frequency domain data: {factor:.3e}")
 
         if return_orbits:
             return data_residual_array, self.orbits

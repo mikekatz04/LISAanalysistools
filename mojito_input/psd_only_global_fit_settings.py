@@ -121,6 +121,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     winalpha = 0.1 # bh tryout
     wintype = "bh92"
+    normalize_window = False
 
     basis_domain = "stft" # fd
     stft_dt = 24 * 3600.0  # how many hours
@@ -131,7 +132,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  do_plots=True,
                                 )
     
-    preprocess_kwargs = dict(normalize=True)
+    preprocess_kwargs = dict()
 
     sensitivity_init_kwargs = dict(tdi_generation=2, 
                                    mask_percentage=0.02,
@@ -156,6 +157,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
+        normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
         #remove_from_data=["mbhb", "dgb", "igb", "vgb"],
         #channels=["X", "Y", "Z"],  # , "T"
