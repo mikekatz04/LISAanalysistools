@@ -63,8 +63,11 @@ N_sparse = 256
 t_tdi = xp.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
-
-wdm_lookup_table = WDMLookupTable(wdm_settings, 100, 50, 3, store_path="./wdm_lookup_table.pkl", fdot_max=0.0, time_layers=8, batch_size_gen=200)
+time_layers = wdm_settings.Nt
+tukey_alpha = 0.00
+td_window = tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha)
+#wdm_lookup_table = WDMLookupTable(wdm_settings, 0.01, 0.1, 3, store_path="./wdm_lookup_table_with_fdot.pkl", num_layers_diff=1, fdot_max_factor=8.0, time_layers=time_layers, batch_size_gen=200)
+wdm_lookup_table = WDMLookupTable(wdm_settings, 0.01, 0.1, 3, store_path="./wdm_lookup_table_without_fdot.pkl", num_layers_diff=2, fdot_max_factor=0.0, time_layers=time_layers, batch_size_gen=1, td_window=td_window)
 f_arr = np.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
 #xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
 # fdot_arr = xp.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
@@ -74,21 +77,43 @@ t_wdm = wdm_settings.t_arr
 amp0 = 1e-22
 f0_check = 3e-3  # wdm_lookup_table.m_ref * wdm_settings.layer_df
 fdot0_check = 0.0
-phi0 = np.pi / 9.
+phi0 = 0.887249823409
 
 td_set = TDSettings(wdm_settings.N, dt, force_backend=force_backend)
 t_check = np.arange(wdm_settings.N) * dt
 wave_check = amp0 * np.sin(2 * np.pi * (f0_check * t_check + 1/2 * fdot0_check * t_check ** 2) + phi0)
-wave_check_wdm = TDSignal(wave_check[None, :], td_set).wdmtransform(wdm_settings, window=tukey(wdm_settings.N, alpha=0.0))
+
+wave_check_wdm = TDSignal(wave_check[None, :], td_set).wdmtransform(wdm_settings, window=tukey(wdm_settings.N, alpha=tukey_alpha))
 phi_t = 2 * np.pi * (f0_check * t_wdm + 1/2 * fdot0_check * t_wdm ** 2) + phi0
 freq_t = f0_check + fdot0_check * t_wdm
-fdot_t = np.full_like(freq_t, fdot0_check)
+fdot_t = np.full_like(freq_t, 0.0)  # fdot0_check)
 amp_t = amp0 * xp.ones_like(t_wdm)
 
 n_arr = np.arange(wdm_settings.Nt)
-wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=0)
-plt.plot(wave_check_wdm[0, wdm_lookup_table.m_ref], lw=3)
-plt.plot(wdm_coeffs.squeeze(), "--", lw=2)
+wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=1)
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex=True, sharey=True)
+_check_fill_wave = np.zeros_like(wave_check_wdm[0])
+_check_fill_wave[m_layers.flatten(), np.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1).flatten()] = wdm_coeffs.flatten()
+_check_fill_wdm = WDMSignal(_check_fill_wave[None, :], wdm_settings)
+min_val = np.min([wave_check_wdm[:].min(), _check_fill_wdm[:].min()])
+max_val = np.max([wave_check_wdm[:].max(), _check_fill_wdm[:].max()])
+
+cax1 = fig.add_axes([0.9, 0.55, 0.05, 0.25])
+cax2 = fig.add_axes([0.9, 0.2, 0.05, 0.25])
+
+ind_check = int(f0_check / wdm_settings.layer_df)
+wave_check_wdm.heatmap(index=0, fig=fig, ax=ax1, vmin=min_val, vmax=max_val, cax=cax1)
+_check_fill_wdm.heatmap(index=0, fig=fig, ax=ax2, vmin=min_val, vmax=max_val)
+difference = WDMSignal(np.log10(np.abs((wave_check_wdm[:] - _check_fill_wdm[:]))), wdm_settings)  #  / wave_check_wdm[:]
+difference.heatmap(index=0, fig=fig, ax=ax3, vmin=difference[:, ind_check, 20:-20].min().item(), vmax=difference[:, ind_check, 20:-20].max().item(), cax=cax2, cmap=cm.Blues)
+ax1.set_ylim(f0_check * 0.997, f0_check * 1.003)
+ax2.set_ylim(f0_check * 0.997, f0_check * 1.003)
+# fig.savefig(f"wdm_check_3_alpha_{tukey_alpha}.png")
+
+plt.show()
+breakpoint()
+ax1.plot(wave_check_wdm[0, m_layers[0,0]], lw=3)
+ax2.plot(wdm_coeffs.squeeze(), "--", lw=2)
 plt.show()
 breakpoint()
 # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)

@@ -500,7 +500,7 @@ class FDSignal(FDSettings, DomainBase):
         
         # free(wdm_temp);
         
-    def wdmtransform(self, settings=None, window=None, return_transpose_time_axis_first: bool = False, window_squared: bool = False):
+    def wdmtransform(self, settings=None, window=None, return_transpose_time_axis_first: bool = False, is_psd: bool = False):
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
@@ -525,7 +525,7 @@ class FDSignal(FDSettings, DomainBase):
 
 
         # multiply by  2 / settings.layer_df for forward transform
-        exponent = 1 if not window_squared else 2
+        exponent = 1 if not is_psd else 2
         base_window = (settings.window[:] * 2 / settings.Nf) ** exponent
         dc_window = (settings.dc_layer_window * 2 / settings.Nf) ** exponent
         # TODO: check if this is right?!?!
@@ -557,6 +557,9 @@ class FDSignal(FDSettings, DomainBase):
         before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
         before_ifft[:, 0, 1:] *= dc_window
         before_ifft[:, -1, 1:] *= max_freq_window
+
+        if is_psd:
+            breakpoint()
 
         after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
         
@@ -676,7 +679,8 @@ class WDMSettings(DomainSettingsBase):
         max_freq_layer_window: Optional[np.ndarray] = None,
         norm: Optional[float] = None, 
         omega: Optional[np.ndarray] = None,
-        frequency_layer_mask: Optional[np.ndarray] = None,
+        ind_min: Optional[int] = None,
+        ind_max: Optional[int] = None,
         **kwargs
     ):
 
@@ -687,7 +691,8 @@ class WDMSettings(DomainSettingsBase):
         self.N = self.Nt * self.Nf
         self.data_dt = dt
         self.Tobs = self.N * self.data_dt
-        self.frequency_layer_mask = frequency_layer_mask
+        self.ind_min = ind_min
+        self.ind_max = ind_max
         self.layer_dt = self.Nf * self.data_dt
         self.layer_df = 1. / (2. * self.Nf * self.data_dt)
         self.Nthalf = int(self.Nt / 2)
@@ -711,16 +716,30 @@ class WDMSettings(DomainSettingsBase):
             self.norm = norm
             self.omega = omega
 
-    @property
-    def frequency_layer_mask(self) -> Optional[np.ndarray]:
-        return self._frequency_layer_mask
+    @staticmethod
+    def adjust_to_even_bins(t_min: float, t_max: float, dt: float, Tobs: float, num_linspace: Optional[int]=1000, verbose: Optional[bool] = False) -> Tuple[int, int, float]:
+        Nf = -1
+        Nt = -1
 
-    @frequency_layer_mask.setter
-    def frequency_layer_mask(self, frequency_layer_mask: Optional[np.ndarray]):
-        if frequency_layer_mask is not None:
-            assert len(frequency_layer_mask) == self.Nf, "Frequency layer mask must have length equal to N."
-        self._frequency_layer_mask = frequency_layer_mask
-   
+        found_wavelet = False
+        wavelet_duration = -1.0
+        for tmp in np.linspace(t_min, t_max, num_linspace):
+            wavelet_duration = int(tmp / dt) * dt
+            Nt = int(Tobs / wavelet_duration)
+            Tobs = Nt * wavelet_duration
+            N = int(Tobs / dt)
+            Nf = int(N / Nt)
+            if verbose:
+                print(f"Attempting wavelet duration: {tmp}, Nf: {Nf}, Nt: {Nt}")
+            if (Nt % 2 == 0) and (Nf % 2 == 0):
+                found_wavelet = True
+                break
+        
+        if not found_wavelet:
+            raise ValueError(f"Could not find suitable wavelet parameters for even numbered Nf and Nt in the range given ({t_min}, {t_max}).")
+        
+        return (Nf, Nt, wavelet_duration)
+    
     def __eq__(self, value):
         return (value.Nt == self.Nt) and (value.Nf == self.Nf) and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) and (value.data_dt == self.data_dt)
 
@@ -824,6 +843,36 @@ class WDMSettings(DomainSettingsBase):
         self.max_freq_layer_window = self.window.copy()
         self.max_freq_layer_window[self.ind_middle] /= 2.0
 
+    @property
+    def ind_min(self) -> int:
+        return self._ind_min
+    
+    @ind_min.setter
+    def ind_min(self, ind_min: int):
+        if ind_min is None:
+            ind_min = 0
+        self._ind_min = ind_min
+
+    @property
+    def ind_max(self) -> int:
+        return self._ind_max
+    
+    @ind_max.setter
+    def ind_max(self, ind_max: int):
+        if ind_max is None:
+            ind_max = self.Nf - 1
+        self._ind_max = ind_max
+
+    @property
+    def frequency_layer_mask(self) -> Optional[np.ndarray]:
+        mask = self.xp.zeros(self.Nf, dtype=bool)
+        mask[self.f_ind_array] = True
+        return mask
+        
+    @property
+    def f_ind_array(self) -> np.ndarray:
+        return self.xp.arange(self.ind_min, self.ind_max + 1)
+
     @staticmethod
     def get_associated_class():
         return WDMSignal
@@ -841,7 +890,8 @@ class WDMSettings(DomainSettingsBase):
             max_freq_layer_window=self.max_freq_layer_window,
             norm=self.norm, 
             omega=self.omega, 
-            frequency_layer_mask=self.frequency_layer_mask, 
+            ind_min=self.ind_min, 
+            ind_max=self.ind_max,
             force_backend=self.force_backend
         )
     
@@ -1021,37 +1071,54 @@ class WDMSignal(WDMSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-    def heatmap(self, **kwargs):
+    def heatmap(self, index: int = None, fig=None, ax=None, cax=None, add_cax=False, **kwargs):
         # if fig is not None or ax is not None:
         #     if fig is None or ax is None:
         #         raise ValueError("If providing fig or ax, must provide both.")
             
         # else:
         #     # fig and ax are None
-        breakpoint()
-        fig, ax = plt.subplots(self.nchannels, 1, sharex=True, sharey=True)
-        
         if "cmap" not in kwargs:
             kwargs["cmap"] = cm.RdBu
 
-        for i, (ax_i, channel)  in enumerate(zip(ax, ["X", "Y", "Z"])):
-            z = self.arr[i]
+        if index is None:
+            if fig is None and ax is None:
+                fig, ax = plt.subplots(self.nchannels, 1, sharex=True, sharey=True)
+            else:
+                assert ax is not None
+
+            for i, (ax_i, channel)  in enumerate(zip(ax, ["X", "Y", "Z"])):
+                z = self.arr[i]
+                x, y = self.t_arr_edges, self.f_arr_edges
+                sc = ax_i.pcolormesh(
+                    x, y, z, 
+                    # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
+                    **kwargs
+                )
+                ax_i.set_ylabel(channel)
+
+        else:
+            assert index is not None and fig is not None and ax is not None
+            z = self.arr[index]
             x, y = self.t_arr_edges, self.f_arr_edges
-            sc = ax_i.pcolormesh(
+            sc = ax.pcolormesh(
                 x, y, z, 
                 # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
                 **kwargs
             )
-            ax_i.set_ylabel(channel)
-        
-        cax = fig.add_axes([0.9, 0.2, 0.05, 0.6])
-        fig.colorbar(sc, cax=cax)
 
+        if add_cax:
+            cax = fig.add_axes([0.9, 0.2, 0.05, 0.6])
+
+        if add_cax or cax is not None:
+            fig.colorbar(sc, cax=cax)
+        
         plt.subplots_adjust(right=0.85, hspace=0.1)
+
         return fig, ax
 
 class WDMLookupTable(WDMSettings):
-    def __init__(self, settings: WDMSettings, f_steps_per: int, fdot_steps: int, num_channel: int, num_layers_diff: int=2, fdot_max: float= 0.1, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, time_layers: Optional[int] = None, td_window: Optional[np.ndarray] = None):
+    def __init__(self, settings: WDMSettings, eps_f: int, eps_fdot: int, nchannels: int, num_layers_diff: int=2, fdot_max_factor: float= 8.0, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, time_layers: Optional[int] = None, td_window: Optional[np.ndarray] = None):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
 
@@ -1061,24 +1128,33 @@ class WDMLookupTable(WDMSettings):
 
         assert isinstance(time_layers, int)
         
+        self.nchannels = nchannels
         self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
         self.num_layers_diff = num_layers_diff
         self.m_ref = int(3e-3 / self.sub_settings.layer_df)  # int(self.sub_settings.Nf / 2)
         self.n_ref = int(self.sub_settings.Nt / 2)
-        
+        self.is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         self.f_ref = self.m_ref * self.sub_settings.layer_df
-        self.f_min = (self.m_ref - num_layers_diff) * self.sub_settings.layer_df
-        self.f_max = (self.m_ref + num_layers_diff) * self.sub_settings.layer_df
+        
+        assert 0.0 < eps_f < 1.0
+        assert 0.0 < eps_fdot < 1.0
+        
+        self.eps_f = eps_f
+        self.delta_f = eps_f * self.layer_df
 
-        self.f_steps = f_steps_per * (2 * num_layers_diff + 1)
-        if self.f_steps % 2 != 1:
-            self.f_steps += 1
+        _freq = self.xp.arange(self.f_ref, self.f_ref + num_layers_diff * self.sub_settings.layer_df, self.delta_f)
+        _norm_freq = _freq - self.f_ref
+        self.f_vals_norm = self.xp.concatenate([-_norm_freq[::-1][:-1], _norm_freq])
+        self.f_vals = self.f_vals_norm + self.f_ref
 
-        self.fdot_steps = fdot_steps
-        if self.fdot_steps % 2 != 1:
-            self.fdot_steps += 1
+        self.f_min = self.f_vals.min().item()
+        self.f_max = self.f_vals.max().item()
 
-        if fdot_max == 0.0:
+        self.f_steps = len(self.f_vals)
+
+        self.eps_fdot = eps_fdot
+        
+        if fdot_max_factor == 0.0:
             self.run_fdot = False
             self.fdot_steps = 1
             self.fdot_vals = self.xp.array([0.0])
@@ -1086,16 +1162,16 @@ class WDMLookupTable(WDMSettings):
 
         else:
             self.run_fdot = True
-            self.fdot_vals = self.xp.linspace(-fdot_max, fdot_max, self.fdot_steps)
-            self.delta_fdot = self.fdot_vals[1] - self.fdot_vals[0]
+            self.delta_fdot = eps_fdot * self.layer_df / self.layer_dt
+            self.fdot_max_val = fdot_max_factor * self.layer_df / self.layer_dt
+            _fdot = self.xp.arange(0.0, self.fdot_max_val, self.delta_fdot)
+            self.fdot_vals = self.xp.concatenate([-_fdot[::-1][:-1], _fdot])
+            
+            self.fdot_min = self.fdot_vals.min().item()
+            self.fdot_max = self.fdot_vals.max().item()
 
-
-        self.f_vals = self.xp.linspace(self.f_min, self.f_max, self.f_steps)
-        self.f_vals_norm = self.f_vals - self.f_ref
-        self.delta_f = self.f_vals[1] - self.f_vals[0]
-
-        self.fdot_max = fdot_max
-        
+            self.fdot_steps = len(self.fdot_vals)
+            
         run_table_gen = True
         if store_path is not None:
             if os.path.exists(self.store_path):
@@ -1114,7 +1190,7 @@ class WDMLookupTable(WDMSettings):
 
         if run_table_gen:
             self.t_ref = self.n_ref * self.sub_settings.layer_dt
-
+            
             total_f_fdot_vals = self.f_steps * self.fdot_steps
             
             if self.run_fdot:
@@ -1142,11 +1218,12 @@ class WDMLookupTable(WDMSettings):
             self.td_window = td_window
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
                 inds = slice(st_batch, end_batch)
-                # if not np.allclose(_f_vals[inds], self.f_ref) or np.any(_fdot_vals[inds] != 0.0):
-                    # continue
+                # if not np.allclose(_f_vals[inds] - self.f_ref, 0.0) or np.any(_fdot_vals[inds] != 0.0):
+                #     continue
                 
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
+                
                 wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
                 wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
                 try:
@@ -1233,7 +1310,7 @@ class WDMLookupTable(WDMSettings):
         assert ms.min() >= 0
         assert self.xp.all((f_arr >= 0.0) & (f_arr <= self.f_arr.max()))
         assert self.xp.all((fdot_arr >= self.fdot_vals.min()) & (fdot_arr <= self.fdot_vals.max()))
-        f_norm = f_arr - ms * self.layer_df
+        f_norm = (f_arr - ms * self.layer_df)
 
         if self.run_fdot:
             sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
@@ -1260,12 +1337,29 @@ class WDMLookupTable(WDMSettings):
 
             sin_coeffs = np.zeros_like(_sin_coeffs)
             cos_coeffs = np.zeros_like(_cos_coeffs)
-            if is_m_ref_n_ref_even:
+            if self.is_m_ref_n_ref_even:
                 sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
                 cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
 
                 sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
                 cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
+                
+                # keep1 = (~is_m_plus_n_even & ~is_m_odd)
+                # sin_coeffs[keep1] = _sin_coeffs[keep1]
+                # cos_coeffs[keep1] = _cos_coeffs[keep1]
+
+                # keep2 = (is_m_plus_n_even & ~is_m_odd)
+                # sin_coeffs[keep2] = _cos_coeffs[keep2]
+                # cos_coeffs[keep2] = -_sin_coeffs[keep2]
+
+                # keep3 = (~is_m_plus_n_even & is_m_odd)
+                # sin_coeffs[keep3] = _cos_coeffs[keep3]
+                # cos_coeffs[keep3] = _sin_coeffs[keep3]
+
+                # keep4 = (is_m_plus_n_even & is_m_odd)
+                # sin_coeffs[keep4] = _sin_coeffs[keep4]
+                # cos_coeffs[keep4] = _cos_coeffs[keep4]
+
 
             else:
                 print("Need to explicitly check this.")
