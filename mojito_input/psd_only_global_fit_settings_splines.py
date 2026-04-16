@@ -131,14 +131,14 @@ def get_general_erebor_settings(use_splines=True) -> GeneralSetup:
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
-    Tobs = 1 * YRSID_SI / 12.0 # .1 * YRSID_SI / 12.0
+    Tobs = .5 * YRSID_SI # / 12.0 # .1 * YRSID_SI / 12.0
     dt = 2.5
 
     head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
-    base_file_name = "noise-only_spline-dev_v1"
-    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev_longer/"
+    base_file_name = "noise-only_spline-1yr"
+    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_1_yr/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
@@ -151,11 +151,11 @@ def get_general_erebor_settings(use_splines=True) -> GeneralSetup:
     nwalkers = 40
     ntemps = 4
 
-    winalpha = 0.1 # bh tryout
-    wintype = "bh92"
+    winalpha = 0.1 # 0.1 # bh tryout
+    wintype = "tukey"
 
     basis_domain = "stft" # fd
-    stft_dt = 24 * 3600.0  # how many hours
+    stft_dt = 7 * 24 * 3600.0  # how many hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['noise'],
@@ -186,8 +186,8 @@ def get_general_erebor_settings(use_splines=True) -> GeneralSetup:
         wintype=wintype,
         use_splines=use_splines, 
         nknots=6,
-        lowerbound=-.5, 
-        upperbound=.5,
+        lowerbound=-1, 
+        upperbound=1,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
