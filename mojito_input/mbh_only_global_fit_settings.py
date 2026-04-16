@@ -159,7 +159,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
-    jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
+    jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20

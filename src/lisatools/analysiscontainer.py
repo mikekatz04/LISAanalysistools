@@ -1010,7 +1010,7 @@ class AnalysisContainerArray:
     def signal_operation(
         self,
         sign: int,
-        templates,
+        templates: DomainBaseArray | List[DomainBase] | DomainBase | np.ndarray | cp.ndarray,
         data_index: Optional[np.ndarray] = None,
         start_index=None,
     ) -> None:
@@ -1037,6 +1037,8 @@ class AnalysisContainerArray:
                 Ignored when domain-aware templates are supplied.
 
         """
+        if self.gpus is not None:
+            main_gpu = self.xp.cuda.runtime.getDevice()
         # ---- normalise *templates* to a flat list of DomainBase ----
         if isinstance(templates, DomainBaseArray):
             item_list = list(templates)
@@ -1086,9 +1088,21 @@ class AnalysisContainerArray:
 
             template_length = int(np.prod(templates.shape[2:]))
             for i, (di, si) in enumerate(zip(data_index, start_index)):
+                if self.gpus is not None:
+                    gpu = self.gpu_map[di]
+                    self.xp.cuda.runtime.setDevice(gpu)
+                    templates_i = self.xp.asarray(templates[i])
+                else:
+                    templates_i = templates[i]
+
                 self.acs.flatten()[di].data_res_arr[:, si : si + template_length] += (
-                    sign * templates[i]
+                    sign * templates_i
                 )
+
+            if self.gpus is not None:                                                                                                                                                                                                                                                              
+                self.xp.get_default_memory_pool().free_all_blocks()
+                self.xp.cuda.runtime.setDevice(main_gpu)    
+            
             return
 
         else:
@@ -1117,6 +1131,12 @@ class AnalysisContainerArray:
             template_arr = signal.arr
             template_settings = signal.settings
 
+            if self.gpus is not None:
+                gpu = self.gpu_map[di]
+                self.xp.cuda.runtime.setDevice(gpu)
+                template_arr = self.xp.asarray(template_arr)
+                # template_settings = template_settings.__class__(*template_settings.args, **template_settings.kwargs)  # make sure settings are on the correct device
+
             if isinstance(template_settings, domains.STFTSettings):
                 self._apply_stft_signal(sign, template_arr, template_settings, data_res_arr)
             elif isinstance(template_settings, domains.FDSettings):
@@ -1127,6 +1147,13 @@ class AnalysisContainerArray:
                 self._apply_td_signal(sign, template_arr, template_settings, data_res_arr)
             else:
                 raise ValueError(f"Unknown domain type for template {i}: {type(template_settings)}")
+            
+        # restore GPU device
+        if self.gpus is not None:
+            self.xp.get_default_memory_pool().free_all_blocks()
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+        return
 
     def add_signal_to_residual(self, templates, data_index=None, **kwargs) -> None:
         """Subtract templates from the residual (residual = data - signal).
