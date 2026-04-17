@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 import jax
 import numpy as np
@@ -546,6 +546,26 @@ class DomainComputationGroupArray:
                 with self.xp.cuda.Device(device):
                     yield f'gpu: {device}'
 
+    def _unpack_indices(self,
+        data_index: np.ndarray, 
+        noise_index: np.ndarray,
+    )-> Tuple[list[np.ndarray], list[np.ndarray]]:
+        """
+        
+        """
+        
+        split_of_each = self.ac_to_split[data_index]        
+
+        data_intra_split_index = []
+        noise_intra_split_index = []
+        
+        for split_id in range(self.num_splits):
+            positions = np.where(split_of_each == split_id)[0]
+            data_intra_split_index.append(self.ac_to_intra[data_index[positions]])
+            noise_intra_split_index.append(self.ac_to_intra[noise_index[positions]])
+
+        return data_intra_split_index, noise_intra_split_index
+
     def _unpack_input_args(
         self,
         data_index: np.ndarray | cp.ndarray,
@@ -648,10 +668,7 @@ class DomainComputationGroupArray:
         self,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
-        template_vals: np.ndarray | cp.ndarray,
-        start_freqs: np.ndarray | cp.ndarray,
-        start_times: np.ndarray | cp.ndarray | None = None,
-        *,
+        likelihood_args: list[tuple],
         mode: str = "serial",
     ) -> np.ndarray:
         """Dispatch to the per-mode likelihood implementation.
@@ -665,11 +682,11 @@ class DomainComputationGroupArray:
         """
         if mode == "serial":
             return self._compute_likelihood_serial(
-                data_index, noise_index, template_vals, start_freqs, start_times
+                data_index, noise_index, likelihood_args
             )
         if mode == "threaded":
             return self._compute_likelihood_threaded(
-                data_index, noise_index, template_vals, start_freqs, start_times
+                data_index, noise_index, likelihood_args
             )
         raise ValueError(f"Unknown mode={mode!r}; expected 'serial' or 'threaded'.")
 
@@ -677,9 +694,7 @@ class DomainComputationGroupArray:
         self,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
-        template_vals: np.ndarray | cp.ndarray,
-        start_freqs: np.ndarray | cp.ndarray,
-        start_times: np.ndarray | cp.ndarray | None = None,
+        likelihood_args: list[tuple],
     ) -> np.ndarray:
         """Serial per-split likelihood path.
 
@@ -715,43 +730,30 @@ class DomainComputationGroupArray:
                 ``group.d_d`` has not been populated (call
                 :meth:`compute_d_d_terms` first).
         """
-        per_group = self._unpack_input_args(
-            data_index, noise_index, template_vals, start_freqs, start_times=start_times
-        )
-
+       
         n_data = data_index.shape[0] if hasattr(data_index, "shape") else len(data_index)
 
-        pending: list[tuple[np.ndarray, Any]] = []  # (positions, device-side likelihood)
-        for group, routing in zip(self.computation_groups, per_group):
-            positions = routing["positions"]
-            if len(positions) == 0:
-                continue
+        data_intra_split_indices, noise_intra_split_indices = self._unpack_indices(data_index=data_index, noise_index=noise_index)
+
+        output = []
+        for i, group in enumerate(self.computation_groups):
+            
             with self.device_context(group.device_id):
-                call_kwargs = dict(
-                    data_index=self.xp.asarray(routing["intra_data_index"]),
-                    noise_index=self.xp.asarray(routing["intra_noise_index"]),
-                    template_vals=self.xp.asarray(routing["template_vals"]),
-                    start_freqs=self.xp.asarray(routing["start_freqs"]),
-                )
-                if routing["start_times"] is not None:
-                    call_kwargs["start_times"] = self.xp.asarray(routing["start_times"])
-                like_dev = group.compute_likelihood(**call_kwargs)
-            pending.append((positions, like_dev))
+                data_index_here = self.xp.asarray(data_intra_split_indices[i])
+                noise_index_here = self.xp.asarray(noise_intra_split_indices[i])
+                
+                group_likelihood = group.compute_likelihood(data_index_here, noise_index_here, *likelihood_args[i])
+                group_likelihood_host = group_likelihood.get() if hasattr(group_likelihood, "get") else group_likelihood
+            
+            output.append(group_likelihood_host)
 
-        output = np.empty(n_data, dtype=np.float64)
-        for positions, like_dev in pending:
-            like_cpu = like_dev.get() if hasattr(like_dev, "get") else np.asarray(like_dev)
-            output[positions] = like_cpu
-
-        return output
+        return np.concatenate(output).flatten()
 
     def _compute_likelihood_threaded(
         self,
         data_index: np.ndarray | cp.ndarray,
         noise_index: np.ndarray | cp.ndarray,
-        template_vals: np.ndarray | cp.ndarray,
-        start_freqs: np.ndarray | cp.ndarray,
-        start_times: np.ndarray | cp.ndarray | None = None,
+        likelihood_args: list[tuple],
     ) -> np.ndarray:
         """Threaded per-split likelihood path (reserved).
 
@@ -770,11 +772,11 @@ class DomainComputationGroupArray:
             "Call warm_jax_compile() once before any future threaded run."
         )
 
-    def _generate_per_split(
+    def _generate_waveform(
         self,
         waveform_gen: Callable,
-        coords,
-        data_index,
+        coords: np.ndarray,
+        data_index: np.ndarray,
         waveform_gen_kwargs: dict | None = None,
     ) -> dict:
         """Partition a flat coord batch by split and generate templates per-split.
@@ -846,43 +848,21 @@ class DomainComputationGroupArray:
             _call, args_per_group, kwargs_per_group
         )
 
-        is_stft = self.domain_type == "STFT"
-        templates: dict[int, Any] = {}
-        start_freqs: dict[int, Any] = {}
-        start_times: dict[int, Any] | None = {} if is_stft else None
-        for split_id, out in enumerate(per_group_out):
-            if out is None:
-                continue
-            if is_stft:
-                vals, sfreqs, stimes = out
-                templates[split_id] = vals
-                start_freqs[split_id] = sfreqs
-                start_times[split_id] = stimes
-            else:
-                vals, sfreqs = out
-                templates[split_id] = vals
-                start_freqs[split_id] = sfreqs
-
-        return {
-            "templates": templates,
-            "start_freqs": start_freqs,
-            "start_times": start_times,
-            "positions": positions_by_split,
-        }
+        return per_group_out
 
     def compute_likelihood_from_coords(
         self,
         waveform_gen: Callable,
-        coords,
-        data_index,
-        noise_index=None,
+        coords: np.ndarray,
+        data_index: np.ndarray,
+        noise_index: np.ndarray | None = None,
         *,
         waveform_gen_kwargs: dict | None = None,
         mode: str = "serial",
     ) -> np.ndarray:
         """End-to-end coords → per-binary log-likelihoods.
 
-        Generates templates per-split via :meth:`_generate_per_split`,
+        Generates templates per-split via :meth:`_generate_waveform`,
         keeping each split's outputs on the device that produced them, and
         dispatches to :meth:`compute_likelihood`. The dict-form
         ``template_vals`` / ``start_freqs`` / ``start_times`` are routed by
@@ -905,118 +885,18 @@ class DomainComputationGroupArray:
         if noise_index is None:
             noise_index = data_index
 
-        per_split = self._generate_per_split(
+        data_intra_split_indices, noise_intra_split_indices = self._unpack_indices(data_index=data_index, noise_index=noise_index)
+
+        likelihood_intra_split_args = self._generate_waveform(
             waveform_gen, coords, data_index, waveform_gen_kwargs
         )
 
         return self.compute_likelihood(
             data_index=data_index,
             noise_index=noise_index,
-            template_vals=per_split["templates"],
-            start_freqs=per_split["start_freqs"],
-            start_times=per_split["start_times"],
+            likelihood_intra_split_args=likelihood_intra_split_args,
             mode=mode,
         )
-
-    def generate_flat_templates_from_coords(
-        self,
-        waveform_gen: Callable,
-        coords,
-        data_index,
-        *,
-        target_device_id: int | None = None,
-        waveform_gen_kwargs: dict | None = None,
-    ) -> tuple:
-        """Generate a flat batched template tensor on a single target device.
-
-        Wraps :meth:`_generate_per_split` and scatters the per-split
-        outputs into one flat tensor placed on ``target_device_id``. Splits
-        whose ``group.device_id`` already matches the target scatter
-        directly; tail splits on other devices transit the host.
-
-        Args:
-            waveform_gen: Batched waveform generator.
-            coords: ``(N, ndim)`` raw coord batch.
-            data_index: ``(N,)`` global AC ids.
-            target_device_id: Device id for the flat output. Defaults to
-                ``self.computation_groups[0].device_id``.
-            waveform_gen_kwargs: Extra kwargs forwarded to ``waveform_gen``.
-
-        Returns:
-            Tuple ``(flat_templates, flat_start_freqs, flat_start_times)``
-            all residing on ``target_device_id``. ``flat_start_times`` is
-            ``None`` for the FD domain.
-
-        Notes:
-            Intended for consumers that need a single flat batch (e.g.
-            ``acs.remove_signal_from_residual``). Residual mutation paths
-            that eventually route through DCGA will be able to skip this
-            method and stay split-local.
-        """
-        if target_device_id is None:
-            target_device_id = self.computation_groups[0].device_id
-
-        per_split = self._generate_per_split(
-            waveform_gen, coords, data_index, waveform_gen_kwargs
-        )
-        templates = per_split["templates"]
-        start_freqs = per_split["start_freqs"]
-        start_times = per_split["start_times"]
-        positions_by_split = per_split["positions"]
-
-        data_index_cpu = np.asarray(
-            data_index.get() if hasattr(data_index, "get") else data_index
-        )
-        n_data = data_index_cpu.shape[0]
-
-        is_stft = start_times is not None
-        ref_split = next(iter(templates))
-        tvals_ref = templates[ref_split]
-        sfreqs_ref = start_freqs[ref_split]
-        stimes_ref = start_times[ref_split] if is_stft else None
-
-        with self.device_context(target_device_id):
-            flat_vals = self.xp.empty(
-                (n_data,) + tuple(tvals_ref.shape[1:]), dtype=tvals_ref.dtype
-            )
-            flat_sfreqs = self.xp.empty((n_data,), dtype=sfreqs_ref.dtype)
-            flat_stimes = (
-                self.xp.empty((n_data,), dtype=stimes_ref.dtype)
-                if is_stft else None
-            )
-
-            for split_id, positions in positions_by_split.items():
-                src_vals = templates[split_id]
-                src_sfreqs = start_freqs[split_id]
-                src_device = self.computation_groups[split_id].device_id
-                pos_dev = self.xp.asarray(positions)
-
-                if src_device == target_device_id:
-                    flat_vals[pos_dev] = src_vals
-                    flat_sfreqs[pos_dev] = src_sfreqs
-                    if is_stft:
-                        flat_stimes[pos_dev] = start_times[split_id]
-                else:
-                    # Cross-device scatter — route through host. cupy
-                    # disallows direct assignment of arrays that live on
-                    # different devices, so we materialize to numpy and
-                    # re-upload under the target context.
-                    flat_vals[pos_dev] = self.xp.asarray(
-                        src_vals.get() if hasattr(src_vals, "get")
-                        else np.asarray(src_vals)
-                    )
-                    flat_sfreqs[pos_dev] = self.xp.asarray(
-                        src_sfreqs.get() if hasattr(src_sfreqs, "get")
-                        else np.asarray(src_sfreqs)
-                    )
-                    if is_stft:
-                        src_stimes = start_times[split_id]
-                        flat_stimes[pos_dev] = self.xp.asarray(
-                            src_stimes.get() if hasattr(src_stimes, "get")
-                            else np.asarray(src_stimes)
-                        )
-
-        return flat_vals, flat_sfreqs, flat_stimes
 
     def warm_jax_compile(
         self,
@@ -1222,3 +1102,14 @@ class DomainComputationGroupArray:
             outputs.append(out_i)
 
         return aggregate(outputs) if aggregate is not None else outputs
+    
+    def _threaded_operation(
+        self,
+        operation: str | Callable,
+        args_per_group: list | None = None,
+        kwargs_per_group: list | None = None,
+        *,
+        aggregate: Callable[[list], Any] | None = None,
+    ) -> list | Any:
+        """Threaded version of :meth:`_loop_operation`. Reserved for future use."""
+        raise NotImplementedError("Threaded operations not yet implemented; use _loop_operation.")
