@@ -40,7 +40,7 @@ from lisatools.domains import WAVELET_DURATION, TDSignal, TDSettings, FDSignal, 
 from fastlisaresponse.gbcomps import GBWDMComputations
 from scipy.signal.windows import tukey
 
-force_backend = "cuda12x"
+force_backend = "cpu"
 xp = np if force_backend == "cpu" else cp
 orbits = DefaultOrbits(force_backend=force_backend)
 orbits.configure(linear_interp_setup=True)
@@ -66,27 +66,27 @@ wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
 time_layers = wdm_settings.Nt
 tukey_alpha = 0.00
 td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
-wdm_lookup_table = WDMLookupTable(wdm_settings, 0.01, 0.1, 3, store_path="./wdm_lookup_table_with_fdot.pkl", num_layers_diff=2, fdot_max_factor=8.0, time_layers=time_layers, batch_size_gen=10, td_window=td_window)
-# wdm_lookup_table = WDMLookupTable(wdm_settings, 0.01, 0.1, 3, store_path="./wdm_lookup_table_without_fdot.pkl", num_layers_diff=2, fdot_max_factor=0.0, time_layers=time_layers, batch_size_gen=15, td_window=td_window)
+wdm_lookup_table = WDMLookupTable(wdm_settings, 0.01, 0.01, 3, store_path="./wdm_lookup_table_with_fdot_cpu.pkl", num_layers_diff=1, fdot_max_factor=1.0, time_layers=time_layers, batch_size_gen=10, td_window=td_window)
 f_arr = xp.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
 #xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
 # fdot_arr = xp.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
 
 t_wdm = wdm_settings.t_arr
 
-amp0 = 1e-22
-f0_check = 3e-3  # wdm_lookup_table.m_ref * wdm_settings.layer_df
-fdot0_check = 0.0
-phi0 = 0.887249823409
+amp0 = 1.0
+f0_check = wdm_lookup_table.m_ref * wdm_settings.layer_df
+fdot0_check = 6.2342038e-14  # wdm_lookup_table.fdot_vals[1]
+phi0 = 0.0
 
+t_ref = int(wdm_settings.Nt / 2) * wdm_settings.layer_dt
 td_set = TDSettings(wdm_settings.N, dt, force_backend=force_backend)
 t_check = xp.arange(wdm_settings.N) * dt
-wave_check = amp0 * xp.sin(2 * xp.pi * (f0_check * t_check + 1/2 * fdot0_check * t_check ** 2) + phi0)
+wave_check = amp0 * xp.sin(2 * xp.pi * (f0_check * (t_check - t_ref) + 1/2 * fdot0_check * (t_check - t_ref) ** 2) + phi0)
 
 wave_check_wdm = TDSignal(wave_check[None, :], td_set).wdmtransform(wdm_settings, window=xp.asarray(tukey(wdm_settings.N, alpha=tukey_alpha)))
-phi_t = 2 * xp.pi * (f0_check * t_wdm + 1/2 * fdot0_check * t_wdm ** 2) + phi0
-freq_t = f0_check + fdot0_check * t_wdm
-fdot_t = xp.full_like(freq_t, 0.0)  # fdot0_check)
+phi_t = 2 * xp.pi * (f0_check * (t_wdm - t_ref) + 1/2 * fdot0_check * (t_wdm - t_ref) ** 2) + phi0
+freq_t = f0_check + fdot0_check * (t_wdm - t_ref)
+fdot_t = xp.full_like(freq_t, fdot0_check)
 amp_t = amp0 * xp.ones_like(t_wdm)
 
 n_arr = xp.arange(wdm_settings.Nt)
@@ -95,32 +95,33 @@ fig, (ax1, ax2, ax3) = plt.subplots(3, 1, sharex=True, sharey=True)
 _check_fill_wave = xp.zeros_like(wave_check_wdm[0])
 _check_fill_wave[m_layers.flatten(), xp.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1).flatten()] = wdm_coeffs.flatten()
 _check_fill_wdm = WDMSignal(_check_fill_wave[None, :], wdm_settings)
-min_val = np.min([wave_check_wdm[:].min().item(), _check_fill_wdm[:].min().item()]).item()
+# min_val = np.min([wave_check_wdm[:].min().item(), _check_fill_wdm[:].min().item()]).item()
 max_val = np.max([wave_check_wdm[:].max().item(), _check_fill_wdm[:].max().item()]).item()
 
 cax1 = fig.add_axes([0.9, 0.55, 0.05, 0.25])
 cax2 = fig.add_axes([0.9, 0.2, 0.05, 0.25])
 
 ind_check = int(f0_check / wdm_settings.layer_df)
-wave_check_wdm.heatmap(index=0, fig=fig, ax=ax1, vmin=min_val, vmax=max_val, cax=cax1)
-_check_fill_wdm.heatmap(index=0, fig=fig, ax=ax2, vmin=min_val, vmax=max_val)
+wave_check_wdm.heatmap(index=0, fig=fig, ax=ax1, vmin=-max_val, vmax=max_val, cax=cax1)
+_check_fill_wdm.heatmap(index=0, fig=fig, ax=ax2, vmin=-max_val, vmax=max_val)
 try:
     _tmp_diff = (wave_check_wdm[:] - _check_fill_wdm[:]).get()
 except AttributeError:
     _tmp_diff = (wave_check_wdm[:] - _check_fill_wdm[:])
 
 difference = WDMSignal(np.log10(np.abs(_tmp_diff)), wdm_settings)  #  / wave_check_wdm[:]
-difference.heatmap(index=0, fig=fig, ax=ax3, vmin=difference[:, ind_check, 20:-20].min().item(), vmax=difference[:, ind_check, 20:-20].max().item(), cax=cax2, cmap=cm.Blues)
+difference.heatmap(index=0, fig=fig, ax=ax3, vmin=difference[:].min().item(), vmax=difference[:].max().item(), cax=cax2, cmap=cm.Blues)
 ax1.set_ylim(f0_check * 0.997, f0_check * 1.003)
 ax2.set_ylim(f0_check * 0.997, f0_check * 1.003)
 # fig.savefig(f"wdm_check_3_alpha_{tukey_alpha}.png")
 
 plt.show()
 breakpoint()
-ax1.plot(wave_check_wdm[0, m_layers[0,0]], lw=3)
-ax2.plot(wdm_coeffs.squeeze(), "--", lw=2)
-plt.show()
-breakpoint()
+# ax1.plot(wave_check_wdm[0, m_layers[0,0]], lw=3)
+# ax2.plot(wdm_coeffs.squeeze(), "--", lw=2)
+# plt.show()
+# breakpoint()
+plt.close()
 # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
 
 num_bin = 1
@@ -131,7 +132,7 @@ tdi_t_arr = data_t_arr[keep]
 
 ind = int(3e-3 / wdm_settings.layer_df) + 3
 num = 10
-for i in range(0, num):
+for i in range(0, num)[:1]:
     amp = np.full(num_bin, 1.0)
     f0 = np.full(num_bin, (ind + i / num) * wdm_settings.layer_df)
     fdot = np.full(num_bin, 0.0)
@@ -172,17 +173,17 @@ for i in range(0, num):
     tdi_output[:, :, keep]= output.eval_tdi(tdi_t_arr)
     from scipy.signal.windows import tukey
     t_diff = (np.arange(tdi_output.shape[-1])[:] * dt - t_ref)
-    fdot = 0.0  # wdm_settings.layer_df / wdm_settings.layer_dt * 0.01
-    tdi_output[:,0, :] = np.sin(2 * np.pi * (f0 * t_diff + 1/2 * fdot * t_diff ** 2 ))
-    tdi_output[:,1, :] = np.cos(2 * np.pi * (f0 * t_diff + 1/2 * fdot * t_diff ** 2 ))
-    # tdi_output[:] *= tukey(tdi_output.shape[-1], alpha=0.7)[None, :]
+    #fdot = 0.0  # wdm_settings.layer_df / wdm_settings.layer_dt * 0.01
+    # tdi_output[:,0, :] = np.sin(2 * np.pi * (f0 * t_diff + 1/2 * fdot * t_diff ** 2 ))
+    # tdi_output[:,1, :] = np.cos(2 * np.pi * (f0 * t_diff + 1/2 * fdot * t_diff ** 2 ))
+    # # tdi_output[:] *= tukey(tdi_output.shape[-1], alpha=0.7)[None, :]
     
     # np.save("td_check", tdi_output[0])
     # import matplotlib.pyplot as plt
     # plt.plot(data_t_arr[:num_points], tdi_output[0,0])
     # plt.show()
 
-    td = TDSignal(tdi_output[0, :2], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
+    td = TDSignal(tdi_output[0, :3], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
 
 
 
@@ -200,9 +201,9 @@ for i in range(0, num):
 
     # wdm_set.frequency_layer_mask = ((wdm_set.f_arr >= 5e-5) &(wdm_set.f_arr <= 40e-3))
 
-    # fd_from_td = td.fft(apply_dt=True)
+    fd_from_td = td.fft(apply_dt=True)
 
-    # fd_set = fd_from_td.settings
+    fd_set = fd_from_td.settings
     # fd_set.frequency_layer_mask = ((fd_set.f_arr >= 5e-5) &(fd_set.f_arr <= 40e-3))
     # fd_from_td.frequency_layer_mask = ((fd_from_td.f_arr >= 5e-5) &(fd_from_td.f_arr <= 40e-3))
     # wdm_from_fd = fd_from_td.transform(wdm_set)
@@ -213,12 +214,12 @@ for i in range(0, num):
     print(f0[0], ind * wdm_settings.layer_df, f0[0] - ind * wdm_settings.layer_df, i)
     # print(wdm_from_td[0, ind+ i, int(Nt /2)] ** 2 + wdm_from_td_new[0, ind+ i, int(Nt /2)] ** 2)
     print("\n")
-    breakpoint()
+    # breakpoint()
     # exit()
-breakpoint()
+# breakpoint()
 # assert np.allclose(wdm_from_fd[:] / np.abs(wdm_from_fd[:]).max(), wdm_from_td[:] / np.abs(wdm_from_td[:]).max())
 
-olitas_check = np.genfromtxt("olitas_wdm_impulse.dat")
+# olitas_check = np.genfromtxt("olitas_wdm_impulse.dat")
 
 # wdm_from_td = td.transform(wdm_set)
 
