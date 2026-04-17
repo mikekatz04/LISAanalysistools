@@ -1523,9 +1523,11 @@ def get_sensitivity(
         npts_c = 20
         f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
         psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
+        if isinstance(psd[0], float):
+            psd = psd + 1j * 0.0
         psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
         PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
-        
+        breakpoint()
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")
     

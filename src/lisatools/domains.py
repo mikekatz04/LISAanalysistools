@@ -46,6 +46,13 @@ class DomainBase:
     def __init__(self, arr):
         self.arr = arr
 
+    @staticmethod
+    def get(x: np.ndarray) -> np.ndarray:
+        try:
+            return x.get()
+        except AttributeError:
+            return x
+
     @property
     def arr(self) -> np.ndarray:
         return self._arr
@@ -559,21 +566,42 @@ class FDSignal(FDSettings, DomainBase):
         before_ifft[:, -1, 1:] *= max_freq_window
 
         if is_psd:
+            # eq. 19 in arxiv.org/pdf/2009.00043
+            # window is squared
+            before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
+            before_ifft[:, 0, 1:] *= dc_window
+            before_ifft[:, -1, 1:] *= max_freq_window
+            psd_out = self.xp.zeros(self.Nf, self.Nt)
+            psd_sum_tmp = before_ifft.sum(axis=-1) / (self.data_dt * self.Nt * self.Nf)
+            wdmpsd = self.xp.zeros((self.nchannels, self.Nf, self.Nt))
             breakpoint()
+            wdmpsd[:, 1:] = psd_sum_tmp[1:self.Nf]          # regular layers
+            wdmpsd[0::2, 0] = psd_sum_tmp[0]           # DC at even rows
+            wdmpsd[1::2, 0] = psd_sum_tmp[self.Nf]     
+            return wdmpsd
 
         after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
         
         is_m_plus_n_even = (((m + n) % 2 == 0)) 
         _new_arr = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
-        _new_arr[:, is_m_plus_n_even] = self.xp.real(after_ifft)[:, :-1][:, is_m_plus_n_even]
-        _new_arr[:, (~is_m_plus_n_even)] = (-1) ** (m[(~is_m_plus_n_even)]) * self.xp.imag(after_ifft)[:, :-1][:, (~is_m_plus_n_even)]
+
+        # TODO: fix this
+
+        if self.backend.uses_cupy:
+            # some issue with cupy and xp.real/imag
+            cache = self.xp.fft.config.get_plan_cache()
+            cache.clear()
+
+        _new_arr[:, is_m_plus_n_even] = self.xp.real(after_ifft[:, :-1][:, is_m_plus_n_even])
+        _new_arr[:, (~is_m_plus_n_even)] = (-1) ** (m[(~is_m_plus_n_even)]) * self.xp.imag(after_ifft[:, :-1][:, (~is_m_plus_n_even)])
         
         # Robbie says this is okay
-        _new_arr[:, 0, 0::2] = np.real(after_ifft[:, 0, 0::2]) * np.sqrt(2.)
-        _new_arr[:, 0, 1::2] = np.real(after_ifft[:, -1, 0::2]) * np.sqrt(2.)
+        # TODO: fix this 
+        _new_arr[:, 0, 0::2] = self.xp.asarray(np.real(self.get(after_ifft[:, 0, 0::2]))) * np.sqrt(2.)
+        _new_arr[:, 0, 1::2] = self.xp.asarray(np.real(self.get(after_ifft[:, -1, 0::2]))) * np.sqrt(2.)
         
         if return_transpose_time_axis_first:
-            output = _new_arr.transpose(0, 2, 1).copy()
+            output = _new_arrn.transpose(0, 2, 1).copy()
         else:
             output = _new_arr
 
@@ -1090,6 +1118,10 @@ class WDMSignal(WDMSettings, DomainBase):
             for i, (ax_i, channel)  in enumerate(zip(ax, ["X", "Y", "Z"])):
                 z = self.arr[i]
                 x, y = self.t_arr_edges, self.f_arr_edges
+                x = self.get(x)
+                y = self.get(y)
+                z = self.get(z)
+
                 sc = ax_i.pcolormesh(
                     x, y, z, 
                     # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
@@ -1101,6 +1133,9 @@ class WDMSignal(WDMSettings, DomainBase):
             assert index is not None and fig is not None and ax is not None
             z = self.arr[index]
             x, y = self.t_arr_edges, self.f_arr_edges
+            x = self.get(x)
+            y = self.get(y)
+            z = self.get(z)
             sc = ax.pcolormesh(
                 x, y, z, 
                 # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
@@ -1185,8 +1220,8 @@ class WDMLookupTable(WDMSettings):
                     check_input["delta_fdot"] == self.delta_fdot
                 ):
                     run_table_gen = False
-                    self.table_sin = check_input["table_sin"]
-                    self.table_cos = check_input["table_cos"]
+                    self.table_sin = self.xp.asarray(check_input["table_sin"])
+                    self.table_cos = self.xp.asarray(check_input["table_cos"])
 
         if run_table_gen:
             self.t_ref = self.n_ref * self.sub_settings.layer_dt
@@ -1197,9 +1232,9 @@ class WDMLookupTable(WDMSettings):
                 _f_vals, _fdot_vals = self.points.T
             else:
                 _f_vals = self.points
-                _fdot_vals = np.zeros_like(_f_vals)
+                _fdot_vals = self.xp.zeros_like(_f_vals)
 
-            t_vals = np.arange(self.sub_settings.N) * self.data_dt
+            t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
 
             t_diff = t_vals - self.t_ref
 
@@ -1218,7 +1253,7 @@ class WDMLookupTable(WDMSettings):
             self.td_window = td_window
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
                 inds = slice(st_batch, end_batch)
-                # if not np.allclose(_f_vals[inds] - self.f_ref, 0.0) or np.any(_fdot_vals[inds] != 0.0):
+                # if not self.xp.allclose(_f_vals[inds] - self.f_ref, 0.0) or self.xp.any(_fdot_vals[inds] != 0.0):
                 #     continue
                 
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
@@ -1231,23 +1266,29 @@ class WDMLookupTable(WDMSettings):
                     _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
                 except:
                     breakpoint()
-                print(inds)
+                print(inds, total_f_fdot_vals)
                 
             self.table_sin = _table_sin.reshape((self.f_steps, self.fdot_steps)).copy()
             self.table_cos = _table_cos.reshape((self.f_steps, self.fdot_steps)).copy()
 
             if store_path is not None:
                 output_dict = {
-                    "basis_settings": self.sub_settings,
-                    "f_steps": self.f_steps,
-                    "fdot_steps": self.fdot_steps,
-                    "delta_f": self.delta_f,
-                    "delta_fdot": self.delta_fdot,
-                    "table_sin": self.table_sin,
-                    "table_cos": self.table_cos
+                    "basis_settings": self.get(self.sub_settings),
+                    "f_steps": self.get(self.f_steps),
+                    "fdot_steps": self.get(self.fdot_steps),
+                    "delta_f": self.get(self.delta_f),
+                    "delta_fdot": self.get(self.delta_fdot),
+                    "table_sin": self.get(self.table_sin),
+                    "table_cos": self.get(self.table_cos)
                 }
                 with open(self.store_path, "wb") as fp:
                     pickle.dump(output_dict, fp, pickle.HIGHEST_PROTOCOL)
+    @staticmethod
+    def get(x: np.ndarray) -> np.ndarray:
+        try:
+            return x.get()
+        except AttributeError:
+            return x
 
     @property
     def points(self) -> np.ndarray:
@@ -1325,18 +1366,18 @@ class WDMLookupTable(WDMSettings):
 
     def get_wdm_coeffs(self, amp_arr: np.ndarray, phi_arr: np.ndarray, f_arr: np.ndarray, fdot_arr: np.ndarray, n_arr: np.ndarray, num_m_layers: int = 1):
         ms = (f_arr // self.layer_df).astype(int)
-        wdm_coeffs_out = np.zeros((amp_arr.shape[0], num_m_layers * 2 + 1))
-        m_map = -np.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
+        wdm_coeffs_out = self.xp.zeros((amp_arr.shape[0], num_m_layers * 2 + 1))
+        m_map = -self.xp.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
         is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
             ms_to_use = (ms + m_diff).astype(int)
-            keep_now = np.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
+            keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
             _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_arr[keep_now], fdot_arr[keep_now], ms_to_use[keep_now])
             
             is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0)) 
 
-            sin_coeffs = np.zeros_like(_sin_coeffs)
-            cos_coeffs = np.zeros_like(_cos_coeffs)
+            sin_coeffs = self.xp.zeros_like(_sin_coeffs)
+            cos_coeffs = self.xp.zeros_like(_cos_coeffs)
             if self.is_m_ref_n_ref_even:
                 sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
                 cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
@@ -1370,7 +1411,7 @@ class WDMLookupTable(WDMSettings):
                 cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
             
             # TODO: idk if this is right NEED TO CHECK
-            wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * np.sin(phi_arr[keep_now]) + cos_coeffs * np.cos(phi_arr[keep_now]))
+            wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * self.xp.sin(phi_arr[keep_now]) + cos_coeffs * self.xp.cos(phi_arr[keep_now]))
             m_map[keep_now, i] = ms_to_use[keep_now]
         return wdm_coeffs_out, m_map
 __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]
