@@ -3,18 +3,19 @@ import time
 from copy import deepcopy
 from typing import Callable
 
-import cupy as xp
+try:
+    import cupy as xp
+except (ImportError, ModuleNotFoundError):
+    import numpy as xp 
 import numpy as np
 from eryn.moves import Move, StretchMove, TemperatureControl
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
 
-# from bbhx.likelihood import NewHeterodynedLikelihood
 from tqdm import tqdm
 
-# from lisatools.globalfit.state import GFState
-# from lisatools.sampling.moves.skymodehop import SkyMove
 from ...analysiscontainer import AnalysisContainerArray
+from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
 from .globalfitmove import GlobalFitMove
 
@@ -604,3 +605,35 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
         xp.get_default_memory_pool().free_all_blocks()
+
+
+class MultiDeviceResidualAddOneRemoveOneMove(ResidualAddOneRemoveOneMove):
+    """
+    
+    """
+    def __init__(self, *args, likelihood_evaluation_mode="serial", **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.dcga = DomainComputationGroupArray(acs=self.acs)
+        self.likelihood_evaluation_mode = likelihood_evaluation_mode
+
+    def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray:
+        raise NotImplementedError("This method is not implemented yet for the multi-device version of the move.")
+    
+    def compute_like(self, coords_in: np.ndarray, data_index: np.ndarray | xp.ndarray) -> np.ndarray:
+        """
+        Spread the likelihood computation for different walkers across different devices using the DomainComputationGroupArray.
+
+        Args:
+            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
+            data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
+        """
+
+        self.dcga.compute_likelihood_from_coords(
+            self.waveform_gen,
+            coords_in,
+            data_index,
+            waveform_gen_kwargs=self.waveform_gen_kwargs,
+            mode=self.likelihood_evaluation_mode,
+        )
+

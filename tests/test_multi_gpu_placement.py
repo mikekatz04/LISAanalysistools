@@ -450,3 +450,290 @@ class TestThreadedModeGuard:
             coord.compute_likelihood(
                 data_index, data_index, template, start_freqs, mode="nope"
             )
+
+
+# ---------------------------------------------------------------------------
+# _loop_operation callable path
+# ---------------------------------------------------------------------------
+
+
+class TestLoopOperationCallable:
+    """String-form dispatch is covered by compute_d_d_terms/compute_likelihood;
+    here we verify the callable-form path added for external per-device work
+    (waveform generation, etc.)."""
+
+    def test_callable_invoked_per_group_with_args(self):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+
+        calls = []
+
+        def op(x, *, tag):
+            calls.append((x, tag))
+            return x * 10
+
+        outputs = coord._loop_operation(
+            op, args_per_group=[(1,), (2,)], kwargs_per_group=[{"tag": "a"}, {"tag": "b"}]
+        )
+
+        assert outputs == [10, 20]
+        assert calls == [(1, "a"), (2, "b")]
+
+    def test_callable_defaults_empty_args_kwargs(self):
+        acs = _StubACS(num_acs=6, num_splits=3, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+
+        counter = {"n": 0}
+
+        def op():
+            counter["n"] += 1
+            return counter["n"]
+
+        outs = coord._loop_operation(op)
+        assert outs == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# _generate_per_split
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratePerSplit:
+    def _fd_waveform_stub(self, nchan, nfreq, df, amp_capture=None):
+        """Return a deterministic FD stub waveform_gen.
+
+        Encodes the coord's first column into the template so the test
+        can verify scatter per-split.
+        """
+        def wf(*cols, amp=1.0):
+            coords = np.stack(cols, axis=-1)
+            k = coords.shape[0]
+            base = coords[:, 0:1, None].astype(np.complex128)
+            vals = amp * np.broadcast_to(base[..., None], (k, nchan, nfreq)).copy()
+            sfreqs = np.full(k, df)
+            if amp_capture is not None:
+                amp_capture.append(amp)
+            return vals, sfreqs
+
+        return wf
+
+    def test_fd_partitioning_and_positions(self):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        wf = self._fd_waveform_stub(acs.nchannels, acs.num_freqs, acs.df)
+
+        data_index = np.array([0, 3, 1, 2, 0, 2], dtype=np.int32)
+        coords = np.column_stack(
+            [np.arange(data_index.shape[0], dtype=np.float64) + 0.5,
+             np.arange(data_index.shape[0], dtype=np.float64) * 0.1]
+        )
+
+        per_split = coord._generate_per_split(wf, coords, data_index, {"amp": 2.0})
+
+        split_of_each = acs.split_map[data_index]
+        assert per_split["start_times"] is None
+        for split_id in range(coord.num_splits):
+            expected_positions = np.where(split_of_each == split_id)[0]
+            np.testing.assert_array_equal(
+                per_split["positions"][split_id], expected_positions
+            )
+            expected_vals, expected_sfreqs = wf(
+                *coords[expected_positions].T, amp=2.0
+            )
+            np.testing.assert_allclose(
+                per_split["templates"][split_id], expected_vals
+            )
+            np.testing.assert_allclose(
+                per_split["start_freqs"][split_id], expected_sfreqs
+            )
+
+    def test_stft_domain_unpacks_start_times(self, monkeypatch):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        # Only the unpacking branch depends on domain_type; override the
+        # property to exercise the STFT path without an STFT kernel.
+        monkeypatch.setattr(
+            type(coord), "domain_type", property(lambda self: "STFT")
+        )
+
+        nchan, nfreq = acs.nchannels, acs.num_freqs
+
+        def wf(*cols):
+            coords = np.stack(cols, axis=-1)
+            k = coords.shape[0]
+            vals = np.zeros((k, nchan, 2, nfreq), dtype=np.complex128)
+            sfreqs = np.full(k, acs.df)
+            stimes = np.full(k, 42.0)
+            return vals, sfreqs, stimes
+
+        data_index = np.array([0, 3, 2, 1, 0], dtype=np.int32)
+        coords = np.arange(data_index.shape[0] * 3, dtype=np.float64).reshape(-1, 3)
+
+        per_split = coord._generate_per_split(wf, coords, data_index, None)
+
+        assert per_split["start_times"] is not None
+        for split_id, positions in per_split["positions"].items():
+            k = len(positions)
+            assert per_split["templates"][split_id].shape == (k, nchan, 2, nfreq)
+            np.testing.assert_array_equal(
+                per_split["start_times"][split_id], np.full(k, 42.0)
+            )
+
+    def test_empty_split_skipped(self):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+
+        calls = []
+
+        def wf(*cols):
+            coords = np.stack(cols, axis=-1)
+            k = coords.shape[0]
+            calls.append(k)
+            return (
+                np.zeros((k, acs.nchannels, acs.num_freqs), dtype=np.complex128),
+                np.full(k, acs.df),
+            )
+
+        # Every binary lives on split 0; split 1 has no data.
+        data_index = np.zeros(3, dtype=np.int32)
+        coords = np.ones((3, 2), dtype=np.float64)
+
+        per_split = coord._generate_per_split(wf, coords, data_index, None)
+
+        assert set(per_split["positions"].keys()) == {0}
+        assert set(per_split["templates"].keys()) == {0}
+        # Exactly one invocation — the short-circuit wrapper skips split 1.
+        assert calls == [3]
+
+
+# ---------------------------------------------------------------------------
+# compute_likelihood_from_coords
+# ---------------------------------------------------------------------------
+
+
+class TestComputeLikelihoodFromCoords:
+    def test_matches_direct_compute_likelihood(self):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=64, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        coord.compute_d_d_terms()
+
+        rng = np.random.default_rng(42)
+        data_index = np.array([0, 1, 2, 3, 0, 2], dtype=np.int32)
+        coords = rng.standard_normal((data_index.shape[0], 2))
+
+        nchan, nfreq = acs.nchannels, acs.num_freqs
+
+        def wf(c0, c1):
+            k = c0.shape[0]
+            tmpl = (c0[:, None, None] + 1j * c1[:, None, None]) * np.ones(
+                (k, nchan, nfreq), dtype=np.complex128
+            )
+            return tmpl, np.full(k, acs.df)
+
+        likes_auto = coord.compute_likelihood_from_coords(wf, coords, data_index)
+
+        flat_vals, flat_sfreqs = wf(*coords.T)
+        likes_manual = coord.compute_likelihood(
+            data_index, data_index, flat_vals, flat_sfreqs
+        )
+        np.testing.assert_allclose(likes_auto, likes_manual, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# generate_flat_templates_from_coords
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateFlatTemplates:
+    def test_flat_order_preserved_across_splits(self):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        nchan, nfreq = acs.nchannels, acs.num_freqs
+
+        def wf(c0, c1):
+            k = c0.shape[0]
+            # Encode coord[:, 0] into the template so scatter is verifiable.
+            base = c0[:, None, None].astype(np.complex128)
+            tmpl = np.broadcast_to(base[..., None], (k, nchan, nfreq)).copy()
+            return tmpl, c0.astype(np.float64) + 0.5
+
+        data_index = np.array([0, 3, 1, 2, 0], dtype=np.int32)
+        coords = np.column_stack(
+            [np.arange(data_index.shape[0], dtype=np.float64),
+             np.zeros(data_index.shape[0], dtype=np.float64)]
+        )
+
+        flat_vals, flat_sfreqs, flat_stimes = (
+            coord.generate_flat_templates_from_coords(wf, coords, data_index)
+        )
+
+        assert flat_vals.shape == (data_index.shape[0], nchan, nfreq)
+        assert flat_stimes is None
+        for i in range(data_index.shape[0]):
+            assert flat_vals[i, 0, 0] == coords[i, 0] + 0j
+            assert flat_sfreqs[i] == coords[i, 0] + 0.5
+
+
+# ---------------------------------------------------------------------------
+# warm_jax_compile via (coords, data_index)
+# ---------------------------------------------------------------------------
+
+
+class TestWarmJaxCompileFromCoords:
+    def test_derives_per_split_from_flat_batch(self):
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+
+        calls = []
+
+        def wf(*cols, **_):
+            calls.append(np.stack(cols, axis=-1))
+            return None
+
+        # Split 0 owns AC ids {0, 1}; split 1 owns {2, 3}.
+        # data_index pattern: positions of split-0 entries are [0, 2, 4];
+        # positions of split-1 entries are [1, 3]. With sample_size=2 we
+        # expect coords[[0, 2]] for split 0 and coords[[1, 3]] for split 1.
+        data_index = np.array([0, 3, 1, 2, 0], dtype=np.int32)
+        coords = np.column_stack(
+            [np.arange(data_index.shape[0], dtype=np.float64),
+             np.arange(data_index.shape[0], dtype=np.float64) + 10.0]
+        )
+
+        coord.warm_jax_compile(
+            wf, coords=coords, data_index=data_index, sample_size_per_split=2
+        )
+
+        assert len(calls) == 2
+        np.testing.assert_array_equal(calls[0], coords[[0, 2]])
+        np.testing.assert_array_equal(calls[1], coords[[1, 3]])
+        assert coord._warm_compile_done is True
+
+    def test_already_warmed_is_noop(self):
+        acs = _StubACS(num_acs=2, num_splits=1, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        coord._warm_compile_done = True
+
+        calls = []
+        coord.warm_jax_compile(
+            lambda *a, **k: calls.append(1),
+            sample_coords_per_split=[np.zeros((1, 2))],
+        )
+        assert calls == []
+
+    def test_both_entry_forms_rejected(self):
+        acs = _StubACS(num_acs=2, num_splits=1, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        with pytest.raises(ValueError, match="either"):
+            coord.warm_jax_compile(
+                lambda *a, **k: None,
+                sample_coords_per_split=[np.zeros((1, 2))],
+                coords=np.zeros((1, 2)),
+                data_index=np.zeros(1, dtype=np.int32),
+            )
+
+    def test_no_entry_form_rejected(self):
+        acs = _StubACS(num_acs=2, num_splits=1, num_channels=3, num_freqs=16, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        with pytest.raises(ValueError, match="sample_coords_per_split"):
+            coord.warm_jax_compile(lambda *a, **k: None)
