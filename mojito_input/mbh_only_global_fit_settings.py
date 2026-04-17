@@ -112,7 +112,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         stft_dt=general_set.stft_dt,
         freq_min=general_set.start_freq,
         freq_max=general_set.end_freq,
-        tukey_alpha=general_set.tukey_alpha,
+        tukey_alpha=general_set.window_alpha,
         force_backend=general_set.force_backend,
         **response_kwargs
     )
