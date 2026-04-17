@@ -1422,6 +1422,16 @@ class DomainBaseArray:
     def __getitem__(self, index):
         return self.signals[index]
 
+    def __radd__(self, other: DomainBaseArray) -> "DomainBaseArray":
+        """
+        Define how to add two DomainBaseArrays together. This will concatenate the signals from both arrays into a single array.
+        """
+
+        if not isinstance(other, DomainBaseArray):
+            raise TypeError("Can only add DomainBaseArray to another DomainBaseArray.")
+        return DomainBaseArray(self.signals + other.signals)
+
+
     @property
     def batched(self) -> Optional[DomainBase]:
         """Batched :class:`DomainBase` (shape ``(nbatch, nchannels, *basis_shape)``),

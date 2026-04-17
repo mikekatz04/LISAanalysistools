@@ -9,13 +9,18 @@ exposes exactly the attributes the coordinator and each
 Key properties verified:
     * ``ac_to_split`` / ``ac_to_intra`` routing tables match
       ``gpu_splits``.
-    * ``_unpack_input_args`` handles tempered-sampler flat inputs and
-      the pre-split ``dict`` form identically.
+    * ``_unpack_indices`` partitions flat ``(data_index, noise_index)``
+      batches by split into ``(positions, data_intra, noise_intra)``.
     * ``compute_d_d_terms`` populates each group's per-split ``d_d``
       vector in intra-split order.
     * ``compute_likelihood`` reproduces the per-binary reference and is
       invariant to the split layout (single split vs. two splits).
     * ``mode='threaded'`` is reserved and raises ``NotImplementedError``.
+    * ``_generate_waveform`` keeps per-split outputs opaque — FD tuples,
+      STFT tuples, or any other waveform return shape.
+    * ``compute_likelihood_from_coords`` composes generation + scatter.
+    * ``generate_signals_for_residuals`` routes
+      ``get_signals_for_residuals`` per-split without centralizing.
 
 All work runs on the CPU backend with ``gpus=None``; the multi-split
 dimension is controlled entirely via ``gpu_splits``. This is sufficient
@@ -199,12 +204,23 @@ class TestRoutingTables:
 
 
 # ---------------------------------------------------------------------------
-# _unpack_input_args
+# _unpack_indices
 # ---------------------------------------------------------------------------
 
 
-class TestUnpackInputArgs:
-    """Tempered-sampler-style flat inputs must route to the right split."""
+def _split_flat_args(coord, data_index, noise_index, *flat_arrays):
+    """Build the per-split ``likelihood_args`` list from flat arrays.
+
+    Callers who already have flat ``(template, start_freqs[, start_times])``
+    tensors use this to reach the new ``compute_likelihood`` signature, which
+    takes ``list[tuple]`` per split rather than flat inputs.
+    """
+    positions, *_ = coord._unpack_indices(data_index, noise_index)
+    return [tuple(a[pos] for a in flat_arrays) for pos in positions]
+
+
+class TestUnpackIndices:
+    """Tempered-sampler-style flat inputs must partition into the right split."""
 
     def _tempered_index(self, nwalkers: int, ntemps: int) -> np.ndarray:
         # ``np.tile(np.arange(nwalkers), ntemps)`` reproduces the
@@ -219,84 +235,46 @@ class TestUnpackInputArgs:
         nwalkers, ntemps = 4, 3
         data_index = self._tempered_index(nwalkers, ntemps)
         noise_index = data_index.copy()
-        batch = data_index.shape[0]
 
-        template = np.zeros((batch, acs.nchannels, acs.num_freqs), dtype=np.complex128)
-        start_freqs = np.full(batch, acs.df)
-
-        per_group = coord._unpack_input_args(
-            data_index, noise_index, template, start_freqs
+        positions, data_intra, noise_intra = coord._unpack_indices(
+            data_index, noise_index
         )
-        assert len(per_group) == 2
+        assert len(positions) == 2
+        assert len(data_intra) == 2
+        assert len(noise_intra) == 2
 
         # Split 0 holds AC ids {0, 1}; split 1 holds {2, 3}.
         expected_positions = [
             np.where(np.isin(data_index, [0, 1]))[0],
             np.where(np.isin(data_index, [2, 3]))[0],
         ]
-        for routing, expected in zip(per_group, expected_positions):
-            np.testing.assert_array_equal(routing["positions"], expected)
-            # intra indices are [0,1] within each split (matching split order).
+        for pos, di, ni, expected in zip(
+            positions, data_intra, noise_intra, expected_positions
+        ):
+            np.testing.assert_array_equal(pos, expected)
             expected_intra = np.array(
-                [0 if data_index[p] in (0, 2) else 1 for p in routing["positions"]],
+                [0 if data_index[p] in (0, 2) else 1 for p in pos],
                 dtype=np.int32,
             )
-            np.testing.assert_array_equal(routing["intra_data_index"], expected_intra)
-            np.testing.assert_array_equal(routing["intra_noise_index"], expected_intra)
-            # Template / start_freqs slices are aligned with positions.
-            np.testing.assert_array_equal(
-                routing["template_vals"], template[routing["positions"]]
-            )
-            np.testing.assert_array_equal(
-                routing["start_freqs"], start_freqs[routing["positions"]]
-            )
-            assert routing["start_times"] is None
-
-    def test_dict_input_passthrough(self):
-        """Pre-split dict form bypasses per-call slicing."""
-        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
-        coord = DomainComputationGroupArray(acs)
-
-        data_index = np.array([0, 1, 2, 3])
-        noise_index = data_index.copy()
-
-        # Callers that generated templates on each target device pass a
-        # dict keyed by split id; _unpack_input_args must return those
-        # exact objects (no copy / re-slice).
-        t0 = np.ones((2, acs.nchannels, acs.num_freqs), dtype=np.complex128)
-        t1 = 2.0 * np.ones((2, acs.nchannels, acs.num_freqs), dtype=np.complex128)
-        template_dict = {0: t0, 1: t1}
-        freqs_dict = {0: np.array([acs.df, acs.df]), 1: np.array([acs.df, acs.df])}
-
-        per_group = coord._unpack_input_args(
-            data_index, noise_index, template_dict, freqs_dict
-        )
-
-        assert per_group[0]["template_vals"] is t0
-        assert per_group[1]["template_vals"] is t1
-        assert per_group[0]["start_freqs"] is freqs_dict[0]
-        assert per_group[1]["start_freqs"] is freqs_dict[1]
+            np.testing.assert_array_equal(di, expected_intra)
+            np.testing.assert_array_equal(ni, expected_intra)
 
     def test_empty_split(self):
-        """A split with no matching binaries produces an empty routing record."""
+        """A split with no matching binaries yields zero-length entries."""
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
         coord = DomainComputationGroupArray(acs)
 
         # All binaries resolve to AC 0 -> split 0; split 1 must be empty.
         data_index = np.zeros(5, dtype=int)
         noise_index = data_index.copy()
-        template = np.zeros((5, acs.nchannels, acs.num_freqs), dtype=np.complex128)
-        start_freqs = np.full(5, acs.df)
 
-        per_group = coord._unpack_input_args(
-            data_index, noise_index, template, start_freqs
+        positions, data_intra, noise_intra = coord._unpack_indices(
+            data_index, noise_index
         )
-        assert len(per_group[0]["positions"]) == 5
-        assert len(per_group[1]["positions"]) == 0
-        # The empty-split slices are ``None`` so the caller can skip
-        # without materializing zero-length device arrays.
-        assert per_group[1]["template_vals"] is None
-        assert per_group[1]["start_freqs"] is None
+        assert len(positions[0]) == 5
+        assert len(positions[1]) == 0
+        assert len(data_intra[1]) == 0
+        assert len(noise_intra[1]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -368,9 +346,10 @@ class TestComputeLikelihoodPlacement:
         data_index, noise_index, template, start_freqs = self._build_batch(
             acs, nwalkers=4, ntemps=3
         )
-        likes = coord.compute_likelihood(
-            data_index, noise_index, template, start_freqs
+        likelihood_args = _split_flat_args(
+            coord, data_index, noise_index, template, start_freqs
         )
+        likes = coord.compute_likelihood(data_index, noise_index, likelihood_args)
         expected = self._reference_likes(acs, data_index, noise_index, template)
 
         np.testing.assert_allclose(likes, expected, rtol=1e-10)
@@ -386,11 +365,49 @@ class TestComputeLikelihoodPlacement:
         data_index, noise_index, template, start_freqs = self._build_batch(
             acs, nwalkers=4, ntemps=3
         )
-        likes = coord.compute_likelihood(
-            data_index, noise_index, template, start_freqs
+        likelihood_args = _split_flat_args(
+            coord, data_index, noise_index, template, start_freqs
         )
+        likes = coord.compute_likelihood(data_index, noise_index, likelihood_args)
         expected = self._reference_likes(acs, data_index, noise_index, template)
 
+        np.testing.assert_allclose(likes, expected, rtol=1e-10)
+
+    def test_empty_split_no_crash(self):
+        """All binaries on split 0; split 1 must be skipped, not crash."""
+        acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=64, df=1e-3)
+        coord = DomainComputationGroupArray(acs)
+        coord.compute_d_d_terms()
+
+        rng = np.random.default_rng(11)
+        # AC 0 -> split 0. Every binary lives on split 0.
+        data_index = np.zeros(6, dtype=np.int32)
+        noise_index = data_index.copy()
+        template = (
+            rng.standard_normal((6, acs.nchannels, acs.num_freqs))
+            + 1j * rng.standard_normal((6, acs.nchannels, acs.num_freqs))
+        )
+        start_freqs = np.full(6, acs.df, dtype=np.float64)
+
+        likelihood_args = _split_flat_args(
+            coord, data_index, noise_index, template, start_freqs
+        )
+        # Split 1 must carry empty-length args tuples — never invoked.
+        assert all(len(a) == 0 for a in likelihood_args[1])
+
+        likes = coord.compute_likelihood(data_index, noise_index, likelihood_args)
+        expected = np.array(
+            [
+                _python_log_likelihood(
+                    acs.data[int(data_index[b])],
+                    acs.invC[int(noise_index[b])],
+                    template[b],
+                    acs.d_d_reference[int(data_index[b])],
+                    acs.df,
+                )
+                for b in range(data_index.shape[0])
+            ]
+        )
         np.testing.assert_allclose(likes, expected, rtol=1e-10)
 
     def test_split_layout_invariance(self):
@@ -408,12 +425,10 @@ class TestComputeLikelihoodPlacement:
             acs1, nwalkers=4, ntemps=3
         )
 
-        likes1 = coord1.compute_likelihood(
-            data_index, noise_index, template, start_freqs
-        )
-        likes2 = coord2.compute_likelihood(
-            data_index, noise_index, template, start_freqs
-        )
+        args1 = _split_flat_args(coord1, data_index, noise_index, template, start_freqs)
+        args2 = _split_flat_args(coord2, data_index, noise_index, template, start_freqs)
+        likes1 = coord1.compute_likelihood(data_index, noise_index, args1)
+        likes2 = coord2.compute_likelihood(data_index, noise_index, args2)
         np.testing.assert_allclose(likes1, likes2, rtol=1e-12)
 
 
@@ -423,18 +438,27 @@ class TestComputeLikelihoodPlacement:
 
 
 class TestThreadedModeGuard:
+    def _args_for(self, acs, coord, data_index):
+        template = np.zeros(
+            (data_index.shape[0], acs.nchannels, acs.num_freqs),
+            dtype=np.complex128,
+        )
+        start_freqs = np.full(data_index.shape[0], acs.df)
+        return _split_flat_args(
+            coord, data_index, data_index, template, start_freqs
+        )
+
     def test_threaded_raises(self):
         acs = _StubACS(num_acs=2, num_splits=1, num_channels=3, num_freqs=16, df=1e-3)
         coord = DomainComputationGroupArray(acs)
         coord.compute_d_d_terms()
 
         data_index = np.array([0, 1], dtype=np.int32)
-        template = np.zeros((2, acs.nchannels, acs.num_freqs), dtype=np.complex128)
-        start_freqs = np.full(2, acs.df)
+        likelihood_args = self._args_for(acs, coord, data_index)
 
         with pytest.raises(NotImplementedError, match="threaded"):
             coord.compute_likelihood(
-                data_index, data_index, template, start_freqs, mode="threaded"
+                data_index, data_index, likelihood_args, mode="threaded"
             )
 
     def test_unknown_mode_raises(self):
@@ -443,12 +467,11 @@ class TestThreadedModeGuard:
         coord.compute_d_d_terms()
 
         data_index = np.array([0, 1], dtype=np.int32)
-        template = np.zeros((2, acs.nchannels, acs.num_freqs), dtype=np.complex128)
-        start_freqs = np.full(2, acs.df)
+        likelihood_args = self._args_for(acs, coord, data_index)
 
         with pytest.raises(ValueError, match="Unknown mode"):
             coord.compute_likelihood(
-                data_index, data_index, template, start_freqs, mode="nope"
+                data_index, data_index, likelihood_args, mode="nope"
             )
 
 
@@ -494,33 +517,27 @@ class TestLoopOperationCallable:
 
 
 # ---------------------------------------------------------------------------
-# _generate_per_split
+# _generate_waveform
 # ---------------------------------------------------------------------------
 
 
-class TestGeneratePerSplit:
-    def _fd_waveform_stub(self, nchan, nfreq, df, amp_capture=None):
-        """Return a deterministic FD stub waveform_gen.
+class TestGenerateWaveform:
+    """Opaque per-split dispatcher: DCGA does not inspect the return shape."""
 
-        Encodes the coord's first column into the template so the test
-        can verify scatter per-split.
-        """
+    def _fd_stub(self, nchan, nfreq, df):
         def wf(*cols, amp=1.0):
             coords = np.stack(cols, axis=-1)
             k = coords.shape[0]
-            base = coords[:, 0:1, None].astype(np.complex128)
-            vals = amp * np.broadcast_to(base[..., None], (k, nchan, nfreq)).copy()
+            base = coords[:, 0:1, None].astype(np.complex128)  # (k, 1, 1)
+            vals = amp * np.broadcast_to(base, (k, nchan, nfreq)).copy()
             sfreqs = np.full(k, df)
-            if amp_capture is not None:
-                amp_capture.append(amp)
             return vals, sfreqs
-
         return wf
 
-    def test_fd_partitioning_and_positions(self):
+    def test_fd_tuple_per_split(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
         coord = DomainComputationGroupArray(acs)
-        wf = self._fd_waveform_stub(acs.nchannels, acs.num_freqs, acs.df)
+        wf = self._fd_stub(acs.nchannels, acs.num_freqs, acs.df)
 
         data_index = np.array([0, 3, 1, 2, 0, 2], dtype=np.int32)
         coords = np.column_stack(
@@ -528,34 +545,24 @@ class TestGeneratePerSplit:
              np.arange(data_index.shape[0], dtype=np.float64) * 0.1]
         )
 
-        per_split = coord._generate_per_split(wf, coords, data_index, {"amp": 2.0})
+        positions, *_ = coord._unpack_indices(data_index, data_index)
+        per_split = coord._generate_waveform(wf, coords, positions, {"amp": 2.0})
 
-        split_of_each = acs.split_map[data_index]
-        assert per_split["start_times"] is None
-        for split_id in range(coord.num_splits):
-            expected_positions = np.where(split_of_each == split_id)[0]
-            np.testing.assert_array_equal(
-                per_split["positions"][split_id], expected_positions
-            )
+        assert len(per_split) == coord.num_splits
+        for split_id, positions_s in enumerate(positions):
+            out = per_split[split_id]
+            assert out is not None
+            vals, sfreqs = out
             expected_vals, expected_sfreqs = wf(
-                *coords[expected_positions].T, amp=2.0
+                *coords[positions_s].T, amp=2.0
             )
-            np.testing.assert_allclose(
-                per_split["templates"][split_id], expected_vals
-            )
-            np.testing.assert_allclose(
-                per_split["start_freqs"][split_id], expected_sfreqs
-            )
+            np.testing.assert_allclose(vals, expected_vals)
+            np.testing.assert_allclose(sfreqs, expected_sfreqs)
 
-    def test_stft_domain_unpacks_start_times(self, monkeypatch):
+    def test_stft_tuple_arity_transparent(self):
+        """STFT returns 3-tuples; DCGA must not inspect arity."""
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
         coord = DomainComputationGroupArray(acs)
-        # Only the unpacking branch depends on domain_type; override the
-        # property to exercise the STFT path without an STFT kernel.
-        monkeypatch.setattr(
-            type(coord), "domain_type", property(lambda self: "STFT")
-        )
-
         nchan, nfreq = acs.nchannels, acs.num_freqs
 
         def wf(*cols):
@@ -569,17 +576,19 @@ class TestGeneratePerSplit:
         data_index = np.array([0, 3, 2, 1, 0], dtype=np.int32)
         coords = np.arange(data_index.shape[0] * 3, dtype=np.float64).reshape(-1, 3)
 
-        per_split = coord._generate_per_split(wf, coords, data_index, None)
+        positions, *_ = coord._unpack_indices(data_index, data_index)
+        per_split = coord._generate_waveform(wf, coords, positions, None)
 
-        assert per_split["start_times"] is not None
-        for split_id, positions in per_split["positions"].items():
-            k = len(positions)
-            assert per_split["templates"][split_id].shape == (k, nchan, 2, nfreq)
-            np.testing.assert_array_equal(
-                per_split["start_times"][split_id], np.full(k, 42.0)
-            )
+        for split_id, positions_s in enumerate(positions):
+            k = len(positions_s)
+            if k == 0:
+                assert per_split[split_id] is None
+                continue
+            vals, sfreqs, stimes = per_split[split_id]
+            assert vals.shape == (k, nchan, 2, nfreq)
+            np.testing.assert_array_equal(stimes, np.full(k, 42.0))
 
-    def test_empty_split_skipped(self):
+    def test_empty_split_returns_none_and_short_circuits(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
         coord = DomainComputationGroupArray(acs)
 
@@ -594,15 +603,15 @@ class TestGeneratePerSplit:
                 np.full(k, acs.df),
             )
 
-        # Every binary lives on split 0; split 1 has no data.
         data_index = np.zeros(3, dtype=np.int32)
         coords = np.ones((3, 2), dtype=np.float64)
 
-        per_split = coord._generate_per_split(wf, coords, data_index, None)
+        positions, *_ = coord._unpack_indices(data_index, data_index)
+        per_split = coord._generate_waveform(wf, coords, positions, None)
 
-        assert set(per_split["positions"].keys()) == {0}
-        assert set(per_split["templates"].keys()) == {0}
-        # Exactly one invocation — the short-circuit wrapper skips split 1.
+        assert per_split[0] is not None
+        assert per_split[1] is None
+        # Exactly one invocation — the short-circuit wrapper skipped split 1.
         assert calls == [3]
 
 
@@ -612,7 +621,7 @@ class TestGeneratePerSplit:
 
 
 class TestComputeLikelihoodFromCoords:
-    def test_matches_direct_compute_likelihood(self):
+    def test_matches_per_binary_reference(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=64, df=1e-3)
         coord = DomainComputationGroupArray(acs)
         coord.compute_d_d_terms()
@@ -632,46 +641,77 @@ class TestComputeLikelihoodFromCoords:
 
         likes_auto = coord.compute_likelihood_from_coords(wf, coords, data_index)
 
-        flat_vals, flat_sfreqs = wf(*coords.T)
-        likes_manual = coord.compute_likelihood(
-            data_index, data_index, flat_vals, flat_sfreqs
+        # Per-binary python reference on the flat batch.
+        flat_vals, _ = wf(*coords.T)
+        expected = np.array(
+            [
+                _python_log_likelihood(
+                    acs.data[int(data_index[b])],
+                    acs.invC[int(data_index[b])],
+                    flat_vals[b],
+                    acs.d_d_reference[int(data_index[b])],
+                    acs.df,
+                )
+                for b in range(data_index.shape[0])
+            ]
         )
-        np.testing.assert_allclose(likes_auto, likes_manual, rtol=1e-12)
+        np.testing.assert_allclose(likes_auto, expected, rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------
-# generate_flat_templates_from_coords
+# generate_signals_for_residuals
 # ---------------------------------------------------------------------------
 
 
-class TestGenerateFlatTemplates:
-    def test_flat_order_preserved_across_splits(self):
+class TestGenerateSignalsForResiduals:
+    """DCGA routes ``get_signals_for_residuals`` per-split without centralizing."""
+
+    def test_routes_method_per_split_and_returns_positions(self):
         acs = _StubACS(num_acs=4, num_splits=2, num_channels=3, num_freqs=16, df=1e-3)
         coord = DomainComputationGroupArray(acs)
-        nchan, nfreq = acs.nchannels, acs.num_freqs
 
-        def wf(c0, c1):
-            k = c0.shape[0]
-            # Encode coord[:, 0] into the template so scatter is verifiable.
-            base = c0[:, None, None].astype(np.complex128)
-            tmpl = np.broadcast_to(base[..., None], (k, nchan, nfreq)).copy()
-            return tmpl, c0.astype(np.float64) + 0.5
+        # Stub waveform object with a `get_signals_for_residuals` method;
+        # DCGA must call the method (not __call__).
+        called_via = []
 
+        class Stub:
+            def __call__(self_stub, *cols, **_):
+                called_via.append("__call__")
+                return ("via_call", np.stack(cols, axis=-1))
+
+            def get_signals_for_residuals(self_stub, *cols, **_):
+                called_via.append("get_signals_for_residuals")
+                # Return a marker per split so the caller can verify
+                # per-split dispatch.
+                return ("signals_for_split", np.stack(cols, axis=-1))
+
+        stub = Stub()
         data_index = np.array([0, 3, 1, 2, 0], dtype=np.int32)
         coords = np.column_stack(
             [np.arange(data_index.shape[0], dtype=np.float64),
              np.zeros(data_index.shape[0], dtype=np.float64)]
         )
 
-        flat_vals, flat_sfreqs, flat_stimes = (
-            coord.generate_flat_templates_from_coords(wf, coords, data_index)
+        signals_per_split, positions_per_split = coord.generate_signals_for_residuals(
+            stub, coords, data_index
         )
 
-        assert flat_vals.shape == (data_index.shape[0], nchan, nfreq)
-        assert flat_stimes is None
-        for i in range(data_index.shape[0]):
-            assert flat_vals[i, 0, 0] == coords[i, 0] + 0j
-            assert flat_sfreqs[i] == coords[i, 0] + 0.5
+        # DCGA must route through get_signals_for_residuals on each
+        # non-empty split — never through __call__.
+        assert set(called_via) == {"get_signals_for_residuals"}
+        assert called_via.count("get_signals_for_residuals") == coord.num_splits
+
+        # Positions partition the flat batch.
+        all_positions = np.concatenate(positions_per_split)
+        np.testing.assert_array_equal(
+            np.sort(all_positions), np.arange(data_index.shape[0])
+        )
+
+        # Each non-empty split's signals encode that split's coord slice.
+        for split_id, positions in enumerate(positions_per_split):
+            tag, encoded = signals_per_split[split_id]
+            assert tag == "signals_for_split"
+            np.testing.assert_array_equal(encoded, coords[positions])
 
 
 # ---------------------------------------------------------------------------

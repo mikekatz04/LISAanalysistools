@@ -20,6 +20,7 @@ from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba
 
 from ... import get_backend
 from ...analysiscontainer import AnalysisContainerArray
+from ...domaincomputation import DomainComputationGroupArray
 from ...sensitivity import XYZSensitivityBackend
 from ..moves import GlobalFitMove
 from ..state import GFState
@@ -487,3 +488,14 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         new_state.log_like[0] = after_vals
         return new_state, accepted
+
+
+class MultiDevicePSDMove(PSDMove):
+    def __init__(self, *args, likelihood_evaluation_mode="serial", **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.dcga = DomainComputationGroupArray(acs=self.acs)
+        self.likelihood_evaluation_mode = likelihood_evaluation_mode
+
+    def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
+        raise NotImplementedError
