@@ -33,7 +33,7 @@ from ..sensitivity import (
     XYZ2SensitivityMatrix,
     XYZSensitivityBackend,
 )
-from ..utils.utility import AET, detrend, tukey
+from ..utils.utility import AET, detrend, windowfun
 from .preprocessing import BaseProcessingStep
 
 
@@ -121,7 +121,7 @@ class GeneralSettings(Settings):
     backup_iter: int = None
     nwalkers: int = None
     ntemps: int = None
-    tukey_alpha: float = None
+    window_type: str = "tukey"
     window_taper_duration: float = None
     gpus: typing.List[int] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
@@ -212,7 +212,6 @@ class GeneralSetup(Setup, GeneralSettings):
 
         default_preprocess_kwargs = dict(
             plot_folder=self.artifacts_file_dir,
-            do_detrend=False,
             highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
             trim_kwargs=dict(duration=200 * 3600, is_percent=False, trimming_type="from_each_end"),
             Tobs=self.Tobs,
@@ -255,9 +254,9 @@ class GeneralSetup(Setup, GeneralSettings):
             )
             nperseg = domain_settings.get_nperseg(dt)
 
-            self.tukey_alpha = self.window_taper_duration / (nperseg * dt)
+            self.window_alpha = self.window_taper_duration / (nperseg * dt)
 
-            window = tukey(nperseg, alpha=self.tukey_alpha)
+            window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
             plot_kwargs_list = [
                 dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
                 dict(channel=0, plot_type="fd", time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
@@ -270,11 +269,11 @@ class GeneralSetup(Setup, GeneralSettings):
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
 
-            self.tukey_alpha = self.window_taper_duration / (Nt * dt)
+            self.window_alpha = self.window_taper_duration / (Nt * dt)
             self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
 
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
-            window = tukey(Nt, alpha=self.tukey_alpha)
+            window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
             plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
 
         else:
@@ -283,7 +282,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
         # self.logger.debug(f"Window factor for normalization: {window_factor}")
 
-        self.logger.debug(f"Applying window with Tukey alpha: {self.tukey_alpha}")
+        self.logger.debug(f"Applying window {self.window_type} with alpha: {self.window_alpha}")
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
