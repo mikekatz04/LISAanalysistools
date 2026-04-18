@@ -416,6 +416,7 @@ class FDSettings(DomainSettingsBase):
             return arr
 
         if arr.ndim == 1:
+            breakpoint()
             return arr[self.frequency_layer_mask]
         elif arr.ndim > 1:
             assert arr.shape[-1] == self.frequency_layer_mask.shape[0], "Last dimension of arr must match length of frequency_layer_mask."
@@ -444,7 +445,13 @@ class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
         FDSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
-        assert arr.shape[-1] == self.clipped_N
+
+        if self.arr.shape[-1] != self.clipped_N:
+            assert arr.shape[-1] == self.N
+            _arr = self._arr.copy()
+            del self._arr
+            self.arr = _arr[:, self.f_ind_array]
+            # self.arr = 
 
     @property
     def settings(self) -> FDSettings:
@@ -1219,9 +1226,9 @@ class WDMLookupTable(WDMSettings):
                     check_input["delta_fdot"] == self.delta_fdot
                 ):
                     run_table_gen = False
-                    print("fix this?")
-                    self.table_sin = self.xp.asarray(np.load("table_sin_gpu_gen.npy"))  # check_input["table_sin"])
-                    self.table_cos = self.xp.asarray(np.load("table_cos_gpu_gen.npy"))  # check_input["table_cos"])
+                    print("fix this!")
+                    self.table_sin = self.xp.asarray(check_input["table_sin"])  # np.load("table_sin_gpu_gen.npy"))  # 
+                    self.table_cos = self.xp.asarray(check_input["table_cos"])  # np.load("table_sin_gpu_gen.npy"))  # 
 
         if run_table_gen:
             self.t_ref = self.n_ref * self.sub_settings.layer_dt
@@ -1266,7 +1273,7 @@ class WDMLookupTable(WDMSettings):
                     _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
                 except:
                     breakpoint()
-                breakpoint()
+                # breakpoint()
                 print(inds, total_f_fdot_vals)
                 
             self.table_sin = _table_sin.reshape((self.f_steps, self.fdot_steps)).copy()
@@ -1346,13 +1353,9 @@ class WDMLookupTable(WDMSettings):
         else:
             return interpolate.interp1d(self.norm_points, table.flatten())
         
-    def get_table_coeffs(self, f_arr: np.ndarray, fdot_arr: np.ndarray, ms: np.ndarray):
+    def get_table_coeffs(self, f_norm: np.ndarray, fdot_arr: np.ndarray):
         # ms = (f_arr // self.layer_df).astype(int)
-        assert ms.max() <= self.Nf + 1
-        assert ms.min() >= 0
-        assert self.xp.all((f_arr >= 0.0) & (f_arr <= self.f_arr.max()))
-        assert self.xp.all((fdot_arr >= self.fdot_vals.min()) & (fdot_arr <= self.fdot_vals.max()))
-        f_norm = (f_arr - ms * self.layer_df)
+
         if self.run_fdot:
             sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
             cos_coeffs = self.table_cos_interpolate(f_norm, fdot_arr)
@@ -1373,8 +1376,15 @@ class WDMLookupTable(WDMSettings):
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
             ms_to_use = (ms + m_diff).astype(int)
             keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
-            _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_arr[keep_now], fdot_arr[keep_now], ms_to_use[keep_now])
             
+            assert ms[keep_now].max() <= self.Nf + 1
+            assert ms[keep_now].min() >= 0
+            assert self.xp.all((f_arr[keep_now] >= 0.0) & (f_arr[keep_now] <= self.f_arr.max()))
+            assert self.xp.all((fdot_arr[keep_now] >= self.fdot_vals.min()) & (fdot_arr[keep_now] <= self.fdot_vals.max()))
+            f_norm = (f_arr[keep_now] - ms_to_use[keep_now] * self.layer_df)
+            m_diff = (f_norm / self.layer_df).astype(int)
+
+            _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_norm, fdot_arr[keep_now])
             is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0)) 
 
             sin_coeffs = self.xp.zeros_like(_sin_coeffs)
@@ -1412,7 +1422,6 @@ class WDMLookupTable(WDMSettings):
                 sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
                 cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
             
-            breakpoint()
             # TODO: idk if this is right NEED TO CHECK
             wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * self.xp.sin(phi_arr[keep_now]) + cos_coeffs * self.xp.cos(phi_arr[keep_now]))
             m_map[keep_now, i] = ms_to_use[keep_now]

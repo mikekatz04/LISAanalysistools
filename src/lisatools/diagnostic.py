@@ -106,7 +106,6 @@ def inner_product(
             raise ValueError("PSD basis is not equivalent to signal basis.")
         
         for i in list(psd.channel_shape):
-            breakpoint()
             if i != nchannels:
                 raise ValueError("Number of channels in PSD not equal to number of channels in signal.")
 

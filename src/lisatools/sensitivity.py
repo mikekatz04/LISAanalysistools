@@ -1438,6 +1438,8 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
         sens_mat = [LISASens for _ in range(nchannels)]
         super().__init__(settings, sens_mat, **sens_kwargs)
 
+def randc(shape):
+    return np.random.randn(*shape) + 1j*np.random.randn(*shape)
 
 def get_sensitivity(
     basis_settings: domains.DomainSettingsBase,
@@ -1523,9 +1525,11 @@ def get_sensitivity(
         npts_c = 20
         f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
         psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
+        testfft = randc(psd.shape) * np.sqrt(psd/2 * basis_settings.N/(2*basis_settings.data_dt))
+
         if isinstance(psd[0], float):
             psd = psd + 1j * 0.0
-        psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
+        psd_fd = domains.FDSignal(testfft, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
         PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
 
     else:
