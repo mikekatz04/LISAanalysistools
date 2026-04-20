@@ -11,6 +11,7 @@ from fastlisaresponse import ResponseWrapper
 
 from ...domains import DomainSettingsBase
 from ...utils.constants import *
+from ...utils.jaxbase import JaxThreadingMixin
 from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
 
 try:
@@ -25,8 +26,10 @@ except (ImportError, ModuleNotFoundError):
 if TYPE_CHECKING:
     try:
         import cupy as cp
+        from jax import Device
     except (ImportError, ModuleNotFoundError):
         import numpy as cp  # type: ignore
+        Device = Any  # type: ignore
 
 
 class BBHSNRWaveform(SNRWaveform):
@@ -124,7 +127,7 @@ class BBHSNRWaveform(SNRWaveform):
         else:
             return (AET[0], AET[1], AET[2])
 
-class PhenomTHMWaveformBase:
+class PhenomTHMWaveformBase(JaxThreadingMixin):
     """
     Base class for PhenomTHM waveforms.
 
@@ -153,6 +156,27 @@ class PhenomTHMWaveformBase:
 
         self.start_freq = start_freq
         self.ref_freq = ref_freq
+
+    @property
+    def phenom_kwargs(self) -> dict:
+        """Keyword arguments for the waveform generationDictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+
+        waveform_kwargs = dict(
+            higher_modes=self.waveform.higher_modes,
+            include_negative_modes=self.waveform.include_negative_modes,
+            coarse_grain=self.waveform.coarse_grain,
+            t_low_fit=self.waveform.t_low == 0.0,
+            atol=self.waveform.atol,
+            rtol=self.waveform.rtol,
+        )
+
+        return {
+            "waveform_kwargs": waveform_kwargs,
+            "Tobs": self.waveform.T,
+            "start_freq": self.start_freq,
+            "ref_freq": self.ref_freq,
+            }
+        
     
     def trim_and_shift_times(
         self, 
@@ -234,6 +258,17 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             ref_freq=ref_freq,
         )
 
+    @property
+    def kwargs(self) -> dict:
+        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+
+        phenom_kwargs = self.phenom_kwargs  # get the PhenomTHM-specific kwargs
+        wrapper_kwargs = self.wrapper_kwargs # get the TD TDI wrapper-specific kwargs
+
+        return {
+            **phenom_kwargs,
+            **wrapper_kwargs,
+        }
         
     def wave_gen(
         self,
@@ -272,16 +307,16 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         ref_freq = ref_freq if ref_freq is not None else self.ref_freq
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
-            m1,
-            m2,
-            s1z,
-            s2z,
-            distance,
-            phi_ref,
-            ref_freq,
-            start_freq,
-            inclination,
-            psi,
+            self._to_jax(m1),
+            self._to_jax(m2),
+            self._to_jax(s1z),
+            self._to_jax(s2z),
+            self._to_jax(distance),
+            self._to_jax(phi_ref),
+            self._to_jax(ref_freq),
+            self._to_jax(start_freq),
+            self._to_jax(inclination),
+            self._to_jax(psi),
             delta_t=self.dt,
         )
 
@@ -342,16 +377,16 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         start_freq = start_freq if start_freq is not None else self.start_freq
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
-            m1,
-            m2,
-            s1z,
-            s2z,
-            distance,
-            phi_ref,
-            ref_freq,
-            start_freq,
-            inclination,
-            psi,
+            self._to_jax(m1),
+            self._to_jax(m2),
+            self._to_jax(s1z),
+            self._to_jax(s2z),
+            self._to_jax(distance),
+            self._to_jax(phi_ref),
+            self._to_jax(ref_freq),
+            self._to_jax(start_freq),
+            self._to_jax(inclination),
+            self._to_jax(psi),
             delta_t=self.dt,
             **kwargs,
         )
@@ -407,6 +442,18 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             start_freq=start_freq,
             ref_freq=ref_freq,
         )
+
+    @property
+    def kwargs(self) -> dict:
+        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+
+        phenom_kwargs = self.phenom_kwargs  # get the PhenomTHM-specific kwargs
+        wrapper_kwargs = self.wrapper_kwargs # get the TD TDI wrapper-specific kwargs
+
+        return {
+            **phenom_kwargs,
+            **wrapper_kwargs,
+        }
         
     def get_amp_phase(
         self,
@@ -450,16 +497,16 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         start_freq = start_freq if start_freq is not None else self.start_freq
 
         times, mask, amplitude, phase = self.waveform.compute_strain_components_amp_phase(
-            jnp.asarray(m1),
-            jnp.asarray(m2),
-            jnp.asarray(s1z),
-            jnp.asarray(s2z),
-            jnp.asarray(distance),
-            jnp.asarray(phi_ref),
-            jnp.asarray(ref_freq),
-            jnp.asarray(start_freq),
-            jnp.asarray(inclination),
-            jnp.asarray(psi),
+            self._to_jax(m1),
+            self._to_jax(m2),
+            self._to_jax(s1z),
+            self._to_jax(s2z),
+            self._to_jax(distance),
+            self._to_jax(phi_ref),
+            self._to_jax(ref_freq),
+            self._to_jax(start_freq),
+            self._to_jax(inclination),
+            self._to_jax(psi),
             delta_t=jnp.asarray(self.dt),
         )
         amplitude.block_until_ready()  # ensure all outputs are ready before moving to self.xp

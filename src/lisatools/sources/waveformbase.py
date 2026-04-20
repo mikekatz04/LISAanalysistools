@@ -123,6 +123,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         self.tukey_alpha = tukey_alpha
 
         self.tdi_config = TDIConfig(tdi=tdi_generation, force_backend=force_backend)
+        self.tdi_generation = tdi_generation # store for repr
         self.tdi_channels = tdi_channels
         self.sampling_frequency = sampling_frequency
         self.orbits = orbits
@@ -150,6 +151,24 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         self.freq_min = freq_min
         self.freq_max = freq_max
+
+    @property
+    def wrapper_kwargs(self) -> dict:
+        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        return {
+            "waveform_t0": self.waveform_t0,
+            "data_td_settings": self.domain_settings,
+            "tdi_generation": self.tdi_generation,
+            "tdi_channels": self.tdi_channels,
+            "sampling_frequency": self.sampling_frequency,
+            "orbits": self.orbits,
+            "tukey_alpha": self.tukey_alpha,
+            "stft_dt": self.nperseg * self.dt if self.nperseg else None,
+            "freq_min": self.freq_min,
+            "freq_max": self.freq_max,
+            "force_backend": self.force_backend,
+        }
+
 
     @property
     def force_backend(self) -> str:
@@ -653,6 +672,20 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         self.buffer_time = buffer_time
 
+    @property
+    def wrapper_kwargs(self) -> dict:
+        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        base_kwargs = super().wrapper_kwargs
+        base_kwargs.update(
+            {
+                "order": self.response.order,
+                "signal_duration": self.response.num_pts * self.dt,
+                "buffer_time": self.buffer_time,
+                "force_uniform_stft": self.force_uniform_stft,
+            }
+        )
+        return base_kwargs
+
     def wave_gen(
         self, *args, **kwargs
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
@@ -1016,6 +1049,17 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         )
 
         self.zero_inclination = zero_inclination
+
+    @property
+    def wrapper_kwargs(self):
+        """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
+        base_kwargs = super().wrapper_kwargs
+        base_kwargs.update(
+            {
+                "zero_inclination": self.zero_inclination,
+            }
+        )
+        return base_kwargs
 
     @property
     def max_length(self) -> int:

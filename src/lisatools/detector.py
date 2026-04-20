@@ -61,6 +61,16 @@ class Orbits(LISAToolsParallelModule, ABC):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @property
+    def kwargs(self):        
+        """Keyword arguments for recreating this class instance."""
+        return {
+            "filename": self.filename,
+            "armlength": self.armlength,
+            "force_backend": self.backend.backend_name.split("_")[-1],
+            "t0": self.t0,
+        }
+
+    @property
     def xp(self):
         """numpy or cupy based on backend."""
         return self.backend.xp
@@ -658,7 +668,7 @@ class L1Orbits(Orbits):
         return {
             "filename": self.filename,
             "armlength": self.armlength,
-            "force_backend": self.backend,
+            "force_backend": self.backend.backend_name.split("_")[-1],
             "frame": self.frame,
         }
 
