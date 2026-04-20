@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import warnings
 from abc import ABC
+import logging
 from typing import Any, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -35,6 +36,7 @@ from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticCon
 from .utils.constants import *
 from .utils.utility import AET, get_array_module
 
+logger = logging.getLogger(__name__)
 
 class AnalysisContainer:
     """Combinatorial container that combines sensitivity and data information.
@@ -653,10 +655,12 @@ class AnalysisContainerArray:
             self.xp = xp = cp
             if isinstance(gpus, list):
                 if len(gpus) > 1:
-                    raise NotImplementedError
+                    logger.warning("Multiple GPUs detected. Data and sensitivity information will be split across the GPUs as evenly as possible. ")
+                       
                 xp.cuda.runtime.setDevice(gpus[0])
             elif isinstance(gpus, int):
                 xp.cuda.runtime.setDevice(gpus)
+                gpus = [gpus]
         else:
             self.xp = xp = np
 
@@ -687,6 +691,10 @@ class AnalysisContainerArray:
             else:
                 self.gpu_map[split] = 0
             self.split_map[split] = i
+
+            if gpus is not None:
+                xp.cuda.runtime.setDevice(gpus[i])
+
             self.linear_data_arr.append(
                 xp.zeros(
                     self.data_length * self.nchannels * len(split),
@@ -696,6 +704,10 @@ class AnalysisContainerArray:
             self.linear_psd_arr.append(
                 xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=complex)
             )
+        
+        if gpus is not None:
+            xp.get_default_memory_pool().free_all_blocks()
+            xp.cuda.runtime.setDevice(gpus[0])
 
         self.num_acs = len(acs.flatten())
         self.gpus = gpus
