@@ -1105,7 +1105,7 @@ class WDMSignal(WDMSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-    def heatmap(self, index: int = None, fig=None, ax=None, cax=None, add_cax=False, **kwargs):
+    def heatmap(self, index: int = None, mag: bool = False, fig=None, ax=None, cax=None, add_cax=False, **kwargs):
         # if fig is not None or ax is not None:
         #     if fig is None or ax is None:
         #         raise ValueError("If providing fig or ax, must provide both.")
@@ -1127,7 +1127,8 @@ class WDMSignal(WDMSettings, DomainBase):
                 x = self.get(x)
                 y = self.get(y)
                 z = self.get(z)
-
+                if mag:
+                    z = np.abs(z)
                 sc = ax_i.pcolormesh(
                     x, y, z, 
                     # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
@@ -1142,6 +1143,8 @@ class WDMSignal(WDMSettings, DomainBase):
             x = self.get(x)
             y = self.get(y)
             z = self.get(z)
+            if mag:
+                z = np.abs(z)
             sc = ax.pcolormesh(
                 x, y, z, 
                 # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
@@ -1183,15 +1186,18 @@ class WDMLookupTable(WDMSettings):
         self.eps_f = eps_f
         self.delta_f = eps_f * self.layer_df
 
-        _freq = self.xp.arange(self.f_ref, self.f_ref + num_layers_diff * self.sub_settings.layer_df, self.delta_f)
-        _norm_freq = _freq - self.f_ref
-        self.f_vals_norm = self.xp.concatenate([-_norm_freq[::-1][:-1], _norm_freq])
-        self.f_vals = self.f_vals_norm + self.f_ref
+        freq_single_layer = self.xp.arange(self.f_ref, (self.m_ref + 1) * self.layer_df, self.delta_f)
+        m_diffs = (_tmp := np.arange(2 * num_layers_diff + 2)) - _tmp[int(len(_tmp) / 2)]
 
-        self.f_min = self.f_vals.min().item()
-        self.f_max = self.f_vals.max().item()
+        self.f_vals = np.concatenate([freq_single_layer + m_tmp * self.layer_df for m_tmp in m_diffs])
+        self.f_vals_norm = self.f_vals - self.f_ref
 
-        self.f_steps = len(self.f_vals)
+
+        # self.f_vals_norm = self.xp.concatenate([-_norm_freq[::-1][:-1], _norm_freq])
+        # self.f_vals = self.f_vals_norm + self.f_ref
+
+        self.f_steps = len(freq_single_layer) * (num_layers_diff + 1)
+        self.f_steps_per_layer = len(freq_single_layer)
 
         self.eps_fdot = eps_fdot
         
@@ -1233,12 +1239,12 @@ class WDMLookupTable(WDMSettings):
         if run_table_gen:
             self.t_ref = self.n_ref * self.sub_settings.layer_dt
             
-            total_f_fdot_vals = self.f_steps * self.fdot_steps
+            total_f_fdot_vals = self.f_steps_per_layer * self.fdot_steps
             
             if self.run_fdot:
-                _f_vals, _fdot_vals = self.points.T
+                _f_vals, _fdot_vals = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(freq_single_layer, self.fdot_vals)])
             else:
-                _f_vals = self.points
+                _f_vals = freq_single_layer.copy()
                 _fdot_vals = self.xp.zeros_like(_f_vals)
 
             t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
@@ -1256,29 +1262,50 @@ class WDMLookupTable(WDMSettings):
             _table_cos = self.xp.zeros((total_f_fdot_vals,))
             if td_window is None:
                 td_window = self.xp.ones_like(t_diff)
-
+            
+            _table_sin = self.xp.zeros((len(m_diffs), total_f_fdot_vals,))
+            _table_cos = self.xp.zeros((len(m_diffs), total_f_fdot_vals,))
+            
             self.td_window = td_window
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
-                inds = slice(st_batch, end_batch)
-                # if not self.xp.allclose(_f_vals[inds] - (self.f_ref+ 0 * self.layer_df), 0.0) or not _fdot_vals[inds][0] == -3.257427471431767e-11:
-                #     continue
-                
+                inds = np.arange(st_batch, end_batch)
+
+                # if not self.xp.allclose(_f_vals[inds] - (self.f_ref+ 0 * self.layer_df), 0.0) or not _fdot_vals[inds][0] == 0.0:  # -3.257427471431767e-11:
+                    # continue
+
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 
                 wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
                 wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
-                try:
-                    _table_sin[inds] = wave_sin_wdm[:, self.m_ref, self.n_ref] 
-                    _table_cos[inds] = wave_cos_wdm[:, self.m_ref, self.n_ref]
-                except:
-                    breakpoint()
-                # breakpoint()
-                print(inds, total_f_fdot_vals)
                 
-            self.table_sin = _table_sin.reshape((self.f_steps, self.fdot_steps)).copy()
-            self.table_cos = _table_cos.reshape((self.f_steps, self.fdot_steps)).copy()
+                for m_i, m_diff in enumerate(m_diffs):
+                    m_current = self.m_ref + m_diff
+                    sin_coeff = wave_sin_wdm[:, self.m_ref - m_diff, self.n_ref] 
+                    cos_coeff = wave_cos_wdm[:, self.m_ref - m_diff, self.n_ref] 
 
+                    _f_norm = _f_vals[inds] - (self.m_ref - m_diff) * self.layer_df
+                    if (m_current + self.n_ref) % 2 == 1:
+                        _tmp = sin_coeff
+                        sin_coeff = cos_coeff
+                        cos_coeff = _tmp
+
+                    try:
+                        _table_sin[m_i, inds] = sin_coeff
+                        _table_cos[m_i, inds] = cos_coeff
+                    except:
+                        breakpoint()
+                print(inds, total_f_fdot_vals)
+
+            _table_sin = _table_sin.reshape((len(m_diffs), self.f_steps_per_layer, self.fdot_steps)).copy()
+            _table_cos = _table_cos.reshape((len(m_diffs), self.f_steps_per_layer, self.fdot_steps)).copy()
+            
+            breakpoint()
+            self.table_sin = _table_sin.reshape(-1, self.fdot_steps)
+            self.table_cos = _table_cos.reshape(-1, self.fdot_steps)
+
+            freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
+            freqs_norm = self.f_ref - freqs
             if store_path is not None:
                 output_dict = {
                     "basis_settings": self.get(self.sub_settings),
@@ -1390,38 +1417,28 @@ class WDMLookupTable(WDMSettings):
             sin_coeffs = self.xp.zeros_like(_sin_coeffs)
             cos_coeffs = self.xp.zeros_like(_cos_coeffs)
             
-            if self.is_m_ref_n_ref_even:
-                sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
-                cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
+            sin_coeffs[~is_m_plus_n_even] = -_sin_coeffs[~is_m_plus_n_even]
+            cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
 
-                sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
-                cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
-                
-                # keep1 = (~is_m_plus_n_even & ~is_m_odd)
-                # sin_coeffs[keep1] = _sin_coeffs[keep1]
-                # cos_coeffs[keep1] = _cos_coeffs[keep1]
-
-                # keep2 = (is_m_plus_n_even & ~is_m_odd)
-                # sin_coeffs[keep2] = _cos_coeffs[keep2]
-                # cos_coeffs[keep2] = -_sin_coeffs[keep2]
-
-                # keep3 = (~is_m_plus_n_even & is_m_odd)
-                # sin_coeffs[keep3] = _cos_coeffs[keep3]
-                # cos_coeffs[keep3] = _sin_coeffs[keep3]
-
-                # keep4 = (is_m_plus_n_even & is_m_odd)
-                # sin_coeffs[keep4] = _sin_coeffs[keep4]
-                # cos_coeffs[keep4] = _cos_coeffs[keep4]
-
-
-            else:
-                print("Need to explicitly check this.")
-                sin_coeffs[is_m_plus_n_even] = -_cos_coeffs[is_m_plus_n_even]
-                cos_coeffs[is_m_plus_n_even] = _sin_coeffs[is_m_plus_n_even]
-
-                sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
-                cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
+            sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
+            cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
             
+            # keep1 = (~is_m_plus_n_even & ~is_m_odd)
+            # sin_coeffs[keep1] = _sin_coeffs[keep1]
+            # cos_coeffs[keep1] = _cos_coeffs[keep1]
+
+            # keep2 = (is_m_plus_n_even & ~is_m_odd)
+            # sin_coeffs[keep2] = _cos_coeffs[keep2]
+            # cos_coeffs[keep2] = -_sin_coeffs[keep2]
+
+            # keep3 = (~is_m_plus_n_even & is_m_odd)
+            # sin_coeffs[keep3] = _cos_coeffs[keep3]
+            # cos_coeffs[keep3] = _sin_coeffs[keep3]
+
+            # keep4 = (is_m_plus_n_even & is_m_odd)
+            # sin_coeffs[keep4] = _sin_coeffs[keep4]
+            # cos_coeffs[keep4] = _cos_coeffs[keep4]
+
             # TODO: idk if this is right NEED TO CHECK
             wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * self.xp.sin(phi_arr[keep_now]) + cos_coeffs * self.xp.cos(phi_arr[keep_now]))
             m_map[keep_now, i] = ms_to_use[keep_now]

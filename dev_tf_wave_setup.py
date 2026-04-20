@@ -49,7 +49,7 @@ dt = 2.5
 Tobs = 2 * YRSID_SI
 Nf = -1
 Nt = -1
-for tmp in np.linspace(4., 5, 1000):
+for tmp in np.linspace(.5, 0.75, 1000):
     wavelet_duration = int(tmp / 365 * YRSID_SI / dt) * dt
     Nt = int(Tobs / wavelet_duration)
     Tobs = Nt * wavelet_duration
@@ -59,7 +59,7 @@ for tmp in np.linspace(4., 5, 1000):
     if (Nt % 2 == 0) and (Nf % 2 == 0):
         break
 
-N_sparse = 256 
+N_sparse = 256
 t_tdi = xp.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
@@ -67,7 +67,7 @@ wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
 time_layers = wdm_settings.Nt
 tukey_alpha = 0.00
 td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
-wdm_lookup_table = WDMLookupTable(wdm_settings, 0.0025, 0.0025, 3, store_path="./wdm_lookup_table_with_fdot_3_cpu.pkl", num_layers_diff=2, fdot_max_factor=0.1, time_layers=time_layers, batch_size_gen=10, td_window=td_window)
+wdm_lookup_table = WDMLookupTable(wdm_settings, 0.01, 0.25, 3, num_layers_diff=2, fdot_max_factor=1.0, time_layers=time_layers, batch_size_gen=1, td_window=td_window)  #  , store_path="./wdm_lookup_table_with_fdot_3_cpu.pkl"
 f_arr = xp.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
 #xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
 # fdot_arr = xp.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
@@ -320,12 +320,12 @@ for i in range(0, num)[:1]:
     cax2 = fig.add_axes([0.9, 0.2, 0.05, 0.25])
 
     ind_check = int(f0_check / wdm_settings.layer_df)
-    wdm_from_td.heatmap(index=0, fig=fig, ax=ax1, vmin=-max_val, vmax=max_val, cax=cax1)
-    gb_fill_wave.heatmap(index=0, fig=fig, ax=ax2, vmin=-max_val, vmax=max_val)
+    wdm_from_td.heatmap(index=0, mag=True, fig=fig, ax=ax1, vmin=-max_val, vmax=max_val, cax=cax1)
+    gb_fill_wave.heatmap(index=0, mag=True, fig=fig, ax=ax2, vmin=-max_val, vmax=max_val)
     try:
-        _tmp_diff = (wdm_from_td[0] - gb_fill_wave[:]).get()  #  / wave_check_wdm[:].get()
+        _tmp_diff = (np.abs(wdm_from_td[0]) - np.abs(gb_fill_wave[:])).get()  #  / wave_check_wdm[:].get()
     except AttributeError:
-        _tmp_diff = (wdm_from_td[0] - gb_fill_wave[:])  # / wave_check_wdm[:]
+        _tmp_diff = (np.abs(wdm_from_td[0]) - np.abs(gb_fill_wave[:]))  # / wave_check_wdm[:]
 
     difference = WDMSignal(np.log10(np.abs(_tmp_diff)), wdm_settings)  #  / wave_check_wdm[:]
     difference.heatmap(index=0, fig=fig, ax=ax3, vmin=difference[:].min().item(), vmax=difference[:].max().item(), cax=cax2, cmap=cm.Blues)
