@@ -1161,90 +1161,111 @@ class WDMSignal(WDMSettings, DomainBase):
 
         return fig, ax
 
+import h5py
+
 class WDMLookupTable(WDMSettings):
-    def __init__(self, settings: WDMSettings, eps_f: int, eps_fdot: int, nchannels: int, num_layers_diff: int=2, fdot_max_factor: float= 8.0, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, time_layers: Optional[int] = None, td_window: Optional[np.ndarray] = None):
+   
+    def to_file(self, fp: str):
+        if os.path.exists(fp):
+            raise ValueError("Trying to write to file that exists.")
+        
+        with h5py.File(fp, "w") as fp:
+            g = fp.create_group("wdm")
+
+            g.attrs["Nf"] = self.Nf,
+            g.attrs["Nt"] = self.Nt,
+            g.attrs["Nt_generate"] = self.sub_settings.Nt,
+            g.attrs["data_dt"] = self.data_dt
+            g.attrs["ind_min"] = self.ind_min
+            g.attrs["ind_max"] = self.ind_max
+            g.attrs["m_ref"] = self.m_ref
+            g.attrs["nchannels"] = self.nchannels
+            g.create_dataset("table_sin", data=self.get(self.table_sin))
+            g.create_dataset("table_cos", data=self.get(self.table_cos))
+            g.create_dataset("fdot_vals", data=self.get(self.fdot_vals))
+            g.create_dataset("norm_freq_single_layer", data=self.get(self.norm_freq_single_layer))
+            g.create_dataset("m_diffs", data=self.get(self.m_diffs))
+
+    @staticmethod
+    def from_file(fp: str):
+        with h5py.File(fp, "r") as f:
+            g = f["wdm"]
+            input_kwargs = dict(
+                ind_min = g.attrs["ind_min"],
+                ind_max = g.attrs["ind_max"],
+            )
+            input_args = (
+                g.attrs["Nf"],
+                g.attrs["Nt"],
+                g.attrs["data_dt"] 
+            )
+            nchannels = g.attrs["nchannels"]
+
+            settings = WDMSettings(*input_args, **input_kwargs)
+            return WDMLookupTable(settings, nchannels, store_path=fp)
+
+    def from_file_internal(self, fp: str):
+        with h5py.File(fp, "r") as fp:
+            g = fp["wdm"]
+            self.sub_settings = WDMSettings(g.attrs["Nf"], g.attrs["Nt_generate"], g.attrs["data_dt"])
+            self.fdot_vals = g["fdot_vals"][:]
+
+            self.m_ref = g.attrs["m_ref"]
+            self.nchannels = g.attrs["nchannels"]
+            self.norm_freq_single_layer = g["norm_freq_single_layer"][:]
+            self.m_diffs = g["m_diffs"][:]
+            self.table_sin = g["table_sin"][:]
+            self.table_cos = g["table_cos"][:]
+            
+    @staticmethod
+    def apply_eps_fdot(eps: float, settings: WDMSettings, fdot_max_factor: float= 8.0) -> np.ndarray:
+        delta_fdot = eps * settings.layer_df / settings.layer_dt
+        fdot_max_val = fdot_max_factor * settings.layer_df / settings.layer_dt
+        _fdot = np.arange(0.0, fdot_max_val, delta_fdot)
+        fdot_vals = np.concatenate([-_fdot[::-1][:-1], _fdot])
+        return fdot_vals
+            
+    @staticmethod 
+    def apply_eps_frequency(eps: float, settings: WDMSettings, m_ref: Optional[int] = None, num_layers_diff: Optional[int] = 2) -> tuple:
+        delta_f = eps * settings.layer_df
+
+        if m_ref is None:
+            m_ref = int(settings.Nt / 2)
+
+        norm_freq_single_layer = np.arange(0.0, settings.layer_df, delta_f)
+        m_diffs = (_tmp := np.arange(2 * num_layers_diff + 2)) - _tmp[int(len(_tmp) / 2)]
+
+        return norm_freq_single_layer, m_diffs, m_ref
+
+    def __init__(self, settings: WDMSettings, nchannels: int, m_ref: int = None, norm_freq_single_layer: np.ndarray = None, m_diffs: np.ndarray = None, fdot_vals: np.ndarray = None, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, time_layers: Optional[int] = None, td_window: Optional[np.ndarray] = None):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
 
-        self.store_path = store_path
-        if time_layers is None:
-            time_layers = self.Nt
-
-        assert isinstance(time_layers, int)
-        
         self.nchannels = nchannels
-        self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
-        self.num_layers_diff = num_layers_diff
-        self.m_ref = int(3e-3 / self.sub_settings.layer_df)  # int(self.sub_settings.Nf / 2)
-        self.n_ref = int(self.sub_settings.Nt / 2)
-        self.is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
-        self.f_ref = self.m_ref * self.sub_settings.layer_df
         
-        assert 0.0 < eps_f < 1.0
-        assert 0.0 < eps_fdot < 1.0
-        
-        self.eps_f = eps_f
-        self.delta_f = eps_f * self.layer_df
-
-        freq_single_layer = self.xp.arange(self.f_ref, (self.m_ref + 1) * self.layer_df, self.delta_f)
-        m_diffs = (_tmp := np.arange(2 * num_layers_diff + 2)) - _tmp[int(len(_tmp) / 2)]
-
-        self.f_vals = np.concatenate([freq_single_layer + m_tmp * self.layer_df for m_tmp in m_diffs])
-        self.f_vals_norm = self.f_vals - self.f_ref
-
-
-        # self.f_vals_norm = self.xp.concatenate([-_norm_freq[::-1][:-1], _norm_freq])
-        # self.f_vals = self.f_vals_norm + self.f_ref
-
-        self.f_steps = len(freq_single_layer) * (num_layers_diff + 1)
-        self.f_steps_per_layer = len(freq_single_layer)
-
-        self.eps_fdot = eps_fdot
-        
-        if fdot_max_factor == 0.0:
-            self.run_fdot = False
-            self.fdot_steps = 1
-            self.fdot_vals = self.xp.array([0.0])
-            self.delta_fdot = 0.0
-
+        self.store_path = store_path
+        if os.path.exists(self.store_path):
+            self.from_file_internal(self.store_path)
         else:
-            self.run_fdot = True
-            self.delta_fdot = eps_fdot * self.layer_df / self.layer_dt
-            self.fdot_max_val = fdot_max_factor * self.layer_df / self.layer_dt
-            _fdot = self.xp.arange(0.0, self.fdot_max_val, self.delta_fdot)
-            self.fdot_vals = self.xp.concatenate([-_fdot[::-1][:-1], _fdot])
-            
-            self.fdot_min = self.fdot_vals.min().item()
-            self.fdot_max = self.fdot_vals.max().item()
+            if time_layers is None:
+                time_layers = self.Nt
 
-            self.fdot_steps = len(self.fdot_vals)
+            assert isinstance(time_layers, int)
             
-        run_table_gen = True
-        if store_path is not None:
-            if os.path.exists(self.store_path):
-                with open(self.store_path, "rb") as fp:
-                    check_input = pickle.load(fp)
-                if (
-                    check_input["basis_settings"] == self.sub_settings and
-                    check_input["f_steps"] == self.f_steps and
-                    check_input["fdot_steps"] == self.fdot_steps and
-                    check_input["delta_f"] == self.delta_f and
-                    check_input["delta_fdot"] == self.delta_fdot
-                ):
-                    run_table_gen = False
-                    print("fix this!")
-                    self.table_sin = self.xp.asarray(check_input["table_sin"])  # np.load("table_sin_gpu_gen.npy"))  # 
-                    self.table_cos = self.xp.asarray(check_input["table_cos"])  # np.load("table_sin_gpu_gen.npy"))  # 
-
-        if run_table_gen:
-            self.t_ref = self.n_ref * self.sub_settings.layer_dt
+            self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
+            self.m_ref = m_ref  # int(3e-3 / self.sub_settings.layer_df)  # int(self.sub_settings.Nf / 2)
+            self.n_ref = int(self.sub_settings.Nt / 2)
+            self.is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
+            self.m_diffs = self.xp.asarray(m_diffs).astype(self.xp.int32)
+            self.fdot_vals = self.xp.asarray(fdot_vals)
+            self.norm_freq_single_layer = self.xp.asarray(norm_freq_single_layer)
             
-            total_f_fdot_vals = self.f_steps_per_layer * self.fdot_steps
+            total_f_fdot_vals = self.norm_f_steps * self.fdot_steps
             
             if self.run_fdot:
-                _f_vals, _fdot_vals = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(freq_single_layer, self.fdot_vals)])
+                _f_vals, _fdot_vals = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(norm_freq_single_layer + self.f_ref, self.fdot_vals)])
             else:
-                _f_vals = freq_single_layer.copy()
+                _f_vals = norm_freq_single_layer.copy() + self.f_ref
                 _fdot_vals = self.xp.zeros_like(_f_vals)
 
             t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
@@ -1269,16 +1290,15 @@ class WDMLookupTable(WDMSettings):
             self.td_window = td_window
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
                 inds = np.arange(st_batch, end_batch)
-
+                
                 # if not self.xp.allclose(_f_vals[inds] - (self.f_ref+ 0 * self.layer_df), 0.0) or not _fdot_vals[inds][0] == 0.0:  # -3.257427471431767e-11:
                     # continue
-
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 
                 wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
                 wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
-                
+
                 for m_i, m_diff in enumerate(m_diffs):
                     m_current = self.m_ref + m_diff
                     sin_coeff = wave_sin_wdm[:, self.m_ref - m_diff, self.n_ref] 
@@ -1295,29 +1315,61 @@ class WDMLookupTable(WDMSettings):
                         _table_cos[m_i, inds] = cos_coeff
                     except:
                         breakpoint()
+
                 print(inds, total_f_fdot_vals)
 
-            _table_sin = _table_sin.reshape((len(m_diffs), self.f_steps_per_layer, self.fdot_steps)).copy()
-            _table_cos = _table_cos.reshape((len(m_diffs), self.f_steps_per_layer, self.fdot_steps)).copy()
+            # TODO: verify if there is a minus sign needed here and below
+            freqs =  (_f_vals.reshape(-1, 2) +  m_diffs[:, None, None] * self.layer_df).transpose(1, 0, 2).reshape(self.fdot_steps, -1)
+            _table_sin = _table_sin.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).T.copy()
+            _table_cos = _table_cos.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).T.copy()
+
+            assert _table_sin.shape == (self.f_vals.shape[0], self.fdot_vals.shape[0])
+            assert _table_cos.shape == (self.f_vals.shape[0], self.fdot_vals.shape[0])
             
-            breakpoint()
-            self.table_sin = _table_sin.reshape(-1, self.fdot_steps)
-            self.table_cos = _table_cos.reshape(-1, self.fdot_steps)
+            self.table_sin = _table_sin
+            self.table_cos = _table_cos
 
             freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
             freqs_norm = self.f_ref - freqs
             if store_path is not None:
-                output_dict = {
-                    "basis_settings": self.get(self.sub_settings),
-                    "f_steps": self.get(self.f_steps),
-                    "fdot_steps": self.get(self.fdot_steps),
-                    "delta_f": self.get(self.delta_f),
-                    "delta_fdot": self.get(self.delta_fdot),
-                    "table_sin": self.get(self.table_sin),
-                    "table_cos": self.get(self.table_cos)
-                }
-                with open(self.store_path, "wb") as fp:
-                    pickle.dump(output_dict, fp, pickle.HIGHEST_PROTOCOL)
+                self.to_file(store_path)
+
+    @property
+    def run_fdot(self) -> bool:
+        return not (len(self.fdot_vals) == 1 and self.fdot_vals[0] == 0.0)
+    
+    @property 
+    def f_vals_norm(self) -> np.ndarray:
+        return self.f_vals - self.f_ref
+    
+    @property 
+    def f_steps(self) -> np.ndarray:
+        return len(self.f_vals)
+    
+    @property 
+    def norm_f_steps(self) -> np.ndarray:
+        return len(self.norm_freq_single_layer)
+    
+    @property 
+    def fdot_steps(self) -> np.ndarray:
+        return len(self.fdot_vals)
+    
+    @property 
+    def t_ref(self) -> np.ndarray:
+        return self.n_ref * self.layer_dt
+    
+    @property 
+    def f_ref(self) -> np.ndarray:
+        return self.m_ref * self.layer_df
+    
+    @property
+    def f_vals(self) -> np.ndarray:
+        freq_single_layer = self.norm_freq_single_layer + self.f_ref 
+        f_vals = self.xp.concatenate([freq_single_layer + m_tmp * self.layer_df for m_tmp in self.m_diffs])
+        assert self.xp.allclose(_tmp := self.xp.diff(f_vals), _tmp[0])
+        return f_vals
+        
+    
     @staticmethod
     def get(x: np.ndarray) -> np.ndarray:
         try:
@@ -1378,6 +1430,7 @@ class WDMLookupTable(WDMSettings):
         if self.run_fdot:
             return interpolate.LinearNDInterpolator(self.norm_points, table.flatten(), rescale=True)
         else:
+            breakpoint()
             return interpolate.interp1d(self.norm_points, table.flatten())
         
     def get_table_coeffs(self, f_norm: np.ndarray, fdot_arr: np.ndarray):
@@ -1396,11 +1449,13 @@ class WDMLookupTable(WDMSettings):
         return (sin_coeffs, cos_coeffs)
 
     def get_wdm_coeffs(self, amp_arr: np.ndarray, phi_arr: np.ndarray, f_arr: np.ndarray, fdot_arr: np.ndarray, n_arr: np.ndarray, num_m_layers: int = 1):
-        ms = (f_arr // self.layer_df).astype(int)
+        ms = (f_arr / self.layer_df).astype(int)
         wdm_coeffs_out = self.xp.zeros((amp_arr.shape[0], num_m_layers * 2 + 1))
         m_map = -self.xp.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
         is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
+            if m_diff == 0:
+                breakpoint()
             ms_to_use = (ms + m_diff).astype(int)
             keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
             
@@ -1417,11 +1472,11 @@ class WDMLookupTable(WDMSettings):
             sin_coeffs = self.xp.zeros_like(_sin_coeffs)
             cos_coeffs = self.xp.zeros_like(_cos_coeffs)
             
-            sin_coeffs[~is_m_plus_n_even] = -_sin_coeffs[~is_m_plus_n_even]
+            sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
             cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
 
             sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
-            cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
+            cos_coeffs[is_m_plus_n_even] = _sin_coeffs[is_m_plus_n_even]
             
             # keep1 = (~is_m_plus_n_even & ~is_m_odd)
             # sin_coeffs[keep1] = _sin_coeffs[keep1]

@@ -1521,17 +1521,12 @@ def get_sensitivity(
         # f2 = integrand[:, :, 2]
         # PSD = simpson_3_integral = h*(f0 + 4.0*f1 + f2)/6.0
         # 0.25 is fudge factor from tysons code
-
-        npts_c = 20
         f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
-        psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
-        testfft = randc(psd.shape) * np.sqrt(psd/2 * basis_settings.N/(2*basis_settings.data_dt))
-
-        if isinstance(psd[0], float):
-            psd = psd + 1j * 0.0
-        psd_fd = domains.FDSignal(testfft, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
-        PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
-
+        psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0]) ** (1/2)
+        
+        psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
+        PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0] / (basis_settings.data_dt * basis_settings.Nt * basis_settings.Nf) 
+        
     else:
         raise ValueError(f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}")
     
