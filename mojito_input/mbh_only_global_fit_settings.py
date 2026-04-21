@@ -165,12 +165,14 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 20
     ntemps = 3
 
+    window_type = "tukey"
+    window_taper_duration = 1 / start_freq
+    normalize_window = True
+
     basis_domain = "stft"
     stft_dt = 24 * 3600.0 if basis_domain == "stft" else None  # hours
 
     base_file_name += f"_{basis_domain}"
-
-    window_taper_duration = 1 / start_freq
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['mbhb',],
@@ -181,7 +183,36 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  orbits_kwargs=dict(force_backend=backend, frame="icrs")
                                 )
     
-    preprocess_kwargs = dict(normalize=False)
+    downsample_kwargs = {
+        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
+        "window": ("kaiser", 31.0)  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+    }
+
+    highpass_kwargs = {
+        'cutoff': 1e-5,  # Hz — highpass cutoff frequency
+        'order': 2,  # Butterworth filter order
+        'zero_phase': True
+    }
+
+    lowpass_kwargs = {
+        'cutoff': 1e-1,  # Hz — lowpass cutoff frequency
+        'order': 2,  # Butterworth filter order
+        'zero_phase': True
+    }
+
+    trim_kwargs = {
+        'duration': 200 * 3600,  # seconds — duration to trim from each end
+        'is_percent': False,  # If True, 'duration' is interpreted as a percentage of the total signal length
+        'trimming_type': "from_each_end"  # "from_each_end" or "from_start"
+    }
+    
+    preprocess_kwargs = dict(
+        highpass_kwargs=highpass_kwargs,
+        lowpass_kwargs=lowpass_kwargs,
+        trim_kwargs=trim_kwargs,
+        downsample_kwargs=downsample_kwargs,
+        Tobs=Tobs
+    )
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
@@ -198,11 +229,13 @@ def get_general_erebor_settings() -> GeneralSetup:
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
+        window_type=window_type,
         window_taper_duration=window_taper_duration,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
+        normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
