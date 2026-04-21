@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 import jax
 import numpy as np
 
+from .domains import FDSettings, STFTSettings
 from .utils.parallelbase import LISAToolsParallelModule
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     import cupy as cp  # typing-only; runtime cupy use lives in call sites
 
     from .analysiscontainer import AnalysisContainerArray
-    from .domains import FDSettings, STFTSettings
+    from .domains import FDSettings, STFTSettings, DomainBase
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             start_times = self.xp.ascontiguousarray(start_times, dtype=self.xp.float64)
         return d_h_out, h_h_out, start_freqs, data_index, noise_index, start_times
 
-    def compute_d_d_term(self, out=False, **kwargs):
+    def compute_d_d_term(self, out: bool=False, **kwargs):
         """
         Compute (d|d) term for the containers in this split only.
 
@@ -354,8 +355,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         )
 
         return d_h_out, h_h_out
-
-
+    
 class FDComputationGroup(BaseDomainComputationGroup):
     """
     Wraps C++ FDDomainWrap for batched likelihood computation.
@@ -429,7 +429,6 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
         return d_h_out, h_h_out
 
-
 class DomainComputationGroupArray:
     """Helper class to manage multiple DomainComputationGroup instances for different splits.
 
@@ -456,12 +455,6 @@ class DomainComputationGroupArray:
         for split_id, ids in enumerate(self.acs.gpu_splits):
             self.ac_to_intra[ids] = np.arange(len(ids), dtype=np.int32)
 
-        # JAX-safe concurrency scaffolding. The lock guards first-time compile
-        # misses when a future threaded path is enabled; ``_warm_compile_done``
-        # is flipped by ``warm_jax_compile`` once every device has compiled.
-        self._jax_compile_lock = threading.Lock()
-        self._warm_compile_done: bool = False
-
     def initialize_computation_groups(self):
         """Initializes a DomainComputationGroup instance for each GPU split in the AnalysisContainerArray."""
         
@@ -478,6 +471,8 @@ class DomainComputationGroupArray:
             computation_groups.append(group)
         self.computation_groups = computation_groups
 
+        self.compute_d_d_terms()
+
     @property
     def xp(self):
         """Array module (numpy or cupy)."""
@@ -489,13 +484,17 @@ class DomainComputationGroupArray:
         return self.acs.gpus
 
     @property
+    def main_gpu(self):
+        """GPU ID of the main device, or None if using CPU."""
+        return self.gpus[0] if self.gpus is not None else None
+
+    @property
     def num_splits(self):
         return len(self.acs.gpu_splits)
 
     @property
     def domain_type(self):
         """Analysis domain type, either 'STFT' or 'FD', inferred from the settings of the AnalysisContainerArray."""
-        from .domains import FDSettings, STFTSettings
 
         if isinstance(self.acs.settings, STFTSettings):
             return "STFT"
@@ -527,7 +526,7 @@ class DomainComputationGroupArray:
             CuPy's TLS-safe ``cupy.cuda.Device`` for kernel dispatch.
         """
 
-        if device_id is None:
+        if device_id is None or self.gpus is None:
             # CPU context - set context to CPU if using a GPU backend, otherwise do nothing
             with jax.default_device(jax.devices("cpu")[0]):
                 yield "cpu"
@@ -538,6 +537,137 @@ class DomainComputationGroupArray:
             with jax.default_device(jax.devices("gpu")[device_id]):
                 with self.xp.cuda.Device(device):
                     yield f"gpu: {device}"
+
+    @contextmanager
+    def _threaded_device_context(self, device_id: int | None = None):
+        """Thread-safe per-worker device context.
+
+        CuPy-only: ``cupy.cuda.Device`` is TLS, so worker threads can
+        hold distinct device contexts concurrently. ``jax.default_device``
+        is deliberately NOT set here — it is process-global and races
+        across threads. JAX-tracing callables running under this context
+        must route their host/cupy inputs via the DLPack bridge
+        (``JaxThreadingMixin._to_jax`` in ``utils/jaxbase.py``) so JAX
+        arrays are placed on the same CUDA device as the cupy TLS
+        allocation.
+
+        Args:
+            device_id: Real CUDA device ordinal (e.g. ``group.device_id``).
+                ``None`` means CPU — the context is a no-op.
+        """
+        if device_id is None or self.gpus is None:
+            yield "cpu"
+            
+        else:
+            device = self.gpus[device_id]
+            with self.xp.cuda.Device(device):
+                yield f"gpu: {device}"
+
+    def _dispatch(self, mode: str) -> Callable:
+        """Select the per-split dispatcher for the requested mode.
+
+        ``"serial"`` returns :meth:`_loop_operation`; ``"threaded"``
+        returns :meth:`_threaded_operation`. Both have the same
+        ``(operation, args_per_group, kwargs_per_group, *, aggregate)``
+        signature — callers can swap between them by changing this
+        single mode string.
+        """
+        if mode == "serial":
+            return self._loop_operation
+        if mode == "threaded":
+            return self._threaded_operation
+        raise ValueError(f"Unknown mode={mode!r}; expected 'serial' or 'threaded'.")
+
+    # ------------------------------------------------------------------ #
+    # Threading-safety protocol glue                                     #
+    # ------------------------------------------------------------------ #
+
+    def _callable_id(self, callable: Callable) -> str:
+        """Stable string key for a callable's role on its owner.
+
+        Uses ``__func__.__qualname__`` for bound methods (distinguishes
+        e.g. ``__call__`` from ``get_signals_for_residuals`` on the same
+        owner), falling back to the object's ``__qualname__`` for
+        callable instances.
+        """
+        fn = getattr(callable, "__func__", callable)
+        return getattr(fn, "__qualname__", repr(fn))
+
+    def _callable_owner(self, callable: Callable):
+        """Return the object that owns a callable.
+
+        Bound method → ``__self__``. Callable instance (e.g. a waveform
+        object implementing ``__call__``) → the instance itself, so the
+        threading-safety protocol can be queried on the object where the
+        mixin lives.
+        """
+        return getattr(callable, "__self__", callable)
+
+    def _threading_safe(
+        self,
+        callable: Callable,
+        args_per_group: list,
+        kwargs_per_group: list,
+    ) -> bool:
+        """Consult the owner's ``supports_threaded`` for every non-empty split.
+
+        Returns ``True`` if every split reports safe, ``False`` if any
+        one reports unsafe. Callables whose owner does not implement
+        ``supports_threaded`` are treated as default-safe (this keeps
+        non-JAX waveforms zero-config). Empty splits are skipped — they
+        never trigger a compile.
+        """
+        owner = self._callable_owner(callable)
+        if not hasattr(owner, "supports_threaded"):
+            return True
+        cid = self._callable_id(callable)
+        for i, group in enumerate(self.computation_groups):
+            if len(args_per_group[i]) == 0:
+                continue
+            if not owner.supports_threaded(
+                cid, group.device_id, *args_per_group[i], **kwargs_per_group[i]
+            ):
+                return False
+        return True
+
+    def _record_threading_completion(
+        self,
+        callable: Callable,
+        args_per_group: list,
+        kwargs_per_group: list,
+    ) -> None:
+        """Notify the owner's registry that a per-split dispatch completed.
+
+        Called after a successful dispatch (serial or threaded); enables
+        the threaded fast path for subsequent calls with the same
+        ``(callable_id, device_id, shape)``. Owners that do not
+        implement ``record_completion`` are no-ops.
+        """
+        owner = self._callable_owner(callable)
+        if not hasattr(owner, "record_completion"):
+            return
+        cid = self._callable_id(callable)
+        for i, group in enumerate(self.computation_groups):
+            if len(args_per_group[i]) == 0:
+                continue
+            owner.record_completion(
+                cid, group.device_id, *args_per_group[i], **kwargs_per_group[i]
+            )
+
+    def restore_main_device(self):
+        """Restores the main device context after GPU computations, and calls ``xp.get_default_memory_pool().free_all_blocks()`` to clear GPU memory.
+
+        Notes:
+            This method should be called after performing computations on multiple GPU devices to ensure that the main device context is restored.
+        """
+        if self.main_gpu is not None:
+            self.xp.get_default_memory_pool().free_all_blocks()
+            self.xp.cuda.runtime.setDevice(self.main_gpu)
+            jax.default_device(jax.devices("gpu")[0])
+
+    def _to_host_array(self, arr: np.ndarray | cp.ndarray) -> np.ndarray:
+        """Move an array to the host, ensuring it is a numpy ndarray."""
+        return np.asarray(arr.get() if hasattr(arr, "get") else arr)
 
     def _unpack_indices(
         self,
@@ -559,10 +689,9 @@ class DomainComputationGroupArray:
         (waveform generation, likelihood scatter, residual dispatch) share
         its output instead of recomputing ``np.where(ac_to_split == s)``.
         """
-        data_index_cpu = np.asarray(data_index.get() if hasattr(data_index, "get") else data_index)
-        noise_index_cpu = np.asarray(
-            noise_index.get() if hasattr(noise_index, "get") else noise_index
-        )
+        data_index_cpu = self._to_host_array(data_index)
+        noise_index_cpu = self._to_host_array(noise_index)
+
         split_of_each = self.ac_to_split[data_index_cpu]
 
         positions_per_split: list[np.ndarray] = []
@@ -593,7 +722,7 @@ class DomainComputationGroupArray:
                 - kwargs_per_group: A list of dictionaries, where each dictionary contains the keyword arguments for a specific split.
         """
 
-        coords_host = np.asarray(coords.get() if hasattr(coords, "get") else coords)
+        coords_host = self._to_host_array(coords)
 
         args_per_group: list = []
         kwargs_per_group: list = []
@@ -608,7 +737,7 @@ class DomainComputationGroupArray:
 
         return args_per_group, kwargs_per_group
 
-    def compute_d_d_terms(self, out=False, **kwargs):
+    def compute_d_d_terms(self, out=False, **kwargs) -> list[np.ndarray] | None:
         """Compute (d|d) terms across all computation groups and aggregate results.
 
         Args:
@@ -619,14 +748,14 @@ class DomainComputationGroupArray:
         """
 
         d_d_list = []
-        for group in self.computation_groups:
-            with self.device_context(group.device_id) as device_info:
+        for i, group in enumerate(self.computation_groups):
+            with self.device_context(i) as device_info:
                 d_d = group.compute_d_d_term(out=out, **kwargs)
             if out:
                 d_d_list.append(d_d)
 
         if out:
-            return self.xp.concatenate(d_d_list).flatten()
+            return d_d_list
 
     def compute_likelihood(
         self,
@@ -709,11 +838,11 @@ class DomainComputationGroupArray:
             positions = positions_per_split[i]
             if len(positions) == 0:
                 continue
-            with self.device_context(group.device_id):
+            with self.device_context(i):
                 idx_d = self.xp.asarray(data_intra_per_split[i])
                 idx_n = self.xp.asarray(noise_intra_per_split[i])
                 likes = group.compute_likelihood(idx_d, idx_n, *likelihood_args[i])
-                likes_host = likes.get() if hasattr(likes, "get") else np.asarray(likes)
+                likes_host = self._to_host_array(likes)
             output[positions] = likes_host
         return output
 
@@ -724,22 +853,59 @@ class DomainComputationGroupArray:
         noise_intra_per_split: list[np.ndarray],
         likelihood_args: list[tuple],
     ) -> np.ndarray:
-        """Threaded per-split likelihood path (reserved).
+        """Threaded per-split likelihood path — input-order scatter.
 
-        When implemented, worker threads must place arrays with
-        ``jax.device_put(x, device=jax.devices("gpu")[idx])`` — NOT via
-        ``self.device_context`` / ``jax.default_device``, which is
-        process-global and races across threads. Callers must invoke
-        :meth:`warm_jax_compile` once before the first threaded run so
-        every device's JAX compile cache is populated serially.
+        One worker thread per computation group. Each worker materializes
+        ``idx_d`` / ``idx_n`` on its own device under
+        :meth:`_threaded_device_context` so cupy allocations land on the
+        right GPU, then runs the C++ likelihood kernel and returns host
+        ``np.ndarray``.
 
-        Raises:
-            NotImplementedError: Always, until the threaded path is wired.
+        No warmup guard is required here: the likelihood kernels are pure
+        cupy / C++ — they hold no process-wide compile lock, so
+        concurrent execution on distinct devices is always safe. JAX's
+        compile hazard (handled via the threading-safety protocol at
+        the :meth:`_generate_waveform` layer) is irrelevant to this
+        function.
+
+        Waveform outputs in ``likelihood_args[i]`` are already on split
+        ``i``'s device (produced earlier by ``_generate_waveform`` under
+        the same TLS context) — no cross-device transfer here.
+
+        Args:
+            positions_per_split: Flat-batch positions per split.
+            data_intra_per_split: Intra-split AC ids per split.
+            noise_intra_per_split: Intra-split noise AC ids per split.
+            likelihood_args: Per-split positional-args tuple forwarded to
+                :meth:`BaseDomainComputationGroup.compute_likelihood`.
+
+        Returns:
+            Host ``np.ndarray`` of shape ``(N,)`` with per-binary
+            log-likelihoods in the original flat input order.
         """
-        raise NotImplementedError(
-            "threaded mode not implemented; use mode='serial'. "
-            "Call warm_jax_compile() once before any future threaded run."
+        n_data = sum(len(p) for p in positions_per_split)
+        output = np.empty(n_data, dtype=np.float64)
+
+        def _eval_split_likelihood(i: int, group):
+            positions = positions_per_split[i]
+            if len(positions) == 0:
+                return None
+            idx_d = self.xp.asarray(data_intra_per_split[i])
+            idx_n = self.xp.asarray(noise_intra_per_split[i])
+            likes = group.compute_likelihood(idx_d, idx_n, *likelihood_args[i])
+            return self._to_host_array(likes)
+
+        per_split_out = self._threaded_operation(
+            _eval_split_likelihood,
+            args_per_group=[(i, g) for i, g in enumerate(self.computation_groups)],
+            kwargs_per_group=None,
         )
+
+        for i, likes_host in enumerate(per_split_out):
+            if likes_host is None:
+                continue
+            output[positions_per_split[i]] = likes_host
+        return output
 
     def _generate_waveform(
         self,
@@ -747,6 +913,8 @@ class DomainComputationGroupArray:
         coords: np.ndarray,
         positions_per_split: list[np.ndarray],
         waveform_gen_kwargs: dict | None = None,
+        *,
+        mode: str = "serial",
     ) -> list:
         """Run ``waveform_callable`` once per non-empty split under device context.
 
@@ -756,11 +924,23 @@ class DomainComputationGroupArray:
         path (``waveform_gen`` → tuples) and the residual path
         (``waveform_gen.get_signals_for_residuals`` → ``DomainBaseArray``).
 
+        Concurrency-safety for ``mode="threaded"``: this is where the
+        threading-safety protocol is consulted, not inside
+        :meth:`_threaded_operation`. The protocol query happens against
+        the *unwrapped* ``waveform_callable`` (not the local ``_call``
+        wrapper built below) so bound-method identity and compile-shape
+        keys resolve on the real waveform owner. When any non-empty
+        split reports unsafe for ``(callable_id, device, shape)``, the
+        whole dispatch falls back to :meth:`_loop_operation` silently —
+        MCMC shape drift is self-healing this way: the first call with a
+        novel N runs serially, seeds the owner's registry via
+        :meth:`record_completion`, and subsequent calls with the same N
+        run threaded.
+
         Args:
             waveform_callable: Callable invoked as
                 ``waveform_callable(*coords_s.T, **waveform_gen_kwargs)`` on
-                each non-empty split, under ``self.device_context`` for the
-                owning computation group.
+                each non-empty split.
             coords: ``(N, ndim)`` coord batch. Materialized to host before
                 slicing so the per-split partitions can be dispatched
                 independently to each group's device.
@@ -769,6 +949,10 @@ class DomainComputationGroupArray:
                 output for that split so callers can uniformly iterate
                 ``num_splits`` groups.
             waveform_gen_kwargs: Extra kwargs forwarded to the callable.
+            mode: Dispatch mode. ``"serial"`` runs under
+                :meth:`_loop_operation` (single-threaded, JAX-safe).
+                ``"threaded"`` runs under :meth:`_threaded_operation`
+                after the protocol check clears every non-empty split.
 
         Returns:
             List of length ``num_splits``. ``out[s]`` is the raw return
@@ -782,12 +966,34 @@ class DomainComputationGroupArray:
             positions_per_split, coords, waveform_gen_kwargs
         )
 
+        dispatch_mode = mode
+        if mode == "threaded" and not self._threading_safe(
+            waveform_callable, args_per_group, kwargs_per_group
+        ):
+            logger.debug(
+                "threading-safety protocol reported unsafe for callable=%s; "
+                "falling back to serial waveform generation.",
+                self._callable_id(waveform_callable),
+            )
+            dispatch_mode = "serial"
+
+        dispatch = self._dispatch(dispatch_mode)
+
         def _call(*flat_coords, **kwargs):
             if not flat_coords or flat_coords[0].shape[0] == 0:
                 return None
             return waveform_callable(*flat_coords, **kwargs)
 
-        return self._loop_operation(_call, args_per_group, kwargs_per_group)
+        outputs = dispatch(_call, args_per_group, kwargs_per_group)
+
+        # Record completion on success. Owners without a registry
+        # (non-JAX callables) are no-ops. If the dispatch raised, we
+        # don't reach this line — the exception propagates and no
+        # compile claim is made.
+        self._record_threading_completion(
+            waveform_callable, args_per_group, kwargs_per_group
+        )
+        return outputs
 
     def compute_likelihood_from_coords(
         self,
@@ -826,7 +1032,7 @@ class DomainComputationGroupArray:
 
         positions, data_intra, noise_intra = self._unpack_indices(data_index, noise_index)
         likelihood_args = self._generate_waveform(
-            waveform_gen, coords, positions, waveform_gen_kwargs
+            waveform_gen, coords, positions, waveform_gen_kwargs, mode=mode
         )
 
         if mode == "serial":
@@ -839,14 +1045,15 @@ class DomainComputationGroupArray:
             )
         raise ValueError(f"Unknown mode={mode!r}; expected 'serial' or 'threaded'.")
 
-    def generate_signals_for_residuals(
+    def generate_signals(
         self,
         waveform_gen,
         coords: np.ndarray,
-        data_index: np.ndarray,
-        *,
+        data_index: np.ndarray = None,
         waveform_gen_kwargs: dict | None = None,
-    ) -> Tuple[list, list[np.ndarray]]:
+        *,
+        mode: str = "serial",
+    ) -> List[DomainBase | None]:
         """Produce per-split residual-ready signals on their origin devices.
 
         Routes ``waveform_gen`` through
@@ -872,135 +1079,52 @@ class DomainComputationGroupArray:
             array whose element ``k`` maps to
             ``signals_per_split[s][k]``.
         """
+        if data_index is None:
+            # infer the number of temperatures by the shape of coords
+            data_index = np.arange(coords.shape[0], dtype=np.int32) % len(self.acs)
+
         positions, *_ = self._unpack_indices(data_index, data_index)
         signals_per_split = self._generate_waveform(
             waveform_gen,
             coords,
             positions,
             waveform_gen_kwargs,
+            mode=mode,
         )
-        return signals_per_split, positions
+        # now use the positions to reorder the signals into the original input order, concatenating the per-split outputs as needed. 
 
-    def warm_jax_compile(
+        out_signals = [None] * len(data_index)
+        for split_id, signals in enumerate(signals_per_split):
+            if signals is None:
+                continue
+            positions_here = positions[split_id]
+            for pos, signal in zip(positions_here, signals):
+                out_signals[pos] = signal
+
+        return out_signals
+
+    def _execute_op(
         self,
-        waveform_gen: Callable,
-        sample_coords_per_split=None,
-        *,
-        coords=None,
-        data_index=None,
-        sample_size_per_split: int = 1,
-        **waveform_gen_kwargs,
-    ) -> None:
-        """Pre-warm the JAX compile cache once per device, serially.
-
-        Threaded execution paths contend on the XLA compile lock and first
-        compiles on distinct devices can deadlock if triggered concurrently.
-        Calling this once at the start of a run (before any future threaded
-        likelihood evaluation) makes the compile misses happen in the safe
-        serial phase.
-
-        The warmup works by invoking ``waveform_gen`` once per device; the
-        MBH path materializes its output to cupy, which is a sync point, so
-        by the time each call returns the JIT compile for that device has
-        completed. No explicit ``block_until_ready`` traversal is required.
-
-        Two entry paths are supported — supply exactly one:
-
-        * ``sample_coords_per_split``: an explicit list/dict of per-split
-          coord batches. Used when the caller already has per-split coords
-          (e.g. pre-split warmups in test harnesses).
-        * ``coords`` + ``data_index``: a flat batch. DCGA partitions by
-          ``ac_to_split[data_index]`` and takes the first
-          ``sample_size_per_split`` entries from each split's partition.
-          If a split has no entries, the first few global coords are used
-          as a stand-in so every device still sees a warmup call.
-
-        Args:
-            waveform_gen: Callable invoked as
-                ``waveform_gen(*coords.T, **waveform_gen_kwargs)`` — the same
-                shape of call the move class uses in its hot path.
-            sample_coords_per_split: List of length ``num_splits`` or
-                ``dict[int, array]`` keyed by split id. Each entry is a
-                small ``(n, ndim)`` coord batch.
-            coords: Flat ``(N, ndim)`` coord batch (alternative to
-                ``sample_coords_per_split``).
-            data_index: Flat ``(N,)`` AC-id batch (required with ``coords``).
-            sample_size_per_split: Number of coords to take per split when
-                deriving from ``coords`` / ``data_index``. Defaults to 1.
-            **waveform_gen_kwargs: Forwarded to ``waveform_gen``.
-
-        Notes:
-            Safe to call multiple times — re-invocation is a no-op once
-            ``self._warm_compile_done`` is True.
-        """
-        if self._warm_compile_done:
-            logger.debug("warm_jax_compile: already warmed, skipping")
-            return
-
-        explicit = sample_coords_per_split is not None
-        derived = coords is not None or data_index is not None
-        if explicit and derived:
-            raise ValueError(
-                "warm_jax_compile: pass either sample_coords_per_split OR "
-                "(coords, data_index), not both."
+        group: BaseDomainComputationGroup,
+        operation: str | Callable,
+        args: tuple,
+        kwargs: dict,
+        device_info: str,
+        split_index: int,
+    ) -> Any:
+        """Helper to invoke either a free callable or a group method / property."""
+        if callable(operation):
+            op_label = getattr(operation, "__name__", repr(operation))
+            logger.debug(
+                f"Executing external callable {op_label} on {device_info} for split index {split_index}"
             )
-        if derived:
-            if coords is None or data_index is None:
-                raise ValueError("warm_jax_compile: coords and data_index must be given together.")
-            sample_coords_per_split = self._derive_warm_samples(
-                coords, data_index, sample_size_per_split
-            )
-        elif not explicit:
-            raise ValueError(
-                "warm_jax_compile: pass sample_coords_per_split or " "(coords, data_index)."
-            )
-
-        if isinstance(sample_coords_per_split, dict):
-            coords_iter = [sample_coords_per_split[i] for i in range(self.num_splits)]
+            return operation(*args, **kwargs)
         else:
-            coords_iter = list(sample_coords_per_split)
-        if len(coords_iter) != self.num_splits:
-            raise ValueError(
-                f"sample_coords_per_split length {len(coords_iter)} "
-                f"!= num_splits {self.num_splits}"
-            )
-
-        for i, (group, coords_s) in enumerate(zip(self.computation_groups, coords_iter)):
-            with self.device_context(group.device_id) as device_info:
-                logger.debug(f"warm_jax_compile: warming {device_info} (split {i})")
-                coords_arr = np.asarray(coords_s)
-                waveform_gen(*coords_arr.T, **waveform_gen_kwargs)
-
-        self._warm_compile_done = True
-
-    def _derive_warm_samples(
-        self,
-        coords,
-        data_index,
-        sample_size_per_split: int,
-    ) -> dict:
-        """Pick per-split warmup coord batches from a flat (coords, data_index).
-
-        For splits whose partition is non-empty, take the first
-        ``sample_size_per_split`` entries. For splits with no matching AC
-        ids, fall back to the first ``sample_size_per_split`` global coords
-        so every device still receives a warmup invocation.
-        """
-        data_index_cpu = np.asarray(data_index.get() if hasattr(data_index, "get") else data_index)
-        coords_host = np.asarray(coords.get() if hasattr(coords, "get") else coords)
-        split_of_each = self.ac_to_split[data_index_cpu]
-        k = max(1, int(sample_size_per_split))
-        fallback = coords_host[:k]
-
-        per_split: dict[int, np.ndarray] = {}
-        for split_id in range(self.num_splits):
-            positions = np.where(split_of_each == split_id)[0]
-            if len(positions) == 0:
-                per_split[split_id] = fallback
-            else:
-                take = positions[: min(k, len(positions))]
-                per_split[split_id] = coords_host[take]
-        return per_split
+            target = getattr(group, operation)
+            if callable(target):
+                logger.debug(f"Executing {operation} on {device_info} for split index {split_index}")
+                return target(*args, **kwargs)
+            return target
 
     def _loop_operation(
         self,
@@ -1053,24 +1177,17 @@ class DomainComputationGroupArray:
                 f"kwargs_per_group length {len(kwargs_per_group)} != num_splits {self.num_splits}"
             )
 
-        op_is_callable = callable(operation)
-        op_label = getattr(operation, "__name__", repr(operation)) if op_is_callable else operation
-
         outputs: list = []
         for i, group in enumerate(self.computation_groups):
-            with self.device_context(group.device_id) as device_info:
-                if op_is_callable:
-                    logger.debug(
-                        f"Executing external callable {op_label} on {device_info} for split index {i}"
-                    )
-                    out_i = operation(*args_per_group[i], **kwargs_per_group[i])
-                else:
-                    target = getattr(group, operation)
-                    if callable(target):
-                        logger.debug(f"Executing {operation} on {device_info} for split index {i}")
-                        out_i = target(*args_per_group[i], **kwargs_per_group[i])
-                    else:
-                        out_i = target
+            with self.device_context(i) as device_info:
+                out_i = self._execute_op(
+                    group,
+                    operation,
+                    args_per_group[i],
+                    kwargs_per_group[i],
+                    device_info,
+                    i,
+                )
             outputs.append(out_i)
 
         return aggregate(outputs) if aggregate is not None else outputs
@@ -1083,5 +1200,319 @@ class DomainComputationGroupArray:
         *,
         aggregate: Callable[[list], Any] | None = None,
     ) -> list | Any:
-        """Threaded version of :meth:`_loop_operation`. Reserved for future use."""
-        raise NotImplementedError("Threaded operations not yet implemented; use _loop_operation.")
+        """Threaded twin of :meth:`_loop_operation`.
+
+        Same interface and input/output contract — only the concurrency
+        model differs. One worker thread per computation group under
+        :meth:`_threaded_device_context` (cupy TLS; never
+        ``jax.default_device``). Output ordering is preserved:
+        ``outputs[i]`` is group ``i``'s return regardless of join order.
+        The first worker exception (lowest split index) is re-raised on
+        the coordinator after all threads join; additional exceptions
+        are logged at ``DEBUG``.
+
+        No protocol-safety check lives here — this is the generic
+        primitive. The "is this JAX-tracing op safe to run concurrently?"
+        question is answered one layer up in :meth:`_generate_waveform`,
+        which consults the owner's threading-safety protocol and falls
+        back to :meth:`_loop_operation` when unsafe.
+
+        Args:
+            operation: String (attribute / method name on each group) or
+                free callable. Same semantics as
+                :meth:`_loop_operation`.
+            args_per_group: Per-group positional-args tuples.
+            kwargs_per_group: Per-group kwargs dicts.
+            aggregate: Optional post-processor over the raw outputs list.
+
+        Returns:
+            List of per-group outputs (or ``aggregate(outputs)`` if
+            provided), in split-index order.
+        """
+        if args_per_group is None:
+            args_per_group = [()] * self.num_splits
+        if kwargs_per_group is None:
+            kwargs_per_group = [{}] * self.num_splits
+        if len(args_per_group) != self.num_splits:
+            raise ValueError(
+                f"args_per_group length {len(args_per_group)} != num_splits {self.num_splits}"
+            )
+        if len(kwargs_per_group) != self.num_splits:
+            raise ValueError(
+                f"kwargs_per_group length {len(kwargs_per_group)} != num_splits {self.num_splits}"
+            )
+
+        outputs: list = [None] * self.num_splits
+        errors: list[tuple[int, BaseException]] = []
+        err_lock = threading.Lock()
+
+        def _worker(i: int, group):
+            try:
+                with self._threaded_device_context(i) as device_info:
+                    out_i = self._execute_op(
+                        group,
+                        operation,
+                        args_per_group[i],
+                        kwargs_per_group[i],
+                        device_info,
+                        i,
+                    )
+                outputs[i] = out_i
+            except BaseException as exc:
+                with err_lock:
+                    errors.append((i, exc))
+
+        threads = [
+            threading.Thread(target=_worker, args=(i, g), name=f"dcga-split-{i}")
+            for i, g in enumerate(self.computation_groups)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        if errors:
+            errors.sort(key=lambda ie: ie[0])
+            for idx, exc in errors[1:]:
+                logger.debug(
+                    "additional worker exception on split %d: %r", idx, exc
+                )
+            raise errors[0][1]
+
+        return aggregate(outputs) if aggregate is not None else outputs
+
+class ComputationRouter:
+    """Routes attribute/method access to per-device replicas based on the current TLS device.
+
+    Use this to wrap objects that hold device-resident allocations (e.g.
+    waveform generators owning cupy-backed orbits or sensitivity tensors)
+    so every thread of a multi-GPU pipeline sees a replica whose internal
+    buffers live on the current GPU. The router is a drop-in for a single
+    instance in APIs that previously accepted one: ``DCGA`` keeps its
+    single ``waveform_gen`` parameter and the router is transparent to it.
+
+    Construction discipline
+    -----------------------
+    The router does not build replicas. Callers must construct each
+    replica under its target GPU's TLS — a pre-built shared instance
+    passed into a closure defeats the mechanism. Use :func:`build_replicas`
+    for a factory-based helper.
+
+    Method routing is lazy
+    ----------------------
+    ``__getattr__`` returns a *wrapper function* that re-reads
+    :attr:`current_device` on every invocation, not a bound method of the
+    replica current at lookup time. This matters because DCGA captures
+    the callable once on the main thread and calls it from every worker;
+    an eager resolution would pin every worker to the main-thread
+    replica and re-introduce the cross-device bug.
+
+    The wrapper exposes ``__func__`` / ``__self__`` / ``__qualname__`` so
+    DCGA's :meth:`_callable_id` / :meth:`_callable_owner` resolve to
+    stable per-method identities and to the router (not to any specific
+    replica). Consequently DCGA's ``_threading_safe`` and
+    ``_record_threading_completion`` invoke the router's
+    :meth:`supports_threaded` / :meth:`record_completion`, which delegate
+    by explicit ``device_id`` to the right replica.
+
+    Non-method attribute access (``router.some_data``) is resolved
+    eagerly against ``class_map[current_device]`` — lazy resolution only
+    makes sense for callables. Callers that read device-resident
+    attributes directly are responsible for ensuring they use them from a
+    thread bound to the correct device.
+
+    Limitation: callable dispatcher, not transparent proxy
+    ------------------------------------------------------
+    This class routes *named attribute access* and *explicit* ``__call__``
+    — nothing more. Python's data model looks up implicit protocol
+    dunders (``__len__``, ``__iter__``, ``__getitem__``, ``__array__``,
+    ``__reduce__``, etc.) on ``type(obj)``, bypassing both the instance
+    ``__dict__`` and ``__getattr__``. Therefore ``len(router)``,
+    ``router[i]``, ``iter(router)``, ``np.asarray(router)``, and
+    pickling will NOT delegate to the underlying replica — they will
+    fail or use ``object``'s defaults.
+
+    This is intentional: waveform generators (the primary use case) are
+    callable computational objects and do not implement those protocols.
+    If you ever need to wrap an object that does, add an explicit
+    passthrough dunder on :class:`ComputationRouter` that routes via
+    :meth:`_routed_operation` — do not migrate to
+    ``__getattribute__`` (too fragile for descriptor protocol) or
+    rely on ``__getattr__`` (wrong lookup path for implicit protocols).
+
+    :meth:`__deepcopy__` is explicitly blocked: silently deep-copying a
+    router would build per-device replicas whose device affinity depends
+    on the current TLS at copy time, which silently shreds the
+    per-device construction contract.
+
+    Args:
+        class_map: Mapping from device id to the replica for that device.
+            Keys must match ``ComputationGroup.device_id``: integer GPU
+            indices on the GPU backend, or ``None`` on the CPU backend.
+    """
+    def __init__(self, class_map: dict[int | None, Any]):
+        self.class_map = class_map
+
+        first_class = next(iter(self.class_map.values()))
+        self._xp = getattr(first_class, "xp", np)
+    
+    @property
+    def xp(self):
+        """The array module (``numpy`` or ``cupy``) of the replicas, for convenience."""
+        return self._xp
+
+    def __getattr__(self, name: str) -> Any:
+        """Return a call-time-dispatching wrapper for methods; eagerly resolved value for non-method attributes.
+
+        Dunders (``__xxx__``) raise ``AttributeError`` to avoid interfering
+        with Python protocols (pickling, copy, ``hasattr`` probes for
+        ``__func__``/``__self__``/``__qualname__`` that land on the router
+        itself).
+        """
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+
+        class_map = self.__dict__["class_map"]
+        any_replica = next(iter(class_map.values()))
+        real_fn = getattr(type(any_replica), name, None)
+        if real_fn is None or not callable(real_fn):
+            # Not a class-level method — fall back to eager resolution on
+            # the current-device replica. Captures reference semantics at
+            # lookup time; caller owns any device-affinity concerns.
+            return getattr(class_map[self.current_device], name)
+
+        router = self
+
+        def routed(*args, **kwargs):
+            return getattr(router.class_map[router.current_device], name)(*args, **kwargs)
+
+        # Identity forwarding so DCGA's callable_id / callable_owner see
+        # the replica's method signature and the router as the owner.
+        routed.__func__ = real_fn
+        routed.__self__ = self
+        routed.__qualname__ = getattr(real_fn, "__qualname__", name)
+        routed.__name__ = getattr(real_fn, "__name__", name)
+        return routed
+
+    @property
+    def current_device(self) -> int | None:
+        """Device id of the current thread's TLS cupy context.
+
+        Returns ``None`` on the CPU backend to match
+        ``ComputationGroup.device_id``'s convention. On GPU, returns the
+        cupy TLS device id — DCGA's ``_threaded_device_context`` installs
+        the split's ``device_id`` before invoking routed methods, so this
+        picks the right replica per worker.
+        """
+        if self.xp is np:
+            return None
+        return self.xp.cuda.runtime.getDevice()
+
+    def _routed_operation(self, operation: str, *args, **kwargs) -> Any:
+        """
+        Run the specified operation on the class corresponding to the current device.
+
+        Args:
+            operation: The name of the operation to run.
+            *args: Positional arguments to pass to the operation.
+            **kwargs: Keyword arguments to pass to the operation.
+        Returns:
+            The result of the operation.
+        """
+        # Route execution based on current Thread-Local Storage device
+        fn = getattr(self.class_map[self.current_device], operation)
+        return fn(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs) -> Any:
+        """
+        Run the :meth:`__call__` method of the class corresponding to the current device.
+
+        Args:
+            *args: Positional arguments to pass to the __call__ method.
+            **kwargs: Keyword arguments to pass to the __call__ method.
+        Returns:
+            The result of the __call__ method.
+        """
+        return self._routed_operation("__call__", *args, **kwargs)
+
+    def __repr__(self) -> str:
+        keys = list(self.class_map.keys())
+        replica_types = sorted({type(r).__name__ for r in self.class_map.values()})
+        return f"ComputationRouter(devices={keys}, replicas={replica_types})"
+
+    def __deepcopy__(self, memo):
+        """Blocked — deep-copying a router silently shreds per-device construction.
+
+        A naive ``deepcopy`` would recursively copy every replica under
+        whatever cupy TLS happens to be current at copy time, producing
+        a router whose replicas all share one device. If you need a
+        fresh router, rebuild it explicitly with :func:`build_replicas`
+        and a factory that re-allocates device-resident state.
+        """
+        raise TypeError(
+            "ComputationRouter is not deep-copyable. Per-device replicas "
+            "must be constructed under their target GPU's TLS via "
+            "build_replicas(gpus, factory); deepcopy cannot preserve that "
+            "contract. Rebuild the router explicitly instead."
+        )
+
+    # --- Threading-Safety Protocol Delegation ---
+
+    def supports_threaded(self, cid: str, device_id: int | None, *args, **kwargs) -> bool:
+        """Route the safety query to the replica for ``device_id``.
+
+        DCGA pre-queries this on the main thread before spawning workers,
+        so we dispatch by explicit ``device_id`` (which matches
+        ``ComputationGroup.device_id``) rather than by TLS — the main
+        thread's TLS is unrelated to any split's target device.
+        """
+        cls = self.class_map[device_id]
+        if hasattr(cls, "supports_threaded"):
+            return cls.supports_threaded(cid, device_id, *args, **kwargs)
+        return True  # Non-JAX replicas are default-safe.
+
+    def record_completion(self, cid: str, device_id: int | None, *args, **kwargs) -> None:
+        """Route the completion registry to the replica for ``device_id``."""
+        cls = self.class_map[device_id]
+        if hasattr(cls, "record_completion"):
+            cls.record_completion(cid, device_id, *args, **kwargs)
+
+
+def build_replicas(
+    gpus: list[int] | None,
+    factory: Callable[[], Any],
+) -> dict[int | None, Any]:
+    """Construct one replica per target GPU under that GPU's cupy TLS.
+
+    Helper for building a ``class_map`` that :class:`ComputationRouter`
+    can wrap. Each replica is constructed inside a ``cupy.cuda.Device(g)``
+    block so any device-resident attribute allocated inside ``factory``
+    (orbits arrays, sensitivity basis, pre-tapered windows, cached TDI
+    tensors) lands on GPU ``g``.
+
+    Critical: ``factory`` must not close over a pre-built shared
+    device-resident object (e.g. an ``orbits`` already allocated on a
+    single GPU). If it does, every replica's closure captures the same
+    GPU-pinned instance and the per-device construction is a no-op. The
+    argument type is ``Callable[[], Any]`` — not an instance — so the
+    factory runs fresh under each GPU's TLS.
+
+    Args:
+        gpus: Absolute GPU ids to replicate across, or ``None`` / empty
+            list for the CPU path.
+        factory: Zero-argument callable that builds a fresh replica.
+
+    Returns:
+        Mapping from device id to replica. Keys match
+        ``ComputationGroup.device_id``: GPU indices when ``gpus`` is
+        non-empty, or ``{None: factory()}`` on the CPU path.
+    """
+    if not gpus:
+        return {None: factory()}
+    # Local import keeps the module importable on CPU-only installs.
+    import cupy as cp  # type: ignore[import-not-found]
+    replicas: dict[int | None, Any] = {}
+    for g in gpus:
+        with cp.cuda.Device(g):
+            replicas[g] = factory()
+    return replicas
