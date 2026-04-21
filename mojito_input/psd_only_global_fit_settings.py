@@ -1,7 +1,8 @@
+import logging
+import shutil
+
 import h5py
 import numpy as np
-import shutil
-import logging
 
 try:
     import cupy as cp
@@ -10,51 +11,57 @@ except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
     gpu_available = True
 
-from lisatools.detector import EqualArmlengthOrbits
-from lisatools.utils.constants import *
-#from gbgpu.utils.utility import get_fdot
+from eryn.moves import CombineMove, StretchMove
+from eryn.prior import ProbDistContainer, uniform_dist
+
 from eryn.state import BranchSupplemental
-from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
+from eryn.utils import TransformContainer
+from eryn.utils.updates import Update
+
+from lisatools.detector import EqualArmlengthOrbits
+
+from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
+from lisatools.globalfit.generatefuncs import *
+from lisatools.globalfit.preprocessing import L1ProcessingStep
+from lisatools.globalfit.recipe_steps import PERecipeStep, SearchRecipeStep, build_psd_moves
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
+from lisatools.globalfit.state import AllGFBranchInfo, EMRIState, GBState, GFBranchInfo, MBHState
+from lisatools.globalfit.stock.erebor import (
+    GalForSettings,
+    GalForSetup,
+    GBSettings,
+    GBSetup,
+    MBHSettings,
+    MBHSetup,
+    PSDSettings,
+    PSDSetup,
+)
+from lisatools.globalfit.utils import AllSetupInfoTransfer, SetupInfoTransfer
+from lisatools.sampling.moves.skymodehop import SkyMove
+from lisatools.sampling.prior import (
+    AmplitudeFrequencySNRPrior,
+    AmplitudeFromSNR,
+    GBPriorWrap,
+    SNRPrior,
+)
+from lisatools.utils.constants import *
+from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.utility import AET, tukey
+
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
-from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
-from lisatools.globalfit.state import MBHState, EMRIState, GBState
 
 #from bbhx.utils.transform import *
 
-from lisatools.globalfit.generatefuncs import *
-from lisatools.utils.utility import AET
-from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
-
-from lisatools.globalfit.stock.erebor import (
-    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings
-)
-
-from eryn.prior import uniform_dist
-from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
-
-from eryn.moves import StretchMove
-from lisatools.sampling.moves.skymodehop import SkyMove
-
-from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, MBHSpecialMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
-from lisatools.globalfit.galaxyglobal import make_gmm
-from lisatools.globalfit.moves import GlobalFitMove
-from lisatools.utils.utility import tukey
 
 
-# import few
-from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 
 
-from eryn.utils.updates import Update
 
-from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves
+
+
+
+
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
@@ -94,9 +101,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 
 def get_general_erebor_settings() -> GeneralSetup:
-    # now with negative fdots
-    
-    from lisatools.utils.constants import YRSID_SI
+    # now with negative fdot
     Tobs = 1. * YRSID_SI / 12.0
     dt = 2.5
     start_freq = 5e-5

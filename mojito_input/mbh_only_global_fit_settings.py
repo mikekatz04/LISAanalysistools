@@ -1,7 +1,8 @@
+import logging
+import shutil
+
 import h5py
 import numpy as np
-import shutil
-import logging
 
 try:
     import cupy as cp
@@ -11,29 +12,28 @@ except (ModuleNotFoundError, ImportError) as e:
     gpu_available = False
 
 
-from lisatools.detector import L1Orbits
-from lisatools.utils.constants import *
-from eryn.state import BranchSupplemental
-from lisatools.globalfit.run import CurrentInfoGlobalFit
-from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, MBHSetup, MBHSettings
-
-
-from eryn.prior import uniform_dist
-from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
-
 from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GFCombineMove
-
-
-from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-
+from eryn.prior import ProbDistContainer, uniform_dist
+from eryn.state import BranchSupplemental
+from eryn.utils import TransformContainer
 from eryn.utils.updates import Update
-
-from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves, build_mbh_moves_phenom, scatter_around_injection, mbh_catalogue_to_sampling_basis
-
 from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
+
+from lisatools.detector import L1Orbits
+from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
+from lisatools.globalfit.moves import GFCombineMove
+from lisatools.globalfit.preprocessing import L1ProcessingStep
+from lisatools.globalfit.recipe_steps import (
+    PERecipeStep,
+    SearchRecipeStep,
+    build_mbh_moves_phenom,
+    build_psd_moves,
+    mbh_catalogue_to_sampling_basis,
+    scatter_around_injection,
+)
+from lisatools.globalfit.run import CurrentInfoGlobalFit
+from lisatools.globalfit.stock.erebor import MBHSettings, MBHSetup, PSDSettings, PSDSetup
+from lisatools.utils.constants import *
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
@@ -95,31 +95,33 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     response_kwargs = dict(
         sampling_frequency=1.0/general_set.dt,
-        tdi='2nd generation',
+        tdi_generation='2nd generation',
+        tdi_channels='XYZ',
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits,
         order=40
     )
 
     waveform_init_kwargs = dict(
         waveform_kwargs=wave_kwargs,
-        response_kwargs=response_kwargs,
         waveform_t0 = 97729089.327664,
-        data_t0 = general_set.data_t0,
-        dt = general_set.dt,
-        Tobs = 3. / 12., # this is only for the waveform generation, not the data, which is still general_set.Tobs
-        start_freq=5e-5,
-        ref_freq=2.0886886878886526e-05, # source 18
+        data_td_settings=general_set.data_td_settings,
+        Tobs = 1. / 12. * YRSID_SI, # this is only for the waveform generation, not the data, which is still general_set.Tobs
+        start_freq=0.00014041319931638136,
+        ref_freq=0.00014041319931638136, # source 5
         buffer_time=3000,
-        tukey_alpha=general_set.tukey_alpha,
-        #is_tref=False,
+        stft_dt=general_set.stft_dt,
+        freq_min=general_set.start_freq,
+        freq_max=general_set.end_freq,
+        tukey_alpha=general_set.window_alpha,
         force_backend=general_set.force_backend,
+        **response_kwargs
     )
 
 
     waveform_runtime_kwargs = dict(
         # this is for the waveform generation during the run, not the initialization
-        output_domain=general_set.basis_domain.capitalize(),
-        domain_kwargs=general_set.basis_kwargs,
+        # output_domain=general_set.basis_domain.capitalize(),
+        # domain_kwargs=general_set.basis_kwargs,
     )
 
     mbh_settings = MBHSettings(
@@ -141,31 +143,34 @@ def get_general_erebor_settings() -> GeneralSetup:
        # limits on parameters
     # now with negative fdots
 
-    source_ids = [18]
+    source_ids = [5]
     
     Tobs = 4. * YRSID_SI / 12.0
     dt = 2.5
+    start_freq = 5e-5
+    end_freq = 1e-1
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
-    #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_noiseless_fd"
+    base_file_name = "mbh_5_noiseless"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
-    jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
+    jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend="cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
     ntemps = 3
 
-    tukey_alpha = 0.1
+    basis_domain = "stft"
+    stft_dt = 24 * 3600.0 if basis_domain == "stft" else None  # hours
 
-    basis_domain = "fd"
-    stft_dt = 24 * 3600.0  # hours
+    base_file_name += f"_{basis_domain}"
+
+    window_taper_duration = 1 / start_freq
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['mbhb',],
@@ -173,7 +178,7 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  verbose=True,
                                  do_plots=True,
                                  orbits_class=L1Orbits,
-                                 orbits_kwargs=dict(force_backend=backend, frame="ecliptic")
+                                 orbits_kwargs=dict(force_backend=backend, frame="icrs")
                                 )
     
     preprocess_kwargs = dict(normalize=False)
@@ -185,15 +190,15 @@ def get_general_erebor_settings() -> GeneralSetup:
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=5e-5,
-        end_freq=1e-2,
+        start_freq=start_freq,
+        end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        window_taper_duration=window_taper_duration,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
