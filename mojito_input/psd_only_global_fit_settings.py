@@ -94,8 +94,6 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 
 def get_general_erebor_settings() -> GeneralSetup:
-       # limits on parameters
-    delta_safe = 1e-5
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
@@ -106,12 +104,12 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "psd_tryout"
+    base_file_name = "matrix_tryout"
     file_store_dir = head_dir + "mojito_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [0]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -132,8 +130,38 @@ def get_general_erebor_settings() -> GeneralSetup:
                                  verbose=True,
                                  do_plots=True,
                                 )
+
+
+    downsample_kwargs = {
+        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
+        "window": ("kaiser", 31.0)  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+    }
+
+    highpass_kwargs = {
+        'cutoff': 1e-5,  # Hz — highpass cutoff frequency
+        'order': 2,  # Butterworth filter order
+        'zero_phase': True
+    }
+
+    lowpass_kwargs = {
+        'cutoff': 1e-1,  # Hz — lowpass cutoff frequency
+        'order': 2,  # Butterworth filter order
+        'zero_phase': True
+    }
+
+    trim_kwargs = {
+        'duration': 200 * 3600,  # seconds — duration to trim from each end
+        'is_percent': False,  # If True, 'duration' is interpreted as a percentage of the total signal length
+        'trimming_type': "from_each_end"  # "from_each_end" or "from_start"
+    }
     
-    preprocess_kwargs = dict()
+    preprocess_kwargs = dict(
+        highpass_kwargs=highpass_kwargs,
+        lowpass_kwargs=lowpass_kwargs,
+        trim_kwargs=trim_kwargs,
+        downsample_kwargs=downsample_kwargs,
+        Tobs=Tobs
+    )
 
     sensitivity_init_kwargs = dict(tdi_generation=2, 
                                    mask_percentage=0.02,
