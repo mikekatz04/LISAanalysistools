@@ -140,8 +140,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         Args:
             coords: coordinates of the sources in the cold chain that we want to add back in to the residual.
         """
-
-        # TODO: fix T channel
         # d - h -> need to add removal waveforms
         # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         removal_waveforms = self.get_waveform_here(coords)
@@ -150,7 +148,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.remove_signal_from_residual(removal_waveforms, data_index=None)
         del removal_waveforms
-        xp.get_default_memory_pool().free_all_blocks()
+        if xp is not np:
+            xp.get_default_memory_pool().free_all_blocks()
 
         ll_tmp3 = self.acs.likelihood(
             source_only=True
@@ -173,7 +172,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.add_signal_to_residual(removal_waveforms, data_index=None)
         del removal_waveforms
-        xp.get_default_memory_pool().free_all_blocks()
+        if xp is not np:
+            xp.get_default_memory_pool().free_all_blocks()
 
         ll_tmp3 = self.acs.likelihood(
             source_only=True
@@ -196,7 +196,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             :class:`~lisatools.domains.DomainBaseArray` of length ``n_sources``.
 
         """
-        xp.get_default_memory_pool().free_all_blocks()
+        if xp is not np:
+            xp.get_default_memory_pool().free_all_blocks()
 
         waveforms = []
         for i in range(coords.shape[0]):

@@ -16,8 +16,6 @@ from eryn.utils.transform import TransformContainer
 # from ..utils import new_sens_mat
 from tqdm import tqdm
 
-from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba
-
 from ... import get_backend
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
