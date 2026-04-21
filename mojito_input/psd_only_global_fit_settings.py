@@ -101,16 +101,17 @@ def get_general_erebor_settings() -> GeneralSetup:
     from lisatools.utils.constants import YRSID_SI
     Tobs = 1. * YRSID_SI / 12.0
     dt = 2.5
+    start_freq = 5e-5
+    end_freq = 1e-1
 
-    head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
-    #ldc_source_file = head_dir + "emri_sangria_injection.h5"
-    data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
-    base_file_name = "noise-only_spline-dev_v1"
-    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev/"
+    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
+    base_file_name = "psd_tryout"
+    file_store_dir = head_dir + "mojito_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [cp.cuda.runtime.getDevice()]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -119,8 +120,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 30
     ntemps = 4
 
-    winalpha = 0.1 # bh tryout
     wintype = "bh92"
+    window_taper_duration = 1 / start_freq
 
     basis_domain = "stft" # fd
     stft_dt = 24 * 3600.0  # how many hours
@@ -142,16 +143,16 @@ def get_general_erebor_settings() -> GeneralSetup:
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=1e-4,
-        end_freq=1e-2,
+        start_freq=start_freq,
+        end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        winalpha=winalpha,
-        wintype=wintype,
+        window_type=wintype,
+        window_taper_duration=window_taper_duration,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
