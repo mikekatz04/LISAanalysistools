@@ -25,7 +25,6 @@ except (ModuleNotFoundError, ImportError):
 
 import dataclasses
 
-from .domaincomputation import FDComputationGroup, STFTComputationGroup
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module, tukey
@@ -375,6 +374,7 @@ class FDSettings(DomainSettingsBase):
 
     @staticmethod
     def get_associated_group():
+        from .domaincomputation import FDComputationGroup
         return FDComputationGroup
 
     @property
@@ -676,6 +676,7 @@ class STFTSettings(DomainSettingsBase):
 
     @staticmethod
     def get_associated_group():
+        from .domaincomputation import STFTComputationGroup
         return STFTComputationGroup
 
     @property
