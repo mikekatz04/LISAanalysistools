@@ -1,7 +1,8 @@
+import logging
+import shutil
+
 import h5py
 import numpy as np
-import shutil
-import logging
 
 try:
     import cupy as cp
@@ -10,51 +11,57 @@ except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
     gpu_available = True
 
-from lisatools.detector import EqualArmlengthOrbits
-from lisatools.utils.constants import *
-#from gbgpu.utils.utility import get_fdot
+from eryn.moves import CombineMove, StretchMove
+from eryn.prior import ProbDistContainer, uniform_dist
+
 from eryn.state import BranchSupplemental
-from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
+from eryn.utils import TransformContainer
+from eryn.utils.updates import Update
+
+from lisatools.detector import EqualArmlengthOrbits
+
+from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
+from lisatools.globalfit.generatefuncs import *
+from lisatools.globalfit.preprocessing import L1ProcessingStep
+from lisatools.globalfit.recipe_steps import PERecipeStep, SearchRecipeStep, build_psd_moves
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
+from lisatools.globalfit.state import AllGFBranchInfo, EMRIState, GBState, GFBranchInfo, MBHState
+from lisatools.globalfit.stock.erebor import (
+    GalForSettings,
+    GalForSetup,
+    GBSettings,
+    GBSetup,
+    MBHSettings,
+    MBHSetup,
+    PSDSettings,
+    PSDSetup,
+)
+from lisatools.globalfit.utils import AllSetupInfoTransfer, SetupInfoTransfer
+from lisatools.sampling.moves.skymodehop import SkyMove
+from lisatools.sampling.prior import (
+    AmplitudeFrequencySNRPrior,
+    AmplitudeFromSNR,
+    GBPriorWrap,
+    SNRPrior,
+)
+from lisatools.utils.constants import *
+from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.utility import AET, tukey
+
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
-from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
-from lisatools.globalfit.state import MBHState, EMRIState, GBState
 
 #from bbhx.utils.transform import *
 
-from lisatools.globalfit.generatefuncs import *
-from lisatools.utils.utility import AET
-from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
-
-from lisatools.globalfit.stock.erebor import (
-    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings
-)
-
-from eryn.prior import uniform_dist
-from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
-
-from eryn.moves import StretchMove
-from lisatools.sampling.moves.skymodehop import SkyMove
-
-from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, MBHSpecialMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
-from lisatools.globalfit.galaxyglobal import make_gmm
-from lisatools.globalfit.moves import GlobalFitMove
-from lisatools.utils.utility import tukey
 
 
-# import few
-from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
 
 
-from eryn.utils.updates import Update
 
-from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves
+
+
+
+
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
@@ -94,46 +101,71 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 
 def get_general_erebor_settings() -> GeneralSetup:
-       # limits on parameters
-    delta_safe = 1e-5
-    # now with negative fdots
-    
-    from lisatools.utils.constants import YRSID_SI
+    # now with negative fdot
     Tobs = 1. * YRSID_SI / 12.0
     dt = 2.5
     start_freq = 5e-5
     end_freq = 1e-1
 
-    head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
-    #ldc_source_file = head_dir + "emri_sangria_injection.h5"
-    data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
-    base_file_name = "noise-only_spline-dev_v1"
-    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/splines_dev/"
+    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
+    base_file_name = "matrix_tryout"
+    file_store_dir = head_dir + "mojito_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [cp.cuda.runtime.getDevice()]
+    gpus = [3]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
-    jax.config.update("jax_cuda_visible_devices", str(gpus[0]))
+    jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
     # few.get_backend('cuda12x')
     nwalkers = 30
     ntemps = 4
 
-    wintype = "bh92"
-
-    basis_domain = "stft"
-    stft_dt = 8 * 3600.0  # 8 hours
+    window_type = "tukey"
     window_taper_duration = 1 / start_freq
+    normalize_window = True
+
+    basis_domain = "stft" # fd
+    stft_dt = 24 * 3600.0  if basis_domain == "stft" else None # how many hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['noise'],
                                  verbose=True,
                                  do_plots=True,
                                 )
+
+    downsample_kwargs = {
+        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
+        "window": ("kaiser", 31.0)  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+    }
+
+    highpass_kwargs = {
+        'cutoff': 1e-5,  # Hz — highpass cutoff frequency
+        'order': 2,  # Butterworth filter order
+        'zero_phase': True
+    }
+
+    lowpass_kwargs = {
+        'cutoff': 1e-1,  # Hz — lowpass cutoff frequency
+        'order': 2,  # Butterworth filter order
+        'zero_phase': True
+    }
+
+    trim_kwargs = {
+        'duration': 200 * 3600,  # seconds — duration to trim from each end
+        'is_percent': False,  # If True, 'duration' is interpreted as a percentage of the total signal length
+        'trimming_type': "from_each_end"  # "from_each_end" or "from_start"
+    }
     
-    preprocess_kwargs = dict(normalize=False)
+    preprocess_kwargs = dict(
+        highpass_kwargs=highpass_kwargs,
+        lowpass_kwargs=lowpass_kwargs,
+        trim_kwargs=trim_kwargs,
+        downsample_kwargs=downsample_kwargs,
+        Tobs=Tobs
+    )
 
     sensitivity_init_kwargs = dict(tdi_generation=2, 
                                    mask_percentage=0.02,
@@ -152,16 +184,14 @@ def get_general_erebor_settings() -> GeneralSetup:
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
+        window_type=window_type,
         window_taper_duration=window_taper_duration,
-        window_type=wintype,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
+        normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
-        #remove_from_data=["mbhb", "dgb", "igb", "vgb"],
-        #channels=["X", "Y", "Z"],  # , "T"
-        #noise_model=sangria
     )
 
     general_setup = GeneralSetup(general_settings)

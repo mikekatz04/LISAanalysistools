@@ -131,6 +131,7 @@ class GeneralSettings(Settings):
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
+    normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
@@ -225,12 +226,6 @@ class GeneralSetup(Setup, GeneralSettings):
         # output the preprocess kwargs to the logger for transparency
         for key, value in preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
-        # now extract `normalize` if present
-        normalize_window = preprocess_kwargs.pop("normalize", False)
-        
-        if normalize_window:
-            self.logger.warning("Window normalization is turned off for now, setting `normalize_window` to False.")
-            normalize_window = False
 
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
@@ -253,10 +248,10 @@ class GeneralSetup(Setup, GeneralSettings):
                 force_backend=self.force_backend,
             )
             nperseg = domain_settings.get_nperseg(dt)
-
+            
             self.window_alpha = self.window_taper_duration / (nperseg * dt)
-
             window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
+
             plot_kwargs_list = [
                 dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
                 dict(channel=0, plot_type="fd", time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
@@ -273,6 +268,8 @@ class GeneralSetup(Setup, GeneralSettings):
             self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
 
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
+
+            self.window_alpha = self.window_taper_duration / (Nt * dt)
             window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
             plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
 
@@ -284,7 +281,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
         self.logger.debug(f"Applying window {self.window_type} with alpha: {self.window_alpha}")
         self.input_data_residual_array, orbits = data_processor.pour(
-            settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
+            settings=domain_settings, window=window, return_orbits=True
         )
         
         for plot_kwargs_here in plot_kwargs_list:
@@ -314,6 +311,7 @@ class GeneralSetup(Setup, GeneralSettings):
             orbits=self.gpu_orbits,
             settings=domain_settings,
             force_backend=self.force_backend,
+            window_values=window if self.normalize_window else None,
             **self.sensitivity_init_kwargs,
         )
 

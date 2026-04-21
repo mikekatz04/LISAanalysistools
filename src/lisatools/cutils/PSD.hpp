@@ -47,9 +47,10 @@ class XYZSensitivityMatrix {
     int n_links;
     int left_mosas[3];
     int generation;
+    double window_factor;
     NoiseLevels noise_levels;
 
-    XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_, int n_times_, double armlength_, int generation_, bool spline_noise_)
+    XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_, int n_times_, double armlength_, int generation_, bool spline_noise_, double window_factor_)
         : noise_levels(true, spline_noise_, .4e-3, 8e-3, 2.0e-3)
     {
         averaged_ltts_arr = averaged_ltts_arr_; // flattened array of size Ntimes * 6
@@ -62,6 +63,7 @@ class XYZSensitivityMatrix {
         left_mosas[0] = 12; 
         left_mosas[1] = 23; 
         left_mosas[2] = 31;
+        window_factor = window_factor_;
     };
     CUDA_DEVICE int get_adjacent_mosa(int mosa);
     CUDA_DEVICE double oms_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);

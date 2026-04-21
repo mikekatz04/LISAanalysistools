@@ -344,8 +344,8 @@ void detector_part(py::module &m) {
 #else
     py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapCPU")
 #endif
-    .def(py::init<array_type<double>, array_type<double>, int, double, int, bool>(),
-            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"))
+    .def(py::init<array_type<double>, array_type<double>, int, double, int, bool, double>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
     .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
@@ -363,8 +363,8 @@ void detector_part(py::module &m) {
 #else
     py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixCPU")
 #endif
-    .def(py::init<double *, double *, int, double, int, bool>(),
-            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"))
+    .def(py::init<double *, double *, int, double, int, bool, double>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
     ;
 
     m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
