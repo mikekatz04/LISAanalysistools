@@ -7,6 +7,7 @@ from abc import ABC
 from copy import deepcopy
 from typing import Any, List, Optional, Tuple
 
+from logging import getLogger
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
@@ -41,6 +42,8 @@ from .stochastic import (
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
+
+logger = getLogger(__name__)
 
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
@@ -1898,7 +1901,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             )
         else:
             self.window_normalization = 1.0
-
+        
+        logger.info(f"Window normalization factor: {self.window_normalization}")
+        
     def _init_basis_settings(self):
         """Initialize basis settings from domain settings."""
         self.f_arr = self.xp.asarray(self.basis_settings.f_arr)
