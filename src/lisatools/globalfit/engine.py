@@ -211,6 +211,8 @@ class GeneralSetup(Setup, GeneralSettings):
                 galfor_params=None,
             )
 
+        self.logger.info(f"Using fixed PSD kwargs: {self.fixed_psd_kwargs}")
+
         default_preprocess_kwargs = dict(
             plot_folder=self.artifacts_file_dir,
             highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),

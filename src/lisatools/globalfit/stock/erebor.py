@@ -323,6 +323,7 @@ class MBHSetup(Setup):
 
             mbh_transform_fn_in = {
                 "logM": np.exp,
+                #"logq": np.exp,
                 "dist": gpc_to_mpc,
                 "cos_iota": np.arccos,
                 "sin_beta": np.arcsin,
