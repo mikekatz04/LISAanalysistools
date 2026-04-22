@@ -1179,6 +1179,7 @@ class WDMLookupTable(WDMSettings):
             g.attrs["ind_min"] = self.ind_min
             g.attrs["ind_max"] = self.ind_max
             g.attrs["m_ref"] = self.m_ref
+            g.attrs["n_ref"] = self.n_ref
             g.attrs["nchannels"] = self.nchannels
             g.create_dataset("table_sin", data=self.get(self.table_sin))
             g.create_dataset("table_cos", data=self.get(self.table_cos))
@@ -1211,6 +1212,8 @@ class WDMLookupTable(WDMSettings):
             self.fdot_vals = self.xp.asarray(g["fdot_vals"][:])
 
             self.m_ref = g.attrs["m_ref"]
+            self.n_ref = int(self.sub_settings.Nt / 2)  # g.attrs["n_ref"]
+
             self.nchannels = g.attrs["nchannels"]
             self.norm_freq_single_layer = self.xp.asarray(g["norm_freq_single_layer"][:])
             self.m_diffs = self.xp.asarray(g["m_diffs"][:])
