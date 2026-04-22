@@ -119,6 +119,8 @@ def scatter_around_injection(
     else:
         raise ValueError(f"spread must be scalar, 1-D, 2-D, or 3-D; got shape {spread.shape}")
 
+    if betas is not None:
+        logger.info(f"Scaling initial covariance by betas: {betas}")
     for leaf in range(nleaves_init):
         center = injection_sampling[leaf]
         leaf_cov = covs[leaf]
@@ -138,7 +140,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     """Convert a single Mojito MBHB catalogue entry to MBH sampling basis.
 
     The sampling basis is:
-    ``[logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
+    ``[logM, logq, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
 
     Parameters
     ----------
@@ -161,6 +163,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
 
     logM = np.log(m1 + m2)
     q = m2 / m1
+    logq = np.log(q)
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
     s2z = float(catalogue_entry["SecondarySpinCompZ"])
@@ -319,8 +322,11 @@ def build_mbh_moves_phenom(
     # breakpoint()
     subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
-    betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
+    if mbh_info.betas is None:
+        mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
+    betas_all = np.tile(mbh_info.betas, (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
+    logger.debug(f"MBH betas: {mbh_info.betas}")
 
     coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
 
