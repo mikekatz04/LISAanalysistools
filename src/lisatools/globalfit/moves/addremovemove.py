@@ -21,6 +21,10 @@ from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
 
+def free_gpu_memory():
+    if xp is not np:
+        xp.get_default_memory_pool().free_all_blocks()
+    
 
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     """
@@ -148,8 +152,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.remove_signal_from_residual(removal_waveforms, data_index=None)
         del removal_waveforms
-        if xp is not np:
-            xp.get_default_memory_pool().free_all_blocks()
+        #if xp is not np:
+        free_gpu_memory()
 
         ll_tmp3 = self.acs.likelihood(
             source_only=True
@@ -172,8 +176,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.add_signal_to_residual(removal_waveforms, data_index=None)
         del removal_waveforms
-        if xp is not np:
-            xp.get_default_memory_pool().free_all_blocks()
+        #if xp is not np:
+        free_gpu_memory()
 
         ll_tmp3 = self.acs.likelihood(
             source_only=True
@@ -196,8 +200,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             :class:`~lisatools.domains.DomainBaseArray` of length ``n_sources``.
 
         """
-        if xp is not np:
-            xp.get_default_memory_pool().free_all_blocks()
+        #if xp is not np:
+        free_gpu_memory()
 
         waveforms = []
         for i in range(coords.shape[0]):
@@ -358,13 +362,15 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
 
             # fix this need to compute prev_logl for all walkers
-            xp.get_default_memory_pool().free_all_blocks()
+            free_gpu_memory()
             for repeat in tqdm(range(self.num_repeats), desc=f"{self.branch_name} update, leaf {leaf}"):
 
                 # pick move
                 move_here = self.moves[
                     model.random.choice(np.arange(len(self.moves)), p=self.move_weights)
                 ]
+
+                logger.debug(f"move here: {move_here.__class__.__name__}")
 
                 # Split the ensemble in half and iterate over these two halves.
                 accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
@@ -430,7 +436,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         data_index=data_index,
                         # constants_index=data_index,
                     )
-
                     # print(f"new logl: {logl}. elapsed: {time.time() - tic}")
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
@@ -454,7 +459,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                     accepted[: self.ntemps][(temp_inds_update, walker_inds_update)] = True
 
-                    # update state informatoin
+                    # update state information
                     new_state.branches[self.branch_name].coords[
                         (
                             temp_inds_update,
@@ -481,7 +486,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     ].copy()[:, :, None]
                 }
 
-                fancy_swap = (repeat % self.permute_every == 0)
+                fancy_swap = (repeat % self.permute_every == 0) and (repeat > 0)
                 if fancy_swap:
                     logger.debug(f"Permuting walkers before swap.")
                 compute_log_like = self.log_like_for_fancy_swaping
@@ -516,7 +521,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
             # add back cold chain sources
-            xp.get_default_memory_pool().free_all_blocks()
+            free_gpu_memory()
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
@@ -538,7 +543,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.acs.likelihood()
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
-        xp.get_default_memory_pool().free_all_blocks()
+        free_gpu_memory()
         # TODO: add check with last used logl
 
         current_lp = (
@@ -550,7 +555,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         new_state.log_like[0] = current_ll
         # new_state.log_prior[0] = current_lp
-        xp.get_default_memory_pool().free_all_blocks()
+        free_gpu_memory()
         if not hasattr(self, "best_last_ll"):
             self.best_last_ll = current_ll.max()
             self.low_last_ll = current_ll.min()
@@ -573,6 +578,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
         # breakpoint()
+        logger.debug(f"accepted fraction: {self.accepted / self.num_proposals}. elapsed: {time.time() - tic}")
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
@@ -605,7 +611,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 new_contrib[1] += add_waveforms[1]
 
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
-        xp.get_default_memory_pool().free_all_blocks()
+        free_gpu_memory()
 
 
 class MultiDeviceResidualAddOneRemoveOneMove(ResidualAddOneRemoveOneMove):
