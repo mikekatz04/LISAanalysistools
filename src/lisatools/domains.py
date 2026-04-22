@@ -1212,7 +1212,7 @@ class WDMLookupTable(WDMSettings):
             self.fdot_vals = self.xp.asarray(g["fdot_vals"][:])
 
             self.m_ref = g.attrs["m_ref"]
-            self.n_ref = g.attrs["n_ref"]
+            self.n_ref = int(self.sub_settings.Nt / 2)  # g.attrs["n_ref"]
 
             self.nchannels = g.attrs["nchannels"]
             self.norm_freq_single_layer = self.xp.asarray(g["norm_freq_single_layer"][:])
@@ -1429,7 +1429,6 @@ class WDMLookupTable(WDMSettings):
             interpolate = interpolate_cpu
 
         if self.run_fdot:
-            breakpoint()
             return interpolate.LinearNDInterpolator(self.norm_points, table.flatten(), rescale=True)
         else:
             return interpolate.interp1d(self.norm_points, table.flatten())
@@ -1455,14 +1454,15 @@ class WDMLookupTable(WDMSettings):
         m_map = -self.xp.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
         is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
-            if m_diff == 0:
-                breakpoint()
             ms_to_use = (ms + m_diff).astype(int)
             keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
             
             assert ms[keep_now].max() <= self.Nf + 1
             assert ms[keep_now].min() >= 0
-            assert self.xp.all((f_arr[keep_now] >= 0.0) & (f_arr[keep_now] <= self.f_arr.max()))
+            try:
+                assert self.xp.all((f_arr[keep_now] >= 0.0) & (f_arr[keep_now] <= self.f_arr.max()))
+            except AssertionError:
+                breakpoint()
             assert self.xp.all((fdot_arr[keep_now] >= self.fdot_vals.min()) & (fdot_arr[keep_now] <= self.fdot_vals.max()))
             f_norm = (f_arr[keep_now] - ms_to_use[keep_now] * self.layer_df)
             m_diff = (f_norm / self.layer_df).astype(int)
@@ -1477,7 +1477,7 @@ class WDMLookupTable(WDMSettings):
             cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
 
             sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
-            cos_coeffs[is_m_plus_n_even] = _sin_coeffs[is_m_plus_n_even]
+            cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
             
             # keep1 = (~is_m_plus_n_even & ~is_m_odd)
             # sin_coeffs[keep1] = _sin_coeffs[keep1]
