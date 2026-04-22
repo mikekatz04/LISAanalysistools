@@ -40,7 +40,7 @@ from lisatools.domains import WAVELET_DURATION, TDSignal, TDSettings, FDSignal, 
 from fastlisaresponse.gbcomps import GBWDMComputations
 from scipy.signal.windows import tukey
 
-force_backend = "cpu"
+force_backend = "cuda12x"
 xp = np if force_backend == "cpu" else cp
 orbits = DefaultOrbits(force_backend=force_backend)
 orbits.configure(linear_interp_setup=True)
@@ -75,11 +75,11 @@ time_layers = wdm_settings.Nt
 tukey_alpha = 0.00
 td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
 m_ref = int(3e-3 / wdm_settings.layer_df)
-norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.5, wdm_settings, m_ref=m_ref, num_layers_diff=2)
-fdot_vals = WDMLookupTable.apply_eps_fdot(0.25, wdm_settings, fdot_max_factor=1.0) 
-store_path = "./wdm_lookup_test_1.h5"
+norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.0025, wdm_settings, m_ref=m_ref, num_layers_diff=3)
+fdot_vals = WDMLookupTable.apply_eps_fdot(0.0025, wdm_settings, fdot_max_factor=1.0) 
+store_path = "./wdm_lookup_test_4.h5"
 if os.path.exists(store_path):
-    wdm_lookup_table = WDMLookupTable.from_file(store_path)
+    wdm_lookup_table = WDMLookupTable.from_file(store_path, force_backend=force_backend)
 else:
     wdm_lookup_table = WDMLookupTable(wdm_settings, 3, norm_freq_single_layer=norm_freq_single_layer, m_diffs=m_diffs, fdot_vals=fdot_vals, m_ref=m_ref, time_layers=time_layers, batch_size_gen=10, td_window=td_window, store_path=store_path)
 breakpoint()

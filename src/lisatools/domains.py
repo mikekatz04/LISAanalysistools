@@ -1172,9 +1172,9 @@ class WDMLookupTable(WDMSettings):
         with h5py.File(fp, "w") as fp:
             g = fp.create_group("wdm")
 
-            g.attrs["Nf"] = self.Nf,
-            g.attrs["Nt"] = self.Nt,
-            g.attrs["Nt_generate"] = self.sub_settings.Nt,
+            g.attrs["Nf"] = self.Nf
+            g.attrs["Nt"] = self.Nt
+            g.attrs["Nt_generate"] = self.sub_settings.Nt
             g.attrs["data_dt"] = self.data_dt
             g.attrs["ind_min"] = self.ind_min
             g.attrs["ind_max"] = self.ind_max
@@ -1187,12 +1187,13 @@ class WDMLookupTable(WDMSettings):
             g.create_dataset("m_diffs", data=self.get(self.m_diffs))
 
     @staticmethod
-    def from_file(fp: str):
+    def from_file(fp: str, force_backend: Optional[str] = None):
         with h5py.File(fp, "r") as f:
             g = f["wdm"]
             input_kwargs = dict(
                 ind_min = g.attrs["ind_min"],
                 ind_max = g.attrs["ind_max"],
+                force_backend=force_backend,
             )
             input_args = (
                 g.attrs["Nf"],
@@ -1200,7 +1201,6 @@ class WDMLookupTable(WDMSettings):
                 g.attrs["data_dt"] 
             )
             nchannels = g.attrs["nchannels"]
-
             settings = WDMSettings(*input_args, **input_kwargs)
             return WDMLookupTable(settings, nchannels, store_path=fp)
 
@@ -1208,14 +1208,14 @@ class WDMLookupTable(WDMSettings):
         with h5py.File(fp, "r") as fp:
             g = fp["wdm"]
             self.sub_settings = WDMSettings(g.attrs["Nf"], g.attrs["Nt_generate"], g.attrs["data_dt"])
-            self.fdot_vals = g["fdot_vals"][:]
+            self.fdot_vals = self.xp.asarray(g["fdot_vals"][:])
 
             self.m_ref = g.attrs["m_ref"]
             self.nchannels = g.attrs["nchannels"]
-            self.norm_freq_single_layer = g["norm_freq_single_layer"][:]
-            self.m_diffs = g["m_diffs"][:]
-            self.table_sin = g["table_sin"][:]
-            self.table_cos = g["table_cos"][:]
+            self.norm_freq_single_layer = self.xp.asarray(g["norm_freq_single_layer"][:])
+            self.m_diffs = self.xp.asarray(g["m_diffs"][:])
+            self.table_sin = self.xp.asarray(g["table_sin"][:])
+            self.table_cos = self.xp.asarray(g["table_cos"][:])
             
     @staticmethod
     def apply_eps_fdot(eps: float, settings: WDMSettings, fdot_max_factor: float= 8.0) -> np.ndarray:
@@ -1261,11 +1261,10 @@ class WDMLookupTable(WDMSettings):
             self.norm_freq_single_layer = self.xp.asarray(norm_freq_single_layer)
             
             total_f_fdot_vals = self.norm_f_steps * self.fdot_steps
-            
             if self.run_fdot:
-                _f_vals, _fdot_vals = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(norm_freq_single_layer + self.f_ref, self.fdot_vals)])
+                _f_vals, _fdot_vals = self.xp.asarray([tmp.ravel() for tmp in self.xp.meshgrid(self.norm_freq_single_layer + self.f_ref, self.fdot_vals)])
             else:
-                _f_vals = norm_freq_single_layer.copy() + self.f_ref
+                _f_vals = self.norm_freq_single_layer.copy() + self.f_ref
                 _fdot_vals = self.xp.zeros_like(_f_vals)
 
             t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
@@ -1319,7 +1318,7 @@ class WDMLookupTable(WDMSettings):
                 print(inds, total_f_fdot_vals)
 
             # TODO: verify if there is a minus sign needed here and below
-            freqs =  (_f_vals.reshape(-1, 2) +  m_diffs[:, None, None] * self.layer_df).transpose(1, 0, 2).reshape(self.fdot_steps, -1)
+            freqs =  (_f_vals.reshape(-1, 2) +  self.xp.asarray(m_diffs)[:, None, None] * self.layer_df).transpose(1, 0, 2).reshape(self.fdot_steps, -1)
             _table_sin = _table_sin.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).T.copy()
             _table_cos = _table_cos.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).T.copy()
 
@@ -1329,8 +1328,8 @@ class WDMLookupTable(WDMSettings):
             self.table_sin = _table_sin
             self.table_cos = _table_cos
 
-            freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
-            freqs_norm = self.f_ref - freqs
+            # freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
+            # freqs_norm = self.f_ref - freqs
             if store_path is not None:
                 self.to_file(store_path)
 
