@@ -1212,7 +1212,7 @@ class WDMLookupTable(WDMSettings):
             self.fdot_vals = self.xp.asarray(g["fdot_vals"][:])
 
             self.m_ref = g.attrs["m_ref"]
-            self.n_ref = int(self.sub_settings.Nt / 2)  # g.attrs["n_ref"]
+            self.n_ref = g.attrs["n_ref"]
 
             self.nchannels = g.attrs["nchannels"]
             self.norm_freq_single_layer = self.xp.asarray(g["norm_freq_single_layer"][:])
@@ -1293,8 +1293,8 @@ class WDMLookupTable(WDMSettings):
             for st_batch, end_batch in zip(batches[:-1], batches[1:]):
                 inds = np.arange(st_batch, end_batch)
                 
-                # if not self.xp.allclose(_f_vals[inds] - (self.f_ref+ 0 * self.layer_df), 0.0) or not _fdot_vals[inds][0] == 0.0:  # -3.257427471431767e-11:
-                    # continue
+                # if not self.xp.allclose(_f_vals[inds] - (self.f_ref + 0 * self.layer_df), 0.0) or not _fdot_vals[inds][0] == 0.0:  # -3.257427471431767e-11:
+                #     continue
                 wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
                 
@@ -1317,16 +1317,15 @@ class WDMLookupTable(WDMSettings):
                         _table_cos[m_i, inds] = cos_coeff
                     except:
                         breakpoint()
-
                 print(inds, total_f_fdot_vals)
 
             # TODO: verify if there is a minus sign needed here and below
             freqs =  (_f_vals.reshape(-1, 2) +  self.xp.asarray(m_diffs)[:, None, None] * self.layer_df).transpose(1, 0, 2).reshape(self.fdot_steps, -1)
-            _table_sin = _table_sin.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).T.copy()
-            _table_cos = _table_cos.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).T.copy()
+            _table_sin = _table_sin.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).copy()
+            _table_cos = _table_cos.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).copy()
 
-            assert _table_sin.shape == (self.f_vals.shape[0], self.fdot_vals.shape[0])
-            assert _table_cos.shape == (self.f_vals.shape[0], self.fdot_vals.shape[0])
+            assert _table_sin.shape == (self.fdot_vals.shape[0], self.f_vals.shape[0])
+            assert _table_cos.shape == (self.fdot_vals.shape[0], self.f_vals.shape[0])
             
             self.table_sin = _table_sin
             self.table_cos = _table_cos
@@ -1430,9 +1429,9 @@ class WDMLookupTable(WDMSettings):
             interpolate = interpolate_cpu
 
         if self.run_fdot:
+            breakpoint()
             return interpolate.LinearNDInterpolator(self.norm_points, table.flatten(), rescale=True)
         else:
-            breakpoint()
             return interpolate.interp1d(self.norm_points, table.flatten())
         
     def get_table_coeffs(self, f_norm: np.ndarray, fdot_arr: np.ndarray):

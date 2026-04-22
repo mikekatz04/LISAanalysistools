@@ -75,14 +75,14 @@ time_layers = wdm_settings.Nt
 tukey_alpha = 0.00
 td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
 m_ref = int(3e-3 / wdm_settings.layer_df)
-norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.5, wdm_settings, m_ref=m_ref, num_layers_diff=2)
-fdot_vals = WDMLookupTable.apply_eps_fdot(0.25, wdm_settings, fdot_max_factor=1.0) 
-store_path = "./wdm_lookup_test_3.h5"
+norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.01, wdm_settings, m_ref=m_ref, num_layers_diff=3)
+fdot_vals = WDMLookupTable.apply_eps_fdot(0.01, wdm_settings, fdot_max_factor=1.0) 
+store_path = "./wdm_lookup_test_6.h5"
 if os.path.exists(store_path):
     wdm_lookup_table = WDMLookupTable.from_file(store_path, force_backend=force_backend)
 else:
-    wdm_lookup_table = WDMLookupTable(wdm_settings, 3, norm_freq_single_layer=norm_freq_single_layer, m_diffs=m_diffs, fdot_vals=fdot_vals, m_ref=m_ref, time_layers=time_layers, batch_size_gen=10, td_window=td_window, store_path=store_path)
-
+    wdm_lookup_table = WDMLookupTable(wdm_settings, 3, norm_freq_single_layer=norm_freq_single_layer, m_diffs=m_diffs, fdot_vals=fdot_vals, m_ref=m_ref, time_layers=time_layers, batch_size_gen=1, td_window=td_window, store_path=store_path)
+breakpoint()
 # f_arr = xp.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
 #xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
 # fdot_arr = xp.random.uniform(wdm_lookup_table.fdot_vals.min(), wdm_lookup_table.fdot_vals.max(), 10)
