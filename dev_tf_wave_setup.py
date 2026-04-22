@@ -187,7 +187,7 @@ for i in range(0, num)[:1]:
     inc = np.full(num_bin, np.pi / 2.)
     psi = np.full(num_bin, 0.0)
     lam = np.full(num_bin, 0.0)
-    beta = np.full(num_bin, np.pi / 3.)
+    beta = np.full(num_bin, 0.0)
 
     t_ref = int(Nt / 2) * wdm_settings.layer_dt
     gb_gen = GBTDIonTheFly(
@@ -314,13 +314,14 @@ for i in range(0, num)[:1]:
     # deriv_delta_t = t_td_wdm * 1e-9
     # f_deriv_tdi = (tdi_phase_up[0] - tdi_phase_down[0]) / (2 * deriv_delta_t) / (2 * np.pi)
     
-    ref_phase_layer = 2 * np.pi * int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df * (output_deriv.t_arr - t_ref) 
+    layer_base_freq = int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df
+    ref_phase_layer = 2 * np.pi * layer_base_freq * (output_deriv.t_arr - t_ref) 
     residual_phase = ref_phase_here - ref_phase_layer
     # if we assume constant over window
     # we can also 
     residual_frequency = np.diff(residual_phase) / np.diff(output_deriv.t_arr) / ( 2* np.pi)
     tdi_frequency = np.diff(tdi_phase_mid) / np.diff(output_deriv.t_arr) / ( 2* np.pi)
-    f_deriv = residual_frequency + tdi_frequency + f0[0]
+    f_deriv = residual_frequency + tdi_frequency + layer_base_freq
     
     residual_fdot = np.diff(residual_frequency) / np.diff(output_deriv.t_arr[0, :-1])
     tdi_fdot = np.diff(tdi_frequency) / np.diff(output_deriv.t_arr[0, :-1])
@@ -340,7 +341,6 @@ for i in range(0, num)[:1]:
 
     n_arr = xp.arange(wdm_settings.Nt)[1:-1][:-2]
 
-    breakpoint()
     wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=1)
 
     gb_fill_wave = xp.zeros_like(wdm_from_td[0])
