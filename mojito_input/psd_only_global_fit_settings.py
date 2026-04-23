@@ -6,9 +6,11 @@ import numpy as np
 
 try:
     import cupy as cp
+
     gpu_available = True
 except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
+
     gpu_available = True
 
 from eryn.moves import CombineMove, StretchMove
@@ -51,17 +53,7 @@ from lisatools.utils.utility import AET, tukey
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 
 
-#from bbhx.utils.transform import *
-
-
-
-
-
-
-
-
-
-
+# from bbhx.utils.transform import *
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
@@ -71,22 +63,22 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
     recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
-    
-    
+
+
 #######################
 ##### SETTINGS ###########
 ###############
 
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
-    
+
     # waveform kwargs
     initialize_kwargs_psd = dict()
 
     priors_psd = {
-                r'$S_{\rm oms}$': uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
-                r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
-            }
+        r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
+        r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
+    }
     priors = {"psd": ProbDistContainer(priors_psd)}
 
     psd_settings = PSDSettings(
@@ -94,7 +86,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
         priors=priors,
-        ndim=2
+        ndim=2,
     )
 
     return PSDSetup(psd_settings)
@@ -102,7 +94,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdot
-    Tobs = 1. * YRSID_SI / 12.0
+    Tobs = 1.0 * YRSID_SI / 12.0
     dt = 2.5
     start_freq = 5e-5
     end_freq = 1e-1
@@ -118,6 +110,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
+
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
     # few.get_backend('cuda12x')
     nwalkers = 30
@@ -127,49 +120,51 @@ def get_general_erebor_settings() -> GeneralSetup:
     window_taper_duration = 1 / start_freq
     normalize_window = True
 
-    basis_domain = "stft" # fd
-    stft_dt = 24 * 3600.0  if basis_domain == "stft" else None # how many hours
+    basis_domain = "stft"  # fd
+    stft_dt = 24 * 3600.0 if basis_domain == "stft" else None  # how many hours
 
-    processor_init_kwargs = dict(L1_folder=data_input_path,
-                                 source_types=['noise'],
-                                 verbose=True,
-                                 do_plots=True,
-                                )
+    processor_init_kwargs = dict(
+        L1_folder=data_input_path,
+        source_types=["noise"],
+        verbose=True,
+        do_plots=True,
+    )
 
     downsample_kwargs = {
         "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
-        "window": ("kaiser", 31.0)  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+        "window": (
+            "kaiser",
+            31.0,
+        ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
     }
 
     highpass_kwargs = {
-        'cutoff': 1e-5,  # Hz — highpass cutoff frequency
-        'order': 2,  # Butterworth filter order
-        'zero_phase': True
+        "cutoff": 1e-5,  # Hz — highpass cutoff frequency
+        "order": 2,  # Butterworth filter order
+        "zero_phase": True,
     }
 
     lowpass_kwargs = {
-        'cutoff': 1e-1,  # Hz — lowpass cutoff frequency
-        'order': 2,  # Butterworth filter order
-        'zero_phase': True
+        "cutoff": 1e-1,  # Hz — lowpass cutoff frequency
+        "order": 2,  # Butterworth filter order
+        "zero_phase": True,
     }
 
     trim_kwargs = {
-        'duration': 200 * 3600,  # seconds — duration to trim from each end
-        'is_percent': False,  # If True, 'duration' is interpreted as a percentage of the total signal length
-        'trimming_type': "from_each_end"  # "from_each_end" or "from_start"
+        "duration": 200 * 3600,  # seconds — duration to trim from each end
+        "is_percent": False,  # If True, 'duration' is interpreted as a percentage of the total signal length
+        "trimming_type": "from_each_end",  # "from_each_end" or "from_start"
     }
-    
+
     preprocess_kwargs = dict(
         highpass_kwargs=highpass_kwargs,
         lowpass_kwargs=lowpass_kwargs,
         trim_kwargs=trim_kwargs,
         downsample_kwargs=downsample_kwargs,
-        Tobs=Tobs
+        Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, 
-                                   mask_percentage=0.02,
-                                   use_splines=False)
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, use_splines=False)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
@@ -204,7 +199,13 @@ def get_global_fit_settings(copy_settings_file=False):
 
     # file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
     if copy_settings_file:
-        shutil.copy(__file__, general_setup.file_store_dir + general_setup.base_file_name + "_" + __file__.split("/")[-1])
+        shutil.copy(
+            __file__,
+            general_setup.file_store_dir
+            + general_setup.base_file_name
+            + "_"
+            + __file__.split("/")[-1],
+        )
 
     ###############################
     ###############################
@@ -215,14 +216,11 @@ def get_global_fit_settings(copy_settings_file=False):
     head_rank = 1
 
     main_rank = 0
-    
+
     # run results rank will be next available rank if used
     # gmm_ranks will be all other ranks
 
-    rank_info = RankInfo(
-        head_rank=head_rank,
-        main_rank=main_rank
-    )
+    rank_info = RankInfo(head_rank=head_rank, main_rank=main_rank)
 
     ##################################
     ##################################
@@ -230,13 +228,11 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
     ##################################
 
-
     psd_setup = get_psd_erebor_settings(general_setup)
 
     ##############
     ## READ OUT ##
     ##############
-
 
     global_settings = GlobalFitSettings(
         source_info={
@@ -251,7 +247,6 @@ def get_global_fit_settings(copy_settings_file=False):
     curr_info = CurrentInfoGlobalFit(global_settings)
 
     return curr_info
-
 
 
 if __name__ == "__main__":

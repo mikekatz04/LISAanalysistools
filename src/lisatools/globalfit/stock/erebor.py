@@ -641,6 +641,7 @@ class PSDSettings(Settings):
     ndim: int = 4
     transform_fn: TransformContainer = None
     injection: Optional[np.ndarray] = None 
+    nknots: Optional[int] = None
 
 
 class PSDSetup(Setup):
