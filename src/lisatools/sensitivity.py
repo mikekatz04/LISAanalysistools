@@ -41,6 +41,7 @@ from .stochastic import (
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
+from eryn.utils import TransformContainer
 
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
@@ -1750,6 +1751,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         settings: DomainSettingsBase,
         tdi_generation: int = 2,
         use_splines: bool = False,
+        spline_order: Optional[str] = "cubic",
         force_backend: Optional[str] = "cpu",
         mask_percentage: Optional[float] = None,
         window_values: Optional[np.ndarray | cp.ndarray] = None
@@ -1770,8 +1772,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         _use_gpu = force_backend != "cpu"
 
         self.use_splines = use_splines
+        self.spline_order = spline_order
         self.spline_interpolant = AkimaInterpolant1D(
-            use_gpu=_use_gpu, threadsperblock=NUM_SPLINE_THREADS, order="cubic"
+            use_gpu=_use_gpu, threadsperblock=NUM_SPLINE_THREADS, order=spline_order
         )
 
         self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
@@ -1787,6 +1790,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "settings": self.basis_settings,
             "tdi_generation": self.tdi_generation,
             "use_splines": self.use_splines,
+            "spline_order": self.spline_order,
             "force_backend": "cpu" if self.backend.xp == np else "gpu",
             "mask_percentage": self.mask_percentage,
             "window_values": self.window_values
@@ -1982,7 +1986,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         if self.use_splines:
             assert knots_position_all is not None and knots_amplitude_all is not None
-            splines_out = self.spline_interpolant(freqs, knots_position_all, knots_amplitude_all)
+            splines_out = self.spline_interpolant(xp.log10(freqs), knots_position_all, knots_amplitude_all)
             splines_in_isi_oms = splines_out[0]
             spline_in_testmass = splines_out[1]
         else:
@@ -2273,9 +2277,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             splines_weights = self.spline_interpolant(
                 xp.log10(self.f_arr), knots_position_all, knots_amplitude_all
             )
-
-            splines_weights_isi_oms = splines_weights[:num_psds].flatten()
-            splines_weights_testmass = splines_weights[num_psds:].flatten()
+            splines_weights_isi_oms = splines_weights[0].flatten()
+            splines_weights_testmass = splines_weights[1].flatten()
+            # splines_weights_isi_oms = splines_weights[:num_psds].flatten()
+            # splines_weights_testmass = splines_weights[num_psds:].flatten()
 
         else:
             splines_weights_isi_oms = xp.zeros(shape=(num_psds * self.num_freqs))
@@ -2328,7 +2333,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return smoothed_matrix
 
     def __call__(
-        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None
+        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None, transform_fn: TransformContainer = None
     ) -> XYZSensitivityBackend:
         """
         Update the internal sensitivity matrix with new noise parameters and return to be used in a AnalysisContainer.
@@ -2345,18 +2350,23 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.name = name
 
-        Soms_d = psd_params[0]
-        Sa_a = psd_params[1]
-
         if self.use_splines:
-            # todo add a container for the noise
-            spline_params = psd_params[2:]
-            spline_knots_position = spline_params[::2]
-            spline_knots_amplitude = spline_params[1::2]
-
+            if transform_fn is None:
+                raise ValueError("A transform container is needed when using splines for fitting the noise.")
+            spline_params = transform_fn.both_transforms(psd_params, copy=True, return_transpose=False) 
+            spline_params = cp.atleast_2d( spline_params )
+            spline_knots_position = spline_params[:,3::2]
+            spline_knots_amplitude = spline_params[:,2:-1:2]
+            half = spline_knots_position.shape[1] // 2
+            spline_knots_amplitude = cp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
+            spline_knots_position = cp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
+            Soms_d = spline_params[:,0].squeeze()
+            Sa_a = spline_params[:,1].squeeze()
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
+            Soms_d = psd_params[0]
+            Sa_a = psd_params[1]
 
         if galfor_params is None:
             galfor_params = np.zeros(5)

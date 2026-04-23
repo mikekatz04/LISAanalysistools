@@ -180,7 +180,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
-        random_seed=103209,
+        random_seed=12345,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,

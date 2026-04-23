@@ -694,8 +694,6 @@ class PSDSetup(Setup):
 
         assert not self.other_tempering_kwargs["permute"]
 
-        self.transform_fn = self.psd_kwargs.get("transform_fn", None)
-
     def init_setup(self):
         self.init_sampling_info()
 

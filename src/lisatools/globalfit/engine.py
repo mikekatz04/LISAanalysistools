@@ -122,6 +122,10 @@ class GeneralSettings(Settings):
     ntemps: int = None
     window_type: str = "tukey"
     window_taper_duration: float = None
+    use_splines: bool = False, 
+    nknots: int = None,
+    lowerbound: float = None, 
+    upperbound: float = None,
     gpus: typing.List[int] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
