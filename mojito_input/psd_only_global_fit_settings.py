@@ -154,7 +154,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     }
 
     trim_kwargs = {
-        "duration": 70 * 24 * 3600,  # seconds — duration to trim from each end
+        "duration": 200 * 3600,  # seconds — duration to trim from each end
         "is_percent": False,  # If True, 'duration' is interpreted as a percentage of the total signal length
         "trimming_type": "from_each_end",  # "from_each_end" or "from_start"
     }
@@ -181,7 +181,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
-        random_seed=103209,
+        random_seed=12345,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,

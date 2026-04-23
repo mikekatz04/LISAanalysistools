@@ -103,6 +103,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     waveform_init_kwargs = dict(
         waveform_kwargs=wave_kwargs,
         waveform_t0=97729089.327664,
+        waveform_t0=97729089.327664,
         data_td_settings=general_set.data_td_settings,
         Tobs=1.0
         / 12.0

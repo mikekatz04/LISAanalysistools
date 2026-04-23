@@ -361,9 +361,9 @@ class GlobalFit:
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
                 else:
                     galfor_params = None
-
                 sens_here = self.curr.general_info.sensitivity_backend(
-                    f"walker_{w}", psd_params, galfor_params=galfor_params
+                    f"walker_{w}", psd_params, transform_fn=self.curr.source_info["psd"].transform_fn, 
+                                               galfor_params=galfor_params
                 )
             else:
                 # TODO: update this
@@ -381,6 +381,7 @@ class GlobalFit:
         # breakpoint()
 
         for name, source_info in self.curr.source_info.items():
+            breakpoint()
             if name not in self.curr.engine_info.branch_names:
                 continue
 

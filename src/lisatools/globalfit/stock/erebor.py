@@ -644,6 +644,7 @@ class PSDSettings(Settings):
     ndim: int = 4
     transform_fn: TransformContainer = None
     injection: Optional[np.ndarray] = None 
+    nknots: Optional[int] = None
 
 
 class PSDSetup(Setup):
@@ -696,8 +697,6 @@ class PSDSetup(Setup):
             self.other_tempering_kwargs["permute"] = False
 
         assert not self.other_tempering_kwargs["permute"]
-
-        self.transform_fn = self.psd_kwargs.get("transform_fn", None)
 
     def init_setup(self):
         self.init_sampling_info()
