@@ -11,7 +11,7 @@ from fastlisaresponse import ResponseWrapper
 
 from ...domains import DomainSettingsBase
 from ...utils.constants import *
-from ...utils.jaxbase import JaxThreadingMixin
+from ...utils.jaxbase import JaxBase
 from ..waveformbase import SNRWaveform, TDPyResponseWaveformBase, TDTDIOnFlyWaveformBase
 
 try:
@@ -127,7 +127,7 @@ class BBHSNRWaveform(SNRWaveform):
         else:
             return (AET[0], AET[1], AET[2])
 
-class PhenomTHMWaveformBase(JaxThreadingMixin):
+class PhenomTHMWaveformBase(JaxBase):
     """
     Base class for PhenomTHM waveforms.
 
@@ -146,6 +146,8 @@ class PhenomTHMWaveformBase(JaxThreadingMixin):
         start_freq: float = None,
         ref_freq: float = None,
     ) -> None:
+        
+        JaxBase.__init__(self)
 
         if not phentax_available:
             raise ImportError(
@@ -282,6 +284,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         psi: float,
         ref_freq: float = None,
         start_freq: float = None,
+        synchronize: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate the waveform's polarizations for a single source.
@@ -297,6 +300,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             psi: Polarisation angle in radians.
             ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
             start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
+            synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
 
         Returns:
             t_arr, h_plus, h_cross
@@ -320,12 +324,10 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             delta_t=self.dt,
         )
 
-        hcross.block_until_ready()  # ensure all outputs are ready before moving to self.xp
-
-        xp_mask = self.xp.asarray(mask)
-        out_times = self.xp.asarray(times)[xp_mask]
-        out_hplus = self.xp.asarray(hplus)[xp_mask]
-        out_hcross = self.xp.asarray(hcross)[xp_mask]        
+        xp_mask = self._from_jax(mask, do_synchronize=synchronize)
+        out_times = self._from_jax(times, do_synchronize=synchronize)[xp_mask]
+        out_hplus = self._from_jax(hplus, do_synchronize=synchronize)[xp_mask]
+        out_hcross = self._from_jax(hcross, do_synchronize=synchronize)[xp_mask]        
 
         return (
             out_times,
@@ -335,16 +337,17 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
 
     def wave_gen_batch(
         self,
-        m1: np.ndarray,
-        m2: np.ndarray,
-        s1z: np.ndarray,
-        s2z: np.ndarray,
-        distance: np.ndarray,
-        phi_ref: np.ndarray,
-        inclination: np.ndarray,
-        psi: np.ndarray,
-        ref_freq: float = None,
-        start_freq: float = None,
+        m1: np.ndarray | cp.ndarray,
+        m2: np.ndarray | cp.ndarray,
+        s1z: np.ndarray | cp.ndarray,
+        s2z: np.ndarray | cp.ndarray,
+        distance: np.ndarray | cp.ndarray,
+        phi_ref: np.ndarray | cp.ndarray,
+        inclination: np.ndarray | cp.ndarray,
+        psi: np.ndarray | cp.ndarray,
+        ref_freq: float | np.ndarray | cp.ndarray = None,
+        start_freq: float | np.ndarray | cp.ndarray = None,
+        synchronize: bool = False,
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Generate polarizations for a batch of sources using phentax's vectorised path.
@@ -364,6 +367,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             psi: Polarisation angle in radians, shape (Nbatch,).
             ref_freq: Reference frequency in Hz, float.
             start_freq: Starting frequency in Hz, float.
+            synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
             **kwargs: Additional keyword arguments forwarded to
                 ``compute_polarizations_at_once`` (e.g. ``T`` for observation time
                 override, ``t_min``, ``t_ref``).
@@ -390,15 +394,12 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             delta_t=self.dt,
             **kwargs,
         )
-        hcross.block_until_ready()  # ensure all outputs are ready before moving to self.xp
         
-        times = self.xp.asarray(times).copy()
-        mask = self.xp.asarray(mask).copy()
-        hplus = self.xp.asarray(hplus).copy()
-        hcross = self.xp.asarray(hcross).copy()
+        times = self._from_jax(times, do_synchronize=synchronize)
+        mask = self._from_jax(mask, do_synchronize=synchronize)
+        hplus = self._from_jax(hplus, do_synchronize=synchronize)
+        hcross = self._from_jax(hcross, do_synchronize=synchronize)
 
-        # Move to the target backend: zero-copy on GPU via __cuda_array_interface__,
-        # host transfer on CPU. _call_batched will slice and re-wrap as needed.
         times_out = self.trim_and_shift_times(times, mask)
         num_keep = times_out.shape[-1]
 
@@ -469,6 +470,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         dec: np.ndarray | cp.ndarray = None,
         ref_freq: np.ndarray | cp.ndarray = None,
         start_freq: np.ndarray | cp.ndarray = None,
+        synchronize: bool = False,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
@@ -487,6 +489,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             dec: Declination for the sources in radians, shape (Nbatch,).
             ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
             start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
+            synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
             **kwargs: Additional keyword arguments forwarded to
                 ``compute_strain_components_amp_phase``.
 
@@ -507,14 +510,14 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(start_freq),
             self._to_jax(inclination),
             self._to_jax(psi),
-            delta_t=jnp.asarray(self.dt),
+            delta_t=self.dt,
         )
-        amplitude.block_until_ready()  # ensure all outputs are ready before moving to self.xp
+        #amplitude.block_until_ready()  # ensure all outputs are ready before moving to self.xp
 
-        times = self.xp.asarray(times).copy()
-        mask = self.xp.asarray(mask).copy()
-        amplitude = self.xp.asarray(amplitude).copy()
-        phase = self.xp.asarray(phase).copy()
+        times = self._from_jax(times, do_synchronize=synchronize)
+        mask = self._from_jax(mask, do_synchronize=synchronize)
+        amplitude = self._from_jax(amplitude, do_synchronize=synchronize)
+        phase = self._from_jax(phase, do_synchronize=synchronize)
 
         times_out = self.trim_and_shift_times(times, mask)
 
