@@ -613,34 +613,3 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
         free_gpu_memory()
 
-
-class MultiDeviceResidualAddOneRemoveOneMove(ResidualAddOneRemoveOneMove):
-    """
-    
-    """
-    def __init__(self, *args, likelihood_evaluation_mode="serial", **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.dcga = DomainComputationGroupArray(acs=self.acs)
-        self.likelihood_evaluation_mode = likelihood_evaluation_mode
-
-    def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray:
-        raise NotImplementedError("This method is not implemented yet for the multi-device version of the move.")
-    
-    def compute_like(self, coords_in: np.ndarray, data_index: np.ndarray | xp.ndarray) -> np.ndarray:
-        """
-        Spread the likelihood computation for different walkers across different devices using the DomainComputationGroupArray.
-
-        Args:
-            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
-            data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
-        """
-
-        self.dcga.compute_likelihood_from_coords(
-            self.waveform_gen,
-            coords_in,
-            data_index,
-            waveform_gen_kwargs=self.waveform_gen_kwargs,
-            mode=self.likelihood_evaluation_mode,
-        )
-

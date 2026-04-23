@@ -20,7 +20,7 @@ from ... import get_backend
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...sensitivity import XYZSensitivityBackend
-from ..moves import GlobalFitMove
+from ..moves import GlobalFitMove, MultiGPUMoveBase
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
 
@@ -172,6 +172,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
         permute_every: int = 20,
+        tolerance: float = 0.0,
         **kwargs,
     ):
 
@@ -189,14 +190,9 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.galfor_transform_fn = galfor_transform_fn
 
         self.permute_every = permute_every
+        self.tolerance = tolerance
 
-    def psd_log_like(self, x, data, supps=None, **sens_kwargs):
-        """ """
-        if supps is None:
-            raise ValueError("Must provide supps to identify the data streams.")
-
-        wi = supps["walker_inds"]
-
+    def unpack_coordinates(self, x):
         # TODO: better way so avoid order issues?
         if self.psd_transform_fn is not None:
             psd_pars = self.psd_transform_fn.both_transforms(x[0])
@@ -211,56 +207,65 @@ class PSDMove(GlobalFitMove, StretchMove):
             else:
                 galfor_pars = x[1]
 
-        data_index_all = cp.asarray(wi).astype(np.int32)
-        # ll = cp.zeros(psd_pars.shape[0])
-        Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-        Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-
+        # all numpy up to here, it's fine
+        
+        
+        # Soms_d_in_all = cp.asarray(psd_pars[:, 0])
+        # Sa_a_in_all = cp.asarray(psd_pars[:, 1])
+        noise_amplitudes = psd_pars[:, :2]
         if self.sensitivity_backend.use_splines:
-            knots_positions = cp.asarray(psd_pars[:, 2::2])
-            knots_amplitudes = cp.asarray(psd_pars[:, 3::2])
-
+            knots_positions = psd_pars[:,3::2]
+            knots_amplitudes = psd_pars[:,2:-1:2]
+            half = knots_positions.shape[1] // 2 # Get the mid of the array 
             # put the 2 noise levels on the batch axis
-            n_knots = int(knots_positions.shape[1] / 2)
+            spline_knots_amplitude = np.stack((knots_amplitudes[:, :half], knots_amplitudes[:, half:]))
+            spline_knots_position = np.stack((knots_positions[:, :half], knots_positions[:, half:]))
 
-            oms_positions, oms_amplitudes = (
-                knots_positions[:, :n_knots],
-                knots_amplitudes[:, :n_knots],
-            )
-            testmass_positions, testmass_amplitudes = (
-                knots_positions[:, n_knots:],
-                knots_amplitudes[:, n_knots:],
-            )
 
-            knots_positions = cp.vstack([oms_positions, testmass_positions])
-            knots_amplitudes = cp.vstack([oms_amplitudes, testmass_amplitudes])
-
-            # now check if any knot position is not in ascending order
-            invalid_knots = cp.any(cp.diff(knots_positions, axis=1) < 0, axis=1)
-
+            # Sort
+            sort_indices = np.argsort(spline_knots_position, axis=2)
+            # Apply the same indices to both arrays
+            spline_knots_position = np.take_along_axis(spline_knots_position, sort_indices, axis=2)
+            spline_knots_amplitude = np.take_along_axis(spline_knots_amplitude, sort_indices, axis=2)
+            # now check if any knot position is not too close together
+            invalid_knots = np.any(np.diff(10**spline_knots_position, axis=2) < self.tolerance, axis=(0, 2))
         else:
-            knots_positions = None
-            knots_amplitudes = None
-            invalid_knots = cp.zeros(psd_pars.shape[0], dtype=bool)
+            spline_knots_position = None
+            spline_knots_amplitude = None
+            invalid_knots = np.zeros(psd_pars.shape[0], dtype=bool)
 
-        Amp_all = cp.asarray(galfor_pars[:, 0])
-        kn_all = cp.asarray(galfor_pars[:, 1])
-        alpha_all = cp.asarray(galfor_pars[:, 2])
-        sl1_all = cp.asarray(galfor_pars[:, 3])
-        sl2_all = cp.asarray(galfor_pars[:, 4])
+        # Amp_all = cp.asarray(galfor_pars[:, 0])
+        # kn_all = cp.asarray(galfor_pars[:, 1])
+        # alpha_all = cp.asarray(galfor_pars[:, 2])
+        # sl1_all = cp.asarray(galfor_pars[:, 3])
+        # sl2_all = cp.asarray(galfor_pars[:, 4])
+
+        return noise_amplitudes, galfor_pars, spline_knots_position, spline_knots_amplitude, invalid_knots
+        
+
+    def psd_log_like(self, x, data, supps=None, **sens_kwargs):
+        """ """
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        wi = supps["walker_inds"]
+        data_index_all = self.xp.asarray(wi).astype(np.int32)
+
+        noise_amplitudes, galfor_pars, spline_knots_position, spline_knots_amplitude, invalid_knots = self.unpack_coordinates(x) 
+        
+        noise_amplitudes = self.xp.asarray(noise_amplitudes)
+        galfor_pars = self.xp.asarray(galfor_pars)
+        if spline_knots_position is not None:
+            spline_knots_position = self.xp.asarray(spline_knots_position)
+            spline_knots_amplitude = self.xp.asarray(spline_knots_amplitude)
 
         ll = self.sensitivity_backend.compute_log_like(
             data,
             data_index_all,
-            Soms_d_in_all,
-            Sa_a_in_all,
-            Amp_all,
-            alpha_all,
-            sl1_all,
-            kn_all,
-            sl2_all,
-            knots_positions,
-            knots_amplitudes,
+            *noise_amplitudes.T,
+            *galfor_pars.T,
+            knots_position_all=spline_knots_position,
+            knots_amplitude_all=spline_knots_amplitude,
         )
 
         ll[invalid_knots] = -1e300
@@ -488,12 +493,12 @@ class PSDMove(GlobalFitMove, StretchMove):
         return new_state, accepted
 
 
-class MultiDevicePSDMove(PSDMove):
-    def __init__(self, *args, likelihood_evaluation_mode="serial", **kwargs):
-        super().__init__(*args, **kwargs)
+class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
+    def __init__(self, 
+                dcga: DomainComputationGroupArray, 
+                *args, 
+                **kwargs):
+        PSDMove.__init__(self, dcga.acs, *args, **kwargs)
+        MultiGPUMoveBase.__init__(self, dcga)
 
-        self.dcga = DomainComputationGroupArray(acs=self.acs)
-        self.likelihood_evaluation_mode = likelihood_evaluation_mode
-
-    def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
-        raise NotImplementedError
+    
