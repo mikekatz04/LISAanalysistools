@@ -46,7 +46,7 @@ dependencies = [
   "astropy",
   "scikit-learn",
   "cudakima",
-  "install>=0.0.1",
+  # "install>=0.0.1",
 ]
 
 
@@ -92,14 +92,6 @@ optional-dependencies.testing = [
   "gbgpu",
   "corner",
   "gpubackendtools>=0.0.16",
-]
-
-optional-dependencies.dev = [
-  "black",
-  "isort",
-  "mypy",
-  "pre-commit",
-  "pylint",
 ]
 
 optional-dependencies.dev = [

@@ -10,7 +10,7 @@ import numpy as np
 from eryn.utils import TransformContainer
 from scipy import interpolate
 
-from lisatools.domains import DomainBase, DomainBaseArray, DomainSettingsBase
+from .domains import DomainBase, DomainBaseArray, DomainSettingsBase
 
 from . import domains
 
