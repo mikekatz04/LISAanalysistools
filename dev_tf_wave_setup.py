@@ -47,22 +47,9 @@ orbits.configure(linear_interp_setup=True)
 tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
 dt = 2.5
 Tobs = 2 * YRSID_SI
-Nf = -1
-Nt = -1
-for tmp in np.linspace(.5, 0.75, 1000):
-    wavelet_duration = int(tmp / 365 * YRSID_SI / dt) * dt
-    Nt = int(Tobs / wavelet_duration)
-    Tobs = Nt * wavelet_duration
-    N = int(Tobs / dt)
-    Nf = int(N / Nt)
-    print(tmp, Nf, Nt)
-    if (Nt % 2 == 0) and (Nf % 2 == 0):
-        break
 
 N_sparse = 256
 t_tdi = xp.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
-
-wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
 
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.detector import sangria, scirdv1
@@ -71,16 +58,37 @@ from lisatools.analysiscontainer import AnalysisContainer
 
 # sens_mat_wdm = XYZ2SensitivityMatrix(wdm_settings, model=scirdv1)
 # breakpoint()
-time_layers = wdm_settings.Nt
 tukey_alpha = 0.00
-td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
-m_ref = int(3e-3 / wdm_settings.layer_df)
-norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.01, wdm_settings, m_ref=m_ref, num_layers_diff=3)
-fdot_vals = WDMLookupTable.apply_eps_fdot(0.01, wdm_settings, fdot_max_factor=1.0) 
-store_path = "./wdm_lookup_test_6.h5"
+
+store_path = "./wdm_lookup_test_8.h5"
 if os.path.exists(store_path):
     wdm_lookup_table = WDMLookupTable.from_file(store_path, force_backend=force_backend)
+    wdm_settings = WDMSettings(*wdm_lookup_table.args, **wdm_lookup_table.kwargs)
+    Nt = wdm_settings.Nt
+    Nf = wdm_settings.Nf
+    N = wdm_settings.N
+    Tobs = wdm_settings.Tobs
+
 else:
+    Nf = -1
+    Nt = -1
+    for tmp in np.linspace(.5, 0.75, 1000):
+        wavelet_duration = int(tmp / 365 * YRSID_SI / dt) * dt
+        Nt = int(Tobs / wavelet_duration)
+        Tobs = Nt * wavelet_duration
+        N = int(Tobs / dt)
+        Nf = int(N / Nt)
+        print(tmp, Nf, Nt)
+        if (Nt % 2 == 0) and (Nf % 2 == 0):
+            break
+    
+    wdm_settings = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
+    time_layers = wdm_settings.Nt
+    td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
+    m_ref = int(3e-3 / wdm_settings.layer_df)
+    norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.01, wdm_settings, m_ref=m_ref, num_layers_diff=3)
+    fdot_vals = WDMLookupTable.apply_eps_fdot(0.01, wdm_settings, fdot_max_factor=1.0) 
+
     wdm_lookup_table = WDMLookupTable(wdm_settings, 3, norm_freq_single_layer=norm_freq_single_layer, m_diffs=m_diffs, fdot_vals=fdot_vals, m_ref=m_ref, time_layers=time_layers, batch_size_gen=1, td_window=td_window, store_path=store_path)
 
 # f_arr = xp.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
@@ -180,14 +188,14 @@ num = 10
 
 for i in range(0, num)[:1]:
     amp = np.full(num_bin, 1.0)  # e-22)
-    f0 = np.full(num_bin, 3.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
-    fdot = np.full(num_bin, 0.0) # 1e-14)
+    f0 = np.full(num_bin, 25.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
+    fdot = np.full(num_bin, 1e-17)
     fddot = np.full(num_bin, 0.0)
     phi0 = np.full(num_bin, 0.0)
     inc = np.full(num_bin, np.pi / 2.)
     psi = np.full(num_bin, 0.0)
     lam = np.full(num_bin, 0.0)
-    beta = np.full(num_bin, 0.0)
+    beta = np.full(num_bin, np.pi / 2.)
 
     t_ref = int(Nt / 2) * wdm_settings.layer_dt
     gb_gen = GBTDIonTheFly(
@@ -202,7 +210,7 @@ for i in range(0, num)[:1]:
         tdi_chan="XYZ",
         force_backend=force_backend,
     )
-
+    
     t_td_wdm = wdm_settings.t_arr[1:-1]
     gb_gen_deriv = GBTDIonTheFly(
         t_td_wdm, 
@@ -218,7 +226,7 @@ for i in range(0, num)[:1]:
     )
 
     gb_gen_down_1 = GBTDIonTheFly(
-        t_td_wdm * (1 - 1e-9), 
+        (t_td_wdm - 1e-7 * t_td_wdm[-1]), 
         Tobs,
         t_ref,
         1. / dt,
@@ -231,7 +239,7 @@ for i in range(0, num)[:1]:
     )
 
     gb_gen_up_1 = GBTDIonTheFly(
-        t_td_wdm * (1 + 1e-9), 
+        (t_td_wdm + 1e-7 * t_td_wdm[-1]), 
         Tobs,
         t_ref,
         1. / dt,
@@ -306,47 +314,62 @@ for i in range(0, num)[:1]:
     print("\n")
 
     #simulate kernel
-    ref_phase_here = output_deriv.phase_ref  # 2 * np.pi * int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df * (output_deriv.t_arr - t_ref) 
-    tdi_phase_down = -np.angle(output_down_1.X * np.exp(1j * ref_phase_here))
-    tdi_phase_mid = -np.angle(output_deriv.X * np.exp(1j * ref_phase_here))
-    tdi_phase_up = -np.angle(output_up_1.X * np.exp(1j * ref_phase_here))
+    ref_phase_down = output_down_1.phase_ref  # 2 * np.pi * int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df * (output_deriv.t_arr - t_ref) 
+    ref_phase_mid = output_deriv.phase_ref  # 2 * np.pi * int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df * (output_deriv.t_arr - t_ref) 
+    ref_phase_up = output_up_1.phase_ref  # 2 * np.pi * int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df * (output_deriv.t_arr - t_ref) 
+    tdi_phase_down = -np.angle(output_down_1.X * np.exp(1j * ref_phase_down))
+    tdi_phase_mid = -np.angle(output_deriv.X * np.exp(1j * ref_phase_mid))
+    tdi_phase_up = -np.angle(output_up_1.X * np.exp(1j * ref_phase_up))
 
-    # deriv_delta_t = t_td_wdm * 1e-9
+    deriv_delta_t = output_up_1.t_arr - output_down_1.t_arr
     # f_deriv_tdi = (tdi_phase_up[0] - tdi_phase_down[0]) / (2 * deriv_delta_t) / (2 * np.pi)
     
     layer_base_freq = int(f0[0] / wdm_settings.layer_df) * wdm_settings.layer_df
-    ref_phase_layer = 2 * np.pi * layer_base_freq * (output_deriv.t_arr - t_ref) 
-    residual_phase = ref_phase_here - ref_phase_layer
+    ref_phase_layer_down = 2 * np.pi * layer_base_freq * (output_down_1.t_arr - t_ref) 
+    ref_phase_layer_mid = 2 * np.pi * layer_base_freq * (output_deriv.t_arr - t_ref) 
+    ref_phase_layer_up = 2 * np.pi * layer_base_freq * (output_up_1.t_arr - t_ref) 
+    residual_phase_down = ref_phase_down - ref_phase_layer_down
+    residual_phase_mid = ref_phase_mid - ref_phase_layer_mid
+    residual_phase_up = ref_phase_up - ref_phase_layer_up
+
     # if we assume constant over window
     # we can also 
-    residual_frequency = np.diff(residual_phase) / np.diff(output_deriv.t_arr) / ( 2* np.pi)
-    tdi_frequency = np.diff(tdi_phase_mid) / np.diff(output_deriv.t_arr) / ( 2* np.pi)
+    # residual_frequency = np.diff(residual_phase) / np.diff(output_deriv.t_arr) / ( 2* np.pi)
+    # tdi_frequency = np.diff(tdi_phase_mid) / np.diff(output_deriv.t_arr) / ( 2* np.pi)
+    residual_frequency = (residual_phase_up - residual_phase_down) / (deriv_delta_t) / (2. * np.pi)
+    tdi_frequency = (tdi_phase_up - tdi_phase_down) / (deriv_delta_t) / (2. * np.pi)
+    
     f_deriv = residual_frequency + tdi_frequency + layer_base_freq
     
-    residual_fdot = np.diff(residual_frequency) / np.diff(output_deriv.t_arr[0, :-1])
-    tdi_fdot = np.diff(tdi_frequency) / np.diff(output_deriv.t_arr[0, :-1])
+    residual_fdot = (residual_phase_up - 2 * residual_phase_mid + residual_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
+    tdi_fdot = (tdi_phase_up - 2 * tdi_phase_mid + tdi_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
+    
+    f_deriv = residual_frequency + tdi_frequency + layer_base_freq
+    
+    # residual_fdot = np.diff(residual_frequency) / np.diff(output_deriv.t_arr[0, :-1])
+    # tdi_fdot = np.diff(tdi_frequency) / np.diff(output_deriv.t_arr[0, :-1])
     fdot_deriv = residual_fdot + tdi_fdot
     _f_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=1)[0, 0] / (2 * np.pi)
     _f_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=1)[0] / (2 * np.pi)
-    _f_deriv = _f_deriv_ref + _f_deriv_tdi
+    f_deriv = _f_deriv_ref + _f_deriv_tdi
 
+    fdot_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=2)[0, 0]
+    fdot_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=2)[0]
+    fdot_deriv = fdot_deriv_ref + fdot_deriv_tdi
+    breakpoint()
+    phi_t = (tdi_phase_mid + ref_phase_mid)[0] + np.pi / 2. #  (np.angle(output_deriv.X).squeeze())# [:-2] # % (2 * np.pi)
+    freq_t = f_deriv.copy().squeeze()# [:-1]
+    fdot_t = fdot_deriv.copy().squeeze()# [:]
+    amp_t = np.abs(output_deriv.X).squeeze()# [:-2]
 
-    # fdot_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=2)[0, 0] / (2 * np.pi)
-    # fdot_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=2)[0] / (2 * np.pi)
-    # fdot_deriv = fdot_deriv_ref + fdot_deriv_tdi
-    phi_t = (np.angle(output_deriv.X.conj()).squeeze())[:-2] # % (2 * np.pi)
-    freq_t = f_deriv.copy().squeeze()[:-1]
-    fdot_t = fdot_deriv.copy().squeeze()[:]
-    amp_t = np.abs(output_deriv.X).squeeze()[:-2]
-
-    n_arr = xp.arange(wdm_settings.Nt)[1:-1][:-2]
+    n_arr = xp.arange(wdm_settings.Nt)[1:-1]# [:-2]
 
     wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=1)
 
     gb_fill_wave = xp.zeros_like(wdm_from_td[0])
     keep_m = (m_layers >= 0) & (m_layers < wdm_settings.Nf)
     gb_fill_wave[m_layers[keep_m], xp.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1)[keep_m]] = wdm_coeffs[keep_m]
-    gb_fill_wave[:] = xp.roll(gb_fill_wave, 4, axis=-1)
+    # gb_fill_wave[:] = xp.roll(gb_fill_wave, 2, axis=-1)
     gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
     
     # fdot_deriv = (phase_up - 2 * phase_mid + phase_up) / (deriv_delta_t * deriv_delta_t) / (2 * np.pi)
@@ -385,11 +408,12 @@ for i in range(0, num)[:1]:
     keep = np.where(check2)
     overlap = np.sum(check1 * check2) / np.sqrt(np.sum(check1 * check1) * np.sum(check2 * check2))
 
-    check3 = wdm_from_td[0, wdm_settings.f_ind_array, int(Nt / 2) - 10:int(Nt / 2) + 10]
-    check4 = gb_fill_wave[0, wdm_settings.f_ind_array, int(Nt / 2) - 10:int(Nt / 2) + 10]
-    keep2 = np.where(check4)
-    overlap_center = np.sum(check3 * check4) / np.sqrt(np.sum(check3 * check3) * np.sum(check4 * check4))
-    
+    for cut in [1, 20, 100, 200, 500, 1000]:
+        check3 = wdm_from_td[0, wdm_settings.f_ind_array, cut:-cut]
+        check4 = gb_fill_wave[0, wdm_settings.f_ind_array, cut:-cut]
+        keep2 = np.where(check4)
+        overlap_center = np.sum(check3 * check4) / np.sqrt(np.sum(check3 * check3) * np.sum(check4 * check4))
+        print(f"overlap center. Cut ends amount: {cut}. Mismatch: {1.- overlap_center}.")
     # fig.suptitle(f"f0: {f0_check:.2e}, fdot: {fdot0_check:.2e}, phi0: {phi0:.2g}, note: {note}, mismatch: {1 - overlap:.2e}, center_mismatch {1 - overlap_center:.2e}")
     # fig.savefig(f"f0_{f0_check:.2e}_fdot_{fdot0_check:.2e}_phi0_{phi0:.2g}_main.png")
     # ax1.set_xlim((int(wdm_settings.Nt / 2) - 10) * wdm_settings.layer_dt, (int(wdm_settings.Nt / 2) + 10) * wdm_settings.layer_dt)
