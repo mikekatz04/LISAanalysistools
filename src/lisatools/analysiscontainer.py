@@ -735,5 +735,5 @@ class AnalysisContainerArray:
         for i, tmp in enumerate(self.linear_psd_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape)) 
+            out.append(tmp.reshape((-1,) + self.shape_sens + self.end_shape)) 
         return out
