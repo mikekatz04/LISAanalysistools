@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from contextlib import contextmanager
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import jax
@@ -24,8 +24,11 @@ if TYPE_CHECKING:
     # own lazy import.
     import cupy as cp  # typing-only; runtime cupy use lives in call sites
 
-    from .analysiscontainer import AnalysisContainerArray
-    from .domains import FDSettings, STFTSettings, DomainBase
+    from .analysiscontainer import AnalysisContainer, AnalysisContainerArray
+    from .detector import L1Orbits
+    from .domains import DomainBase, FDSettings, STFTSettings
+    from .sensitivity import XYZSensitivityBackend
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,75 +40,31 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     to prevent GC from invalidating the C++ domain's pointers.
 
     Args:
-        acs : AnalysisContainerArray, optional
-            The AnalysisContainerArray containing the data and noise arrays. If not provided, the necessary arrays and Args: must be provided directly.
+        acs : AnalysisContainerArray
+            The AnalysisContainerArray containing the data and noise arrays.
         split_index : int, optional
             The index of the GPU split to use from the AnalysisContainerArray. Only used if `acs` is provided. Default is 0.
-        data_arr : np.ndarray, optional
-            The linearized data array for the current split. Only used if `acs` is not provided.
-        invC_arr : np.ndarray, optional
-            The linearized inverse noise PSD array for the current split. Only used if `acs` is not provided.
-        num_data : int, optional
-            The number of data points for the current split. Only used if `acs` is not provided.
-        num_noise : int, optional
-            The number of noise points for the current split. Only used if `acs` is not provided.
-        num_channels : int, optional
-            The number of channels for the current split. Only used if `acs` is not provided.
-        settings : STFTSettings or FDSettings, optional
-            The settings for the domain computation. Must be an instance of STFTSettings for STFTComputationGroup or FDSettings for FDComputationGroup. Only used if `acs` is not provided.
         tdi_type : str, optional
             The TDI type to use for the likelihood computation. Default is "XYZ". Must be a key in the backend's TDITypeDict.
         force_backend : str, optional
             If provided, forces the use of the specified backend. Must be one of the supported backends for the domain computation. Default is 'cpu'.
-        device_id : int, optional
-            If using a GPU backend and multiple devices are available, specifies the device ID to use. Only used if `force_backend` is a GPU backend. Defaults to None for `cpu` usage.
     """
 
     def __init__(
         self,
-        acs: AnalysisContainerArray = None,
+        acs: AnalysisContainerArray,
         split_index: int = 0,
-        data_arr: np.ndarray | None = None,
-        invC_arr: np.ndarray | None = None,
-        num_data: int = None,
-        num_noise: int = None,
-        num_channels: int = None,
-        settings: STFTSettings | FDSettings = None,
         tdi_type: str = "XYZ",
         force_backend: str = "cpu",
-        device_id: int = None,
     ):
         super().__init__(force_backend=force_backend)
         self.tdi_type = tdi_type
         self.d_d = None
         self.split_acs = None
 
-        if acs is not None:
-            self.extract_from_acs(acs, split_index)
-        else:
-            # ``device_id`` is intentionally NOT in this list — it is
-            # legitimately ``None`` on the CPU path. The GPU-backend
-            # branch below raises its own assertion for the ``None``
-            # case, so we don't need to pre-check it here.
-            for param in [
-                data_arr,
-                invC_arr,
-                num_data,
-                num_noise,
-                num_channels,
-                settings,
-            ]:
-                if param is None:
-                    raise ValueError("All Args: must be provided if acs is not given.")
-            # Keep references alive so the C++ pointers remain valid. We do not copy to always point to the same memory.
-            self.data_arr = data_arr
-            self.invC_arr = invC_arr
-            self.num_channels = num_channels
-            self.num_data = num_data
-            self.num_noise = num_noise
-            self.settings = settings
-            self.device_id = device_id
-        
+        self.extract_from_acs(acs, split_index)
+        self.build_cpp_objects()  # create orbits and sensitivity backend on the correct device.
+
     def extract_from_acs(self, acs: AnalysisContainerArray, split_index: int):
         """
         Extracts the necessary arrays and Args: from the given AnalysisContainerArray for the specified split index.
@@ -124,23 +83,57 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         self.num_noise = len(acs.gpu_splits[split_index])
         self.settings = acs.settings
 
-        # Store references to the containers in this split for (d|d) computation.
-        # Do NOT wrap them in a new AnalysisContainerArray — that would call
-        # reset_linear_data_arr / reset_linear_psd_arr, rebinding each AC's
-        # internal ._arr to a new buffer and breaking the C++ pointer contract.
         all_acs = acs.acs.flatten()
         split_container_ids = acs.gpu_splits[split_index]
-        self.split_acs = [all_acs[i] for i in split_container_ids]
-        self.device_id = acs.gpus[split_index] if acs.gpus is not None else None
+        self.split_acs: list[AnalysisContainer] = [all_acs[i] for i in split_container_ids]
+        self.device = acs.gpus[split_index] if acs.gpus is not None else None
 
         if self.backend.name.split("_")[-1] == "cpu":
             assert (
-                self.device_id == None
-            ), "CPU backend specified but device_id is not None. Please set device_id to None for CPU usage."
+                self.device == None
+            ), "CPU backend specified but device is not None. Please set `device` to None for CPU usage."
         else:
             assert (
-                self.device_id is not None
-            ), "GPU backend specified but device_id is None. Please provide a valid device_id for GPU usage."
+                self.device is not None
+            ), "GPU backend specified but `device` is None. Please provide a valid `device` for GPU usage."
+
+    @contextmanager
+    def group_device_context(self):
+        """Context manager to set the device context for this computation group."""
+        if self.device is not None:
+            with self.xp.cuda.Device(self.device):
+                yield
+        else:
+            yield
+
+    def build_cpp_objects(self):
+        """Builds the C++ domain objects for this computation group. Should be called after extracting arrays from the AnalysisContainerArray."""
+
+        ref_analysis_container = self.split_acs[0] if self.split_acs else None
+        if ref_analysis_container is None:
+            raise ValueError(
+                "No AnalysisContainers found in the specified split. Cannot build C++ domain objects."
+            )
+
+        sensitivity_backend = ref_analysis_container.sens_mat
+
+        assert hasattr(
+            sensitivity_backend, "orbits"
+        ), "Sensitivity matrix must have 'orbits' attribute to build C++ domain objects."
+        assert hasattr(
+            sensitivity_backend.orbits, "kwargs"
+        ), "Sensitivity matrix orbits must have 'kwargs' attribute to build C++ domain objects."
+        assert hasattr(
+            sensitivity_backend, "kwargs"
+        ), "Sensitivity matrix must have 'kwargs' attribute to build C++ domain objects."
+
+        sensitivity_backend_kwargs = sensitivity_backend.kwargs.copy()
+
+        with self.group_device_context():
+            self._orbits = sensitivity_backend.orbits.__class__(**sensitivity_backend.orbits.kwargs)
+
+            sensitivity_backend_kwargs["orbits"] = self._orbits
+            self._sensitivity_backend = sensitivity_backend.__class__(**sensitivity_backend_kwargs)
 
     def __repr__(self):
         split_index = getattr(self, "split_index", None)
@@ -149,6 +142,20 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
     @property
     def xp(self):
         return self.backend.xp
+
+    @property
+    def orbits(self) -> L1Orbits:
+        if not hasattr(self, "_orbits"):
+            raise ValueError("Orbits have not been created yet. Call build_cpp_objects first.")
+        return self._orbits
+
+    @property
+    def sensitivity_backend(self) -> XYZSensitivityBackend:
+        if not hasattr(self, "_sensitivity_backend"):
+            raise ValueError(
+                "Sensitivity matrix has not been created yet. Call build_cpp_objects first."
+            )
+        return self._sensitivity_backend
 
     @property
     def cpp_domain(self):
@@ -172,7 +179,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             start_times = self.xp.ascontiguousarray(start_times, dtype=self.xp.float64)
         return d_h_out, h_h_out, start_freqs, data_index, noise_index, start_times
 
-    def compute_d_d_term(self, out: bool=False, **kwargs):
+    def compute_d_d_term(self, out: bool = False, **kwargs):
         """
         Compute (d|d) term for the containers in this split only.
 
@@ -265,24 +272,45 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         like_out = -1.0 / 2.0 * (d_d_per_binary + h_h_out - 2 * d_h_out).real
         return like_out
 
+    def compute_psd_likelihood(
+        self,
+        data_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray,
+        *args,
+        **kwargs,
+    ) -> np.ndarray | cp.ndarray:
+        """
+        Compute the log-likelihood for a batch of binaries using the data stored in this split.
+        Refer to the :meth:`compute_log_like` of lisatools.sensitivity.XYZSensitivityBackend.
+        Args:
+            data_index : int array, shape ``(num_binaries,)``
+            noise_index : int array, shape ``(num_binaries,)``. Unused but kept for consistency with the signal likelihood method signature.
+
+        """
+
+        return self.sensitivity_backend.compute_log_like(self.data_arr, data_index, *args, **kwargs)
+
 
 class STFTComputationGroup(BaseDomainComputationGroup):
     """Wraps C++ STFTDomainWrap for batched likelihood computation."""
 
-    def __init__(self, *args, settings: STFTSettings = None, **kwargs):
+    def __init__(
+        self,
+        acs: AnalysisContainerArray,
+        split_index: int = 0,
+        tdi_type: str = "XYZ",
+        force_backend: str = "cpu",
+    ):
         from .domains import STFTSettings
 
-        if settings is None or not isinstance(settings, STFTSettings):
+        if not isinstance(acs.settings, STFTSettings):
             raise ValueError(
                 "settings must be an instance of STFTSettings for STFTComputationGroup."
             )
-        super().__init__(*args, settings=settings, **kwargs)
+        super().__init__(acs, split_index, tdi_type, force_backend)
 
-        if self.device_id is not None:
-            with self.xp.cuda.Device(self.device_id):
-                self._cpp_domain = self._create_cpp_domain()
-        else:
-            self._cpp_domain = self._create_cpp_domain()
+        with self.group_device_context():
+            self._create_cpp_domain()
 
     def __repr__(self):
         return super().__repr__() + f" with STFT settings: {self.settings}"
@@ -306,14 +334,15 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         ]
 
     def _create_cpp_domain(self):
-        domain = self.backend.STFTDomainWrap(*self.domain_args)
+        self._cpp_domain = self.backend.STFTDomainWrap(*self.domain_args)
         logger.debug("Initialized STFTDomainWrap with arguments: %s", self.domain_args)
-        return domain
+        self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8])
+        logger.debug("Initialized STFTFresnelWrap with arguments: %s", self.domain_args[:8])
 
     @property
     def cpp_fresnel(self):
         if not hasattr(self, "_cpp_fresnel"):
-            self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8])
+            raise ValueError("C++ Fresnel object has not been created yet.")
         return self._cpp_fresnel
 
     def compute_signal_likelihood_terms(
@@ -362,24 +391,28 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         )
 
         return d_h_out, h_h_out
-    
+
+
 class FDComputationGroup(BaseDomainComputationGroup):
     """
     Wraps C++ FDDomainWrap for batched likelihood computation.
     """
 
-    def __init__(self, *args, settings: FDSettings = None, **kwargs):
+    def __init__(
+        self,
+        acs: AnalysisContainerArray,
+        split_index: int = 0,
+        tdi_type: str = "XYZ",
+        force_backend: str = "cpu",
+    ):
         from .domains import FDSettings
 
-        if settings is None or not isinstance(settings, FDSettings):
+        if not isinstance(acs.settings, FDSettings):
             raise ValueError("settings must be an instance of FDSettings for FDComputationGroup.")
-        super().__init__(*args, settings=settings, **kwargs)
+        super().__init__(acs, split_index, tdi_type, force_backend)
 
-        if self.device_id is not None:
-            with self.xp.cuda.Device(self.device_id):
-                self._cpp_domain = self._create_cpp_domain()
-        else:
-            self._cpp_domain = self._create_cpp_domain()
+        with self.group_device_context():
+            self._create_cpp_domain()
 
     @property
     def domain_args(self):
@@ -397,9 +430,8 @@ class FDComputationGroup(BaseDomainComputationGroup):
         ]
 
     def _create_cpp_domain(self):
-        domain = self.backend.FDDomainWrap(*self.domain_args)
+        self._cpp_domain = self.backend.FDDomainWrap(*self.domain_args)
         logger.debug("Initialized FDDomainWrap with arguments: %s", self.domain_args)
-        return domain
 
     def compute_signal_likelihood_terms(
         self,
@@ -442,6 +474,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
         return d_h_out, h_h_out
 
+
 class DomainComputationGroupArray:
     """Helper class to manage multiple DomainComputationGroup instances for different splits.
 
@@ -470,12 +503,14 @@ class DomainComputationGroupArray:
 
     def initialize_computation_groups(self):
         """Initializes a DomainComputationGroup instance for each GPU split in the AnalysisContainerArray."""
-        
+
         force_backend = "cpu" if self.acs.gpus is None else "gpu"
         settings = self.acs.settings
         computation_groups: list[BaseDomainComputationGroup] = []
         for split_index in range(self.num_splits):
-            with self.device_context(self.acs.gpus[split_index] if self.acs.gpus is not None else None):
+            with self.device_context(
+                self.acs.gpus[split_index] if self.acs.gpus is not None else None
+            ):
                 group = self.computation_group_class(
                     acs=self.acs,
                     split_index=split_index,
@@ -557,7 +592,9 @@ class DomainComputationGroupArray:
         if self.main_gpu is not None:
             self.xp.get_default_memory_pool().free_all_blocks()
             self.xp.cuda.runtime.setDevice(self.main_gpu)
-            jax.default_device(jax.devices("gpu")[self.gpus.index(self.main_gpu)])
+            jax.config.update(
+                "jax_default_device", jax.devices("gpu")[self.gpus.index(self.main_gpu)]
+            )
 
     def synchronize(self):
         """Synchronizes all GPU devices to ensure that all computations are complete before proceeding.
@@ -575,10 +612,10 @@ class DomainComputationGroupArray:
         """Move an array to the host, ensuring it is a numpy ndarray."""
         return arr.get() if hasattr(arr, "get") else arr
 
-    def _unpack_indices(
+    def unpack_indices(
         self,
         data_index: np.ndarray | cp.ndarray,
-        noise_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         """Partition a flat ``(data_index, noise_index)`` batch by split.
 
@@ -596,7 +633,7 @@ class DomainComputationGroupArray:
         its output instead of recomputing ``np.where(ac_to_split == s)``.
         """
         data_index_cpu = self._to_host(data_index)
-        noise_index_cpu = self._to_host(noise_index)
+        noise_index_cpu = self._to_host(noise_index) if noise_index is not None else data_index_cpu
 
         split_of_each = self.ac_to_split[data_index_cpu]
 
@@ -611,26 +648,26 @@ class DomainComputationGroupArray:
 
         return positions_per_split, data_intra_per_split, noise_intra_per_split
 
-    def _unpack_coords(
-        self, 
-        positions_per_split: list[np.ndarray], 
-        coords: np.ndarray | cp.ndarray | list[np.ndarray | cp.ndarray], 
-    ) -> tuple[list[tuple[np.ndarray]], list[dict]]:
+    def unpack_coords(
+        self,
+        positions_per_split: list[np.ndarray],
+        coords: np.ndarray | cp.ndarray | tuple[np.ndarray | cp.ndarray],
+    ) -> list[tuple[np.ndarray] | np.ndarray]:
         """
         Unpack coordinates for each split based on the positions per split.
 
         Args:
             positions_per_split: list of numpy arrays, where each array contains the positions for a specific split.
-            coords: A numpy or cupy array containing the coordinates to be unpacked, or a list of such arrays if there are multiple coordinate arrays.
+            coords: A numpy or cupy array containing the coordinates to be unpacked, or a tuple of such arrays if there are multiple coordinate arrays (multiple branches).
 
         Returns:
             args_per_group: A list of coordinates for each split, where each element is either a single array (if there is only one coordinate array) or a tuple of arrays (if there are multiple coordinate arrays). The coordinates are indexed according to the positions for each split.
         """
 
-        if not isinstance(coords, list):
-            coords = [coords]
+        if not isinstance(coords, tuple):
+            coords = (coords,)
 
-        coords_host = [self._to_host(coords_here) for coords_here in coords]
+        coords_host = tuple(self._to_host(coords_here) for coords_here in coords)
 
         args_per_group: list = []
         for positions in positions_per_split:
@@ -643,21 +680,54 @@ class DomainComputationGroupArray:
 
         return args_per_group
 
+    def place_on_device(
+        self, items: tuple[list[np.ndarray | tuple[np.ndarray]]]
+    ) -> tuple[list[np.ndarray | cp.ndarray | tuple[np.ndarray | cp.ndarray]]]:
+        """Place lists of arrays on the appropriate devices for each split.
+
+        Args:
+            items: A tuple of lists of numpy arrays, where each entry in the tuple corresponds to a different type of array (e.g., data_index, noise_index, template_vals), and each list contains the arrays for each split.
+
+        Returns:
+            A tuple of lists of arrays, where each array has been moved to the appropriate device for its split using ``self.xp.asarray``.
+        """
+        num_items = len(items)
+
+        device_items: list[list] = [[] for _ in range(num_items)]
+
+        for i, device in enumerate(
+            self.gpus if self.gpus is not None else [None] * self.num_splits
+        ):
+            with self.device_context(device):
+                for item_id, item_per_split in enumerate(items):
+                    entry = item_per_split[i]
+                    if isinstance(entry, np.ndarray):
+                        device_items[item_id].append(self.xp.asarray(entry))
+                    elif isinstance(entry, tuple):
+                        if len(entry) == 0:
+                            device_items[item_id].append(())
+                        else:
+                            device_items[item_id].append(tuple(self.xp.asarray(arr) for arr in entry))
+                    else:
+                        raise ValueError("Each entry in items must be either a numpy array or a tuple of numpy arrays.")
+        return tuple(device_items)
+
     def _loop_operation(
         self,
         operation: Callable | list[Callable],
         operation_args_per_split: list[tuple] = None,
         operation_kwargs: dict | list[dict] = None,
         aggregate_fn: Callable = None,
+        positions_per_split: list[np.ndarray] = None,
     ) -> list | Any:
         """General loop to perform an operation across splits, with optional result aggregation.
 
         Args:
             operation: A callable or a list of callables (one per split) to execute within each split's device context. Each callable should accept the corresponding args and kwargs for that split.
             operation_args_per_split: Optional list of tuples, where each tuple contains the positional arguments to pass to the operation for the corresponding split. The caller is responsible for ensuring that the arguments are correctly placed on the appropriate device (e.g., via self.xp.asarray). If not provided, defaults to a list of empty tuples.
-            operation_kwargs: Optional dictionary or list of dictionaries of keyword arguments to pass to the operation for all splits. 
+            operation_kwargs: Optional dictionary or list of dictionaries of keyword arguments to pass to the operation for all splits.
             aggregate_fn: Optional callable to aggregate the results from all splits after the loop. If not provided, the raw list of results from each split is returned.
-        
+            positions_per_split: Optional list of numpy arrays containing the positions for each split, used to guard against empty splits.
         Returns:
             A list of results from each split if aggregate_fn is not provided, or the aggregated result if aggregate_fn is provided.
         """
@@ -665,26 +735,36 @@ class DomainComputationGroupArray:
             operation_args_per_split = [()] * self.num_splits
         if operation_kwargs is None:
             operation_kwargs = {}
-        
+
         if len(operation_args_per_split) != self.num_splits:
             raise ValueError("Length of operation_args_per_split must match the number of splits.")
 
         if isinstance(operation, list):
             if len(operation) != self.num_splits:
-                raise ValueError("If operation is a list, its length must match the number of splits.")
+                raise ValueError(
+                    "If operation is a list, its length must match the number of splits."
+                )
             operations = operation
         else:
             operations = [operation] * self.num_splits
-        
+
         if isinstance(operation_kwargs, list):
             if len(operation_kwargs) != self.num_splits:
-                raise ValueError("If operation_kwargs is a list, its length must match the number of splits.")
+                raise ValueError(
+                    "If operation_kwargs is a list, its length must match the number of splits."
+                )
             operation_kwargs_per_split = operation_kwargs
         else:
             operation_kwargs_per_split = [operation_kwargs] * self.num_splits
 
         outputs = []
-        for i, device in enumerate(self.gpus if self.gpus is not None else [None] * self.num_splits):
+        for i, device in enumerate(
+            self.gpus if self.gpus is not None else [None] * self.num_splits
+        ):
+            # guard agains empty splits by checking if the operation args
+            if positions_per_split is not None and len(positions_per_split[i]) == 0:
+              outputs.append(None)                                                                                                                                                                                       
+              continue
             with self.device_context(device):
                 out_i = operations[i](*operation_args_per_split[i], **operation_kwargs_per_split[i])
             outputs.append(out_i)
@@ -695,9 +775,63 @@ class DomainComputationGroupArray:
 
     def compute_d_d_terms(self, out: bool = False, **kwargs):
         """Compute (d|d) terms for all splits and store them in the respective computation groups."""
-        
+
         operations = [group.compute_d_d_term for group in self.computation_groups]
 
-        list_out = self._loop_operation(operation=operations, operation_kwargs={'out': out, **kwargs})
+        list_out = self._loop_operation(
+            operation=operations, operation_kwargs={"out": out, **kwargs}
+        )
         if out:
             return list_out
+
+    def _compute_group_likelihood(
+        self,
+        positions_per_split: list[np.ndarray],
+        data_intra_per_split: list[np.ndarray | cp.ndarray],
+        noise_intra_per_split: list[np.ndarray | cp.ndarray],
+        operations: list[Callable],
+        likelihood_args: list[tuple],
+    ):
+        """Compute likelihood for each split using the provided likelihood functions and arguments, and aggregate the results into a single output array."""
+        # todo I am assuming everything has been placed on the correct device. use self.place_on_device if not.
+
+        operation_args_per_split = []
+        for split_id in range(self.num_splits):
+            args_i = (
+                data_intra_per_split[split_id],
+                noise_intra_per_split[split_id],
+                *likelihood_args[split_id],
+            )
+            operation_args_per_split.append(args_i)
+
+        all_logls = self._loop_operation(
+            operation=operations, operation_args_per_split=operation_args_per_split, positions_per_split=positions_per_split
+        )
+
+        # now synchronize
+        self.synchronize()
+        n_data = sum(len(p) for p in positions_per_split)
+        output = np.empty(n_data, dtype=np.float64)
+        for split_id, positions in enumerate(positions_per_split):
+            if len(positions) > 0:
+                output[positions] = self._to_host(all_logls[split_id])
+
+        self.synchronize()
+        return output
+
+    def compute_psd_likelihood(
+        self,
+        positions_per_split: list[np.ndarray],
+        data_intra_per_split: list[np.ndarray | cp.ndarray],
+        noise_intra_per_split: list[np.ndarray | cp.ndarray],
+        likelihood_args: list[tuple],
+    ):
+        """Compute PSD likelihood for each split and aggregate results."""
+        operations = [group.compute_psd_likelihood for group in self.computation_groups]
+        return self._compute_group_likelihood(
+            positions_per_split,
+            data_intra_per_split,
+            noise_intra_per_split,
+            operations,
+            likelihood_args,
+        )
