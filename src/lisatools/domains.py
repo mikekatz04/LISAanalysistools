@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import copy
+import math
 import warnings
 from abc import ABC
 from typing import Any, Tuple, Optional, List
@@ -13,15 +16,21 @@ except (ModuleNotFoundError, ImportError):
     pass
 from scipy import interpolate as interpolate_cpu
 from scipy import signal
+
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib import cm
-from scipy import interpolate
+from scipy import interpolate, signal, special
 
 try:
     import cupy as cp
+    import cupyx.scipy.signal as cupyx_signal
+    from cupyx.scipy import special as cupy_special
+
+    CUPY_AVAILABLE = True
 
 except (ModuleNotFoundError, ImportError):
-    import numpy as cp
+    import numpy as cp  # type: ignore
 
 from . import detector as lisa_models
 from .utils.utility import AET, get_array_module
@@ -34,11 +43,21 @@ class DomainSettingsBase(LISAToolsParallelModule):
     force_backend: str = None
     def __init__(self, force_backend: str = None):
         self.force_backend = force_backend
+
+
+@dataclasses.dataclass
+class DomainSettingsBase(LISAToolsParallelModule):
+    force_backend: str = None
+
+    def __init__(self, force_backend: str = None):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @classmethod
     def supported_backends(cls):
         return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+
+    def get_slice(self, index: tuple) -> DomainSettingsBase:
+        raise NotImplementedError("get_slice needs to be implemented for this signal type.")
 
 
 class DomainBase:
@@ -54,29 +73,58 @@ class DomainBase:
             return x
 
     @property
-    def arr(self) -> np.ndarray:
+    def arr(self) -> np.ndarray | cp.ndarray:
         return self._arr
-    
+
     @arr.setter
-    def arr(self, arr: np.ndarray):
+    def arr(self, arr: np.ndarray | cp.ndarray):
         xp = get_array_module(arr)
+
+        if CUPY_AVAILABLE and xp != np:
+            self._stft = cupyx_signal.stft
+        else:
+            self._stft = signal.stft
+
         assert len(arr.shape) >= len(self.basis_shape)
         if len(arr.shape) == len(self.basis_shape):
-            arr = arr[None, :]
+            arr = arr[None, ...]
 
-        channel_shape = arr.shape[:-len(self.basis_shape)]
-        if len(channel_shape) > 1:
-            raise ValueError("Too many dimensions outside of basis_shape.")
-        
-        self.nchannels = channel_shape[0]
+        self.outer_shape = arr.shape[: -len(self.basis_shape)]
+        if len(self.outer_shape) > 2:
+            raise ValueError(
+                f"Too many dimensions outside of basis_shape. "
+                f"Expected at most 2 outer dims (batch, channels), got {len(self.outer_shape)}: {self.outer_shape}."
+            )
+        elif len(self.outer_shape) == 2:
+            # batched: shape is (nbatch, nchannels, *basis_shape)
+            self._nbatch = self.outer_shape[0]
+            self.nchannels = self.outer_shape[1]
+        else:
+            # unbatched: shape is (nchannels, *basis_shape)
+            self._nbatch = None
+            self.nchannels = self.outer_shape[0]
         self._arr = arr
 
     def __getitem__(self, index):
         return self.arr[index]
+
     def __setitem__(self, index, value):
         self.arr[index] = value
 
-    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
+    @property
+    def is_batched(self) -> bool:
+        """Whether this signal has a batch dimension."""
+        return self._nbatch is not None
+
+    @property
+    def nbatch(self) -> int | None:
+        """Number of batch elements, or None if unbatched."""
+        return self._nbatch
+
+    def flatten(self) -> np.ndarray | cp.ndarray:
+        return self.arr.flatten()
+
+    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         raise NotImplementedError("Transform needs to be implemented for this signal type.")
 
     @property
@@ -107,49 +155,109 @@ class DomainBase:
             raise ValueError("Can only divide by a scalar.")
         return self.__class__(self.arr / other, settings=self.settings)
 
+    def get_array_slice(self, index: tuple) -> DomainBase:
+        new_arr = self.arr[(Ellipsis,) + index]
+        new_settings = self.settings.get_slice(index)
+        return self.settings.associated_class(new_arr, new_settings)
+
+
 class TDSettings(DomainSettingsBase):
     N: int
     dt: float
+    t0: float = 0.0
 
-    def __init__(self, N: int, dt: float, **kwargs):
+    def __init__(self, N: int, dt: float, t0: float = 0.0, **kwargs):
+        self.t0 = t0
         self.N = N
         self.dt = dt
+        # TODO: include kwargs in kwargs property?
         super().__init__(**kwargs)
 
     @staticmethod
     def get_associated_class():
         return TDSignal
-    
+
     @property
     def associated_class(self):
         return self.get_associated_class()
 
     @property
     def kwargs(self) -> dict:
-        return dict(force_backend=self.force_backend)
+        return dict(t0=self.t0, force_backend=self.force_backend)
     
     @property
     def args(self) -> tuple:
-        return (self.N, self.dt)   
-    
+        return (self.N, self.dt)
+
     @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.N) * self.dt
-    
+        return self.t0 + self.xp.arange(self.N) * self.dt
+
     @property
     def basis_shape(self) -> tuple:
         return (self.N,)
-    
+
+    def __repr__(self) -> str:
+        return (
+            f"TDSettings(t0={self.t0}, N={self.N}, dt={self.dt}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
+
     def __eq__(self, value):
-        return (value.N == self.N) and (value.dt == self.dt)
-    
+        if not isinstance(value, TDSettings):
+            return False
+
+        return (
+            (value.N == self.N) and (value.dt == self.dt) and (self.xp.isclose(value.t0, self.t0))
+        )
+
     @property
     def differential_component(self) -> float:
         return self.dt
-    
+
     @property
     def total_terms(self) -> int:
         return self.N
+
+    def compute_slice_indices(self, tmin: float, tmax: float) -> slice:
+        if tmin < self.t0:
+            raise ValueError("tmin must be greater than or equal to t0.")
+        if tmax > self.t0 + self.N * self.dt:
+            raise ValueError("tmax must be less than or equal to t0 + N*dt.")
+
+        start_idx = int(self.xp.round((tmin - self.t0) / self.dt))
+        end_idx = int(self.xp.round((tmax - self.t0) / self.dt))
+
+        return slice(start_idx, end_idx)
+
+    def get_slice(self, index=None, tmin: float = None, tmax: float = None) -> TDSettings:
+        """
+        Return a new TDSettings object corresponding to the slice of the time points specified by index.
+
+        Args:
+            index: A slice object for the time dimension, e.g. slice(0, 10). If provided, this will be used to compute the new t0 and N for the sliced settings.
+            tmin: Minimum time value for the slice. If provided, this will be used to compute the new t0 and N for the sliced settings.
+            tmax: Maximum time value for the slice. If provided, this will be used to compute the new t0 and N for the sliced settings.
+
+        If both index and (tmin, tmax) are provided, they must be consistent with each other (i.e. the time range specified by index must match the time range specified by tmin and tmax).
+
+        Returns:
+            A new TDSettings object corresponding to the slice of the time points specified by index or (tmin, tmax).
+        """
+
+        if index is None:
+            if tmin is None or tmax is None:
+                raise ValueError("If index is not provided, both tmin and tmax must be provided.")
+            index = self.compute_slice_indices(tmin, tmax)
+
+        if not isinstance(index, slice):
+            raise TypeError("index must be a slice object")
+
+        start, stop, step = index.indices(self.N)
+        new_N = (stop - start) // step
+        new_t0 = self.t0 + start * self.dt
+
+        return TDSettings(new_t0, new_N, self.dt, force_backend=self.backend_name.split("_")[-1])
 
 
 class TDSignal(DomainBase, TDSettings):
@@ -161,45 +269,84 @@ class TDSignal(DomainBase, TDSettings):
     def settings(self) -> TDSettings:
         return TDSettings(*self.args, **self.kwargs)
 
-    def fft(self, settings=None, window=None, apply_dt=True):
+    def __repr__(self) -> str:
+        return (
+            f"TDSignal(t0={self.t0}, N={self.N}, dt={self.dt}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
+
+    def fft(self, settings=None, window=None):
+        xp = get_array_module(self.arr)
         if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
+            window = xp.ones(self.arr.shape, dtype=float)
 
         df = 1 / (self.N * self.dt)
 
-        factor = 1.0 if not apply_dt else self.dt
-        fd_arr = self.xp.fft.rfft(self.arr * window) * factor
+        fd_arr = xp.fft.rfft(self.arr * window) * self.dt
+
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            assert settings.df == df
-            assert settings.N == fd_arr.shape[-1]
+            assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
             fd_settings = settings
-        
         else:
-            fd_settings = FDSettings(fd_arr.shape[-1], df, force_backend=self.backend)
-        
-        fd_arr_in = fd_arr[..., fd_settings.ind_min:fd_settings.ind_max + 1]
-        return FDSignal(fd_arr_in, fd_settings)
+            fd_settings = FDSettings(
+                fd_arr.shape[-1],
+                df,
+                force_backend=self.backend_name.split("_")[-1],
+            )
+
+        return FDSignal(fd_arr[..., fd_settings.active_slice], fd_settings)
 
     def stft(self, settings=None, window=None):
-        if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
 
         if settings is None:
             raise ValueError("Must provide STFTSettings for stft transform.")
         assert isinstance(settings, STFTSettings)
         big_dt = settings.dt
 
-        assert float(int(big_dt / self.dt)) == big_dt / self.dt
-        big_df = settings.df
-        nperseg = int(big_dt / self.dt)
+        xp = get_array_module(self.arr)
 
-        stft_arr = signal.stft(self.arr * window, fs=(1/self.dt), nperseg=nperseg)
-        return STFTSignal(stft_arr, settings)
-    
-    def wdmtransform(self, settings=None, window=None):
+        # Validate that big_dt is an integer multiple of self.dt
+        nperseg = settings.get_nperseg(self.dt)
+
         if window is None:
-            window = self.xp.ones(self.arr.shape, dtype=float)
+            window = xp.ones(nperseg, dtype=float)
+
+        # Use NT from settings directly to ensure consistency
+        Nsegments = settings.NT
+        Nsegments_available = self.N // nperseg
+
+        # Check we have enough data
+        required_samples = Nsegments * nperseg
+
+        if self.N < required_samples:
+            raise ValueError(
+                f"Not enough data: have {self.N} samples, need {required_samples} for {Nsegments} segments"
+            )
+
+        if Nsegments > Nsegments_available:
+            # Need to pad
+            pad_samples = required_samples - self.N
+
+            # Pad with zeros at the end
+            # pad_width format: ((before_axis0, after_axis0), (before_axis1, after_axis1), ...)
+            pad_width = [(0, 0)] * len(self.outer_shape) + [(0, pad_samples)]
+            _arr = xp.pad(self.arr, pad_width, mode="constant", constant_values=0)
+        else:
+            # Truncate to use only what we need
+            _arr = self.arr[..., :required_samples]
+
+        stft_arr = self.dt * xp.fft.rfft(
+            window[None, :] * _arr.reshape(self.outer_shape + (Nsegments, nperseg)),
+            axis=-1,
+        )
+
+        return STFTSignal(stft_arr[..., settings.active_slice], settings)  # (nchannels, NT, NF)
+
+    def wdmtransform(self, settings=None, window=None):
+        xp = get_array_module(self.arr)
+        if window is None:
+            window = xp.ones(self.arr.shape, dtype=float)
 
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
@@ -208,158 +355,52 @@ class TDSignal(DomainBase, TDSettings):
         # go to frequency domain then wavelets
         return self.fft(settings=None, window=window, apply_dt=False).transform(settings)
 
-# static void wavelet_window_time(struct Wavelets *wdm)
-# {
-#     *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
-    
-#     //zero frequency
-#     REAL(DX,0) =  wdm->inv_root_dOmega
-#     IMAG(DX,0) =  0.0
-    
-#     for(int i=1 i<= wdm->N/2 i++)
-#     {
-#         int j = wdm->N-i
-#         omega = (double)(i)*wdm->domega
-        
-#         // postive frequencies
-#         REAL(DX,i) = phitilde(wdm,omega)
-#         IMAG(DX,i) =  0.0
-        
-#         // negative frequencies
-#         REAL(DX,j) =  phitilde(wdm,-omega)
-#         IMAG(DX,j) =  0.0
-#     }
-        
-#     glass_inverse_complex_fft(DX, wdm->N)
-
-#     wdm->window = (double*)malloc(sizeof(double)* (wdm->N))
-#     for(int i=0 i < wdm->N/2 i++)
-#     {
-#         wdm->window[i] = REAL(DX,wdm->N/2+i)
-#         wdm->window[wdm->N/2+i] = REAL(DX,i)
-#     }
-    
-#     wdm->norm = sqrt((double)wdm->N * wdm->cadence / wdm->domega)
-
-#     free(DX)
-# }
-
-# void wavelet_transform(struct Wavelets *wdm, *data)
-# {
-#     //array index for tf pixel
-#     int k
-    
-#     //total data size
-#     int ND = wdm->Nt*wdm->Nf
-    
-#     //windowed data packets
-#     *wdata = double_vector(wdm->N)
-
-#     //wavelet wavepacket transform of the signal
-#     **wave = double_matrix(wdm->Nt,wdm->Nf)
-    
-#     //normalization factor
-#     fac = M_SQRT2*sqrt(wdm->cadence)/wdm->norm
-    
-#     //normalization fudge factor
-#     fac *= sqrt(wdm->cadence)/2
-        
-#     //do the wavelet transform by convolving data w/ window and FFT
-#     for(int i=0 i<wdm->Nt i++)
-#     {
-        
-#         for(int j=0 j<wdm->N j++)
-#         {
-#             int n = i*wdm->Nf - wdm->N/2 + j
-#             if(n < 0)   n += ND  // periodically wrap the data
-#             if(n >= ND) n -= ND  // periodically wrap the data
-#             wdata[j] = data[n] * wdm->window[j]  // apply the window
-#         }
-                
-#         glass_forward_real_fft(wdata, wdm->N)
-
-#         //unpack Fourier transform
-#         wave[i][0] = wdata[0]
-#         for(int j=1 j<wdm->Nf j++)
-#         {
-#             int n = j*wdm->oversample
-#             if((i+j)%2 ==0)
-#                 wave[i][j] = wdata[2*n]
-#             else
-#                 wave[i][j] = -wdata[2*n+1]
-#         }
-#     }
-    
-#     //replace data vector with wavelet transform mapped from pixel to index
-#     for(int i=0 i<wdm->Nt i++)
-#     {
-#         for(int j=0 j<wdm->Nf j++)
-#         {
-#             //get index number k for tf pixel {i,j}
-#             wavelet_pixel_to_index(wdm,i,j,&k)
-            
-#             //replace data array
-#             data[k] = wave[i][j]*fac
-#         }
-#     }
-    
-#     free_double_vector(wdata)
-#     free_double_matrix(wave,wdm->Nt)
-# }
-
-#         breakpoint()
-
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
         if window is None:
-            window = np.ones(self.arr.shape, dtype=float)
+            window = self.xp.ones(self.arr.shape, dtype=float)
 
         if isinstance(new_domain, TDSettings):
+            if window is None:
+                window = self.xp.ones(self.arr.shape, dtype=float)
             return self.settings.associated_class(self.arr * window, self.settings)
-        
+
         elif isinstance(new_domain, FDSettings):
             return self.fft(settings=new_domain, window=window, apply_dt=True)
         
         elif isinstance(new_domain, STFTSettings):
+
             return self.stft(settings=new_domain, window=window)
-        
+
         elif isinstance(new_domain, WDMSettings):
             return self.wdmtransform(settings=new_domain, window=window)
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-# TODO: dataclass setup?
-@dataclasses.dataclass
+
 class FDSettings(DomainSettingsBase):
     N: int
     df: float
-    ind_min : Optional[int] = None 
-    ind_max : Optional[int] = None  # inclusive
-    
-    def __init__(self,
+    min_freq: Optional[float] = 0.0
+    max_freq: Optional[float] = None
+
+    def __init__(
+        self,
         N: int,
         df: float,
-        ind_min : Optional[int] = None,
-        ind_max : Optional[int] = None,
+        min_freq: Optional[float] = 0.0,
+        max_freq: Optional[float] = None,
         **kwargs,
     ):
-        self.N, self.df = N, df
-        self.ind_min, self.ind_max = ind_min, ind_max
+        self.N = N
+        self.df = df
+        self.min_freq = min_freq
+        self.max_freq = max_freq
         super().__init__(**kwargs)
-
-    @property
-    def frequency_layer_mask(self) -> Optional[np.ndarray]:
-        mask = self.xp.zeros(self.N, dtype=bool)
-        mask[self.f_ind_array] = True
-        return mask
-        
-    @property
-    def f_ind_array(self) -> np.ndarray:
-        return self.xp.arange(self.ind_min, self.ind_max + 1)
 
     @property
     def differential_component(self) -> float:
         return self.df
-    
+
     @property
     def ind_min(self) -> int:
         return self._ind_min
@@ -380,66 +421,92 @@ class FDSettings(DomainSettingsBase):
             ind_max = self.N - 1
         self._ind_max = ind_max
 
-    @property
-    def clipped_N(self) -> int:
-        return self.ind_max - self.ind_min + 1
-    
     @staticmethod
     def get_associated_class():
         return FDSignal
-    
+
     @property
     def associated_class(self):
         return self.get_associated_class()
-    
+
     @property
     def kwargs(self) -> dict:
-        return dict(ind_min=self.ind_min, ind_max=self.ind_max, force_backend=self.force_backend)
+        return dict(
+            min_freq=self.min_freq,
+            max_freq=self.max_freq,
+            force_backend=self.force_backend,
+        )
 
     @property
     def args(self) -> tuple:
-        return (self.N, self.df)  
-    
+        return (self.N, self.df)
+
     @property
     def basis_shape(self) -> tuple:
-        return (self.clipped_N,)
-    
+        return (self.N_active,)
+
     @property
     def f_arr(self) -> np.ndarray:
-        return self.f_ind_array * self.df
-    
-    def __eq__(self, value):
-        return (value.N == self.N) and (value.df == self.df)
-    
-    def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
-        if self.frequency_layer_mask is None or arr.shape[-1] == self.clipped_N:
-            return arr
+        _all_freqs = self.xp.arange(0, self.N) * self.df
 
-        if arr.ndim == 1:
-            breakpoint()
-            return arr[self.frequency_layer_mask]
-        elif arr.ndim > 1:
-            assert arr.shape[-1] == self.frequency_layer_mask.shape[0], "Last dimension of arr must match length of frequency_layer_mask."
-            dims_transpose = tuple(np.roll(np.arange(arr.ndim)))
-            _arr = arr.transpose(dims_transpose)
-            new_arr = _arr[self.frequency_layer_mask]
-            dims_back = tuple(np.roll(np.arange(arr.ndim), -1))
-            new_arr = new_arr.transpose(dims_back)
-            return new_arr
+        return _all_freqs[self.active_slice]
+
+    def __repr__(self) -> str:
+        return (
+            f"FDSettings(N={self.N}, df={self.df}, "
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
+
+    def __eq__(self, value):
+        if not isinstance(value, FDSettings):
+            return False
+        return (
+            (value.N == self.N)
+            and (value.df == self.df)
+            and (self.xp.isclose(value.min_freq, self.min_freq))
+            and (self.xp.isclose(value.max_freq, self.max_freq))
+        )
 
     @property
     def total_terms(self) -> int:
-        return self.N
-    
+        return self.N_active
 
-# from pywavelet.transforms.phi_computer import phitilde_vec_norm
-# from pywavelet.transforms.numpy.forward.from_freq import (
-#     transform_wavelet_freq_helper
-# )
+    @property
+    def active_slice(
+        self,
+    ) -> slice:
+        if self.min_freq is not None and self.min_freq < 0:
+            raise ValueError("min_freq must be non-negative.")
+        if self.max_freq is not None and self.max_freq < 0:
+            raise ValueError("max_freq must be non-negative.")
+        if self.min_freq is None:
+            start_idx = 0
+        else:
+            start_idx = int(np.ceil(self.min_freq / self.df))
+        if self.max_freq is None:
+            end_idx = self.N
+        else:
+            end_idx = int(np.floor(self.max_freq / self.df)) + 1
+
+        return slice(start_idx, end_idx)
+
+    @property
+    def N_active(self) -> int:
+        sl = self.active_slice
+        return sl.stop - sl.start
+
+
+# try:
+#     from pywavelet.transforms.phi_computer import phitilde_vec_norm
+#     from pywavelet.transforms.numpy.forward.from_freq import (
+#         transform_wavelet_freq_helper
+#     )
 
 # from pywavelet.transforms.numpy.inverse.to_freq import (
 #     inverse_wavelet_freq_helper_fast as inverse_wavelet_freq_helper,
 # )
+
 
 class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
@@ -476,17 +543,20 @@ class FDSignal(FDSettings, DomainBase):
         Tobs = 1 / self.df
         factor = 1.0 if not apply_dt else self.dt
         td_arr = self.xp.fft.irfft(arr_in * window) / factor
-        N = td_arr.shape[-1]
-        dt = Tobs / N
-        assert N == int(Tobs / dt)
-        if settings is not None:
-            assert isinstance(settings, TDSettings)
-            assert settings.dt == dt
-
-        td_settings = TDSettings(N, dt, force_backend=self.force_backend)
-        return TDSignal(td_arr, td_settings)
     
+    def __repr__(self) -> str:
+        return (
+            f"FDSignal(N={self.N}, df={self.df}, "
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
+
+        td_settings = TDSettings(N, dt, t0=0.0, force_backend=self.force_backend)
+        return TDSignal(td_arr, td_settings)
+
     def get_fd_window_for_wdm(self, settings):
+
+        xp = get_array_module(self.arr)
 
         N = self.settings.N
 
@@ -503,18 +573,20 @@ class FDSignal(FDSettings, DomainBase):
         for i in range(0, int(settings.Nt / 2)):  # (i=0; i<=wdm->Nt/2; i++)
             omega = i*domega
             window[i] = settings.phitilde(omega)
-    
+
         raise NotImplementedError
-    
+
         # normalize
         # for(i=-wdm->Nt/2; i<= wdm->Nt/2; i++) norm += window[abs(i)]*window[abs(i)];
         # norm = sqrt(norm/wdm_temp->cadence);
-        
-        # for(i=0; i<=wdm->Nt/2; i++) window[i] /= norm;
-        
+
+        # for(i=0; i<=wdm->NT/2; i++) window[i] /= norm;
+
         # free(wdm_temp);
-        
-    def wdmtransform(self, settings=None, window=None, return_transpose_time_axis_first: bool = False, is_psd: bool = False):
+
+    def wdmtransform(
+        self, settings=None, window=None, return_transpose_time_axis_first: bool = False, is_psd: bool = False
+    ):
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
@@ -607,19 +679,20 @@ class FDSignal(FDSettings, DomainBase):
         _new_arr[:, 0, 1::2] = self.xp.asarray(np.real(self.get(after_ifft[:, -1, 0::2]))) * np.sqrt(2.)
         
         if return_transpose_time_axis_first:
-            output = _new_arrn.transpose(0, 2, 1).copy()
+            output = _new_arr.transpose(0, 2, 1).copy()
         else:
             output = _new_arr
 
         return WDMSignal(output, settings=settings)
 
-    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
+    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
+        xp = get_array_module(self.arr)
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         if isinstance(new_domain, FDSettings):
             return self.settings.associated_class(self.arr * window, self.settings)
-        
+
         elif isinstance(new_domain, TDSettings):
             return self.ifft(settings=new_domain, window=window, apply_dt=True)
         
@@ -632,81 +705,433 @@ class FDSignal(FDSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
+    def plot(self, 
+             channel: int = 0, 
+             ax: plt.Axes | None = None, 
+             filename: Optional[str] = None,
+             **kwargs) -> plt.Axes:
+        """
+        Plot the squared amplitude of the FD signal for a given channel.
 
+        Args:
+            channel: The channel index to visualize.
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.  
+            filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
+            **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
+        
+        Returns:
+            The matplotlib Axes object containing the plot.
+        """
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+
+        ax.loglog(f_arr, np.abs(arr_here) ** 2, **kwargs)
+
+        ax.set_title(f"Frequency Spectrum for Channel {channel}")
+        ax.set_xlabel("Frequency")
+        ax.set_ylabel("Magnitude")
+        ax.set_xlim(self.min_freq, self.max_freq)
+        if filename is not None:
+            plt.savefig(filename, bbox_inches="tight")
+        return ax
+        
 class STFTSettings(DomainSettingsBase):
+    t0: float
     dt: float
-    df: float 
-    Nt: int
-    Nf: int
+    df: float
+    NT: int
+    NF: int
+    min_freq: Optional[float] = 0.0
+    max_freq: Optional[float] = None
 
-    def __init__(self, 
+    def __init__(
+        self,
+        t0: float,
         dt: float,
-        df: float, 
-        Nt: int,
-        Nf: int,
-        **kwargs
+        df: float,
+        NT: int,
+        NF: int,
+        min_freq: Optional[float] = 0.0,
+        max_freq: Optional[float] = None,
+        **kwargs,
     ):
-        self.dt, self.df = dt, df
-        self.Nt, self.Nf = Nt, Nf
+        self.t0 = t0
+        self.dt = dt
+        self.df = df
+        self.NT = NT
+        self.NF = NF
+        self.min_freq = min_freq
+        self.max_freq = max_freq
         super().__init__(**kwargs)
-    
+
+    def __repr__(self):
+        return (
+            f"STFTSettings(t0={self.t0}, dt={self.dt}, df={self.df}, NT={self.NT}, NF={self.NF}, "
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, backend={self.backend_name.split('_')[-1]})"
+        )
+
     @staticmethod
     def get_associated_class():
         return STFTSignal
-    
+
     @property
     def associated_class(self):
         return self.get_associated_class()
-    
+
+    @property
+    def basis_shape(self) -> tuple:
+        return (
+            self.NT,
+            self.NF_active,
+        )  #! in the STFT domain, the basis shape is (# number of times segments, # number of frequencies)
+
+    @property
+    def total_terms(self) -> int:
+        return self.NT * self.NF_active
+
     @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.Nt) * self.dt
+        return self.t0 + self.xp.arange(self.NT) * self.dt
+
+    @property
+    def min_freq(self) -> float:
+        return self._min_freq
+
+    @min_freq.setter
+    def min_freq(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError("min_freq must be non-negative.")
+
+        # self._min_freq = value
+        # set it to the closest frequency bin
+        if value is not None:
+            self._min_freq = np.ceil(value / self.df) * self.df
+        else:
+            self._min_freq = 0.0
+
+    @property
+    def max_freq(self) -> Optional[float]:
+        return self._max_freq
+
+    @max_freq.setter
+    def max_freq(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError("max_freq must be non-negative.")
+
+        # self._max_freq = value
+        # set it to the closest frequency bin
+        if value is not None:
+            self._max_freq = np.floor(value / self.df) * self.df
+        else:
+            self._max_freq = (self.NF - 1) * self.df
 
     @property
     def f_arr(self) -> np.ndarray:
-        return self.xp.arange(self.Nf) * self.df
-    
+
+        _all_freqs = self.xp.arange(0, self.NF) * self.df
+        return _all_freqs[self.active_slice]
+
+    @property
+    def args(self) -> tuple:
+        return (self.t0, self.dt, self.df, self.NT, self.NF)
+
+    @property
+    def kwargs(self) -> dict:
+        return dict(
+            min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.backend_name.split("_")[-1]
+        )
+
     @property
     def f_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.Nf + 1) * self.df
+        return self.xp.arange(self.NF + 1) * self.df
+
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.Nt + 1) * self.dt
+        return self.xp.arange(self.NT + 1) * self.dt
 
     def __eq__(self, value):
-        return (value.Nt == self.Nt) and (value.Nf == self.Nf) and (value.dt == self.dt) and (value.df == self.df)
+        if not isinstance(value, STFTSettings):
+            return False
+        return (
+            (value.NT == self.NT)
+            and (value.NF == self.NF)
+            and (value.dt == self.dt)
+            and (value.df == self.df)
+            and (self.xp.isclose(value.t0, self.t0))
+            and (self.xp.isclose(value.min_freq, self.min_freq))
+            and (self.xp.isclose(value.max_freq, self.max_freq))
+        )
+
+    @property
+    def differential_component(self) -> float:
+        return self.df
+
+    @property
+    def active_slice(
+        self,
+    ) -> slice:
+        if self.min_freq is not None and self.min_freq < 0:
+            raise ValueError("min_freq must be non-negative.")
+        if self.max_freq is not None and self.max_freq < 0:
+            raise ValueError("max_freq must be non-negative.")
+
+        if self.min_freq is None:
+            start_idx = 0
+        else:
+            start_idx = int(self.xp.ceil(self.min_freq / self.df))
+        if self.max_freq is None:
+            end_idx = self.NF
+        else:
+            end_idx = int(self.xp.floor(self.max_freq / self.df)) + 1
+
+        return slice(start_idx, end_idx)
+
+    @property
+    def NF_active(self) -> int:
+        sl = self.active_slice
+        return sl.stop - sl.start
+
+    def get_nperseg(self, small_dt: float):
+
+        nperseg = round(self.dt / small_dt)
+
+        assert (
+            abs(nperseg * small_dt - self.dt) < 1e-10 * self.dt
+        ), f"big_dt={self.dt} must be an integer multiple of dt={small_dt}"
+
+        return nperseg
+
+    def compute_slice_indices(
+        self, tmin: float, tmax: float, fmin: float, fmax: float
+    ) -> Tuple[slice, slice]:
+        """
+        Compute the slice indices for the time and frequency dimensions based on the provided min and max values.
+
+        Args:
+            tmin: Minimum time value for the slice.
+            tmax: Maximum time value for the slice.
+            fmin: Minimum frequency value for the slice.
+            fmax: Maximum frequency value for the slice.
+
+        Returns:
+            A tuple of slices for the time and frequency dimensions, e.g. (slice(0, 10), slice(5, 15)).
+        """
+
+        if tmin < self.t0:
+            raise ValueError("tmin must be greater than or equal to t0.")
+        if tmax > self.t0 + self.NT * self.dt:
+            raise ValueError("tmax must be less than or equal to t0 + NT*dt.")
+        f_min_active = self.f_arr[0]
+        f_max_active = self.f_arr[-1]
+        if fmin < f_min_active:
+            raise ValueError(
+                f"fmin ({fmin}) must be >= the active minimum frequency ({f_min_active})."
+            )
+        if fmax > f_max_active:
+            raise ValueError(
+                f"fmax ({fmax}) must be <= the active maximum frequency ({f_max_active})."
+            )
+
+        time_start_idx = int(self.xp.round((tmin - self.t0) / self.dt))
+        time_end_idx = int(self.xp.round((tmax - self.t0) / self.dt))
+        freq_start_idx = int(self.xp.round((fmin - self.f_arr[0]) / self.df))
+        freq_end_idx = int(self.xp.floor((fmax - self.f_arr[0]) / self.df)) + 1
+
+        return slice(time_start_idx, time_end_idx), slice(freq_start_idx, freq_end_idx)
+
+    def get_slice(self, index: tuple) -> STFTSettings:
+        """
+        Return a new STFTSettings object corresponding to the slice of the time and frequency points specified by index.
+
+        Args:
+            index: A tuple of slices for the time and frequency dimensions, e.g. (slice(0, 10), slice(5, 15)).
+
+        Returns:
+            STFTSettings: A new STFTSettings object corresponding to the slice.
+        """
+        if not isinstance(index, tuple) or len(index) != 2:
+            raise ValueError(
+                "Index must be a tuple of two slices for time and frequency dimensions."
+            )
+
+        time_slice, freq_slice = index
+
+        new_t0 = self.t0 + time_slice.start * self.dt
+        new_NT = time_slice.stop - time_slice.start
+        new_NF = self.NF
+
+        new_min_freq = float(self.f_arr[freq_slice.start])
+        new_max_freq = float(self.f_arr[freq_slice.stop - 1])
+
+        return STFTSettings(
+            t0=new_t0,
+            dt=self.dt,
+            df=self.df,
+            NT=new_NT,
+            NF=new_NF,
+            min_freq=new_min_freq,
+            max_freq=new_max_freq,
+            force_backend=self.backend_name.split("_")[-1],
+        )
+
+
+def get_stft_settings(
+    times: np.ndarray | cp.ndarray,
+    big_dt: float,
+    min_freq: Optional[float] = 0.0,
+    max_freq: Optional[float] = None,
+    **kwargs,
+) -> STFTSettings:
+    """
+    Get STFT settings from time array and desired big_dt.
+
+    Args:
+        times: Time array.
+        big_dt: Desired time resolution for STFT segments.
+        min_freq: Minimum frequency to consider.
+        max_freq: Maximum frequency to consider.
+        **kwargs: Additional keyword arguments to pass to STFTSettings.
+
+    Returns:
+        STFTSettings: The settings for the STFT.
+    """
+
+    t0 = float(times[0])
+    N = len(times)
+    dt = float(times[1] - times[0])
+
+    big_dt = int(big_dt / dt) * dt  # make sure big_dt is an integer multiple of dt
+    NT = int(np.floor(N / (big_dt / dt)))
+    DF = 1 / big_dt
+    nperseg = int(big_dt / dt)
+    NF = nperseg // 2 + 1
+
+    return STFTSettings(
+        t0=t0, dt=big_dt, df=DF, NT=NT, NF=NF, min_freq=min_freq, max_freq=max_freq, **kwargs
+    )
+
 
 class STFTSignal(STFTSettings, DomainBase):
     def __init__(self, arr, settings: STFTSettings):
-        STFTSettings.__init__(self, settings.dt, settings.df)
+        STFTSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
 
     @property
     def settings(self) -> STFTSettings:
-        return STFTSettings(self.dt, self.df, force_backend=self.force_backend)
+        return STFTSettings(*self.args, **self.kwargs)
+
+    def __repr__(self) -> str:
+        return (
+            f"STFTSignal(t0={self.t0}, dt={self.dt}, df={self.df}, NT={self.NT}, NF={self.NF}, "
+            f"min_freq={self.min_freq}, max_freq={self.max_freq}, backend={self.backend_name.split('_')[-1]})"
+        )
+
+    def _plot_stft(self, channel=0, ax=None, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        t_arr = self.t_arr if get_array_module(self.t_arr) == np else self.t_arr.get()
+        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+        cb = ax.pcolormesh(
+            t_arr, f_arr, (np.abs(arr_here) ** 2).T, shading="auto", cmap="cividis", **kwargs
+        )
+
+        ax.set_yscale("log")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Frequency")
+        ax.set_ylim(self.min_freq, self.max_freq)
+        plt.colorbar(cb, ax=ax, label="Magnitude")
+        return ax
+
+    def _plot_fd(self, channel=0, ax=None, time_bin=0, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+
+        ax.loglog(f_arr, np.abs(arr_here[time_bin]) ** 2, **kwargs)
+
+        ax.set_title(f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})")
+        ax.set_xlabel("Frequency")
+        ax.set_ylabel("Magnitude")
+        ax.set_xlim(self.min_freq, self.max_freq)
+        return ax
     
-    @property
-    def differential_component(self) -> float:
-        return 1.0
+    def _plot_td(self, channel=0, ax=None, freq_bin=0, **kwargs):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        xp = get_array_module(self.arr)
+        t_arr = self.t_arr if get_array_module(self.t_arr) == np else self.t_arr.get()
+        arr_here = self.arr[channel].get() if xp != np else self.arr[channel]
+
+        ax.plot(t_arr, arr_here[:, freq_bin].real, label="real part", **kwargs)
+        ax.plot(t_arr, arr_here[:, freq_bin].imag, label="imag part", **kwargs)
+
+        ax.legend()
+        ax.set_title(f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Magnitude")
+        return ax
     
-    @property
-    def total_terms(self) -> int:
-        return self.Nt * self.Nf
+    def plot(self, 
+             channel: int = 0, 
+             ax: plt.Axes | None = None, 
+             plot_type: str = "stft", 
+             filename: Optional[str] = None,
+             **kwargs) -> plt.Axes:
+        """
+        Visualize the STFT signal in either the time-frequency domain (stft), frequency domain (fd), or time domain (td).
+
+        Args:
+            channel: The channel index to visualize.
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.
+            plot_type: The type of plot to create. Must be one of 'stft', 'fd', or 'td'. 'stft' will create a time
+                vs frequency plot of the magnitude squared of the STFT coefficients. 'fd' will create a log-log plot of the magnitude squared of the STFT coefficients for a single time bin. 'td' will create a plot of the magnitude squared of the real and imaginary parts of the STFT coefficients for a single frequency bin.
+            filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
+            **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
+        
+        Returns:
+            The matplotlib Axes object containing the plot.
+        """
+        if plot_type == "stft":
+            ax = self._plot_stft(channel=channel, ax=ax, **kwargs)
+        elif plot_type == "fd":
+            ax = self._plot_fd(channel=channel, ax=ax, **kwargs)
+        elif plot_type == "td":
+            ax = self._plot_td(channel=channel, ax=ax, **kwargs)
+        else:
+            raise ValueError(f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'.")
+
+        if filename is not None:
+            plt.savefig(filename, bbox_inches="tight")
+
+        return ax
 
 
 WAVELET_BANDWIDTH = 6.51041666666667e-5
 WAVELET_DURATION = 7680.0
 WAVELET_FILTER_CONSTANT = 6
 
-from scipy import special
 
 class WDMSettings(DomainSettingsBase):
+    xp: Any = np
 
     def __init__(
         self,
         Nf: float, 
         Nt: float,
         dt: float,
+        t0: float = 0.0,
         oversample: int = 16,
         window: Optional[np.ndarray] = None,
         dc_layer_window: Optional[np.ndarray] = None,
@@ -813,7 +1238,7 @@ class WDMSettings(DomainSettingsBase):
         z[(np.abs(omega) < A)] = insDOM
         #breakpoint()
         return z
-    
+
     def wavelet(self, N: int, in_fd: Optional[bool] = True) -> np.ndarray:
         raise NotImplementedError
         # Nt * Nf is even 
@@ -837,7 +1262,7 @@ class WDMSettings(DomainSettingsBase):
         else:
             wavelets_time = self.xp.fft.ifft(wavelets_fft, axis=-1) / self.norm
             return wavelets_time
-        
+
     def get_shift_map(self, m: np.ndarray[int]) -> np.ndarray:
         if m.ndim == 1:
             m_in = m[:, None]
@@ -910,11 +1335,11 @@ class WDMSettings(DomainSettingsBase):
     @staticmethod
     def get_associated_class():
         return WDMSignal
-    
+
     @property
     def associated_class(self):
         return self.get_associated_class()
-    
+
     @property
     def kwargs(self) -> dict:
         return dict(
@@ -928,7 +1353,7 @@ class WDMSettings(DomainSettingsBase):
             ind_max=self.ind_max,
             force_backend=self.force_backend
         )
-    
+
     @property
     def args(self) -> tuple:
         return (self.Nf, self.Nt, self.data_dt)   
@@ -958,6 +1383,7 @@ class WDMSettings(DomainSettingsBase):
             new_arr = new_arr.transpose(dims_back)
             return new_arr
 
+
 class WDMSignal(WDMSettings, DomainBase):
     def __init__(self, arr, settings: WDMSettings):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
@@ -966,7 +1392,14 @@ class WDMSignal(WDMSettings, DomainBase):
     @property
     def settings(self) -> WDMSettings:
         return WDMSettings(*self.args, **self.kwargs)
-    
+
+    def __repr__(self) -> str:
+        return (
+            f"WDMSignal(Tobs={self.Tobs}, dt={self.data_dt}, t0={self.t0}, "
+            f"NT={self.NT}, NF={self.NF}, oversample={self.oversample}, "
+            f"backend={self.backend_name.split('_')[-1]})"
+        )
+
     def wdm_to_fd(self, settings=None, window=None):
         
         if settings is None:
@@ -1084,7 +1517,7 @@ class WDMSignal(WDMSettings, DomainBase):
         assert new_arr.shape == (self.nchannels, settings.N)
         return FDSignal(new_arr, settings)
 
-    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
+    def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
@@ -1093,7 +1526,7 @@ class WDMSignal(WDMSettings, DomainBase):
         
         elif isinstance(new_domain, FDSettings):
             return self.wdm_to_fd(settings=new_domain, window=window)
-        
+
         elif isinstance(new_domain, STFTSettings):
             return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None, apply_dt=False).stft(settings=new_domain, window=window)
         
@@ -1101,7 +1534,9 @@ class WDMSignal(WDMSettings, DomainBase):
             if new_domain == self.settings:
                 return self
             else:
-                return self.wdm_to_fd(settings=None, window=None).wdmtransform(settings=new_domain, window=window)
+                return self.wdm_to_fd(settings=None, window=None).wdmtransform(
+                    settings=new_domain, window=window
+                )
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
@@ -1109,7 +1544,7 @@ class WDMSignal(WDMSettings, DomainBase):
         # if fig is not None or ax is not None:
         #     if fig is None or ax is None:
         #         raise ValueError("If providing fig or ax, must provide both.")
-            
+
         # else:
         #     # fig and ax are None
         if "cmap" not in kwargs:
@@ -1505,6 +1940,7 @@ __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]
 def get_available_domains() -> List[DomainSettingsBase]:
     return __available_domains__
 
+
 # from .detector import LISAModel, ExtendedLISAModel
 
 
@@ -1533,6 +1969,6 @@ def get_available_domains() -> List[DomainSettingsBase]:
 #         self.models = models
 #         self.psd_kwargs = psd_kwargs
 
-#         tmp_arr = np.asarray([tmp_mat.sens_mat for tmp_mat in sens_mats])
-        
+#         tmp_arr = xp.asarray([tmp_mat.sens_mat for tmp_mat in sens_mats])
+
 #         SensitivityMatrix.__init__(self, settings.f_arr, tmp_arr)

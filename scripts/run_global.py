@@ -8,6 +8,47 @@ import os
 import warnings
 from copy import deepcopy
 
+import ast
+import ctypes
+import sys
+
+
+def _pre_init_cuda() -> None:
+    """Set the CUDA device before any cupy/GPU import.
+
+    Parses the settings file path from sys.argv via AST (no code execution)
+    to extract the ``gpus`` list, then calls ``cudaSetDevice`` through ctypes
+    so that the CUDA runtime initialises on the correct device before cupy
+    is imported anywhere in the module-level import chain.
+    """
+    sfp = next(
+        (sys.argv[i + 1] for i, a in enumerate(sys.argv[:-1])
+         if a in ("-sfp", "--settings_file_path")),
+        None,
+    )
+    if sfp is None:
+        return
+    try:
+        with open(sfp) as f:
+            tree = ast.parse(f.read())
+    except (OSError, SyntaxError):
+        return
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for stmt in ast.walk(node):
+                if isinstance(stmt, ast.Assign):
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name) and target.id == "gpus":
+                            try:
+                                gpus = ast.literal_eval(stmt.value)
+                                ctypes.CDLL("libcudart.so").cudaSetDevice(gpus[0])
+                                return
+                            except Exception:
+                                pass
+
+
+_pre_init_cuda() # avoid allocating GPU memory on unrequested devices.
+
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
 
 

@@ -130,7 +130,6 @@ CUDA_DEVICE
 double Orbits::get_light_travel_time(double t, int link)
 {
     int window = get_window(t, ltt_t0, ltt_dt, ltt_N);
-    // printf("INNER: %d %e %d\n", window, t, link);
     if (window == -1)
     {
         // out of bounds
@@ -216,7 +215,6 @@ void Orbits::get_light_travel_time_arr(double *ltt, double *t, int *link, int nu
     gpuErrchk(cudaFree(orbits_gpu));
 
 #else // __CUDACC__
-    printf("CHECK2\n");
     get_light_travel_time_kernel(ltt, t, link, num, *this);
 
 #endif // __CUDACC__

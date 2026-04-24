@@ -2,13 +2,12 @@
 
 # ruff: noqa: E402
 try:
-    from lisatools._version import (  # pylint: disable=E0401,E0611
-        __version__,
-        __version_tuple__,
-    )
+    from lisatools._version import __version__  # pylint: disable=E0401,E0611
+    from lisatools._version import __version_tuple__
 
 except ModuleNotFoundError:
-    from importlib.metadata import PackageNotFoundError, version  # pragma: no cover
+    from importlib.metadata import PackageNotFoundError  # pragma: no cover
+    from importlib.metadata import version
 
     try:
         __version__ = version(__name__)
@@ -28,24 +27,23 @@ try:
 except (ModuleNotFoundError, ImportError):
     _is_editable = False
 
+from gpubackendtools import Globals, get_backend, get_first_backend, has_backend
+
 from . import cutils, utils
-
-from gpubackendtools import get_backend, has_backend, get_first_backend
-from gpubackendtools import Globals
-from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend
-
+from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend, LISAToolsCuda13xBackend
 
 add_backends = {
     "lisatools_cpu": LISAToolsCpuBackend,
     "lisatools_cuda11x": LISAToolsCuda11xBackend,
     "lisatools_cuda12x": LISAToolsCuda12xBackend,
+    "lisatools_cuda13x": LISAToolsCuda13xBackend,
 }
 
 Globals().backends_manager.add_backends(add_backends)
 
 from gpubackendtools import get_backend as _get_backend
-from gpubackendtools import has_backend as _has_backend
 from gpubackendtools import get_first_backend as _get_first_backend
+from gpubackendtools import has_backend as _has_backend
 from gpubackendtools.gpubackendtools import Backend
 
 
@@ -64,17 +62,18 @@ def has_backend(backend: str) -> Backend:
     else:
         return _has_backend(backend)
 
-        
+
 def get_first_backend(backend: str) -> Backend:
     __doc__ = _get_first_backend.__doc__
     if "lisatools_" not in backend:
         return _get_first_backend("lisatools_" + backend)
     else:
         return _get_first_backend(backend)
-    
+
+
 from .analysiscontainer import AnalysisContainer
 from .datacontainer import DataResidualArray
-from .sensitivity import get_sensitivity, SensitivityMatrix
+from .sensitivity import SensitivityMatrix, get_sensitivity
 
 __all__ = [
     "__version__",

@@ -1,13 +1,13 @@
 from __future__ import annotations
-import warnings
-from abc import ABC
-from typing import Any, Tuple, Optional, List
 
 import math
-import numpy as np
-from scipy import interpolate
-from scipy import signal
+import warnings
+from abc import ABC
+from typing import Any, List, Optional, Tuple
+
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy import interpolate, signal
 
 try:
     import cupy as cp
@@ -15,19 +15,15 @@ try:
 except (ModuleNotFoundError, ImportError):
     import numpy as cp
 
-from . import detector as lisa_models
-from .utils.utility import AET, get_array_module
-from .utils.constants import *
-from .stochastic import (
-    StochasticContribution,
-    FittedHyperbolicTangentGalacticForeground,
-)
-from .sensitivity import SensitivityMatrix
-
-
 import dataclasses
 
-from .domains import *
+from . import detector as lisa_models
+from . import domains
+from .sensitivity import SensitivityMatrix
+from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticContribution
+from .utils.constants import *
+from .utils.utility import AET, get_array_module
+
 
 class DataResidualArray:
     pass
@@ -53,11 +49,11 @@ class DataResidualArray:
     def __init__(
         self,
         data_res_in: List[np.ndarray] | np.ndarray | DataResidualArray,
-        signal_domain: Optional[SignalSettingsBase] = None,
-        input_signal_domain: Optional[SignalSettingsBase] = None,
+        signal_domain: Optional[domains.DomainSettingsBase] = None,
+        input_signal_domain: Optional[domains.DomainSettingsBase] = None,
+        window: np.ndarray | cp.ndarray | None = None,
         **kwargs: dict,
     ) -> None:
-        
         self.data_res_in_orig_input = data_res_in
         if isinstance(data_res_in, DataResidualArray):
             for key, item in data_res_in.__dict__.items():
@@ -70,33 +66,41 @@ class DataResidualArray:
                 xp = get_array_module(data_res_in)
                 data_res_in = xp.atleast_2d(data_res_in)
                 if input_signal_domain is None:
-                    raise ValueError("If inputing a basic array, must put in the input_signal_domain argument.")
-                assert isinstance(input_signal_domain, DomainSettingsBase)
+                    raise ValueError(
+                        "If inputing a basic array, must put in the input_signal_domain argument."
+                    )
+                assert isinstance(input_signal_domain, domains.DomainSettingsBase)
                 data_res_in = input_signal_domain.associated_class(data_res_in, input_signal_domain)
-            
+
             input_signal_domain = data_res_in.settings
 
             if signal_domain is None:
-                if isinstance(input_signal_domain, TDSettings):
+                if isinstance(input_signal_domain, domains.TDSettings):
                     # default for TD for now is in FD
                     Nf = np.fft.rfft(np.ones(input_signal_domain.N)).shape[0]
                     df = 1. / (input_signal_domain.N * input_signal_domain.dt)
-                    signal_domain = FDSettings(Nf, df, force_backend=input_signal_domain.force_backend)
+                    signal_domain = domains.FDSettings(Nf, df, force_backend=input_signal_domain.force_backend)
 
                 else:
                     # default is same domain
                     signal_domain = input_signal_domain
-        
+             
             if signal_domain == input_signal_domain:
                 self.data_res_arr = data_res_in
             else:
-                self.data_res_arr = data_res_in.transform(signal_domain)
+                self.data_res_arr = data_res_in.transform(signal_domain, window=window)
 
             self.nchannels = self.data_res_arr.nchannels
+            self.nbatch = self.data_res_arr.nbatch
+            self.is_batched = self.data_res_arr.is_batched
             self.data_shape = self.data_res_arr.settings.basis_shape
-            
-        self.init_kwargs = dict(signal_domain=signal_domain, input_signal_domain=input_signal_domain, **kwargs)
-    
+
+        self.init_kwargs = dict(
+            signal_domain=signal_domain,
+            input_signal_domain=input_signal_domain,
+            **kwargs,
+        )
+
     @property
     def init_kwargs(self) -> dict:
         """Initial dt, df, f_arr"""
@@ -127,14 +131,14 @@ class DataResidualArray:
     #             "Can only provide one of dt, f_arr, or df. Not more than one."
     #         )
     #     self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
-
+    
     @property
     def start_freq_ind(self):
         if self.df is not None:
             return int(self.f_arr[0] / self.df)
         else:
             return None
-        
+
     def _store_time_and_frequency_information(
         self,
         dt: Optional[float] = None,
@@ -162,7 +166,9 @@ class DataResidualArray:
             # constant spacing
             if np.allclose(np.diff(f_arr), np.diff(f_arr)[0]):
                 if df is None:
-                    raise ValueError("When providing evenly spaced f_arr, need to also provide df to avoid numerical issues.")
+                    raise ValueError(
+                        "When providing evenly spaced f_arr, need to also provide df to avoid numerical issues."
+                    )
                 # TODO: fix this up in the docs
                 self._df = df  # np.diff(f_arr)[0].item()
 
@@ -188,11 +194,15 @@ class DataResidualArray:
             self._dt = 1 / (2 * self._fmax)
             self._f_arr = np.arange(0.0, self._fmax, self._df)
 
-        
         if len(self.f_arr) != self.data_length:
             raise ValueError(
                 "Entered or determined f_arr does not have the same length as the data channel inputs."
             )
+
+    @property
+    def settings(self) -> domains.DomainSettingsBase:
+        """Basis settings of the data residual array."""
+        return self.data_res_arr.settings
 
     @property
     def fmax(self):
@@ -231,7 +241,7 @@ class DataResidualArray:
     @property
     def frequency_arr(self) -> np.ndarray:
         """Frequency array"""
-        return self._f_arr
+        return self.settings.f_arr
 
     @property
     def data_res_arr(self) -> np.ndarray:
@@ -289,7 +299,7 @@ class DataResidualArray:
 
         """
 
-        assert isinstance(self.data_res_arr.data_res_arr.settings, FDSettings)
+        assert isinstance(self.data_res_arr.data_res_arr.settings, domains.FDSettings)
         if ax is None and fig is None:
             nrows = 1
             ncols = self.shape[0]
@@ -308,20 +318,29 @@ class DataResidualArray:
                     inds_list = inds
 
             elif isinstance(ax, plt.Axes):
-                assert inds is not None and (
-                    isinstance(inds, tuple) or isinstance(inds, int)
-                )
+                assert inds is not None and (isinstance(inds, tuple) or isinstance(inds, int))
                 ax = [ax]
                 inds_list = [inds]
 
         elif fig is not None:
             raise NotImplementedError
 
+        _f_arr = (
+            self.settings.f_arr.get()
+            if isinstance(self.settings.f_arr, cp.ndarray)
+            else self.settings.f_arr
+        )
+        _data_res_arr = (
+            self.data_res_arr.arr.get()
+            if isinstance(self.data_res_arr.arr, cp.ndarray)
+            else self.data_res_arr.arr
+        )
+
         for i, ax_tmp in zip(inds_list, ax):
-            plot_in = np.abs(self.data_res_arr[i])
+            plot_in = np.abs(_data_res_arr[i])
             if char_strain:
-                plot_in *= self.frequency_arr
-            ax_tmp.loglog(self.frequency_arr, plot_in, **kwargs)
+                plot_in *= _f_arr
+            ax_tmp.loglog(_f_arr, plot_in, **kwargs)
 
         return (fig, ax)
 

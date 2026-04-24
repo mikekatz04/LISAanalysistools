@@ -44,9 +44,9 @@ set(HERE_CUDA_ARCH ${LISATOOLS_CUDA_ARCH})
 # * * Definition of compiled backends * *
 # * * * * * * * * * * * * * * * * * * * *
 
-# ----------------------
-# --- pycppdetector ----
-# ----------------------
+# ----------------
+# --- utils ---
+# ----------------
 
 # I. Process pycppdetector.pyx into a C++ file
 
@@ -67,11 +67,35 @@ if(LISATOOLS_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM
     )
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx)
+  
+  # # NEW: Copy L1Detector.cu to L1Detector.cxx for CPU build
+  # add_custom_command(
+  #   OUTPUT "L1Detector.cxx"
+  #   COMMENT "Copy L1Detector.cu to L1Detector.cxx"
+  #   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/L1Detector.cu"
+  #           "${CMAKE_CURRENT_BINARY_DIR}/L1Detector.cxx"
+  #   DEPENDS "L1Detector.cu"
+  #   VERBATIM
+  #   )
+
+  # Copy PSD.cu to PSD.cxx for CPU build
+  add_custom_command(
+    OUTPUT "PSD.cxx"
+    COMMENT "Copy PSD.cu to PSD.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/PSD.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/PSD.cxx"
+    DEPENDS "PSD.cu"
+    VERBATIM
+    )
+
+  # Add L1Detector.cxx to the sources
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
+  
+  # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp)
+                                        Detector.hpp  PSD.hpp)
 
   pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
@@ -83,12 +107,15 @@ endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu)
+  # Add L1Detector.cu to the GPU sources
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
+  
+  # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp)
-				# set_target_properties(lisaanalysistools_gpu_detector_gpu_static PROPERTIES LINKER_LANGUAGE CXX)
+                                        Detector.hpp PSD.hpp)
+
   pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
@@ -98,46 +125,3 @@ if(LISATOOLS_WITH_GPU)
                                       binding.hpp)
 
 endif()
-
-
-
-# ----------------------
-# --- psd ----
-# ----------------------
-
-# I. Process pycppdetector.pyx into a C++ file
-add_custom_command(
-  OUTPUT "psdgen.cxx"
-  COMMENT "Cythonize psdgen.pyx into psdgen.cxx"
-  COMMAND
-    Python::Interpreter -m cython "${CMAKE_CURRENT_SOURCE_DIR}/psdgen.pyx"
-    --output-file "${CMAKE_CURRENT_BINARY_DIR}/psdgen.cxx" -3 -+ --module-name
-    "psd" -I "${CMAKE_CURRENT_SOURCE_DIR}"
-  DEPENDS "psdgen.pyx"
-  VERBATIM)
-
-# II. Declare the CPU backend
-if(LISATOOLS_WITH_CPU)
-  add_custom_command(
-    OUTPUT "PSD.cxx"
-    COMMENT "Copy PSD.cu to PSD.cxx"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/PSD.cu"
-            "${CMAKE_CURRENT_BINARY_DIR}/PSD.cxx"
-    DEPENDS "PSD.cu"
-    VERBATIM)
-
-  python_add_library(lisaanalysistools_cpu_psd MODULE WITH_SOABI psdgen.cxx PSD.cxx)
-  apply_cpu_backend_common_options(psd)
-
-  target_sources(lisaanalysistools_cpu_psd PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp PSD.hpp)
-endif()
-
-# III. Declare the GPU backend
-if(LISATOOLS_WITH_GPU)
-  python_add_library(lisaanalysistools_gpu_psd MODULE WITH_SOABI psdgen.cxx PSD.cu)
-  apply_gpu_backend_common_options(psd)
-  target_sources(lisaanalysistools_gpu_psd PUBLIC FILE_SET HEADERS FILES
-                                         global.hpp PSD.hpp)
-endif()
-

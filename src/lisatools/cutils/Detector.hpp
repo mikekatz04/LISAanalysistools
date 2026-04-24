@@ -1,7 +1,8 @@
-#ifndef __DETECTOR_HPP__
-#define __DETECTOR_HPP__
+#ifndef __L1DETECTOR_HPP__
+#define __L1DETECTOR_HPP__
 
 #include "gbt_global.h"
+#include "cuda_complex.hpp"
 #include <iostream>
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
@@ -9,6 +10,9 @@
 #else
 #define Orbits OrbitsCPU
 #endif
+
+#define Clight 299792458.
+
 class Vec
 {
 public:

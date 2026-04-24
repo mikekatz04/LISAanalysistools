@@ -1,23 +1,24 @@
 from __future__ import annotations
+
 import os
 from abc import ABC, abstractmethod
-from typing import Any, List, Tuple, Optional
-from dataclasses import dataclass
-import requests
 from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple
+
 import h5py
+import numpy as np
+import requests
 from scipy import interpolate
 
 from .utils.constants import *
-from .utils.utility import get_array_module
-
-import numpy as np
-
 from .utils.parallelbase import LISAToolsParallelModule
+from .utils.utility import get_array_module
 
 try:
     import jax
     import jax.numpy as jnp
+
     jax.config.update("jax_enable_x64", True)
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     jax_here = True
@@ -51,7 +52,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         t0: Optional[float] = 0.0,
         **kwargs
     ) -> None:
-        
+
         # TODO: should we make it compute armlength.
         self.filename = filename
         self.armlength = armlength
@@ -322,9 +323,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             arr_tmp = arr.reshape(self.size_base, -1)
             arr_out_tmp = np.zeros((len(x_new), arr_tmp.shape[-1]))
             for i in range(arr_tmp.shape[-1]):
-                arr_out_tmp[:, i] = interpolate.CubicSpline(x_orig, arr_tmp[:, i])(
-                    x_new
-                )
+                arr_out_tmp[:, i] = interpolate.CubicSpline(x_orig, arr_tmp[:, i])(x_new)
             arr_out = arr_out_tmp.reshape((len(x_new),) + arr.shape[1:])
             setattr(self, "_" + which, arr_out)
 
@@ -406,9 +405,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     def _check_configured(self) -> None:
         if not self.configured:
-            raise ValueError(
-                "Cannot request property. Need to use configure() method first."
-            )
+            raise ValueError("Cannot request property. Need to use configure() method first.")
 
     def get_light_travel_times(
         self, t: float | np.ndarray, link: int | np.ndarray
@@ -505,9 +502,7 @@ class Orbits(LISAToolsParallelModule, ABC):
             return output.squeeze()
         return output
 
-    def get_normal_unit_vec(
-        self, t: float | np.ndarray, link: int | np.ndarray
-    ) -> np.ndarray:
+    def get_normal_unit_vec(self, t: float | np.ndarray, link: int | np.ndarray) -> np.ndarray:
         """Compute link normal vector as a function of time.
 
         Computes with the c++ backend.
@@ -556,9 +551,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         )
 
         # prep outputs
-        output = self.xp.array(
-            [normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]
-        ).T
+        output = self.xp.array([normal_unit_vec_x, normal_unit_vec_y, normal_unit_vec_z]).T
         if squeeze:
             return output.squeeze()
         return output
@@ -567,12 +560,10 @@ class Orbits(LISAToolsParallelModule, ABC):
     def ptr(self) -> int:
         """pointer to c++ class"""
         return self.pycppdetector.ptr
-    
-    
+
     @classmethod
     def supported_backends(cls):
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
-
 
 
 class EqualArmlengthOrbits(Orbits):
@@ -618,24 +609,35 @@ def icrs_to_ecliptic(positions_icrs):
     """
 
     import astropy
+
     positions_ecliptic = np.zeros_like(positions_icrs)
-    
+
     for sc in range(3):
 
-        c_icrs = astropy.coordinates.SkyCoord(positions_icrs[:,sc,0], positions_icrs[:,sc,1], positions_icrs[:,sc,2], frame='icrs', unit='m', representation_type='cartesian')
+        c_icrs = astropy.coordinates.SkyCoord(
+            positions_icrs[:, sc, 0],
+            positions_icrs[:, sc, 1],
+            positions_icrs[:, sc, 2],
+            frame="icrs",
+            unit="m",
+            representation_type="cartesian",
+        )
         c_ecliptic = c_icrs.transform_to(astropy.coordinates.BarycentricMeanEcliptic)
-        c_ecliptic.representation_type='cartesian'
-        positions_ecliptic[:, sc, :] = np.array([c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]).T
+        c_ecliptic.representation_type = "cartesian"
+        positions_ecliptic[:, sc, :] = np.array(
+            [c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]
+        ).T
 
     return positions_ecliptic
 
+
 class L1Orbits(Orbits):
     """Base class for LISA Orbits from Mojito L1 File structure.
-    
+
     This class handles orbit data from MojitoL1File where:
     - Light travel times and positions have different time arrays
     - Both time arrays may start at t0 != 0
-    
+
     Args:
         armlength: Armlength of detector (default 2.5e9 m)
     """
@@ -646,13 +648,12 @@ class L1Orbits(Orbits):
         armlength: float = 2.5e9,
         force_backend: Optional[str] = None,
         frame: str = "ecliptic",
-        **kwargs
+        **kwargs,
     ):
         assert frame in ["ecliptic", "icrs"], "frame must be 'ecliptic' or 'icrs'"
         self.frame = frame
         super().__init__(filename, armlength, force_backend, **kwargs)
        
-
     @property
     def kwargs(self):
         """Keyword arguments for recreating this class instance."""
@@ -668,13 +669,15 @@ class L1Orbits(Orbits):
         try:
             from mojito import MojitoL1File
         except ImportError:
-            raise ImportError("mojito package required for L1Orbits. Follow instructions at: https://mojito-e66317.io.esa.int/content/installation.html")
+            raise ImportError(
+                "mojito package required for L1Orbits. Follow instructions at: https://mojito-e66317.io.esa.int/content/installation.html"
+            )
         f = MojitoL1File(self.filename)
-        return f            
-    
+        return f
+
     def _setup(self):
         """Load orbit and LTT data from Mojito file."""
-        
+
         with self.open() as f:
             # Load light travel times and their time array
             self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6)
@@ -686,19 +689,19 @@ class L1Orbits(Orbits):
                 self.x_base = icrs_to_ecliptic(pos_icrs)
             else:
                 self.x_base = pos_icrs
-            self.v_base = f.orbits.velocities[:] # Shape: (N_pos_times, 3, 3)
+            self.v_base = f.orbits.velocities[:]  # Shape: (N_pos_times, 3, 3)
             self.sc_t_base = f.orbits.time_sampling.t()  # Shape: (N_pos_times,)
             self.size_base = self.sc_t_base.shape[0]
             self.dt_base = float(f.orbits.time_sampling.dt)
-            
+
             # Store dt from each dataset (they may differ)
             self.ltt_dt = f.ltts.time_sampling.dt
             self.sc_dt = f.orbits.time_sampling.dt
-            
+
             # Store t0 values
             self.ltt_t0 = float(self.ltt_t[0])
             self.sc_t0 = float(self.sc_t_base[0])
-    
+
     @property
     def ltt_t(self):
         """LTT file time."""
@@ -833,7 +836,6 @@ class L1Orbits(Orbits):
     def n(self, x):
         self._n = x
 
-    
     @property
     def pycppdetector(self) -> object:
         """C++ class"""
@@ -841,16 +843,15 @@ class L1Orbits(Orbits):
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."
             )
-
-        self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetector_args)
+        self._pycppdetector = self.backend.OrbitsWrap(*self._pycppdetect_args)
 
         return self._pycppdetector
-    
+
     def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
         """Configure orbits with interpolation to a target time grid.
-        
+
         Handles different time arrays for LTTs and positions in Mojito files.
-        
+
         Args:
             t_arr: Target time array (if None, will be constructed)
             dt: Target time step
@@ -1018,9 +1019,11 @@ if jax_here:
             val_z = interp_1d(pos_grid[:, sc, 2])
             return jnp.array([val_x, val_y, val_z])
 
-        # If inputs are arrays, we vmap. 
+        # If inputs are arrays, we vmap.
         # query_t is (N,), sc_idx is (3,) or (1,)
-        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, sc_idx)
+        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(
+            query_t, sc_idx
+        )
 
     @jax.jit
     def interpolate_ltt(query_t, link_idx, t_grid, ltt_grid):
@@ -1033,12 +1036,14 @@ if jax_here:
             t_grid: shape (T_dense,)
             ltt_grid: shape (T_dense, N_links)
         """
+
         def _single_point(t, l):
             vals = ltt_grid[:, l]
             return jnp.interp(t, t_grid, vals)
-        
-        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
 
+        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(
+            query_t, link_idx
+        )
 
     @jax.jit
     def interpolate_n(query_t, link_idx, t_grid, n_grid):
@@ -1062,7 +1067,9 @@ if jax_here:
             val_z = interp_1d(n_grid[:, l, 2])
             return jnp.array([val_x, val_y, val_z])
 
-        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(query_t, link_idx)
+        return jax.vmap(jax.vmap(_single_point, in_axes=(None, 0)), in_axes=(0, None))(
+            query_t, link_idx
+        )
 
     @jax.tree_util.register_pytree_node_class
     class JAXL1Orbits(L1Orbits):
@@ -1079,7 +1086,6 @@ if jax_here:
             armlength: Armlength of detector (default 2.5e9 m)
             force_backend: If 'gpu' or 'cuda', use GPU; if 'cpu', use CPU
         """
-        
         
         def configure(self, t_arr=None, dt=None, linear_interp_setup=False):
             super().configure(t_arr, dt, linear_interp_setup)
@@ -1101,35 +1107,35 @@ if jax_here:
             if not self.configured:
                 return self._dt
             return self._dt
-        
+
         @dt.setter
         def dt(self, dt):
             self._dt = dt
-        
+
         def _map_link_to_index(self, link_arr):
             """Map link IDs to array indices.
-            
+
             Args:
                 link_arr: Array of link IDs (12, 23, 31, 13, 32, 21)
-                
+
             Returns:
                 Array of indices (0-5) corresponding to link positions
             """
             link_map_keys = jnp.array(self.LINKS)
             link_map_vals = jnp.arange(len(self.LINKS))
-            
+
             def map_single_link(l):
                 return jnp.sum(link_map_vals * (link_map_keys == l))
-            
+
             return jax.vmap(map_single_link)(link_arr)
-        
+
         def get_pos(self, t, sc):
             """Compute spacecraft position using JAX interpolation.
-            
+
             Args:
                 t: Time (scalar or array)
                 sc: Spacecraft index (1, 2, or 3) or array of indices
-                
+
             Returns:
                 Spacecraft position(s) with shape (..., 3) for coordinates
             """
@@ -1143,72 +1149,66 @@ if jax_here:
             sc_arr = (jnp.atleast_1d(sc) - 1).astype(int)
 
             output = interpolate_pos(t_arr, sc_arr, self.sc_t, self.x)
-            
             if squeeze_sc:
                 output = output.squeeze(axis=1)
             if squeeze_t:
                 output = output.squeeze(axis=0)
-            
-            return output.block_until_ready()
 
-        
+            return output
+
         def get_light_travel_times(self, t, link):
             """Compute light travel times using JAX interpolation.
-            
+
             Args:
                 t: Time (scalar or array)
                 link: Link index (12, 23, 31, 13, 32, 21) or array of indices
-                
+
             Returns:
                 Light travel time(s)
             """
             if not self.configured:
                 raise RuntimeError("Must call configure() before get_light_travel_times()")
-            
             squeeze_t = jnp.isscalar(t)
             squeeze_link = jnp.isscalar(link)
 
             t_arr = jnp.atleast_1d(t)
             link_arr = jnp.atleast_1d(link)
             link_idx = self._map_link_to_index(link_arr)
-            
             output = interpolate_ltt(t_arr, link_idx, self.ltt_t, self.ltt)
 
             if squeeze_link:
                 output = output.squeeze(axis=1)
             if squeeze_t:
                 output = output.squeeze(axis=0)
-            
-            return output.block_until_ready()
+
+            return output
 
         def get_normal_unit_vec(self, t, link):
             """Compute normal unit vectors using JAX interpolation.
-            
+
             Args:
                 t: Time (scalar or array)
                 link: Link index (12, 23, 31, 13, 32, 21) or array of indices
-                
+
             Returns:
                 Normal unit vector(s) with shape (..., 3) for coordinates
             """
             if not self.configured:
                 raise RuntimeError("Must call configure() before get_normal_unit_vec()")
-            
             squeeze_t = jnp.isscalar(t)
             squeeze_link = jnp.isscalar(link)
 
             t_arr = jnp.atleast_1d(t)
             link_arr = jnp.atleast_1d(link)
             link_idx = self._map_link_to_index(link_arr)
-            
             output = interpolate_n(t_arr, link_idx, self.sc_t, self.n)
 
             if squeeze_link:
                 output = output.squeeze(axis=1)
             if squeeze_t:
                 output = output.squeeze(axis=0)
-            
-            return output.block_until_ready()
+
+            return output
 
         def tree_flatten(self):
             # Collect children (JAX arrays)
@@ -1219,54 +1219,49 @@ if jax_here:
                 self.v_base,
                 self.sc_t_base,
             )
-            
+
             # If configured, add interpolated arrays
             if self.configured:
-                children += (
-                    self.sc_t,
-                    self.x,
-                    self.v,
-                    self.n
-                )
-            
+                children += (self.sc_t, self.x, self.v, self.n)
+
             # Collect aux_data (static configuration)
             aux_data = {
-                'filename': self.filename,
-                'armlength': self._armlength,
-                'configured': self.configured,
-                'ltt_dt': self.ltt_dt,
-                'sc_dt': self.sc_dt,
-                'ltt_t0': self.ltt_t0,
-                'sc_t0': self.sc_t0,
+                "filename": self.filename,
+                "armlength": self._armlength,
+                "configured": self.configured,
+                "ltt_dt": self.ltt_dt,
+                "sc_dt": self.sc_dt,
+                "ltt_t0": self.ltt_t0,
+                "sc_t0": self.sc_t0,
                 # Capture other potential attributes
-                '_dt': getattr(self, '_dt', None),
-                '_t0': getattr(self, '_t0', None),
+                "_dt": getattr(self, "_dt", None),
+                "_t0": getattr(self, "_t0", None),
                 # Preserve backend info if needed (though usually static)
-                'use_gpu': getattr(self, 'use_gpu', False)
+                "use_gpu": getattr(self, "use_gpu", False),
             }
-            
+
             return (children, aux_data)
 
         @classmethod
         def tree_unflatten(cls, aux_data, children):
             # Create empty instance without calling __init__
             obj = object.__new__(cls)
-            
+
             # Restore aux_data
-            obj.filename = aux_data['filename']
-            obj._armlength = aux_data['armlength']
-            obj.configured = aux_data['configured']
-            obj.ltt_dt = aux_data['ltt_dt']
-            obj.sc_dt = aux_data['sc_dt']
-            obj.ltt_t0 = aux_data['ltt_t0']
-            obj.sc_t0 = aux_data['sc_t0']
-            obj.use_gpu = aux_data['use_gpu']
-            obj._filename = aux_data['filename']
-            
-            if aux_data.get('_dt') is not None:
-                obj._dt = aux_data['_dt']
-            if aux_data.get('_t0') is not None:
-                obj._t0 = aux_data['_t0']
+            obj.filename = aux_data["filename"]
+            obj._armlength = aux_data["armlength"]
+            obj.configured = aux_data["configured"]
+            obj.ltt_dt = aux_data["ltt_dt"]
+            obj.sc_dt = aux_data["sc_dt"]
+            obj.ltt_t0 = aux_data["ltt_t0"]
+            obj.sc_t0 = aux_data["sc_t0"]
+            obj.use_gpu = aux_data["use_gpu"]
+            obj._filename = aux_data["filename"]
+
+            if aux_data.get("_dt") is not None:
+                obj._dt = aux_data["_dt"]
+            if aux_data.get("_t0") is not None:
+                obj._t0 = aux_data["_t0"]
 
             # Restore children
             # Base arrays always present (first 5)
@@ -1275,19 +1270,20 @@ if jax_here:
             obj.x_base = children[2]
             obj.v_base = children[3]
             obj.sc_t_base = children[4]
-            
             if obj.configured:
                 # Configured arrays (next 4)
                 obj.sc_t = children[5]
                 obj.x = children[6]
                 obj.v = children[7]
                 obj.n = children[8]
-            
+
             # Initialize other attributes needed for method calls
             obj._pycppdetector_args = None
-            
+
             return obj
+
 else:
+
     class JAXL1Orbits(L1Orbits):
         def __init__(self, *args, **kwargs):
             raise ImportError("JAX is not available. Install JAX to use JAXL1Orbits.")
@@ -1296,21 +1292,23 @@ class DefaultOrbits(EqualArmlengthOrbits):
     """Set default orbit class to Equal Armlength orbits for now."""
 
     pass
-    
+
+
 @dataclass
 class CurrentNoises:
-    """Noise values at a given frequency. 
+    """Noise values at a given frequency.
 
     Args:
-        isi_oms_noise: Interspacecraft OMS noise value. 
-        rfi_oms_noise: Reference interferometer OMS noise value. 
-        tmi_oms_noise: Test-mass interferometer OMS noise value. 
-        tm_noise: Test-mass acceleration noise value. 
+        isi_oms_noise: Interspacecraft OMS noise value.
+        rfi_oms_noise: Reference interferometer OMS noise value.
+        tmi_oms_noise: Test-mass interferometer OMS noise value.
+        tm_noise: Test-mass acceleration noise value.
         rfi_backlink_noise: Reference interferometer backlink noise value.
         tmi_backlink_noise: Test-mass interferometer backlink noise value.
-        units: Either ``"relative_frequency"`` (AKA fractional frequency deviation [ffd]) or ``"displacement"``. 
-    
+        units: Either ``"relative_frequency"`` (AKA fractional frequency deviation [ffd]) or ``"displacement"``.
+
     """
+
     isi_oms_noise: float
     rfi_oms_noise: float
     tmi_oms_noise: float
@@ -1366,8 +1364,8 @@ class LISAModel(LISAModelSettings, ABC):
             f: Frequency array.
             unit: Either ``"relative_frequency"`` or ``"displacement"``.
         Returns:
-            Current noise values at ``f``.    
-        
+            Current noise values at ``f``.
+
         """
 
         # TODO: fix this up
@@ -1395,7 +1393,7 @@ class LISAModel(LISAModelSettings, ABC):
         if unit == "displacement":
             isi_oms_noise = Soms_d
             tm_noise = Sa_d
-            
+
         elif unit == "relative_frequency":
             isi_oms_noise = Sop
             tm_noise = Spm
@@ -1413,7 +1411,7 @@ class LISAModel(LISAModelSettings, ABC):
             tm_noise,
             rfi_backlink_noise,
             tmi_backlink_noise,
-            unit
+            unit,
         )
 
 
@@ -1421,24 +1419,26 @@ class LISAModel(LISAModelSettings, ABC):
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
 proposal = LISAModel((10.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "proposal")
 mrdv1 = LISAModel((10.0e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "mrdv1")
-sangria = LISAModel((7.9e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "sangria") 
+sangria = LISAModel((7.9e-12) ** 2, (2.4e-15) ** 2, DefaultOrbits(), "sangria")
 scirdv1 = LISAModel((15.0e-12) ** 2, (3.0e-15) ** 2, DefaultOrbits(), "scirdv1")
-    
+
+
 @dataclass
 class ExtendedLISAModelSettings:
     """Required Extended LISA model settings:
 
     Args:
-        isi_oms_noise: Interspacecraft OMS noise level. 
-        rfi_oms_noise: Reference interferometer OMS noise level. 
-        tmi_oms_noise: Test-mass interferometer OMS noise level. 
-        tm_noise: Test-mass acceleration noise level. 
+        isi_oms_noise: Interspacecraft OMS noise level.
+        rfi_oms_noise: Reference interferometer OMS noise level.
+        tmi_oms_noise: Test-mass interferometer OMS noise level.
+        tm_noise: Test-mass acceleration noise level.
         rfi_backlink_noise: Reference interferometer backlink noise level.
         tmi_backlink_noise: Test-mass interferometer backlink noise level.
         orbits: Orbital information.
         name: Name of model.
 
     """
+
     isi_oms_level: float
     rfi_oms_level: float
     tmi_oms_level: float
@@ -1447,6 +1447,7 @@ class ExtendedLISAModelSettings:
     tmi_backlink_noise_level: float
     orbits: Orbits
     name: str
+
 
 # TODO: verify this
 # conversion factors into ffd units used in LDC
@@ -1471,18 +1472,18 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
         for key, item in self.__dict__.items():
             out += f"{key}: {item}\n"
         return out
-    
+
     def disp_2_ffd(self, f: float | np.ndarray) -> float | np.ndarray:
         return (2 * np.pi * f / lamb / nu0) ** 2
-    
+
     def acc_2_ffd(self, f: float | np.ndarray) -> float | np.ndarray:
-        return (1 / (lamb * 2 * np.pi * f ) / nu0) ** 2
-    
+        return (1 / (lamb * 2 * np.pi * f) / nu0) ** 2
+
     def lisanoises(
         self,
         f: float | np.ndarray,
         unit: Optional[str] = "relative_frequency",
-        method: Optional[str] ="modern",
+        method: Optional[str] = "modern",
     ) -> CurrentNoises:
         """Calculate both LISA noise terms based on input model.
         Args:
@@ -1498,19 +1499,19 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
             rfi_oms_noise = self.rfi_oms_level**2 * f**0
             tmi_oms_noise = self.tmi_oms_level**2 * f**0
 
-            tm_noise = (self.tm_noise_level ** 2) * (1 + (0.4e-3 / f) ** 2)
-            rfi_backlink_noise = self.rfi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
-            tmi_backlink_noise = self.tmi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
-        
+            tm_noise = (self.tm_noise_level**2) * (1 + (0.4e-3 / f) ** 2)
+            rfi_backlink_noise = self.rfi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
+            tmi_backlink_noise = self.tmi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
+
         elif method == "old":
             isi_oms_noise = self.isi_oms_level**2 * f**0
             rfi_oms_noise = self.rfi_oms_level**2 * f**0
             tmi_oms_noise = self.tmi_oms_level**2 * f**0
 
-            tm_noise = (self.tm_noise_level ** 2) * (1 + (0.4e-3 / f) ** 2)
-            rfi_backlink_noise = self.rfi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
-            tmi_backlink_noise = self.tmi_backlink_noise_level ** 2 * (1. + (2.e-3 / f) ** 4)
-        
+            tm_noise = (self.tm_noise_level**2) * (1 + (0.4e-3 / f) ** 2)
+            rfi_backlink_noise = self.rfi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
+            tmi_backlink_noise = self.tmi_backlink_noise_level**2 * (1.0 + (2.0e-3 / f) ** 4)
+
         if unit == "displacement":
             return CurrentNoises(
                 isi_oms_noise,
@@ -1519,7 +1520,7 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
                 tm_noise,
                 rfi_backlink_noise,
                 tmi_backlink_noise,
-                unit
+                unit,
             )
         elif unit == "relative_frequency":
             return CurrentNoises(
@@ -1529,17 +1530,27 @@ class ExtendedLISAModel(ExtendedLISAModelSettings, ABC):
                 tm_noise * self.acc_2_ffd(f),
                 rfi_backlink_noise * self.disp_2_ffd(f),
                 tmi_backlink_noise * self.disp_2_ffd(f),
-                unit
+                unit,
             )
         else:
             raise ValueError("unit kwarg must be 'displacement' or 'relative_frequency'.")
 
+
 # defaults
 
-# HERE we simulate the old LDC way of generating the sensitivity by pretending 
+# HERE we simulate the old LDC way of generating the sensitivity by pretending
 # the rfi_backlink_noise, which has the same functionality of the OMS noise in the
-# LDC code, is the oms noise. 
-sangria_v2 = ExtendedLISAModel(6.35e-12, 3.32e-12, 1.42e-12, 2.4e-15, 3.0E-12, 3.0E-12, DefaultOrbits(), "sangria_v2")
+# LDC code, is the oms noise.
+sangria_v2 = ExtendedLISAModel(
+    6.35e-12,
+    3.32e-12,
+    1.42e-12,
+    2.4e-15,
+    3.0e-12,
+    3.0e-12,
+    DefaultOrbits(),
+    "sangria_v2",
+)
 
 
 __stock_list_models__ = [scirdv1, proposal, mrdv1, sangria, sangria_v2]

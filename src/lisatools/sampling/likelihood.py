@@ -1,7 +1,7 @@
 import warnings
-from eryn.state import Branch, BranchSupplemental
 
 import numpy as np
+from eryn.state import Branch, BranchSupplemental
 
 try:
     import cupy as cp
@@ -89,9 +89,7 @@ class Likelihood(object):
                 key = list(self.parameter_transforms.keys())[0]
                 params = self.parameter_transforms[key].both_transforms(params)
 
-            injection_channels = xp.asarray(
-                self.template_model(*params, **waveform_kwargs)
-            )
+            injection_channels = xp.asarray(self.template_model(*params, **waveform_kwargs))
             try:
                 injection_channels = injection_channels.get()
 
@@ -107,9 +105,7 @@ class Likelihood(object):
                 injection_channels = np.asarray(data_stream)
 
         else:
-            raise ValueError(
-                "Must provide data_stream or params kwargs to inject signal."
-            )
+            raise ValueError("Must provide data_stream or params kwargs to inject signal.")
 
         self.injection_length = len(injection_channels[0])
 
@@ -214,10 +210,7 @@ class Likelihood(object):
 
                 # TODO: need to check this
                 self.noise_likelihood_factor = np.sum(
-                    [
-                        1.0 / 2.0 * (2 * np.pi) * np.sum(diff_freqs * psd_temp)
-                        for psd_temp in psd
-                    ]
+                    [1.0 / 2.0 * (2 * np.pi) * np.sum(diff_freqs * psd_temp) for psd_temp in psd]
                 )
                 self.noise_has_been_added = True
 
@@ -271,9 +264,7 @@ class Likelihood(object):
         # TODO: make sure parameter transformations appear in posterior if possible
         num_likes = params.shape[0]
         if self.vectorized:
-            template_channels = xp.asarray(
-                self.template_model(*params, *args, **kwargs)
-            )
+            template_channels = xp.asarray(self.template_model(*params, *args, **kwargs))
 
         else:
             if isinstance(params[0], np.float64):
@@ -314,11 +305,7 @@ class Likelihood(object):
             ll = -(
                 1.0
                 / 2.0
-                * (
-                    4.0
-                    * self.df
-                    * xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2))
-                )
+                * (4.0 * self.df * xp.sum(((d_minus_h.conj() * d_minus_h) / psd).real, axis=(1, 2)))
             )
 
             if self.adjust_psd:
@@ -421,9 +408,9 @@ class Likelihood(object):
             params = self.parameter_transforms[keys[0]].both_transforms(params)
 
             if "noise_params" in keys:
-                noise_params = self.parameter_transforms[
-                    "noise_params"
-                ].both_transforms(noise_params)
+                noise_params = self.parameter_transforms["noise_params"].both_transforms(
+                    noise_params
+                )
 
         # only has to do with params, not noise params
         if self.transpose_params:
@@ -550,11 +537,7 @@ class GlobalLikelihood(Likelihood):
         if not isinstance(self.vectorized, list):
             self.vectorized = [self.vectorized for _ in self.template_model]
 
-        assert (
-            len(self.template_model)
-            == len(self.parameter_transforms)
-            == len(self.vectorized)
-        )
+        assert len(self.template_model) == len(self.parameter_transforms) == len(self.vectorized)
 
         self.like_here = True
 
@@ -656,24 +639,17 @@ class GlobalLikelihood(Likelihood):
                 # TODO: make fill templates adjustable per model
                 if not self.fill_templates:  # False
                     if vec_i:
-                        template_channels = xp.asarray(
-                            tm_i(params_i, *args_i, **kwargs_i)
-                        )
+                        template_channels = xp.asarray(tm_i(params_i, *args_i, **kwargs_i))
 
                     else:
                         template_channels = xp.asarray(
-                            [
-                                tm_i(params_ij, *args_i, **kwargs_i)
-                                for params_ij in params_i.T
-                            ]
+                            [tm_i(params_ij, *args_i, **kwargs_i) for params_ij in params_i.T]
                         )
 
                     if self.frequency_domain is False:
                         # TODO: vectorize this
                         # 2: is removal of DC component + right summation approximation
-                        template_channels = (
-                            xp.fft.rfft(template_channels, axis=-1) * self.dt
-                        )
+                        template_channels = xp.fft.rfft(template_channels, axis=-1) * self.dt
 
                     # TODO: could put this in c?
                     for group_ij in np.unique(groups_i):
@@ -724,9 +700,7 @@ class GlobalLikelihood(Likelihood):
                 4.0
                 * self.df
                 * xp.sum(
-                    (
-                        d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]
-                    ).real
+                    (d_minus_h[:, :, start_ind:].conj() * d_minus_h[:, :, start_ind:]).real
                     / psd[:, :, start_ind:],
                     axis=(1, 2),
                 )
@@ -768,9 +742,7 @@ class GlobalLikelihood(Likelihood):
         #    breakpoint()
 
         if self.parameter_transforms is not None:
-            for i, (params_i, transform_i) in enumerate(
-                zip(params, self.parameter_transforms)
-            ):
+            for i, (params_i, transform_i) in enumerate(zip(params, self.parameter_transforms)):
                 params[i] = transform_i.both_transforms(params_i.copy())
 
         else:

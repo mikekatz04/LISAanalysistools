@@ -1,23 +1,20 @@
 import numpy as np
+from eryn.moves.multipletry import logsumexp
 from scipy import stats
 
-from ..utils.constants import *
 from ..sensitivity import get_sensitivity
-from eryn.moves.multipletry import logsumexp
+from ..utils.constants import *
 
 try:
     from ..cutils.psd_gpu import compute_logpdf
-    
+
 except (ModuleNotFoundError, ImportError) as e:
     pass
 
-from typing import Union, Optional, Tuple, List
-
 import sys
+from typing import List, Optional, Tuple, Union
 
-sys.path.append(
-    "/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/"
-)
+sys.path.append("/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/")
 # from galaxy_ffdot import GalaxyFFdot
 # from galaxy import Galaxy
 
@@ -29,9 +26,7 @@ except (ModuleNotFoundError, ImportError) as e:
 
 
 class AmplitudeFrequencySNRPrior:
-    def __init__(
-        self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs
-    ):
+    def __init__(self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs):
         self.rho_star = rho_star
         self.frequency_prior = frequency_prior
 
@@ -113,9 +108,7 @@ class SNRPrior:
         p = xp.zeros_like(rho)
         good = rho > 0.0
         p[good] = (
-            3
-            * rho[good]
-            / (4 * self.rho_star**2 * (1 + rho[good] / (4 * self.rho_star)) ** 5)
+            3 * rho[good] / (4 * self.rho_star**2 * (1 + rho[good] / (4 * self.rho_star)) ** 5)
         )
         return p
 
@@ -132,8 +125,7 @@ class SNRPrior:
             * self.rho_star**3
             * (
                 1 / (768.0 * self.rho_star**3)
-                - (rho[good] + self.rho_star)
-                / (3.0 * (rho[good] + 4 * self.rho_star) ** 4)
+                - (rho[good] + self.rho_star) / (3.0 * (rho[good] + 4 * self.rho_star) ** 4)
             )
         )
         return c
@@ -245,11 +237,7 @@ class SNRPrior:
                                 + 3131031158784 * u**3 * self.rho_star**12
                             )
                         )
-                        / (
-                            3.0
-                            * 2**0.3333333333333333
-                            * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3)
-                        )
+                        / (3.0 * 2**0.3333333333333333 * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3))
                     )
                 )
             )
@@ -391,11 +379,7 @@ class GBPriorWrap:
         if not ignore_amp:
             f0_input = arr[:, 1] if self.gen_frequency_alone else None
             arr[:, :diff] = (
-                xp.asarray(
-                    self.base_prior.priors_in[(0, 1)].rvs(
-                        size, f0_input=f0_input, **kwargs
-                    )
-                )
+                xp.asarray(self.base_prior.priors_in[(0, 1)].rvs(size, f0_input=f0_input, **kwargs))
                 .reshape(diff, -1)
                 .T
             )
@@ -453,9 +437,7 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         self.means_in_pdf = self.means.T.flatten().copy()
         self.invcovs_in_pdf = self.invcovs.transpose(1, 2, 0).flatten().copy()
 
-        self.cumulative_weights = xp.concatenate(
-            [xp.array([0.0]), xp.cumsum(self.weights)]
-        )
+        self.cumulative_weights = xp.concatenate([xp.array([0.0]), xp.cumsum(self.weights)])
 
         self.min_limit_f = self.map_back_frequency(
             -1.0 * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]
@@ -465,9 +447,9 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         )
 
         # compute the jacobian
-        self.log_det_J = (
-            self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1)
-        )[self.indexing].copy()
+        self.log_det_J = (self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1))[
+            self.indexing
+        ].copy()
 
         """self.inds_sort_min_limit_f = xp.argsort(self.min_limit_f)
         self.inds_sort_max_limit_f = xp.argsort(self.max_limit_f)
@@ -502,9 +484,7 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         cs = xp.concatenate([xp.array([0]), xp.cumsum(diff)])
         tmp = xp.arange(cs[-1])
         keep_component_map = xp.searchsorted(cs, tmp, side="right") - 1
-        keep_point_map = (
-            tmp - cs[keep_component_map] + ind_min_limit[keep_component_map]
-        )
+        keep_point_map = tmp - cs[keep_component_map] + ind_min_limit[keep_component_map]
         max_components = diff.max().item()
 
         int_check = int(1e6)

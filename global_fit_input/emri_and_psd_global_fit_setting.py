@@ -462,7 +462,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 5.0
 
     emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
-    base_file_name = "emri_psd_11th_try"
+    base_file_name = "emri_psd_12th_try"
     file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
