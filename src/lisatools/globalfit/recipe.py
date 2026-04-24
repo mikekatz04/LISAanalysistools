@@ -1,0 +1,127 @@
+import logging 
+logger = logging.getLogger(__name__)
+
+class Recipe:
+    def __init__(self):
+        self.recipe = []
+        self.backend_added = False
+        self._current_iter = 0
+        self._current_recipe_step = None
+        self._has_setup_first_step = False
+
+    @property
+    def backend(self):
+        return self._backend
+
+    @backend.setter
+    def backend(self, backend):
+        self._backend = backend
+        self.backend_added = True
+
+    def add_recipe_component(self, adjust_fn, name=None):
+        if name is None:
+            name = f"recipe step {len(self.recipe) + 1}"
+        self.recipe.append({"name": name, "adjust": adjust_fn, "status": False})
+
+    def to_file(self):
+        _tmp = {recipe_step["name"]: recipe_step["status"] for recipe_step in self.recipe}
+        return _tmp
+
+    def __next__(self):
+        while self._current_iter < len(self.recipe):
+            # False means it is not finished
+            if self.recipe[self._current_iter]["status"]:
+                self._current_iter += 1
+
+            else:
+                break
+
+        if self._current_iter < len(self.recipe):
+            self._current_recipe_step = self.recipe[self._current_iter]
+
+    def setup_first_recipe_step(self, iteration, last_sample, sampler):
+        assert not self._has_setup_first_step
+        # move to next recipe step
+        next(self)
+        if self._current_iter >= len(self.recipe):
+            raise ValueError("Recipe is already finished.")
+
+        self._current_recipe_step["adjust"].setup_run(iteration, last_sample, sampler)
+        self._has_setup_first_step = True
+
+    @property
+    def current_recipe_step(self):
+        return self._current_recipe_step
+
+    def __call__(self, iteration, last_sample, sampler):
+        stop_here = self._current_recipe_step["adjust"].stopping_function(
+            iteration, last_sample, sampler
+        )
+        if stop_here:
+            self.backend.completed_recipe_step(self._current_recipe_step["name"])
+            self._current_recipe_step["status"] = True
+            next(self)
+
+            if self._current_iter >= len(self.recipe):
+                return True
+            self._current_recipe_step["adjust"].setup_run(iteration, last_sample, sampler)
+
+        return False
+
+
+class RecipeStep:
+    """
+    Abstract class for a recipe step. Each recipe step needs to have a setup function and a stopping function, that define how the sampler behaves during that step.
+
+    Args:
+        moves (list, optional): List of moves to use during this recipe step. Defaults to None.
+        weights (list, optional): List of weights for the moves. Defaults to None.
+    """
+    def __init__(self, moves=None, weights=None):
+        if moves is not None:
+            self.moves = moves
+            if weights is not None:
+                self.weights = weights
+
+    def __repr__(self):
+        return f"RecipeStep with moves: {self.moves} and weights: {self.weights}"
+
+    @property
+    def moves(self):
+        if not hasattr(self, "_moves"):
+            raise ValueError("Must add moves for this recipe step.")
+        return self._moves
+
+    @moves.setter
+    def moves(self, moves):
+        self._moves = moves
+
+    @property
+    def weights(self):
+        if not hasattr(self, "_weights"):
+            self._weights = [1.0 / len(self.moves) for _ in self.moves]
+        return self._weights
+
+    @weights.setter
+    def weights(self, weights):
+        self._weights = weights
+
+    def setup_run(self, iteration, last_sample, sampler):
+        raise NotImplementedError
+
+    def stopping_function(self, iteration, last_sample, sampler):
+        raise NotImplementedError
+
+class BaseRecipeStep(RecipeStep):
+    """Base class for recipe steps."""
+    def __init__(self, *args, moves=None, weights=None, **kwargs):
+        super().__init__(moves=moves, weights=weights)
+
+    def setup_run(self, iteration, last_sample, sampler):
+        for move in self.moves:
+            if sampler.periodic is not None and move.periodic is None:
+                logger.debug(f"Setting periodicity of move {move} to {sampler.periodic}")
+                move.periodic = sampler.periodic
+
+        sampler.moves = self.moves
+        sampler.weights = self.weights

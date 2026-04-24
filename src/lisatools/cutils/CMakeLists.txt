@@ -67,11 +67,35 @@ if(LISATOOLS_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM
     )
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx)
+  
+  # # NEW: Copy L1Detector.cu to L1Detector.cxx for CPU build
+  # add_custom_command(
+  #   OUTPUT "L1Detector.cxx"
+  #   COMMENT "Copy L1Detector.cu to L1Detector.cxx"
+  #   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/L1Detector.cu"
+  #           "${CMAKE_CURRENT_BINARY_DIR}/L1Detector.cxx"
+  #   DEPENDS "L1Detector.cu"
+  #   VERBATIM
+  #   )
+
+  # Copy PSD.cu to PSD.cxx for CPU build
+  add_custom_command(
+    OUTPUT "PSD.cxx"
+    COMMENT "Copy PSD.cu to PSD.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/PSD.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/PSD.cxx"
+    DEPENDS "PSD.cu"
+    VERBATIM
+    )
+
+  # Add L1Detector.cxx to the sources
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
+  
+  # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp)
+                                        Detector.hpp  PSD.hpp)
 
   pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
@@ -83,11 +107,14 @@ endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu)
+  # Add L1Detector.cu to the GPU sources
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
+  
+  # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp)
+                                        Detector.hpp PSD.hpp)
 
   pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
@@ -98,4 +125,3 @@ if(LISATOOLS_WITH_GPU)
                                       binding.hpp)
 
 endif()
-

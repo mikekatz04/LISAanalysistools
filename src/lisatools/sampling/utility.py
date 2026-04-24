@@ -1,5 +1,5 @@
-from multiprocessing.sharedctypes import Value
 import os
+from multiprocessing.sharedctypes import Value
 
 import numpy as np
 
@@ -9,7 +9,8 @@ try:
 except (ImportError, ModuleNotFoundError) as e:
     pass
 
-from eryn.state import State, BranchSupplemental
+from eryn.state import BranchSupplemental, State
+from eryn.utils.transform import TransformContainer
 from eryn.utils.utility import groups_from_inds
 
 
@@ -235,17 +236,13 @@ class GetLastGBState:
 
         if fix_temp_initial_ind is not None or fix_temp_inds is not None:
             if fix_temp_initial_ind is None or fix_temp_inds is None:
-                raise ValueError(
-                    "If giving fix_temp_initial_ind or fix_temp_inds, must give both."
-                )
+                raise ValueError("If giving fix_temp_initial_ind or fix_temp_inds, must give both.")
 
         state = reader.get_last_sample()
 
         waveform_kwargs = {**self.waveform_kwargs, **waveform_kwargs}
         if "start_freq_ind" not in waveform_kwargs:
-            raise ValueError(
-                "In get_last_gb_state, waveform_kwargs must include 'start_freq_ind'."
-            )
+            raise ValueError("In get_last_gb_state, waveform_kwargs must include 'start_freq_ind'.")
 
         # check = reader.get_last_sample()
         ntemps, nwalkers, nleaves_max_old, ndim = state.branches["gb"].shape
@@ -272,12 +269,8 @@ class GetLastGBState:
                     state.branches_coords["gb"][i] = state.branches_coords["gb"][
                         fix_temp_initial_ind
                     ]
-                    state.branches_inds["gb"][i] = state.branches_inds["gb"][
-                        fix_temp_initial_ind
-                    ]
-                    state.branches_inds["gb"][i] = state.branches_inds["gb"][
-                        fix_temp_initial_ind
-                    ]
+                    state.branches_inds["gb"][i] = state.branches_inds["gb"][fix_temp_initial_ind]
+                    state.branches_inds["gb"][i] = state.branches_inds["gb"][fix_temp_initial_ind]
 
             ntemps, nwalkers, nleaves_max_old, ndim = state.branches["gb"].shape
             if nleaves_max_in is None:
@@ -301,9 +294,7 @@ class GetLastGBState:
             # add "gb" if there are any
             data_index_in = groups_from_inds({"gb": state.branches_inds["gb"]})["gb"]
 
-            data_index = xp.asarray(mgh.get_mapped_indices(data_index_in)).astype(
-                xp.int32
-            )
+            data_index = xp.asarray(mgh.get_mapped_indices(data_index_in)).astype(xp.int32)
 
             params_add_in = self.transform_fn["gb"].both_transforms(
                 state.branches_coords["gb"][state.branches_inds["gb"]]
@@ -349,9 +340,7 @@ class GetLastGBState:
 
         self.gb_wave_generator.d_d = np.asarray(mgh.get_inner_product(use_cpu=True))
 
-        state.log_like = (
-            -1 / 2 * self.gb_wave_generator.d_d.real.reshape(ntemps, nwalkers)
-        )
+        state.log_like = -1 / 2 * self.gb_wave_generator.d_d.real.reshape(ntemps, nwalkers)
 
         temp_inds = mgh.temp_indices.copy()
         walker_inds = mgh.walker_indices.copy()
@@ -391,9 +380,7 @@ class HeterodynedUpdate:
             best, copy=True
         )
 
-        sampler.log_like_fn.f.template_model.init_heterodyne_info(
-            best_full, **self.update_kwargs
-        )
+        sampler.log_like_fn.f.template_model.init_heterodyne_info(best_full, **self.update_kwargs)
 
         if self.set_d_d_zero:
             sampler.log_like_fn.f.template_model.reference_d_d = 0.0
@@ -409,3 +396,17 @@ class HeterodynedUpdate:
         sample_state.blobs = blobs
 
         # sampler.backend.save_step(sample_state, np.full_like(lp, True))
+
+
+def get_psd_transform_container(
+    Soms_fill: float = None,
+    Sa_fill: float = None,
+    n_knots: int = 5,
+    freq_min: float = None,
+    freq_max: float = None,
+) -> TransformContainer:
+    """
+    Prepare the transform container for psd sampling.
+
+
+    """

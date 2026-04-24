@@ -1,17 +1,20 @@
 import numpy as np
+from eryn.moves.multipletry import logsumexp
 from scipy import stats
 
-from ..utils.constants import *
 from ..sensitivity import get_sensitivity
-from eryn.moves.multipletry import logsumexp
+from ..utils.constants import *
 
-from typing import Union, Optional, Tuple, List
+try:
+    from ..cutils.psd_gpu import compute_logpdf
+
+except (ModuleNotFoundError, ImportError) as e:
+    pass
 
 import sys
+from typing import List, Optional, Tuple, Union
 
-sys.path.append(
-    "/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/"
-)
+sys.path.append("/data/mkatz/LISAanalysistools/lisaflow/flow/experiments/rvs/gf_search/")
 # from galaxy_ffdot import GalaxyFFdot
 # from galaxy import Galaxy
 
@@ -23,9 +26,7 @@ except (ModuleNotFoundError, ImportError) as e:
 
 
 class AmplitudeFrequencySNRPrior:
-    def __init__(
-        self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs
-    ):
+    def __init__(self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs):
         self.rho_star = rho_star
         self.frequency_prior = frequency_prior
 
@@ -61,8 +62,9 @@ class AmplitudeFrequencySNRPrior:
         Jac = xp.abs(rho / amp)
 
         logpdf_amp = np.log(np.abs(Jac * rho_pdf))
-        logpdf_f = self.frequency_prior.logpdf(f0_ms)
 
+        # TODO: fix this?
+        logpdf_f = xp.asarray(self.frequency_prior.logpdf(f0_ms))
         return logpdf_amp + logpdf_f
 
     def rvs(self, size=1, f0_input=None, **noise_kwargs):
@@ -106,9 +108,7 @@ class SNRPrior:
         p = xp.zeros_like(rho)
         good = rho > 0.0
         p[good] = (
-            3
-            * rho[good]
-            / (4 * self.rho_star**2 * (1 + rho[good] / (4 * self.rho_star)) ** 5)
+            3 * rho[good] / (4 * self.rho_star**2 * (1 + rho[good] / (4 * self.rho_star)) ** 5)
         )
         return p
 
@@ -125,8 +125,7 @@ class SNRPrior:
             * self.rho_star**3
             * (
                 1 / (768.0 * self.rho_star**3)
-                - (rho[good] + self.rho_star)
-                / (3.0 * (rho[good] + 4 * self.rho_star) ** 4)
+                - (rho[good] + self.rho_star) / (3.0 * (rho[good] + 4 * self.rho_star) ** 4)
             )
         )
         return c
@@ -238,11 +237,7 @@ class SNRPrior:
                                 + 3131031158784 * u**3 * self.rho_star**12
                             )
                         )
-                        / (
-                            3.0
-                            * 2**0.3333333333333333
-                            * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3)
-                        )
+                        / (3.0 * 2**0.3333333333333333 * xp.cbrt(-1 + 3 * u - 3 * u**2 + u**3))
                     )
                 )
             )
@@ -314,7 +309,13 @@ class AmplitudeFromSNR:
     def get_Sn_f(self, f0, psds=None, walker_inds=None, Sn_f=None, **noise_kwargs):
         if Sn_f is not None:
             assert len(f0) == len(Sn_f)
-            assert isinstance(f0, type(Sn_f))
+            if not isinstance(f0, type(Sn_f)):
+                if isinstance(f0, np.ndarray):
+                    assert isinstance(Sn_f, cp.ndarray)
+                    Sn_f = Sn_f.get()
+                else:
+                    assert isinstance(Sn_f, np.ndarray)
+                    f0 = cp.asarray(f0)
 
         elif psds is not None:
             Sn_f = self.interp_psd(f0, psds, walker_inds=walker_inds)
@@ -355,7 +356,7 @@ class GBPriorWrap:
         xp = np if not self.use_cupy else cp
         assert x.shape[1] == self.ndim and x.ndim == 2
 
-        logpdf_everything_else = self.base_prior.logpdf(x, keys=self.keys_sep)
+        logpdf_everything_else = xp.asarray(self.base_prior.logpdf(x, keys=self.keys_sep))
 
         f0 = xp.asarray(x[:, 1])
         amp = xp.asarray(x[:, 0])
@@ -378,11 +379,7 @@ class GBPriorWrap:
         if not ignore_amp:
             f0_input = arr[:, 1] if self.gen_frequency_alone else None
             arr[:, :diff] = (
-                xp.asarray(
-                    self.base_prior.priors_in[(0, 1)].rvs(
-                        size, f0_input=f0_input, **kwargs
-                    )
-                )
+                xp.asarray(self.base_prior.priors_in[(0, 1)].rvs(size, f0_input=f0_input, **kwargs))
                 .reshape(diff, -1)
                 .T
             )
@@ -391,10 +388,12 @@ class GBPriorWrap:
         return arr
 
 
-class FullGaussianMixtureModel:
+from ..utils.parallelbase import LISAToolsParallelModule
+
+
+class FullGaussianMixtureModel(LISAToolsParallelModule):
     def __init__(
         self,
-        gb,
         weights,
         means,
         covs,
@@ -406,13 +405,13 @@ class FullGaussianMixtureModel:
         use_cupy=False,
     ):
 
+        force_backend = "gpu" if use_cupy else "cpu"
+        LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         self.use_cupy = use_cupy
         if use_cupy:
             xp = cp
         else:
             xp = np
-
-        self.gb = gb
 
         indexing = []
         for i, weight in enumerate(weights):
@@ -438,9 +437,7 @@ class FullGaussianMixtureModel:
         self.means_in_pdf = self.means.T.flatten().copy()
         self.invcovs_in_pdf = self.invcovs.transpose(1, 2, 0).flatten().copy()
 
-        self.cumulative_weights = xp.concatenate(
-            [xp.array([0.0]), xp.cumsum(self.weights)]
-        )
+        self.cumulative_weights = xp.concatenate([xp.array([0.0]), xp.cumsum(self.weights)])
 
         self.min_limit_f = self.map_back_frequency(
             -1.0 * limit, self.mins[self.indexing, 1], self.maxs[self.indexing, 1]
@@ -450,15 +447,19 @@ class FullGaussianMixtureModel:
         )
 
         # compute the jacobian
-        self.log_det_J = (
-            self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1)
-        )[self.indexing].copy()
+        self.log_det_J = (self.ndim * np.log(2) - xp.sum(xp.log(self.maxs - self.mins), axis=-1))[
+            self.indexing
+        ].copy()
 
         """self.inds_sort_min_limit_f = xp.argsort(self.min_limit_f)
         self.inds_sort_max_limit_f = xp.argsort(self.max_limit_f)
         self.sorted_min_limit_f = self.min_limit_f[self.inds_sort_min_limit_f]
         self.sorted_max_limit_f = self.max_limit_f[self.inds_sort_max_limit_f]
         """
+
+    @property
+    def compute_logpdf(self) -> callable:
+        return self.backend.compute_logpdf
 
     def logpdf(self, x):
 
@@ -483,9 +484,7 @@ class FullGaussianMixtureModel:
         cs = xp.concatenate([xp.array([0]), xp.cumsum(diff)])
         tmp = xp.arange(cs[-1])
         keep_component_map = xp.searchsorted(cs, tmp, side="right") - 1
-        keep_point_map = (
-            tmp - cs[keep_component_map] + ind_min_limit[keep_component_map]
-        )
+        keep_point_map = tmp - cs[keep_component_map] + ind_min_limit[keep_component_map]
         max_components = diff.max().item()
 
         int_check = int(1e6)
@@ -507,7 +506,7 @@ class FullGaussianMixtureModel:
 
         logpdf_out_tmp = xp.zeros(points_sorted_in.shape[0])
 
-        self.gb.compute_logpdf(
+        self.compute_logpdf(
             logpdf_out_tmp,
             components_keep_in.astype(xp.int32),
             points_sorted_in,

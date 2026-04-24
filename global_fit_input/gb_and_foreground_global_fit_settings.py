@@ -1,0 +1,393 @@
+import h5py
+import numpy as np
+import shutil
+import logging
+
+logger = logging.getLogger(__name__)
+level = logging.INFO
+logger.setLevel(level)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    # * Prevent duplicate messages*
+    logger.propagate = False
+
+
+GPU_BACKEND = "cuda13x"
+try:
+    import lisatools
+    lisatools.get_backend("lisatools_" + GPU_BACKEND)
+    import cupy as cp
+    gpu_available = True
+    logger.info("STATUS: GPUs are available and running on " + GPU_BACKEND)
+except:
+    import numpy as cp
+    gpu_available = False
+    logger.info("STATUS: Either cupy could not be imported or gpu backends were not found...")
+    logger.info("WARNING: switching to cpus and numpy.")
+    
+
+from eryn.moves.tempering import TemperatureControl, make_ladder
+
+from lisatools.detector import EqualArmlengthOrbits, L1Orbits
+from eryn.moves import TemperatureControl
+from lisatools.utils.constants import YRSID_SI
+from gbgpu.utils.utility import get_fdot
+from eryn.state import BranchSupplemental
+from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
+from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
+from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
+# from global_fit_input.global_fit_settings import get_global_fit_settings
+
+from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
+from lisatools.globalfit.state import MBHState, EMRIState, GBState
+
+# from bbhx.utils.transform import *
+
+from lisatools.globalfit.generatefuncs import *
+from lisatools.utils.utility import AET
+from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
+
+from lisatools.globalfit.stock.erebor import (
+    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
+    MBHSetup, MBHSettings, GBSetup, GBSettings
+)
+
+from eryn.prior import uniform_dist
+from eryn.utils import TransformContainer
+from eryn.prior import ProbDistContainer
+
+from eryn.moves import StretchMove
+from lisatools.sampling.moves.skymodehop import SkyMove
+
+from eryn.moves import CombineMove
+from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
+from lisatools.globalfit.galaxyglobal import make_gmm
+from lisatools.globalfit.moves import GlobalFitMove
+from lisatools.utils.utility import tukey
+from lisatools.analysiscontainer import AnalysisContainerArray
+
+# import few
+
+
+# basic transform functions for pickling
+def f_ms_to_s(x):
+    return x * 1e-3
+
+from eryn.utils.updates import Update
+
+from lisatools.globalfit.preprocessing import L1ProcessingStep
+from lisatools.globalfit.recipe import Recipe, RecipeStep
+import time
+
+from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
+from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves
+
+
+################
+
+### DEFINE RECIPE
+
+#############
+
+
+def setup_recipe(
+    recipe: Recipe, 
+    engine_info, 
+    curr: CurrentInfoGlobalFit, 
+    acs: AnalysisContainerArray, 
+    priors: dict[str, ProbDistContainer], 
+    state
+):
+    general_info = curr.general_info
+    nwalkers: int = general_info.nwalkers
+    ntemps: int = general_info.ntemps
+    gpus: list[int] = curr.general_info.gpus
+    cp.cuda.runtime.setDevice(gpus[0])
+    
+    #* ================================= BUILD MOVES ================================= 
+    num_repeats_psd = 500 # standard = 60   
+    permute_every_psd = 50 # standard = 50
+    psd_search_move, psd_pe_move = build_psd_moves(
+                                        engine_info, curr, acs, priors, 
+                                        num_repeats=num_repeats_psd,
+                                        permute_every=permute_every_psd
+                                    )
+    gb_search_moves, gb_pe_moves = build_gb_moves(
+                                        engine_info, curr, acs, priors, state
+                                    )
+
+    #! add move to see if it all still works
+    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
+    # recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
+
+    #* ================================= SETUP SEARCH ================================= 
+    all_search_moves = [psd_search_move] + gb_search_moves
+    gf_search_move = GFCombineMove(moves=all_search_moves, verbose=True, share_temperature_control=False)
+    gf_search_move.accepted = np.zeros((ntemps, nwalkers))
+    
+    #? This can also be done with RJRecipeStep, e.g., to set convergence_iter = 5 but could make the search too long
+    recipe.add_recipe_component(SearchRecipeStep(moves=[gf_search_move]), name="gb + psd search")
+    
+    
+    #* ========================== SETUP PARAMETER ESTIMATION ========================== 
+    # all_pe_moves = gb_pe_moves + [psd_pe_move]
+    # pe_weights = [0.6, 0.08, 0.02, 0.3]
+    # recipe.add_recipe_component(RJRecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=5, convergence_iter=100), name="gb pe")
+
+
+#######################
+##### SETTINGS ###########
+###############
+
+
+def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
+    delta_safe = 1e-5
+    
+    A_lims = [7e-26, 1e-19]
+    f0_lims = [0.05e-3, 2.5e-2]  #! TODO: check validity for mojito
+    
+    m_chirp_lims = [0.001, 1.0]
+    fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
+    
+    fdot_lims = [-fdot_max_val, fdot_max_val]
+    phi0_lims = [0.0, 2 * np.pi]
+    iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
+    psi_lims = [0.0, np.pi]
+    lam_lims = [0.0, 2 * np.pi]
+    beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
+    
+    start_freq = general_set.start_freq # 0.0001
+    end_freq = general_set.end_freq # 0.025
+    oversample = 4
+    extra_buffer = 5
+    start_freq_ind = 0
+    # TODO properly reset/setup start_freq, end_freq and start_freq_ind informed by band edges
+    t0_gbs = 97729089.327664 # TODO obtain this properly from orbits currently taken from federicos validation of gbgpu
+    initialize_kwargs = dict(force_backend=general_set.gpu_backend)
+
+    gb_settings = GBSettings(
+        A_lims=A_lims,
+        f0_lims=f0_lims,
+        m_chirp_lims=m_chirp_lims,
+        fdot_lims=fdot_lims,
+        phi0_lims=phi0_lims,
+        iota_lims=iota_lims,
+        psi_lims=psi_lims,
+        lam_lims=lam_lims,
+        beta_lims=beta_lims,
+        start_freq=start_freq,
+        end_freq=end_freq,
+        oversample=oversample,
+        extra_buffer=extra_buffer,
+        # Start_resample_iter, Iter_count_per_resample, !group_proposal_kwargs (handled later?)
+        start_freq_ind=start_freq_ind,
+        t0=t0_gbs,
+        tdi_setup="XYZ",
+        use_tdi2=True,
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs,
+        # Transform, Priors, Periodic (handled later!)
+        nleaves_max=8000,
+        nleaves_min=0,
+        ndim=8,
+        log_dir=general_set.file_store_dir
+        # Betas, Other_tempering_kwargs, Branch_state, Branch_backend, Log_dir (handled later!)
+    )
+
+    gb_setup = GBSetup(gb_settings)
+    return gb_setup
+
+
+def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
+    initialize_kwargs_psd = dict()
+
+    priors_psd = {
+                r'$S_{\rm oms}$': uniform_dist(6.0e-12, 20.0e-11),  # Soms_d
+                r'$S_{\rm tm}$': uniform_dist(1.0e-15, 20.0e-14),  # Sa_a
+            }
+    priors = {"psd": ProbDistContainer(priors_psd)}
+    injection = np.array([15e-12, 3e-15]) # for diagnostic plots
+
+    psd_settings = PSDSettings(
+        # Psd_kwargs, Nleaves_max, Nleaves_min, Transform_fn (handled later or fixed)
+        ndim=2,
+        injection=injection,
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs_psd,
+        #* ?transform, ?periodic, !betas, !other_tempering_kwargs, ?branch_state, ?branch_backend
+        priors=priors,
+        log_dir=general_set.file_store_dir
+    )
+
+    return PSDSetup(psd_settings)
+
+
+def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:    
+
+    galfor_settings = GalForSettings(
+        # galfor_kwargs, nleaves_max, nleaves_min, ndim (handled later or fixed)
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs={},
+        log_dir=general_set.file_store_dir
+    )
+
+    return GalForSetup(galfor_settings)
+
+
+
+def get_general_erebor_settings() -> GeneralSetup:    
+    Tobs = 12. * YRSID_SI / 12.0
+    dt = 2.5
+
+    head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
+    # data_input_path = "/sps/lisaf/LISA/DDPC/MojitoLight/brickmarket/mojito_light_v1_0_0/"
+    data_input_path = head_dir
+    base_file_name = "gb_foreground"
+    file_store_dir = head_dir + "gf_outputs/"
+    
+    delete_previous_test_run = True
+    if delete_previous_test_run:
+        os.remove(file_store_dir+"gb_foreground_testing.h5")
+    
+    gpus = [0]
+    cp.cuda.runtime.setDevice(gpus[0])
+    nwalkers = 8
+    ntemps = 4
+
+    winalpha = 0.1
+    
+    basis_domain = "fd"
+    # stft_dt = 24 * 3600.0
+    
+    processor_init_kwargs = dict(L1_folder=data_input_path,
+                                 source_types=['noise', 'gb'], # 'mbhb', 'vgb',
+                                 verbose=True,
+                                 do_plots=True,
+                                 orbits_class=L1Orbits,
+                                 orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic") #icrs
+                                )
+    
+    preprocess_kwargs = dict(normalize=False)
+
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, use_splines=False)
+
+    general_settings = GeneralSettings(
+        Tobs=Tobs,
+        dt=dt,
+        file_store_dir=file_store_dir,
+        base_file_name=base_file_name,
+        main_file_key="testing",
+        start_freq=5e-5,
+        end_freq=3e-2,
+        basis_domain=basis_domain,
+        random_seed=103209,
+        backup_iter=5,
+        nwalkers=nwalkers,
+        ntemps=ntemps,
+        winalpha=winalpha,
+        gpu_backend=GPU_BACKEND,
+        gpus=gpus,
+        data_processor=L1ProcessingStep,
+        processor_init_kwargs=processor_init_kwargs,
+        preprocess_kwargs=preprocess_kwargs,
+        sensitivity_init_kwargs=sensitivity_init_kwargs,
+    )
+
+    general_setup = GeneralSetup(general_settings)
+    return general_setup
+
+
+def get_global_fit_settings(copy_settings_file=False):
+
+    general_setup = get_general_erebor_settings()
+
+    # file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
+    if copy_settings_file:
+        shutil.copy(__file__, general_setup.file_store_dir + general_setup.base_file_name + "_" + __file__.split("/")[-1])
+
+    ###############################
+    ###############################
+    ######    Rank/GPU setup  #####
+    ###############################
+    ###############################
+
+    head_rank = 1
+
+    main_rank = 0
+    
+    # run results rank will be next available rank if used
+    # gmm_ranks will be all other ranks
+
+    rank_info = RankInfo(
+        head_rank=head_rank,
+        main_rank=main_rank
+    )
+
+    ##################################
+    ##################################
+    ###  Galactic Binary Settings  ###
+    ##################################
+    ##################################
+
+    # limits on parameters
+    gb_setup = get_gb_erebor_settings(general_setup)
+
+    ##################################
+    ##################################
+    ###  PSD Settings  ###############
+    ##################################
+    ##################################
+
+
+    psd_setup = get_psd_erebor_settings(general_setup)
+
+    ##################################
+    ##################################
+    ###  Galfor Settings  ############
+    ##################################
+    ##################################
+
+
+    galfor_setup = get_galfor_erebor_settings(general_setup)
+
+    ##################################
+    ##################################
+    ### EMRI Settings ################
+    ##################################
+    ##################################
+
+
+    # emri_setup = get_emri_erebor_settings(general_setup)
+
+    ##############
+    ## READ OUT ##
+    ##############
+
+    global_settings = GlobalFitSettings(
+        source_info={
+            "gb": gb_setup,
+            "psd": psd_setup,
+            "galfor": galfor_setup,
+        },
+        general_info=general_setup,
+        rank_info=rank_info,
+        setup_function=setup_recipe,
+    )
+
+    curr_info = CurrentInfoGlobalFit(global_settings)
+
+    return curr_info
+
+
+
+if __name__ == "__main__":
+    settings = get_global_fit_settings()
+    breakpoint()

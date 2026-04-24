@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import numpy as np
-from typing import Any, Tuple, List, Optional
+from typing import Any, List, Optional, Tuple
 
-from ..diagnostic import snr as snr_func
-from lisatools.diagnostic import (
-    covariance,
-    plot_covariance_corner,
-    plot_covariance_contour,
-)
-from ..sensitivity import A1TDISens, Sensitivity
-from .waveformbase import SNRWaveform, AETTDIWaveform
-from ..detector import LISAModel
-from ..utils.constants import *
+import astropy.units as u
+import numpy as np
+from astropy.coordinates import SkyCoord
 from eryn.utils import TransformContainer
+
+from lisatools.diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
+
+from ..detector import LISAModel
+from ..diagnostic import snr as snr_func
+from ..sensitivity import A1TDISens, Sensitivity
+from ..utils.constants import *
+from .waveformbase import AETTDIWaveform, SNRWaveform
 
 
 class CalculationController:
@@ -127,8 +127,14 @@ class BBHCalculationController(CalculationController):
             11: time_convert,
             (0, 1): mT_q_to_m1_m2,
         }
+
+        input_basis = list(range(12))
+        output_basis = list(range(12))
         self.transform_fn = TransformContainer(
-            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis,
+            output_basis,
+            parameter_transforms=parameter_transforms,
+            fill_dict=None,  # fill_dict
         )
 
         super(BBHCalculationController, self).__init__(*args, **kwargs)
@@ -159,7 +165,7 @@ class BBHCalculationController(CalculationController):
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
         precision: bool = False,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
@@ -264,8 +270,14 @@ class GBCalculationController(CalculationController):
             8: np.arcsin,
             # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
         }
+
+        input_basis = list(range(9))
+        output_basis = list(range(9))
         self.transform_fn = TransformContainer(
-            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis,
+            output_basis,
+            parameter_transforms=parameter_transforms,
+            fill_dict=None,  # fill_dict
         )
 
         super(GBCalculationController, self).__init__(*args, **kwargs)
@@ -279,7 +291,7 @@ class GBCalculationController(CalculationController):
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
         precision: bool = False,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
@@ -310,9 +322,7 @@ class GBCalculationController(CalculationController):
         params[2] = params[2] / 1e-18
 
         if params[3] != 0.0:
-            raise NotImplementedError(
-                "This class has not been implemented for fddot != 0 yet."
-            )
+            raise NotImplementedError("This class has not been implemented for fddot != 0 yet.")
 
         params[5] = np.cos(params[5])
         params[8] = np.sin(params[8])
@@ -390,8 +400,14 @@ class EMRICalculationController(CalculationController):
             9: np.arccos,
             # (1, 2, 3): lambda x, y, z: (x, y, 11.0 / 3.0 * y**2 / x),
         }
+
+        input_basis = list(range(14))
+        output_basis = list(range(14))
         self.transform_fn = TransformContainer(
-            parameter_transforms=parameter_transforms, fill_dict=None  # fill_dict
+            input_basis,
+            output_basis,
+            parameter_transforms=parameter_transforms,
+            fill_dict=None,  # fill_dict
         )
 
         super(EMRICalculationController, self).__init__(*args, **kwargs)
@@ -403,7 +419,7 @@ class EMRICalculationController(CalculationController):
         eps: float = 1e-9,
         deriv_inds: np.ndarray = None,
         precision: bool = False,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Get covariance matrix.
 
@@ -457,3 +473,22 @@ class EMRICalculationController(CalculationController):
         )
 
         return params[deriv_inds], cov
+
+
+def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, float]:
+    """
+    Convert ICRS coordinates and angles, (psi, ra, dec) to ecliptic coordinates (psi_ecliptic, lambda, beta)."""
+    eps = 0.40909263366002024 # obliquity of the ecliptic at J2000 in radians
+
+    coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
+    ecliptic_coord = coord.barycentrictrueecliptic
+
+    lambd = ecliptic_coord.lon.rad
+    beta = ecliptic_coord.lat.rad
+
+    cosdeltapsi = 1./np.cos(dec) * (-np.sin(eps)*np.sin(beta)*np.sin(lambd) + np.cos(eps)*np.cos(beta))
+    sindeltapsi = -1./np.cos(dec) * np.sin(eps)*np.cos(lambd)
+    deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
+    psi_ecliptic = psi - deltapsi
+
+    return psi_ecliptic, lambd, beta
