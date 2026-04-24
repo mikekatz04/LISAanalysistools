@@ -303,7 +303,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all,
     double *spline_in_isi_oms_all, double *spline_in_testmass_all,
     double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds, 
-    XYZSensitivityMatrix *sensitivity_matrix)
+    XYZSensitivityMatrix sensitivity_matrix)
 {
     int tid;
 #ifdef __CUDACC__ 
@@ -400,7 +400,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             double spline_in_testmass = spline_in_testmass_all[psd_i * num_freqs + f_idx];
 
             // Get noise covariance matrix for this (time, frequency) pair
-            sensitivity_matrix->get_noise_covariance(
+            sensitivity_matrix.get_noise_covariance(
                 f, time_index,
                 Soms_d_in, Sa_a_in,
                 Amp, alpha, slope_1, f_knee, slope_2,
@@ -548,22 +548,23 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     double *like_contrib;
     int num_blocks = std::ceil((double)total_tf_pairs / NUM_THREADS_LIKE); // Blocks for (time, freq) coverage
 
-    gpuErrchk(cudaMalloc(&like_contrib, num_psds * num_blocks * sizeof(double)));
+    gpuErrchk(cudaMallocAsync(&like_contrib, num_psds * num_blocks * sizeof(double), cudaStreamDefault));
     
     // Grid: X=blocks for (time,freq) pairs, Y=blocks for PSDs
     dim3 grid(num_blocks, std::min(num_psds, 65535), 1);
     
-    XYZSensitivityMatrix *dev_ptr;
-    gpuErrchk(cudaMalloc(&dev_ptr, sizeof(XYZSensitivityMatrix)));
-    gpuErrchk(cudaMemcpy(dev_ptr, this, sizeof(XYZSensitivityMatrix), cudaMemcpyHostToDevice));
+    // XYZSensitivityMatrix *dev_ptr;
+    // gpuErrchk(cudaMalloc(&dev_ptr, sizeof(XYZSensitivityMatrix)));
+    // gpuErrchk(cudaMemcpy(dev_ptr, this, sizeof(XYZSensitivityMatrix), cudaMemcpyHostToDevice));
 
     psd_likelihood_xyz_kernel<<<grid, NUM_THREADS_LIKE>>>(
         like_contrib, f_arr, data, data_index_all, time_index_all,
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        differential_component, num_freqs, num_times, dips_mask, num_psds, dev_ptr);
+        differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
         
+    cudaStreamSynchronize(cudaStreamDefault);
     gpuErrchk(cudaGetLastError());
     
     // Reduction across blocks
@@ -571,8 +572,8 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     like_sum_from_contrib<<<grid_reduc, NUM_THREADS_LIKE>>>(like_contrib_final, like_contrib, num_blocks, num_psds);
     
     gpuErrchk(cudaGetLastError());
-    gpuErrchk(cudaFree(like_contrib));
-    gpuErrchk(cudaFree(dev_ptr));
+    gpuErrchk(cudaFreeAsync(like_contrib, cudaStreamDefault));
+    // gpuErrchk(cudaFree(dev_ptr));
 #else
     // CPU Fallback
     psd_likelihood_xyz_kernel(
@@ -580,7 +581,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
         Soms_d_in_all, Sa_a_in_all,
         Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
-        differential_component, num_freqs, num_times, dips_mask, num_psds, this);
+        differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
 #endif
 }
 
