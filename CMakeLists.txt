@@ -10,7 +10,7 @@
 cmake_minimum_required(VERSION 3.23...3.31)
 
 # ---- Main project definition ----
-project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX)
+project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX) #@ADDCUDAHERE@
 
 # ---- Find required dependencies ----
 find_package(Python COMPONENTS Interpreter Development.Module NumPy REQUIRED)
@@ -50,11 +50,13 @@ set_property(
 # LISATOOLS_CUDA_ARCH will be passed as the CUDA_ARCHITECTURES property for the CUDA
 # backend if it is compiled. See the documentation of CUDA_ARCHITECTURES:
 # https://cmake.org/cmake/help/latest/prop_tgt/CUDA_ARCHITECTURES.html
-set(
-  LISATOOLS_CUDA_ARCH "native"
-  CACHE STRING "CUDA Architecture targetted for LISATOOLS compilation (see doc of \
-          CMAKE_CUDA_ARCHITECTURES)."
-)
+# setting the cuda_arch for specific devices 
+# set(
+#   LISATOOLS_CUDA_ARCH "70;75;80;86;90"
+#   CACHE STRING "CUDA Architecture targetted for LISATOOLS compilation (see doc of \
+#           CMAKE_CUDA_ARCHITECTURES)."
+# )
+# see fix below
 
 set(
   LISATOOLS_MARCH "native"
@@ -125,6 +127,28 @@ get_target_property(_LISATOOLS_WITH_GPU lisaanalysistools WITH_GPU)
 if(_LISATOOLS_WITH_GPU)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
+
+  # For cuda13x and upwards cuda_arch <= 70 (v100) is not supported anymore. The code below takes 
+  # that into consideration, while still being agnostic to the cuda version usage. The following 
+  # checks if CUDAToolkit_VERSION is less than 13.0 --> full default arch. Otherwise, without 70.
+  set(DEFAULT_ARCHS "70;75;80;86;90")
+  set(FILTERED_ARCHS "")
+
+  foreach(_arch IN LISTS DEFAULT_ARCHS)
+    if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0" AND _arch LESS_EQUAL 70)
+      message(STATUS "CUDA Toolkit ${CUDAToolkit_VERSION} detected: Dropping unsupported architecture '${_arch}'")
+    else()
+      list(APPEND FILTERED_ARCHS "${_arch}")
+    endif()
+  endforeach()
+
+  set(
+    LISATOOLS_CUDA_ARCH "${FILTERED_ARCHS}"
+    CACHE STRING "CUDA Architectures targeted for LISATOOLS compilation."
+  )
+
+  set(CMAKE_CUDA_ARCHITECTURES ${LISATOOLS_CUDA_ARCH})
+  message(STATUS "LISATOOLS CUDA Architectures set to: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
 
 # ---- Include sources ----

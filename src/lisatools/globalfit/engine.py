@@ -86,13 +86,13 @@ class Setup:
 
 @dataclasses.dataclass
 class Settings:
-    Tobs: float = None
-    dt: float = None
-    initialize_kwargs: dict = None
+    Tobs: float | None = None
+    dt: float | None = None
+    initialize_kwargs: dict | None = None
     transform: Optional[TransformContainer] = None
-    priors: Optional[ProbDistContainer] = None
+    priors: Optional[typing.Dict[str,ProbDistContainer]] = None
     periodic: Optional[dict] = None
-    nleaves_max: Optional[int] = None  # TODO: need to make higher
+    nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
     ndim: Optional[int] = None
     betas: Optional[np.ndarray] = None
@@ -104,26 +104,27 @@ class Settings:
 
 @dataclasses.dataclass
 class GeneralSettings(Settings):
-    Tobs: float = None
-    dt: float = None
-    file_store_dir: str = None
-    base_file_name: str = None
+    Tobs: float | None = None
+    dt: float | None = None
+    file_store_dir: str | None = None
+    base_file_name: str | None = None
     main_file_key: Optional[str] = "parameter_estimation_main"
     past_file_for_start: Optional[str] = None
-    orbits: Orbits = None
-    gpu_orbits: Orbits = None
+    orbits: Orbits | None = None
+    gpu_orbits: Orbits | None = None
     basis_domain: str = "stft"
-    start_freq: float = None
-    end_freq: float = None
-    stft_dt: float = None
-    random_seed: int = None
-    backup_iter: int = None
-    nwalkers: int = None
-    ntemps: int = None
+    start_freq: float | None = None
+    end_freq: float | None = None
+    stft_dt: float | None = None
+    random_seed: int | None = None
+    backup_iter: int | None = None
+    nwalkers: int | None = None
+    ntemps: int | None = None
     window_type: str = "tukey"
-    window_taper_duration: float = None
-    gpus: typing.List[int] = None
-    fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
+    window_taper_duration: float | None = None
+    gpu_backend: str = "cuda12x"
+    gpus: typing.List[int] | None = None
+    fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
     # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
     # noise_model: Optional[LISAModel] = None
     data_processor: Optional[BaseProcessingStep] = None
@@ -176,7 +177,7 @@ class GeneralSetup(Setup, GeneralSettings):
         # if self.data_input_path is None:
         #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
-        self.force_backend = "cuda12x" if self.gpus is not None else "cpu"
+        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu" 
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
         if not os.path.exists(self.artifacts_file_dir):
@@ -188,9 +189,9 @@ class GeneralSetup(Setup, GeneralSettings):
     def init_orbit_information(self):
         if self.orbits is None:
             self.orbits = EqualArmlengthOrbits()
-            self.gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+            self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.gpu_backend)
         else:
-            if self.gpu_orbits is None and self.force_backend == "cuda12x":
+            if self.gpu_orbits is None and self.force_backend == self.gpu_backend:
                 # TODO: make better
                 raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
@@ -276,11 +277,19 @@ class GeneralSetup(Setup, GeneralSettings):
 
         # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
         # self.logger.debug(f"Window factor for normalization: {window_factor}")
-
+        self.domain_settings = domain_settings
+        
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, return_orbits=True
         )
         
+        if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
+            self.input_data_residual_array.data_length = len(domain_settings.f_arr)
+            self.input_data_residual_array._store_time_and_frequency_information(
+                df = domain_settings.df,
+                f_arr = domain_settings.f_arr
+            )
+
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
 
@@ -291,11 +300,11 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if orbits is not None:
             self.orbits = orbits
-            if self.force_backend == "cuda12x":
+            if self.force_backend == self.gpu_backend:
                 self.gpu_orbits = data_processor.orbits_class(
                     filename=orbits.filename,
                     armlength=orbits.armlength,
-                    force_backend="cuda12x",
+                    force_backend=self.gpu_backend,
                 )
             # self.gpu_orbits.configure()
 

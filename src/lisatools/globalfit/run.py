@@ -27,6 +27,7 @@ from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
+from .stock.erebor import Setup
 from .moves import GFCombineMove, GlobalFitMove
 from .recipe import Recipe
 from .state import GFState
@@ -192,8 +193,8 @@ class GlobalFit:
         self.comm = comm
         self.curr = curr
         self.rank = comm.Get_rank()
-        self.nwalkers = self.curr.general_info.nwalkers
-        self.ntemps = self.curr.general_info.ntemps
+        self.nwalkers: int = self.curr.general_info.nwalkers
+        self.ntemps: int = self.curr.general_info.ntemps
         self.all_ranks = list(range(self.comm.Get_size()))
         self.used_ranks = []
         self.head_rank = self.curr.rank_info.head_rank
@@ -341,8 +342,10 @@ class GlobalFit:
         Returns:
             AnalysisContainerArray containing data, residuals, and sensitivity for all walkers.
         """
+        general_info = self.curr.general_info
         if xp.__name__ == "cupy":
-            xp.cuda.runtime.setDevice(self.curr.general_info.gpus[0])
+            assert general_info.gpus is not None
+            xp.cuda.runtime.setDevice(general_info.gpus[0])
 
         # df = self.curr.general_info.df
         # N = self.curr.general_info.injection[0].shape[-1]
@@ -352,7 +355,7 @@ class GlobalFit:
         acs_tmp = []
         for w in range(self.nwalkers):
             # data_res_arr = DataResidualArray(deepcopy(self.curr.general_info.injection), f_arr=f_arr, df=df)
-            data_res_arr = deepcopy(self.curr.general_info.input_data_residual_array)
+            data_res_arr = deepcopy(general_info.input_data_residual_array)
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
@@ -367,7 +370,7 @@ class GlobalFit:
                 )
             else:
                 # TODO: update this
-                sens_here = self.curr.general_info.sensitivity_backend(
+                sens_here = general_info.sensitivity_backend(
                     f"walker_{w}", **self.curr.general_info.fixed_psd_kwargs
                 )
 
@@ -375,7 +378,7 @@ class GlobalFit:
             # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here)))
 
-        gpus = self.curr.general_info.gpus
+        gpus = general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
 
         # breakpoint()
@@ -448,6 +451,7 @@ class GlobalFit:
             priors = {}
             periodic = {}
             for name in branch_names:
+                # TODO: clean up, but also inform using current_info: Settings? = self.curr.source_info[name]
                 if name not in self.curr.source_info:
                     continue
 
@@ -455,14 +459,9 @@ class GlobalFit:
                     for key, value in self.curr.source_info[name]["priors"].items():
                         priors[key] = value
 
-                    if (
-                        "periodic" in self.curr.source_info[name]
-                        and self.curr.source_info[name]["periodic"] is not None
-                    ):
+                    if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
                         for key, value in self.curr.source_info[name]["periodic"].items():
                             periodic[key] = value
-
-                from .stock.erebor import Setup
 
                 # TODO: clean up
                 if isinstance(self.curr.source_info[name], Setup):
@@ -711,7 +710,7 @@ class GlobalFit:
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
-            sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 50, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
