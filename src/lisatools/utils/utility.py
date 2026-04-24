@@ -238,7 +238,7 @@ def generate_noise_fd(
 
     if func is None:
         # TODO: make this better
-        from lisatools.sensitivity import get_sensitivity
+        from .sensitivity import get_sensitivity
 
         func = get_sensitivity
 

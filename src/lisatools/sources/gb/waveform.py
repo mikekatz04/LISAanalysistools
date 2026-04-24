@@ -10,7 +10,7 @@ from fastlisaresponse import ResponseWrapper
 from few.waveform import GenerateEMRIWaveform
 from gbgpu.gbgpu import GBGPU
 
-from lisatools.detector import EqualArmlengthOrbits
+from .detector import EqualArmlengthOrbits
 
 from ..waveformbase import AETTDIWaveform
 

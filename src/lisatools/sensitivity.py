@@ -13,7 +13,7 @@ from scipy import interpolate
 from scipy.ndimage import gaussian_filter1d as np_gaussian_filter1d
 from scipy.signal import find_peaks
 
-from lisatools.utils.utility import get_array_module
+from .utils.utility import get_array_module
 
 from . import domains
 

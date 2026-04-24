@@ -7,8 +7,6 @@ import numpy as np
 from fastlisaresponse import ResponseWrapper
 # from few.waveform import GenerateEMRIWaveform
 
-from lisatools.detector import EqualArmlengthOrbits
-
 from ...detector import EqualArmlengthOrbits
 
 # imports
