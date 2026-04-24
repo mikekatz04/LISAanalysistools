@@ -166,6 +166,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     oversample = 4
     extra_buffer = 5
     start_freq_ind = 0
+    # TODO properly reset/setup start_freq, end_freq and start_freq_ind informed by band edges
     t0_gbs = 97729089.327664 # TODO obtain this properly from orbits currently taken from federicos validation of gbgpu
     initialize_kwargs = dict(force_backend=general_set.gpu_backend)
 

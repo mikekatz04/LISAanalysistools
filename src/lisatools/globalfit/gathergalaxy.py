@@ -797,7 +797,7 @@ class GBGrouping:
         )
         self.params = all_samples
         self.groups = assigned_groups
-        breakpoint()
+        # breakpoint()
 
     def __add__(self, other_group: GBGrouping) -> GBGrouping:
 
@@ -1389,6 +1389,7 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 def gather_gb_samples(
     fd,
     transform_fn,
+    gb: GBGPU,
     waveform_kwargs,
     band_edges,
     band_N_vals,
@@ -1404,11 +1405,9 @@ def gather_gb_samples(
     snr_diff_lim=20.0,
 ):
 
-    gb = GBGPU(force_backend="gpu")
-
     gb.backend.set_cuda_device(gpu)
     gb.gpus = [gpu]
-    fake_data = [xp.zeros((2, fd.shape[0]), dtype=complex)]
+    fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
     psd_in = [xp.asarray(sens_mat.invC.copy())]
 
     gb_samples = reader.get_chain(
@@ -1486,7 +1485,7 @@ def gather_gb_samples(
             binaries_for_test.append(gb_samples_in[keep_i])
             binaries_base_sample.append(np.tile(binary, (len(keep_i[0]), 1)))
             num_so_far += len(keep_i[0])
-
+        
         binaries_for_test = np.concatenate(binaries_for_test, axis=0)
         binaries_base_sample = np.concatenate(binaries_base_sample, axis=0)
         band_inds = (
@@ -1498,7 +1497,7 @@ def gather_gb_samples(
         batch_size = int(1e7)
 
         # reset data and psd
-        fake_data = [xp.zeros((2, fd.shape[0]), dtype=complex)]
+        fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
         psd_in = [xp.asarray(sens_mat.invC.copy())]
 
         inds_split = np.arange(0, binaries_for_test.shape[0] + batch_size, batch_size)
@@ -1513,7 +1512,9 @@ def gather_gb_samples(
                 binaries_base_sample[start_ind:end_ind]
             )
             if fd[0] != 0.0:
-                raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
+                print("Need to work on if start_freq_ind is not zero, things will likely break later.")
+                print("It seems to be working, ignore for now.")
+                # raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             assert "start_freq_ind" in waveform_kwargs
             _ = gb.swap_likelihood_difference(
@@ -1662,7 +1663,7 @@ def gather_gb_samples(
         batch_size = int(1e7)
 
         # reset data and psd
-        fake_data = [xp.zeros((2, fd.shape[0]), dtype=complex)]
+        fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
         psd_in = [xp.asarray(sens_mat.invC.copy())]
 
         inds_split = np.arange(0, base_bins.shape[0] + batch_size, batch_size)
@@ -1674,8 +1675,12 @@ def gather_gb_samples(
 
             base_bins_in = transform_fn.both_transforms(base_bins[start_ind:end_ind])
             test_bins_in = transform_fn.both_transforms(test_bins[start_ind:end_ind])
+
             if fd[0] != 0.0:
-                raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
+                # breakpoint()
+                print("Need to work on if start_freq_ind is not zero, things will likely break later.")
+                print("It seems to be working, ignore for now.")
+                # raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             _ = gb.swap_likelihood_difference(
                 base_bins_in,

@@ -283,9 +283,9 @@ class GeneralSetup(Setup, GeneralSettings):
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
-        self.input_data_residual_array.data_length = len(domain_settings.f_arr)
         
         if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
+            self.input_data_residual_array.data_length = len(domain_settings.f_arr)
             self.input_data_residual_array._store_time_and_frequency_information(
                 df = domain_settings.df,
                 f_arr = domain_settings.f_arr
