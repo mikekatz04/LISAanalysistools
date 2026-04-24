@@ -8,8 +8,7 @@ class DefaultResponseKwargs:
     """Default response kwargs
 
     Default response kwargs for
-    `fastlisaresponse.ResponseWrapper <https://mikekatz04.github.io/lisa-on-gpu/html/user/main.html#response-function-wrapper>`_.
-
+    
     ``t0=30000.0``
     ``order=25``
     ``tdi="1st generation"``
@@ -17,6 +16,8 @@ class DefaultResponseKwargs:
     ``orbits=EqualArmlengthOrbits()``
 
     """
+    # `fastlisaresponse.ResponseWrapper <https://mikekatz04.github.io/lisa-on-gpu/user/main.html#response-function-wrapper>`_.
+
 
     t0 = 30000.0
     order = 25

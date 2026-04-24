@@ -71,6 +71,10 @@ def get_first_backend(backend: str) -> Backend:
         return _get_first_backend("lisatools_" + backend)
     else:
         return _get_first_backend(backend)
+    
+from .analysiscontainer import AnalysisContainer
+from .datacontainer import DataResidualArray
+from .sensitivity import get_sensitivity, SensitivityMatrix
 
 __all__ = [
     "__version__",

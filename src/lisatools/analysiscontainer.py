@@ -12,7 +12,7 @@ from scipy import interpolate
 import matplotlib.pyplot as plt
 
 from eryn.utils import TransformContainer
-
+from . import domains
 
 try:
     import cupy as cp
@@ -110,6 +110,7 @@ class AnalysisContainer:
             Matplotlib figure and axes object in a 2-tuple.
 
         """
+        assert isinstance(self.data_res_arr.data_res_arr.settings, domains.FDSettings)
         fig, ax = self.sens_mat.loglog(char_strain=True)
         if self.sens_mat.ndim == 3:
             # 3x3 most likely
@@ -117,18 +118,18 @@ class AnalysisContainer:
                 for j in range(i, self.sens_mat.shape[1]):
                     # char strain
                     ax[i * self.sens_mat.shape[1] + j].loglog(
-                        self.data_res_arr.f_arr,
-                        self.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
+                        self.data_res_arr.data_res_arr.f_arr,
+                        self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
                     )
                     ax[i * self.sens_mat.shape[1] + j].loglog(
-                        self.data_res_arr.f_arr,
-                        self.data_res_arr.f_arr * np.abs(self.data_res_arr[j]),
+                        self.data_res_arr.data_res_arr.f_arr,
+                        self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[j]),
                     )
         else:
             for i in range(self.sens_mat.shape[0]):
                 ax[i].loglog(
-                    self.data_res_arr.f_arr,
-                    self.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
+                    self.data_res_arr.data_res_arr.f_arr,
+                    self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
                 )
         return (fig, ax)
 
@@ -145,7 +146,7 @@ class AnalysisContainer:
         if "psd" in kwargs:
             kwargs.pop("psd")
 
-        return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat)
+        return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs)
 
     def snr(self, **kwargs: dict) -> float:
         """Return the SNR of the current set of information
@@ -219,6 +220,7 @@ class AnalysisContainer:
         template: DataResidualArray,
         include_psd_info: bool = False,
         phase_maximize: bool = False,
+        amp_maximize: bool = False,
         **kwargs: dict,
     ) -> float:
         """Calculate the Likelihood of a template against the data.
@@ -227,6 +229,7 @@ class AnalysisContainer:
             template: Template signal.
             include_psd_info: If ``True``, add the PSD term to the Likelihood value.
             phase_maximize: If ``True``, maximize over an overall phase.
+            amp_maximize: If ``True``, maximize over an overall amplitude.
             **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
@@ -250,8 +253,14 @@ class AnalysisContainer:
         )
         d_h = np.abs(non_marg_d_h) if phase_maximize else non_marg_d_h.copy()
         self.non_marg_d_h = non_marg_d_h
-        like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
 
+        if amp_maximize:
+            amp_factor = d_h.real / h_h.real
+            d_h *= amp_factor
+            h_h *= amp_factor ** 2
+        # breakpoint()
+        like_out = -1 / 2 * (d_d + h_h - 2 * d_h).real
+        
         if include_psd_info:
             # add noise term if requested
             like_out += self.likelihood(noise_only=True)
@@ -481,12 +490,17 @@ class AnalysisContainer:
                 likelihood_out[i] = self.calculate_signal_likelihood(
                     *input_vals, **kwargs
                 )
+            return likelihood_out
 
         else:
             raise ValueError("x must be a 1D or 2D array.")
 
 
 class AnalysisContainerArray:
+    @property
+    def xp(self) -> object:
+        return cp if self.gpus is not None else np
+    
     def __init__(self, analysis_containers, gpus=None):
         if isinstance(analysis_containers, AnalysisContainer):
             acs = np.array([analysis_containers], dtype=object)
@@ -504,14 +518,23 @@ class AnalysisContainerArray:
         self.acs = acs
         self.acs_shape = acs.shape
         self.acs_total_entries = np.prod(acs.shape)
-        try:
-            self.nchannels, self.data_length = acs.flatten()[0].data_res_arr.shape
-        except ValueError:
-            self.data_length = acs.flatten()[0].data_res_arr.shape[0]
+
+        data_shape = acs.flatten()[0].data_res_arr.shape
+
+        if len(data_shape) == 1:
+            self.data_length = data_shape[0]
             self.nchannels = 1
+            self.end_shape = (self.data_length,)
+        elif len(data_shape) == 2:
+            self.nchannels, self.data_length = data_shape
+            self.end_shape = (self.data_length,)
+        elif len(data_shape) == 3:
+            self.nchannels, self.m, self.n = data_shape
+            self.data_length = self.m * self.n
+            self.end_shape = (self.m, self.n)
 
         if gpus is not None:
-            self.xp = xp = cp
+            xp = cp
             if isinstance(gpus, list):
                 if len(gpus) > 1:
                     raise NotImplementedError
@@ -523,8 +546,11 @@ class AnalysisContainerArray:
         # xp = get_array_module(acs.flatten()[0].data_res_arr[0])
 
         ac_tmp = acs.flatten()[0]
-        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-1]
-
+        self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[:-len(ac_tmp.sens_mat.data_shape)]
+        if isinstance(ac_tmp.sens_mat.basis_settings, domains.WDMSettings):
+            self.data_dtype = float
+        else:
+            self.data_dtype = complex
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory
         num_machines = 1 if gpus is None else len(gpus)
@@ -539,9 +565,12 @@ class AnalysisContainerArray:
         self.linear_data_arr = []
         self.linear_psd_arr = []
         for i, split in enumerate(gpu_splits):
-            self.gpu_map[split] = gpus[i]
+            if gpus is not None:
+                self.gpu_map[split] = gpus[i]
+            else:
+                self.gpu_map[split] = 0
             self.split_map[split] = i
-            self.linear_data_arr.append(xp.zeros(self.data_length * self.nchannels * len(split), dtype=complex))
+            self.linear_data_arr.append(xp.zeros(self.data_length * self.nchannels * len(split), dtype=self.data_dtype))
             self.linear_psd_arr.append(xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=float))
 
         self.num_acs = num_acs = len(acs.flatten())
@@ -574,7 +603,7 @@ class AnalysisContainerArray:
             start_index = intra_split_index * (self.nchannels * self.data_length)
             end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
             self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(ac.data_res_arr.flatten())
-            ac.data_res_arr._data_res_arr = self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, self.data_length)
+            ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][start_index:end_index].reshape((self.nchannels,) + self.end_shape)
             # TODO: add check to make sure changes are made inline along with protections
             if self.gpus is not None:
                 self.xp.get_default_memory_pool().free_all_blocks()
@@ -597,7 +626,7 @@ class AnalysisContainerArray:
             start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
             end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
             self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(ac.sens_mat.invC.flatten())
-            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + (self.data_length,))
+            ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(self.shape_sens + (self.m, self.n))
 
             # TODO: add check to make sure changes are made inline along with protections
             if self.gpus is not None:
@@ -653,11 +682,21 @@ class AnalysisContainerArray:
 
         assert isinstance(templates, np.ndarray) or isinstance(templates, cp.ndarray)
         
-        if templates.ndim == 2:
-            _nchannels, template_length = templates.shape
-            num_templates = 1
-        elif templates.ndim == 3:
-            num_templates, _nchannels, template_length = templates.shape
+        if isinstance(self.acs[0].data_res_arr.basis_settings, domains.WDMSettings):
+            if templates.ndim == 2:
+                _nchannels, template_length = templates.shape
+                num_templates = 1
+                templates = templates[None, :]
+            elif templates.ndim == 3:
+                num_templates, _nchannels, template_length = templates.shape
+        else:
+            if templates.ndim == 3:
+                _nchannels, template_m, template_n = templates.shape
+                templates = templates[None, :]
+                num_templates = 1
+            elif templates.ndim == 4:
+                num_templates, _nchannels, template_m, template_n = templates.shape
+            template_length = template_m * template_n
 
         if data_index is None:
             assert num_templates == self.acs_total_entries
@@ -687,7 +726,7 @@ class AnalysisContainerArray:
         for i, tmp in enumerate(self.linear_data_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape(-1, self.nchannels, self.data_length)) 
+            out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape))
         return out
         
     @property
@@ -696,7 +735,5 @@ class AnalysisContainerArray:
         for i, tmp in enumerate(self.linear_psd_arr):
             if self.gpus is not None:
                 self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape(-1, self.nchannels, self.data_length)) 
+            out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape)) 
         return out
-
-    

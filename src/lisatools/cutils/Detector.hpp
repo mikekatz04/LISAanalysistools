@@ -1,9 +1,14 @@
 #ifndef __DETECTOR_HPP__
 #define __DETECTOR_HPP__
 
-#include "global.hpp"
+#include "gbt_global.h"
 #include <iostream>
 
+#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+#define Orbits OrbitsGPU
+#else
+#define Orbits OrbitsCPU
+#endif
 class Vec
 {
 public:
@@ -12,19 +17,109 @@ public:
     double z;
 
     CUDA_DEVICE
+    Vec()
+    {
+        x = 0.0;
+        y = 0.0;
+        z = 0.0;
+    }
+
+    CUDA_DEVICE
     Vec(double x_, double y_, double z_)
     {
         x = x_;
         y = y_;
         z = z_;
     }
+
+    CUDA_DEVICE
+    Vec add(Vec a, Vec b) {
+        Vec c(0., 0., 0.);
+        c.x = a.x + b.x;
+        c.y = a.y + b.y;
+        c.z = a.z + b.z;
+        return c;
+    }
+
+    CUDA_DEVICE
+    Vec minus(Vec a, Vec b) {
+        Vec c(0., 0., 0.);
+        c.x = a.x + b.x;
+        c.y = a.y + b.y;
+        c.z = a.z + b.z;
+        return c;
+    }
+
+    CUDA_DEVICE
+    Vec operator-(const Vec& other) const {
+        Vec out(0., 0., 0.);
+        out.x = this->x - other.x;
+        out.y = this->y - other.y;
+        out.z = this->z - other.z;
+        return out;
+    }
+
+    CUDA_DEVICE
+    Vec operator+(const Vec& other) const {
+        Vec out(0., 0., 0.);
+        out.x = this->x + other.x;
+        out.y = this->y + other.y;
+        out.z = this->z + other.z;
+        return out;
+    }
+
+    CUDA_DEVICE
+    // Non-const version: Allows modification of elements
+    double& operator[](int index) {
+        if (index < 0 || index >= 3)
+        {
+            printf("BAD INDEX");
+        }
+        if (index == 0) return this->x;
+        if (index == 1) return this->y;
+        return this->z;  // (index == 2) 
+    }
+
+    CUDA_DEVICE
+    // Non-const version: Allows modification of elements
+    Vec operator/(double val) {
+        Vec out(0., 0., 0.);
+        out.x = this->x / val;
+        out.y = this->y / val;
+        out.z = this->z / val;
+        return out;
+    }
+
+    CUDA_DEVICE
+    // Non-const version: Allows modification of elements
+    Vec operator*(double val) {
+        Vec out(0., 0., 0.);
+        out.x = this->x * val;
+        out.y = this->y * val;
+        out.z = this->z * val;
+        return out;
+    }
+
+    CUDA_DEVICE
+    double dot(Vec other)
+    {
+        double _dot = 0.0;
+        _dot += this->x * other.x;
+        _dot += this->y * other.y;
+        _dot += this->z * other.z;
+        return _dot;
+    }
 };
 
 class Orbits
 {
 public:
-    double dt;
-    int N;
+    double sc_t0;
+    double sc_dt;
+    int sc_N;
+    double ltt_t0;
+    double ltt_dt;
+    int ltt_N;
     double *n_arr;
     double *ltt_arr;
     double *x_arr;
@@ -34,11 +129,17 @@ public:
     int *links;
     int *sc_r;
     int *sc_e;
-
-    Orbits(double dt_, int N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
+    
+    Orbits(double sc_t0_, double sc_dt_, int sc_N_, double ltt_t0_, double ltt_dt_, int ltt_N_, double *n_arr_, double *ltt_arr_, double *x_arr_, int *links_, int *sc_r_, int *sc_e_, double armlength_)
     {
-        dt = dt_;
-        N = N_;
+        sc_t0 = sc_t0_;
+        sc_dt = sc_dt_;
+        sc_N = sc_N_;
+
+        ltt_t0 = ltt_t0_;
+        ltt_dt = ltt_dt_;
+        ltt_N = ltt_N_;
+
         n_arr = n_arr_;
         ltt_arr = ltt_arr_;
         x_arr = x_arr_;
@@ -49,26 +150,29 @@ public:
         sc_e = sc_e_;
         links = links_;
         armlength = armlength_;
+
     };
 
     int get_sc_r_from_arr(int i)
     {
+        
         return sc_r[i];
     };
 
     int get_sc_e_from_arr(int i)
     {
+        
         return sc_e[i];
     };
-
     int get_link_from_arr(int i)
     {
+        
         return links[i];
     };
 
-    CUDA_DEVICE int get_window(double t);
+    CUDA_DEVICE int get_window(double t, double t0, double dt, int N);
     CUDA_DEVICE Vec get_normal_unit_vec(double t, int link);
-    CUDA_DEVICE double interpolate(double t, double *in_arr, int window, int major_ndim, int major_ind, int ndim, int pos);
+    CUDA_DEVICE double interpolate(double t, double *in_arr, double t0, double dt, int window, int major_ndim, int major_ind, int ndim, int pos);
     CUDA_DEVICE int get_link_ind(int link);
     CUDA_DEVICE int get_sc_ind(int sc);
     CUDA_DEVICE double get_light_travel_time(double t, int link);
@@ -81,4 +185,5 @@ public:
     void dealloc() {};
 };
 
-#endif // __DETECTOR_HPP__
+#endif // __L1DETECTOR_HPP__
+    

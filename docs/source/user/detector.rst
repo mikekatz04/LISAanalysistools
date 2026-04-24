@@ -7,8 +7,18 @@ LISA Models
 ---------------------
 
 .. autoclass:: lisatools.detector.LISAModel
+    :members:
+    :show-inheritance:
 
 .. autoclass:: lisatools.detector.LISAModelSettings
+    :members:
+    :show-inheritance:
+
+.. autoclass:: lisatools.detector.ExtendedLISAModel
+    :members:
+    :show-inheritance:
+
+.. autoclass:: lisatools.detector.ExtendedLISAModelSettings
     :members:
     :show-inheritance:
 

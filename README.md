@@ -28,22 +28,6 @@ $ nvidia-smi
 ...
 ```
 
-You may also install `lisaanalysistools` directly using conda (including on Windows)
-as well as its CUDA 12.x plugin (only on Linux). It is strongly advised to:
-
-1. Ensure that your conda environment makes sole use of the `conda-forge` channel
-2. Install `lisaanalysistools` directly when building your conda environment, not afterwards
-
-```sh
-# For CPU-only version, on either Linux, macOS or Windows:
-conda create --name lisatools_cpu -c conda-forge --override-channels python=3.12 lisaanalysistools
-conda activate lisatools_cpu
-
-# For CUDA 12.x version, only on Linux
-conda create --name lisatools_cuda -c conda-forge --override-channels python=3.12 lisaanalysistools-cuda12x
-conda activate lisatools_cuda
-```
-
 Now, in a python file or notebook:
 
 ```py3
@@ -120,7 +104,7 @@ cd LISAanalysistools
 
 Now create an environment (these instructions work for all platforms but some
 adjustements can be needed, refer to the
-[detailed installation documentation](https://mikekatz04.github.io/LISAanalysistools/build/html/index.html) for more information):
+[detailed installation documentation](https://mikekatz04.github.io/LISAanalysistools) for more information):
 
 ```
 conda create -n lisatools_env -y -c conda-forge --override-channels |
