@@ -615,7 +615,7 @@ class DomainComputationGroupArray:
         self, 
         positions_per_split: list[np.ndarray], 
         coords: np.ndarray | cp.ndarray | list[np.ndarray | cp.ndarray], 
-    ) -> tuple[list[tuple], list[dict]]:
+    ) -> tuple[list[tuple[np.ndarray]], list[dict]]:
         """
         Unpack coordinates for each split based on the positions per split.
 
