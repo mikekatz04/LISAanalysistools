@@ -124,12 +124,12 @@ class XYZSensitivityMatrixWrap {
 public:
     XYZSensitivityMatrix *sensitivity_matrix;
 
-    XYZSensitivityMatrixWrap(array_type<double> averaged_ltts_arr_, array_type<double> delta_ltts_arr_, int n_times_, double armlength_, int generation_, bool spline_noise_)
+    XYZSensitivityMatrixWrap(array_type<double> averaged_ltts_arr_, array_type<double> delta_ltts_arr_, int n_times_, double armlength_, int generation_, bool spline_noise_, double window_factor_)
     {
         double *_averaged_ltts_arr = return_pointer_and_check_length(averaged_ltts_arr_, "averaged_ltts_arr", n_times_, 6);
         double *_delta_ltts_arr = return_pointer_and_check_length(delta_ltts_arr_, "delta_ltts_arr", n_times_, 6);
-        
-        sensitivity_matrix = new XYZSensitivityMatrix(_averaged_ltts_arr, _delta_ltts_arr, n_times_, armlength_, generation_, spline_noise_);
+
+        sensitivity_matrix = new XYZSensitivityMatrix(_averaged_ltts_arr, _delta_ltts_arr, n_times_, armlength_, generation_, spline_noise_, window_factor_);
     }
 
     ~XYZSensitivityMatrixWrap() {

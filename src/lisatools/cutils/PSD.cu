@@ -834,14 +834,14 @@ void XYZSensitivityMatrix::get_noise_covariance(
 
     // Build Covariance Matrix C (3x3 Hermitian, upper triangle)
     // Diagonal elements are real
-    *c00 = (oms_xx * S_isi_oms + tm_xx * S_tm);
-    *c11 = (oms_yy * S_isi_oms + tm_yy * S_tm);
-    *c22 = (oms_zz * S_isi_oms + tm_zz * S_tm);
+    *c00 = (oms_xx * S_isi_oms + tm_xx * S_tm) * window_factor;
+    *c11 = (oms_yy * S_isi_oms + tm_yy * S_tm) * window_factor;
+    *c22 = (oms_zz * S_isi_oms + tm_zz * S_tm) * window_factor;
     
     // Off-diagonal elements are complex
-    *c01 = (oms_xy * S_isi_oms + tm_xy * S_tm);
-    *c02 = (oms_xz * S_isi_oms + tm_xz * S_tm);
-    *c12 = (oms_yz * S_isi_oms + tm_yz * S_tm);
+    *c01 = (oms_xy * S_isi_oms + tm_xy * S_tm) * window_factor;
+    *c02 = (oms_xz * S_isi_oms + tm_xz * S_tm) * window_factor;
+    *c12 = (oms_yz * S_isi_oms + tm_yz * S_tm) * window_factor;
 }
 
 CUDA_KERNEL

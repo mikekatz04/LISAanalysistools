@@ -11,14 +11,14 @@ from typing import Optional
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-from mojito.reader import MojitoL1File
-from scipy import signal
+from mojito import MojitoL1File
+from MojitoProcessor import SignalProcessor as MPSignalProcessor
 from tqdm import tqdm
 
 from ..datacontainer import DataResidualArray
 from ..detector import L1Orbits, Orbits
 from ..domains import DomainBase, DomainSettingsBase, TDSettings, TDSignal
-from ..utils.utility import detrend, get_array_module
+from ..utils.utility import get_array_module
 
 logger = logging.getLogger(__name__)
 
@@ -60,86 +60,6 @@ def find_file(folder: str, source_type: str, source_id: int) -> str:
     raise FileNotFoundError(
         f"No Mojito L1 file found for source type '{source_type}' and source ID '{source_id}' in folder '{folder}'."
     )
-
-
-def _apply_filter(
-    data_in: np.ndarray,
-    fs: float,
-    low_or_cutoff: float,
-    high: Optional[float],
-    btype: str,
-    order: int,
-    filter_type: str,
-    zero_phase: bool,
-    axis: int = -1,
-    **kwargs,
-) -> np.ndarray:
-    """
-    Internal method to apply filter to all channels. Credits: Ollie Burke.
-
-    Args:
-        data_in (np.ndarray): Input data array with shape (n_channels, n_times).
-        fs (float): Sampling frequency in Hz.
-        low_or_cutoff (float): Low cutoff frequency for highpass/bandpass or cutoff frequency for lowpass.
-        high (Optional[float]): High cutoff frequency for bandpass. None for lowpass/highpass.
-        btype (str): Type of filter: 'lowpass', 'highpass', 'bandpass'.
-        order (int): Filter order.
-        filter_type (str): Filter type: 'butterworth', 'chebyshev1', 'chebyshev2', 'bessel'.
-        zero_phase (bool): If True, use zero-phase filtering (filtfilt), else single-pass.
-        axis (int): Axis    along which to apply the filter. Defaults to -1 (last axis).
-        **kwargs: Additional keyword arguments for the eventual plot.
-
-    Returns:
-        np.ndarray: Filtered data array.
-    """
-    # Determine critical frequencies
-    if btype == "bandpass":
-        Wn = [low_or_cutoff, high]
-    else:
-        Wn = low_or_cutoff
-
-    # Design filter
-    filter_funcs = {
-        "butterworth": signal.butter,
-        "chebyshev1": signal.cheby1,
-        "chebyshev2": signal.cheby2,
-        "bessel": signal.bessel,
-    }
-
-    if filter_type not in filter_funcs:
-        raise ValueError(
-            f"Unknown filter type: {filter_type}. " f"Choose from {list(filter_funcs.keys())}"
-        )
-
-    sos = filter_funcs[filter_type](order, Wn, btype=btype, fs=fs, output="sos")
-
-    # Apply filter to all channels
-    if zero_phase:
-        filtered_data = signal.sosfiltfilt(sos, data_in, axis=axis)
-    else:
-        filtered_data = signal.sosfilt(sos, data_in, axis=axis)
-
-    if kwargs.get("do_plots", False):
-        decimate_factor = kwargs.get(
-            "decimate_factor", 1000
-        )  # Decimate for plotting if too many points
-
-        plt.figure(figsize=(10, 4))
-        plt.plot(
-            data_in[0, ::decimate_factor],
-            label="Original X channel",
-            c="gray",
-            alpha=0.5,
-        )
-        plt.plot(filtered_data[0, ::decimate_factor], label="Filtered X channel", c="blue")
-        plt.xlabel("Sample Index")
-        plt.ylabel("Strain")
-        plt.title(f"Signal {btype.capitalize()} Filtering ({filter_type}, order={order})")
-        plt.legend()
-        plt.savefig(os.path.join(kwargs.get("plot_folder", "."), f"{btype}_filter_signal.png"))
-        plt.close()
-
-    return filtered_data
 
 
 class L1DataLoader:
@@ -437,6 +357,8 @@ class SignalProcessor:
         Whether to generate plots during processing steps. Default is False.
     """
 
+    _CHANNEL_NAMES = ["X", "Y", "Z"]
+
     def __init__(
         self,
         times: np.ndarray,
@@ -457,11 +379,42 @@ class SignalProcessor:
         self.verbose = verbose
         self.do_plots = do_plots
 
+    def _to_mp_dict(self):
+        """ndarray (n_ch, N) -> {'X': arr, 'Y': arr, 'Z': arr}"""
+        return {ch: self.data[i] for i, ch in enumerate(self._CHANNEL_NAMES[: self.data.shape[0]])}
+
+    def _from_mp_dict(self, mp_data):
+        """{'X': arr, 'Y': arr, 'Z': arr} -> ndarray (n_ch, N)"""
+        return np.vstack([mp_data[ch] for ch in self._CHANNEL_NAMES if ch in mp_data])
+
+    def _filter_via_mp(self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True):
+        mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
+        mp.filter(low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase)
+        return self._from_mp_dict(mp.data)
+
+    def _plot_filter(self, filtered, btype, order, filter_type, **kwargs):
+        """Plot original vs filtered X channel."""
+        decimate_factor = kwargs.get("decimate_factor", 1000)
+        plt.figure(figsize=(10, 4))
+        plt.plot(
+            self.data[0, ::decimate_factor],
+            label="Original X channel",
+            c="gray",
+            alpha=0.5,
+        )
+        plt.plot(filtered[0, ::decimate_factor], label="Filtered X channel", c="blue")
+        plt.xlabel("Sample Index")
+        plt.ylabel("Strain")
+        plt.title(f"Signal {btype.capitalize()} Filtering ({filter_type}, order={order})")
+        plt.legend()
+        plt.savefig(os.path.join(kwargs.get("plot_folder", "."), f"{btype}_filter_signal.png"))
+        plt.close()
+
     def bandpass_filter(
         self,
         low: float,
         high: float,
-        order: int = 6,
+        order: int = 2,
         filter_type: str = "butterworth",
         zero_phase: bool = True,
         **kwargs,
@@ -476,7 +429,7 @@ class SignalProcessor:
         high : float
             Upper cutoff frequency in Hz
         order : int, optional
-            Filter order (default: 6)
+            Filter order (default: 2)
         filter_type : str, optional
             Filter type: 'butterworth', 'chebyshev1', 'chebyshev2', 'bessel'
             (default: 'butterworth')
@@ -489,24 +442,17 @@ class SignalProcessor:
         filtered_data : np.ndarray
             Array of filtered channel data
         """
-        return _apply_filter(
-            self.data,
-            self.fs,
-            low,
-            high,
-            "bandpass",
-            order,
-            filter_type,
-            zero_phase,
-            axis=-1,
-            do_plots=self.do_plots,
-            **kwargs,
+        filtered = self._filter_via_mp(
+            low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase
         )
+        if self.do_plots:
+            self._plot_filter(filtered, "bandpass", order, filter_type, **kwargs)
+        return filtered
 
     def lowpass_filter(
         self,
         cutoff: float,
-        order: int = 6,
+        order: int = 2,
         filter_type: str = "butterworth",
         zero_phase: bool = True,
         **kwargs,
@@ -519,7 +465,7 @@ class SignalProcessor:
         cutoff : float
             Cutoff frequency in Hz
         order : int, optional
-            Filter order (default: 6)
+            Filter order (default: 2)
         filter_type : str, optional
             Filter type (default: 'butterworth')
         zero_phase : bool, optional
@@ -531,24 +477,17 @@ class SignalProcessor:
         filtered_data : np.ndarray
             Array of filtered channel data
         """
-        return _apply_filter(
-            self.data,
-            self.fs,
-            cutoff,
-            None,
-            "lowpass",
-            order,
-            filter_type,
-            zero_phase,
-            axis=-1,
-            do_plots=self.do_plots,
-            **kwargs,
+        filtered = self._filter_via_mp(
+            high=cutoff, order=order, filter_type=filter_type, zero_phase=zero_phase
         )
+        if self.do_plots:
+            self._plot_filter(filtered, "lowpass", order, filter_type, **kwargs)
+        return filtered
 
     def highpass_filter(
         self,
         cutoff: float,
-        order: int = 6,
+        order: int = 2,
         filter_type: str = "butterworth",
         zero_phase: bool = True,
         **kwargs,
@@ -561,7 +500,7 @@ class SignalProcessor:
         cutoff : float
             Cutoff frequency in Hz
         order : int, optional
-            Filter order (default: 6)
+            Filter order (default: 2)
         filter_type : str, optional
             Filter type (default: 'butterworth')
         zero_phase : bool, optional
@@ -573,19 +512,12 @@ class SignalProcessor:
         filtered_data : np.ndarray
             Array of filtered channel data
         """
-        return _apply_filter(
-            self.data,
-            self.fs,
-            cutoff,
-            None,
-            "highpass",
-            order,
-            filter_type,
-            zero_phase,
-            axis=-1,
-            do_plots=self.do_plots,
-            **kwargs,
+        filtered = self._filter_via_mp(
+            low=cutoff, order=order, filter_type=filter_type, zero_phase=zero_phase
         )
+        if self.do_plots:
+            self._plot_filter(filtered, "highpass", order, filter_type, **kwargs)
+        return filtered
 
     def _update_params(self):
         """Update internal parameters after data modification."""
@@ -594,6 +526,35 @@ class SignalProcessor:
 
         if self.verbose:
             logger.info(f"Updated parameters: N={self.N}, T={self.T}")
+
+    def downsample(self, target_fs, window=("kaiser", 31.0), padtype="line"):
+        """Downsample all channels to target_fs via polyphase filtering.
+
+        Delegates to MojitoProcessor.SignalProcessor.downsample().
+        Updates self.data, self.fs, self.times and derived params (N, T, dt).
+
+        Parameters
+        ----------
+        target_fs : float
+            Target sampling frequency in Hz.
+        window : tuple, optional
+            Window for the anti-aliasing filter (default: ('kaiser', 31.0)).
+        padtype : str, optional
+            Padding type for the resampling (default: 'line').
+
+        Returns
+        -------
+        np.ndarray
+            Downsampled data array.
+        """
+        mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
+        mp.downsample(target_fs=target_fs, window=window, padtype=padtype)
+        self.data = self._from_mp_dict(mp.data)
+        self.fs = mp.fs
+        self.dt = 1.0 / self.fs
+        self.times = self.times[0] + np.arange(self.data.shape[1]) * self.dt
+        self._update_params()
+        return self.data
 
     def trim(
         self,
@@ -725,10 +686,10 @@ class BaseProcessingStep(SignalProcessor):
 
     def process(
         self,
-        do_detrend: bool = True,
         highpass_kwargs: dict = None,
         lowpass_kwargs: dict = None,
         bandpass_kwargs: dict = None,
+        downsample_kwargs: dict = None,
         trim_kwargs: dict = None,
         Tobs: float = None,
         **kwargs,
@@ -737,10 +698,11 @@ class BaseProcessingStep(SignalProcessor):
         Apply preprocessing steps to the loaded data. for each step, if the corresponding kwargs is None, the step is skipped.
 
         Args:
-            do_detrend (bool, optional): Whether to detrend the data. Defaults to True.
             highpass_kwargs (dict, optional): Keyword arguments for highpass_filter method.
             lowpass_kwargs (dict, optional): Keyword arguments for lowpass_filter method.
             bandpass_kwargs (dict, optional): Keyword arguments for bandpass_filter method.
+            downsample_kwargs (dict, optional): Keyword arguments for downsample method.
+                Applied after filtering and before trimming. Example: dict(target_fs=1.0).
             trim_kwargs (dict, optional): Keyword arguments for trim method.
             Tobs (float, optional): Observation time in seconds. If provided, applies trimming to keep only the first `Tobs` duration of data.
             **kwargs: Additional keyword arguments for the eventual plots.
@@ -749,17 +711,6 @@ class BaseProcessingStep(SignalProcessor):
             tuple: Processed times and data arrays.
         """
         filtered = False
-
-        if do_detrend:
-            if self.verbose:
-                logger.info("Detrending data...")
-            _X = detrend(self.times, self.data[0])
-            _Y = detrend(self.times, self.data[1])
-            _Z = detrend(self.times, self.data[2])
-            self.data = np.vstack([_X, _Y, _Z])
-            assert (
-                self.data.shape[1] == self.times.shape[0]
-            ), "Data and times length mismatch after detrending."
 
         if highpass_kwargs is not None:
             if self.verbose:
@@ -778,6 +729,11 @@ class BaseProcessingStep(SignalProcessor):
                 logger.info("Applying bandpass filter...")
             self.data = self.bandpass_filter(**bandpass_kwargs, **kwargs)
             filtered = True
+
+        if downsample_kwargs is not None:
+            if self.verbose:
+                logger.info("Downsampling data...")
+            self.downsample(**downsample_kwargs)
 
         if trim_kwargs is not None:
             if self.verbose:
@@ -828,7 +784,6 @@ class BaseProcessingStep(SignalProcessor):
         self,
         settings: DomainSettingsBase,
         window: Optional[np.ndarray | str] = None,
-        normalize: bool = False,
         return_orbits: bool = False,
     ) -> DataResidualArray | tuple[DataResidualArray, Orbits]:
         """
@@ -837,7 +792,6 @@ class BaseProcessingStep(SignalProcessor):
         Args:
             settings (DomainSettingsBase): Settings for the domain.
             window (Optional[np.ndarray | str], optional): Window to apply to the data. Defaults to None.
-            normalize (bool, optional): Whether to normalize the data with the window. Defaults to False.
             return_orbits (bool, optional): Whether to return the orbits instance along with the domain. Defaults to False.
 
         Returns:
@@ -850,19 +804,6 @@ class BaseProcessingStep(SignalProcessor):
             input_signal_domain=self.td_signal.settings,
             window=window,
         )
-
-        if window is not None and normalize:
-            if isinstance(window, str):
-                raise NotImplementedError(
-                    "Normalization with string-specified windows is not implemented yet."
-                )
-
-            logger.info("Normalizing data with window norm.")
-            window_norm = np.sum(window**2)
-            N = window.shape[0]
-            factor = float(np.sqrt(window_norm / N))
-            data_residual_array.data_res_arr.arr /= factor
-            logger.info(f"Applied normalization factor to the frequency domain data: {factor:.3e}")
 
         if return_orbits:
             return data_residual_array, self.orbits
