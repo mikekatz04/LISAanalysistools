@@ -226,8 +226,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # TODO: we should probably move the prior in here even though
         # in general with current setup it should only be points in the prior
         # that make it here
-        ll = np.full_like(data_index.get(), -1e300, dtype=float)
-        
+        ll = np.full_like(data_index, -1e300, dtype=float)
+        data_index = xp.asarray(data_index.astype(np.int32)) # make sure data index is on the same device as the likelihood computation
         for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index.get())):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
@@ -261,7 +261,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         ntemps = x[self.branch_name].shape[0]
 
         coords = x[self.branch_name].reshape(-1, x[self.branch_name].shape[-1])
-        data_index_in = xp.tile(xp.arange(self.nwalkers), (ntemps, 1)).flatten().astype(xp.int32)
+        data_index_in = np.tile(np.arange(self.nwalkers), (ntemps, 1)).flatten().astype(np.int32)
 
         coords_in = self.transform_fn.both_transforms(coords)
 
@@ -334,7 +334,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             old_coords_in = self.transform_fn.both_transforms(old_coords)
 
             data_index_in = (
-                xp.tile(xp.arange(self.nwalkers), (self.ntemps, 1)).flatten().astype(xp.int32)
+                np.tile(np.arange(self.nwalkers), (self.ntemps, 1)).flatten().astype(np.int32)
             )
             # TODO: fix this
             # prev_logl = self.waveform_gen.get_direct_ll(fd, data_residuals.flatten(), psd.flatten(), self.df, *old_coords_in.T, noise_index=noise_index, data_index=data_index, **self.waveform_kwargs).reshape((ntemps, nwalkers)).real.get()
@@ -423,7 +423,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     )
 
                     # Compute the lnprobs of the proposed position.
-                    data_index = xp.asarray(walker_inds_here[~np.isinf(logp)].astype(np.int32))
+                    data_index = np.asarray(walker_inds_here[~np.isinf(logp)].astype(np.int32))
                     # noise_index = walker_inds_here[~np.isinf(logp)].astype(np.int32)
 
                     # self.waveform_gen.d_d = xp.asarray(d_d_store[(temp_inds_here[~np.isinf(logp)], walker_inds_here[~np.isinf(logp)])])
