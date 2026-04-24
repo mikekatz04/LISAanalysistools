@@ -115,25 +115,25 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
                 "No AnalysisContainers found in the specified split. Cannot build C++ domain objects."
             )
 
-        sens_mat = ref_analysis_container.sens_mat
+        sensitivity_backend = ref_analysis_container.sens_mat
 
         assert hasattr(
-            sens_mat, "orbits"
+            sensitivity_backend, "orbits"
         ), "Sensitivity matrix must have 'orbits' attribute to build C++ domain objects."
         assert hasattr(
-            sens_mat.orbits, "kwargs"
+            sensitivity_backend.orbits, "kwargs"
         ), "Sensitivity matrix orbits must have 'kwargs' attribute to build C++ domain objects."
         assert hasattr(
-            sens_mat, "kwargs"
+            sensitivity_backend, "kwargs"
         ), "Sensitivity matrix must have 'kwargs' attribute to build C++ domain objects."
 
-        sens_mat_kwargs = sens_mat.kwargs.copy()
+        sensitivity_backend_kwargs = sensitivity_backend.kwargs.copy()
 
         with self.group_device_context():
-            self._orbits = sens_mat.orbits.__class__(**sens_mat.orbits.kwargs)
+            self._orbits = sensitivity_backend.orbits.__class__(**sensitivity_backend.orbits.kwargs)
 
-            sens_mat_kwargs["orbits"] = self._orbits
-            self._sens_mat = sens_mat.__class__(**sens_mat_kwargs)
+            sensitivity_backend_kwargs["orbits"] = self._orbits
+            self._sensitivity_backend = sensitivity_backend.__class__(**sensitivity_backend_kwargs)
 
     def __repr__(self):
         split_index = getattr(self, "split_index", None)
@@ -150,12 +150,12 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         return self._orbits
 
     @property
-    def sens_mat(self) -> XYZSensitivityBackend:
-        if not hasattr(self, "_sens_mat"):
+    def sensitivity_backend(self) -> XYZSensitivityBackend:
+        if not hasattr(self, "_sensitivity_backend"):
             raise ValueError(
                 "Sensitivity matrix has not been created yet. Call build_cpp_objects first."
             )
-        return self._sens_mat
+        return self._sensitivity_backend
 
     @property
     def cpp_domain(self):
@@ -288,7 +288,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
         """
 
-        return self.sens_mat.compute_log_like(self.data_arr, data_index, *args, **kwargs)
+        return self.sensitivity_backend.compute_log_like(self.data_arr, data_index, *args, **kwargs)
 
 
 class STFTComputationGroup(BaseDomainComputationGroup):
@@ -612,10 +612,10 @@ class DomainComputationGroupArray:
         """Move an array to the host, ensuring it is a numpy ndarray."""
         return arr.get() if hasattr(arr, "get") else arr
 
-    def _unpack_indices(
+    def unpack_indices(
         self,
         data_index: np.ndarray | cp.ndarray,
-        noise_index: np.ndarray | cp.ndarray,
+        noise_index: np.ndarray | cp.ndarray = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         """Partition a flat ``(data_index, noise_index)`` batch by split.
 
@@ -633,7 +633,7 @@ class DomainComputationGroupArray:
         its output instead of recomputing ``np.where(ac_to_split == s)``.
         """
         data_index_cpu = self._to_host(data_index)
-        noise_index_cpu = self._to_host(noise_index)
+        noise_index_cpu = self._to_host(noise_index) if noise_index is not None else data_index_cpu
 
         split_of_each = self.ac_to_split[data_index_cpu]
 
@@ -648,26 +648,26 @@ class DomainComputationGroupArray:
 
         return positions_per_split, data_intra_per_split, noise_intra_per_split
 
-    def _unpack_coords(
+    def unpack_coords(
         self,
         positions_per_split: list[np.ndarray],
-        coords: np.ndarray | cp.ndarray | list[np.ndarray | cp.ndarray],
+        coords: np.ndarray | cp.ndarray | tuple[np.ndarray | cp.ndarray],
     ) -> list[tuple[np.ndarray] | np.ndarray]:
         """
         Unpack coordinates for each split based on the positions per split.
 
         Args:
             positions_per_split: list of numpy arrays, where each array contains the positions for a specific split.
-            coords: A numpy or cupy array containing the coordinates to be unpacked, or a list of such arrays if there are multiple coordinate arrays.
+            coords: A numpy or cupy array containing the coordinates to be unpacked, or a tuple of such arrays if there are multiple coordinate arrays (multiple branches).
 
         Returns:
             args_per_group: A list of coordinates for each split, where each element is either a single array (if there is only one coordinate array) or a tuple of arrays (if there are multiple coordinate arrays). The coordinates are indexed according to the positions for each split.
         """
 
-        if not isinstance(coords, list):
-            coords = [coords]
+        if not isinstance(coords, tuple):
+            coords = (coords,)
 
-        coords_host = [self._to_host(coords_here) for coords_here in coords]
+        coords_host = tuple(self._to_host(coords_here) for coords_here in coords)
 
         args_per_group: list = []
         for positions in positions_per_split:
@@ -681,8 +681,8 @@ class DomainComputationGroupArray:
         return args_per_group
 
     def place_on_device(
-        self, items: tuple[list[np.ndarray]]
-    ) -> tuple[list[np.ndarray | cp.ndarray]]:
+        self, items: tuple[list[np.ndarray | tuple[np.ndarray]]]
+    ) -> tuple[list[np.ndarray | cp.ndarray | tuple[np.ndarray | cp.ndarray]]]:
         """Place lists of arrays on the appropriate devices for each split.
 
         Args:
@@ -700,8 +700,16 @@ class DomainComputationGroupArray:
         ):
             with self.device_context(device):
                 for item_id, item_per_split in enumerate(items):
-                    device_items[item_id].append(self.xp.asarray(item_per_split[i]))
-
+                    entry = item_per_split[i]
+                    if isinstance(entry, np.ndarray):
+                        device_items[item_id].append(self.xp.asarray(entry))
+                    elif isinstance(entry, tuple):
+                        if len(entry) == 0:
+                            device_items[item_id].append(())
+                        else:
+                            device_items[item_id].append(tuple(self.xp.asarray(arr) for arr in entry))
+                    else:
+                        raise ValueError("Each entry in items must be either a numpy array or a tuple of numpy arrays.")
         return tuple(device_items)
 
     def _loop_operation(
@@ -710,6 +718,7 @@ class DomainComputationGroupArray:
         operation_args_per_split: list[tuple] = None,
         operation_kwargs: dict | list[dict] = None,
         aggregate_fn: Callable = None,
+        positions_per_split: list[np.ndarray] = None,
     ) -> list | Any:
         """General loop to perform an operation across splits, with optional result aggregation.
 
@@ -718,7 +727,7 @@ class DomainComputationGroupArray:
             operation_args_per_split: Optional list of tuples, where each tuple contains the positional arguments to pass to the operation for the corresponding split. The caller is responsible for ensuring that the arguments are correctly placed on the appropriate device (e.g., via self.xp.asarray). If not provided, defaults to a list of empty tuples.
             operation_kwargs: Optional dictionary or list of dictionaries of keyword arguments to pass to the operation for all splits.
             aggregate_fn: Optional callable to aggregate the results from all splits after the loop. If not provided, the raw list of results from each split is returned.
-
+            positions_per_split: Optional list of numpy arrays containing the positions for each split, used to guard against empty splits.
         Returns:
             A list of results from each split if aggregate_fn is not provided, or the aggregated result if aggregate_fn is provided.
         """
@@ -752,6 +761,10 @@ class DomainComputationGroupArray:
         for i, device in enumerate(
             self.gpus if self.gpus is not None else [None] * self.num_splits
         ):
+            # guard agains empty splits by checking if the operation args
+            if positions_per_split is not None and len(positions_per_split[i]) == 0:
+              outputs.append(None)                                                                                                                                                                                       
+              continue
             with self.device_context(device):
                 out_i = operations[i](*operation_args_per_split[i], **operation_kwargs_per_split[i])
             outputs.append(out_i)
@@ -792,7 +805,7 @@ class DomainComputationGroupArray:
             operation_args_per_split.append(args_i)
 
         all_logls = self._loop_operation(
-            operation=operations, operation_args_per_split=operation_args_per_split
+            operation=operations, operation_args_per_split=operation_args_per_split, positions_per_split=positions_per_split
         )
 
         # now synchronize
