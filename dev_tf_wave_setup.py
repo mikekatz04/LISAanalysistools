@@ -186,16 +186,22 @@ tdi_t_arr = data_t_arr[keep]
 ind = int(3e-3 / wdm_settings.layer_df) + 3
 num = 10
 
+f_max = 30e-3
+f_min = 0.1e-3
+
+del wdm_settings
+wdm_settings = wdm_set = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, force_backend=force_backend)
+    
 for i in range(0, num)[:1]:
     amp = np.full(num_bin, 1.0)  # e-22)
-    f0 = np.full(num_bin, 25.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
-    fdot = np.full(num_bin, 1e-17)
+    f0 = np.full(num_bin, 20.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
+    fdot = np.full(num_bin, 1e-14)
     fddot = np.full(num_bin, 0.0)
     phi0 = np.full(num_bin, 0.0)
-    inc = np.full(num_bin, np.pi / 2.)
-    psi = np.full(num_bin, 0.0)
-    lam = np.full(num_bin, 0.0)
-    beta = np.full(num_bin, np.pi / 2.)
+    inc = np.full(num_bin, 0.2231231098)
+    psi = np.full(num_bin, np.pi/9.)
+    lam = np.full(num_bin, 4.0982342019)
+    beta = np.full(num_bin, 0.25)
 
     t_ref = int(Nt / 2) * wdm_settings.layer_dt
     gb_gen = GBTDIonTheFly(
@@ -273,14 +279,6 @@ for i in range(0, num)[:1]:
 
     td = TDSignal(tdi_output[0, :3], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
 
-    f_max = 30e-3
-    f_min = 0.1e-3
-    _wdm_set = WDMSettings(Nf, Nt, dt, force_backend=force_backend)
-    inds_keep = np.where((_wdm_set.f_arr > f_min) & (_wdm_set.f_arr < f_max))[0]
-    ind_min = inds_keep[0]
-    ind_max = inds_keep[-1]
-    wdm_set = WDMSettings(Nf, Nt, dt, ind_min=ind_min, ind_max=ind_max, force_backend=force_backend)
-    
     # y[:, 0] = 1.0
     # y[:, 1:] = 0.0
     # td = TDSignal(y, TDSettings(N, dt, force_backend=force_backend))
@@ -296,10 +294,7 @@ for i in range(0, num)[:1]:
     _fd_from_td = td.fft(apply_dt=True)
 
     _fd_set = _fd_from_td.settings
-    inds_keep_fd = np.where((_fd_set.f_arr > f_min) & (_fd_set.f_arr < f_max))[0]
-    ind_min_fd = inds_keep_fd[0]
-    ind_max_fd = inds_keep_fd[-1]
-    fd_set = FDSettings(_fd_set.N, _fd_set.df, ind_min=ind_min_fd, ind_max=ind_max_fd, force_backend=force_backend)
+    fd_set = FDSettings(_fd_set.N, _fd_set.df, min_freq=f_min, max_freq=f_max, force_backend=force_backend)
     fd_from_td = FDSignal(_fd_from_td[:], fd_set)
     
     # fd_set.frequency_layer_mask = ((fd_set.f_arr >= 5e-5) &(fd_set.f_arr <= 40e-3))
@@ -356,7 +351,8 @@ for i in range(0, num)[:1]:
     fdot_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=2)[0, 0]
     fdot_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=2)[0]
     fdot_deriv = fdot_deriv_ref + fdot_deriv_tdi
-    breakpoint()
+
+    # pi/2 PHASE SHIFT !!!!!!!!!!!!!!!!!!!!!!!!!
     phi_t = (tdi_phase_mid + ref_phase_mid)[0] + np.pi / 2. #  (np.angle(output_deriv.X).squeeze())# [:-2] # % (2 * np.pi)
     freq_t = f_deriv.copy().squeeze()# [:-1]
     fdot_t = fdot_deriv.copy().squeeze()# [:]
@@ -366,10 +362,11 @@ for i in range(0, num)[:1]:
 
     wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=1)
 
-    gb_fill_wave = xp.zeros_like(wdm_from_td[0])
+    gb_fill_wave = xp.zeros((wdm_set.Nf, wdm_set.Nt))
     keep_m = (m_layers >= 0) & (m_layers < wdm_settings.Nf)
     gb_fill_wave[m_layers[keep_m], xp.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1)[keep_m]] = wdm_coeffs[keep_m]
     # gb_fill_wave[:] = xp.roll(gb_fill_wave, 2, axis=-1)
+
     gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
     
     # fdot_deriv = (phase_up - 2 * phase_mid + phase_up) / (deriv_delta_t * deriv_delta_t) / (2 * np.pi)
@@ -403,14 +400,14 @@ for i in range(0, num)[:1]:
     cax1.set_ylabel("WDM Coeff")
     cax2.set_ylabel("log10(abs(delta))")
     # fig.savefig(f"wdm_check_3_alpha_{tukey_alpha}.png")
-    check1 = wdm_from_td[0, wdm_settings.f_ind_array, 10:-10]
-    check2 = gb_fill_wave[0, wdm_settings.f_ind_array, 10:-10]
+    check1 = wdm_from_td[0, :, 10:-10]
+    check2 = gb_fill_wave[0, :, 10:-10]
     keep = np.where(check2)
     overlap = np.sum(check1 * check2) / np.sqrt(np.sum(check1 * check1) * np.sum(check2 * check2))
 
     for cut in [1, 20, 100, 200, 500, 1000]:
-        check3 = wdm_from_td[0, wdm_settings.f_ind_array, cut:-cut]
-        check4 = gb_fill_wave[0, wdm_settings.f_ind_array, cut:-cut]
+        check3 = wdm_from_td[0, :, cut:-cut]
+        check4 = gb_fill_wave[0, :, cut:-cut]
         keep2 = np.where(check4)
         overlap_center = np.sum(check3 * check4) / np.sqrt(np.sum(check3 * check3) * np.sum(check4 * check4))
         print(f"overlap center. Cut ends amount: {cut}. Mismatch: {1.- overlap_center}.")
