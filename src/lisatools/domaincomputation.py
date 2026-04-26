@@ -814,6 +814,7 @@ class DomainComputationGroupArray:
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
         operations: list[Callable],
         likelihood_args: list[tuple],
+        run_threaded: bool = False,
     ):
         """Compute likelihood for each split using the provided likelihood functions and arguments, and aggregate the results into a single output array."""
         # todo I am assuming everything has been placed on the correct device. use self.place_on_device if not.
@@ -828,7 +829,7 @@ class DomainComputationGroupArray:
             operation_args_per_split.append(args_i)
 
         all_logls = self._loop_operation(
-            operation=operations, operation_args_per_split=operation_args_per_split, positions_per_split=positions_per_split
+            operation=operations, operation_args_per_split=operation_args_per_split, positions_per_split=positions_per_split, run_threaded=run_threaded
         )
 
         # now synchronize
@@ -848,6 +849,7 @@ class DomainComputationGroupArray:
         data_intra_per_split: list[np.ndarray | cp.ndarray],
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
         likelihood_args: list[tuple],
+        run_threaded: bool = False,
     ):
         """Compute PSD likelihood for each split and aggregate results."""
         operations = [group.compute_psd_likelihood for group in self.computation_groups]
@@ -857,4 +859,5 @@ class DomainComputationGroupArray:
             noise_intra_per_split,
             operations,
             likelihood_args,
+            run_threaded=run_threaded,
         )

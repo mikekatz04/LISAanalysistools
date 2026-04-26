@@ -406,6 +406,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         galfor_transform_fn: TransformContainer = None,
         permute_every: int = 20,
         tolerance: float = 0.0,
+        run_threaded: bool = False,
         **kwargs,
     ):
 
@@ -424,7 +425,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
             tolerance=tolerance,
             **kwargs,
         )
-        MultiGPUMoveBase.__init__(self, dcga)
+        MultiGPUMoveBase.__init__(self, dcga, run_threaded=run_threaded)
 
     def psd_log_like(self, x: list[np.ndarray], supps=None, **sens_kwargs):
         """ """
@@ -454,6 +455,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
             data_intra_per_split,
             data_intra_per_split,
             likelihood_args_per_split,
+            run_threaded=self.run_threaded,
         )
 
         # now check if any knot position is not too close together
