@@ -4,11 +4,11 @@ likelihood computation of (d|h) and (h|h) inner products."""
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from concurrent.futures import ThreadPoolExecutor
 import jax
 import numpy as np
 
@@ -501,6 +501,12 @@ class DomainComputationGroupArray:
         for split_id, ids in enumerate(self.acs.gpu_splits):
             self.ac_to_intra[ids] = np.arange(len(ids), dtype=np.int32)
 
+        self._thread_pool = ThreadPoolExecutor(max_workers=self.num_splits)
+
+    def __del__(self):
+        if hasattr(self, "_thread_pool"):
+            self._thread_pool.shutdown(wait=False, cancel_futures=True)
+
     def initialize_computation_groups(self):
         """Initializes a DomainComputationGroup instance for each GPU split in the AnalysisContainerArray."""
 
@@ -540,6 +546,14 @@ class DomainComputationGroupArray:
     @property
     def num_splits(self):
         return len(self.acs.gpu_splits)
+    
+    @property
+    def thread_pool(self):
+        """ThreadPoolExecutor for parallel execution across splits"""
+        if not hasattr(self, "_thread_pool"):
+            self._thread_pool = ThreadPoolExecutor(max_workers=self.num_splits)
+            logger.warning("ThreadPoolExecutor not initialized. Initializing with num_splits workers.")
+        return self._thread_pool
 
     @property
     def domain_type(self):
@@ -719,6 +733,7 @@ class DomainComputationGroupArray:
         operation_kwargs: dict | list[dict] = None,
         aggregate_fn: Callable = None,
         positions_per_split: list[np.ndarray] = None,
+        run_threaded: bool = False,
     ) -> list | Any:
         """General loop to perform an operation across splits, with optional result aggregation.
 
@@ -728,6 +743,7 @@ class DomainComputationGroupArray:
             operation_kwargs: Optional dictionary or list of dictionaries of keyword arguments to pass to the operation for all splits.
             aggregate_fn: Optional callable to aggregate the results from all splits after the loop. If not provided, the raw list of results from each split is returned.
             positions_per_split: Optional list of numpy arrays containing the positions for each split, used to guard against empty splits.
+            run_threaded: If True, dispatch operations across splits using a ThreadPoolExecutor. Default is False.
         Returns:
             A list of results from each split if aggregate_fn is not provided, or the aggregated result if aggregate_fn is provided.
         """
@@ -757,17 +773,24 @@ class DomainComputationGroupArray:
         else:
             operation_kwargs_per_split = [operation_kwargs] * self.num_splits
 
-        outputs = []
-        for i, device in enumerate(
-            self.gpus if self.gpus is not None else [None] * self.num_splits
-        ):
-            # guard agains empty splits by checking if the operation args
+        devices = self.gpus if self.gpus is not None else [None] * self.num_splits
+
+        def _run_split_operation(i, device):
             if positions_per_split is not None and len(positions_per_split[i]) == 0:
-              outputs.append(None)                                                                                                                                                                                       
-              continue
+                return None
             with self.device_context(device):
-                out_i = operations[i](*operation_args_per_split[i], **operation_kwargs_per_split[i])
-            outputs.append(out_i)
+                return operations[i](*operation_args_per_split[i], **operation_kwargs_per_split[i])
+        
+        if run_threaded:
+            futures = [self.thread_pool.submit(_run_split_operation, i, device) for i, device in enumerate(devices)]
+            outputs = [future.result() for future in futures]
+        else:
+            outputs = []
+            for i, device in enumerate(
+                devices
+            ):
+                out_i = _run_split_operation(i, device)
+                outputs.append(out_i)
 
         if aggregate_fn is not None:
             return aggregate_fn(outputs)
