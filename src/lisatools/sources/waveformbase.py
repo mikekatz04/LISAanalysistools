@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import logging
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import numpy as np
 
@@ -614,6 +614,35 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         return signal_out, start_freqs, start_times
 
+    def __call__(self, *args, **kwargs):
+        """Generate the waveform and return the signal in the analysis domain.
+
+        Sky/response parameters may be supplied either as explicit keyword
+        arguments or as the last N positional arguments; ``compute_tdi_channels``
+        on each subclass is responsible for peeling them off ``*args``.
+        """
+        times, channels = self.compute_tdi_channels(*args, **kwargs)
+        left_edges, padded = self.build_common_grid(times, channels)
+        return self.transform_to_domain(left_edges, padded)
+
+    def get_signals_for_residuals(self, *args, **kwargs) -> DomainBaseArray:
+        """Generate per-source domain-wrapped signals for residual operations.
+
+        Sky/response parameters may be supplied either as explicit keyword
+        arguments or as the last N positional arguments.
+
+        Returns:
+            :class:`DomainBaseArray` of per-source signals, or a single domain
+            signal when ``times`` is 1-D (single-source path).
+        """
+        times, channels = self.compute_tdi_channels(*args, **kwargs)
+        if times.ndim == 2:
+            return DomainBaseArray([
+                self._td_to_output_domain(times_in=times[i], signal_in=channels[i])
+                for i in range(channels.shape[0])
+            ])
+        return self._td_to_output_domain(times_in=times, signal_in=channels)
+
 
 class TDPyResponseWaveformBase(TDWaveformBase):
     """
@@ -635,7 +664,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         freq_max: float = 1.0,
         signal_duration: float = None,
         buffer_time: int = 5000,
-        force_uniform_stft: bool = False,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -655,8 +683,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         if signal_duration is None:
             signal_duration = self.Tobs
-
-        self.force_uniform_stft = force_uniform_stft
 
         num_points = int(signal_duration / self.dt)
 
@@ -681,7 +707,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                 "order": self.response.order,
                 "signal_duration": self.response.num_pts * self.dt,
                 "buffer_time": self.buffer_time,
-                "force_uniform_stft": self.force_uniform_stft,
             }
         )
         return base_kwargs
@@ -831,58 +856,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         return self.xp.stack(all_times), self.xp.stack(all_channels)
 
-        # if output_domain == "TD":
-        #     return DomainBaseArray(td_signals)
-
-        # if output_domain == "STFT" and self.force_uniform_stft:
-        #     return self._to_uniform_stft(td_signals, domain_kwargs)
-
-        # # Natural (non-uniform) path: transform each signal with its own settings.
-        # return DomainBaseArray(
-        #     [self._td_to_output_domain(s, output_domain, domain_kwargs) for s in td_signals]
-        # )
-
-    def _to_uniform_stft(
-        self,
-        td_signals: List[TDSignal],
-        domain_kwargs: dict,
-    ) -> DomainBaseArray:
-        """
-        Project all TDSignals onto a common STFT grid spanning the union of their time ranges.
-
-        Sources whose time range is shorter than the global span are zero-padded at
-        the appropriate boundary so that all signals share exactly the same
-        STFTSettings, yielding a uniform DomainBaseArray.
-        """
-        # Determine the global time span.
-        waveform_t0_global = min(s.settings.waveform_t0 for s in td_signals)
-        t_end_global = max(
-            s.settings.waveform_t0 + s.settings.N * s.settings.dt for s in td_signals
-        )
-        N_global = int(round((t_end_global - waveform_t0_global) / self.dt))
-
-        # Derive a common STFTSettings from the global time grid.
-        ref_t_arr = self.xp.arange(N_global) * self.dt + waveform_t0_global
-        common_settings = get_stft_settings(ref_t_arr, **domain_kwargs, force_backend=self.backend)
-        nperseg = common_settings.get_nperseg(self.dt)
-        window = tukey(nperseg, alpha=self.tukey_alpha, xp=self.xp)
-
-        signals = []
-        for td_sig in td_signals:
-            left_pad = int(round((td_sig.settings.waveform_t0 - waveform_t0_global) / self.dt))
-            right_pad = max(N_global - left_pad - td_sig.settings.N, 0)
-
-            # pad_width: keep all outer dims (channels) intact, pad only the time axis.
-            pad_width = [(0, 0)] * len(td_sig.outer_shape) + [(left_pad, right_pad)]
-            padded_arr = self.xp.pad(td_sig.arr, pad_width, mode="constant", constant_values=0)
-            padded_settings = TDSettings(
-                waveform_t0=waveform_t0_global, dt=self.dt, N=N_global, force_backend=self.backend
-            )
-            padded_td = TDSignal(arr=padded_arr, settings=padded_settings)
-            signals.append(padded_td.transform(common_settings, window=window))
-
-        return DomainBaseArray(signals)
-
     def compute_tdi_channels(
         self,
         *args,
@@ -910,94 +883,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             return self._call_batched(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
         return self._call_single(*args, ra=ra, dec=dec, merger_time=merger_time, **kwargs)
 
-    def __call__(
-        self,
-        *args,
-        ra: float | np.ndarray = None,
-        dec: float | np.ndarray = None,
-        merger_time: float | np.ndarray = None,
-        **kwargs,
-    ) -> DomainBase | DomainBaseArray:
-        """
-        Generate the waveform and return the signal in the specified output domain.
-
-        When ``ra`` is a 1-D array the call is treated as batched: ``wave_gen_batch``
-        is invoked and a :class:`DomainBaseArray` is returned.  For scalar ``ra`` the
-        single-source path is used and a :class:`DomainBase` is returned.
-
-        Sky/response parameters (``ra``, ``dec``, ``merger_time``) can be
-        passed either as explicit keyword arguments **or** as the last
-        ``n_sky_params`` positional arguments.  The latter allows the common
-        calling convention ``wave_gen(*full_param_vector, **kwargs)`` used
-        throughout the global-fit pipeline.
-
-        Args:
-            *args: Arguments for the wave_gen / wave_gen_batch method.
-                When ``ra``/``dec``/``merger_time`` are not given as keywords,
-                the last 3 positional arguments are interpreted as
-                ``(ra, dec, merger_time)`` and the remaining ones are
-                forwarded to ``wave_gen``.
-            ra: Right ascension in radians.  Scalar for single source, 1-D array for batch.
-            dec: Declination in radians.  Same shape as ``ra``.
-            merger_time: Time of merger in seconds.  Same shape as ``ra``.
-            output_domain: Target output domain ('TD', 'STFT', or 'FD').
-            domain_kwargs: Extra keyword arguments forwarded to the domain settings constructor.
-            **kwargs: Keyword arguments for the wave_gen / wave_gen_batch method.
-
-        Returns:
-            Signal in the specified output domain.  A single :class:`DomainBase` for
-            scalar ``ra``, a :class:`DomainBaseArray` for array ``ra``.
-        """
-
-        times, channels = self.compute_tdi_channels(
-            *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs
-        )
-
-        left_edges, padded_signals = self.build_common_grid(times, channels)
-        return self.transform_to_domain(left_edges, padded_signals)
-
-    def get_signals_for_residuals(
-        self,
-        *args,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
-        merger_time: np.ndarray | cp.ndarray = None,
-        **kwargs,
-    ) -> DomainBaseArray:
-        """
-        Generate the on-the-fly response for a batch of sources and return the domain wrapped signals for residual operations.
-
-        Args:
-            *args: Arguments for the amplitude and phase generation method.
-                The last 3 positional arguments can be (ra, dec, merger_time)
-                if not provided as keyword arguments.
-            ra: Right ascension for the sources, shape (Nbatch,).
-            dec: Declination for the sources, shape (Nbatch,).
-            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
-            **kwargs: Keyword arguments for the amplitude and phase generation method.
-
-        Returns:
-            DomainBaseArray containing the signals for each source, transformed to the desired output domain.
-        """
-
-        times, channels = self.compute_tdi_channels(
-            *args, ra=ra, dec=dec, merger_time=merger_time, **kwargs
-        )
-
-        if len(times.shape) == 2:  # batched path
-
-            signals_out = []
-            for i in range(channels.shape[0]):
-                signals_out.append(
-                    self._td_to_output_domain(
-                        times_in=times[i],
-                        signal_in=channels[i],
-                    )
-                )
-
-            return DomainBaseArray(signals_out)
-
-        return self._td_to_output_domain(times_in=times, signal_in=channels)
 
 
 class TDTDIOnFlyWaveformBase(TDWaveformBase):
@@ -1212,11 +1097,11 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
     def compute_tdi_channels(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray,
-        psi: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray,
-        dec: np.ndarray | cp.ndarray,
-        merger_time: np.ndarray | cp.ndarray,
+        inclination: np.ndarray | cp.ndarray = None,
+        psi: np.ndarray | cp.ndarray = None,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        merger_time: np.ndarray | cp.ndarray = None,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
@@ -1234,6 +1119,8 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         Returns:
             Tuple of (dense_times, tdi_channels) where `dense_times` has shape (Nbatch, num_times) and `tdi_channels` has shape (Nbatch, num_TDI_channels, num_times).
         """
+        if inclination is None:
+            *args, inclination, psi, ra, dec, merger_time = args
 
         # Ensure all inputs are at least 1-D for batch processing
         args = tuple(self.xp.atleast_1d(self.xp.asarray(a)) for a in args)
@@ -1351,139 +1238,3 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         ]  # reshape and take the time array from the first mode (all modes share the same time array)
 
         return dense_times, tdi_channels
-
-    def __call__(
-        self,
-        *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
-        merger_time: np.ndarray | cp.ndarray = None,
-        **kwargs,
-    ) -> (
-        Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]
-        | Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]
-    ):
-        """
-        Generate the on-the-fly response for a batch of sources and transform it to the desired domain.
-
-        Args:
-            *args: Arguments for the amplitude and phase generation method.
-                The last 5 positional arguments can be (inclination, psi, ra, dec, merger_time)
-                if not provided as keyword arguments.
-            inclination: Inclination angles for the sources, shape (Nbatch,).
-            psi: Polarization angles for the sources, shape (Nbatch,).
-            ra: Right ascension for the sources, shape (Nbatch,).
-            dec: Declination for the sources, shape (Nbatch,).
-            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
-            **kwargs: Keyword arguments for the amplitude and phase generation method.
-
-        Returns:
-            If self.transform_to_domain is self.fft: Tuple of (signal_out, start_freqs) where signal_out has shape (Nbatch, num_freqs) and start_freqs has shape (Nbatch,).
-            If self.transform_to_domain is self.stft: Tuple of (signal_out, start_freqs, start_times) where signal_out has shape (Nbatch, num_stft_times, num_freqs), start_freqs has shape (Nbatch,), and start_times has shape (Nbatch,).
-        """
-
-        if inclination is None:
-            *args, inclination, psi, ra, dec, merger_time = args
-
-        dense_times, tdi_channels = self.compute_tdi_channels(
-            *args,
-            inclination=inclination,
-            psi=psi,
-            ra=ra,
-            dec=dec,
-            merger_time=merger_time,
-            **kwargs,
-        )
-
-        left_edges, padded_channels = self.build_common_grid(dense_times, tdi_channels)
-        return self.transform_to_domain(left_edges, padded_channels)
-
-    def get_signals_for_residuals(
-        self,
-        *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
-        merger_time: np.ndarray | cp.ndarray = None,
-        **kwargs,
-    ) -> DomainBaseArray:
-        """
-        Generate the on-the-fly response for a batch of sources and return the domain wrapped signals for residual operations.
-
-        Args:
-            *args: Arguments for the amplitude and phase generation method.
-                The last 5 positional arguments can be (inclination, psi, ra, dec, merger_time)
-                if not provided as keyword arguments.
-            inclination: Inclination angles for the sources, shape (Nbatch,).
-            psi: Polarization angles for the sources, shape (Nbatch,).
-            ra: Right ascension for the sources, shape (Nbatch,).
-            dec: Declination for the sources, shape (Nbatch,).
-            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
-            **kwargs: Keyword arguments for the amplitude and phase generation method.
-
-        Returns:
-            DomainBaseArray containing the signals for each source, transformed to the desired output domain.
-        """
-
-        if inclination is None:
-            *args, inclination, psi, ra, dec, merger_time = args
-
-        dense_times, tdi_channels = self.compute_tdi_channels(
-            *args,
-            inclination=inclination,
-            psi=psi,
-            ra=ra,
-            dec=dec,
-            merger_time=merger_time,
-            **kwargs,
-        )
-
-        signals_out = []
-        for i in range(tdi_channels.shape[0]):
-            signals_out.append(
-                self._td_to_output_domain(
-                    times_in=dense_times[i],
-                    signal_in=tdi_channels[i],
-                )
-            )
-
-        return DomainBaseArray(signals_out)
-
-    #     output_domain = self.get_output_settings(dense_times[i])
-
-    #     if isinstance(output_domain, FDSettings):
-    #         # Left-pad + right-pad to place signal at correct position
-    #         # within observation, then window at full data length.
-    #         natural_n = td_signal.settings.N
-    #         n_fft = round(1 / (output_domain.df * td_signal.settings.dt))
-
-    #         n_left = round((td_signal.settings.t0 - self.domain_settings.t0) / self.dt)
-    #         n_right = n_fft - natural_n - n_left
-
-    #         pad_width = [(0, 0)] * (td_signal.arr.ndim - 1) + [(n_left, n_right)]
-    #         padded_arr = self.xp.pad(td_signal.arr, pad_width, mode="constant")
-
-    #         window = tukey(n_fft, alpha=self.tukey_alpha, xp=self.xp)
-    #         windowed_arr = padded_arr * window
-
-    #         td_signal = TDSignal(
-    #             arr=windowed_arr,
-    #             settings=TDSettings(
-    #                 t0=self.domain_settings.t0,
-    #                 dt=self.dt,
-    #                 N=n_fft,
-    #                 force_backend=self.force_backend,
-    #             ),
-    #         )
-    #         # Signal is pre-windowed — pass None so fft() uses ones
-    #         signals_out.append(td_signal.transform(new_domain=output_domain, window=None))
-    #     else:
-    #         # STFT case — window is per-segment, handled by stft() internally
-    #         window_n = self.nperseg
-    #         window = tukey(window_n, alpha=self.tukey_alpha, xp=self.xp)
-    #         signals_out.append(td_signal.transform(new_domain=output_domain, window=window))
-
-    # return signals_out

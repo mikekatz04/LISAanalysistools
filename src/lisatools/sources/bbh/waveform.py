@@ -180,10 +180,13 @@ class PhenomTHMWaveformBase(JaxBase):
             }
         
     
+    @staticmethod
     def trim_and_shift_times(
-        self, 
-        times: np.ndarray | cp.ndarray, 
+        times: np.ndarray | cp.ndarray,
         mask: np.ndarray | cp.ndarray,
+        *,
+        xp,
+        dt: float,
     ) -> np.ndarray | cp.ndarray:
         """
         Shift and trim the time arrays for each source according to its mask, so that the resulting time arrays have the same shape (Nbatch, max_valid_times). the initial time points can be different across sources.
@@ -191,35 +194,29 @@ class PhenomTHMWaveformBase(JaxBase):
         Args:
             times (Array): Time arrays for each source, shape (Nbatch, Ntimes).
             mask (Array): Boolean mask indicating valid time samples for each source, shape (Nbatch, Ntimes).
+            xp: Array module (numpy or cupy).
+            dt: Time step in seconds.
 
         Returns:
             Shifted time arrays, shape (Nbatch, max_valid_times).
         """
-        valid_points = mask.sum(axis=1)  # number of valid time samples for each source
-        max_valid_points = int(
-            valid_points.max()
-        )  # maximum number of valid time samples across sources
+        valid_points = mask.sum(axis=1)
+        max_valid_points = int(valid_points.max())
 
-        # Trim to max_valid_points: removes time points unused by ALL sources
         times_out = times[:, -max_valid_points:]
 
-        # Per-source count of remaining invalid points in the trimmed array
         n_pad = max_valid_points - valid_points  # (Nbatch,)
 
-        # Position index in trimmed array
-        j = self.xp.arange(max_valid_points)  # (max_valid_points,)
+        j = xp.arange(max_valid_points)  # (max_valid_points,)
 
-        # Identify invalid positions: position j is invalid for source i if j < n_pad[i]
         is_invalid = j[None, :] < n_pad[:, None]  # (Nbatch, max_valid_points)
 
-        # First valid time per source (at index n_pad[i] in trimmed array)
-        batch_idx = self.xp.arange(times_out.shape[0])
+        batch_idx = xp.arange(times_out.shape[0])
         first_valid_time = times_out[batch_idx, n_pad]  # (Nbatch,)
 
-        replacement_times = first_valid_time[:, None] - (n_pad[:, None] - j[None, :]) * self.dt
+        replacement_times = first_valid_time[:, None] - (n_pad[:, None] - j[None, :]) * dt
 
-        # Apply only to invalid positions (valid positions keep their original times)
-        times_out = self.xp.where(is_invalid, replacement_times, times_out)
+        times_out = xp.where(is_invalid, replacement_times, times_out)
 
         return times_out  # shape (Nbatch, max_valid_points)
 
@@ -400,7 +397,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         hplus = self._from_jax(hplus, do_synchronize=synchronize)
         hcross = self._from_jax(hcross, do_synchronize=synchronize)
 
-        times_out = self.trim_and_shift_times(times, mask)
+        times_out = self.trim_and_shift_times(times, mask, xp=self.xp, dt=self.dt)
         num_keep = times_out.shape[-1]
 
         return (
@@ -519,7 +516,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         amplitude = self._from_jax(amplitude, do_synchronize=synchronize)
         phase = self._from_jax(phase, do_synchronize=synchronize)
 
-        times_out = self.trim_and_shift_times(times, mask)
+        times_out = self.trim_and_shift_times(times, mask, xp=self.xp, dt=self.dt)
 
         num_keep = times_out.shape[-1]
 
@@ -541,57 +538,3 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         """
 
         return (amp / 2.0, self.xp.pi - phase)
-
-    def compute_tdi_channels(
-        self,
-        m1: np.ndarray | cp.ndarray,
-        m2: np.ndarray | cp.ndarray,
-        s1z: np.ndarray | cp.ndarray,
-        s2z: np.ndarray | cp.ndarray,
-        distance: np.ndarray | cp.ndarray,
-        phi_ref: np.ndarray | cp.ndarray,
-        inclination: np.ndarray | cp.ndarray,
-        psi: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray,
-        dec: np.ndarray | cp.ndarray,
-        merger_time: np.ndarray | cp.ndarray,
-        ref_freq: np.ndarray | cp.ndarray = None,
-        start_freq: np.ndarray | cp.ndarray = None,
-        **kwargs,
-    ):
-        """
-        Call parent's :meth:`compute_tdi_channels` method with the correct signature for sampling.
-
-        Args:
-            m1: Source-1 masses in solar masses, shape (Nbatch,).
-            m2: Source-2 masses in solar masses, shape (Nbatch,).
-            s1z: Dimensionless spin of source 1, shape (Nbatch,).
-            s2z: Dimensionless spin of source 2, shape (Nbatch,).
-            distance: Luminosity distance in Mpc, shape (Nbatch,).
-            phi_ref: Reference phase in radians, shape (Nbatch,).
-            inclination: Inclination angle in radians, shape (Nbatch,).
-            psi: Polarisation angle in radians, shape (Nbatch,).
-            ra: Right ascension for the sources in radians, shape (Nbatch,).
-            dec: Declination for the sources in radians, shape (Nbatch,).
-            merger_time: Merger time with respect to `self.waveform_t0` in seconds, shape (Nbatch,).
-            ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
-            start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
-            **kwargs: Additional keyword arguments forwarded to
-                ``compute_strain_components_amp_phase``.
-        """
-
-        return super().compute_tdi_channels(
-                        m1,
-                        m2,
-                        s1z,
-                        s2z,
-                        distance,
-                        phi_ref,
-                        inclination=inclination,
-                        psi=psi,
-                        ra=ra,
-                        dec=dec,
-                        merger_time=merger_time,
-                        ref_freq=ref_freq,
-                        start_freq=start_freq,
-                    )
