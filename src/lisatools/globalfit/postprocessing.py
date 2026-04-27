@@ -25,7 +25,7 @@ from eryn.backends import HDFBackend
 from eryn.utils import get_integrated_act
 
 if TYPE_CHECKING:
-    from .engine import CurrentInfoGlobalFit
+    from .run import CurrentInfoGlobalFit
 
 logger = getLogger(__name__)
 # ─── Parameter metadata ───────────────────────────────────────────────────────
@@ -143,6 +143,23 @@ class BackendConsumer:
             self.backend = HDFBackend(filename=curr.main_file_path, read_only=True)
         else:
             raise ValueError("Must provide either curr or backend.")
+        
+        if curr is not None:
+            self._curr = curr
+
+            self.from_curr()
+
+    
+    def from_curr(self):
+        """
+        Extract any additional info needed from curr to configure the consumer for post-processing.
+        """
+
+    @property
+    def curr(self) -> CurrentInfoGlobalFit:
+        if not hasattr(self, "_curr"):
+            raise AttributeError("BackendConsumer was not initialized with a curr object.")
+        return self._curr
 
     @property
     def ndims(self) -> dict:
@@ -151,6 +168,13 @@ class BackendConsumer:
     @property
     def nleaves_max(self) -> dict:
         return self.backend.nleaves_max
+    
+    @property
+    def transform_containers(self) -> dict:
+        """Return the TransformContainer for each branch, if present."""
+
+        _transforms = {name: self.curr.source_info[name].transform for name in self.branches if hasattr(self.curr.source_info[name], "transform")}
+        return _transforms
 
     def store_cold_chains(self):
         """Extract cold chains and inds for all branches and cache them."""
@@ -219,6 +243,7 @@ class BackendConsumer:
                 act[branch] = np.where(np.isfinite(value), value, 1.0)
 
         return act
+
 
     def store_independent_samples(self, discard: int | float = 0.0, ess: int = 10000, **act_kwargs):
         """
@@ -289,6 +314,36 @@ class BackendConsumer:
         if return_inds:
             return self._thinned_chains, self._thinned_inds
         return self._thinned_chains
+    
+    def transform(self, samples: dict | np.ndarray, branch: str | None = None) -> dict | np.ndarray:
+        """
+        Apply the TransformContainer for the specified samples to the given samples.
+
+        Args:
+            samples: dict of branch to (n_samples, nleaves_max, ndim) array, or a single (n_samples, nleaves_max, ndim) array if branch is specified.
+            branch: str (optional). If provided, apply the transform for this branch to the samples. Else, apply the appropriate transform to each branch in the dict.
+
+        Returns:
+            dict of branch to transformed samples, or a single array if branch is specified.
+        """
+
+        if branch is not None:
+            if branch not in self.branches:
+                raise ValueError(f"Branch '{branch}' not found in backend.")
+            if branch not in self.transform_containers:
+                logger.warning(f"No TransformContainer found for branch '{branch}'. Returning input samples.")
+                return samples
+            return self.transform_containers[branch].transform_base_parameters(samples)
+        
+        transformed = {}
+        for b, s in samples.items():
+            if b in self.transform_containers:
+                transformed[b] = self.transform_containers[b].transform_base_parameters(s)
+            else:
+                logger.warning(f"No TransformContainer found for branch '{b}'. Returning input samples for this branch.")
+                transformed[b] = s
+
+        return transformed
 
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
