@@ -92,7 +92,7 @@ struct ComplexSum {
  *               contributes array[threadIdx.x].
  * @return       The sum of all elements (valid only on thread 0).
  */
-CUDA_DEVICE
+static CUDA_DEVICE
 cmplx block_reduce_cmplx(cmplx *array) {
     using BlockReduce = cub::BlockReduce<cmplx, NUM_THREADS>;
     CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
