@@ -47,6 +47,7 @@ dependencies = [
   "scikit-learn",
   "cudakima",
   "install>=0.0.1",
+  "pybind11>=3.0.4",
 ]
 
 
