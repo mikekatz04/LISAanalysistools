@@ -448,7 +448,7 @@ void compute_fourier_values_kernel(cmplx* output, STFTFresnel* fresnel,
  */
 CUDA_KERNEL
 void compute_likelihood_contributions_kernel(
-    cmplx* d_h_contrib, cmplx* h_h_contrib, STFTDomain* domain,
+    cmplx* d_h_contrib, cmplx* h_h_contrib, STFTDomain domain,
     cmplx* template_vals, double* start_times_all, double* start_freqs_all,
     int num_binaries, int* data_index_all, int* noise_index_all,
     int n_t_template, int n_f_template);

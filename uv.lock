@@ -797,15 +797,6 @@ wheels = [
 ]
 
 [[package]]
-name = "install"
-version = "0.0.1"
-source = { registry = "https://test.pypi.org/simple/" }
-sdist = { url = "https://test-files.pythonhosted.org/packages/f6/6f/431a6c24c031b1a8a61c2af7c288045c69ee8936089d46fa4cc45470e310/install-0.0.1.tar.gz", hash = "sha256:cf734fc2965be332e11f8eff8f25d623e57a5713fb8d75e7192ceb41bc4a5174", size = 2059, upload-time = "2024-07-16T18:28:48.922Z" }
-wheels = [
-    { url = "https://test-files.pythonhosted.org/packages/81/12/4533be30ac52b9d7fa578fe4c03f330252d97bf981b22630f543c2c747a0/install-0.0.1-py3-none-any.whl", hash = "sha256:d5c269ff0f0660902acb212b5127e1d00189b3b4654079ff8aaf8dac8177ea1a", size = 2415, upload-time = "2024-07-16T18:28:47.801Z" },
-]
-
-[[package]]
 name = "iniconfig"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1156,7 +1147,6 @@ dependencies = [
     { name = "astropy" },
     { name = "cudakima" },
     { name = "h5py" },
-    { name = "install" },
     { name = "jsonschema" },
     { name = "lisaconstants" },
     { name = "matplotlib" },
@@ -1230,7 +1220,6 @@ requires-dist = [
     { name = "fastlisaresponse", marker = "extra == 'sampling'" },
     { name = "gbgpu", marker = "extra == 'testing'" },
     { name = "h5py" },
-    { name = "install", specifier = ">=0.0.1" },
     { name = "ipykernel", marker = "extra == 'doc'" },
     { name = "ipython", marker = "extra == 'doc'" },
     { name = "ipywidgets", marker = "extra == 'doc'" },

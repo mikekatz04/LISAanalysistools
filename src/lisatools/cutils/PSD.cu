@@ -541,7 +541,8 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
 
   gpuErrchk(cudaMallocAsync(&like_contrib,
                             num_psds * num_blocks * sizeof(double),
-                            cudaStreamDefault));
+                            cudaStreamDefault
+                            ));
 
   // Grid: X=blocks for (time,freq) pairs, Y=blocks for PSDs
   dim3 grid(num_blocks, std::min(num_psds, 65535), 1);

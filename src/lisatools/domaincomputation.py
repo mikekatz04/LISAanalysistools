@@ -520,7 +520,6 @@ class DomainComputationGroupArray:
                 group = self.computation_group_class(
                     acs=self.acs,
                     split_index=split_index,
-                    settings=settings,
                     force_backend=force_backend,
                 )
                 computation_groups.append(group)
@@ -686,7 +685,7 @@ class DomainComputationGroupArray:
         args_per_group: list = []
         for positions in positions_per_split:
             if len(positions) > 0:
-                coords_s = [coords_host[i][positions] for i in range(len(coords_host))]
+                coords_s = [np.asfortranarray(coords_host[i][positions]) for i in range(len(coords_host))]
 
                 args_per_group.append(tuple(coords_s) if len(coords_s) > 1 else coords_s[0])
             else:

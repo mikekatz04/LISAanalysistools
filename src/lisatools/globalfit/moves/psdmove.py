@@ -147,10 +147,11 @@ class PSDMove(GlobalFitMove, StretchMove):
             spline_knots_position = None
             spline_knots_amplitude = None
 
+        galfor_pars_c = xp.ascontiguousarray(galfor_pars.T)
         likelihood_args = (
             Soms_d_in_all,
             Sa_a_in_all,
-            *galfor_pars.T,
+            *galfor_pars_c,
             spline_knots_position,
             spline_knots_amplitude,
         )
@@ -438,11 +439,11 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
 
         data_index_all = np.asarray(wi).astype(np.int32)
 
-        positions_per_split, data_intra_per_split, _ = self.dcga.unpack_indices(data_index_all)
+        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index_all)
         coords_per_split = self.dcga.unpack_coords(positions_per_split, (psd_pars, galfor_pars))
 
-        data_intra_per_split, coords_per_split = self.dcga.place_on_device(
-            items=(data_intra_per_split, coords_per_split)
+        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
+            items=(data_intra_index_per_split, coords_per_split)
         )
 
         likelihood_args_per_split = self.dcga._loop_operation(
@@ -452,8 +453,8 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
 
         ll = self.dcga.compute_psd_likelihood(
             positions_per_split,
-            data_intra_per_split,
-            data_intra_per_split,
+            data_intra_index_per_split,
+            data_intra_index_per_split,
             likelihood_args_per_split,
             run_threaded=self.run_threaded,
         )
