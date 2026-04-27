@@ -128,10 +128,13 @@ class BackendConsumer:
     def __init__(
         self,
         curr: CurrentInfoGlobalFit = None,
-        backend: HDFBackend = None,
+        backend: HDFBackend | str = None,
     ):
         if backend is not None:
-            self.backend = backend
+            if isinstance(backend, str):
+                self.backend = HDFBackend(filename=backend, read_only=True)
+            else:
+                self.backend = backend
         elif curr is not None:
             self.backend = HDFBackend(filename=curr.main_file_path, read_only=True)
         else:
@@ -150,9 +153,11 @@ class BackendConsumer:
         """Extract cold chains and inds for all branches and cache them."""
         self._cold_chains = {}
         self._cold_inds = {}
-        for branch in self.backend.branches:
-            self._cold_chains[branch] = self.backend.get_chain(branch, temp_index=0)
-            self._cold_inds[branch] = self.backend.get_inds(branch, temp_index=0)
+        all_chains = self.backend.get_chain()
+        all_inds = self.backend.get_inds()
+        for branch in self.branches:
+            self._cold_chains[branch] = all_chains[branch][:, :1]
+            self._cold_inds[branch] = all_inds[branch][:, :1]
 
     @property
     def configured(self) -> bool:
@@ -160,9 +165,7 @@ class BackendConsumer:
 
     @property
     def branches(self) -> List[str]:
-        if not self.configured:
-            raise AttributeError("Cold chains have not been extracted yet.")
-        return list(self._cold_chains.keys())
+        return self.backend.branch_names
 
     @property
     def cold_chains(self) -> Dict[str, np.ndarray]:
@@ -205,7 +208,7 @@ class BackendConsumer:
         act: dict = get_integrated_act(self.cold_chains, **act_kwargs)
 
         # now remove nans if present
-        for branch, value in act.items:
+        for branch, value in act.items():
             if not np.isfinite(value).all():
                 logger.warning(f"NaN values found in ACT for branch '{branch}'. These will be replaced with 1.")
                 act[branch] = np.where(np.isfinite(value), value, 1.0)
@@ -229,12 +232,17 @@ class BackendConsumer:
 
         nsteps = None
         for branch in self.branches:
+            print(f"Processing branch '{branch}'")
             if nsteps == None:
                 nsteps = self.cold_chains[branch].shape[0]
                 if discard < 1.:
-                    discard = discard * nsteps
+                    discard = int(discard * nsteps)
             tmp = self.cold_chains[branch][discard::max_act].reshape(-1, self.nleaves_max[branch], self.ndims[branch])
             tmp_inds = self.cold_inds[branch][discard::max_act].reshape(-1, self.nleaves_max[branch])
+
+            if len(tmp.shape) == 5: # it still has the temperature dimension
+                tmp = tmp[:, 0] # take only the coldest temperature
+
             if tmp.shape[0] < ess:
                 logger.warning(f"Branch '{branch}' has fewer than {ess} thinned samples.")
             self._thinned_chains[branch] = tmp[-ess:]
@@ -260,7 +268,7 @@ class BackendConsumer:
         Get the thinned samples for the specified branch or all branches.
         """
 
-        if not hasattr(self, '_thinned_chains') or self.ess != ess:
+        if not hasattr(self, '_thinned_chains') or (hasattr(self, 'ess') and self.ess != ess):
             self.store_independent_samples(discard=discard, ess=ess)
 
         if branch is not None:
