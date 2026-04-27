@@ -92,14 +92,15 @@ def inner_product(
     sig2_batched = getattr(sig2, "is_batched", False)
     any_batched = sig1_batched or sig2_batched
 
-    arr1 = sig1.data_res_arr.arr
-    arr2 = sig2.data_res_arr.arr
+    breakpoint()
     if not sig1_batched:
-        arr1 = arr1[None, ...]
+        # sig_type = sig1.data_res_arr.__class__
+        tmp = DataResidualArray(domains.DomainBaseArray([sig1.data_res_arr]), input_signal_domain=sig1.settings, signal_domain=sig1.settings)
+        sig1.data_res_arr.arr = sig1.data_res_arr.arr[None, ...]
     if not sig2_batched:
-        arr2 = arr2[None, ...]
+        sig2.data_res_arr.arr = sig2.data_res_arr.arr[None, ...]
 
-    xp = get_array_module(arr1)
+    xp = get_array_module(sig1.data_res_arr.arr)
 
     basis = sig1.data_res_arr.settings
 
@@ -122,7 +123,7 @@ def inner_product(
 
     # Build channel-pair iteration over PSD structure
     operational_sets = []
-
+    breakpoint()
     if len(psd.channel_shape) == 2:
         assert psd.shape[0] == psd.shape[1] == nchannels
         for i in range(nchannels):
@@ -145,7 +146,7 @@ def inner_product(
         temp1 = sig1[op_set["sig1_ind"]]
         temp2 = sig2[op_set["sig2_ind"]]
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
-
+        
         # TODO: fix this up
         if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") or hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
             if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") and hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
@@ -166,30 +167,31 @@ def inner_product(
         if inv_psd_tmp.ndim == 1:
             ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
             inv_psd_tmp = inv_psd_tmp[ind_start:]
-            sig_component_1 = temp1[ind_start:]
-            sig_component_2 = temp2[ind_start:]
+            temp1 = temp1[ind_start:]
+            temp2 = temp2[ind_start:]
             inv_psd_component = inv_psd_tmp[ind_start:]
 
-        y = (temp1.conj() * temp2) * inv_psd_tmp
+        breakpoint()
+        y = (temp1.conj() * temp2) * inv_psd_tmp  # assumes right summation rule
 
         # Sum over all axes except batch (axis 0) → shape (nbatch,)
         sum_axes = tuple(range(1, y.ndim))
-        out += op_set["factor"] * 4 * xp.sum(y, axis=sum_axes) * psd.differential_component
+        out += factor * 4 * xp.sum(y, axis=sum_axes) * psd.differential_component
 
-        y = (
-            func(sig_component_1.conj() * sig_component_2 * inv_psd_component)
-        )  # assumes right summation rule
-
-        # switching to summation for comp to other domains
-        tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
         # y = (
-        #     func((sig_component_1.conj() * sig_component_2) + (sig_component_2.conj() * sig_component_1)) * inv_psd_component
-        # )  # assumes right summation rule
+        #     sig_component_1.conj() * sig_component_2 * inv_psd_component
+        # )  
+
         # # switching to summation for comp to other domains
-        # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
-        # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
-        # tmp.append(tmp_out)
-        out += tmp_out
+        # tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
+        # # y = (
+        # #     func((sig_component_1.conj() * sig_component_2) + (sig_component_2.conj() * sig_component_1)) * inv_psd_component
+        # # )  # assumes right summation rule
+        # # # switching to summation for comp to other domains
+        # # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
+        # # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
+        # # tmp.append(tmp_out)
+        # out += tmp_out
 
     # tmp = xp.asarray(tmp)
     # normalize the inner produce
@@ -234,6 +236,7 @@ def inner_product(
 
     out /= normalization_value
 
+    breakpoint()
     # Convert output: squeeze dummy batch dim for unbatched inputs, transfer from GPU if needed
     if any_batched:
         try:

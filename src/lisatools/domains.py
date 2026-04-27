@@ -89,19 +89,20 @@ class DomainBase:
             arr = arr[None, ...]
 
         self.outer_shape = arr.shape[: -len(self.basis_shape)]
-        if len(self.outer_shape) > 2:
+        self.nchannels = self.outer_shape[0]
+        if len(self.outer_shape) > 1:
             raise ValueError(
                 f"Too many dimensions outside of basis_shape. "
-                f"Expected at most 2 outer dims (batch, channels), got {len(self.outer_shape)}: {self.outer_shape}."
+                # f"Expected at most 1 outer dims (channels), got {len(self.outer_shape)}: {self.outer_shape}."
             )
-        elif len(self.outer_shape) == 2:
-            # batched: shape is (nbatch, nchannels, *basis_shape)
-            self._nbatch = self.outer_shape[0]
-            self.nchannels = self.outer_shape[1]
-        else:
-            # unbatched: shape is (nchannels, *basis_shape)
-            self._nbatch = None
-            self.nchannels = self.outer_shape[0]
+        # elif len(self.outer_shape) == 2:
+        #     # batched: shape is (nbatch, nchannels, *basis_shape)
+        #     self._nbatch = self.outer_shape[0]
+        #     self.nchannels = self.outer_shape[1]
+        # else:
+        #     # unbatched: shape is (nchannels, *basis_shape)
+        #     self._nbatch = None
+        #     self.nchannels = self.outer_shape[0]
         self._arr = arr
 
     def __getitem__(self, index):
@@ -1461,7 +1462,7 @@ class WDMSettings(DomainSettingsBase):
         return self.Nt * self.Nf
     
     def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
-        if self.frequency_layer_mask is None:
+        if self.frequency_layer_mask is None or arr.shape[-2] == self.Nf_active:
             return arr
         elif arr.ndim == 1:
             raise ValueError("arr must be at least 2D to apply frequency layer mask.")
@@ -2077,7 +2078,8 @@ class DomainBaseArray:
             self.is_uniform = True
 
         if self.is_uniform and len(signals) > 0:
-            arr_stacked =self.xp.stack([s.arr for s in signals], axis=0)
+            xp = get_array_module(signals[0].arr)
+            arr_stacked = xp.stack([s.arr for s in signals], axis=0)
             settings = signals[0].settings
             self._batched = settings.associated_class(arr_stacked, settings)
         else:
@@ -2097,6 +2099,14 @@ class DomainBaseArray:
         """Batched :class:`DomainBase` (shape ``(nbatch, nchannels, *basis_shape)``),
         or ``None`` when settings are non-uniform."""
         return self._batched
+    
+    @property
+    def nchannels(self) -> int:
+        return self.signals[0].settings.nchannels
+    
+    @property
+    def nchannels(self) -> int:
+        return self.signals[0].settings.nchannels
 
     @property
     def settings(self) -> List[DomainSettingsBase]:
