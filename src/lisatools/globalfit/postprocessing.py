@@ -30,47 +30,49 @@ if TYPE_CHECKING:
 logger = getLogger(__name__)
 # ─── Parameter metadata ───────────────────────────────────────────────────────
 
+
 @dataclasses.dataclass(frozen=True)
 class ParameterInfo:
     """Stores the L3C plain name, LaTeX display label, and unit for one parameter."""
+
     l3c_name: str
     latex_name: str
     unit: str
 
 
 _GB_PARAM_INFO: Dict[str, ParameterInfo] = {
-    "A":        ParameterInfo("amplitude",          r"$A$",                                 "dimensionless"),
-    "f0":       ParameterInfo("frequency",          r"$f_0\,[\mathrm{Hz}]$",               "Hz"),
-    "fdot":     ParameterInfo("frequency_dot",      r"$\dot{f}\,[\mathrm{Hz\,s^{-1}}]$",   "Hz/s"),
-    "phi0":     ParameterInfo("initial_phase",      r"$\phi_0\,[\mathrm{rad}]$",            "rad"),
-    "cos_iota": ParameterInfo("inclination",        r"$\iota\,[\mathrm{rad}]$",             "rad"),
-    "psi":      ParameterInfo("polarization",       r"$\psi\,[\mathrm{rad}]$",              "rad"),
-    "lam":      ParameterInfo("ecliptic_longitude", r"$\lambda\,[\mathrm{rad}]$",           "rad"),
-    "sin_beta": ParameterInfo("ecliptic_latitude",  r"$\beta\,[\mathrm{rad}]$",             "rad"),
+    "A": ParameterInfo("amplitude", r"$A$", "dimensionless"),
+    "f0": ParameterInfo("frequency", r"$f_0\,[\mathrm{Hz}]$", "Hz"),
+    "fdot": ParameterInfo("frequency_dot", r"$\dot{f}\,[\mathrm{Hz\,s^{-1}}]$", "Hz/s"),
+    "phi0": ParameterInfo("initial_phase", r"$\phi_0\,[\mathrm{rad}]$", "rad"),
+    "cos_iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
+    "psi": ParameterInfo("polarization", r"$\psi\,[\mathrm{rad}]$", "rad"),
+    "lam": ParameterInfo("ecliptic_longitude", r"$\lambda\,[\mathrm{rad}]$", "rad"),
+    "sin_beta": ParameterInfo("ecliptic_latitude", r"$\beta\,[\mathrm{rad}]$", "rad"),
 }
 
 _MBH_PARAM_INFO: Dict[str, ParameterInfo] = {
-    "logM":     ParameterInfo("mass1",                  r"$M_1\,[M_\odot]$",                "solMass"),
-    "q":        ParameterInfo("mass2",                  r"$M_2\,[M_\odot]$",                "solMass"),
-    "s1z":      ParameterInfo("spin1",                  r"$a_1$",                           "dimensionless"),
-    "s2z":      ParameterInfo("spin2",                  r"$a_2$",                           "dimensionless"),
-    "dist":     ParameterInfo("distance",               r"$d_L\,[\mathrm{Gpc}]$",           "Gpc"),
-    "phi_ref":  ParameterInfo("phase_at_coalescence",   r"$\phi_c\,[\mathrm{rad}]$",        "rad"),
-    "cos_iota": ParameterInfo("inclination",            r"$\iota\,[\mathrm{rad}]$",         "rad"),
-    "psi":      ParameterInfo("polarization",           r"$\psi\,[\mathrm{rad}]$",          "rad"),
-    "lam":      ParameterInfo("ecliptic_longitude",     r"$\lambda\,[\mathrm{rad}]$",       "rad"),
-    "sin_beta": ParameterInfo("ecliptic_latitude",      r"$\beta\,[\mathrm{rad}]$",         "rad"),
-    "t_plunge": ParameterInfo("coalescence_time",       r"$t_c\,[\mathrm{s}]$",             "s"),
+    "logM": ParameterInfo("mass1", r"$M_1\,[M_\odot]$", "solMass"),
+    "q": ParameterInfo("mass2", r"$M_2\,[M_\odot]$", "solMass"),
+    "s1z": ParameterInfo("spin1", r"$a_1$", "dimensionless"),
+    "s2z": ParameterInfo("spin2", r"$a_2$", "dimensionless"),
+    "dist": ParameterInfo("distance", r"$d_L\,[\mathrm{Gpc}]$", "Gpc"),
+    "phi_ref": ParameterInfo("phase_at_coalescence", r"$\phi_c\,[\mathrm{rad}]$", "rad"),
+    "cos_iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
+    "psi": ParameterInfo("polarization", r"$\psi\,[\mathrm{rad}]$", "rad"),
+    "lam": ParameterInfo("ecliptic_longitude", r"$\lambda\,[\mathrm{rad}]$", "rad"),
+    "sin_beta": ParameterInfo("ecliptic_latitude", r"$\beta\,[\mathrm{rad}]$", "rad"),
+    "t_plunge": ParameterInfo("coalescence_time", r"$t_c\,[\mathrm{s}]$", "s"),
 }
 
 _PARAM_INFO_REGISTRY: Dict[str, Dict[str, ParameterInfo]] = {
-    "gb":  _GB_PARAM_INFO,
+    "gb": _GB_PARAM_INFO,
     "mbh": _MBH_PARAM_INFO,
 }
 
 # Parameters omitted from L3C output (filled constants unused by analysts)
 _EXCLUDE_REGISTRY: Dict[str, set] = {
-    "gb":  {"fddot"},
+    "gb": {"fddot"},
     "mbh": set(),
 }
 
@@ -78,12 +80,13 @@ _EXCLUDE_REGISTRY: Dict[str, set] = {
 # The MBH transform applies gpc_to_mpc (Gpc→Mpc) for the waveform generator;
 # L3C requires distance in Gpc, so we invert here.
 _OUTPUT_CORRECTIONS_REGISTRY: Dict[str, Dict[str, Callable]] = {
-    "gb":  {},
+    "gb": {},
     "mbh": {"dist": lambda x: x * 1e-3},
 }
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _seconds_to_l3c_datetime(t: float) -> str:
     """Convert a UTC timestamp in seconds to the L3C format yyyy.mm.dd.hh.mm.ss."""
@@ -117,6 +120,7 @@ def _infer_tdi_channels(curr: CurrentInfoGlobalFit) -> List[str]:
 
 # ─── BackendConsumer ──────────────────────────────────────────────────────────
 
+
 class BackendConsumer:
     """
     Wraps an Eryn HDFBackend and provides cold-chain extraction utilities.
@@ -139,12 +143,11 @@ class BackendConsumer:
             self.backend = HDFBackend(filename=curr.main_file_path, read_only=True)
         else:
             raise ValueError("Must provide either curr or backend.")
-        
-    
+
     @property
     def ndims(self) -> dict:
         return self.backend.ndims
-    
+
     @property
     def nleaves_max(self) -> dict:
         return self.backend.nleaves_max
@@ -172,7 +175,7 @@ class BackendConsumer:
         if not self.configured:
             raise AttributeError("Cold chains have not been extracted yet.")
         return self._cold_chains
-    
+
     @property
     def cold_inds(self) -> Dict[str, np.ndarray]:
         if not self.configured:
@@ -210,16 +213,18 @@ class BackendConsumer:
         # now remove nans if present
         for branch, value in act.items():
             if not np.isfinite(value).all():
-                logger.warning(f"NaN values found in ACT for branch '{branch}'. These will be replaced with 1.")
+                logger.warning(
+                    f"NaN values found in ACT for branch '{branch}'. These will be replaced with 1."
+                )
                 act[branch] = np.where(np.isfinite(value), value, 1.0)
-    
+
         return act
 
-    def store_independent_samples(self, discard: int | float = 0., ess: int = 10000, **act_kwargs):
+    def store_independent_samples(self, discard: int | float = 0.0, ess: int = 10000, **act_kwargs):
         """
         Thin the cold chains by the ACT and keep the last `ess`.
-        
-        Args: 
+
+        Args:
             discard: int or float (optional). If int, the number of initial samples to discard. Else, fraction of initial steps to discard
             ess: int (optional). Effective sample size
         """
@@ -235,13 +240,17 @@ class BackendConsumer:
             print(f"Processing branch '{branch}'")
             if nsteps == None:
                 nsteps = self.cold_chains[branch].shape[0]
-                if discard < 1.:
+                if discard < 1.0:
                     discard = int(discard * nsteps)
-            tmp = self.cold_chains[branch][discard::max_act].reshape(-1, self.nleaves_max[branch], self.ndims[branch])
-            tmp_inds = self.cold_inds[branch][discard::max_act].reshape(-1, self.nleaves_max[branch])
+            tmp = self.cold_chains[branch][discard::max_act].reshape(
+                -1, self.nleaves_max[branch], self.ndims[branch]
+            )
+            tmp_inds = self.cold_inds[branch][discard::max_act].reshape(
+                -1, self.nleaves_max[branch]
+            )
 
-            if len(tmp.shape) == 5: # it still has the temperature dimension
-                tmp = tmp[:, 0] # take only the coldest temperature
+            if len(tmp.shape) == 5:  # it still has the temperature dimension
+                tmp = tmp[:, 0]  # take only the coldest temperature
 
             if tmp.shape[0] < ess:
                 logger.warning(f"Branch '{branch}' has fewer than {ess} thinned samples.")
@@ -252,14 +261,14 @@ class BackendConsumer:
 
     @property
     def thinned_chains(self) -> Dict[str, np.ndarray]:
-        if not hasattr(self, '_thinned_chains'):
+        if not hasattr(self, "_thinned_chains"):
             raise ValueError("Thinned samples have not been computed yet")
-        
+
         return self._thinned_chains
- 
+
     def get_independent_samples(
         self,
-        discard: int | float = 0.,
+        discard: int | float = 0.0,
         ess: int = 10000,
         branch: str | None = None,
         return_inds: bool = False,
@@ -268,7 +277,7 @@ class BackendConsumer:
         Get the thinned samples for the specified branch or all branches.
         """
 
-        if not hasattr(self, '_thinned_chains') or (hasattr(self, 'ess') and self.ess != ess):
+        if not hasattr(self, "_thinned_chains") or (hasattr(self, "ess") and self.ess != ess):
             self.store_independent_samples(discard=discard, ess=ess)
 
         if branch is not None:
@@ -280,10 +289,10 @@ class BackendConsumer:
         if return_inds:
             return self._thinned_chains, self._thinned_inds
         return self._thinned_chains
-                
-                
+
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
+
 
 @dataclasses.dataclass
 class RunMetadata:
@@ -321,9 +330,7 @@ class RunMetadata:
     searched_source_types: List[str] = dataclasses.field(default_factory=list, init=False)
 
     # extra info for web display (not part of L3C spec)
-    _web_extras: Dict[str, Any] = dataclasses.field(
-        default_factory=dict, init=False, repr=False
-    )
+    _web_extras: Dict[str, Any] = dataclasses.field(default_factory=dict, init=False, repr=False)
 
     @classmethod
     def from_curr(cls, curr: CurrentInfoGlobalFit, **user_fields) -> "RunMetadata":
@@ -337,48 +344,48 @@ class RunMetadata:
         instance = cls(**user_fields)
         gi = curr.general_info
 
-        instance.obs_begin        = _seconds_to_l3c_datetime(gi.data_t0)
-        instance.obs_end          = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
+        instance.obs_begin = _seconds_to_l3c_datetime(gi.data_t0)
+        instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.effective_duration = _seconds_to_duration_str(gi.Tobs)
-        instance.tdi_channels       = _infer_tdi_channels(curr)
+        instance.tdi_channels = _infer_tdi_channels(curr)
         instance.searched_source_types = list(curr.source_info.keys())
 
         instance._web_extras = {
-            "Tobs_s":        float(gi.Tobs),
-            "dt_s":          float(gi.dt),
-            "basis_domain":  gi.basis_domain,
+            "Tobs_s": float(gi.Tobs),
+            "dt_s": float(gi.dt),
+            "basis_domain": gi.basis_domain,
             "start_freq_hz": float(gi.start_freq) if gi.start_freq is not None else None,
-            "end_freq_hz":   float(gi.end_freq)   if gi.end_freq   is not None else None,
-            "nwalkers":      gi.nwalkers,
-            "ntemps":        gi.ntemps,
+            "end_freq_hz": float(gi.end_freq) if gi.end_freq is not None else None,
+            "nwalkers": gi.nwalkers,
+            "ntemps": gi.ntemps,
         }
         return instance
 
     def to_l3c_dict(self) -> dict:
         """Return a dict matching the l2_output_metadata template keys exactly."""
         return {
-            "global_fit_codename":              self.codename,
-            "global_fit_version":               self.version,
-            "global_fit_release_date":          datetime.now(tz=timezone.utc).strftime("%Y.%m.%d"),
-            "global_fit_contact":               self.contact,
-            "input_data_link":                  self.input_data_link,
-            "input_reference":                  self.input_reference,
-            "global_fit_code_link":             self.code_link,
-            "observation_period_begin":         self.obs_begin,
-            "observation_period_end":           self.obs_end,
-            "effective_observation_duration":   self.effective_duration,
-            "quality":                          self.quality,
-            "searched_source_types_list":       self.searched_source_types,
-            "found_source_types_list":          self.found_source_types,
-            "noise_model":                      self.noise_model,
-            "noise_model_code_link":            self.noise_model_code_link,
-            "noise_model_config_file_link":     "",
-            "waveform_model":                   self.waveform_model,
-            "waveform_model_code_link":         self.waveform_model_code_link,
-            "waveform_model_config_file_link":  "",
-            "tdi_channels":                     self.tdi_channels,
-            "list_of_detected_sources":         ", ".join(self.found_source_types),
-            "comment":                          self.comment,
+            "global_fit_codename": self.codename,
+            "global_fit_version": self.version,
+            "global_fit_release_date": datetime.now(tz=timezone.utc).strftime("%Y.%m.%d"),
+            "global_fit_contact": self.contact,
+            "input_data_link": self.input_data_link,
+            "input_reference": self.input_reference,
+            "global_fit_code_link": self.code_link,
+            "observation_period_begin": self.obs_begin,
+            "observation_period_end": self.obs_end,
+            "effective_observation_duration": self.effective_duration,
+            "quality": self.quality,
+            "searched_source_types_list": self.searched_source_types,
+            "found_source_types_list": self.found_source_types,
+            "noise_model": self.noise_model,
+            "noise_model_code_link": self.noise_model_code_link,
+            "noise_model_config_file_link": "",
+            "waveform_model": self.waveform_model,
+            "waveform_model_code_link": self.waveform_model_code_link,
+            "waveform_model_config_file_link": "",
+            "tdi_channels": self.tdi_channels,
+            "list_of_detected_sources": ", ".join(self.found_source_types),
+            "comment": self.comment,
         }
 
     def to_web_dict(self) -> dict:
@@ -389,6 +396,7 @@ class RunMetadata:
 
 
 # ─── ParameterMapper ──────────────────────────────────────────────────────────
+
 
 class ParameterMapper:
     """
@@ -408,10 +416,10 @@ class ParameterMapper:
         exclude: set = None,
         output_corrections: Dict[str, Callable] = None,
     ):
-        self._transform         = transform
-        self._output_basis      = output_basis
-        self._param_info        = param_info
-        self._exclude           = exclude or set()
+        self._transform = transform
+        self._output_basis = output_basis
+        self._param_info = param_info
+        self._exclude = exclude or set()
         self._output_corrections = output_corrections or {}
 
     @classmethod
@@ -436,10 +444,7 @@ class ParameterMapper:
         )
 
     def _active_output_params(self) -> List[str]:
-        return [
-            p for p in self._output_basis
-            if p not in self._exclude and p in self._param_info
-        ]
+        return [p for p in self._output_basis if p not in self._exclude and p in self._param_info]
 
     @property
     def l3c_names(self) -> List[str]:
@@ -479,6 +484,7 @@ class ParameterMapper:
 
 
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
+
 
 class DetectionCriteria(ABC):
     """
@@ -536,8 +542,8 @@ class SNRDetectionCriteria(DetectionCriteria):
     def detect(self, samples: np.ndarray, inds: np.ndarray) -> np.ndarray:
         n_steps, n_walkers, n_leaves, ndim = samples.shape
         # Use the last independent step as a proxy for MAP
-        map_samples = samples[-1]    # (nwalkers, nleaves_max, ndim)
-        map_inds    = inds[-1]       # (nwalkers, nleaves_max)
+        map_samples = samples[-1]  # (nwalkers, nleaves_max, ndim)
+        map_inds = inds[-1]  # (nwalkers, nleaves_max)
 
         # Average over walkers: take the walker with maximum occupancy per leaf
         leaf_occupancy = map_inds.mean(axis=0)  # (nleaves_max,)
@@ -554,6 +560,7 @@ class SNRDetectionCriteria(DetectionCriteria):
 
 
 # ─── L3CSubmissionWriter ──────────────────────────────────────────────────────
+
 
 class L3CSubmissionWriter:
     """
@@ -575,10 +582,10 @@ class L3CSubmissionWriter:
         detection_criteria: Optional[Dict[str, DetectionCriteria]] = None,
         discard_fraction: float = 0.0,
     ):
-        self.consumer         = backend_consumer
-        self.metadata         = run_metadata
-        self.curr             = curr
-        self.output_dir       = output_dir
+        self.consumer = backend_consumer
+        self.metadata = run_metadata
+        self.curr = curr
+        self.output_dir = output_dir
         self.discard_fraction = discard_fraction
         self.detection_criteria = detection_criteria or {}
         os.makedirs(output_dir, exist_ok=True)
@@ -599,34 +606,29 @@ class L3CSubmissionWriter:
         samples, inds = self.consumer.get_independent_samples(
             source_type, discard_fraction=self.discard_fraction
         )
-        criteria = (
-            self.detection_criteria.get(source_type)
-            or self._default_criteria(source_type)
-        )
-        detected_mask    = criteria.detect(samples, inds)
+        criteria = self.detection_criteria.get(source_type) or self._default_criteria(source_type)
+        detected_mask = criteria.detect(samples, inds)
         detected_indices = np.where(detected_mask)[0]
 
         mapper = ParameterMapper.from_curr(self.curr, source_type)
 
-        posteriors_dir = os.path.join(
-            self.output_dir, f"posteriors_{self.TEAM_NAME}_{source_type}"
-        )
+        posteriors_dir = os.path.join(self.output_dir, f"posteriors_{self.TEAM_NAME}_{source_type}")
         os.makedirs(posteriors_dir, exist_ok=True)
 
         posterior_files = []
-        map_estimates   = []
+        map_estimates = []
 
         for det_i, leaf_idx in enumerate(detected_indices):
             # Flatten steps × walkers for this leaf, keep only active samples
             leaf_samples = samples[:, :, leaf_idx, :].reshape(-1, samples.shape[-1])
-            leaf_active  = inds[:, :, leaf_idx].reshape(-1)
+            leaf_active = inds[:, :, leaf_idx].reshape(-1)
             leaf_samples = leaf_samples[leaf_active]
 
             if len(leaf_samples) == 0:
                 continue
 
             physical = mapper.map(leaf_samples)
-            map_est  = {k: float(np.median(v)) for k, v in physical.items()}
+            map_est = {k: float(np.median(v)) for k, v in physical.items()}
             map_estimates.append(map_est)
 
             fname = os.path.join(posteriors_dir, f"source_{det_i}.h5")
@@ -643,12 +645,12 @@ class L3CSubmissionWriter:
         source_type: str,
     ):
         with h5py.File(filepath, "w") as f:
-            f.attrs["source_type"]                = source_type.upper()
-            f.attrs["prior_model"]                = "uniform"
-            f.attrs["prior_model_code_link"]      = self.metadata.code_link
+            f.attrs["source_type"] = source_type.upper()
+            f.attrs["prior_model"] = "uniform"
+            f.attrs["prior_model_code_link"] = self.metadata.code_link
             f.attrs["prior_model_config_file_link"] = ""
-            f.attrs["vb_references"]              = ""
-            f.attrs["estimation_method"]          = "MCMC (Eryn)"
+            f.attrs["vb_references"] = ""
+            f.attrs["estimation_method"] = "MCMC (Eryn)"
 
             for l3c_name, values in physical.items():
                 f.create_dataset(l3c_name, data=values.astype(np.float64))
@@ -661,21 +663,23 @@ class L3CSubmissionWriter:
         mapper: ParameterMapper,
     ):
         team = self.TEAM_NAME.upper()
-        src  = source_type.upper()
+        src = source_type.upper()
         filepath = os.path.join(self.output_dir, f"{team}_{src}.h5")
 
         with h5py.File(filepath, "w") as f:
             # / — l2_output_metadata attributes
             for k, v in self.metadata.to_l3c_dict().items():
-                f.attrs[k] = json.dumps(v) if isinstance(v, list) else (str(v) if v is not None else "")
+                f.attrs[k] = (
+                    json.dumps(v) if isinstance(v, list) else (str(v) if v is not None else "")
+                )
 
             # /sources — dataset_metadata attributes + N×P MAP detections matrix
             sources_grp = f.create_group("sources")
-            sources_grp.attrs["source_type"]             = source_type.upper()
-            sources_grp.attrs["prior_model"]             = "uniform"
-            sources_grp.attrs["prior_model_code_link"]   = self.metadata.code_link
+            sources_grp.attrs["source_type"] = source_type.upper()
+            sources_grp.attrs["prior_model"] = "uniform"
+            sources_grp.attrs["prior_model_code_link"] = self.metadata.code_link
             sources_grp.attrs["prior_model_config_file_link"] = ""
-            sources_grp.attrs["vb_references"]           = ""
+            sources_grp.attrs["vb_references"] = ""
 
             if map_estimates:
                 det_matrix = np.array(
@@ -683,9 +687,9 @@ class L3CSubmissionWriter:
                     dtype=np.float64,
                 )  # (N_detections, N_params)
                 ds = sources_grp.create_dataset("detections", data=det_matrix)
-                ds.attrs["columns"]      = json.dumps(mapper.l3c_names)
-                ds.attrs["latex_names"]  = json.dumps(mapper.latex_names)
-                ds.attrs["units"]        = json.dumps(mapper.units)
+                ds.attrs["columns"] = json.dumps(mapper.l3c_names)
+                ds.attrs["latex_names"] = json.dumps(mapper.latex_names)
+                ds.attrs["units"] = json.dumps(mapper.units)
 
             # /posteriors_files — path strings to per-source posterior HDF5 files
             pf_grp = f.create_group("posteriors_files")
@@ -694,6 +698,7 @@ class L3CSubmissionWriter:
 
 
 # ─── WebManifestWriter ────────────────────────────────────────────────────────
+
 
 class WebManifestWriter:
     """
@@ -713,15 +718,15 @@ class WebManifestWriter:
         web_output_dir: str,
         max_sources_with_full_samples: Optional[int] = None,
     ):
-        self.l3c_writer  = l3c_writer
+        self.l3c_writer = l3c_writer
         self.web_output_dir = web_output_dir
-        self.max_full    = max_sources_with_full_samples
+        self.max_full = max_sources_with_full_samples
         os.makedirs(web_output_dir, exist_ok=True)
 
     def write(self, source_types: List[str]):
         """Write manifest.json and per-source sample files for all source types."""
         manifest: Dict[str, Any] = {
-            "run":     self.l3c_writer.metadata.to_web_dict(),
+            "run": self.l3c_writer.metadata.to_web_dict(),
             "sources": {},
         }
         for source_type in source_types:
@@ -736,28 +741,27 @@ class WebManifestWriter:
             source_type,
             discard_fraction=self.l3c_writer.discard_fraction,
         )
-        criteria = (
-            self.l3c_writer.detection_criteria.get(source_type)
-            or self.l3c_writer._default_criteria(source_type)
-        )
-        detected_mask    = criteria.detect(samples, inds)
+        criteria = self.l3c_writer.detection_criteria.get(
+            source_type
+        ) or self.l3c_writer._default_criteria(source_type)
+        detected_mask = criteria.detect(samples, inds)
         detected_indices = np.where(detected_mask)[0]
 
-        mapper  = ParameterMapper.from_curr(self.l3c_writer.curr, source_type)
+        mapper = ParameterMapper.from_curr(self.l3c_writer.curr, source_type)
         src_dir = os.path.join(self.web_output_dir, source_type)
         os.makedirs(src_dir, exist_ok=True)
 
         detections_meta = []
         for det_i, leaf_idx in enumerate(detected_indices):
             leaf_samples = samples[:, :, leaf_idx, :].reshape(-1, samples.shape[-1])
-            leaf_active  = inds[:, :, leaf_idx].reshape(-1)
+            leaf_active = inds[:, :, leaf_idx].reshape(-1)
             leaf_samples = leaf_samples[leaf_active]
             if len(leaf_samples) == 0:
                 continue
 
             physical = mapper.map(leaf_samples)
             entry = {
-                "id":      det_i,
+                "id": det_i,
                 "summary": self._summary_stats(physical),
             }
 
@@ -774,10 +778,10 @@ class WebManifestWriter:
 
         return {
             "n_detections": len(detected_indices),
-            "parameters":   mapper.l3c_names,
-            "latex_names":  mapper.latex_names,
-            "units":        mapper.units,
-            "detections":   detections_meta,
+            "parameters": mapper.l3c_names,
+            "latex_names": mapper.latex_names,
+            "units": mapper.units,
+            "detections": detections_meta,
         }
 
     @staticmethod
@@ -785,7 +789,7 @@ class WebManifestWriter:
         return {
             name: {
                 "median": float(np.median(vals)),
-                "ci_90":  [float(np.percentile(vals, 5)), float(np.percentile(vals, 95))],
+                "ci_90": [float(np.percentile(vals, 5)), float(np.percentile(vals, 95))],
             }
             for name, vals in physical.items()
         }
@@ -797,10 +801,10 @@ class WebManifestWriter:
         mapper: ParameterMapper,
     ):
         payload = {
-            "parameters":  mapper.l3c_names,
+            "parameters": mapper.l3c_names,
             "latex_names": mapper.latex_names,
-            "units":       mapper.units,
-            "samples":     {name: vals.tolist() for name, vals in physical.items()},
+            "units": mapper.units,
+            "samples": {name: vals.tolist() for name, vals in physical.items()},
         }
         with open(filepath, "w") as f:
             json.dump(payload, f)
