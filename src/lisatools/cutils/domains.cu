@@ -92,16 +92,15 @@ struct ComplexSum {
  *               contributes array[threadIdx.x].
  * @return       The sum of all elements (valid only on thread 0).
  */
-static CUDA_DEVICE
-cmplx block_reduce_cmplx(cmplx *array) {
-    using BlockReduce = cub::BlockReduce<cmplx, NUM_THREADS>;
-    CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
-    // Synchronise before reading: ensures all threads have written their element.
-    CUDA_SYNC_THREADS;
-    int tid = threadIdx.x;
-    cmplx thread_data = array[tid];
-    cmplx output = BlockReduce(temp_storage).Reduce(thread_data, ComplexSum());
-    return output;
+static CUDA_DEVICE cmplx block_reduce_cmplx(cmplx* array) {
+  using BlockReduce = cub::BlockReduce<cmplx, NUM_THREADS>;
+  CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
+  // Synchronise before reading: ensures all threads have written their element.
+  CUDA_SYNC_THREADS;
+  int tid = threadIdx.x;
+  cmplx thread_data = array[tid];
+  cmplx output = BlockReduce(temp_storage).Reduce(thread_data, ComplexSum());
+  return output;
 }
 #endif
 
@@ -658,19 +657,19 @@ void STFTFresnel::get_fresnel_integrals(double* C, double* S, double x) {
 }
 
 CUDA_DEVICE
-cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0,
-                                      double fdot0) {
-  double v0 = get_v(t0, f, t0, f0, fdot0);
-  double t1 = t0 + dt;  // End of the current STFT window. we are assuming that
-                        // everything is correctly aligned with the stft grid
-  double v1 = get_v(t1, f, t0, f0, fdot0);
+cmplx STFTFresnel::get_fresnel_kernel_interval(double f, double t0, double f0,
+                                               double fdot0, double t_start,
+                                               double t_end) {
+  double v_start = get_v(t_start, f, t0, f0, fdot0);
 
-  double C_0, S_0, C_1, S_1;
-  get_fresnel_integrals(&C_0, &S_0, v0);
-  get_fresnel_integrals(&C_1, &S_1, v1);
+  double v_end = get_v(t_end, f, t0, f0, fdot0);
 
-  double delta_C = C_1 - C_0;
-  double delta_S = S_1 - S_0;
+  double C_start, S_start, C_end, S_end;
+  get_fresnel_integrals(&C_start, &S_start, v_start);
+  get_fresnel_integrals(&C_end, &S_end, v_end);
+
+  double delta_C = C_end - C_start;
+  double delta_S = S_end - S_start;
   cmplx kernel =
       (fdot0 >= 0.0) ? cmplx(delta_C, delta_S) : cmplx(delta_C, -delta_S);
 
@@ -678,17 +677,71 @@ cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0,
 }
 
 CUDA_DEVICE
+cmplx STFTFresnel::get_fresnel_kernel(double f, double t0, double f0,
+                                      double fdot0) {
+  double t1 = t0 + dt;  // End of the current STFT window. we are assuming that
+                        // everything is correctly aligned with the stft grid
+
+  cmplx kernel = get_fresnel_kernel_interval(f, t0, f0, fdot0, t0, t1);
+  return kernel;
+}
+
+CUDA_DEVICE
+cmplx STFTFresnel::get_phase_kernel_product(double f_eff, double t0, double f0,
+                                            double fdot0, double t_start,
+                                            double t_end) {
+  cmplx kernel =
+      get_fresnel_kernel_interval(f_eff, t0, f0, fdot0, t_start, t_end);
+  double zeta = get_zeta(f_eff, f0, fdot0);
+  double phase = -M_PI * fdot0 * zeta * zeta;
+  return gcmplx::polar(1.0, phase) * kernel;
+}
+
+CUDA_DEVICE
+cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
+                                              double f0, double fdot0,
+                                              double t0, double f) {
+  // account the effect of a tukey window on the fourier value.
+  double t_end = t0 + dt;
+  double t_roll_on = t0 + taper_duration;
+  double t_roll_off = t_end - taper_duration;
+
+  double amplitude = amp / std::sqrt(2.0 * std::abs(fdot0));
+  cmplx overall_factor = gcmplx::polar(amplitude, phase0);
+
+  cmplx rectangular = get_phase_kernel_product(f, t0, f0, fdot0, t0, t_end);
+  cmplx left_dc = get_phase_kernel_product(f, t0, f0, fdot0, t0, t_roll_on);
+  cmplx left_plus_shift =
+      get_phase_kernel_product(f - f_taper, t0, f0, fdot0, t0, t_roll_on);
+  cmplx left_minus_shift =
+      get_phase_kernel_product(f + f_taper, t0, f0, fdot0, t0, t_roll_on);
+  cmplx right_dc =
+      get_phase_kernel_product(f, t0, f0, fdot0, t_roll_off, t_end);
+  cmplx right_plus_shift =
+      get_phase_kernel_product(f - f_taper, t0, f0, fdot0, t_roll_off, t_end);
+  cmplx right_minus_shift =
+      get_phase_kernel_product(f + f_taper, t0, f0, fdot0, t_roll_off, t_end);
+
+  cmplx out = overall_factor * (rectangular - 0.5 * (left_dc + right_dc) -
+                                0.25 * (left_plus_shift + left_minus_shift +
+                                        right_plus_shift + right_minus_shift));
+  return out;
+}
+
+CUDA_DEVICE
 cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
                                      double fdot0, double t0, double f,
                                      double window_factor) {
-  cmplx kernel = get_fresnel_kernel(f, t0, f0, fdot0);
-  double amplitude =
-      window_factor * amp /
-      std::sqrt(2.0 * std::abs(fdot0));  // todo: check for negative fdot0?
-  double zeta = get_zeta(f, f0, fdot0);
-  double phase = phase0 - M_PI * fdot0 * zeta * zeta;
+  if (window_alpha > 0.0)
+    return get_windowed_fourier_value(amp, phase0, f0, fdot0, t0, f);
 
-  cmplx out = gcmplx::polar(amplitude, phase) * kernel;
+  double t1 = t0 + dt;
+
+  double amplitude = window_factor * amp / std::sqrt(2.0 * std::abs(fdot0));
+
+  cmplx phase_kernel = get_phase_kernel_product(f, t0, f0, fdot0, t0, t1);
+  cmplx out = gcmplx::polar(amplitude, phase0) * phase_kernel;
+
   return out;
 }
 

@@ -414,10 +414,10 @@ void domains_part(py::module &m) {
 #else
     py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapCPU")
 #endif
-    .def(py::init<int, int, int, double, double, double, double, double>(),
+    .def(py::init<int, int, int, double, double, double, double, double, double>(),
          py::arg("num_times"), py::arg("num_freqs"), py::arg("num_channels"),
          py::arg("t0"), py::arg("f_min"), py::arg("f_max"),
-         py::arg("dt"), py::arg("df"))
+         py::arg("dt"), py::arg("df"), py::arg("window_alpha") = 0.0)
     .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
          "Compute Fresnel-based Fourier values for a batch of binaries.");
 }

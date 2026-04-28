@@ -333,10 +333,10 @@ public:
 
     STFTFresnelWrap(int num_times, int num_freqs, int num_channels,
                     double t0, double f_min, double f_max,
-                    double dt, double df)
+                    double dt, double df, double window_alpha = 0.0)
     {
         fresnel = new STFTFresnel(num_times, num_freqs, num_channels,
-                                  t0, f_min, f_max, dt, df);
+                                  t0, f_min, f_max, dt, df, window_alpha);
     }
 
     ~STFTFresnelWrap() { delete fresnel; }

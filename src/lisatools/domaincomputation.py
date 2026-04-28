@@ -300,6 +300,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
         split_index: int = 0,
         tdi_type: str = "XYZ",
         force_backend: str = "cpu",
+        window_alpha: float = 0.0,
     ):
         from .domains import STFTSettings
 
@@ -308,6 +309,8 @@ class STFTComputationGroup(BaseDomainComputationGroup):
                 "settings must be an instance of STFTSettings for STFTComputationGroup."
             )
         super().__init__(acs, split_index, tdi_type, force_backend)
+
+        self.window_alpha = window_alpha
 
         with self.group_device_context():
             self._create_cpp_domain()
@@ -336,8 +339,8 @@ class STFTComputationGroup(BaseDomainComputationGroup):
     def _create_cpp_domain(self):
         self._cpp_domain = self.backend.STFTDomainWrap(*self.domain_args)
         logger.debug("Initialized STFTDomainWrap with arguments: %s", self.domain_args)
-        self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8])
-        logger.debug("Initialized STFTFresnelWrap with arguments: %s", self.domain_args[:8])
+        self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8], window_alpha=self.window_alpha)
+        logger.debug("Initialized STFTFresnelWrap with arguments: %s", self.domain_args[:8], window_alpha=self.window_alpha)
 
     @property
     def cpp_fresnel(self):
@@ -485,10 +488,11 @@ class DomainComputationGroupArray:
             The AnalysisContainerArray containing the data and noise arrays, as well as the GPU split information. This will be used to initialize the individual DomainComputationGroup instances for each split.
     """
 
-    def __init__(self, acs: AnalysisContainerArray):
+    def __init__(self, acs: AnalysisContainerArray, domain_group_kwargs: dict[str, Any] = None):
 
         self.acs = acs
-        self.initialize_computation_groups()
+        
+        self.initialize_computation_groups(domain_group_kwargs)
 
         # Precomputed routing tables. ``ac_to_split`` maps a global AC id
         # (equivalently walker id in the tempered sampler) to the split that
@@ -507,7 +511,7 @@ class DomainComputationGroupArray:
         if hasattr(self, "_thread_pool"):
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
 
-    def initialize_computation_groups(self):
+    def initialize_computation_groups(self, domain_group_kwargs: dict[str, Any] = None):
         """Initializes a DomainComputationGroup instance for each GPU split in the AnalysisContainerArray."""
 
         force_backend = "cpu" if self.acs.gpus is None else "gpu"
@@ -521,6 +525,7 @@ class DomainComputationGroupArray:
                     acs=self.acs,
                     split_index=split_index,
                     force_backend=force_backend,
+                    **(domain_group_kwargs or {})
                 )
                 computation_groups.append(group)
         self.computation_groups = computation_groups

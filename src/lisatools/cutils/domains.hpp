@@ -119,12 +119,12 @@ class FDSettings : public STFTSettings {
  */
 class STFTDomain : public STFTSettings {
  public:
-  cmplx* data;  ///< Complex data array, shape [num_data, num_channels,
-                ///< num_times, num_freqs]
-  cmplx* invC;  ///< Inverse-covariance array; shape depends on TDI mode:
-                ///<   diagonal (AET): [num_noise, num_channels, num_times,
-                ///<   num_freqs] full matrix (XYZ): [num_noise, num_channels,
-                ///<   num_channels, num_times, num_freqs]
+  cmplx* data;    ///< Complex data array, shape [num_data, num_channels,
+                  ///< num_times, num_freqs]
+  cmplx* invC;    ///< Inverse-covariance array; shape depends on TDI mode:
+                  ///<   diagonal (AET): [num_noise, num_channels, num_times,
+                  ///<   num_freqs] full matrix (XYZ): [num_noise, num_channels,
+                  ///<   num_channels, num_times, num_freqs]
   int num_data;   ///< Number of independent data realisations (e.g. MCMC
                   ///< walkers)
   int num_noise;  ///< Number of independent noise/PSD realisations
@@ -379,11 +379,20 @@ class FDDomain : public STFTDomain {
 
 class STFTFresnel : public STFTSettings {
  public:
+  double window_alpha;  ///< Window function parameter (e.g. for a Tukey window)
+  double taper_duration;  ///< Duration of the window taper (e.g. for a Tukey
+                          ///< window) [s] alpha * dt / 2
+  double f_taper;  /// 1.0 / (2.0 * taper_duration);  ///< Frequency scale
+                   /// associated with the window taper [Hz]
   CUDA_CALLABLE_MEMBER
   STFTFresnel(int num_times_, int num_freqs_, int num_channels_, double t0_,
-              double f_min_, double f_max_, double dt_, double df_)
+              double f_min_, double f_max_, double dt_, double df_,
+              double window_alpha_)
       : STFTSettings(num_times_, num_freqs_, num_channels_, t0_, f_min_, f_max_,
-                     dt_, df_){};
+                     dt_, df_),
+        window_alpha(window_alpha_),
+        taper_duration(window_alpha_ > 0.0 ? window_alpha_ * dt_ / 2.0 : 0.0),
+        f_taper(window_alpha_ > 0.0 ? 1.0 / (2.0 * taper_duration) : 0.0){};
 
   CUDA_DEVICE
   void get_amp_phase(double* amp, double* phase, cmplx z);
@@ -399,6 +408,15 @@ class STFTFresnel : public STFTSettings {
   void get_fresnel_integrals(double* C, double* S,
                              double x);  // Fresnel integrals C(x) and S(x)
                                          // returned in ints[0] and ints[1]
+  CUDA_DEVICE
+  cmplx get_fresnel_kernel_interval(double f, double t0, double f0,
+                                    double fdot0, double t_start, double t_end);
+  CUDA_DEVICE
+  cmplx get_phase_kernel_product(double f_eff, double t0, double f0,
+                                 double fdot0, double t_start, double t_end);
+  CUDA_DEVICE
+  cmplx get_windowed_fourier_value(double amp, double phase0, double f0,
+                                   double fdot0, double t0, double f);
   CUDA_DEVICE
   cmplx get_fresnel_kernel(double f, double t0, double f0, double fdot0);
   CUDA_DEVICE
