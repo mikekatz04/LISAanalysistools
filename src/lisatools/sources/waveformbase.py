@@ -1193,6 +1193,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         # STFT boundary snapping in `get_dense_times` can expand the domain by thousands of
         # seconds. Anchoring the spline's immediate edges at zero ensures that out-of-bounds
         # evaluation flawlessly returns 0.0 without causing massive polynomial extrapolation ringing.
+        # todo check this. I've stopped looking at TOF for the moment
         if self.analysis_domain == "STFT":
             anchor_time_end = tdi_spline.x[:, -1:] + self.dt  # (num_sub, 1)
             anchor_time_start = tdi_spline.x[:, 0:1] - self.dt
