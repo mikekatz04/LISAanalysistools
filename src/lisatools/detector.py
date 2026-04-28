@@ -61,10 +61,14 @@ class Orbits(LISAToolsParallelModule, ABC):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @property
+    def args(self):
+        """Arguments for recreating this class instance."""
+        return (self.filename,)
+
+    @property
     def kwargs(self):        
         """Keyword arguments for recreating this class instance."""
         return {
-            "filename": self.filename,
             "armlength": self.armlength,
             "force_backend": self.backend.backend_name.split("_")[-1],
             "t0": self.t0,
@@ -588,6 +592,10 @@ class EqualArmlengthOrbits(Orbits):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__("equalarmlength-orbits.h5", *args, **kwargs)
 
+    @property
+    def args(self):
+        """Arguments for recreating this class instance."""
+        return ()
 
 class ESAOrbits(Orbits):
     """ESA Orbits
@@ -602,6 +610,11 @@ class ESAOrbits(Orbits):
 
     def __init__(self, *args, **kwargs):
         super().__init__("esa-trailing-orbits.h5", *args, **kwargs)
+
+    @property
+    def args(self):
+        """Arguments for recreating this class instance."""
+        return ()
 
 
 def icrs_to_ecliptic(positions_icrs):
@@ -666,7 +679,6 @@ class L1Orbits(Orbits):
     def kwargs(self):
         """Keyword arguments for recreating this class instance."""
         return {
-            "filename": self.filename,
             "armlength": self.armlength,
             "force_backend": self.backend.backend_name.split("_")[-1],
             "frame": self.frame,
