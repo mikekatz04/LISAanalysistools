@@ -860,3 +860,22 @@ class DomainComputationGroupArray:
             likelihood_args,
             run_threaded=run_threaded,
         )
+
+    def compute_signal_likelihood(
+        self,
+        positions_per_split: list[np.ndarray],
+        data_intra_per_split: list[np.ndarray | cp.ndarray],
+        noise_intra_per_split: list[np.ndarray | cp.ndarray],
+        likelihood_args: list[tuple],
+        run_threaded: bool = False,
+    ):
+        """Compute signal likelihood for each split and aggregate results."""
+        operations = [group.compute_signal_likelihood for group in self.computation_groups]
+        return self._compute_group_likelihood(
+            positions_per_split,
+            data_intra_per_split,
+            noise_intra_per_split,
+            operations,
+            likelihood_args,
+            run_threaded=run_threaded,
+        )
