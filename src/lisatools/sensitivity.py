@@ -1208,7 +1208,6 @@ class SensitivityMatrixBase:
 
                     else:
                         raise ValueError
-
             # setup in array form
             self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + self.basis_settings.basis_shape)
 
@@ -1246,6 +1245,7 @@ class SensitivityMatrixBase:
 
         new_mat.sens_mat = self.sens_mat[(Ellipsis,) + basis_idx]
         new_mat.detC = self.detC[basis_idx]
+        breakpoint()
         new_mat.invC = self.invC[(Ellipsis,) + basis_idx]
 
         # now set skip_inv_det to False
@@ -1304,8 +1304,15 @@ class SensitivityMatrixBase:
             self.detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
 
             tmp = self.sens_mat.transpose(transpose_shape).reshape((-1,) + self.channel_shape)
+            
             _invC = xp.zeros_like(tmp)
             
+            # adjust for nans in off-diagonals
+            for i in range(3):
+                for j in range(3):
+                    if i != j:
+                        tmp[np.isnan(tmp[:, i, j]), i, j] = 0.0
+
             batch = 100000
             inds = np.arange(0, tmp.shape[0], batch)
             if inds[0] < tmp.shape[0]:
@@ -1617,7 +1624,7 @@ def get_sensitivity(
     *args: tuple,
     sens_fn: Optional[Sensitivity | str] = LISASens,
     return_type="PSD",
-    fill_nans: float = 1e10,
+    fill_nans: float = np.nan,
     args_list: Optional[List[tuple]] = None,
     kwargs_list: Optional[List[dict]] = None,
     **kwargs,
@@ -1695,11 +1702,11 @@ def get_sensitivity(
         # PSD = simpson_3_integral = h*(f0 + 4.0*f1 + f2)/6.0
         # 0.25 is fudge factor from tysons code
         f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
-        psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0]) ** (1/2)
+        psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
         
         psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
-        PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0] / (basis_settings.data_dt * basis_settings.Nt * basis_settings.Nf) 
-        
+        PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
+
     else:
         raise ValueError(
             f"Domain type entered ({type(basis_settings)}). Needs to be one of {domains.get_available_domains()}"

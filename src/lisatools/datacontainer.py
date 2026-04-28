@@ -60,7 +60,9 @@ class DataResidualArray:
                 setattr(self, key, item)
 
         else:
-            if isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray):
+            if not isinstance(data_res_in, domains.DomainBase):
+                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
+
                 xp = get_array_module(data_res_in)
                 data_res_in = xp.atleast_2d(data_res_in)
                 if input_signal_domain is None:
@@ -82,14 +84,16 @@ class DataResidualArray:
                 else:
                     # default is same domain
                     signal_domain = input_signal_domain
-
-            if not isinstance(input_signal_domain, list):
-                input_signal_domain = [input_signal_domain]
-            
-            if signal_domain == input_signal_domain[0]:
+             
+            if signal_domain == input_signal_domain:
                 self.data_res_arr = data_res_in
             else:
                 self.data_res_arr = data_res_in.transform(signal_domain, window=window)
+
+            self.nchannels = self.data_res_arr.nchannels
+            self.nbatch = self.data_res_arr.nbatch
+            self.is_batched = self.data_res_arr.is_batched
+            self.data_shape = self.data_res_arr.settings.basis_shape
 
         self.init_kwargs = dict(
             signal_domain=signal_domain,
@@ -247,10 +251,6 @@ class DataResidualArray:
     @data_res_arr.setter
     def data_res_arr(self, data_res_arr: List[np.ndarray] | np.ndarray) -> None:
         """Set ``data_res_arr``."""
-        self.nchannels = data_res_arr.nchannels
-        self.nbatch = data_res_arr.nbatch
-        self.is_batched = data_res_arr.is_batched
-        self.data_shape = data_res_arr.settings.basis_shape
         self._data_res_arr = data_res_arr
 
     def __getitem__(self, index: tuple) -> np.ndarray:

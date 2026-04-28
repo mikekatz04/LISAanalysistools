@@ -89,20 +89,19 @@ class DomainBase:
             arr = arr[None, ...]
 
         self.outer_shape = arr.shape[: -len(self.basis_shape)]
-        self.nchannels = self.outer_shape[0]
-        if len(self.outer_shape) > 1:
+        if len(self.outer_shape) > 2:
             raise ValueError(
                 f"Too many dimensions outside of basis_shape. "
-                # f"Expected at most 1 outer dims (channels), got {len(self.outer_shape)}: {self.outer_shape}."
+                f"Expected at most 2 outer dims (batch, channels), got {len(self.outer_shape)}: {self.outer_shape}."
             )
-        # elif len(self.outer_shape) == 2:
-        #     # batched: shape is (nbatch, nchannels, *basis_shape)
-        #     self._nbatch = self.outer_shape[0]
-        #     self.nchannels = self.outer_shape[1]
-        # else:
-        #     # unbatched: shape is (nchannels, *basis_shape)
-        #     self._nbatch = None
-        #     self.nchannels = self.outer_shape[0]
+        elif len(self.outer_shape) == 2:
+            # batched: shape is (nbatch, nchannels, *basis_shape)
+            self._nbatch = self.outer_shape[0]
+            self.nchannels = self.outer_shape[1]
+        else:
+            # unbatched: shape is (nchannels, *basis_shape)
+            self._nbatch = None
+            self.nchannels = self.outer_shape[0]
         self._arr = arr
 
     def __getitem__(self, index):
@@ -627,12 +626,10 @@ class FDSignal(FDSettings, DomainBase):
 
 
         # multiply by  2 / settings.layer_df for forward transform
-        exponent = 1 if not is_psd else 2
-        base_window = (settings.window[:] * 2 / settings.Nf) ** exponent
-        dc_window = (settings.dc_layer_window * 2 / settings.Nf) ** exponent
+        base_window = (settings.window[:] * 2 / settings.Nf)
+        dc_window = (settings.dc_layer_window * 2 / settings.Nf)
         # TODO: check if this is right?!?!
-        max_freq_window = (settings.max_freq_layer_window * 2 / settings.Nf) ** exponent
-
+        max_freq_window = (settings.max_freq_layer_window * 2 / settings.Nf)
         k_in = k.copy()
 
         # this to make indexing work
@@ -663,9 +660,9 @@ class FDSignal(FDSettings, DomainBase):
         if is_psd:
             # eq. 19 in arxiv.org/pdf/2009.00043
             # window is squared
-            before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
-            before_ifft[:, 0, 1:] *= dc_window
-            before_ifft[:, -1, 1:] *= max_freq_window
+            before_ifft[:, 1:-1, 1:] *= (base_window[None, None, :] * settings.Nf / 2.)  # remove factor of Nf over 2
+            before_ifft[:, 0, 1:] *= (dc_window * settings.Nf / 2.)  # remove factor of Nf over 2
+            before_ifft[:, -1, 1:] *= (max_freq_window * settings.Nf / 2.)  # remove factor of Nf over 2
             psd_sum_tmp = before_ifft.sum(axis=-1) / (settings.data_dt * settings.Nt * settings.Nf)
             wdmpsd = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
 
@@ -1455,7 +1452,7 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def differential_component(self) -> float:
-        return self.layer_df
+        return 1.0
 
     @property
     def total_terms(self) -> int:
@@ -2099,14 +2096,6 @@ class DomainBaseArray:
         """Batched :class:`DomainBase` (shape ``(nbatch, nchannels, *basis_shape)``),
         or ``None`` when settings are non-uniform."""
         return self._batched
-    
-    @property
-    def nchannels(self) -> int:
-        return self.signals[0].settings.nchannels
-    
-    @property
-    def nchannels(self) -> int:
-        return self.signals[0].settings.nchannels
 
     @property
     def settings(self) -> List[DomainSettingsBase]:

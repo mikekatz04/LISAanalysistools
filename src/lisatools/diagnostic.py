@@ -25,12 +25,11 @@ def inner_product(
     sig1: np.ndarray | list | DataResidualArray,
     sig2: np.ndarray | list | DataResidualArray,
     basis_settings: domains.DomainSettingsBase = None,
-    psd: Optional[str | None | np.ndarray | SensitivityMatrixBase] = "LISASens",
+    psd: Optional[str | None | np.ndarray | SensitivityMatrix] = "LISASens",
     psd_args: Optional[tuple] = (),
     psd_kwargs: Optional[dict] = {},
     normalize: Optional[bool | str] = False,
     complex: Optional[bool] = False,
-    sum_instead_of_trapz: Optional[bool] = False,
 ) -> float | complex:
     """Compute the inner product between two signals weighted by a psd.
 
@@ -79,75 +78,81 @@ def inner_product(
         raise ValueError(
             f"Signal 1 has {sig1.nchannels} channels. Signal 2 has {sig2.nchannels} channels. Must be the same."
         )
-
+    
     nchannels = sig1.nchannels
 
+    xp = get_array_module(sig1[0])
+
+    # checks
+    for i in range(sig1.nchannels):
+        if not type(sig1[0]) == type(sig1[i]) and type(sig1[0]) == type(sig2[i]):
+            raise ValueError(
+                "Array in sig1, index 0 sets array module. Not all arrays match that module type (Numpy or Cupy)"
+            )
+
     if sig1.data_shape != sig2.data_shape:
-        raise ValueError("The two signals are two different lengths. Must be the same length.")
-
-    # Detect batch dimensions.
-    # After normalization, arr1/arr2 always have shape (nbatch, nchannels, *basis_shape).
-    # When neither input is batched, nbatch == 1 and the extra dim is squeezed at the end.
-    sig1_batched = getattr(sig1, "is_batched", False)
-    sig2_batched = getattr(sig2, "is_batched", False)
-    any_batched = sig1_batched or sig2_batched
-
-    breakpoint()
-    if not sig1_batched:
-        # sig_type = sig1.data_res_arr.__class__
-        tmp = DataResidualArray(domains.DomainBaseArray([sig1.data_res_arr]), input_signal_domain=sig1.settings, signal_domain=sig1.settings)
-        sig1.data_res_arr.arr = sig1.data_res_arr.arr[None, ...]
-    if not sig2_batched:
-        sig2.data_res_arr.arr = sig2.data_res_arr.arr[None, ...]
-
-    xp = get_array_module(sig1.data_res_arr.arr)
+        raise ValueError(
+            "The two signals are two different lengths. Must be the same length."
+        )
 
     basis = sig1.data_res_arr.settings
 
     # get psd weighting
-    if not isinstance(psd, SensitivityMatrixBase):
+    if not isinstance(psd, SensitivityMatrix):
         psd = SensitivityMatrix(basis, [psd], *psd_args, **psd_kwargs)
 
     else:
         if psd.basis_settings != basis:
-            print(f"{psd.basis_settings}")
-            print(f"{basis}")
-
             raise ValueError("PSD basis is not equivalent to signal basis.")
-
+        
         for i in list(psd.channel_shape):
             if i != nchannels:
-                raise ValueError(
-                    "Number of channels in PSD not equal to number of channels in signal."
+                raise ValueError("Number of channels in PSD not equal to number of channels in signal.")
+
+    operational_sets = []
+
+    if len(psd.channel_shape) == 2:
+        assert psd.shape[0] == psd.shape[1] == sig1.shape[0] == sig2.shape[0]
+
+        # this avoids 9 inner products for 6 (with symmetry)
+        for i in range(psd.shape[0]):
+            # for j in range(i, psd.shape[1]):
+            #     factor = 1.0 if i == j else 2.0
+            #     operational_sets.append(
+            #         dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
+            #     )
+            # TODO: this could be faster?
+            for j in range(psd.shape[1]):  # i, psd.shape[1]):
+                factor = 1.0  #  if i == j else -1.0  # 2.0
+                operational_sets.append(
+                    dict(factor=factor, sig1_ind=i, sig2_ind=j, psd_ind=(i, j))
                 )
 
-    # Build channel-pair iteration over PSD structure
-    operational_sets = []
-    breakpoint()
-    if len(psd.channel_shape) == 2:
-        assert psd.shape[0] == psd.shape[1] == nchannels
-        for i in range(nchannels):
-            for j in range(nchannels):
-                operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=j, psd_ind=(i, j)))
-
     elif len(psd.channel_shape) == 1:
-        assert psd.shape[0] == nchannels
-        for i in range(nchannels):
+        assert psd.shape[0] == sig1.shape[0] == sig2.shape[0]
+        for i in range(psd.shape[0]):
             operational_sets.append(dict(factor=1.0, sig1_ind=i, sig2_ind=i, psd_ind=i))
 
     else:
-        raise ValueError("PSD channel_shape must be 1D or 2D.")
+        raise ValueError("# TODO")
 
-    # Accumulate inner product.
-    # arr[:, ch] always yields (nbatch, *basis_shape) thanks to the normalization above.
+    if complex:
+        func = lambda x: x
+    else:
+        func = xp.real
+
+    # initialize
     out = 0.0
+    # x = freqs
+
+    tmp = []
+    # account for hp and hx if included in time domain signal
     for op_set in operational_sets:
         factor = op_set["factor"]
         temp1 = sig1[op_set["sig1_ind"]]
         temp2 = sig2[op_set["sig2_ind"]]
         inv_psd_tmp = psd.invC[op_set["psd_ind"]]
-        
-        # TODO: fix this up
+
         if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") or hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
             if hasattr(sig1.data_res_arr, "apply_frequency_layer_mask") and hasattr(sig2.data_res_arr, "apply_frequency_layer_mask"):
                 if sig1.data_res_arr.frequency_layer_mask is not None and sig2.data_res_arr.frequency_layer_mask is not None:
@@ -167,33 +172,35 @@ def inner_product(
         if inv_psd_tmp.ndim == 1:
             ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
             inv_psd_tmp = inv_psd_tmp[ind_start:]
-            temp1 = temp1[ind_start:]
-            temp2 = temp2[ind_start:]
+            sig_component_1 = temp1[ind_start:]
+            sig_component_2 = temp2[ind_start:]
             inv_psd_component = inv_psd_tmp[ind_start:]
 
-        breakpoint()
-        y = (temp1.conj() * temp2) * inv_psd_tmp  # assumes right summation rule
+        elif inv_psd_tmp.ndim == 2:
+            ind_start = 1 if np.isnan(inv_psd_tmp[0, 0]) else 0
+            sig_component_1 = temp1[:, ind_start:]
+            sig_component_2 = temp2[:, ind_start:]
+            inv_psd_component = inv_psd_tmp[:, ind_start:]
 
-        # Sum over all axes except batch (axis 0) → shape (nbatch,)
-        sum_axes = tuple(range(1, y.ndim))
-        out += factor * 4 * xp.sum(y, axis=sum_axes) * psd.differential_component
+        else:
+            raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")
 
+        y = (
+            func(sig_component_1.conj() * sig_component_2 * inv_psd_component)
+        )  # assumes right summation rule
+
+        # switching to summation for comp to other domains
+        tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
         # y = (
-        #     sig_component_1.conj() * sig_component_2 * inv_psd_component
-        # )  
-
+        #     func((sig_component_1.conj() * sig_component_2) + (sig_component_2.conj() * sig_component_1)) * inv_psd_component
+        # )  # assumes right summation rule
         # # switching to summation for comp to other domains
-        # tmp_out = factor * 4 * xp.sum(y) * psd.differential_component
-        # # y = (
-        # #     func((sig_component_1.conj() * sig_component_2) + (sig_component_2.conj() * sig_component_1)) * inv_psd_component
-        # # )  # assumes right summation rule
-        # # # switching to summation for comp to other domains
-        # # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
-        # # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
-        # # tmp.append(tmp_out)
-        # out += tmp_out
+        # # I CHANGED THE 4 to a 2 and put in the complex components above for CSD issue (# TODO: check this)
+        # tmp_out = factor * 2 * xp.sum(y) * psd.differential_component
+        tmp.append(tmp_out)
+        out += tmp_out
 
-    # tmp = xp.asarray(tmp)
+    tmp = xp.asarray(tmp)
     # normalize the inner produce
     normalization_value = 1.0
     if normalize is True:
@@ -236,23 +243,15 @@ def inner_product(
 
     out /= normalization_value
 
-    breakpoint()
-    # Convert output: squeeze dummy batch dim for unbatched inputs, transfer from GPU if needed
-    if any_batched:
-        try:
-            out = out.get()
-        except AttributeError:
-            pass
-        out = np.asarray(out, dtype=np.complex128 if complex else np.float64)
-    else:
-        try:
-            out = out.item()
-        except (AttributeError, ValueError):
-            pass
-        if complex:
-            out = np.complex128(out)
-        else:
-            out = float(out.real) if hasattr(out, 'real') else float(out)
+    # remove from cupy if needed
+    try:
+        out = out.item()
+    except AttributeError:
+        pass
+
+    # add copy function to complex value for compatibility
+    if complex:
+        out = np.complex128(out)
 
     return out
 

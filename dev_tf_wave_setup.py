@@ -175,8 +175,28 @@ t_wdm = wdm_settings.t_arr
 # # plt.show()
 # # breakpoint()
 # plt.close()
-# # gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
-# breakpoint()
+gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
+breakpoint()
+
+def get_quadratic_coefficients(p1, p2, p3):
+    """
+    Calculates coefficients a, b, c for y = ax^2 + bx + c
+    given three points (x1, y1), (x2, y2), (x3, y3).
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+
+    # Common denominator for all coefficients
+    denom = (x1 - x2) * (x1 - x3) * (x2 - x3)
+
+    # Direct calculation of a, b, and c
+    a = (x1 * (y3 - y2) + x2 * (y1 - y3) + x3 * (y2 - y1)) / denom
+    b = (x1**2 * (y2 - y3) + x2**2 * (y3 - y1) + x3**2 * (y1 - y2)) / denom
+    c = (x1**2 * (x2 * y3 - x3 * y2) + x1 * (x3**2 * y2 - x2**2 * y3) + x2 * x3 * y1 * (x2 - x3)) / denom
+
+    return a, b, c
+
 num_bin = 1
 
 data_t_arr = np.arange(N) * dt
@@ -193,13 +213,13 @@ del wdm_settings
 wdm_settings = wdm_set = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, force_backend=force_backend)
     
 for i in range(0, num)[:1]:
-    amp = np.full(num_bin, 1.0)  # e-22)
-    f0 = np.full(num_bin, 20.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
+    amp = np.full(num_bin, 1.0e-22)
+    f0 = np.full(num_bin, 25.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
     fdot = np.full(num_bin, 1e-14)
     fddot = np.full(num_bin, 0.0)
     phi0 = np.full(num_bin, 0.0)
-    inc = np.full(num_bin, 0.2231231098)
-    psi = np.full(num_bin, np.pi/9.)
+    inc = np.full(num_bin, np.pi / 3.)
+    psi = np.full(num_bin, 0.0)
     lam = np.full(num_bin, 4.0982342019)
     beta = np.full(num_bin, 0.25)
 
@@ -232,7 +252,7 @@ for i in range(0, num)[:1]:
     )
 
     gb_gen_down_1 = GBTDIonTheFly(
-        (t_td_wdm - 1e-7 * t_td_wdm[-1]), 
+        (t_td_wdm - 1e-5 * t_td_wdm[-1]), 
         Tobs,
         t_ref,
         1. / dt,
@@ -245,7 +265,7 @@ for i in range(0, num)[:1]:
     )
 
     gb_gen_up_1 = GBTDIonTheFly(
-        (t_td_wdm + 1e-7 * t_td_wdm[-1]), 
+        (t_td_wdm + 1e-5 * t_td_wdm[-1]), 
         Tobs,
         t_ref,
         1. / dt,
@@ -323,9 +343,9 @@ for i in range(0, num)[:1]:
     ref_phase_layer_down = 2 * np.pi * layer_base_freq * (output_down_1.t_arr - t_ref) 
     ref_phase_layer_mid = 2 * np.pi * layer_base_freq * (output_deriv.t_arr - t_ref) 
     ref_phase_layer_up = 2 * np.pi * layer_base_freq * (output_up_1.t_arr - t_ref) 
-    residual_phase_down = ref_phase_down - ref_phase_layer_down
-    residual_phase_mid = ref_phase_mid - ref_phase_layer_mid
-    residual_phase_up = ref_phase_up - ref_phase_layer_up
+    residual_phase_down = ref_phase_down #  - ref_phase_layer_down
+    residual_phase_mid = ref_phase_mid #  - ref_phase_layer_mid
+    residual_phase_up = ref_phase_up #  - ref_phase_layer_up
 
     # if we assume constant over window
     # we can also 
@@ -334,23 +354,31 @@ for i in range(0, num)[:1]:
     residual_frequency = (residual_phase_up - residual_phase_down) / (deriv_delta_t) / (2. * np.pi)
     tdi_frequency = (tdi_phase_up - tdi_phase_down) / (deriv_delta_t) / (2. * np.pi)
     
-    f_deriv = residual_frequency + tdi_frequency + layer_base_freq
+    f_deriv = residual_frequency + tdi_frequency #  + layer_base_freq
+
+    ac, bc, cc, = get_quadratic_coefficients(
+        (gb_gen_down_1.t_arr.squeeze(), residual_phase_down), 
+        (gb_gen_deriv.t_arr.squeeze(), residual_phase_mid), 
+        (gb_gen_up_1.t_arr.squeeze(), residual_phase_up), 
+    )
+
+    residual_fdot = 4 * (residual_phase_up - 2 * residual_phase_mid + residual_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
+    # 4? from a 1 / 2**2 maybe?
+    tdi_fdot = 4 * (tdi_phase_up - 2 * tdi_phase_mid + tdi_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
     
-    residual_fdot = (residual_phase_up - 2 * residual_phase_mid + residual_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
-    tdi_fdot = (tdi_phase_up - 2 * tdi_phase_mid + tdi_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
-    
-    f_deriv = residual_frequency + tdi_frequency + layer_base_freq
+    # f_deriv = residual_frequency + tdi_frequency#  + layer_base_freq
     
     # residual_fdot = np.diff(residual_frequency) / np.diff(output_deriv.t_arr[0, :-1])
     # tdi_fdot = np.diff(tdi_frequency) / np.diff(output_deriv.t_arr[0, :-1])
     fdot_deriv = residual_fdot + tdi_fdot
+
     _f_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=1)[0, 0] / (2 * np.pi)
     _f_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=1)[0] / (2 * np.pi)
-    f_deriv = _f_deriv_ref + _f_deriv_tdi
+    _f_deriv = _f_deriv_ref + _f_deriv_tdi
 
-    fdot_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=2)[0, 0]
-    fdot_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=2)[0]
-    fdot_deriv = fdot_deriv_ref + fdot_deriv_tdi
+    fdot_deriv_tdi = output_deriv.tdi_phase_spl(output_deriv.tdi_phase_spl.x, derivative=2)[0, 0] / (2 * np.pi)
+    fdot_deriv_ref = output_deriv.phase_ref_spl(output_deriv.phase_ref_spl.x, derivative=2)[0]  / (2 * np.pi)
+    _fdot_deriv = fdot_deriv_ref + fdot_deriv_tdi
 
     # pi/2 PHASE SHIFT !!!!!!!!!!!!!!!!!!!!!!!!!
     phi_t = (tdi_phase_mid + ref_phase_mid)[0] + np.pi / 2. #  (np.angle(output_deriv.X).squeeze())# [:-2] # % (2 * np.pi)
@@ -415,9 +443,9 @@ for i in range(0, num)[:1]:
     # fig.savefig(f"f0_{f0_check:.2e}_fdot_{fdot0_check:.2e}_phi0_{phi0:.2g}_main.png")
     # ax1.set_xlim((int(wdm_settings.Nt / 2) - 10) * wdm_settings.layer_dt, (int(wdm_settings.Nt / 2) + 10) * wdm_settings.layer_dt)
     # fig.savefig(f"f0_{f0_check:.2e}_fdot_{fdot0_check:.2e}_phi0_{phi0:.2g}zoom_center.png")
-    # plt.show()
+    plt.show()
     plt.close()
-    # breakpoint()
+    breakpoint()
 
     # breakpoint()
     # exit()
