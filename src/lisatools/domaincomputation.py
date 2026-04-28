@@ -130,7 +130,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         sensitivity_backend_kwargs = sensitivity_backend.kwargs.copy()
 
         with self.group_device_context():
-            self._orbits = sensitivity_backend.orbits.__class__(**sensitivity_backend.orbits.kwargs)
+            self._orbits = sensitivity_backend.orbits.__class__(*sensitivity_backend.orbits.args, **sensitivity_backend.orbits.kwargs)
 
             sensitivity_backend_kwargs["orbits"] = self._orbits
             self._sensitivity_backend = sensitivity_backend.__class__(**sensitivity_backend_kwargs)
