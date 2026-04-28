@@ -606,11 +606,10 @@ double STFTFresnel::get_zeta(double f, double f0, double fdot0) {
 }
 
 CUDA_DEVICE
-double STFTFresnel::get_v(double t, double f, double t0, double f0,
-                          double fdot0) {
+double STFTFresnel::get_v(double tau, double f, double f0, double fdot0) {
   double zeta = get_zeta(f, f0, fdot0);
   double v = std::sqrt(2.0 * std::abs(fdot0)) *
-             (t - t0 + zeta);  // todo: check for negative fdot0
+             (tau + zeta);  // todo: check for negative fdot0
   return v;
 }
 
@@ -660,9 +659,11 @@ CUDA_DEVICE
 cmplx STFTFresnel::get_fresnel_kernel_interval(double f, double t0, double f0,
                                                double fdot0, double t_start,
                                                double t_end) {
-  double v_start = get_v(t_start, f, t0, f0, fdot0);
+  double tau_start = t_start - t0;
+  double tau_end = t_end - t0;
+  double v_start = get_v(tau_start, f, f0, fdot0);
 
-  double v_end = get_v(t_end, f, t0, f0, fdot0);
+  double v_end = get_v(tau_end, f, f0, fdot0);
 
   double C_start, S_start, C_end, S_end;
   get_fresnel_integrals(&C_start, &S_start, v_start);
@@ -731,7 +732,7 @@ cmplx STFTFresnel::get_windowed_fourier_value(double amp, double phase0,
 CUDA_DEVICE
 cmplx STFTFresnel::get_fourier_value(double amp, double phase0, double f0,
                                      double fdot0, double t0, double f,
-                                     double window_factor) {
+                                     double window_factor = 1.0) {
   if (window_alpha > 0.0)
     return get_windowed_fourier_value(amp, phase0, f0, fdot0, t0, f);
 
