@@ -384,7 +384,6 @@ class GlobalFit:
         # breakpoint()
 
         for name, source_info in self.curr.source_info.items():
-            breakpoint()
             if name not in self.curr.engine_info.branch_names:
                 continue
 

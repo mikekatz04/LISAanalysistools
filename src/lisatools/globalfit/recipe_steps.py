@@ -2,6 +2,7 @@ import time
 import logging
 import typing
 from copy import deepcopy
+from dataclasses import dataclass
 
 import numpy as np
 import cupy as cp
@@ -10,6 +11,7 @@ from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
 
 # from bbhx.utils.transform import SSB_to_LISA
+from gbgpu.gbgpu import GBGPU
 from eryn.moves.tempering import TemperatureControl, make_ladder
 from eryn.prior import ProbDistContainer
 
@@ -21,7 +23,6 @@ from .recipe import RecipeStep, BaseRecipeStep
 from .run import CurrentInfoGlobalFit
 from .state import GFState
 from .stock.erebor import GBSetup, GeneralSetup
-
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +68,12 @@ class RJRecipeStep(BaseRecipeStep):
             self.st = time.perf_counter()
 
         current_iter = sampler.backend.iteration
-        assert isinstance(current_iter, int)
+
+        assert isinstance(current_iter, (int, np.integer))
         
         stop = False
         if current_iter > self.convergence_iter:
-
+            #? Actual convergence should be related to the same number of sources above SNR XX for Y itterations
             nleaves_cc = sampler.backend.get_nleaves(branch_names=["gb"], temp_index=0)["gb"]
 
             # do not include most recent
@@ -86,8 +88,8 @@ class RJRecipeStep(BaseRecipeStep):
 
             
             dur = (time.perf_counter() - self.st) / 3600.0  # hours
-            logger.info(f"Previous nleaves: {nleaves_cc_max_old} --> new nleaves: {nleaves_cc_max_new}")
-            logger.info(f"TIME SINCE START: {dur} hours")
+            print(f"Previous nleaves: {nleaves_cc_max_old} --> new nleaves: {nleaves_cc_max_new}")
+            print(f"TIME SINCE START: {dur} hours")
 
         return stop
         
@@ -97,7 +99,7 @@ class RJRecipeStep(BaseRecipeStep):
         last_sample, 
         sampler: GlobalFitEngine
     ):
-        # TODO: maybe make this the defaul setup
+        # TODO: maybe make this the default setup
         sampler.moves = self.moves
         sampler.weights = self.weights
         sampler.yield_step = self.thin_by
@@ -106,12 +108,14 @@ class RJRecipeStep(BaseRecipeStep):
         
         for move in self.moves: 
             if sampler.periodic is not None and move.periodic is None:
-                logger.debug(f"Setting periodicity of move {move} to {sampler.periodic}")
+                print(f"Setting periodicity of move {move} to {sampler.periodic}")
                 move.periodic = sampler.periodic
+            if sampler.temperature_control is not None and move.temperature_control is None:
+                print(f"Setting temperature control of move {move} to {sampler.temperature_control}")
+                move.temperature_control = sampler.temperature_control
             
             # TODO: do we also need to set these? I think the current settings setup has ntemps covered, not sure about temp_cntrl            
             # move.ntemps = sampler.ntemps 
-            # move.temperature_control = sampler.temperature_control
             
 
 def scatter_around_injection(
@@ -420,7 +424,15 @@ def build_mbh_moves_phenom(
     return wave_gen, mbh_pe_move
 
 
-# TODO would it make more sense to split this up into search and pe?
+@dataclass
+class GBWaveformDict(typing.TypedDict):
+    dt: float
+    T: float
+    use_c_implementation: bool
+    start_freq_ind: int
+    tdi_channel_setup: str
+    tdi2: bool
+
 def build_gb_moves(
     engine_info: Setup,
     curr: CurrentInfoGlobalFit,
@@ -462,8 +474,7 @@ def build_gb_moves(
     general_info: GeneralSetup = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-    band_edges = gb_info.band_edges
-    band_N_vals = gb_info.band_N_vals
+
     gb_betas = gb_info.betas
     gpus: list[int] = general_info.gpus
     
@@ -483,60 +494,71 @@ def build_gb_moves(
     gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
     
     nleaves_max_gb = state.branches["gb"].shape[-2]
-    waveform_kwargs = gb_info.waveform_kwargs
-    if "N" in waveform_kwargs:
-        waveform_kwargs.pop("N")
+
+    waveform_kwargs = GBWaveformDict(
+        dt=gb_info.dt,
+        T=gb_info.Tobs,
+        use_c_implementation=True,
+        start_freq_ind=int(gb_info.start_freq_ind),
+        tdi_channel_setup=gb_info.tdi_setup,
+        tdi2=gb_info.use_tdi2
+    )
+
+    #* Get band information
+    band_edges = gb_info.band_edges
+    band_N_vals = gb_info.band_N_vals
+    assert band_edges is not None
+    assert band_N_vals is not None
 
     #* This checks if the initialization has any gbs in it and adjusts acs accordingly
-    if state.branches["gb"].inds[0].sum() > 0:
+    # if state.branches["gb"].inds[0].sum() > 0:
         
-        coords_out_gb = state.branches["gb"].coords[0,
-            state.branches["gb"].inds[0]
-        ]
+    #     coords_out_gb = state.branches["gb"].coords[0,
+    #         state.branches["gb"].inds[0]
+    #     ]
 
-        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
-        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
-        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
+    #     coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
+    #     coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
+    #     coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
         
-        check = priors["gb"].logpdf(coords_out_gb)
-        if np.any(np.isinf(check)):
-            raise ValueError("Starting priors are inf.")
+    #     check = priors["gb"].logpdf(coords_out_gb)
+    #     if np.any(np.isinf(check)):
+    #         raise ValueError("Starting priors are inf.")
 
-        coords_in_in = gb_info.transform.both_transforms(coords_out_gb)
+    #     coords_in_in = gb_info.transform.both_transforms(coords_out_gb)
 
-        band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+    #     band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
 
-        walker_vals = np.tile(
-            np.arange(nwalkers), (nleaves_max_gb, 1)
-        ).transpose((1, 0))[state.branches["gb"].inds[0]]
+    #     walker_vals = np.tile(
+    #         np.arange(nwalkers), (nleaves_max_gb, 1)
+    #     ).transpose((1, 0))[state.branches["gb"].inds[0]]
 
-        data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
+    #     data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
 
-        data_index = cp.asarray(data_index_1).astype(
-            cp.int32
-        )
-        # goes in as -h
-        factors = -cp.ones_like(data_index, dtype=cp.float64)
+    #     data_index = cp.asarray(data_index_1).astype(
+    #         cp.int32
+    #     )
+    #     # goes in as -h
+    #     factors = -cp.ones_like(data_index, dtype=cp.float64)
 
-        N_vals = band_N_vals[band_inds]
+    #     N_vals = band_N_vals[band_inds]
 
-        logger.debug("Generating global GB template")
-        # TODO: add test to make sure that the genertor send in the general information matches this one
-        gb.gpus = gpus
-        template_in: cp.ndarray = acs.linear_data_arr
-        gb.generate_global_template(
-            coords_in_in,
-            data_index,
-            acs.linear_data_arr,
-            data_length=acs.data_length,
-            factors=factors,
-            data_splits=acs.gpu_map,
-            N=N_vals,
-            **waveform_kwargs,
-        )
-        max_diff_templates = cp.abs(template_in-acs.linear_data_arr).max()
-        logger.debug(f"Global GB template generated with max template in/out diff = {max_diff_templates:5e}")
-
+    #     logger.debug("Generating global GB template")
+    #     # TODO: add test to make sure that the genertor send in the general information matches this one
+    #     gb.gpus = gpus
+    #     template_in: cp.ndarray = acs.linear_data_arr
+    #     gb.generate_global_template(
+    #         coords_in_in,
+    #         data_index,
+    #         acs.linear_data_arr,
+    #         data_length=acs.data_length,
+    #         factors=factors,
+    #         data_splits=acs.gpu_map,
+    #         N=N_vals,
+    #         **waveform_kwargs,
+    #     )
+    #     max_diff_templates = cp.abs(template_in-acs.linear_data_arr).max()
+    #     logger.debug(f"Global GB template generated with max template in/out diff = {max_diff_templates:5e}")
 
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False
@@ -599,7 +621,7 @@ def build_gb_moves(
         ranks_needed=0,
         run_swaps=True, 
         gpus=[],
-        **gb_move_kwargs
+        **gb_move_kwargs 
     )
     gb_search_prune_move.accepted = np.zeros((ntemps, nwalkers))
     
@@ -630,13 +652,7 @@ def build_gb_moves(
     )
     gb_search_refit_move.accepted = np.zeros((ntemps, nwalkers))
     
-    gb_search_moves = [gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move]
-    
-    # OLD stuff, but still here for **inspiration**
-    # # gb_search_moves = GFCombineMove([psd_search_move, mbh_pe_move, gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, mbh_pe_move, psd_search_move])
-    # gb_search_moves = GFCombineMove([gb_search_fstat_mcmc_move, gb_search_refit_move, gb_search_prune_move, psd_search_move])
-    # gb_search_moves.accepted = np.zeros((ntemps, nwalkers))
-    # recipe.add_recipe_component(GBRunStep(moves=[gb_search_moves], convergence_iter=5, verbose=True), name="gb search")
+    gb_search_moves = [gb_search_fstat_mcmc_move, gb_search_prune_move] # gb_search_refit_move, Refit currently not used for search
     
     #* ============================================= PARAMETER ESTIMATION MOVES =============================================
     gb_pe_prior_move = GBSpecialRJPriorMove(

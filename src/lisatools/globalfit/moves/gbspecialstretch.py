@@ -90,6 +90,7 @@ def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
 #         pass
 
 
+
 def fit_gmm(samples, comm, comm_info):
 
     if len(samples) == 0:
@@ -552,14 +553,14 @@ class Buffer(LISAToolsParallelModule):
             wave_kwargs_tmp.pop("start_freq_ind")
 
         # check for out-of-bound error when frequency indexing
-        # if np.any((params_add_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] + (N_vals / 2) >  self.band_buffer.shape[-1]):
-        #     breakpoint()
-        # if np.any((params_remove_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] + (N_vals / 2) >  self.band_buffer.shape[-1]):
-        #     breakpoint()
-        # if np.any((params_add_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] - (N_vals / 2) < 0):
-        #     breakpoint()
-        # if np.any((params_remove_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] - (N_vals / 2) < 0):
-        #     breakpoint()
+        if np.any((params_add_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] + (N_vals / 2) >  self.band_buffer.shape[-1]):
+            breakpoint()
+        if np.any((params_remove_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] + (N_vals / 2) >  self.band_buffer.shape[-1]):
+            breakpoint()
+        if np.any((params_add_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] - (N_vals / 2) < 0):
+            breakpoint()
+        if np.any((params_remove_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] - (N_vals / 2) < 0):
+            breakpoint()
 
         # q_remove = cp.rint(params_remove_in[:,1] / self.df).astype(int)
         # q_add = cp.rint(params_add_in[:,1] / self.df).astype(int)
@@ -707,7 +708,7 @@ class Buffer(LISAToolsParallelModule):
 
     def reset_residual_buffers(self, inds_fill=None):
         if inds_fill is None:
-            inds_fill = cp.arange(self.num_bands_now)     
+            inds_fill = cp.arange(self.num_bands_now)
         self.band_buffer[inds_fill] = 0.0
 
     def reset_psd_buffers(self, inds_fill=None):
@@ -743,13 +744,14 @@ class Buffer(LISAToolsParallelModule):
 
         inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
         self.reset_psd_buffers(inds_fill=inds_fill)
-        
+
         self.psd_buffer[inds_fill] = acs.psd_shaped[0][inds_get_psd]
+
         del inds_get_psd
 
     def _get_fill_buffer_ind_map(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None, is_psd: bool = False
-    ) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
+    ) -> Tuple[cp.ndarray, ...]:
         
         if inds_fill is None:
             inds_fill = cp.arange(self.num_bands_now)
@@ -771,13 +773,20 @@ class Buffer(LISAToolsParallelModule):
         
         if is_psd and self.tdi_channel_setup == "XYZ":
             # Target output shape: (len(inds_fill), self.nchannels, self.nchannels, self.band_buffer.shape[-1])
-            inds1 = (
-                self.unique_band_combos[inds_fill, 1][:, None, None, None] 
-                * self.nchannels 
-                + cp.arange(self.nchannels)[None, :, None, None]
-            )
-            inds2 = cp.arange(self.nchannels)[None, None, :, None]
-            inds3 = start_inds[:, None, None, None] + cp.arange(self.band_buffer.shape[-1])[None, None, None, :]
+            if acs.psd_shaped[0].ndim == 4:
+                inds0 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
+                inds1 = cp.arange(self.nchannels)[None, :, None, None]
+                inds2 = cp.arange(self.nchannels)[None, None, :, None]
+                inds3 = start_inds[:, None, None, None] + cp.arange(self.band_buffer.shape[-1])[None, None, None, :]
+                return inds0, inds1, inds2, inds3
+            else:
+                inds1 = (
+                    self.unique_band_combos[inds_fill, 1][:, None, None, None] 
+                    * self.nchannels 
+                    + cp.arange(self.nchannels)[None, :, None, None]
+                )
+                inds2 = cp.arange(self.nchannels)[None, None, :, None]
+                inds3 = start_inds[:, None, None, None] + cp.arange(self.band_buffer.shape[-1])[None, None, None, :]
             
         else:
             # Target output shape: (len(inds_fill), self.nchannels, self.band_buffer.shape[-1])
@@ -1682,14 +1691,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.num_bands == 1:
             units = 1
 
-        # global_ll_tracker = model.analysis_container_arr.likelihood().copy()
-        # accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
-        # walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
+        global_ll_tracker = model.analysis_container_arr.likelihood().copy()
+        accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
+        walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
         
         # random start to rotation around
         start_unit = model.random.randint(units)
         fixed_coords_for_info_mat = band_sorter.coords.copy()
         has_fixed_coords = band_sorter.inds.copy()
+
         for tmp in range(units):
             # continue
             remainder = (start_unit + tmp) % units
@@ -1986,41 +1996,58 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                             # transform fdot
                             info_mat_params[:, 2] /= fdot_scale
+                            
+                            walker_inds_chol = band_sorter.walker_inds[source_map_now[new_chol]]
 
                             _tmp_waveform_kwargs = self.waveform_kwargs.copy()
                             _tmp_waveform_kwargs.pop("start_freq_ind")
-                            info_mat = self.xp.zeros((info_mat_params.shape[0], 8, 8))
-                            batch_size = 1000
-                            assert len(info_mat_params) > 0
-
-                            batches = np.arange(0, len(info_mat_params), batch_size, dtype=int)
-
-                            if batches[-1] < len(info_mat_params):
-                                batches = np.concatenate(
-                                    [
-                                        batches,
-                                        np.array([len(info_mat_params)], dtype=int),
-                                    ],
-                                    dtype=int,
-                                )
                             
-                            for start_batch, end_batch in zip(batches[:-1], batches[1:]):
-                                info_mat[start_batch:end_batch] = self.gb.information_matrix(
-                                    info_mat_params[start_batch:end_batch].T,
-                                    eps=1e-9,
-                                    parameter_transforms=info_mat_transforms,
-                                    inds=_test_inds,
-                                    N=1024,
-                                    psd_func=sensitivity.XYZSensitivityBackend,
-                                    psd_kwargs=dict(
-                                        name="info_matrix",
-                                        psd_params=cp.array([15e-12, 3e-15]),
-                                        galfor_params=None, # TODO change in future foreground params
-                                    ),
-                                    easy_central_difference=False,
-                                    return_gpu=True,
-                                    **_tmp_waveform_kwargs,
-                                )
+                            # print("Number of params to calculate FIM for is", info_mat_params.shape[0])
+                            
+                            info_mat = self.gb.information_matrix(
+                                info_mat_params,
+                                psd = model.analysis_container_arr.linear_psd_arr,
+                                eps = 1e-9,
+                                parameter_transforms=info_mat_transforms,
+                                inds = self.xp.asarray(_test_inds),
+                                easy_central_difference=False,
+                                noise_index = walker_inds_chol,
+                                N = 1024,
+                                data_length = model.analysis_container_arr.end_shape[0],
+                                batch_size = 1000,
+                                **_tmp_waveform_kwargs,                                
+                            )
+                            #* old info mat setup
+                            # info_mat = self.xp.zeros((info_mat_params.shape[0], 8, 8))
+                            # batch_size = 1000
+                            # assert len(info_mat_params) > 0
+
+                            # batches = np.arange(0, len(info_mat_params), batch_size, dtype=int)
+
+                            # if batches[-1] < len(info_mat_params):
+                            #     batches = np.concatenate(
+                            #         [
+                            #             batches,
+                            #             np.array([len(info_mat_params)], dtype=int),
+                            #         ],
+                            #         dtype=int,
+                            #     )
+                                
+                            
+                            # for start_batch, end_batch in zip(batches[:-1], batches[1:]):
+                            #     batch_walker_inds = walker_inds_chol[start_batch:end_batch].astype(int)
+                            #     breakpoint()
+                            #     info_mat[start_batch:end_batch] = self.gb.information_matrix(
+                            #         info_mat_params[start_batch:end_batch].T,
+                            #         eps=1e-9,
+                            #         parameter_transforms=info_mat_transforms,
+                            #         inds=_test_inds,
+                            #         N=1024,
+                            #         linear_psd_arr=model.analysis_container_arr.linear_psd_arr,
+                            #         easy_central_difference=False,
+                            #         return_gpu=True,
+                            #         **_tmp_waveform_kwargs,
+                            #     )
 
                             self.mempool.free_all_blocks()
 
@@ -2314,6 +2341,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     lnpdiff = delta_logP + update_factors.squeeze()
                     accept = lnpdiff >= cp.log(cp.random.rand(*lnpdiff.shape))
 
+                    # check if any coords outside of the prior are accepted
+                    # this should only be possible for beta=0, but should still be rejected
+                    bad_mask = ((ll_diff <= -1e299) | (curr_logp <= -1e229))
+                    bad_accepts = accept & bad_mask
+                    if self.xp.any(bad_accepts):
+                        if self.xp.any(curr_beta[bad_accepts] != 0.0):
+                            print("WARNING: A chain with beta > 0 accepted a coordinate outside of prior range")
+                            breakpoint()
+                        accept[bad_accepts] = False
+                            
                     if is_rj_now and self.use_prior_removal:
                         if self.xp.any(~(band_sorter.inds[inds_to_update][accept])):
                             breakpoint()
@@ -2372,10 +2409,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                         accepted_out[temp_inds_accept, walker_inds_accept, band_inds_accept] += 1
                         
-                        # for t_idx, w_idx, ll_change in zip(temp_inds_accept, walker_inds_accept, ll_accept):
-                        #     if t_idx == 0:  # Count acceptances for the cold chain
-                        #         accumulated_local_diffs[w_idx] += ll_change
-                        #         walker_accept_counts[w_idx] += 1
+                        for t_idx, w_idx, ll_change in zip(temp_inds_accept, walker_inds_accept, ll_accept):
+                            if t_idx == 0:  # Count acceptances for the cold chain
+                                accumulated_local_diffs[w_idx] += ll_change
+                                walker_accept_counts[w_idx] += 1
                                 
                         # switch accepted waveform
                         old_coords_for_change = old_coords[accept].copy()
@@ -2452,25 +2489,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # add back in all sources in the cold-chain
             # residual from this group
             # llaf1 = model.analysis_container_arr.likelihood()
-
+            breakpoint()
             self.add_cold_chain_sources_to_residual(
                 model, band_sorter, units=units, remainder=remainder
             )
-            # final_global_ll = model.analysis_container_arr.likelihood().copy()
-            # true_global_diffs = final_global_ll - global_ll_tracker
+            final_global_ll = model.analysis_container_arr.likelihood().copy()
+            true_global_diffs = final_global_ll - global_ll_tracker
+
+            print("\n" + "="*65)
+            print("WALKER DRIFT ANALYSIS (COLD CHAIN)")
+            print(f"{'Walker':<8} | {'Accepted':<8} | {'Local C++ Sum':<15} | {'Global Diff':<15} | {'Error':<15}")
+            print("-" * 65)
             
-            # print("\n" + "="*65)
-            # print("WALKER DRIFT ANALYSIS (COLD CHAIN)")
-            # print(f"{'Walker':<8} | {'Accepted':<8} | {'Local C++ Sum':<15} | {'Global Diff':<15} | {'Error':<15}")
-            # print("-" * 65)
-            
-            # for w in range(self.nwalkers):
-            #     loc = accumulated_local_diffs[w].item()
-            #     glob = true_global_diffs[w].item()
-            #     err = abs(glob - loc)
-            #     acc = walker_accept_counts[w].item()
-            #     print(f"{w:<8} | {acc:<8} | {loc:<15.4f} | {glob:<15.4f} | {err:<15.4f}")
-            # print("="*65)
+            for w in range(self.nwalkers):
+                loc = accumulated_local_diffs[w].item()
+                glob = true_global_diffs[w].item()
+                err = abs(glob - loc)
+                acc = walker_accept_counts[w].item()
+                print(f"{w:<8} | {acc:<8} | {loc:<15.4f} | {glob:<15.4f} | {err:<15.4f}")
+            print("="*65)
             
             # llaf2 = model.analysis_container_arr.likelihood(source_only=True)
             # breakpoint()
@@ -3587,6 +3624,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         #     test_params,
         #     *ll_args
         # )
+
         gibbs_sampling_setup = np.ones(8, dtype=bool)
         gibbs_sampling_setup[np.array([0, 3, 4, 5])] = False
         para_sampler = ParaEnsembleSampler(
@@ -3617,8 +3655,8 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         state.log_prior = para_sampler.compute_log_prior(state.branches_coords)
         state.log_like = para_sampler.compute_log_like(state.branches_coords, logp=state.log_prior)
 
-        nsteps = 500
-        para_sampler.run_mcmc(state, nsteps, burn=500, progress=True)
+        nsteps = 100
+        para_sampler.run_mcmc(state, nsteps, burn=100, progress=True)
 
         samples = self.xp.asarray(para_sampler.get_chain()[:, :, 0])
         check_ll = para_sampler.get_log_like()[:, :, 0]
@@ -3704,8 +3742,8 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         if np.any(np.isinf(new_state.log_prior)):
             breakpoint()
 
-        nsteps = 500
-        para_sampler_2.run_mcmc(new_state, nsteps, burn=500, progress=True)
+        nsteps = 100
+        para_sampler_2.run_mcmc(new_state, nsteps, burn=100, progress=True)
 
         samples_2 = self.xp.asarray(para_sampler_2.get_chain()[:, :, 0])
         check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
@@ -3723,7 +3761,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         # TODO: add removal of bands that consistently dont find things
         samples_2 = samples_2.transpose(1, 0, 2, 3)
-        # np.save("/sps/lisaf/crondeel/secret_sauce/GBgpu_sampler/data/output_dir_ldc_highf_test/diagnostics/samples_ldc_run_3.npy", samples_2)
+        # np.save("/sps/lisaf/crondeel/packages/junk_folder/samples_test.npy", samples_2)
 
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[

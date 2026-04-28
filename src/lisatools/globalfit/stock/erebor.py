@@ -28,6 +28,7 @@ from lisatools.utils.constants import YRSID_SI, PC_SI
 
 from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
+from ..priors.gbpriors import get_fdot_mojito
 
 
 @dataclasses.dataclass
@@ -76,30 +77,24 @@ class GBSetup(Setup, GBSettings):
 
     def init_sampling_info(self):
 
-        input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+        input_basis = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", 
+                       r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
 
         if self.transform is None:
             gb_transform_fn_in = {
-                "A": np.exp,
-                "f0": f_ms_to_s,
-                "cos_iota": np.arccos,
-                "sin_beta": np.arcsin,
+                r"$\log A$": np.exp,
+                r"$f_0$": f_ms_to_s,
+                r"$\cos\iota$": np.arccos,
+                r"$\sin\beta$": np.arcsin,
             }
 
             output_basis = [
-                "A",
-                "f0",
-                "fdot",
-                "fddot",
-                "phi0",
-                "cos_iota",
-                "psi",
-                "lam",
-                "sin_beta",
+                r"$\log A$", r"$f_0$", r"$\dot{f}$", 
+                r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", 
+                r"$\psi$", r"$\lambda$", r"$\sin\beta$"
             ]
-            gb_fill_dict = {"fddot": 0.0}
-
-            # gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
+            
+            gb_fill_dict = {r"$\ddot{f}$": 0.0}
 
             self.transform = TransformContainer(
                 input_basis=input_basis,
@@ -109,11 +104,9 @@ class GBSetup(Setup, GBSettings):
             )
 
         if self.periodic is None:
-            self.periodic = {"gb": {"phi0": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}}
+            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\lambda$": 2 * np.pi}}
 
-        self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
             priors_gb = {
                 input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
                 input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
@@ -125,33 +118,14 @@ class GBSetup(Setup, GBSettings):
                 input_basis[7]: uniform_dist(*np.sin(self.beta_lims)),
             }
 
-            # TODO: orbits check against sangria/sangria_hm
-
-            # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
             self.priors = {"gb": ProbDistContainer(priors_gb)}
 
         if self.betas is None:
-            snrs_ladder = np.array(
-                [
-                    1.0,
-                    1.5,
-                    2.0,
-                    3.0,
-                    4.0,
-                    5.0,
-                    7.5,
-                    10.0,
-                    15.0,
-                    20.0,
-                    35.0,
-                    50.0,
-                    75.0,
-                    125.0,
-                    250.0,
-                    5e2,
-                ]
-            )
-            ntemps_pe = 4  # len(snrs_ladder)
+            # snrs_ladder = np.array(
+            #     [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0,
+            #      15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2]
+            # )
+            ntemps_pe = 24 # len(snrs_ladder)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
             betas[-1] = 0.0001
@@ -196,7 +170,6 @@ class GBSetup(Setup, GBSettings):
 
     def init_band_structure(self):
         # band separation setup
-
         if self.oversample is None and self.Tobs < YRSID_SI / 2.0:
             self.oversample = 2
         elif self.oversample is None:
@@ -206,10 +179,8 @@ class GBSetup(Setup, GBSettings):
 
         # TODO: assign to binned f or leave general? probably better to be general
         band_edges_in_reverse_order = [self.end_freq]
-        band_N_vals_reverse_order = []
-        # determines N from high_Frequency edge of sub-band
         current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
-        band_N_vals_reverse_order.append(current_N)
+        band_N_vals_reverse_order = [current_N]
 
         current_freq = self.end_freq
         last_freq = self.end_freq
@@ -223,17 +194,28 @@ class GBSetup(Setup, GBSettings):
             last_freq - (current_N * 2 + self.extra_buffer) * self.df
         )
 
-        self.band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
-        self.band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
+        band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
+        band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
+        
+        # trim edges to avoid out of bound indexing
+        self.band_edges = band_edges[1:-1]
+        self.band_N_vals = band_N_vals[1:-1]
 
-        self.logger.debug("NEED TO THINK ABOUT mCHIRP prior")
         self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
-        fdot_max_val = get_fdot(self.f0_lims[-1], Mc=self.m_chirp_lims[-1])
 
-        self.fdot_lims = [-fdot_max_val, fdot_max_val]
+        self.fdot_lims = [
+            get_fdot_mojito(self.f0_lims[1], sign="-"), 
+            get_fdot_mojito(self.f0_lims[1], sign="+"), 
+        ]
 
-        self.num_sub_bands = len(self.band_edges)
-
+        self.num_sub_bands = len(self.band_edges) - 1
+        
+        self.logger.info(
+            f"GB f0 prior range is set from {round(self.f0_lims[0],7)} to {round(self.f0_lims[1],7)}"
+        )
+        self.logger.info(f"The number of subbands is {self.num_sub_bands}")
+        self.logger.info(f"Min f of subbands is {self.band_edges.min()}")
+        self.logger.info(f"Max f of subbands is {self.band_edges.max()}")
 
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc

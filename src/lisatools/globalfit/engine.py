@@ -284,11 +284,11 @@ class GeneralSetup(Setup, GeneralSettings):
         )
         
         if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
-            self.input_data_residual_array.data_length = len(domain_settings.f_arr)
+            self.input_data_residual_array.data_length = len(domain_settings.f_arr) #! use acs.data_shape[0]
             self.input_data_residual_array._store_time_and_frequency_information(
                 df = domain_settings.df,
                 f_arr = domain_settings.f_arr
-            )
+            ) #* hi allesandro, if you are seeing this, I will replace this by passing domain_settings to GB block eventually
 
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
