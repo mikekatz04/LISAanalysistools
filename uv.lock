@@ -669,41 +669,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gbgpu"
-version = "1.2.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "gpubackendtools" },
-    { name = "h5py" },
-    { name = "jsonschema" },
-    { name = "lisaanalysistools" },
-    { name = "lisaconstants" },
-    { name = "matplotlib" },
-    { name = "multispline" },
-    { name = "numba" },
-    { name = "numpy" },
-    { name = "nvidia-ml-py" },
-    { name = "platformdirs" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "scipy" },
-    { name = "tqdm" },
-    { name = "wrapt" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/b0/29fc4b854c70648fee10fbe4f0d28f1b5fcca81d01cdb3fbbc277bcb67fd/gbgpu-1.2.4-cp312-cp312-macosx_13_0_x86_64.whl", hash = "sha256:368ce1c72cc46f4697c25288adb0e6ba2c3f705f992db630c07c40f9b2620876", size = 1196933, upload-time = "2025-09-18T19:34:43.192Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/a1/20d8cffd33118ab54861f163c3e42bd963b09a6b58ac4c32178cd135253e/gbgpu-1.2.4-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:8a4ce8df149a569d882d1f7f628986aefa797e3213d069da833d2c736084873b", size = 1103106, upload-time = "2025-09-18T19:34:44.67Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/3d/03405efda4b0b42d7c1fe0ad06768ff3ec9b8b13eaddff588bd6a28b2a91/gbgpu-1.2.4-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2d5c25c5e0368138a5abf831bf115422158a5e22b1facf75de08a82fad45f2a2", size = 75310, upload-time = "2025-09-18T19:34:45.7Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/f4/297ea28fa4f4a998dfab3b7aa7bc62b478e3b2735df8986c4f859fe79aa2/gbgpu-1.2.4-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:015890d08b48e67a55e06178eae82c2bd2cb7a4b31d8217cef337b7ebb47525f", size = 77893, upload-time = "2025-09-18T19:34:46.494Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/1d/9dee4e60c187df852834ce7dc7304252ae929c4f5c8b55013b55977f0af6/gbgpu-1.2.4-cp313-cp313-macosx_13_0_x86_64.whl", hash = "sha256:2340081f567ea70840d2e8743a7ac06b7597894dc398ab5f819c08a2fd391274", size = 1196637, upload-time = "2025-09-18T19:34:47.604Z" },
-    { url = "https://files.pythonhosted.org/packages/b7/4f/3a359c4b0b1193d3ffd5599b002de07d8c01edf310f4cd8fbee039c36da8/gbgpu-1.2.4-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:45a0e1aac1ca68afa947c32dd4fed05266fb7755820b1049f837a2279b1dacda", size = 1102749, upload-time = "2025-09-18T19:34:48.783Z" },
-    { url = "https://files.pythonhosted.org/packages/92/ac/9393cabc750d09bb9f18d9a9d2f74f2e7b976575c17eeb485ca3931a635d/gbgpu-1.2.4-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0f0ba2e316d110cad9bd62114959aa50144df16437e696035dbeb5f36be074ce", size = 74731, upload-time = "2025-09-18T19:34:50.193Z" },
-    { url = "https://files.pythonhosted.org/packages/c4/8d/4ac7fc4c9f432c1f3287eb075030b99d49c2dfbf9edc20c5df4be52584ae/gbgpu-1.2.4-cp313-cp313-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:49791fc364c70cf15e433988ead4facf505a53a51695e7169b767d75f79c451e", size = 77611, upload-time = "2025-09-18T19:34:51.307Z" },
-]
-
-[[package]]
 name = "gpubackendtools"
 version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -794,15 +759,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6c/e6/7bf14eeb8f8b7251141944835abd42eb20a658d89084b7e1f3e5fe394090/imagesize-2.0.0.tar.gz", hash = "sha256:8e8358c4a05c304f1fccf7ff96f036e7243a189e9e42e90851993c558cfe9ee3", size = 1773045, upload-time = "2026-03-03T14:18:29.941Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5f/53/fb7122b71361a0d121b669dcf3d31244ef75badbbb724af388948de543e2/imagesize-2.0.0-py2.py3-none-any.whl", hash = "sha256:5667c5bbb57ab3f1fa4bc366f4fbc971db3d5ed011fd2715fd8001f782718d96", size = 9441, upload-time = "2026-03-03T14:18:27.892Z" },
-]
-
-[[package]]
-name = "install"
-version = "0.0.1"
-source = { registry = "https://test.pypi.org/simple/" }
-sdist = { url = "https://test-files.pythonhosted.org/packages/f6/6f/431a6c24c031b1a8a61c2af7c288045c69ee8936089d46fa4cc45470e310/install-0.0.1.tar.gz", hash = "sha256:cf734fc2965be332e11f8eff8f25d623e57a5713fb8d75e7192ceb41bc4a5174", size = 2059, upload-time = "2024-07-16T18:28:48.922Z" }
-wheels = [
-    { url = "https://test-files.pythonhosted.org/packages/81/12/4533be30ac52b9d7fa578fe4c03f330252d97bf981b22630f543c2c747a0/install-0.0.1-py3-none-any.whl", hash = "sha256:d5c269ff0f0660902acb212b5127e1d00189b3b4654079ff8aaf8dac8177ea1a", size = 2415, upload-time = "2024-07-16T18:28:47.801Z" },
 ]
 
 [[package]]
@@ -1147,7 +1103,6 @@ dependencies = [
     { name = "astropy" },
     { name = "cudakima" },
     { name = "h5py" },
-    { name = "install" },
     { name = "jsonschema" },
     { name = "lisaconstants" },
     { name = "matplotlib" },
@@ -1199,7 +1154,7 @@ sampling = [
 testing = [
     { name = "corner" },
     { name = "eryn" },
-    { name = "gbgpu" },
+    { name = "gpubackendtools" },
 ]
 
 [package.metadata]
@@ -1214,9 +1169,8 @@ requires-dist = [
     { name = "eryn", marker = "extra == 'sampling'" },
     { name = "eryn", marker = "extra == 'testing'" },
     { name = "fastlisaresponse", marker = "extra == 'sampling'" },
-    { name = "gbgpu", marker = "extra == 'testing'" },
+    { name = "gpubackendtools", marker = "extra == 'testing'", specifier = ">=0.0.16" },
     { name = "h5py" },
-    { name = "install", specifier = ">=0.0.1" },
     { name = "ipykernel", marker = "extra == 'doc'" },
     { name = "ipython", marker = "extra == 'doc'" },
     { name = "ipywidgets", marker = "extra == 'doc'" },
