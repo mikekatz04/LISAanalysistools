@@ -1,7 +1,8 @@
 import logging
 import time
 from copy import deepcopy
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
+
 
 try:
     import cupy as xp
@@ -18,8 +19,14 @@ from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...domains import DomainBase, DomainBaseArray
 from .globalfitmove import GlobalFitMove
+from .multigpumove import MultiGPUMoveBase
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from ...sources.waveformbase import TDWaveformBase
+    from ...domaincomputation import DomainComputationGroupArray
+    from typing import Any
 
 def free_gpu_memory():
     if xp is not np:
@@ -183,7 +190,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             source_only=True
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
-    def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray:
+    def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray | list[DomainBase]:
         """Get the waveforms for the given source coordinates.
 
         Each call to ``waveform_gen`` returns a :class:`~lisatools.domains.DomainBase`
@@ -612,4 +619,177 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
         free_gpu_memory()
+
+class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBase):
+    def __init__(
+        self, 
+        dcga: DomainComputationGroupArray,
+        waveform_gen: Any,
+        branch_name: str,
+        coords_shape: tuple,
+        waveform_gen_method: str,
+        waveform_gen_kwargs: dict,
+        waveform_like_kwargs: dict,
+        num_repeats: int,
+        transform_fn: TransformContainer,
+        priors: ProbDistContainer,
+        inner_moves: list,
+        Tmax: float = np.inf,
+        betas_all: np.ndarray = None,
+        permute_every: int = 20,
+        run_threaded: bool = False,
+        waveform_like_method: str = None,
+
+        **kwargs
+    ):
+        ResidualAddOneRemoveOneMove.__init__(
+            self,
+            branch_name=branch_name,
+            coords_shape=coords_shape,
+            waveform_gen=getattr(waveform_gen, waveform_gen_method),
+            waveform_gen_kwargs=waveform_gen_kwargs,
+            waveform_like_kwargs=waveform_like_kwargs,
+            acs=dcga.acs,
+            num_repeats=num_repeats,
+            transform_fn=transform_fn,
+            priors=priors,
+            inner_moves=inner_moves,
+            Tmax=Tmax,
+            betas_all=betas_all,
+            permute_every=permute_every,
+            **kwargs
+        )
+
+        MultiGPUMoveBase.__init__(self, dcga, run_threaded=run_threaded)
+
+        self.waveform_gen = waveform_gen
+        self.waveform_gen_method = waveform_gen_method
+        self.waveform_like_method = waveform_like_method or waveform_gen_method
+
+        self.create_waveform_gen_replicas()
+
+    def create_waveform_gen_replicas(self, ):
+        """
+        Create replicas of the waveform generator for each GPU.
+        """
+
+        self._waveform_generators = []
+        for i, device in enumerate(
+            self.dcga.gpus if self.dcga.gpus is not None else [None] * self.dcga.num_splits
+        ):
+            if not hasattr(self.waveform_gen, "kwargs"):
+                raise ValueError("Waveform generator must have a 'kwargs' attribute that contains the keyword arguments to initialize the waveform generator.")    
+            
+            with self.dcga.device_context(device):
+                init_kwargs = self.waveform_gen.kwargs.copy()
+                if "orbits" in init_kwargs:
+                    init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
+
+                self._waveform_generators.append(
+                    self.waveform_gen.__class__(**init_kwargs)
+                )
+
+    @property
+    def waveform_generators(self) -> list:
+        return self._waveform_generators
+    
+    def make_args_tuple(self, coords) -> tuple:
+        """
+        Make a tuple of arguments for the waveform generator from the given coordinates.
+        """
+        return (*self.xp.ascontiguousarray(coords.T),)  # unpack the coordinates into separate arguments for the waveform generator
+
+    def prepare_inputs(self, coords, data_index):
+        """
+        Prepare the inputs for the waveform generator from the given coordinates and data index.
+        """
+
+        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index)
+        coords_per_split = self.dcga.unpack_coords(positions_per_split, coords, keep_tuple=True)
+
+        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
+            items=(data_intra_index_per_split, coords_per_split)
+        )
+
+        waveform_args_per_split = self.dcga._loop_operation(
+            operation=[self.make_args_tuple for _ in self.dcga.computation_groups],
+            operation_args_per_split=coords_per_split,
+        )
+
+        return positions_per_split, data_intra_index_per_split, waveform_args_per_split
+    
+    def aggregate_waveforms(self, waveforms_per_split: list[DomainBaseArray | list[DomainBase]]) -> list[DomainBase]:
+        """
+        Aggregate the waveforms from each split into a single list of DomainBase objects.
+        """
+        waveforms = []
+        for waveforms_split in waveforms_per_split:
+            waveforms.extend(waveforms_split)
+        return waveforms
+
+    def get_waveform_here(self, coords: np.ndarray) -> list[DomainBase]:
+        """Get the waveforms for the given source coordinates.
+
+        """
+        free_gpu_memory()
+
+        data_index = np.arange(coords.shape[0], dtype=np.int32)
+
+        _, _, waveform_args_per_split = self.prepare_inputs(coords, data_index)
+
+        operations = [getattr(waveform_gen, self.waveform_gen_method) for waveform_gen in self.waveform_generators]
+
+        waveforms_out = self.dcga._loop_operation(
+            operation=operations,
+            operation_args_per_split=waveform_args_per_split,
+            operation_kwargs=self.waveform_gen_kwargs,
+            aggregate_fn=self.aggregate_waveforms,
+            run_threaded=self.run_threaded,
+        )
+
+        self.dcga.synchronize()
+
+        return waveforms_out
+
+    def setup_likelihood_here(self, coords: np.ndarray) -> None:
+        """
+        Set up the likelihood computation. In the general case, this means computing the :math:\\langle d | d \\rangle term.
+        """
+
+        self.dcga.compute_d_d_terms()
+
+    def compute_like(self, coords_in: np.ndarray, data_index: np.ndarray) -> np.ndarray:
+        """
+        Compute the likelihood for the given coordinates and data index.
+
+        Args:
+            coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
+            data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
+        
+        Returns:
+            ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
+        """
+
+        positions_per_split, data_intra_index_per_split, waveform_args_per_split = self.prepare_inputs(coords_in, data_index)
+
+        waveform_like_operations = [getattr(waveform_gen, self.waveform_like_method) for waveform_gen in self.waveform_generators]
+
+        likelihood_args_per_split = self.dcga._loop_operation(
+            operation=waveform_like_operations,
+            operation_args_per_split=waveform_args_per_split,
+            operation_kwargs=self.waveform_like_kwargs,
+            positions_per_split=positions_per_split,
+            run_threaded=self.run_threaded,
+        ) 
+
+        likelihoods = self.dcga.compute_signal_likelihood(
+            positions_per_split=positions_per_split,
+            data_intra_per_split=data_intra_index_per_split,
+            noise_intra_per_split=data_intra_index_per_split,
+            likelihood_args_per_split=likelihood_args_per_split,
+            run_threaded=self.run_threaded,
+        )
+
+        likelihoods = np.where(np.isfinite(likelihoods), likelihoods, -1e300)
+        return likelihoods
 

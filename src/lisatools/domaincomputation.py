@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import cupy as cp  # typing-only; runtime cupy use lives in call sites
 
     from .analysiscontainer import AnalysisContainer, AnalysisContainerArray
-    from .detector import L1Orbits
+    from .detector import Orbits
     from .domains import DomainBase, FDSettings, STFTSettings
     from .sensitivity import XYZSensitivityBackend
 
@@ -144,7 +144,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         return self.backend.xp
 
     @property
-    def orbits(self) -> L1Orbits:
+    def orbits(self) -> Orbits:
         if not hasattr(self, "_orbits"):
             raise ValueError("Orbits have not been created yet. Call build_cpp_objects first.")
         return self._orbits
@@ -670,6 +670,7 @@ class DomainComputationGroupArray:
         self,
         positions_per_split: list[np.ndarray],
         coords: np.ndarray | cp.ndarray | tuple[np.ndarray | cp.ndarray],
+        keep_tuple: bool = False,
     ) -> list[tuple[np.ndarray] | np.ndarray]:
         """
         Unpack coordinates for each split based on the positions per split.
@@ -677,6 +678,7 @@ class DomainComputationGroupArray:
         Args:
             positions_per_split: list of numpy arrays, where each array contains the positions for a specific split.
             coords: A numpy or cupy array containing the coordinates to be unpacked, or a tuple of such arrays if there are multiple coordinate arrays (multiple branches).
+            keep_tuple: If True, ensure the returned coordinates per split are always in a tuple format. This applies only when there is a single coordinate array.
 
         Returns:
             args_per_group: A list of coordinates for each split, where each element is either a single array (if there is only one coordinate array) or a tuple of arrays (if there are multiple coordinate arrays). The coordinates are indexed according to the positions for each split.
@@ -692,7 +694,7 @@ class DomainComputationGroupArray:
             if len(positions) > 0:
                 coords_s = [np.asfortranarray(coords_host[i][positions]) for i in range(len(coords_host))]
 
-                args_per_group.append(tuple(coords_s) if len(coords_s) > 1 else coords_s[0])
+                args_per_group.append(tuple(coords_s) if len(coords_s) > 1 or keep_tuple else coords_s[0])
             else:
                 args_per_group.append(())
 
@@ -817,7 +819,7 @@ class DomainComputationGroupArray:
         data_intra_per_split: list[np.ndarray | cp.ndarray],
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
         operations: list[Callable],
-        likelihood_args: list[tuple],
+        likelihood_args_per_split: list[tuple],
         run_threaded: bool = False,
     ):
         """Compute likelihood for each split using the provided likelihood functions and arguments, and aggregate the results into a single output array."""
@@ -828,7 +830,7 @@ class DomainComputationGroupArray:
             args_i = (
                 data_intra_per_split[split_id],
                 noise_intra_per_split[split_id],
-                *likelihood_args[split_id],
+                *likelihood_args_per_split[split_id],
             )
             operation_args_per_split.append(args_i)
 
@@ -852,7 +854,7 @@ class DomainComputationGroupArray:
         positions_per_split: list[np.ndarray],
         data_intra_per_split: list[np.ndarray | cp.ndarray],
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
-        likelihood_args: list[tuple],
+        likelihood_args_per_split: list[tuple],
         run_threaded: bool = False,
     ):
         """Compute PSD likelihood for each split and aggregate results."""
@@ -862,7 +864,7 @@ class DomainComputationGroupArray:
             data_intra_per_split,
             noise_intra_per_split,
             operations,
-            likelihood_args,
+            likelihood_args_per_split,
             run_threaded=run_threaded,
         )
 
@@ -871,7 +873,7 @@ class DomainComputationGroupArray:
         positions_per_split: list[np.ndarray],
         data_intra_per_split: list[np.ndarray | cp.ndarray],
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
-        likelihood_args: list[tuple],
+        likelihood_args_per_split: list[tuple],
         run_threaded: bool = False,
     ):
         """Compute signal likelihood for each split and aggregate results."""
@@ -881,6 +883,6 @@ class DomainComputationGroupArray:
             data_intra_per_split,
             noise_intra_per_split,
             operations,
-            likelihood_args,
+            likelihood_args_per_split,
             run_threaded=run_threaded,
         )

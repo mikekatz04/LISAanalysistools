@@ -156,8 +156,8 @@ class PhenomTHMWaveformBase(JaxBase):
 
         self.waveform = phentax.waveform.IMRPhenomTHM(T=Tobs, **waveform_kwargs)
 
-        self.start_freq = start_freq
-        self.ref_freq = ref_freq
+        self.start_freq = jnp.asarray(start_freq) if start_freq is not None else None
+        self.ref_freq = jnp.asarray(ref_freq) if ref_freq is not None else None
 
     @property
     def phenom_kwargs(self) -> dict:
