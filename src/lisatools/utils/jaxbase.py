@@ -66,7 +66,7 @@ class JaxBase:
                 device_id: Optional[int] = None, 
                 do_synchronize: bool = False) -> jnp.ndarray:
         """Convert input to a JAX array, optionally synchronizing if it's a CuPy array."""
-        if isinstance(x, cp.ndarray):
+        if isinstance(x, cp.ndarray) and cupy_available:
             if do_synchronize:
                 x.device.synchronize()
             return jax.dlpack.from_dlpack(x)
