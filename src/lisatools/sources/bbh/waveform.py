@@ -304,8 +304,8 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
 
         """
 
-        start_freq = start_freq if start_freq is not None else self.start_freq
-        ref_freq = ref_freq if ref_freq is not None else self.ref_freq
+        start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
+        ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
             self._to_jax(m1),
@@ -314,8 +314,8 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(s2z),
             self._to_jax(distance),
             self._to_jax(phi_ref),
-            self._to_jax(ref_freq),
-            self._to_jax(start_freq),
+            ref_freq,
+            start_freq,
             self._to_jax(inclination),
             self._to_jax(psi),
             delta_t=self.dt,
@@ -374,8 +374,8 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             each of shape (Nbatch, N_valid_times) as plain NumPy or Cupy arrays.
         """
 
-        ref_freq = ref_freq if ref_freq is not None else self.ref_freq
-        start_freq = start_freq if start_freq is not None else self.start_freq
+        start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
+        ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
             self._to_jax(m1),
@@ -384,8 +384,8 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(s2z),
             self._to_jax(distance),
             self._to_jax(phi_ref),
-            self._to_jax(ref_freq),
-            self._to_jax(start_freq),
+            ref_freq,
+            start_freq,
             self._to_jax(inclination),
             self._to_jax(psi),
             delta_t=self.dt,

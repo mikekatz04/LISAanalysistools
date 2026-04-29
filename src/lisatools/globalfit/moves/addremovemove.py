@@ -621,6 +621,27 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         free_gpu_memory()
 
 class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBase):
+    """
+    Wrapper around ResidualAddOneRemoveOneMove that runs the waveform generation and likelihood computation on multiple GPUs.
+
+    Args:
+    dcga: DomainComputationGroupArray that contains the information about the domain computation groups and the GPUs to use for each group.
+    waveform_gen: waveform generator class that generates the waveforms for the sources given their coordinates.
+    branch_name: name of the branch that this move will operate on.
+    coords_shape: shape of the coordinates of the sources in the branch that this move will operate on.
+    waveform_gen_method: name of the method of the waveform generator class to use for generating the waveforms for residual operations.
+    waveform_gen_kwargs: keyword arguments for the waveform generator method.
+    waveform_like_kwargs: keyword arguments for the likelihood computation function.
+    num_repeats: number of times to repeat the proposal step for each leaf.
+    transform_fn: transform container that contains the transforms to be applied to the coordinates before generating waveforms and computing likelihoods.
+    priors: prior distribution container that contains the prior distributions for the sources in the branch.
+    inner_moves: list of moves and their corresponding weights to be used for proposing new sources for each leaf.
+    Tmax: maximum temperature for the temperature control.
+    betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
+    permute_every: number of repeats after which to permute the walkers during a temperature swap. 
+    run_threaded: whether to run the waveform generation and likelihood computation in separate threads for each GPU.
+    waveform_like_method: name of the method of the waveform generator class to use for generating the waveforms for likelihood computation. If None, will use the same method as waveform_gen_method.
+    """
     def __init__(
         self, 
         dcga: DomainComputationGroupArray,
@@ -639,7 +660,6 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         permute_every: int = 20,
         run_threaded: bool = False,
         waveform_like_method: str = None,
-
         **kwargs
     ):
         ResidualAddOneRemoveOneMove.__init__(
@@ -697,7 +717,8 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         """
         Make a tuple of arguments for the waveform generator from the given coordinates.
         """
-        return (*self.xp.ascontiguousarray(coords.T),)  # unpack the coordinates into separate arguments for the waveform generator
+        # unpack the coordinates into separate arguments for the waveform generator
+        return tuple(xp.array(coords[:, i]) for i in range(coords.shape[1])) # had to do in this way to give JAX the right memory addresses
 
     def prepare_inputs(self, coords, data_index):
         """
