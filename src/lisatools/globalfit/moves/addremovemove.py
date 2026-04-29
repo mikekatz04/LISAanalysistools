@@ -234,8 +234,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # in general with current setup it should only be points in the prior
         # that make it here
         ll = np.full_like(data_index, -1e300, dtype=float)
-        data_index = xp.asarray(data_index.astype(np.int32)) # make sure data index is on the same device as the likelihood computation
-        for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index.get())):
+        #data_index = xp.asarray(data_index.astype(np.int32)) # make sure data index is on the same device as the likelihood computation
+        for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index)):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
                 waveform_kwargs=self.waveform_gen_kwargs,
