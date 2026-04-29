@@ -145,6 +145,7 @@ class PhenomTHMWaveformBase(JaxBase):
         Tobs: float,
         start_freq: float = None,
         ref_freq: float = None,
+        use_reference_time: bool = True,
     ) -> None:
         
         JaxBase.__init__(self)
@@ -158,6 +159,7 @@ class PhenomTHMWaveformBase(JaxBase):
 
         self.start_freq = jnp.asarray(start_freq) if start_freq is not None else None
         self.ref_freq = jnp.asarray(ref_freq) if ref_freq is not None else None
+        self.use_reference_time = use_reference_time
 
     @property
     def phenom_kwargs(self) -> dict:
@@ -177,6 +179,7 @@ class PhenomTHMWaveformBase(JaxBase):
             "Tobs": self.waveform.T,
             "start_freq": self.start_freq,
             "ref_freq": self.ref_freq,
+            "use_reference_time": self.use_reference_time,
             }
         
     
@@ -220,6 +223,32 @@ class PhenomTHMWaveformBase(JaxBase):
 
         return times_out  # shape (Nbatch, max_valid_points)
 
+    def get_reference_quantities(self,
+                                merger_time: float | np.ndarray | cp.ndarray, 
+                                start_freq: float | np.ndarray | cp.ndarray = None,
+                                ref_freq: float | np.ndarray | cp.ndarray = None
+                                ) -> dict:
+        """
+        Get the reference quantities for the waveform generation, depending on the settings of the class.
+
+        Args:
+            merger_time: Merger time in seconds, shape (Nbatch,).
+            start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
+            ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
+
+        Returns:
+            Dictionary of reference quantities for the waveform generation.
+        """
+
+        start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
+        ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
+
+        if self.use_reference_time:
+            ref_time = self._to_jax(-merger_time)
+            return {'t_ref': ref_time, 'f_min': start_freq}
+        else:
+            return {'f_min': start_freq, 'f_ref': ref_freq}
+
 class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
     """
     Generate PhenomTHM waveforms with the TDI LISA Response.
@@ -239,6 +268,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         Tobs: float = 1.0,
         start_freq: float = None,
         ref_freq: float = None,
+        use_reference_time: bool = True,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -255,6 +285,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             Tobs=Tobs,
             start_freq=start_freq,
             ref_freq=ref_freq,
+            use_reference_time=use_reference_time,
         )
 
     @property
@@ -279,6 +310,9 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         phi_ref: float,
         inclination: float,
         psi: float,
+        ra: float = None,
+        dec: float = None,
+        merger_time: float = None,
         ref_freq: float = None,
         start_freq: float = None,
         synchronize: bool = False,
@@ -295,6 +329,9 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             phi_ref: Reference phase in radians.
             inclination: Inclination angle in radians.
             psi: Polarisation angle in radians.
+            ra: Right ascension for the source in radians.
+            dec: Declination for the source in radians.
+            merger_time: Time of merger in seconds.
             ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
             start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
             synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
@@ -304,8 +341,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
 
         """
 
-        start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
-        ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
+        reference_kwargs = self.get_reference_quantities(merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
             self._to_jax(m1),
@@ -314,11 +350,10 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(s2z),
             self._to_jax(distance),
             self._to_jax(phi_ref),
-            ref_freq,
-            start_freq,
             self._to_jax(inclination),
             self._to_jax(psi),
             delta_t=self.dt,
+            **reference_kwargs,
         )
 
         xp_mask = self._from_jax(mask, do_synchronize=synchronize)
@@ -342,6 +377,9 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         phi_ref: np.ndarray | cp.ndarray,
         inclination: np.ndarray | cp.ndarray,
         psi: np.ndarray | cp.ndarray,
+        ra: np.ndarray | cp.ndarray = None,
+        dec: np.ndarray | cp.ndarray = None,
+        merger_time: np.ndarray | cp.ndarray = None,
         ref_freq: float | np.ndarray | cp.ndarray = None,
         start_freq: float | np.ndarray | cp.ndarray = None,
         synchronize: bool = False,
@@ -364,6 +402,9 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             psi: Polarisation angle in radians, shape (Nbatch,).
             ref_freq: Reference frequency in Hz, float.
             start_freq: Starting frequency in Hz, float.
+            ra: Right ascension in radians, shape (Nbatch,).
+            dec: Declination in radians, shape (Nbatch,).
+            merger_time: Time of merger in seconds, shape (Nbatch,).
             synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
             **kwargs: Additional keyword arguments forwarded to
                 ``compute_polarizations_at_once`` (e.g. ``T`` for observation time
@@ -374,8 +415,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             each of shape (Nbatch, N_valid_times) as plain NumPy or Cupy arrays.
         """
 
-        start_freq = self._to_jax(start_freq) if start_freq is not None else self.start_freq
-        ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
+        reference_kwargs = self.get_reference_quantities(merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
 
         times, mask, hplus, hcross = self.waveform.compute_polarizations_at_once(
             self._to_jax(m1),
@@ -384,11 +424,10 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(s2z),
             self._to_jax(distance),
             self._to_jax(phi_ref),
-            ref_freq,
-            start_freq,
             self._to_jax(inclination),
             self._to_jax(psi),
             delta_t=self.dt,
+            **reference_kwargs,
             **kwargs,
         )
         
@@ -423,6 +462,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         Tobs: float,
         start_freq: float = None,
         ref_freq: float = None,
+        use_reference_time: bool = True,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -439,6 +479,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             Tobs=Tobs,
             start_freq=start_freq,
             ref_freq=ref_freq,
+            use_reference_time=use_reference_time,
         )
 
     @property
@@ -465,6 +506,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         psi: np.ndarray | cp.ndarray,
         ra: np.ndarray | cp.ndarray = None,
         dec: np.ndarray | cp.ndarray = None,
+        merger_time: np.ndarray | cp.ndarray = None,
         ref_freq: np.ndarray | cp.ndarray = None,
         start_freq: np.ndarray | cp.ndarray = None,
         synchronize: bool = False,
@@ -484,6 +526,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             psi: Polarisation angle in radians, shape (Nbatch,).
             ra: Right ascension for the sources in radians, shape (Nbatch,).
             dec: Declination for the sources in radians, shape (Nbatch,).
+            merger_time: Time of merger in seconds, shape (Nbatch,).
             ref_freq: Reference frequency in Hz. If `None`, it will default to `self.ref_freq` if that is not `None`, otherwise it has to be explicitly provided.
             start_freq: Starting frequency in Hz. If `None`, it will default to `self.start_freq` if that is not `None`, otherwise it has to be explicitly provided.
             synchronize: If `True`, it will call `block_until_ready()` on the waveform outputs. :meth:`self._from_jax` relies on `dlpack` to move data from JAX to Cupy, that should already handle CUDA streams correctly.
@@ -493,8 +536,8 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         Returns:
             times, mode amplitudes and mode phases
         """
-        ref_freq = ref_freq if ref_freq is not None else self.ref_freq
-        start_freq = start_freq if start_freq is not None else self.start_freq
+        
+        reference_kwargs = self.get_reference_quantities(merger_time=merger_time, start_freq=start_freq, ref_freq=ref_freq)
 
         times, mask, amplitude, phase = self.waveform.compute_strain_components_amp_phase(
             self._to_jax(m1),
@@ -503,11 +546,10 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             self._to_jax(s2z),
             self._to_jax(distance),
             self._to_jax(phi_ref),
-            self._to_jax(ref_freq),
-            self._to_jax(start_freq),
             self._to_jax(inclination),
             self._to_jax(psi),
             delta_t=self.dt,
+            **reference_kwargs
         )
         #amplitude.block_until_ready()  # ensure all outputs are ready before moving to self.xp
 

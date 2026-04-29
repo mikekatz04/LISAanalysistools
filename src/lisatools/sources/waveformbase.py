@@ -813,7 +813,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Handle single-source waveform generation and return a Tuple of times and channels."""
 
-        t_arr, h_plus, h_cross = self.wave_gen(*args, **kwargs)
+        t_arr, h_plus, h_cross = self.wave_gen(*args, ra, dec, merger_time, **kwargs)
 
         times, channels = self._apply_response_single(t_arr, h_plus, h_cross, ra, dec, merger_time)
 
@@ -833,7 +833,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         batching natively), then optionally projects all signals onto a common STFT
         grid when ``self.force_uniform_stft`` is True.
         """
-        times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, **kwargs)
+        times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, ra, dec, merger_time, **kwargs)
 
         Nbatch = times_batch.shape[0]
 
@@ -1132,7 +1132,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         # step 1: generate the amplitude and phase arrays for each mode of each source:
         input_times, input_amplitudes, input_phases = self.get_amp_phase(
-            *args, inclination, psi, ra, dec, **kwargs
+            *args, inclination, psi, ra, dec, merger_time, **kwargs
         )
 
         input_amplitudes, input_phases = self.process_amp_phase(input_amplitudes, input_phases)
