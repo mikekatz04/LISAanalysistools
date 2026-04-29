@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
-import astropy.units as u
 import numpy as np
 from eryn.utils import TransformContainer
-from numpy.random import beta
 
 from lisatools.diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
 
