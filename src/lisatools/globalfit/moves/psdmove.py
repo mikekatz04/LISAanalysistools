@@ -119,7 +119,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         xp = self.xp  # Use the appropriate array library (numpy or cupy)
 
         Soms_d_in_all = xp.ascontiguousarray(psd_pars[:, 0])
-        Sa_a_in_all = xp.ascontiguousin the array(psd_pars[:, 1])
+        Sa_a_in_all = xp.ascontiguousarray(psd_pars[:, 1])
 
         if self.sensitivity_backend.use_splines:
             knots_positions = xp.asarray(psd_pars[:, 3::2])
