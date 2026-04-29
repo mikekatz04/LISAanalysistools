@@ -216,7 +216,6 @@ def subtract_initial_signal(
     else:
         logger.info(f"No initial signals for {source_name}")
 
-    print("coordinates post transform: ", inj_coords_in[0])
     #breakpoint()
 
 def build_psd_moves(

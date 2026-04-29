@@ -17,13 +17,12 @@ from eryn.utils.transform import TransformContainer
 # from ..utils import new_sens_mat
 from tqdm import tqdm
 
-from ... import get_backend
+from .globalfitmove import GlobalFitMove
+from .multigpumove import MultiGPUMoveBase
+from ..state import GFState
 from ...analysiscontainer import AnalysisContainerArray
 from ...domaincomputation import DomainComputationGroupArray
 from ...sensitivity import XYZSensitivityBackend
-from ..moves import GlobalFitMove, MultiGPUMoveBase
-from ..state import GFState
-from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
 

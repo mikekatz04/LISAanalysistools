@@ -1423,7 +1423,7 @@ class DomainBaseArray:
     def __getitem__(self, index):
         return self.signals[index]
 
-    def __radd__(self, other: DomainBaseArray) -> "DomainBaseArray":
+    def __add__(self, other: DomainBaseArray) -> "DomainBaseArray":
         """
         Define how to add two DomainBaseArrays together. This will concatenate the signals from both arrays into a single array.
         """

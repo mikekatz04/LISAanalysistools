@@ -60,6 +60,8 @@ class JaxBase:
 
     def __init__(self) -> None:
         """Initialize the JaxBase instance."""
+        if not jax_available:
+            raise ImportError("JAX is required for JaxBase but is not available.")
         
     def _to_jax(self, 
                 x: float | np.ndarray | cp.ndarray, 
@@ -74,7 +76,7 @@ class JaxBase:
         elif isinstance(x, (float, int, np.ndarray)):
             platform = jax.default_backend()
             device = jax.devices(platform)[device_id] if device_id is not None else None
-            return jnp.asarray(x, device=device)
+            return jax.device_put(x, device=device)
            
         else:
             raise TypeError(f"Unsupported type for _to_jax: {type(x)}")

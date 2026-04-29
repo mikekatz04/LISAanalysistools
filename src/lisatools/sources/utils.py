@@ -632,21 +632,21 @@ def icrs_to_ecliptic(
     sin_beta = sin_dec * cos_eps - cos_dec * sin_eps * sin_ra
     beta = np.arcsin(sin_beta)
 
-    cos_lambda = cos_dec * cos_ra / np.cos(beta)
-    sin_lambda = (sin_dec * sin_eps + cos_dec * cos_eps * sin_ra) / np.cos(beta)
+    cos_beta = np.cos(beta)
+    eps_cos_beta = np.finfo(float).eps
+    safe_cos_beta = np.where(
+        np.abs(cos_beta) < eps_cos_beta,
+        np.copysign(eps_cos_beta, cos_beta),
+        cos_beta,
+    )
+    inv_cos_beta = 1.0 / safe_cos_beta
+
+    cos_lambda = cos_dec * cos_ra * inv_cos_beta
+    sin_lambda = (sin_dec * sin_eps + cos_dec * cos_eps * sin_ra) * inv_cos_beta
     lambd = np.arctan2(sin_lambda, cos_lambda) % (2 * np.pi)
 
     if psi is not None:
         psi = np.asarray(psi, dtype=float)
-
-        cos_beta = np.cos(beta)
-        eps_cos_beta = np.finfo(float).eps
-        safe_cos_beta = np.where(
-            np.abs(cos_beta) < eps_cos_beta,
-            np.copysign(eps_cos_beta, cos_beta),
-            cos_beta,
-        )
-        inv_cos_beta = 1.0 / safe_cos_beta
 
         cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * cos_dec)
         sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
@@ -715,24 +715,31 @@ def ecliptic_to_icrs(
 
     sin_dec = sin_beta * cos_eps + cos_beta * sin_eps * sin_lambda
     dec = np.arcsin(sin_dec)
+    cos_dec = np.cos(dec)
+    eps_float = np.finfo(float).eps
+    safe_cos_dec = np.where(
+        np.abs(cos_dec) < eps_float,
+        np.copysign(eps_float, cos_dec),
+        cos_dec,
+    )
+    inv_cos_dec = 1.0 / safe_cos_dec
 
-    cos_ra = cos_beta * cos_lambda / np.cos(dec)
-    sin_ra = (-sin_beta * sin_eps + cos_beta * cos_eps * sin_lambda) / np.cos(dec)
+    cos_ra = cos_beta * cos_lambda * inv_cos_dec
+    sin_ra = (-sin_beta * sin_eps + cos_beta * cos_eps * sin_lambda) * inv_cos_dec
     ra = np.arctan2(sin_ra, cos_ra) % (2 * np.pi)
 
     if psi_ecliptic is not None:
         psi_ecliptic = np.asarray(psi_ecliptic, dtype=float)
 
         cos_beta = np.cos(beta)
-        eps_cos_beta = np.finfo(float).eps
         safe_cos_beta = np.where(
-            np.abs(cos_beta) < eps_cos_beta,
-            np.copysign(eps_cos_beta, cos_beta),
+            np.abs(cos_beta) < eps_float,
+            np.copysign(eps_float, cos_beta),
             cos_beta,
         )
         inv_cos_beta = 1.0 / safe_cos_beta
 
-        cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * np.cos(dec))
+        cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * cos_dec)
         sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
 
         deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
