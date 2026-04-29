@@ -5,7 +5,7 @@ from datetime import datetime
 import cupy as xp
 import numpy as np
 import pandas as pd
-from bbhx.utils.transform import LISA_to_SSB
+# from bbhx.utils.transform import LISA_to_SSB
 from gbgpu.gbgpu import GBGPU
 from gbgpu.utils.constants import *
 from gbgpu.utils.utility import get_N
