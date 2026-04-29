@@ -4,7 +4,7 @@ import warnings
 from copy import deepcopy
 
 import numpy as np
-from bbhx.waveformbuild import BBHWaveformFD
+# from bbhx.waveformbuild import BBHWaveformFD
 from eryn.backends import HDFBackend
 from gbgpu.gbgpu import GBGPU
 

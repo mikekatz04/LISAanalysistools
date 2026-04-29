@@ -243,5 +243,40 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             xp=cupy,
         )
 
+class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
+    """Implementation of CUDA 13.x backend"""
 
+    _backend_name: str = "lisatools_backend_cuda13x"
+    _name = "lisatools_cuda13x"
+
+    def __init__(self, *args, **kwargs):
+        Cuda13xBackend.__init__(self, *args, **kwargs)
+        LISAToolsBackend.__init__(self, self.cuda13x_module_loader())
+
+    @staticmethod
+    def cuda13x_module_loader():
+        try:
+            import lisatools_backend_cuda13x.pycppdetector
+
+            # import lisatools_backend_cuda13x.psd
+
+        except (ModuleNotFoundError, ImportError) as e:
+            raise BackendUnavailableException("'cuda13x' backend could not be imported.") from e
+
+        try:
+            import cupy
+        except (ModuleNotFoundError, ImportError) as e:
+            raise MissingDependencies(
+                "'cuda13x' backend requires cupy", pip_deps=["cupy-cuda13x"]
+            ) from e
+
+        return LISAToolsBackendMethods(
+            OrbitsWrap=lisatools_backend_cuda13x.pycppdetector.OrbitsWrapGPU,
+            Orbits=lisatools_backend_cuda13x.pycppdetector.OrbitsGPU,
+            check_orbits=lisatools_backend_cuda13x.pycppdetector.check_orbits,
+            SensitivityMatrixWrap=lisatools_backend_cuda13x.pycppdetector.XYZSensitivityMatrixWrapGPU,
+            psd_likelihood=lisatools_backend_cuda13x.pycppdetector.psd_likelihood,
+            compute_logpdf=lisatools_backend_cuda13x.pycppdetector.compute_logpdf,
+            xp=cupy,
+        )
 """List of existing backends, per default order of preference."""

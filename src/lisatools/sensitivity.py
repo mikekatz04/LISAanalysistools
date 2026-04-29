@@ -1192,8 +1192,8 @@ class SensitivityMatrixBase:
             self.sens_kwargs = tmp_kwargs
 
             num_components = np.prod(outer_shape).item()
-            # xp = get_array_module(self.frequency_arr)
-            xp = np
+            xp = get_array_module(self.basis_settings.f_arr)
+            # xp = np
             if self.is_array_base:
                 _sens_mat = xp.asarray(sens_mat)
 
@@ -1257,33 +1257,82 @@ class SensitivityMatrixBase:
 
         return new_mat
 
-    def _setup_det_and_inv(self):
-        """Determinant and inverse of TDI matrix."""
+    # def _setup_det_and_inv(self):
+    #     """Determinant and inverse of TDI matrix."""
 
-        # setup detC
-        xp = get_array_module(self.sens_mat)
+    #     # setup detC
+    #     xp = get_array_module(self.sens_mat)
 
-        # setup detC
+    #     # setup detC
+    #     if self.sens_mat.ndim < 3:
+    #         self.detC = xp.prod(self.sens_mat, axis=0)
+    #         self.invC = 1 / self.sens_mat
+
+    #     else:
+    #         full_shape = tuple(range(len(self.sens_mat.shape)))
+
+    #         basis_axes = full_shape[-len(self.data_shape) :]
+    #         mat_axes = full_shape[: -len(self.data_shape)]
+    #         transpose_shape = basis_axes + mat_axes
+    #         self.detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
+    #         invC = xp.zeros_like(self.sens_mat.transpose(transpose_shape))
+    #         invC[self.detC != 0.0] = xp.linalg.inv(
+    #             self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
+    #         )
+    #         invC[self.detC == 0.0] = 1e-100
+
+    #         # switch them after they were effectively switched above
+    #         self.invC = invC.transpose(transpose_shape)
+    def _setup_det_and_inv(self) -> None:
+        """Determinant and inverse of TDI matrix. (Patched version)"""
+        
+        # Check if a custom array module is used (like cupy), fallback to numpy
+        try:
+            xp = get_array_module(self.sens_mat)
+        except NameError:
+            xp = np
+
         if self.sens_mat.ndim < 3:
             self.detC = xp.prod(self.sens_mat, axis=0)
             self.invC = 1 / self.sens_mat
 
+        # TODO switch to Cholesky decomposition and inversion!
         else:
-            full_shape = tuple(range(len(self.sens_mat.shape)))
+            full_shape = tuple(range(self.sens_mat.ndim))
 
+            # Determine axes
             basis_axes = full_shape[-len(self.data_shape) :]
             mat_axes = full_shape[: -len(self.data_shape)]
+            
+            # Forward permutation: gets matrix to (N_freqs, C, C)
             transpose_shape = basis_axes + mat_axes
-            self.detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
-            invC = xp.zeros_like(self.sens_mat.transpose(transpose_shape))
-            invC[self.detC != 0.0] = xp.linalg.inv(
-                self.sens_mat.transpose(transpose_shape)[self.detC != 0.0]
-            )
-            invC[self.detC == 0.0] = 1e-100
+            
+            # Inverse permutation: securely reverts to (C, C, N_freqs)
+            # BUG FIX IS HERE
+            inverse_transpose_shape = tuple(np.argsort(transpose_shape))
 
-            # switch them after they were effectively switched above
-            self.invC = invC.transpose(transpose_shape)
+            # Transpose once for efficiency
+            sens_mat_T = self.sens_mat.transpose(transpose_shape)
+            
+            # Compute Determinant
+            self.detC = xp.linalg.det(sens_mat_T)
+            
+            # Compute Inverse
+            invC_T = xp.zeros_like(sens_mat_T)
+            valid_mask = self.detC != 0.0
+            
+            invC_T[valid_mask] = xp.linalg.inv(sens_mat_T[valid_mask])
+            invC_T[~valid_mask] = 1e-100
 
+            # Apply the inverse transpose to fix the shape!
+            self.invC = invC_T.transpose(inverse_transpose_shape)
+            
+            # The first two axes of self.invC are the matrix channels (e.g., 3x3)
+            nchannels = self.invC.shape[0]
+            for i in range(nchannels):
+                # Keep dtype complex, but force imaginary part to be exactly 0 since numerical precision errors occured
+                self.invC[i, i] = self.invC[i, i].real + 0j
+            
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
         return self.sens_mat[index]

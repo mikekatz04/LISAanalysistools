@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import numpy as np
 from fastlisaresponse import ResponseWrapper
-from few.waveform import GenerateEMRIWaveform
+# from few.waveform import GenerateEMRIWaveform
 
 from lisatools.detector import EqualArmlengthOrbits
 

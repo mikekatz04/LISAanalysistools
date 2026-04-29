@@ -131,6 +131,12 @@ class DataResidualArray:
     #             "Can only provide one of dt, f_arr, or df. Not more than one."
     #         )
     #     self.init_kwargs = dict(dt=dt, f_arr=f_arr, df=df)
+    @property
+    def start_freq_ind(self):
+        if self.df is not None:
+            return int(self.f_arr[0] / self.df)
+        else:
+            return None
 
     def _store_time_and_frequency_information(
         self,

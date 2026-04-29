@@ -18,38 +18,42 @@ import logging
 from eryn.backends import HDFBackend as eryn_Backend
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
-from eryn.state import State as eryn_State
+from eryn.state import State as ErynState
+from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
 from lisatools.sources.utils import ecliptic_to_icrs
 from lisatools.utils.utility import AET, detrend, tukey
+from lisatools.utils.constants import YRSID_SI, PC_SI
 
-from ..engine import Settings, Setup
+from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
+from ..priors.gbpriors import get_fdot_mojito
 
 
-# TODO: better way than None?
 @dataclasses.dataclass
 class GBSettings(Settings):
-    A_lims: typing.List[float, float] = None
-    f0_lims: typing.List[float, float] = None
-    m_chirp_lims: typing.List[float, float] = None
-    fdot_lims: typing.List[float, float] = None
-    phi0_lims: typing.List[float, float] = None
-    iota_lims: typing.List[float, float] = None
-    psi_lims: typing.List[float, float] = None
-    lam_lims: typing.List[float, float] = None
-    beta_lims: typing.List[float, float] = None
+    A_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    f0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    m_chirp_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    fdot_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    iota_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    psi_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    lam_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    beta_lims: typing.List[float] = dataclasses.field(default_factory=list)
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
     oversample: int = 4
     extra_buffer: int = 5
-    start_resample_iter: Optional[int] = (-1,)  # -1 so that it starts right at the start of PE
+    start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
-
+    t0: Optional[float] = 0.0
+    tdi_setup: Optional[str] = "XYZ" # other options are AET and AE. 
+    use_tdi2: Optional[bool] = True
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -74,30 +78,24 @@ class GBSetup(Setup, GBSettings):
 
     def init_sampling_info(self):
 
-        input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+        input_basis = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", 
+                       r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
 
         if self.transform is None:
             gb_transform_fn_in = {
-                "A": np.exp,
-                "f0": f_ms_to_s,
-                "cos_iota": np.arccos,
-                "sin_beta": np.arcsin,
+                r"$\log A$": np.exp,
+                r"$f_0$": f_ms_to_s,
+                r"$\cos\iota$": np.arccos,
+                r"$\sin\beta$": np.arcsin,
             }
 
             output_basis = [
-                "A",
-                "f0",
-                "fdot",
-                "fddot",
-                "phi0",
-                "cos_iota",
-                "psi",
-                "lam",
-                "sin_beta",
+                r"$\log A$", r"$f_0$", r"$\dot{f}$", 
+                r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", 
+                r"$\psi$", r"$\lambda$", r"$\sin\beta$"
             ]
-            gb_fill_dict = {"fddot": 0.0}
-
-            # gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
+            
+            gb_fill_dict = {r"$\ddot{f}$": 0.0}
 
             self.transform = TransformContainer(
                 input_basis=input_basis,
@@ -107,51 +105,28 @@ class GBSetup(Setup, GBSettings):
             )
 
         if self.periodic is None:
-            self.periodic = {"gb": {"phi0": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}}
+            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\lambda$": 2 * np.pi}}
 
-        self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
-            # TODO: change to scaled linear in amplitude!?!
             priors_gb = {
                 input_basis[0]: uniform_dist(*(np.log(np.asarray(self.A_lims)))),
-                input_basis[1]: uniform_dist(
-                    *(np.asarray(self.f0_lims) * 1e3)
-                ),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
-                input_basis[2]: uniform_dist(*self.fdot_lims),
-                input_basis[3]: uniform_dist(*self.phi0_lims),
+                input_basis[1]: uniform_dist(*(np.asarray(self.f0_lims) * 1e3)),  # AmplitudeFrequencySNRPrior(rho_star, frequency_prior, L, Tobs, fd=fd),  # use sangria as a default
+                input_basis[2]: uniform_dist(self.fdot_lims[0], self.fdot_lims[1]),
+                input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
                 input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
-                input_basis[5]: uniform_dist(*self.psi_lims),
-                input_basis[6]: uniform_dist(*self.lam_lims),
+                input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
+                input_basis[6]: uniform_dist(self.lam_lims[0], self.lam_lims[1]),
                 input_basis[7]: uniform_dist(*np.sin(self.beta_lims)),
             }
 
-            # TODO: orbits check against sangria/sangria_hm
-
-            # priors_gb_fin = GBPriorWrap(8, ProbDistContainer(priors_gb))
             self.priors = {"gb": ProbDistContainer(priors_gb)}
 
         if self.betas is None:
-            snrs_ladder = np.array(
-                [
-                    1.0,
-                    1.5,
-                    2.0,
-                    3.0,
-                    4.0,
-                    5.0,
-                    7.5,
-                    10.0,
-                    15.0,
-                    20.0,
-                    35.0,
-                    50.0,
-                    75.0,
-                    125.0,
-                    250.0,
-                    5e2,
-                ]
-            )
-            ntemps_pe = 24  # len(snrs_ladder)
+            # snrs_ladder = np.array(
+            #     [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0,
+            #      15.0, 20.0, 35.0, 50.0, 75.0, 125.0, 250.0, 5e2]
+            # )
+            ntemps_pe = 24 # len(snrs_ladder)
             # betas =  1 / snrs_ladder ** 2  # make_ladder(ndim * 10, Tmax=5e6, ntemps=ntemps_pe)
             betas = 1 / 1.2 ** np.arange(ntemps_pe)
             betas[-1] = 0.0001
@@ -169,10 +144,12 @@ class GBSetup(Setup, GBSettings):
             use_c_implementation=True,
             oversample=self.oversample,
             start_freq_ind=self.start_freq_ind,
+            tdi_channel_setup=self.tdi_setup,
+            tdi2=self.use_tdi2
         )
 
         if self.group_proposal_kwargs is None:
-            self.group_proposal_kwargs = dict(
+            self.group_proposal_kwargs: typing.Dict[str, Any] = dict(
                 n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=200
             )
 
@@ -194,8 +171,7 @@ class GBSetup(Setup, GBSettings):
 
     def init_band_structure(self):
         # band separation setup
-
-        if self.oversample is None and Tobs < YEAR / 2.0:
+        if self.oversample is None and self.Tobs < YRSID_SI / 2.0:
             self.oversample = 2
         elif self.oversample is None:
             self.oversample = 4
@@ -204,10 +180,8 @@ class GBSetup(Setup, GBSettings):
 
         # TODO: assign to binned f or leave general? probably better to be general
         band_edges_in_reverse_order = [self.end_freq]
-        band_N_vals_reverse_order = []
-        # determines N from high_Frequency edge of sub-band
         current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
-        band_N_vals_reverse_order.append(current_N)
+        band_N_vals_reverse_order = [current_N]
 
         current_freq = self.end_freq
         last_freq = self.end_freq
@@ -221,17 +195,28 @@ class GBSetup(Setup, GBSettings):
             last_freq - (current_N * 2 + self.extra_buffer) * self.df
         )
 
-        self.band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
-        self.band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
+        band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
+        band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
+        
+        # trim edges to avoid out of bound indexing
+        self.band_edges = band_edges[1:-1]
+        self.band_N_vals = band_N_vals[1:-1]
 
-        self.logger.debug("NEED TO THINK ABOUT mCHIRP prior")
         self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
-        fdot_max_val = get_fdot(self.f0_lims[-1], Mc=self.m_chirp_lims[-1])
 
-        self.fdot_lims = [-fdot_max_val, fdot_max_val]
+        self.fdot_lims = [
+            get_fdot_mojito(self.f0_lims[1], sign="-"), 
+            get_fdot_mojito(self.f0_lims[1], sign="+"), 
+        ]
 
-        self.num_sub_bands = len(self.band_edges)
-
+        self.num_sub_bands = len(self.band_edges) - 1
+        
+        self.logger.info(
+            f"GB f0 prior range is set from {round(self.f0_lims[0],7)} to {round(self.f0_lims[1],7)}"
+        )
+        self.logger.info(f"The number of subbands is {self.num_sub_bands}")
+        self.logger.info(f"Min f of subbands is {self.band_edges.min()}")
+        self.logger.info(f"Max f of subbands is {self.band_edges.max()}")
 
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
@@ -244,7 +229,7 @@ def gpc_to_mpc(x):
     return x * 1e3
 
 
-from bbhx.utils.transform import *
+# from bbhx.utils.transform import *
 from eryn.moves import Move
 
 from ..hdfbackend import MBHHDFBackend
@@ -444,11 +429,11 @@ from ..state import EMRIState
 
 @dataclasses.dataclass
 class EMRISettings(Settings):
-    logm1_lims: typing.List[float, float] = None
-    m2_lims: typing.List[float, float] = None
-    a_lims: typing.List[float, float] = None
-    p0_lims: typing.List[float, float] = None
-    e0_lims: typing.List[float, float] = None
+    logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    m2_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    a_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    p0_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    e0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     waveform_kwargs: Optional[dict] = None
     injection: Optional[np.ndarray] = None  # AS here only for the starting state
     info_matrix_gen: Optional[Any] = None  # todo change name to info matrix or smth
@@ -642,7 +627,7 @@ class PSDSettings(Settings):
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 4
-    transform_fn: TransformContainer = None
+    transform_fn: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None 
     nknots: Optional[int] = None
 
@@ -781,11 +766,11 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 
 
 if __name__ == "__main__":
-    general_set = get_general_erebor_settings()
-    gb_set = get_gb_erebor_settings(general_set)
-    mbh_set = get_mbh_erebor_settings(general_set)
-    psd_set = get_psd_erebor_settings(general_set)
-    galfor_set = get_galfor_erebor_settings(general_set)
+    # general_set = get_general_erebor_settings()
+    # gb_set = get_gb_erebor_settings(general_set)
+    # mbh_set = get_mbh_erebor_settings(general_set)
+    # psd_set = get_psd_erebor_settings(general_set)
+    # galfor_set = get_galfor_erebor_settings(general_set)
     breakpoint()
 
     # # mcmc info for main run
