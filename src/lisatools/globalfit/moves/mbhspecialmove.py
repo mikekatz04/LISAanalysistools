@@ -7,6 +7,7 @@ from eryn.ensemble import EnsembleSampler
 from eryn.moves import RedBlueMove, StretchMove
 
 # from bbhx.likelihood import NewHeterodynedLikelihood
+from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
@@ -24,8 +25,15 @@ from ...utils.utility import tukey
 
 # from eryn.state import State
 from ..state import GFState
-from .addremovemove import ResidualAddOneRemoveOneMove
+from .addremovemove import ResidualAddOneRemoveOneMove, MultiGPUResidualAddRemoveMove
 from .globalfitmove import GlobalFitMove
+
+if TYPE_CHECKING:
+    from eryn.prior import ProbDistContainer
+    from eryn.utils.transform import TransformContainer
+    from typing import Any
+    from ...domaincomputation import DomainComputationGroupArray
+    from ...sources.bbh import PhenomTHMTDIWaveform, PhenomTHMTDIOnFlyWaveform
 
 
 def update_fn(i, last_sample, sampler):
@@ -73,6 +81,56 @@ def search_likelihood_wrap(
     ).real.get()
 
     return ll
+
+class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
+    """
+    
+    """
+    def __init__(
+        self, 
+        dcga: DomainComputationGroupArray,
+        waveform_gen: PhenomTHMTDIWaveform | PhenomTHMTDIOnFlyWaveform,
+        branch_name: str,
+        coords_shape: tuple,
+        waveform_gen_kwargs: dict,
+        num_repeats: int,
+        transform_fn: TransformContainer,
+        priors: ProbDistContainer,
+        inner_moves: list,
+        Tmax: float = np.inf,
+        betas_all: np.ndarray = None,
+        permute_every: int = 20,
+        run_threaded: bool = False,
+        **kwargs
+    ):
+        waveform_gen_method: str = "get_signals_for_residuals"
+        waveform_like_method: str = "__call__"
+
+        if not hasattr(waveform_gen, waveform_gen_method):
+            raise ValueError(f"Waveform generator must have method {waveform_gen_method} for TDMBHSpecialMove.")
+        if not hasattr(waveform_gen, waveform_like_method):
+            raise ValueError(f"Waveform generator must have method {waveform_like_method} for TDMBHSpecialMove.")
+
+        super().__init__(
+            dcga,
+            waveform_gen,
+            branch_name,
+            coords_shape,
+            waveform_gen_kwargs,
+            waveform_gen_method,
+            num_repeats,
+            transform_fn,
+            priors,
+            inner_moves,
+            Tmax,
+            betas_all,
+            permute_every,
+            run_threaded,
+            waveform_like_method,
+            **kwargs
+        )
+            
+
 
 
 class MBHSpecialMove(

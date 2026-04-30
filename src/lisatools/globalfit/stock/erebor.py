@@ -23,6 +23,7 @@ from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
+from lisatools.sources.utils import ecliptic_to_icrs
 from lisatools.utils.utility import AET, detrend, tukey
 from lisatools.utils.constants import YRSID_SI, PC_SI
 
@@ -307,11 +308,13 @@ class MBHSetup(Setup):
 
             mbh_transform_fn_in = {
                 "logM": np.exp,
+                #"logq": np.exp,
                 "dist": gpc_to_mpc,
                 "cos_iota": np.arccos,
                 "sin_beta": np.arcsin,
                 ("logM", "q"): mT_q,
                 ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
+                ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
             }
 
             # for transforms
@@ -331,14 +334,14 @@ class MBHSetup(Setup):
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
             priors_mbh = {
-                "logM": uniform_dist(np.log(1e4), np.log(1e8)),
-                "q": uniform_dist(0.01, 0.999999999),
+                "logM": uniform_dist(np.log(1e5), np.log(1e8)),
+                "q": uniform_dist(0.1, 0.999999999),
                 "s1z": uniform_dist(-0.99999999, +0.99999999),
                 "s2z": uniform_dist(-0.99999999, +0.99999999),
-                "dist": uniform_dist(0.01, 1000.0),
+                "dist": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
                 "phi_ref": uniform_dist(0.0, 2 * np.pi),
                 "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                "psi": uniform_dist(0.0, 2 * np.pi),
+                "psi": uniform_dist(0.0, np.pi), #is this right?
                 "lam": uniform_dist(0.0, 2 * np.pi),
                 "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                 "t_plunge": uniform_dist(0.0, self.Tobs + 3600.0),

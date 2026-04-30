@@ -201,6 +201,8 @@ def scatter_around_injection(
     else:
         raise ValueError(f"spread must be scalar, 1-D, 2-D, or 3-D; got shape {spread.shape}")
 
+    if betas is not None:
+        logger.info(f"Scaling initial covariance by betas: {betas}")
     for leaf in range(nleaves_init):
         center = injection_sampling[leaf]
         leaf_cov = covs[leaf]
@@ -243,6 +245,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
 
     logM = np.log(m1 + m2)
     q = m2 / m1
+    logq = np.log(q)
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
     s2z = float(catalogue_entry["SecondarySpinCompZ"])
@@ -254,7 +257,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     ra = float(catalogue_entry["RightAscension"])
     dec = float(catalogue_entry["Declination"])
     psi_icrs = float(catalogue_entry["PolarisationAngle"])
-    psi_ssb, lam_ecl, beta_ecl = icrs_to_ecliptic(psi_icrs, ra, dec)
+    lam_ecl, beta_ecl, psi_ssb = icrs_to_ecliptic(ra, dec, psi_icrs)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
     logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
@@ -295,6 +298,7 @@ def subtract_initial_signal(
     else:
         logger.info(f"No initial signals for {source_name}")
 
+    #breakpoint()
 
 def build_psd_moves(
     engine_info: Setup,
@@ -396,18 +400,21 @@ def build_mbh_moves_phenom(
     ntemps = curr.general_info.ntemps
 
     wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
+    # breakpoint()
+    subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
-    subtract_initial_signal(acs, state, wave_gen, "mbh", mbh_info)
-
-    betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
+    if mbh_info.betas is None:
+        mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
+    betas_all = np.tile(mbh_info.betas, (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
+    logger.debug(f"MBH betas: {mbh_info.betas}")
 
     coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
 
     mbh_move_args = (
         "mbh",  # branch_name
         coords_shape,
-        wave_gen,
+        wave_gen.get_signals_for_residuals,
         # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs
         dict(propagate_data_res_kwargs=False),  # waveform_like_kwargs
