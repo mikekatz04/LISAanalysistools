@@ -39,7 +39,7 @@ class DomainSettingsBase(LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls):
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_slice(self, index: tuple) -> DomainSettingsBase:
         raise NotImplementedError("get_slice needs to be implemented for this signal type.")
@@ -233,15 +233,18 @@ class TDSignal(DomainBase, TDSettings):
         if window is None:
             window = xp.ones(self.arr.shape, dtype=float)
 
-        df = 1 / (self.N * self.dt)
-
-        fd_arr = xp.fft.rfft(self.arr * window) * self.dt
-
         if settings is not None:
             assert isinstance(settings, FDSettings)
-            assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
+            n_fft = round(1 / (settings.df * self.dt))
+            assert self.N == n_fft, (
+                f"Signal length ({self.N}) != target FFT length ({n_fft}). "
+                f"Caller must pre-pad the signal."
+            )
+            fd_arr = xp.fft.rfft(self.arr * window, axis=-1) * self.dt
             fd_settings = settings
         else:
+            fd_arr = xp.fft.rfft(self.arr * window, axis=-1) * self.dt
+            df = 1 / (self.N * self.dt)
             fd_settings = FDSettings(
                 fd_arr.shape[-1],
                 df,
@@ -369,9 +372,18 @@ class FDSettings(DomainSettingsBase):
     def get_associated_class():
         return FDSignal
 
+    @staticmethod
+    def get_associated_group():
+        from .domaincomputation import FDComputationGroup
+        return FDComputationGroup
+
     @property
     def associated_class(self):
         return self.get_associated_class()
+
+    @property
+    def associated_group(self):
+        return self.get_associated_group()
 
     @property
     def kwargs(self) -> dict:
@@ -590,20 +602,18 @@ class FDSignal(FDSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-    def plot(self, 
-             channel: int = 0, 
-             ax: plt.Axes | None = None, 
-             filename: Optional[str] = None,
-             **kwargs) -> plt.Axes:
+    def plot(
+        self, channel: int = 0, ax: plt.Axes | None = None, filename: Optional[str] = None, **kwargs
+    ) -> plt.Axes:
         """
         Plot the squared amplitude of the FD signal for a given channel.
 
         Args:
             channel: The channel index to visualize.
-            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.  
+            ax: An optional matplotlib Axes object to plot on. If None, a new figure and axes will be created.
             filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
             **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
-        
+
         Returns:
             The matplotlib Axes object containing the plot.
         """
@@ -623,7 +633,8 @@ class FDSignal(FDSettings, DomainBase):
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight")
         return ax
-        
+
+
 class STFTSettings(DomainSettingsBase):
     t0: float
     dt: float
@@ -663,9 +674,18 @@ class STFTSettings(DomainSettingsBase):
     def get_associated_class():
         return STFTSignal
 
+    @staticmethod
+    def get_associated_group():
+        from .domaincomputation import STFTComputationGroup
+        return STFTComputationGroup
+
     @property
     def associated_class(self):
         return self.get_associated_class()
+
+    @property
+    def associated_group(self):
+        return self.get_associated_group()
 
     @property
     def basis_shape(self) -> tuple:
@@ -727,7 +747,9 @@ class STFTSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
-            min_freq=self.min_freq, max_freq=self.max_freq, force_backend=self.backend_name.split("_")[-1]
+            min_freq=self.min_freq,
+            max_freq=self.max_freq,
+            force_backend=self.backend_name.split("_")[-1],
         )
 
     @property
@@ -945,12 +967,14 @@ class STFTSignal(STFTSettings, DomainBase):
 
         ax.loglog(f_arr, np.abs(arr_here[time_bin]) ** 2, **kwargs)
 
-        ax.set_title(f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})")
+        ax.set_title(
+            f"STFT Frequency Spectrum for Time Bin {time_bin} (Time = {self.t_arr[time_bin]:.2f})"
+        )
         ax.set_xlabel("Frequency")
         ax.set_ylabel("Magnitude")
         ax.set_xlim(self.min_freq, self.max_freq)
         return ax
-    
+
     def _plot_td(self, channel=0, ax=None, freq_bin=0, **kwargs):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
@@ -963,17 +987,21 @@ class STFTSignal(STFTSettings, DomainBase):
         ax.plot(t_arr, arr_here[:, freq_bin].imag, label="imag part", **kwargs)
 
         ax.legend()
-        ax.set_title(f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})")
+        ax.set_title(
+            f"STFT Time Series for Frequency Bin {freq_bin} (Frequency = {self.f_arr[freq_bin]:.2f})"
+        )
         ax.set_xlabel("Time")
         ax.set_ylabel("Magnitude")
         return ax
-    
-    def plot(self, 
-             channel: int = 0, 
-             ax: plt.Axes | None = None, 
-             plot_type: str = "stft", 
-             filename: Optional[str] = None,
-             **kwargs) -> plt.Axes:
+
+    def plot(
+        self,
+        channel: int = 0,
+        ax: plt.Axes | None = None,
+        plot_type: str = "stft",
+        filename: Optional[str] = None,
+        **kwargs,
+    ) -> plt.Axes:
         """
         Visualize the STFT signal in either the time-frequency domain (stft), frequency domain (fd), or time domain (td).
 
@@ -984,7 +1012,7 @@ class STFTSignal(STFTSettings, DomainBase):
                 vs frequency plot of the magnitude squared of the STFT coefficients. 'fd' will create a log-log plot of the magnitude squared of the STFT coefficients for a single time bin. 'td' will create a plot of the magnitude squared of the real and imaginary parts of the STFT coefficients for a single frequency bin.
             filename: An optional filename to save the plot to. If provided, the plot will be saved to this file.
             **kwargs: Additional keyword arguments to pass to the underlying plotting functions.
-        
+
         Returns:
             The matplotlib Axes object containing the plot.
         """
@@ -995,7 +1023,9 @@ class STFTSignal(STFTSettings, DomainBase):
         elif plot_type == "td":
             ax = self._plot_td(channel=channel, ax=ax, **kwargs)
         else:
-            raise ValueError(f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'.")
+            raise ValueError(
+                f"Invalid plot_type {plot_type}. Must be one of 'stft', 'fd', or 'td'."
+            )
 
         if filename is not None:
             plt.savefig(filename, bbox_inches="tight")
@@ -1362,7 +1392,10 @@ class DomainBaseArray:
 
     """
 
-    def __init__(self, signals: List[DomainBase]) -> None:
+    def __init__(self, signals: List[DomainBase] | DomainBaseArray) -> None:
+        if isinstance(signals, DomainBaseArray):
+            signals = signals.signals
+            
         if not all(isinstance(s, DomainBase) for s in signals):
             raise TypeError("All elements of DomainBaseArray must be DomainBase instances.")
         self.signals = list(signals)
@@ -1389,6 +1422,16 @@ class DomainBaseArray:
 
     def __getitem__(self, index):
         return self.signals[index]
+
+    def __add__(self, other: DomainBaseArray) -> "DomainBaseArray":
+        """
+        Define how to add two DomainBaseArrays together. This will concatenate the signals from both arrays into a single array.
+        """
+
+        if not isinstance(other, DomainBaseArray):
+            raise TypeError("Can only add DomainBaseArray to another DomainBaseArray.")
+        return DomainBaseArray(self.signals + other.signals)
+
 
     @property
     def batched(self) -> Optional[DomainBase]:

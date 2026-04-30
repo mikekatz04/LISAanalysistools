@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
-import astropy.units as u
 import numpy as np
-from astropy.coordinates import SkyCoord
 from eryn.utils import TransformContainer
 
 from lisatools.diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
@@ -475,20 +473,182 @@ class EMRICalculationController(CalculationController):
         return params[deriv_inds], cov
 
 
-def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, float]:
+def return_input(x: Any) -> Any:
+    """Return the input."""
+    return x
+
+
+def return_float(x: np.ndarray | float) -> float:
+    """Return the input as a float."""
+    return float(x)
+
+
+def icrs_to_ecliptic(
+    ra: float | np.ndarray, dec: float | np.ndarray, psi: Optional[float | np.ndarray] = None
+) -> (
+    Tuple[float | np.ndarray, float | np.ndarray]
+    | Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
+):
     """
-    Convert ICRS coordinates and angles, (psi, ra, dec) to ecliptic coordinates (psi_ecliptic, lambda, beta)."""
-    eps = 0.40909263366002024 # obliquity of the ecliptic at J2000 in radians
+    Convert ICRS angles (ra, dec, optional psi) to ecliptic coordinates
+    (lambda, beta, optional psi_ecliptic).
 
-    coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
-    ecliptic_coord = coord.barycentrictrueecliptic
+    The sky angles are converted according to the convention document LISA-DDPC-SEG-TN-007, sec 5.4.2:
+    .. math::
 
-    lambd = ecliptic_coord.lon.rad
-    beta = ecliptic_coord.lat.rad
+        \\sin(\\beta) = \\sin(\\delta) \\cos(\\epsilon) - \\cos(\\delta) \\sin(\\epsilon) \\sin(\\alpha)
+        \\cos(\\lambda) = \\cos(\\delta) \\cos(\\alpha) / \\cos(\\beta)
+        \\sin(\\lambda) = (\\sin(\\delta) \\sin(\\epsilon) + \\cos(\\delta) \\cos(\\epsilon) \\sin(\\alpha)) / \\cos(\\beta).
 
-    cosdeltapsi = 1./np.cos(dec) * (-np.sin(eps)*np.sin(beta)*np.sin(lambd) + np.cos(eps)*np.cos(beta))
-    sindeltapsi = -1./np.cos(dec) * np.sin(eps)*np.cos(lambd)
-    deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-    psi_ecliptic = psi - deltapsi
+    The polarization angle is converted according to:
+    ..math::
+        \\psi_{\rm ecliptic} = \\psi - \\delta \\psi
+        \\cos(\\delta \\psi) = \\frac{1}{\\cos(\\beta)} (\\sin(\\epsilon) \\sin(\\delta) \\sin(\\alpha) + \\cos(\\epsilon) \\cos(\\delta))
+        \\sin(\\delta \\psi) = - \\frac{1}{\\cos(\\beta)} \\sin(\\epsilon) \\cos(\\alpha)
 
-    return psi_ecliptic, lambd, beta
+    Inputs are broadcast following NumPy rules. If all inputs are scalar,
+    scalar outputs are returned.
+
+    Args:
+        ra: Right ascension in radians.
+        dec: Declination in radians.
+        psi: Optional polarization angle in radians. If provided, the returned tuple will include the converted polarization angle in ecliptic coordinates.
+
+    Returns:
+        If `psi` is not provided, returns a tuple of (lambda, beta) in radians.
+        If `psi` is provided, returns a tuple of (lambda, beta, psi_ecliptic) in radians.
+    """
+    scalar_output = (
+        isinstance(ra, float) and isinstance(dec, float) and (psi is None or isinstance(psi, float))
+    )
+    out_fun = return_float if scalar_output else return_input
+
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+
+    cos_dec = np.cos(dec)
+    sin_dec = np.sin(dec)
+    cos_ra = np.cos(ra)
+    sin_ra = np.sin(ra)
+    cos_eps = np.cos(EPS_RAD)
+    sin_eps = np.sin(EPS_RAD)
+
+    sin_beta = sin_dec * cos_eps - cos_dec * sin_eps * sin_ra
+    beta = np.arcsin(sin_beta)
+
+    cos_beta = np.cos(beta)
+    eps_cos_beta = np.finfo(float).eps
+    safe_cos_beta = np.where(
+        np.abs(cos_beta) < eps_cos_beta,
+        np.copysign(eps_cos_beta, cos_beta),
+        cos_beta,
+    )
+    inv_cos_beta = 1.0 / safe_cos_beta
+
+    cos_lambda = cos_dec * cos_ra * inv_cos_beta
+    sin_lambda = (sin_dec * sin_eps + cos_dec * cos_eps * sin_ra) * inv_cos_beta
+    lambd = np.arctan2(sin_lambda, cos_lambda) % (2 * np.pi)
+
+    if psi is not None:
+        psi = np.asarray(psi, dtype=float)
+
+        cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * cos_dec)
+        sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
+
+        deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
+        psi_ecliptic = (psi - deltapsi) % np.pi
+
+        return out_fun(lambd), out_fun(beta), out_fun(psi_ecliptic)
+
+    return out_fun(lambd), out_fun(beta)
+
+
+def ecliptic_to_icrs(
+    lambd: float | np.ndarray,
+    beta: float | np.ndarray,
+    psi_ecliptic: Optional[float | np.ndarray] = None,
+) -> (
+    Tuple[float | np.ndarray, float | np.ndarray]
+    | Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
+):
+    """
+    Convert ecliptic coordinates (lambda, beta, optional psi_ecliptic) to ICRS angles
+    (ra, dec, optional psi).
+
+    The sky angles are converted according to the convention document LISA-DDPC-SEG-TN-007, sec 5.4.2:
+    .. math::
+
+        \\sin(\\delta) = \\sin(\\beta) \\cos(\\epsilon) + \\cos(\\beta) \\sin(\\epsilon) \\sin(\\lambda)
+        \\cos(\\alpha) = \\cos(\\beta) \\cos(\\lambda) / \\cos(\\delta)
+        \\sin(\\alpha) = (-\\sin(\\beta) \\sin(\\epsilon) + \\cos(\\beta) \\cos(\\epsilon) \\sin(\\lambda)) / \\cos(\\delta).
+
+    The polarization angle is converted according to:
+    ..math::
+        \\psi = \\psi_{\\rm ecliptic} + \\delta \\psi
+        \\cos(\\delta \\psi) = \\frac{1}{\\cos(\\beta)} (\\sin(\\epsilon) \\sin(\\delta) \\sin(\\alpha) + \\cos(\\epsilon) \\cos(\\delta))
+        \\sin(\\delta \\psi) = - \\frac{1}{\\cos(\\beta)} \\sin(\\epsilon) \\cos(\\alpha)
+
+    Inputs are broadcast following NumPy rules. If all inputs are scalar,
+    scalar outputs are returned.
+
+    Args:
+        lambd: Ecliptic longitude in radians.
+        beta: Ecliptic latitude in radians.
+        psi_ecliptic: Optional polarization angle in radians. If provided, the returned tuple will include the converted polarization angle in ICRS coordinates.
+
+    Returns:
+        If `psi_ecliptic` is not provided, returns a tuple of (ra, dec) in radians.
+        If `psi_ecliptic` is provided, returns a tuple of (ra, dec, psi) in radians.
+    """
+    scalar_output = (
+        isinstance(lambd, float)
+        and isinstance(beta, float)
+        and (psi_ecliptic is None or isinstance(psi_ecliptic, float))
+    )
+    out_fun = return_float if scalar_output else return_input
+
+    lambd = np.asarray(lambd, dtype=float)
+    beta = np.asarray(beta, dtype=float)
+
+    cos_beta = np.cos(beta)
+    sin_beta = np.sin(beta)
+    cos_lambda = np.cos(lambd)
+    sin_lambda = np.sin(lambd)
+    cos_eps = np.cos(EPS_RAD)
+    sin_eps = np.sin(EPS_RAD)
+
+    sin_dec = sin_beta * cos_eps + cos_beta * sin_eps * sin_lambda
+    dec = np.arcsin(sin_dec)
+    cos_dec = np.cos(dec)
+    eps_float = np.finfo(float).eps
+    safe_cos_dec = np.where(
+        np.abs(cos_dec) < eps_float,
+        np.copysign(eps_float, cos_dec),
+        cos_dec,
+    )
+    inv_cos_dec = 1.0 / safe_cos_dec
+
+    cos_ra = cos_beta * cos_lambda * inv_cos_dec
+    sin_ra = (-sin_beta * sin_eps + cos_beta * cos_eps * sin_lambda) * inv_cos_dec
+    ra = np.arctan2(sin_ra, cos_ra) % (2 * np.pi)
+
+    if psi_ecliptic is not None:
+        psi_ecliptic = np.asarray(psi_ecliptic, dtype=float)
+
+        cos_beta = np.cos(beta)
+        safe_cos_beta = np.where(
+            np.abs(cos_beta) < eps_float,
+            np.copysign(eps_float, cos_beta),
+            cos_beta,
+        )
+        inv_cos_beta = 1.0 / safe_cos_beta
+
+        cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * cos_dec)
+        sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
+
+        deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
+        psi = (psi_ecliptic + deltapsi) % np.pi
+
+        return out_fun(ra), out_fun(dec), out_fun(psi)
+
+    return out_fun(ra), out_fun(dec)

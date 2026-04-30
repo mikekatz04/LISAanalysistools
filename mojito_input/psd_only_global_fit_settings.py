@@ -20,7 +20,7 @@ from eryn.state import BranchSupplemental
 from eryn.utils import TransformContainer
 from eryn.utils.updates import Update
 
-from lisatools.detector import EqualArmlengthOrbits
+from lisatools.detector import EqualArmlengthOrbits, L1Orbits
 
 from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
 from lisatools.globalfit.generatefuncs import *
@@ -95,43 +95,46 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdot
     Tobs = 1.0 * YRSID_SI / 12.0
-    dt = 2.5
-    start_freq = 5e-5
-    end_freq = 1e-1
+    dt = 5.0
+    start_freq = 1e-4
+    end_freq = 2.9e-2
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "matrix_tryout"
+    base_file_name = "matrix_for_mbhb"
     file_store_dir = head_dir + "mojito_output/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
-    gpus = [3]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
 
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
     # few.get_backend('cuda12x')
+    backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 30
     ntemps = 4
 
     window_type = "tukey"
-    window_taper_duration = 1 / start_freq
+    window_taper_duration = 0.1 * 7 * 24 * 3600.0
     normalize_window = True
 
     basis_domain = "stft"  # fd
-    stft_dt = 24 * 3600.0 if basis_domain == "stft" else None  # how many hours
+    stft_dt = 7 * 24 * 3600.0 if basis_domain == "stft" else None  # how many hours
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
         source_types=["noise"],
         verbose=True,
         do_plots=True,
+        orbits_class=L1Orbits,
+        orbits_kwargs=dict(force_backend=backend, frame="icrs"),
     )
 
     downsample_kwargs = {
-        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
+        "target_fs": 1 / dt,  # Hz — target sampling rate (None = no downsampling).
         "window": (
             "kaiser",
             31.0,
@@ -164,8 +167,11 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, use_splines=False)
-
+    sensitivity_init_kwargs = dict(
+        tdi_generation=2,
+        mask_percentage=0.02,
+        use_splines=False,
+    )
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
