@@ -481,19 +481,23 @@ def build_gb_moves(
     general_info: GeneralSetup = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-
+    data_start_freq_ind = int(acs.start_freq_ind[0])
+    
     gb_betas = gb_info.betas
     gpus: list[int] = general_info.gpus
     
     #* Setting up gbgpu on correct backend and gpu(s) for correct orbits and timeshift
     from gbgpu.gbgpu import GBGPU
     import gbgpu 
+    from ..detector import L1Orbits
     _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
     _gb_backend.set_cuda_device(gpus[0])
-    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.gpu_orbits, t0=gb_info.t0)
+    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.orbits, t0=gb_info.t0)
     cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
 
+    logger.debug(f"GBGPU initialized at t0 = {gb_info.t0}")
+    
     #* Make sure that priors are evaluated on gpus
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for _, item in gpu_priors_in.items():
@@ -503,10 +507,10 @@ def build_gb_moves(
     nleaves_max_gb = state.branches["gb"].shape[-2]
 
     waveform_kwargs = GBWaveformDict(
-        dt=gb_info.dt,
-        T=gb_info.Tobs,
+        dt=general_info.dt,
+        T=1/getattr(acs.settings, "df"),
         use_c_implementation=True,
-        start_freq_ind=int(gb_info.start_freq_ind),
+        start_freq_ind=data_start_freq_ind,
         tdi_channel_setup=gb_info.tdi_setup,
         tdi2=gb_info.use_tdi2
     )
@@ -593,13 +597,13 @@ def build_gb_moves(
     # state.branches["gb"].branch_supplemental = BranchSupplemental(
     #     {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
     # )
-        
+
     #* Assembling args and kwargs
     gb_move_args = (
         gb,
         priors,
-        gb_info.start_freq_ind,
-        acs.data_length,
+        data_start_freq_ind,
+        acs.end_shape[0],
         acs,
         general_info.domain_settings.f_arr,
         band_edges,
@@ -607,6 +611,10 @@ def build_gb_moves(
         gpu_priors,
     )
 
+    effective_ndim = engine_info.ndims["gb"]
+    temperature_control = TemperatureControl(
+        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    )
     gb_move_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=gb_info.transform,
@@ -615,7 +623,9 @@ def build_gb_moves(
         random_seed=general_info.random_seed,
         force_backend=general_info.gpu_backend,
         nfriends=nwalkers,
+        temperature_control=temperature_control,
         **gb_info.group_proposal_kwargs
+       
     )
 
     #* ============================================= SEARCH MOVES =============================================

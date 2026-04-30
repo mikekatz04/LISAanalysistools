@@ -292,7 +292,7 @@ class GeneralSetup(Setup, GeneralSettings):
             self.input_data_residual_array._store_time_and_frequency_information(
                 df = domain_settings.df,
                 f_arr = domain_settings.f_arr
-            ) #* hi allesandro, if you are seeing this, I will replace this by passing domain_settings to GB block eventually
+            ) 
 
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)

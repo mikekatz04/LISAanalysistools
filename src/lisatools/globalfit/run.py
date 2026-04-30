@@ -380,9 +380,7 @@ class GlobalFit:
 
         gpus = general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
-
-        # breakpoint()
-
+        
         for name, source_info in self.curr.source_info.items():
             if name not in self.curr.engine_info.branch_names:
                 continue
@@ -697,7 +695,7 @@ class GlobalFit:
                 stopping_iterations=1,
             )
             _tmp_move.temperature_control.swaps_accepted = np.zeros(
-                (self.ntemps, self.nwalkers), dtype=int
+                (self.ntemps - 1), dtype=int
             )
 
             self.recipe.backend = backend
@@ -709,7 +707,7 @@ class GlobalFit:
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
-            sampler_mix.run_mcmc(state, 50, thin_by=1, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
