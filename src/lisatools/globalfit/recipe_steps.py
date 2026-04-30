@@ -222,7 +222,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     """Convert a single Mojito MBHB catalogue entry to MBH sampling basis.
 
     The sampling basis is:
-    ``[logM, logq, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
+    ``[logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
 
     Parameters
     ----------
