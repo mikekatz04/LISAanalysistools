@@ -168,6 +168,18 @@ class L1DataLoader:
 
     def _open(self, file_path: str) -> MojitoL1File:
         raise NotImplementedError("_open method should be implemented in subclasses.")
+    
+    @property
+    def individual_timeseries(self) -> dict:
+        """
+        Property to access individual timeseries for each source type and ID.
+
+        Returns:
+            dict: A dictionary containing individual timeseries for each source type and ID.
+        """
+        if not hasattr(self, "_individual_timeseries"):
+            self._individual_timeseries = {}
+        return self._individual_timeseries
 
     def load_data(self) -> tuple:
         """
@@ -182,6 +194,8 @@ class L1DataLoader:
         """
         xyz = None
 
+        _individual_timeseries = {}  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
+
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
             file_path = find_file(subfolder, "NOISE", 00)
@@ -193,6 +207,10 @@ class L1DataLoader:
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
                 tdi_times = f.tdis.time_sampling.t()
 
+                noise_covariance = f.noise_estimates.xyz[:] / f.laser_frequency ** 2
+                noise_frequencies = f.noise_estimates.freq_sampling.f()
+                noise_times = f.noise_estimates.time_sampling.t()
+
             orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
             orbits.configure(linear_interp_setup=True)
             self.source_types.remove("NOISE")
@@ -202,6 +220,11 @@ class L1DataLoader:
                 logger.info(f"data, times and orbits initialized from NOISE file.")
                 logger.info(f"TDI time step: {tdi_dt} seconds")
                 logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
+
+            _individual_timeseries["NOISE"] = xyz.T.copy()  # store the noise timeseries separately if needed
+            _individual_timeseries["NOISE_COVARIANCE"] = noise_covariance 
+            _individual_timeseries["NOISE_FREQUENCIES"] = noise_frequencies
+            _individual_timeseries["NOISE_TIMES"] = noise_times
 
         for source_type in self.source_types:
 
@@ -262,13 +285,33 @@ class L1DataLoader:
                             tdi_times == _tdi_times
                         ).all(), "Time arrays do not match between files."
 
+                    _individual_timeseries[f"{source_type}_{source_id}"] = _xyz.T.copy()  # store individual timeseries for this source
+
         xyz = xyz.T  # Transpose to have shape (n_channels, n_times)
         assert (
             xyz.shape[1] == tdi_times.shape[0]
         ), "Data time dimension does not match time array length."
 
-        return tdi_times, tdi_fs, xyz, orbits
+        self._individual_timeseries = _individual_timeseries  # store the individual timeseries for potential further use
 
+        return tdi_times, tdi_fs, xyz, orbits
+    
+    def dump_individual_timeseries(self, file_path: str, delete_after_dump: bool = False):
+        """
+        Dump the individual timeseries for each source type and ID to a .h5 file for debugging or further analysis.
+
+        Args:
+            file_path (str): The path to the output .h5 file.
+            delete_after_dump (bool, optional): Whether to delete the individual timeseries after dumping them. Defaults to False.
+        """
+        with h5py.File(file_path, "w") as f:
+            for key, ts_data in self.individual_timeseries.items():
+                f.create_dataset(key, data=ts_data)
+        if self.verbose:
+            logger.info(f"Dumped individual timeseries to {file_path}")
+
+        if delete_after_dump:
+            self.individual_timeseries.clear()
 
 class SangriaDataLoader:
     """
@@ -858,6 +901,29 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
     def _open(self, file_path: str) -> MojitoL1File:
         return MojitoL1File(file_path)
 
+    def process(self, *args, **kwargs):
+        """
+        Apply identical processing to the main data and all individual timeseries.
+        """
+        if hasattr(self, "individual_timeseries"):
+            for key, ts_data in self.individual_timeseries.items():
+                temp_processor = BaseProcessingStep(
+                    times=self.times.copy(),
+                    data=ts_data.copy(),
+                    fs=self.fs,
+                    verbose=False,  # Suppress logs for the individual processing
+                    do_plots=False,
+                )
+                _, ts_data = temp_processor.process(*args, **kwargs)
+                self.individual_timeseries[key] = ts_data
+
+        processed_times, processed_data = super().process(*args, **kwargs)
+
+        if hasattr(self, "individual_timeseries"):
+            self.individual_timeseries["TIMES"] = processed_times  # store the processed times as well
+            self.individual_timeseries["COMBINED"] = processed_data
+        
+        return processed_times, processed_data
 
 class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
     """
@@ -881,3 +947,4 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
         BaseProcessingStep.__init__(self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots)
 
         self.orbits = None  # no orbital information available in Sangria files
+        self.individual_timeseries = {}  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis
