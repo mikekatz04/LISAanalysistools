@@ -387,7 +387,9 @@ class SignalProcessor:
         """{'X': arr, 'Y': arr, 'Z': arr} -> ndarray (n_ch, N)"""
         return np.vstack([mp_data[ch] for ch in self._CHANNEL_NAMES if ch in mp_data])
 
-    def _filter_via_mp(self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True):
+    def _filter_via_mp(
+        self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True
+    ):
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.filter(low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase)
         return self._from_mp_dict(mp.data)
@@ -547,6 +549,17 @@ class SignalProcessor:
         np.ndarray
             Downsampled data array.
         """
+        if target_fs == self.fs:
+            if self.verbose:
+                logger.info(
+                    f"Target sampling frequency is the same as current fs ({self.fs} Hz). No downsampling applied."
+                )
+            return self.data
+        elif target_fs > self.fs:
+            raise ValueError(
+                f"Target sampling frequency ({target_fs} Hz) must be less than current fs ({self.fs} Hz) for downsampling."
+            )
+
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.downsample(target_fs=target_fs, window=window, padtype=padtype)
         self.data = self._from_mp_dict(mp.data)

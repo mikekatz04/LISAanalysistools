@@ -1374,7 +1374,10 @@ class GaussianMixtureModel:
                 samples_so_far[tmp0, tmp_fill] = True
                 comp_out[tmp0, tmp_fill] = k
 
-            assert self.xp.all(samples_so_far)
+            try:
+                assert self.xp.all(samples_so_far)
+            except:
+                breakpoint()
             # X = self.xp.vstack(
             #     [
             #         rng.multivariate_normal(mean, covariance, int(sample))

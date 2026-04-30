@@ -23,6 +23,7 @@ from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
 from gbgpu.utils.utility import get_fdot, get_N
 
+from lisatools.sources.utils import ecliptic_to_icrs
 from lisatools.utils.utility import AET, detrend, tukey
 from lisatools.utils.constants import YRSID_SI, PC_SI
 
@@ -180,11 +181,12 @@ class GBSetup(Setup, GBSettings):
         # TODO: assign to binned f or leave general? probably better to be general
         band_edges_in_reverse_order = [self.end_freq]
         current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
+        min_N = get_N(1e-30, self.start_freq, self.Tobs, oversample=self.oversample).item()
         band_N_vals_reverse_order = [current_N]
 
         current_freq = self.end_freq
         last_freq = self.end_freq
-        while current_freq > self.start_freq:
+        while current_freq > self.start_freq + min_N * self.df:
             current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df
             band_edges_in_reverse_order.append(current_freq)
             current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
@@ -198,8 +200,8 @@ class GBSetup(Setup, GBSettings):
         band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
         
         # trim edges to avoid out of bound indexing
-        self.band_edges = band_edges[1:-1]
-        self.band_N_vals = band_N_vals[1:-1]
+        self.band_edges = band_edges[2:-1]
+        self.band_N_vals = band_N_vals[2:-1]
 
         self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
 
@@ -214,9 +216,10 @@ class GBSetup(Setup, GBSettings):
             f"GB f0 prior range is set from {round(self.f0_lims[0],7)} to {round(self.f0_lims[1],7)}"
         )
         self.logger.info(f"The number of subbands is {self.num_sub_bands}")
-        self.logger.info(f"Min f of subbands is {self.band_edges.min()}")
-        self.logger.info(f"Max f of subbands is {self.band_edges.max()}")
+        self.logger.info(f"Min freq of subbands is {self.band_edges.min()}")
+        self.logger.info(f"Max freq of subbands is {self.band_edges.max()}")
 
+        
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
 
@@ -307,11 +310,13 @@ class MBHSetup(Setup):
 
             mbh_transform_fn_in = {
                 "logM": np.exp,
+                #"logq": np.exp,
                 "dist": gpc_to_mpc,
                 "cos_iota": np.arccos,
                 "sin_beta": np.arcsin,
                 ("logM", "q"): mT_q,
                 ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
+                ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
             }
 
             # for transforms
@@ -331,14 +336,14 @@ class MBHSetup(Setup):
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
             priors_mbh = {
-                "logM": uniform_dist(np.log(1e4), np.log(1e8)),
-                "q": uniform_dist(0.01, 0.999999999),
+                "logM": uniform_dist(np.log(1e5), np.log(1e8)),
+                "q": uniform_dist(0.1, 0.999999999),
                 "s1z": uniform_dist(-0.99999999, +0.99999999),
                 "s2z": uniform_dist(-0.99999999, +0.99999999),
-                "dist": uniform_dist(0.01, 1000.0),
+                "dist": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
                 "phi_ref": uniform_dist(0.0, 2 * np.pi),
                 "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-                "psi": uniform_dist(0.0, 2 * np.pi),
+                "psi": uniform_dist(0.0, np.pi), #is this right?
                 "lam": uniform_dist(0.0, 2 * np.pi),
                 "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                 "t_plunge": uniform_dist(0.0, self.Tobs + 3600.0),

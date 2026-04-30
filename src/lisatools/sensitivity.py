@@ -7,6 +7,7 @@ from abc import ABC
 from copy import deepcopy
 from typing import Any, List, Optional, Tuple
 
+from logging import getLogger
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import interpolate
@@ -41,6 +42,8 @@ from .stochastic import (
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
+
+logger = getLogger(__name__)
 from eryn.utils import TransformContainer
 
 """
@@ -1840,7 +1843,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "tdi_generation": self.tdi_generation,
             "use_splines": self.use_splines,
             "spline_order": self.spline_order,
-            "force_backend": "cpu" if self.backend.xp == np else "gpu",
+            "force_backend": self.backend.backend_name.split("_")[-1],
             "mask_percentage": self.mask_percentage,
             "window_values": self.window_values
         }
@@ -1951,7 +1954,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             )
         else:
             self.window_normalization = 1.0
-
+        
+        logger.info(f"Window normalization factor: {self.window_normalization}")
+        
     def _init_basis_settings(self):
         """Initialize basis settings from domain settings."""
         self.f_arr = self.xp.asarray(self.basis_settings.f_arr)

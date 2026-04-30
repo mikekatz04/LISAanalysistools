@@ -1,5 +1,6 @@
 #include "Detector.hpp"
 #include "PSD.hpp"
+#include "domains.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -373,11 +374,61 @@ void detector_part(py::module &m) {
 }
 
 
+void domains_part(py::module &m) {
+    m.attr("TDI_XYZ") = TDI_XYZ;
+    m.attr("TDI_AET") = TDI_AET;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<STFTDomainWrap>(m, "STFTDomainWrapGPU")
+#else
+    py::class_<STFTDomainWrap>(m, "STFTDomainWrapCPU")
+#endif
+    .def(py::init<int, int, int, double, double, double, double, double,
+                  array_type<std::complex<double>>, array_type<std::complex<double>>,
+                  int, int, int>(),
+         py::arg("num_times"), py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("t0"), py::arg("f_min"), py::arg("f_max"),
+         py::arg("dt"), py::arg("df"),
+         py::arg("data"), py::arg("invC"),
+         py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
+    .def("compute_likelihood_terms", &STFTDomainWrap::compute_likelihood_terms,
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries.");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<FDDomainWrap>(m, "FDDomainWrapGPU")
+#else
+    py::class_<FDDomainWrap>(m, "FDDomainWrapCPU")
+#endif
+    .def(py::init<int, int, double, double, double,
+                  array_type<std::complex<double>>, array_type<std::complex<double>>,
+                  int, int, int>(),
+         py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("f_min"), py::arg("f_max"), py::arg("df"),
+         py::arg("data"), py::arg("invC"),
+         py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
+    .def("compute_likelihood_terms", &FDDomainWrap::compute_likelihood_terms,
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (FD).");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapGPU")
+#else
+    py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapCPU")
+#endif
+    .def(py::init<int, int, int, double, double, double, double, double, double>(),
+         py::arg("num_times"), py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("t0"), py::arg("f_min"), py::arg("f_max"),
+         py::arg("dt"), py::arg("df"), py::arg("window_alpha") = 0.0)
+    .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
+         "Compute Fresnel-based Fourier values for a batch of binaries.");
+}
+
+
 PYBIND11_MODULE(pycppdetector, m) {
     m.doc() = "Orbits/Detector C++ plug-in"; // Optional module docstring
 
     // Call initialization functions from other files
     detector_part(m);
+    domains_part(m);
     m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 
     m.def("get_module_path_cpp", &get_module_path, "Returns the file path of the module");

@@ -766,7 +766,7 @@ class Buffer(LISAToolsParallelModule):
             
         assert np.all(
             (self.buffer_start_index[inds_fill] - start_freq_ind + self.data_length)
-            <= acs.data_length
+            <= acs.end_shape[0]
         )
         
         start_inds = self.buffer_start_index[inds_fill] - start_freq_ind
@@ -1203,7 +1203,7 @@ class BandSorter(LISAToolsParallelModule):
                 special_indices_unique,
                 self.transform_fn,
                 self.waveform_kwargs,
-                acs.df,
+                acs.settings.df,
                 sources_now_map,
                 sources_inject_now_map,
                 self.main_band_sorter.special_band_inds[sources_now_map],
@@ -1648,7 +1648,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         walkers_in = subset.walker_inds[subset.inds].astype(self.xp.int32)
         N_vals_in = subset.N_vals[subset.inds]
         
-        if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] + (N_vals_in / 2)  >  model.analysis_container_arr.data_length):
+        if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] + (N_vals_in / 2)  >  model.analysis_container_arr.end_shape[0]):
             breakpoint()
         if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] - (N_vals_in / 2) < 0):
             breakpoint()
@@ -1659,7 +1659,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             params_in,
             walkers_in,
             model.analysis_container_arr.linear_data_arr,
-            data_length=model.analysis_container_arr.data_length,
+            data_length=model.analysis_container_arr.end_shape[0],
             factors=factors_tmp,
             data_splits=model.analysis_container_arr.gpu_map,
             N=N_vals_in,
@@ -1691,9 +1691,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if self.num_bands == 1:
             units = 1
 
-        global_ll_tracker = model.analysis_container_arr.likelihood().copy()
-        accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
-        walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
+        # global_ll_tracker = model.analysis_container_arr.likelihood().copy()
+        # accumulated_local_diffs = cp.zeros_like(global_ll_tracker)
+        # walker_accept_counts = cp.zeros(self.nwalkers, dtype=int)
         
         # random start to rotation around
         start_unit = model.random.randint(units)
@@ -2014,7 +2014,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 noise_index = walker_inds_chol,
                                 N = 1024,
                                 data_length = model.analysis_container_arr.end_shape[0],
-                                batch_size = 1000,
+                                batch_size = 10000,
                                 **_tmp_waveform_kwargs,                                
                             )
                             #* old info mat setup
@@ -2032,7 +2032,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             #         ],
                             #         dtype=int,
                             #     )
-                                
                             
                             # for start_batch, end_batch in zip(batches[:-1], batches[1:]):
                             #     batch_walker_inds = walker_inds_chol[start_batch:end_batch].astype(int)
@@ -2329,10 +2328,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         swap_N_vals,
                         phase_maximize=self.phase_maximize,
                     )
-                        
+                    
                     # in case there is phase marginalization, need to adjust in new_coords
                     if self.phase_maximize:
                         new_coords[keep2] = params_add[:]
+                    
+                    # wrap because phase marginalization can put coords outside of prior range
+                    new_coords[:] = self.periodic.wrap( 
+                        {"gb": new_coords[:, None, :]}, xp=self.xp
+                    )["gb"][:, 0]
 
                     curr_beta = band_temps[map_to_update[2], map_to_update[0]]
                     # print("change priors?, need to adjust here")
@@ -2409,10 +2413,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                         accepted_out[temp_inds_accept, walker_inds_accept, band_inds_accept] += 1
                         
-                        for t_idx, w_idx, ll_change in zip(temp_inds_accept, walker_inds_accept, ll_accept):
-                            if t_idx == 0:  # Count acceptances for the cold chain
-                                accumulated_local_diffs[w_idx] += ll_change
-                                walker_accept_counts[w_idx] += 1
+                        # for t_idx, w_idx, ll_change in zip(temp_inds_accept, walker_inds_accept, ll_accept):
+                        #     if t_idx == 0:  # Count acceptances for the cold chain
+                        #         accumulated_local_diffs[w_idx] += ll_change
+                        #         walker_accept_counts[w_idx] += 1
                                 
                         # switch accepted waveform
                         old_coords_for_change = old_coords[accept].copy()
@@ -2489,25 +2493,25 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # add back in all sources in the cold-chain
             # residual from this group
             # llaf1 = model.analysis_container_arr.likelihood()
-            breakpoint()
+
             self.add_cold_chain_sources_to_residual(
                 model, band_sorter, units=units, remainder=remainder
             )
-            final_global_ll = model.analysis_container_arr.likelihood().copy()
-            true_global_diffs = final_global_ll - global_ll_tracker
+            # final_global_ll = model.analysis_container_arr.likelihood().copy()
+            # true_global_diffs = final_global_ll - global_ll_tracker
 
-            print("\n" + "="*65)
-            print("WALKER DRIFT ANALYSIS (COLD CHAIN)")
-            print(f"{'Walker':<8} | {'Accepted':<8} | {'Local C++ Sum':<15} | {'Global Diff':<15} | {'Error':<15}")
-            print("-" * 65)
+            # print("\n" + "="*65)
+            # print("WALKER DRIFT ANALYSIS (COLD CHAIN)")
+            # print(f"{'Walker':<8} | {'Accepted':<8} | {'Local C++ Sum':<15} | {'Global Diff':<15} | {'Error':<15}")
+            # print("-" * 65)
             
-            for w in range(self.nwalkers):
-                loc = accumulated_local_diffs[w].item()
-                glob = true_global_diffs[w].item()
-                err = abs(glob - loc)
-                acc = walker_accept_counts[w].item()
-                print(f"{w:<8} | {acc:<8} | {loc:<15.4f} | {glob:<15.4f} | {err:<15.4f}")
-            print("="*65)
+            # for w in range(self.nwalkers):
+            #     loc = accumulated_local_diffs[w].item()
+            #     glob = true_global_diffs[w].item()
+            #     err = abs(glob - loc)
+            #     acc = walker_accept_counts[w].item()
+            #     print(f"{w:<8} | {acc:<8} | {loc:<15.4f} | {glob:<15.4f} | {err:<15.4f}")
+            # print("="*65)
             
             # llaf2 = model.analysis_container_arr.likelihood(source_only=True)
             # breakpoint()
@@ -2892,7 +2896,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             source_only=False
         )  #  - cp.sum(cp.log(cp.asarray(psd[:2])), axis=(0, 2))).get()
 
-        print(np.abs(new_state.log_like - ll_after).max())        
+        # print(np.abs(new_state.log_like - ll_after).max())        
         # store_max_diff = np.abs(new_state.log_like[0] - ll_after).max()
         start_diffs = np.abs(new_state.log_like[0] - ll_after)
 
@@ -3226,7 +3230,7 @@ def para_log_like(
             acs.linear_psd_arr,
             data_index=data_index,
             noise_index=data_index,
-            data_length=acs.data_length,
+            data_length=acs.end_shape[0],
             data_splits=np.array([gb.gpus[0]]),
             phase_marginalize=phase_maximize,
             return_cupy=True,
@@ -3248,7 +3252,7 @@ def para_log_like(
             acs.linear_psd_arr,
             data_index=data_index,
             noise_index=data_index,
-            data_length=acs.data_length,
+            data_length=acs.end_shape[0],
             data_splits=np.array([gb.gpus[0]]),
             phase_marginalize=phase_maximize,
             return_cupy=True,
@@ -3659,16 +3663,16 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         para_sampler.run_mcmc(state, nsteps, burn=100, progress=True)
 
         samples = self.xp.asarray(para_sampler.get_chain()[:, :, 0])
-        check_ll = para_sampler.get_log_like()[:, :, 0]
-        sample_ll = (
-            para_log_like(samples.reshape(-1, 8), *ll_args).reshape(samples.shape[:-1]).get()
-        )
+        # check_ll = para_sampler.get_log_like()[:, :, 0]
+        # sample_ll = (
+        #     para_log_like(samples.reshape(-1, 8), *ll_args).reshape(samples.shape[:-1]).get()
+        # )
 
-        check_real_ll_phase_maximized = (
-            para_log_like(samples.reshape(-1, 8), *ll_args, fstat=False)
-            .reshape(samples.shape[:-1])
-            .get()
-        )
+        # check_real_ll_phase_maximized = (
+        #     para_log_like(samples.reshape(-1, 8), *ll_args, fstat=False)
+        #     .reshape(samples.shape[:-1])
+        #     .get()
+        # )
         check_real_ll, opt_snr = para_log_like(
             samples.reshape(-1, 8), *ll_args_2, fstat=False, return_snr=True
         )
@@ -3742,22 +3746,22 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         if np.any(np.isinf(new_state.log_prior)):
             breakpoint()
 
-        nsteps = 100
-        para_sampler_2.run_mcmc(new_state, nsteps, burn=100, progress=True)
+        nsteps = 500
+        para_sampler_2.run_mcmc(new_state, nsteps, burn=500, progress=True)
 
         samples_2 = self.xp.asarray(para_sampler_2.get_chain()[:, :, 0])
-        check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
+        # check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
 
-        check_real_ll_phase_maximized_2 = (
-            para_log_like(samples_2.reshape(-1, 8), *ll_args, fstat=False)
-            .reshape(samples_2.shape[:-1])
-            .get()
-        )
-        check_real_ll_2 = (
-            para_log_like(samples_2.reshape(-1, 8), *ll_args_2, fstat=False)
-            .reshape(samples_2.shape[:-1])
-            .get()
-        )
+        # check_real_ll_phase_maximized_2 = (
+        #     para_log_like(samples_2.reshape(-1, 8), *ll_args, fstat=False)
+        #     .reshape(samples_2.shape[:-1])
+        #     .get()
+        # )
+        # check_real_ll_2 = (
+        #     para_log_like(samples_2.reshape(-1, 8), *ll_args_2, fstat=False)
+        #     .reshape(samples_2.shape[:-1])
+        #     .get()
+        # )
 
         # TODO: add removal of bands that consistently dont find things
         samples_2 = samples_2.transpose(1, 0, 2, 3)
@@ -4015,7 +4019,7 @@ def get_param_limits(array): # can be used for debugging of coordinate values
     if num_params == 8:
         param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
     if num_params == 9:
-        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$" r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
     
     for i, param_label in enumerate(param_labels):
         param_values = array[..., i]

@@ -3,6 +3,7 @@
 
 #include "Detector.hpp"
 #include "PSD.hpp"
+#include "domains.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -43,7 +44,7 @@ T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N
 {
     #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
         T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
-        
+
 #else
         py::buffer_info buf1 = input1.request();
 
@@ -55,6 +56,17 @@ T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N
         T* ptr1 = static_cast<T *>(buf1.ptr);
 #endif
         return ptr1;
+};
+
+template<typename T>
+T* return_pointer_no_check(array_type<T> input1)
+{
+    #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+        return static_cast<T *>(input1.get_compatible_typed_pointer());
+#else
+        py::buffer_info buf1 = input1.request();
+        return static_cast<T *>(buf1.ptr);
+#endif
 };
 
 
@@ -191,5 +203,169 @@ public:
     };
 };
 
+
+// STFTDomain / FDDomain Python wrappers
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+#define STFTDomainWrap STFTDomainWrapGPU
+#define FDDomainWrap FDDomainWrapGPU
+#define STFTFresnelWrap STFTFresnelWrapGPU
+#else
+#define STFTDomainWrap STFTDomainWrapCPU
+#define FDDomainWrap FDDomainWrapCPU
+#define STFTFresnelWrap STFTFresnelWrapCPU
+#endif
+
+class STFTDomainWrap {
+public:
+    STFTDomain *domain;
+
+    STFTDomainWrap(int num_times, int num_freqs, int num_channels,
+                   double t0, double f_min, double f_max,
+                   double dt, double df,
+                   array_type<std::complex<double>> data_arr,
+                   array_type<std::complex<double>> invC_arr,
+                   int num_data, int num_noise, int tdi_type)
+    {
+        cmplx *data_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_no_check(data_arr));
+        cmplx *invC_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_no_check(invC_arr));
+
+        domain = new STFTDomain(num_times, num_freqs, num_channels,
+                                t0, f_min, f_max, dt, df,
+                                data_ptr, invC_ptr,
+                                num_data, num_noise, tdi_type);
+    }
+
+    ~STFTDomainWrap() {
+        delete domain;
+    }
+
+    void compute_likelihood_terms(
+        array_type<std::complex<double>> d_h_out,
+        array_type<std::complex<double>> h_h_out,
+        array_type<std::complex<double>> template_vals,
+        array_type<double> start_times,
+        array_type<double> start_freqs,
+        int num_binaries,
+        array_type<int> data_index,
+        array_type<int> noise_index,
+        int n_t_template,
+        int n_f_template)
+    {
+        cmplx *d_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1));
+        cmplx *h_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1));
+        cmplx *tmpl_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_no_check(template_vals));
+        double *st_ptr = return_pointer_and_check_length(start_times, "start_times", num_binaries, 1);
+        double *sf_ptr = return_pointer_and_check_length(start_freqs, "start_freqs", num_binaries, 1);
+        int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
+        int *ni_ptr = return_pointer_and_check_length(noise_index, "noise_index", num_binaries, 1);
+
+        domain->compute_likelihood_terms_wrap(
+            d_h_ptr, h_h_ptr, tmpl_ptr,
+            st_ptr, sf_ptr,
+            num_binaries,
+            di_ptr, ni_ptr,
+            n_t_template, n_f_template);
+    }
+};
+
+class FDDomainWrap {
+public:
+    FDDomain *domain;
+
+    FDDomainWrap(int num_freqs, int num_channels,
+                 double f_min, double f_max, double df,
+                 array_type<std::complex<double>> data_arr,
+                 array_type<std::complex<double>> invC_arr,
+                 int num_data, int num_noise, int tdi_type)
+    {
+        cmplx *data_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_no_check(data_arr));
+        cmplx *invC_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_no_check(invC_arr));
+
+        domain = new FDDomain(num_freqs, num_channels,
+                              f_min, f_max, df,
+                              data_ptr, invC_ptr,
+                              num_data, num_noise, tdi_type);
+    }
+
+    ~FDDomainWrap() {
+        delete domain;
+    }
+
+    void compute_likelihood_terms(
+        array_type<std::complex<double>> d_h_out,
+        array_type<std::complex<double>> h_h_out,
+        array_type<std::complex<double>> template_vals,
+        array_type<double> start_freqs,
+        int num_binaries,
+        array_type<int> data_index,
+        array_type<int> noise_index,
+        int n_f_template)
+    {
+        cmplx *d_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1));
+        cmplx *h_h_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(h_h_out, "h_h_out", num_binaries, 1));
+        cmplx *tmpl_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_no_check(template_vals));
+        double *sf_ptr = return_pointer_and_check_length(start_freqs, "start_freqs", num_binaries, 1);
+        int *di_ptr = return_pointer_and_check_length(data_index, "data_index", num_binaries, 1);
+        int *ni_ptr = return_pointer_and_check_length(noise_index, "noise_index", num_binaries, 1);
+
+        domain->compute_likelihood_terms_wrap(
+            d_h_ptr, h_h_ptr, tmpl_ptr,
+            sf_ptr,
+            num_binaries,
+            di_ptr, ni_ptr,
+            n_f_template);
+    }
+};
+
+class STFTFresnelWrap {
+public:
+    STFTFresnel *fresnel;
+
+    STFTFresnelWrap(int num_times, int num_freqs, int num_channels,
+                    double t0, double f_min, double f_max,
+                    double dt, double df, double window_alpha = 0.0)
+    {
+        fresnel = new STFTFresnel(num_times, num_freqs, num_channels,
+                                  t0, f_min, f_max, dt, df, window_alpha);
+    }
+
+    ~STFTFresnelWrap() { delete fresnel; }
+
+    void compute_fourier_values(
+        array_type<std::complex<double>> output,
+        array_type<double> amps,
+        array_type<double> phase0s,
+        array_type<double> f0s,
+        array_type<double> fdot0s,
+        array_type<double> t0s,
+        array_type<double> freqs,
+        double window_factor,
+        int num_binaries,
+        int num_freqs)
+    {
+        cmplx *out_ptr = reinterpret_cast<cmplx*>(
+            return_pointer_and_check_length(output, "output", num_binaries * num_freqs, 1));
+        double *amp_ptr = return_pointer_and_check_length(amps, "amps", num_binaries, 1);
+        double *ph_ptr = return_pointer_and_check_length(phase0s, "phase0s", num_binaries, 1);
+        double *f0_ptr = return_pointer_and_check_length(f0s, "f0s", num_binaries, 1);
+        double *fd_ptr = return_pointer_and_check_length(fdot0s, "fdot0s", num_binaries, 1);
+        double *t0_ptr = return_pointer_and_check_length(t0s, "t0s", num_binaries, 1);
+        double *freq_ptr = return_pointer_and_check_length(freqs, "freqs", num_binaries * num_freqs, 1);
+
+        fresnel->compute_fourier_values_wrap(
+            out_ptr, amp_ptr, ph_ptr, f0_ptr, fd_ptr, t0_ptr,
+            freq_ptr, window_factor, num_binaries, num_freqs);
+    }
+};
 
 #endif // __BINDING_HPP__

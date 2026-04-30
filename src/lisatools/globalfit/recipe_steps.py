@@ -201,6 +201,8 @@ def scatter_around_injection(
     else:
         raise ValueError(f"spread must be scalar, 1-D, 2-D, or 3-D; got shape {spread.shape}")
 
+    if betas is not None:
+        logger.info(f"Scaling initial covariance by betas: {betas}")
     for leaf in range(nleaves_init):
         center = injection_sampling[leaf]
         leaf_cov = covs[leaf]
@@ -243,6 +245,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
 
     logM = np.log(m1 + m2)
     q = m2 / m1
+    logq = np.log(q)
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
     s2z = float(catalogue_entry["SecondarySpinCompZ"])
@@ -254,7 +257,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     ra = float(catalogue_entry["RightAscension"])
     dec = float(catalogue_entry["Declination"])
     psi_icrs = float(catalogue_entry["PolarisationAngle"])
-    psi_ssb, lam_ecl, beta_ecl = icrs_to_ecliptic(psi_icrs, ra, dec)
+    lam_ecl, beta_ecl, psi_ssb = icrs_to_ecliptic(ra, dec, psi_icrs)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
     logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
@@ -295,6 +298,7 @@ def subtract_initial_signal(
     else:
         logger.info(f"No initial signals for {source_name}")
 
+    #breakpoint()
 
 def build_psd_moves(
     engine_info: Setup,
@@ -396,18 +400,21 @@ def build_mbh_moves_phenom(
     ntemps = curr.general_info.ntemps
 
     wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
+    # breakpoint()
+    subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
-    subtract_initial_signal(acs, state, wave_gen, "mbh", mbh_info)
-
-    betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
+    if mbh_info.betas is None:
+        mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
+    betas_all = np.tile(mbh_info.betas, (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
+    logger.debug(f"MBH betas: {mbh_info.betas}")
 
     coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
 
     mbh_move_args = (
         "mbh",  # branch_name
         coords_shape,
-        wave_gen,
+        wave_gen.get_signals_for_residuals,
         # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs
         dict(propagate_data_res_kwargs=False),  # waveform_like_kwargs
@@ -474,19 +481,23 @@ def build_gb_moves(
     general_info: GeneralSetup = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-
+    data_start_freq_ind = int(acs.start_freq_ind[0])
+    
     gb_betas = gb_info.betas
     gpus: list[int] = general_info.gpus
     
     #* Setting up gbgpu on correct backend and gpu(s) for correct orbits and timeshift
     from gbgpu.gbgpu import GBGPU
     import gbgpu 
+    from ..detector import L1Orbits
     _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
     _gb_backend.set_cuda_device(gpus[0])
-    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.gpu_orbits, t0=gb_info.t0)
+    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.orbits, t0=gb_info.t0)
     cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
 
+    logger.debug(f"GBGPU initialized at t0 = {gb_info.t0}")
+    
     #* Make sure that priors are evaluated on gpus
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for _, item in gpu_priors_in.items():
@@ -496,10 +507,10 @@ def build_gb_moves(
     nleaves_max_gb = state.branches["gb"].shape[-2]
 
     waveform_kwargs = GBWaveformDict(
-        dt=gb_info.dt,
-        T=gb_info.Tobs,
+        dt=general_info.dt,
+        T=1/getattr(acs.settings, "df"),
         use_c_implementation=True,
-        start_freq_ind=int(gb_info.start_freq_ind),
+        start_freq_ind=data_start_freq_ind,
         tdi_channel_setup=gb_info.tdi_setup,
         tdi2=gb_info.use_tdi2
     )
@@ -586,13 +597,13 @@ def build_gb_moves(
     # state.branches["gb"].branch_supplemental = BranchSupplemental(
     #     {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
     # )
-        
+
     #* Assembling args and kwargs
     gb_move_args = (
         gb,
         priors,
-        gb_info.start_freq_ind,
-        acs.data_length,
+        data_start_freq_ind,
+        acs.end_shape[0],
         acs,
         general_info.domain_settings.f_arr,
         band_edges,
@@ -600,6 +611,10 @@ def build_gb_moves(
         gpu_priors,
     )
 
+    effective_ndim = engine_info.ndims["gb"]
+    temperature_control = TemperatureControl(
+        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    )
     gb_move_kwargs = dict(
         waveform_kwargs=waveform_kwargs,
         parameter_transforms=gb_info.transform,
@@ -608,7 +623,9 @@ def build_gb_moves(
         random_seed=general_info.random_seed,
         force_backend=general_info.gpu_backend,
         nfriends=nwalkers,
+        temperature_control=temperature_control,
         **gb_info.group_proposal_kwargs
+       
     )
 
     #* ============================================= SEARCH MOVES =============================================

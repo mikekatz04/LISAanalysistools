@@ -24,6 +24,7 @@ from lisatools.detector import EqualArmlengthOrbits, Orbits
 
 from ..analysiscontainer import AnalysisContainerArray
 from ..detector import LISAModel, sangria
+from ..domains import TDSettings
 from ..sensitivity import (
     AE1SensitivityMatrix,
     AE2SensitivityMatrix,
@@ -211,6 +212,8 @@ class GeneralSetup(Setup, GeneralSettings):
                 galfor_params=None,
             )
 
+        self.logger.info(f"Using fixed PSD kwargs: {self.fixed_psd_kwargs}")
+
         default_preprocess_kwargs = dict(
             plot_folder=self.artifacts_file_dir,
             highpass_kwargs=dict(cutoff=2e-5, order=2, zero_phase=True),
@@ -230,7 +233,7 @@ class GeneralSetup(Setup, GeneralSettings):
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
-        self.data_t0 = float(times[0])
+        self.data_td_settings = TDSettings(*data_processor.td_signal.settings.args, force_backend=self.force_backend)
         self.catalogue = getattr(data_processor, 'catalogue', {})
 
         if self.basis_domain == "stft":
@@ -264,6 +267,7 @@ class GeneralSetup(Setup, GeneralSettings):
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
 
+            self.window_alpha = self.window_taper_duration / (Nt * dt)
             self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
 
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
@@ -277,8 +281,8 @@ class GeneralSetup(Setup, GeneralSettings):
 
         # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
         # self.logger.debug(f"Window factor for normalization: {window_factor}")
-        self.domain_settings = domain_settings
-        
+
+        self.logger.debug(f"Applying window {self.window_type} with alpha: {self.window_alpha}")
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, return_orbits=True
         )
@@ -288,7 +292,7 @@ class GeneralSetup(Setup, GeneralSettings):
             self.input_data_residual_array._store_time_and_frequency_information(
                 df = domain_settings.df,
                 f_arr = domain_settings.f_arr
-            ) #* hi allesandro, if you are seeing this, I will replace this by passing domain_settings to GB block eventually
+            ) 
 
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
@@ -300,12 +304,16 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if orbits is not None:
             self.orbits = orbits
+            orbits_kwargs = orbits.kwargs
+           
             if self.force_backend == self.gpu_backend:
+                orbits_kwargs["force_backend"] = self.gpu_backend
+                self.logger.debug(f"Initializing GPU orbits with kwargs: {orbits_kwargs}")
+                  
                 self.gpu_orbits = data_processor.orbits_class(
-                    filename=orbits.filename,
-                    armlength=orbits.armlength,
-                    force_backend=self.gpu_backend,
+                    *orbits.args, **orbits_kwargs
                 )
+
             # self.gpu_orbits.configure()
 
         self.init_orbit_information()

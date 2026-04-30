@@ -152,6 +152,8 @@ sdist.include = [
   "src/lisatools/cutils/global.hpp",
   "src/lisatools/cutils/binding.cxx",
   "src/lisatools/cutils/binding.hpp",
+  "src/lisatools/cutils/lisatools_sources.cmake",
+  "src/lisatools/cutils/lisatools_sources.cmake.in",
 ]
 sdist.exclude = [
   ".devcontainer/",
@@ -188,6 +190,11 @@ report.omit = [
   "*/lisatools/tests/*.py",
   "*/lisatools/git_version.py",
   "*/lisatools_backend_*/git_version.py",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
 ]
 
 [tool.uv.sources]
