@@ -10,7 +10,7 @@ import cupy as cp
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
 
-# from bbhx.utils.transform import SSB_to_LISA
+from bbhx.utils.transform import SSB_to_LISA
 from gbgpu.gbgpu import GBGPU
 from eryn.moves.tempering import TemperatureControl, make_ladder
 from eryn.prior import ProbDistContainer
@@ -25,7 +25,6 @@ from .state import GFState
 from .stock.erebor import GBSetup, GeneralSetup
 
 logger = logging.getLogger(__name__)
-
 
 class SearchRecipeStep(BaseRecipeStep):
     """
