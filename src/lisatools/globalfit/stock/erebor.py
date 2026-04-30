@@ -228,7 +228,7 @@ def gpc_to_mpc(x):
     return x * 1e3
 
 
-# from bbhx.utils.transform import *
+from bbhx.utils.transform import mT_q, LISA_to_SSB
 from eryn.moves import Move
 
 from ..hdfbackend import MBHHDFBackend
