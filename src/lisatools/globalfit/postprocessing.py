@@ -243,7 +243,6 @@ class BackendConsumer:
 
         return act
 
-
     def store_independent_samples(self, discard: int | float = 0.0, ess: int = 10000, **act_kwargs):
         """
         Thin the cold chains by the ACT and keep the last `ess`.
@@ -343,7 +342,44 @@ class BackendConsumer:
                 transformed[b] = s
 
         return transformed
+    
+    def process_samples(self, discard: int | float = 0.0, ess: int = 10000, return_inds: bool = False) -> dict | Tuple[dict, dict]:
+        """
+        Convenience method to run the end-to-end processing pipeline, starting from the raw samples.
 
+        Args:
+            discard: int or float (optional). If int, the number of initial samples to discard. Else, fraction of initial steps to discard
+            ess: int (optional). Effective sample size
+            return_inds: bool (optional). Whether to return the corresponding inds arrays.
+
+        Returns:
+            dict of branch to transformed samples, or a tuple of (samples_dict, inds_dict) if return_inds is True.
+        """
+        if not self.configured:
+            self.store_cold_chains()
+
+        samples, inds = self.get_independent_samples(discard=discard, ess=ess, return_inds=True)
+
+        transformed_samples = self.transform(samples)
+
+        if return_inds:
+            return transformed_samples, inds
+
+        return transformed_samples
+
+
+# ——— Plotter ──────────────────────────────────────────────────────────────————
+
+class GlobalFitPlotter:
+    """
+    Produce summary plots at the end of a global fit run, including posterior predictive plots and corner plots.
+    """
+    def __init__(self,
+                 curr: CurrentInfoGlobalFit):
+
+        self.curr = curr
+
+        # corner plots: separated per leaf, joint over all leaves color coded by snr
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
 
