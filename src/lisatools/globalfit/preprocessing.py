@@ -207,7 +207,7 @@ class L1DataLoader:
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
                 tdi_times = f.tdis.time_sampling.t()
 
-                noise_covariance = f.noise_estimates.xyz[:] / f.laser_frequency ** 2
+                noise_covariance = f.noise_estimates.xyz[:] / (f.laser_frequency ** 2)
                 noise_frequencies = f.noise_estimates.freq_sampling.f()
                 noise_times = f.noise_estimates.time_sampling.t()
 
@@ -222,9 +222,9 @@ class L1DataLoader:
                 logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
 
             _individual_timeseries["NOISE"] = xyz.T.copy()  # store the noise timeseries separately if needed
-            _individual_timeseries["NOISE_COVARIANCE"] = noise_covariance 
-            _individual_timeseries["NOISE_FREQUENCIES"] = noise_frequencies
-            _individual_timeseries["NOISE_TIMES"] = noise_times
+            _individual_timeseries["PSD_MATRIX"] = noise_covariance 
+            _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
+            _individual_timeseries["PSD_TIMES"] = noise_times
 
         for source_type in self.source_types:
 
@@ -312,6 +312,25 @@ class L1DataLoader:
 
         if delete_after_dump:
             self.individual_timeseries.clear()
+
+    def dump_catalogue(self, file_path: str):
+        """
+        Dump the loaded catalogue parameters to a .h5 file for debugging or further analysis.
+
+        Args:
+            file_path (str): The path to the output .h5 file.
+        """
+        with h5py.File(file_path, "w") as f:
+            for source_type, sources in self.catalogue.items():
+                grp = f.create_group(source_type)
+                for source_id, params in sources.items():
+                    subgrp = grp.create_group(f"source_{source_id}")
+                    for param_key, param_value in params.items():
+                        if isinstance(param_value, str):
+                            param_value = np.string_(param_value)  # convert to bytes for h5py
+                        subgrp.create_dataset(param_key, data=param_value)
+        if self.verbose:
+            logger.info(f"Dumped catalogue parameters to {file_path}")
 
 class SangriaDataLoader:
     """
@@ -907,6 +926,8 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         """
         if hasattr(self, "individual_timeseries"):
             for key, ts_data in self.individual_timeseries.items():
+                if "PSD" in key:  # skip processing for PSD data
+                    continue
                 temp_processor = BaseProcessingStep(
                     times=self.times.copy(),
                     data=ts_data.copy(),

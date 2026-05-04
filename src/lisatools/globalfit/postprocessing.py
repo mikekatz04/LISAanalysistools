@@ -17,9 +17,11 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from tqdm import tqdm
 
 import h5py
 import numpy as np
+from scipy.interpolate import CubicSpline
 from eryn.backends import HDFBackend
 from eryn.utils import get_integrated_act
 
@@ -83,9 +85,27 @@ _OUTPUT_CORRECTIONS_REGISTRY: Dict[str, Dict[str, Callable]] = {
     "mbh": {"dist": lambda x: x * 1e-3},
 }
 
+source_types_names = dict(
+    gb="GB",
+    mbh="MBHB",
+    emri="EMRI",
+    sobh="SOBHB",
+)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
+    """Get the list of source types searched for in this run, inferred from curr."""
+    sources = list(curr.source_info.keys())
+
+    out = []
+    for s in sources:
+        if s in source_types_names.keys():
+            out.append(source_types_names[s])
+        else:
+            logger.debug(f"Excluding source type '{s}' from metadata")
+    
+    return out
 
 def _seconds_to_l3c_datetime(t: float) -> str:
     """Convert a UTC timestamp in seconds to the L3C format yyyy.mm.dd.hh.mm.ss."""
@@ -370,6 +390,63 @@ class BackendConsumer:
 
 # ——— Plotter ──────────────────────────────────────────────────────────────————
 
+def to_periodogram(x: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Convert a timeseries to a periodogram (frequency, power) pair.
+
+        Uses a Tukey window and proper normalization to produce a one-sided PSD estimate.
+        """
+        from scipy.signal import windows
+
+        window = windows.tukey(len(x), alpha=0.1)
+        x_windowed = x * window
+        freqs = np.fft.rfftfreq(len(x), dt)
+        norm = 2 / (dt * np.sum(window**2))  # "two-sided" normalization
+        periodogram = np.abs(np.fft.rfft(x_windowed) * dt)**2 * norm
+
+        return freqs, periodogram
+    
+def to_characteristic_strain(freqs: np.ndarray, periodogram: np.ndarray) -> np.ndarray:
+    """
+    Convert a periodogram to characteristic strain.
+
+    Uses the relation h_c(f) = sqrt(f * S_n(f)), where S_n is the one-sided PSD estimate.
+    """
+    return np.sqrt(freqs * periodogram)
+
+def log_decimate(freqs, power, f_min=None, f_max=None, decimation_factor=10):
+    """
+    Logarithmically decimate the periodogram by a given factor.
+    
+    Args:
+        freqs: Array of frequencies (must be sorted)
+        power: Array of power values
+        f_min, f_max: Frequency range of interest
+        decimation_factor: Factor by which to reduce the number of points
+
+    Returns:
+        tuple: (decimated_freqs, decimated_power)
+    """
+    # Mask frequencies in range of interest
+    f_min = f_min or freqs.min()
+    f_max = f_max or freqs.max()
+
+    mask = (freqs >= f_min) & (freqs <= f_max)
+    freqs = freqs[mask]
+    power = power[mask, ...] 
+
+    # Create decimated frequency array
+    n_points = len(freqs)
+    n_decimated = max(1, n_points // decimation_factor)
+    
+    decimated_indices = np.unique(np.round(np.logspace(0, np.log10(n_points - 1), n_decimated)).astype(int))
+    
+    decimated_freqs = freqs[decimated_indices]
+    decimated_power = power[decimated_indices]
+
+    return decimated_freqs, decimated_power
+
+
 class GlobalFitPlotter:
     """
     Produce summary plots at the end of a global fit run, including posterior predictive plots and corner plots.
@@ -380,6 +457,47 @@ class GlobalFitPlotter:
         self.curr = curr
 
         # corner plots: separated per leaf, joint over all leaves color coded by snr
+
+    def convert_input_data_for_plotting(self,):
+        """
+        Convert the raw timeseries data into characteristic strain. We keep only the X channel for plotting.
+        """
+        if not hasattr(self.curr.general_info.data_processor, "individual_timeseries"):
+            raise ValueError("Data processor does not have individual_timeseries attribute.")
+        
+        out = {}
+        
+        data_components = self.curr.general_info.data_processor.individual_timeseries
+
+        times, combined = data_components.pop("TIMES"), data_components.pop("COMBINED")[0]
+
+        dt = times[1] - times[0]
+        freqs, periodogram = to_periodogram(combined, dt)
+        freqs_h, power_avg = log_decimate(freqs, periodogram, f_min=self.curr.general_info.start_freq, f_max=self.curr.general_info.end_freq, decimation_factor=100)
+
+        combined_char_strain = to_characteristic_strain(freqs_h, power_avg)
+        out["freqs"] = freqs_h
+        out["combined"] = combined_char_strain
+
+        logger.info("Converted input data to characteristic strain for plotting.")
+
+        covariance_matrix = data_components.pop("PSD_MATRIX")[0, :, 0, 0].real
+        covariance_frequencies = data_components.pop("PSD_FREQUENCIES")
+        _ = data_components.pop("PSD_TIMES")
+
+        noise_amplitude = to_characteristic_strain(covariance_frequencies, covariance_matrix)
+        out["noise_amplitude_estimate"] = CubicSpline(covariance_frequencies, noise_amplitude)(freqs_h)
+
+        logger.info("Converted noise covariance to characteristic strain for plotting.")
+
+        for k, v in tqdm(data_components.items(), desc="Converting components to characteristic strain"):
+            
+            freqs, periodogram = to_periodogram(v[0], dt)
+            char_strain = to_characteristic_strain(freqs, periodogram)
+            
+            out[k.lower()] = CubicSpline(freqs, char_strain)(freqs_h)
+
+        
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
 
@@ -438,7 +556,7 @@ class RunMetadata:
         instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.effective_duration = _seconds_to_duration_str(gi.Tobs)
         instance.tdi_channels = _infer_tdi_channels(curr)
-        instance.searched_source_types = list(curr.source_info.keys())
+        instance.searched_source_types = get_source_types(curr)
 
         instance._web_extras = {
             "Tobs_s": float(gi.Tobs),
@@ -483,98 +601,27 @@ class RunMetadata:
         d = self.to_l3c_dict()
         d.update(self._web_extras)
         return d
+    
 
-
-# ─── ParameterMapper ──────────────────────────────────────────────────────────
-
-
-class ParameterMapper:
+class SubmissionWriter(BackendConsumer):
     """
-    Transforms posterior samples from sampling space to physical L3C space.
+    BackendConsumer subclass that produces L3C-compliant HDF5 submission files and JSON manifests.
 
-    Uses the TransformContainer from the source Setup for the mathematical
-    transforms (same functions used by the waveform generator), then renames
-    output_basis parameters to L3C names and applies any unit corrections
-    needed for output (e.g., Mpc → Gpc for MBH distance).
+    This class is responsible for applying the detection criteria to identify genuine sources,
+    and for writing the final outputs in the required formats.
     """
+    def __init__(self, 
+                 curr: CurrentInfoGlobalFit = None,
+                 backend: HDFBackend | str = None,
+                 detection_criteria: DetectionCriteria = None):
 
-    def __init__(
-        self,
-        transform,
-        output_basis: List[str],
-        param_info: Dict[str, ParameterInfo],
-        exclude: set = None,
-        output_corrections: Dict[str, Callable] = None,
-    ):
-        self._transform = transform
-        self._output_basis = output_basis
-        self._param_info = param_info
-        self._exclude = exclude or set()
-        self._output_corrections = output_corrections or {}
+        super().__init__(curr=curr, backend=backend)
 
-    @classmethod
-    def from_curr(cls, curr: CurrentInfoGlobalFit, source_type: str) -> "ParameterMapper":
-        """
-        Build a ParameterMapper from the TransformContainer in curr.source_info[source_type].
+        
 
-        Raises ValueError if source_type has no registered parameter info.
-        """
-        if source_type not in _PARAM_INFO_REGISTRY:
-            raise ValueError(
-                f"No ParameterMapper defined for source type '{source_type}'. "
-                f"Registered types: {list(_PARAM_INFO_REGISTRY.keys())}"
-            )
-        setup = curr.source_info[source_type]
-        return cls(
-            transform=setup.transform,
-            output_basis=list(setup.transform.output_basis),
-            param_info=_PARAM_INFO_REGISTRY[source_type],
-            exclude=_EXCLUDE_REGISTRY.get(source_type, set()),
-            output_corrections=_OUTPUT_CORRECTIONS_REGISTRY.get(source_type, {}),
-        )
-
-    def _active_output_params(self) -> List[str]:
-        return [p for p in self._output_basis if p not in self._exclude and p in self._param_info]
-
-    @property
-    def l3c_names(self) -> List[str]:
-        return [self._param_info[p].l3c_name for p in self._active_output_params()]
-
-    @property
-    def latex_names(self) -> List[str]:
-        return [self._param_info[p].latex_name for p in self._active_output_params()]
-
-    @property
-    def units(self) -> List[str]:
-        return [self._param_info[p].unit for p in self._active_output_params()]
-
-    def map(self, samples: np.ndarray) -> Dict[str, np.ndarray]:
-        """
-        Apply the full transform chain and rename to L3C parameter names.
-
-        Args:
-            samples: (n_samples, ndim_sampling) array in sampling parameter space.
-
-        Returns:
-            Dict keyed by L3C parameter name, each value is a (n_samples,) array.
-        """
-        # TransformContainer accepts (n_samples, ndim_input) and returns (n_samples, ndim_output)
-        physical = self._transform(samples)
-
-        result = {}
-        for i, param_name in enumerate(self._output_basis):
-            if param_name in self._exclude or param_name not in self._param_info:
-                continue
-            values = physical[:, i].copy()
-            if param_name in self._output_corrections:
-                values = self._output_corrections[param_name](values)
-            result[self._param_info[param_name].l3c_name] = values
-
-        return result
-
+        self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
 
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
-
 
 class DetectionCriteria(ABC):
     """
@@ -647,254 +694,3 @@ class SNRDetectionCriteria(DetectionCriteria):
             detected[i] = snr >= self.snr_threshold
 
         return detected
-
-
-# ─── L3CSubmissionWriter ──────────────────────────────────────────────────────
-
-
-class L3CSubmissionWriter:
-    """
-    Orchestrates the full L3C submission output for one or more source types.
-
-    For each source type, produces:
-    - A main HDF5 file (EREBOR_{SOURCE}.h5) with L3C metadata and MAP estimates.
-    - A directory (posteriors_erebor_{source}/) with one HDF5 file per detection.
-    """
-
-    TEAM_NAME = "erebor"
-
-    def __init__(
-        self,
-        backend_consumer: BackendConsumer,
-        run_metadata: RunMetadata,
-        curr: CurrentInfoGlobalFit,
-        output_dir: str,
-        detection_criteria: Optional[Dict[str, DetectionCriteria]] = None,
-        discard_fraction: float = 0.0,
-    ):
-        self.consumer = backend_consumer
-        self.metadata = run_metadata
-        self.curr = curr
-        self.output_dir = output_dir
-        self.discard_fraction = discard_fraction
-        self.detection_criteria = detection_criteria or {}
-        os.makedirs(output_dir, exist_ok=True)
-
-    def _default_criteria(self, source_type: str) -> DetectionCriteria:
-        return OccupancyDetectionCriteria(min_occupancy=0.5)
-
-    def write(self, source_types: List[str]):
-        """Run the full submission pipeline for the given source types."""
-        found = []
-        for source_type in source_types:
-            n_det = self._write_source_type(source_type)
-            if n_det > 0:
-                found.append(source_type)
-        self.metadata.found_source_types = found
-
-    def _write_source_type(self, source_type: str) -> int:
-        samples, inds = self.consumer.get_independent_samples(
-            source_type, discard_fraction=self.discard_fraction
-        )
-        criteria = self.detection_criteria.get(source_type) or self._default_criteria(source_type)
-        detected_mask = criteria.detect(samples, inds)
-        detected_indices = np.where(detected_mask)[0]
-
-        mapper = ParameterMapper.from_curr(self.curr, source_type)
-
-        posteriors_dir = os.path.join(self.output_dir, f"posteriors_{self.TEAM_NAME}_{source_type}")
-        os.makedirs(posteriors_dir, exist_ok=True)
-
-        posterior_files = []
-        map_estimates = []
-
-        for det_i, leaf_idx in enumerate(detected_indices):
-            # Flatten steps × walkers for this leaf, keep only active samples
-            leaf_samples = samples[:, :, leaf_idx, :].reshape(-1, samples.shape[-1])
-            leaf_active = inds[:, :, leaf_idx].reshape(-1)
-            leaf_samples = leaf_samples[leaf_active]
-
-            if len(leaf_samples) == 0:
-                continue
-
-            physical = mapper.map(leaf_samples)
-            map_est = {k: float(np.median(v)) for k, v in physical.items()}
-            map_estimates.append(map_est)
-
-            fname = os.path.join(posteriors_dir, f"source_{det_i}.h5")
-            self._write_posterior_file(fname, physical, source_type)
-            posterior_files.append(fname)
-
-        self._write_main_hdf5(source_type, map_estimates, posterior_files, mapper)
-        return len(posterior_files)
-
-    def _write_posterior_file(
-        self,
-        filepath: str,
-        physical: Dict[str, np.ndarray],
-        source_type: str,
-    ):
-        with h5py.File(filepath, "w") as f:
-            f.attrs["source_type"] = source_type.upper()
-            f.attrs["prior_model"] = "uniform"
-            f.attrs["prior_model_code_link"] = self.metadata.code_link
-            f.attrs["prior_model_config_file_link"] = ""
-            f.attrs["vb_references"] = ""
-            f.attrs["estimation_method"] = "MCMC (Eryn)"
-
-            for l3c_name, values in physical.items():
-                f.create_dataset(l3c_name, data=values.astype(np.float64))
-
-    def _write_main_hdf5(
-        self,
-        source_type: str,
-        map_estimates: List[Dict[str, float]],
-        posterior_files: List[str],
-        mapper: ParameterMapper,
-    ):
-        team = self.TEAM_NAME.upper()
-        src = source_type.upper()
-        filepath = os.path.join(self.output_dir, f"{team}_{src}.h5")
-
-        with h5py.File(filepath, "w") as f:
-            # / — l2_output_metadata attributes
-            for k, v in self.metadata.to_l3c_dict().items():
-                f.attrs[k] = (
-                    json.dumps(v) if isinstance(v, list) else (str(v) if v is not None else "")
-                )
-
-            # /sources — dataset_metadata attributes + N×P MAP detections matrix
-            sources_grp = f.create_group("sources")
-            sources_grp.attrs["source_type"] = source_type.upper()
-            sources_grp.attrs["prior_model"] = "uniform"
-            sources_grp.attrs["prior_model_code_link"] = self.metadata.code_link
-            sources_grp.attrs["prior_model_config_file_link"] = ""
-            sources_grp.attrs["vb_references"] = ""
-
-            if map_estimates:
-                det_matrix = np.array(
-                    [[est[k] for k in mapper.l3c_names] for est in map_estimates],
-                    dtype=np.float64,
-                )  # (N_detections, N_params)
-                ds = sources_grp.create_dataset("detections", data=det_matrix)
-                ds.attrs["columns"] = json.dumps(mapper.l3c_names)
-                ds.attrs["latex_names"] = json.dumps(mapper.latex_names)
-                ds.attrs["units"] = json.dumps(mapper.units)
-
-            # /posteriors_files — path strings to per-source posterior HDF5 files
-            pf_grp = f.create_group("posteriors_files")
-            for i, fpath in enumerate(posterior_files):
-                pf_grp.attrs[f"source_{i}"] = fpath
-
-
-# ─── WebManifestWriter ────────────────────────────────────────────────────────
-
-
-class WebManifestWriter:
-    """
-    Writes GitHub Pages-compatible JSON output for web dashboard display.
-
-    Produces:
-    - manifest.json  — run metadata + per-source summary statistics (median + 90% CI)
-    - {source_type}/source_N_samples.json — full posterior samples per detection
-
-    For large catalogs, `max_sources_with_full_samples` limits how many
-    per-source JSON files are written (summary stats are always written for all).
-    """
-
-    def __init__(
-        self,
-        l3c_writer: L3CSubmissionWriter,
-        web_output_dir: str,
-        max_sources_with_full_samples: Optional[int] = None,
-    ):
-        self.l3c_writer = l3c_writer
-        self.web_output_dir = web_output_dir
-        self.max_full = max_sources_with_full_samples
-        os.makedirs(web_output_dir, exist_ok=True)
-
-    def write(self, source_types: List[str]):
-        """Write manifest.json and per-source sample files for all source types."""
-        manifest: Dict[str, Any] = {
-            "run": self.l3c_writer.metadata.to_web_dict(),
-            "sources": {},
-        }
-        for source_type in source_types:
-            manifest["sources"][source_type] = self._write_source_type_web(source_type)
-
-        manifest_path = os.path.join(self.web_output_dir, "manifest.json")
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
-
-    def _write_source_type_web(self, source_type: str) -> dict:
-        samples, inds = self.l3c_writer.consumer.get_independent_samples(
-            source_type,
-            discard_fraction=self.l3c_writer.discard_fraction,
-        )
-        criteria = self.l3c_writer.detection_criteria.get(
-            source_type
-        ) or self.l3c_writer._default_criteria(source_type)
-        detected_mask = criteria.detect(samples, inds)
-        detected_indices = np.where(detected_mask)[0]
-
-        mapper = ParameterMapper.from_curr(self.l3c_writer.curr, source_type)
-        src_dir = os.path.join(self.web_output_dir, source_type)
-        os.makedirs(src_dir, exist_ok=True)
-
-        detections_meta = []
-        for det_i, leaf_idx in enumerate(detected_indices):
-            leaf_samples = samples[:, :, leaf_idx, :].reshape(-1, samples.shape[-1])
-            leaf_active = inds[:, :, leaf_idx].reshape(-1)
-            leaf_samples = leaf_samples[leaf_active]
-            if len(leaf_samples) == 0:
-                continue
-
-            physical = mapper.map(leaf_samples)
-            entry = {
-                "id": det_i,
-                "summary": self._summary_stats(physical),
-            }
-
-            if self.max_full is None or det_i < self.max_full:
-                samples_file = f"{source_type}/source_{det_i}_samples.json"
-                self._write_samples_json(
-                    os.path.join(self.web_output_dir, samples_file),
-                    physical,
-                    mapper,
-                )
-                entry["samples_file"] = samples_file
-
-            detections_meta.append(entry)
-
-        return {
-            "n_detections": len(detected_indices),
-            "parameters": mapper.l3c_names,
-            "latex_names": mapper.latex_names,
-            "units": mapper.units,
-            "detections": detections_meta,
-        }
-
-    @staticmethod
-    def _summary_stats(physical: Dict[str, np.ndarray]) -> Dict[str, dict]:
-        return {
-            name: {
-                "median": float(np.median(vals)),
-                "ci_90": [float(np.percentile(vals, 5)), float(np.percentile(vals, 95))],
-            }
-            for name, vals in physical.items()
-        }
-
-    @staticmethod
-    def _write_samples_json(
-        filepath: str,
-        physical: Dict[str, np.ndarray],
-        mapper: ParameterMapper,
-    ):
-        payload = {
-            "parameters": mapper.l3c_names,
-            "latex_names": mapper.latex_names,
-            "units": mapper.units,
-            "samples": {name: vals.tolist() for name, vals in physical.items()},
-        }
-        with open(filepath, "w") as f:
-            json.dump(payload, f)
