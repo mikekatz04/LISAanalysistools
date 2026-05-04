@@ -664,6 +664,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         freq_max: float = 1.0,
         signal_duration: float = None,
         buffer_time: int = 5000,
+        run_async: bool = False,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -697,6 +698,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         )
 
         self.buffer_time = buffer_time
+        self.run_async = run_async
 
     @property
     def wrapper_kwargs(self) -> dict:
@@ -707,6 +709,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                 "order": self.response.order,
                 "signal_duration": self.response.num_pts * self.dt,
                 "buffer_time": self.buffer_time,
+                "run_async": self.run_async,
             }
         )
         return base_kwargs
@@ -783,9 +786,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         strain = h_plus + 1j * h_cross
 
         self.response.get_projections(
-            strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time
+            strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time, run_async=self.run_async
         )
-        tdis = self.xp.array(self.response.get_tdi_delays())
+        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
 
         # trim the invalid points
         tdis = tdis[:, num_pad:-num_pad]
