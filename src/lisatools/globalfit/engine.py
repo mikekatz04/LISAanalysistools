@@ -134,6 +134,21 @@ class GeneralSettings(Settings):
     sensitivity_init_kwargs: Optional[dict] = None
     normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
+
+    # --- run metadata (propagated to RunMetadata.from_curr) ---
+    run_codename: Optional[str] = None
+    run_version: Optional[str] = None
+    run_contact: Optional[str] = None
+    run_code_link: Optional[str] = None
+    run_input_data_link: Optional[str] = None
+    run_input_reference: Optional[str] = None
+    run_noise_model: Optional[str] = None
+    run_noise_model_code_link: Optional[str] = None
+    run_waveform_model: Optional[str] = None
+    run_waveform_model_code_link: Optional[str] = None
+    run_quality: Optional[str] = None
+    run_comment: Optional[str] = None
+
     # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
     # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
 
@@ -169,6 +184,10 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def artifacts_file_dir(self) -> str:
         return self.file_store_dir + self.base_file_name + "_artifacts/"
+
+    @property
+    def data_t0(self) -> float:
+        return self.data_td_settings.t0
 
     def init_setup(self):
         if self.file_store_dir is None:

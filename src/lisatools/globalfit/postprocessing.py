@@ -499,6 +499,49 @@ class GlobalFitPlotter:
 
         
 
+# ─── Metadata extractors ─────────────────────────────────────────────────────
+
+def _extract_sensitivity_metadata(gi) -> dict:
+    """Extract noise model configuration from the initialised sensitivity backend."""
+    backend = gi.sensitivity_backend
+    return {
+        "class": type(backend).__name__,
+        "tdi_generation": backend.tdi_generation,
+        "use_splines": backend.use_splines,
+        "spline_order": backend.spline_order,
+        "mask_percentage": backend.mask_percentage,
+    }
+
+
+def _extract_orbit_metadata(gi) -> dict:
+    """Extract orbit configuration from the initialised orbits object."""
+    orbits = gi.orbits
+    out = {
+        "class": type(orbits).__name__,
+        "filename": orbits.filename,
+        "armlength_m": float(orbits.armlength),
+    }
+    if hasattr(orbits, "frame"):
+        out["frame"] = orbits.frame
+    return out
+
+
+# Maps GeneralSettings attribute names → RunMetadata __init__ parameter names.
+_SETTINGS_TO_METADATA: Dict[str, str] = {
+    "run_codename":                 "codename",
+    "run_version":                  "version",
+    "run_contact":                  "contact",
+    "run_code_link":                "code_link",
+    "run_input_data_link":          "input_data_link",
+    "run_input_reference":          "input_reference",
+    "run_noise_model":              "noise_model",
+    "run_noise_model_code_link":    "noise_model_code_link",
+    "run_waveform_model":           "waveform_model",
+    "run_waveform_model_code_link": "waveform_model_code_link",
+    "run_quality":                  "quality",
+    "run_comment":                  "comment",
+}
+
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
 
 
@@ -543,14 +586,30 @@ class RunMetadata:
     @classmethod
     def from_curr(cls, curr: CurrentInfoGlobalFit, **user_fields) -> "RunMetadata":
         """
-        Construct RunMetadata, auto-populating timing and channel fields from `curr`.
+        Construct RunMetadata, auto-populating timing, channel, and metadata
+        fields from `curr`.
+
+        Descriptive fields (version, contact, etc.) are read from
+        ``curr.general_info`` when set there; ``**user_fields`` takes precedence.
 
         Args:
             curr: Live CurrentInfoGlobalFit object.
-            **user_fields: All user-supplied fields (version, contact, etc.).
+            **user_fields: Optional overrides for any RunMetadata field.
         """
-        instance = cls(**user_fields)
         gi = curr.general_info
+
+        # Pull non-None metadata values from GeneralSettings; user_fields wins.
+        auto = {
+            meta_name: getattr(gi, settings_name)
+            for settings_name, meta_name in _SETTINGS_TO_METADATA.items()
+            if getattr(gi, settings_name, None) is not None
+        }
+        merged = {**auto, **user_fields}
+
+        # Derive noise_model from the backend class name when not explicitly set.
+        merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
+
+        instance = cls(**merged)
 
         instance.obs_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
@@ -566,6 +625,8 @@ class RunMetadata:
             "end_freq_hz": float(gi.end_freq) if gi.end_freq is not None else None,
             "nwalkers": gi.nwalkers,
             "ntemps": gi.ntemps,
+            "sensitivity_backend": _extract_sensitivity_metadata(gi),
+            "orbits": _extract_orbit_metadata(gi),
         }
         return instance
 
@@ -617,7 +678,7 @@ class SubmissionWriter(BackendConsumer):
 
         super().__init__(curr=curr, backend=backend)
 
-        
+        self.samples, self.inds = self.process_samples(ess=10000, return_inds=True)
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
 
