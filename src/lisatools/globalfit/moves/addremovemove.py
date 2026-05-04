@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import logging
 import time
 from copy import deepcopy
-from typing import Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 
 try:
@@ -26,7 +28,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from ...sources.waveformbase import TDWaveformBase
     from ...domaincomputation import DomainComputationGroupArray
-    from typing import Any
 
 def free_gpu_memory():
     if xp is not np:

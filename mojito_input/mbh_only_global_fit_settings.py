@@ -58,8 +58,8 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["mbh"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = np.array([1e-4, 1e-3, 1e-2, 1e-2, 1e-2, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1])
-        # spread = 1e-7
+        # spread = np.array([1e-4, 1e-3, 1e-2, 1e-2, 1e-2, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1])
+        spread = 1e-5
         # | logM | q | s1z | s2z | dL | phi_ref | iota | psi | lambda_SSB | beta_SSB | tc |
 
         scatter_around_injection(
@@ -103,14 +103,14 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     waveform_init_kwargs = dict(
         waveform_kwargs=wave_kwargs,
         waveform_t0=97729089.327664,
-        waveform_t0=97729089.327664,
         data_td_settings=general_set.data_td_settings,
         Tobs=1.0
         / 12.0
         / 2.0
         * YRSID_SI,  # this is only for the waveform generation, not the data, which is still general_set.Tobs
-        start_freq=1e-5,
-        ref_freq=2.0886886878886526e-05,  # source 5
+        start_freq=1e-4,
+        ref_freq=1e-4,
+        use_reference_time=True,
         buffer_time=6000,
         stft_dt=general_set.stft_dt,
         freq_min=general_set.start_freq,
@@ -157,11 +157,11 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "mbh_18_with_noise_and_covariance_try_3"
+    base_file_name = "postmerger"
     # base_file_name = "mbh_18_test_no_tempering"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [0]
+    gpus = [5]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -169,11 +169,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 30
-    ntemps = 3
+    nwalkers = 20
+    ntemps = 1
 
-    basis_domain = "fd"
-    stft_dt = 7 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
+    basis_domain = "stft"
+    stft_dt = 1 * 24 * 3600.0 if basis_domain == "stft" else None  # hours
 
     window_type = "tukey"
     window_taper_duration = 0.1 * stft_dt if basis_domain == "stft" else 1 / start_freq

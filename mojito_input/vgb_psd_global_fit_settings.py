@@ -109,32 +109,32 @@ def setup_recipe(
     gpus: list[int] = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
     
-    # #* ================================= BUILD MOVES ================================= 
+    #* ================================= BUILD MOVES ================================= 
+    num_repeats_psd = 60
+    permute_every_psd = 50
+    psd_search_move, psd_pe_move = build_psd_moves(
+        engine_info, curr, acs, priors, 
+        num_repeats=num_repeats_psd,
+        permute_every=permute_every_psd
+    )
     gb_search_moves, gb_pe_moves = build_gb_moves(
         engine_info, curr, acs, priors, state
     )
 
-    # #* ================================= SETUP SEARCH ================================= 
-    gb_search_weights = [0.8, 0.2]
-    recipe.add_recipe_component(
-        RJRecipeStep(
-            moves=gb_search_moves, 
-            weights=gb_search_weights,
-            convergence_iter=10
-        ), 
-        name="gb search"
-    )
+    #* ================================= SETUP SEARCH ================================= 
+    all_search_moves = [psd_search_move] + gb_search_moves
+    all_search_weights = [0.5, 0.4, 0.1]
+    gf_search_move = GFCombineMove(moves=all_search_moves, weights=all_search_weights, verbose=True, share_temperature_control=False)
+    gf_search_move.accepted = np.zeros((ntemps, nwalkers))
     
-    # #* ========================== SETUP PARAMETER ESTIMATION ========================== 
-    gb_pe_weights = [0.6, 0.2, 0.2]
-    recipe.add_recipe_component(
-        RJRecipeStep(
-            moves=gb_pe_moves, 
-            weights=gb_pe_weights, 
-            convergence_iter=500
-        ), 
-        name="gb pe"
-    )
+    recipe.add_recipe_component(RJRecipeStep(moves=[gf_search_move], convergence_iter=10), name="gb + psd search")
+    # search_weights = [0.8, 0.2]
+    # recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
+    
+    #* ========================== SETUP PARAMETER ESTIMATION ========================== 
+    all_pe_moves = gb_pe_moves + [psd_pe_move]
+    pe_weights = [0.6, 0.08, 0.02, 0.3]
+    recipe.add_recipe_component(RJRecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=1, convergence_iter=100), name="gb pe")
 
 
 #######################
@@ -146,20 +146,20 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     delta_safe = 1e-9
 
     A_lims = [10**(-23.2), 1e-20]
-    f0_lims = [0.014, 0.022]  #! TODO: will be reset during band initialization anyway
+    f0_lims = [1e-4, 0.023] # reset by band limits
     
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
     
-    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")]
+    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")] # also reset in band limits
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
     lam_lims = [0.0, 2 * np.pi]
     beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
-    start_freq = general_set.domain_settings.min_freq 
-    end_freq = general_set.domain_settings.max_freq 
+    start_freq = float(general_set.domain_settings.f_arr[0])
+    end_freq = float(general_set.domain_settings.f_arr[-1])
 
     oversample = 4
     extra_buffer = 5
@@ -194,11 +194,11 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         t0=t0_gbs,
         tdi_setup="XYZ",
         use_tdi2=True,
-        Tobs=general_set.Tobs,
+        Tobs=float(1/general_set.domain_settings.df),
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=40,
+        nleaves_max=300,
         nleaves_min=0,
         ndim=8,
         log_dir=general_set.file_store_dir
@@ -251,21 +251,17 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 def get_general_erebor_settings() -> GeneralSetup:    
     
     Tobs = 0.75 * YRSID_SI
-    dt = 2.5
-    start_freq, end_freq = [0.01940, 0.01999] # [0.0138032364, 0.0220867393] # 
+    dt = 5.0
+    start_freq, end_freq = [5e-5, 0.025] # [0.0138032364, 0.0220867393] # 
 
     head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
     data_input_path = head_dir
-    base_file_name = "gb_high_freq"
+    base_file_name = "vgb_psd"
     file_store_dir = head_dir + "gf_outputs/"
-    
-    delete_previous_test_run = False
-    if delete_previous_test_run:
-        os.remove(file_store_dir+"gb_high_freq_fd_parameter_estimation_main.h5")
     
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
-    nwalkers = 32
+    nwalkers = 8
     ntemps = 24
 
     window_type = "tukey"
@@ -280,8 +276,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=['noise', 'gb'], # 'mbhb', 'vgb',
-        source_ids=dict(gb=source_ids),
+        source_types=['noise', 'vgb'], # 'mbhb', 'gb',
+        source_ids=dict(vgb=source_ids),
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
@@ -289,11 +285,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     )
 
     downsample_kwargs = {
-        "target_fs": 0.,  # Hz — target sampling rate (None = no downsampling).
-        # "window": (
-        #     "kaiser",
-        #     31.0,
-        # ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+        "target_fs": 1/dt,  # Hz — target sampling rate (None = no downsampling).
+        "window": (
+            "kaiser",
+            31.0,
+        ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
     }
 
     highpass_kwargs = {
@@ -399,7 +395,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    # psd_setup = get_psd_erebor_settings(general_setup)
+    psd_setup = get_psd_erebor_settings(general_setup)
 
     ##################################
     ##################################
@@ -426,7 +422,7 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "gb": gb_setup,
-            # "psd": psd_setup,
+            "psd": psd_setup,
             # "galfor": galfor_setup,
         },
         general_info=general_setup,

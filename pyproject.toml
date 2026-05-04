@@ -46,6 +46,7 @@ dependencies = [
   "astropy",
   "scikit-learn",
   "cudakima",
+  "pybind11>=3.0.4",
 ]
 
 

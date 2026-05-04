@@ -181,11 +181,12 @@ class GBSetup(Setup, GBSettings):
         # TODO: assign to binned f or leave general? probably better to be general
         band_edges_in_reverse_order = [self.end_freq]
         current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
+        min_N = get_N(1e-30, self.start_freq, self.Tobs, oversample=self.oversample).item()
         band_N_vals_reverse_order = [current_N]
 
         current_freq = self.end_freq
         last_freq = self.end_freq
-        while current_freq > self.start_freq:
+        while current_freq > self.start_freq + min_N * self.df:
             current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df
             band_edges_in_reverse_order.append(current_freq)
             current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
@@ -199,8 +200,8 @@ class GBSetup(Setup, GBSettings):
         band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
         
         # trim edges to avoid out of bound indexing
-        self.band_edges = band_edges[1:-1]
-        self.band_N_vals = band_N_vals[1:-1]
+        self.band_edges = band_edges[2:-1]
+        self.band_N_vals = band_N_vals[2:-1]
 
         self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
 
@@ -215,9 +216,10 @@ class GBSetup(Setup, GBSettings):
             f"GB f0 prior range is set from {round(self.f0_lims[0],7)} to {round(self.f0_lims[1],7)}"
         )
         self.logger.info(f"The number of subbands is {self.num_sub_bands}")
-        self.logger.info(f"Min f of subbands is {self.band_edges.min()}")
-        self.logger.info(f"Max f of subbands is {self.band_edges.max()}")
+        self.logger.info(f"Min freq of subbands is {self.band_edges.min()}")
+        self.logger.info(f"Max freq of subbands is {self.band_edges.max()}")
 
+        
 def mbh_dist_trans(x):
     return x * PC_SI * 1e9  # Gpc
 
