@@ -158,13 +158,14 @@ public:
                           int num_freqs, int num_times,
                           array_type<int> time_indices);
                           
-    void psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+    void psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data,
                              array_type<int> data_index_all, array_type<int> time_index_all,
-                             array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
-                             array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
+                             array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all,
+                             array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all,
                              array_type<double> spline_in_isi_oms_all, array_type<double> spline_in_testmass_all,
-                             double differential_component, int num_freqs, int num_times, 
-                             array_type<bool> dips_mask, int num_psds);
+                             double differential_component, int num_freqs, int num_times,
+                             array_type<bool> dips_mask, int num_psds,
+                             bool run_async = false);
 
     void get_noise_covariance_wrap(
         array_type<double> freqs, array_type<int> time_indices,
@@ -251,7 +252,8 @@ public:
         array_type<int> data_index,
         array_type<int> noise_index,
         int n_t_template,
-        int n_f_template)
+        int n_f_template,
+        bool run_async = false)
     {
         cmplx *d_h_ptr = reinterpret_cast<cmplx*>(
             return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1));
@@ -269,7 +271,7 @@ public:
             st_ptr, sf_ptr,
             num_binaries,
             di_ptr, ni_ptr,
-            n_t_template, n_f_template);
+            n_t_template, n_f_template, run_async);
     }
 };
 
@@ -306,7 +308,8 @@ public:
         int num_binaries,
         array_type<int> data_index,
         array_type<int> noise_index,
-        int n_f_template)
+        int n_f_template,
+        bool run_async = false)
     {
         cmplx *d_h_ptr = reinterpret_cast<cmplx*>(
             return_pointer_and_check_length(d_h_out, "d_h_out", num_binaries, 1));
@@ -323,7 +326,7 @@ public:
             sf_ptr,
             num_binaries,
             di_ptr, ni_ptr,
-            n_f_template);
+            n_f_template, run_async);
     }
 };
 

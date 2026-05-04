@@ -351,7 +351,8 @@ class STFTDomain : public STFTSettings {
                                      double* start_times_all,
                                      double* start_freqs_all, int num_binaries,
                                      int* data_index_all, int* noise_index_all,
-                                     int n_t_template, int n_f_template);
+                                     int n_t_template, int n_f_template,
+                                     bool run_async = false);
 };
 
 /**
@@ -374,7 +375,8 @@ class FDDomain : public STFTDomain {
                                      cmplx* template_vals,
                                      double* start_freqs_all, int num_binaries,
                                      int* data_index_all, int* noise_index_all,
-                                     int n_f_template);
+                                     int n_f_template,
+                                     bool run_async = false);
 };
 
 class STFTFresnel : public STFTSettings {

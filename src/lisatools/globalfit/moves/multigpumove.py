@@ -16,14 +16,19 @@ logger = getLogger(__name__)
 
 
 class MultiGPUMoveBase:
-    def __init__(self, dcga: DomainComputationGroupArray, run_threaded: bool = False):
+    def __init__(self, dcga: DomainComputationGroupArray, run_async: bool = False, run_threaded: bool = False):
         self._dcga = dcga
+        self._run_async = run_async
         self._run_threaded = run_threaded
 
     @property
     def dcga(self) -> DomainComputationGroupArray:
         return self._dcga
     
+    @property
+    def run_async(self) -> bool:
+        return self._run_async
+
     @property
     def run_threaded(self) -> bool:
         return self._run_threaded
