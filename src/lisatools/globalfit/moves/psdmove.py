@@ -78,16 +78,19 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.permute_every = permute_every
         self.tolerance = tolerance
 
-    def transform_coords(self, coords: list[np.ndarray], return_cupy: bool = False) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    def transform_coords(self, coords: list[np.ndarray], return_cupy: bool = False, xp=None) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
         Prepare the coordinates for the move. This can include transforming the parameters if necessary.
 
         Args:
             coords: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
             return_cupy: if True, will return the transformed coordinates as cupy arrays for use on the GPU. If False, will return numpy arrays.
+            xp: the array library to use (numpy or cupy).
         Returns:
             A tuple containing the transformed PSD parameters and galactic foreground parameters (if present) in the target array library.
         """
+        if xp is None:
+            xp = self.acs.xp  # Use the array library from the analysis container
 
         if self.psd_transform_fn is not None:
             psd_pars = self.psd_transform_fn.both_transforms(coords[0])
@@ -103,8 +106,8 @@ class PSDMove(GlobalFitMove, StretchMove):
                 galfor_pars = coords[1]
 
         if return_cupy:
-            psd_pars = self.xp.asarray(psd_pars)
-            galfor_pars = self.xp.asarray(galfor_pars)
+            psd_pars = xp.asarray(psd_pars)
+            galfor_pars = xp.asarray(galfor_pars)
 
         return psd_pars, galfor_pars
 
@@ -115,7 +118,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         Prepare the inputs for the likelihood computation. This can include placing the data on the correct device and formatting the parameters as needed.
         """
 
-        xp = self.xp  # Use the appropriate array library (numpy or cupy)
+        xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
 
         Soms_d_in_all = xp.ascontiguousarray(psd_pars[:, 0])
         Sa_a_in_all = xp.ascontiguousarray(psd_pars[:, 1])
@@ -171,10 +174,12 @@ class PSDMove(GlobalFitMove, StretchMove):
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
 
-        wi = supps["walker_inds"]
-        data_index_all = self.xp.asarray(wi).astype(np.int32)
+        xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
 
-        psd_pars, galfor_pars = self.transform_coords(x, return_cupy=True)
+        wi = supps["walker_inds"]
+        data_index_all = xp.asarray(wi).astype(np.int32)
+
+        psd_pars, galfor_pars = self.transform_coords(x, return_cupy=True, xp=xp)
 
         likelihood_args = self.prepare_likelihood_inputs(psd_pars, galfor_pars)
 
@@ -183,11 +188,11 @@ class PSDMove(GlobalFitMove, StretchMove):
         )
 
         if likelihood_args[-2] is not None and likelihood_args[-1] is not None:
-            invalid_knots = self.xp.any(
-                self.xp.diff(10 ** likelihood_args[-2], axis=2) < self.tolerance, axis=(0, 2)
+            invalid_knots = xp.any(
+                xp.diff(10 ** likelihood_args[-2], axis=2) < self.tolerance, axis=(0, 2)
             )
         else:
-            invalid_knots = self.xp.zeros(psd_pars.shape[0], dtype=bool)
+            invalid_knots = xp.zeros(psd_pars.shape[0], dtype=bool)
 
         ll[invalid_knots] = -1e300
 
@@ -306,6 +311,8 @@ class PSDMove(GlobalFitMove, StretchMove):
     def propose(self, model, state):
         # setup model framework for passing necessary
         # self.priors["all_models_together"].full_state = state
+        xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
+
         tmp_branches_coords = {
             key: state.branches_coords[key]
             for key in ["psd", "galfor"]
@@ -369,7 +376,7 @@ class PSDMove(GlobalFitMove, StretchMove):
 
             gpu = self.acs.gpu_map[w]
             if self.acs.gpus is not None:
-                with self.xp.cuda.Device(gpu):
+                with xp.cuda.Device(gpu):
                     new_sens = self.sensitivity_backend(
                         f"walker_{w}",
                         psd_params,
