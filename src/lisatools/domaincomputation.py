@@ -380,6 +380,8 @@ class STFTComputationGroup(BaseDomainComputationGroup):
             )
         )
 
+        run_async = kwargs.get("run_async", False)
+
         self.cpp_domain.compute_likelihood_terms(
             d_h_out,
             h_h_out,
@@ -391,6 +393,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
             noise_index,
             num_times,
             num_freqs,
+            run_async,
         )
 
         return d_h_out, h_h_out
@@ -464,6 +467,8 @@ class FDComputationGroup(BaseDomainComputationGroup):
             num_binaries, start_freqs, data_index, noise_index
         )
 
+        run_async = kwargs.get("run_async", False)
+
         self.cpp_domain.compute_likelihood_terms(
             d_h_out,
             h_h_out,
@@ -473,6 +478,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
             data_index,
             noise_index,
             num_freqs,
+            run_async,
         )
 
         return d_h_out, h_h_out
@@ -820,6 +826,7 @@ class DomainComputationGroupArray:
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
         operations: list[Callable],
         likelihood_args_per_split: list[tuple],
+        likelihood_kwargs: dict | list[dict] = None, 
         run_threaded: bool = False,
     ):
         """Compute likelihood for each split using the provided likelihood functions and arguments, and aggregate the results into a single output array."""
@@ -835,7 +842,7 @@ class DomainComputationGroupArray:
             operation_args_per_split.append(args_i)
 
         all_logls = self._loop_operation(
-            operation=operations, operation_args_per_split=operation_args_per_split, positions_per_split=positions_per_split, run_threaded=run_threaded
+            operation=operations, operation_args_per_split=operation_args_per_split, operation_kwargs=likelihood_kwargs, positions_per_split=positions_per_split, run_threaded=run_threaded
         )
 
         # now synchronize
@@ -855,6 +862,7 @@ class DomainComputationGroupArray:
         data_intra_per_split: list[np.ndarray | cp.ndarray],
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
         likelihood_args_per_split: list[tuple],
+        likelihood_kwargs: dict | list[dict] = None,
         run_threaded: bool = False,
     ):
         """Compute PSD likelihood for each split and aggregate results."""
@@ -865,6 +873,7 @@ class DomainComputationGroupArray:
             noise_intra_per_split,
             operations,
             likelihood_args_per_split,
+            likelihood_kwargs=likelihood_kwargs,
             run_threaded=run_threaded,
         )
 
@@ -874,6 +883,7 @@ class DomainComputationGroupArray:
         data_intra_per_split: list[np.ndarray | cp.ndarray],
         noise_intra_per_split: list[np.ndarray | cp.ndarray],
         likelihood_args_per_split: list[tuple],
+        likelihood_kwargs: dict | list[dict] = None,
         run_threaded: bool = False,
     ):
         """Compute signal likelihood for each split and aggregate results."""
@@ -884,5 +894,6 @@ class DomainComputationGroupArray:
             noise_intra_per_split,
             operations,
             likelihood_args_per_split,
+            likelihood_kwargs=likelihood_kwargs,
             run_threaded=run_threaded,
         )

@@ -2300,6 +2300,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         sl2_in_all: np.ndarray | cp.ndarray,
         knots_position_all: np.ndarray | cp.ndarray = None,
         knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        run_async: bool = False,
     ) -> np.ndarray | cp.ndarray:
         """
         Compute log-likelihood using the c++ backend.
@@ -2316,6 +2317,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             sl2_in_all: Second galactic foreground slope parameter for each walker. Shape (num_psds)
             knots_position_all: Positions of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
             knots_amplitude_all: Amplitudes of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
+            run_async: Whether to run the CUDA computation asynchronously. Default is False.
 
         Returns:
             log_like_out: Computed log-likelihoods for each PSD. Shape (num_psds,)
@@ -2360,6 +2362,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.num_times,
             self.dips_mask,
             num_psds,
+            run_async
         )
 
         return log_like_out

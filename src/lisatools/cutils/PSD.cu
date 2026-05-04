@@ -530,7 +530,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     double* Amp_all, double* alpha_all, double* slope_1_all, double* f_knee_all,
     double* slope_2_all, double* spline_in_testmass_all,
     double* spline_in_isi_oms_all, double differential_component, int num_freqs,
-    int num_times, bool* dips_mask, int num_psds) {
+    int num_times, bool* dips_mask, int num_psds, bool run_async) {
   int total_tf_pairs = num_times * num_freqs;
 
 #ifdef __CUDACC__
@@ -539,10 +539,15 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
       std::ceil((double)total_tf_pairs /
                 NUM_THREADS_LIKE);  // Blocks for (time, freq) coverage
 
-  gpuErrchk(cudaMallocAsync(&like_contrib,
-                            num_psds * num_blocks * sizeof(double),
-                            cudaStreamDefault
-                            ));
+  if (run_async) {
+    gpuErrchk(cudaMallocAsync(&like_contrib,
+                              num_psds * num_blocks * sizeof(double),
+                              cudaStreamDefault
+                              ));
+  } else {
+    gpuErrchk(cudaMalloc(&like_contrib,
+                          num_psds * num_blocks * sizeof(double)));
+  }
 
   // Grid: X=blocks for (time,freq) pairs, Y=blocks for PSDs
   dim3 grid(num_blocks, std::min(num_psds, 65535), 1);
@@ -568,7 +573,12 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
       like_contrib_final, like_contrib, num_blocks, num_psds);
 
   gpuErrchk(cudaGetLastError());
-  gpuErrchk(cudaFreeAsync(like_contrib, cudaStreamDefault));
+  if (run_async) {
+    gpuErrchk(cudaFreeAsync(like_contrib, cudaStreamDefault));
+  } else {
+    gpuErrchk(cudaFree(like_contrib));
+    cudaDeviceSynchronize();  // Ensure all GPU work is done before returning
+  }
   // gpuErrchk(cudaFree(dev_ptr));
 #else
   // CPU Fallback

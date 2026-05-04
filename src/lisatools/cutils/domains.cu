@@ -519,7 +519,7 @@ void STFTDomain::compute_likelihood_terms_wrap(
     cmplx* d_h_out, cmplx* h_h_out, cmplx* template_vals,
     double* start_times_all, double* start_freqs_all, int num_binaries,
     int* data_index_all, int* noise_index_all, int num_times_template,
-    int num_freqs_template) {
+    int num_freqs_template, bool run_async) {
 #ifdef __CUDACC__
   cmplx* d_h_contrib;
   cmplx* h_h_contrib;
@@ -532,12 +532,19 @@ void STFTDomain::compute_likelihood_terms_wrap(
   dim3 grid_dim(num_blocks_x, num_blocks_y);
 
   // Allocate partial-sum buffers: [num_binaries, num_blocks_x]
-  gpuErrchk(cudaMallocAsync(&d_h_contrib,
-                            num_binaries * num_blocks_x * sizeof(cmplx),
-                            cudaStreamDefault));
-  gpuErrchk(cudaMallocAsync(&h_h_contrib,
-                            num_binaries * num_blocks_x * sizeof(cmplx),
-                            cudaStreamDefault));
+  if (run_async) {
+    gpuErrchk(cudaMallocAsync(&d_h_contrib,
+                              num_binaries * num_blocks_x * sizeof(cmplx),
+                              cudaStreamDefault));
+    gpuErrchk(cudaMallocAsync(&h_h_contrib,
+                              num_binaries * num_blocks_x * sizeof(cmplx),
+                              cudaStreamDefault));
+  } else {
+    gpuErrchk(cudaMalloc(&d_h_contrib,
+                         num_binaries * num_blocks_x * sizeof(cmplx)));
+    gpuErrchk(cudaMalloc(&h_h_contrib,
+                         num_binaries * num_blocks_x * sizeof(cmplx)));
+  }
 
   // Copy the host STFTDomain struct (including its device data/invC pointers)
   // to the device so the kernel can call member functions through the pointer.
@@ -558,8 +565,14 @@ void STFTDomain::compute_likelihood_terms_wrap(
       d_h_out, h_h_out, d_h_contrib, h_h_contrib, num_blocks_x, num_binaries);
 
   gpuErrchk(cudaGetLastError());
-  gpuErrchk(cudaFreeAsync(d_h_contrib, cudaStreamDefault));
-  gpuErrchk(cudaFreeAsync(h_h_contrib, cudaStreamDefault));
+  if (run_async) {
+    gpuErrchk(cudaFreeAsync(d_h_contrib, cudaStreamDefault));
+    gpuErrchk(cudaFreeAsync(h_h_contrib, cudaStreamDefault));
+  } else {
+    gpuErrchk(cudaFree(d_h_contrib));
+    gpuErrchk(cudaFree(h_h_contrib));
+    cudaDeviceSynchronize();
+  }
   //   gpuErrchk(cudaFree(domain_ptr));
 
 #else
@@ -575,7 +588,7 @@ void STFTDomain::compute_likelihood_terms_wrap(
 void FDDomain::compute_likelihood_terms_wrap(
     cmplx* d_h_out, cmplx* h_h_out, cmplx* template_vals,
     double* start_freqs_all, int num_binaries, int* data_index_all,
-    int* noise_index_all, int num_freqs_template) {
+    int* noise_index_all, int num_freqs_template, bool run_async) {
   // Delegate to the STFT version with num_times_template = 1.
   // start_times_all = nullptr signals the kernel to use start_t_idx = 0.
   STFTDomain::compute_likelihood_terms_wrap(
@@ -583,7 +596,7 @@ void FDDomain::compute_likelihood_terms_wrap(
       nullptr,  // start_times_all not used in FDDomain
       start_freqs_all, num_binaries, data_index_all, noise_index_all,
       1,  // num_times_template = 1 for FDDomain
-      num_freqs_template);
+      num_freqs_template, run_async);
 }
 
 /**
