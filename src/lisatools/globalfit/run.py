@@ -32,6 +32,7 @@ from .moves import GFCombineMove, GlobalFitMove
 from .recipe import Recipe
 from .state import GFState
 from .utils import BasicResidualacsLikelihood
+from .postprocessing import SubmissionWriter
 
 
 class CurrentInfoGlobalFit:
@@ -710,6 +711,11 @@ class GlobalFit:
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
             sampler_mix.run_mcmc(state, 50, thin_by=1, progress=True, store=True)
+
+            submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=10_000)
+
+            breakpoint()
+
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
         elif self.rank == self.results_rank:
