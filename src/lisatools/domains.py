@@ -84,11 +84,11 @@ class DomainBase:
         else:
             self._stft = signal.stft
 
-        assert len(arr.shape) >= len(self.basis_shape)
-        if len(arr.shape) == len(self.basis_shape):
+        assert len(arr.shape) >= len(self.basis_shape_active)
+        if len(arr.shape) == len(self.basis_shape_active):
             arr = arr[None, ...]
 
-        self.outer_shape = arr.shape[: -len(self.basis_shape)]
+        self.outer_shape = arr.shape[: -len(self.basis_shape_active)]
         if len(self.outer_shape) > 2:
             raise ValueError(
                 f"Too many dimensions outside of basis_shape. "
@@ -182,7 +182,7 @@ class TDSettings(DomainSettingsBase):
 
     @property
     def kwargs(self) -> dict:
-        return dict(t0=self.t0, force_backend=self.force_backend)
+        return dict(t0=self.t0, force_backend=self.backend)
     
     @property
     def args(self) -> tuple:
@@ -194,6 +194,11 @@ class TDSettings(DomainSettingsBase):
 
     @property
     def basis_shape(self) -> tuple:
+        return (self.N,)
+    
+    @property
+    def basis_shape_active(self) -> tuple:
+        # TODO: adjust this
         return (self.N,)
 
     def __repr__(self) -> str:
@@ -464,7 +469,7 @@ class FDSettings(DomainSettingsBase):
         return dict(
             min_freq=self.min_freq,
             max_freq=self.max_freq,
-            force_backend=self.force_backend,
+            force_backend=self.backend,
         )
 
     @property
@@ -473,6 +478,10 @@ class FDSettings(DomainSettingsBase):
 
     @property
     def basis_shape(self) -> tuple:
+        return (self.N,)
+    
+    @property
+    def basis_shape_active(self) -> tuple:
         return (self.N_active,)
 
     @property
@@ -527,7 +536,10 @@ class FDSettings(DomainSettingsBase):
 
 class FDSignal(FDSettings, DomainBase):
     def __init__(self, arr, settings: FDSettings):
-        FDSettings.__init__(self, *settings.args, **settings.kwargs)
+        try:
+            FDSettings.__init__(self, *settings.args, **settings.kwargs)
+        except:
+            breakpoint()
         DomainBase.__init__(self, arr)
 
         if self.arr.shape[-1] != self.N_active:
@@ -616,28 +628,40 @@ class FDSignal(FDSettings, DomainBase):
         # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
         k = settings.get_shift_map(m_special)
         k = self.xp.concatenate([self.xp.zeros((k.shape[0], 1), dtype=int), k], axis=1)
-        
-        k[-1] -= 1
-
-        keep_dc_layer = (k[0] >= 0)
-        keep_dc_layer[0] = False
-        keep_nyquist_layer = (k[-1] < self.N - 1)
-        keep_nyquist_layer[0] = False
-
-
-        # multiply by  2 / settings.layer_df for forward transform
-        base_window = (settings.window[:] * 2 / settings.Nf)
-        dc_window = (settings.dc_layer_window * 2 / settings.Nf)
+   
+        base_window = (settings.window[:])
+        dc_window = (settings.dc_layer_window[:])
         # TODO: check if this is right?!?!
-        max_freq_window = (settings.max_freq_layer_window * 2 / settings.Nf)
-        k_in = k.copy()
+        max_freq_window = (settings.max_freq_layer_window[:])
 
-        # this to make indexing work
-        k[0, ~keep_dc_layer] = 0
-        k[-1, ~keep_nyquist_layer] = 0
+        if not is_psd:
+            # TODO: check this !!!
+            k[-1] -= 1
+            keep_dc_layer = (k[0] >= 0)
+            keep_dc_layer[0] = False
+            keep_nyquist_layer = (k[-1] < self.N - 1)
+            keep_nyquist_layer[0] = False
 
-        assert np.sum(keep_dc_layer) == int(settings.Nt / 2)
-        assert np.sum(keep_nyquist_layer) == int(settings.Nt / 2)
+            k_in = k.copy()
+
+            # this to make indexing work
+            k[0, ~keep_dc_layer] = 0
+            k[-1, ~keep_nyquist_layer] = 0
+
+            assert np.sum(keep_dc_layer) == int(settings.Nt / 2)
+            assert np.sum(keep_nyquist_layer) == int(settings.Nt / 2)
+
+            # multiply by  2 / settings.layer_df for forward transform
+            # forward transform for signals requires additional factor (2/Nf)
+            base_window *= 2 / settings.Nf
+            dc_window *= 2 / settings.Nf
+            max_freq_window *= 2 / settings.Nf
+
+        else:
+            k[:] = np.abs(k[:])
+            k[(k > self.N - 2)] = (self.N - 1) - (k[(k > self.N - 2)] - (self.N - 1))
+            dc_window[:] = base_window[:]
+            max_freq_window[:] = base_window[:]
 
         arr_in = self.arr.copy()
         
@@ -648,28 +672,45 @@ class FDSignal(FDSettings, DomainBase):
         # it is 2 because the max frequency would be at 1, but it removes that (?)
         before_ifft = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
         before_ifft = arr_in[:, k]
-        before_ifft[:, 0, ~keep_dc_layer] = 0.0
-        before_ifft[:, -1, ~keep_nyquist_layer] = 0.0
-        before_ifft[:, :, 0] = 0.0
-        before_ifft2 = before_ifft.copy()
 
-        before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
-        before_ifft[:, 0, 1:] *= dc_window
-        before_ifft[:, -1, 1:] *= max_freq_window
+        if not is_psd:
+            before_ifft[:, 0, ~keep_dc_layer] = 0.0
+            before_ifft[:, -1, ~keep_nyquist_layer] = 0.0
+            before_ifft[:, :, 0] = 0.0
+
+        before_ifft2 = before_ifft.copy()
 
         if is_psd:
             # eq. 19 in arxiv.org/pdf/2009.00043
             # window is squared
-            before_ifft[:, 1:-1, 1:] *= (base_window[None, None, :] * settings.Nf / 2.)  # remove factor of Nf over 2
-            before_ifft[:, 0, 1:] *= (dc_window * settings.Nf / 2.)  # remove factor of Nf over 2
-            before_ifft[:, -1, 1:] *= (max_freq_window * settings.Nf / 2.)  # remove factor of Nf over 2
-            psd_sum_tmp = before_ifft.sum(axis=-1) / (settings.data_dt * settings.Nt * settings.Nf)
+
+            # try this 
+            # base_window *= 2 / settings.Nf
+            # dc_window *= 2 / settings.Nf
+            # max_freq_window *= 2 / settings.Nf
+            
+            tmp_arr = before_ifft[:, :, 1:]  # removes dc component for transforms
+            tmp_arr[:, 1:-1] *= (base_window[None, None, :]) ** 2  # remove factor of Nf over 2
+            tmp_arr[:, 0] *= (dc_window) ** 2  # remove factor of Nf over 2
+            tmp_arr[:, -1] *= (max_freq_window) ** 2  # remove factor of Nf over 2
+            psd_sum_tmp = tmp_arr.sum(axis=-1)  #  * self.df 
+
+            psd_sum_tmp[1:-1] /= (2 * settings.Nt * settings.Nt)
+            psd_sum_tmp[0] /= (settings.Nt * settings.Nt)
+            psd_sum_tmp[-1] /= (settings.Nt * settings.Nt)
+
             wdmpsd = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
 
             wdmpsd[:, 1:] = psd_sum_tmp[:, 1:settings.Nf, None]          # regular layers
             wdmpsd[:, 0, 0::2] = psd_sum_tmp[:, 0, None]           # DC at even rows
-            wdmpsd[:, 0, 1::2] = psd_sum_tmp[:, settings.Nf, None]     
-            return wdmpsd
+            wdmpsd[:, 0, 1::2] = psd_sum_tmp[:, settings.Nf, None]  
+            
+            wdmpsd_out = wdmpsd[:, settings.active_slice_f, settings.active_slice_t]
+            return wdmpsd_out
+
+        before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
+        before_ifft[:, 0, 1:] *= dc_window
+        before_ifft[:, -1, 1:] *= max_freq_window
 
         after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
         
@@ -690,11 +731,11 @@ class FDSignal(FDSettings, DomainBase):
         # TODO: fix this 
         _new_arr[:, 0, 0::2] = self.xp.asarray(np.real(self.get(after_ifft[:, 0, 0::2]))) * np.sqrt(2.)
         _new_arr[:, 0, 1::2] = self.xp.asarray(np.real(self.get(after_ifft[:, -1, 0::2]))) * np.sqrt(2.)
-        
+
         if return_transpose_time_axis_first:
-            output = _new_arr.transpose(0, 2, 1).copy()
+            output = _new_arr[:, settings.active_slice_f, settings.active_slice_t].transpose(0, 2, 1).copy()
         else:
-            output = _new_arr
+            output = _new_arr[:, settings.active_slice_f, settings.active_slice_t]
 
         return WDMSignal(output, settings=settings)
 
@@ -861,7 +902,7 @@ class STFTSettings(DomainSettingsBase):
     @ind_max.setter
     def ind_max(self, ind_max: int):
         if ind_max is None:
-            ind_max = self.N - 1
+            ind_max = self.NF - 1
         self._ind_max = ind_max
 
     @property
@@ -1125,7 +1166,7 @@ class STFTSignal(STFTSettings, DomainBase):
     @ind_max.setter
     def ind_max(self, ind_max: int):
         if ind_max is None:
-            ind_max = self.Nf - 1
+            ind_max = self.NF - 1
         self._ind_max = ind_max
     
     def plot(self, 
@@ -1181,8 +1222,10 @@ class WDMSettings(DomainSettingsBase):
         max_freq_layer_window: Optional[np.ndarray] = None,
         norm: Optional[float] = None, 
         omega: Optional[np.ndarray] = None,
-        min_freq: Optional[int] = None,
-        max_freq: Optional[int] = None,
+        min_freq: Optional[float] = None,
+        max_freq: Optional[float] = None,
+        min_time: Optional[float] = None,
+        max_time: Optional[float] = None,
         **kwargs
     ):
         DomainSettingsBase.__init__(self, **kwargs)
@@ -1199,6 +1242,8 @@ class WDMSettings(DomainSettingsBase):
         # sets ind_min and ind_max
         self.min_freq = min_freq
         self.max_freq = max_freq
+        self.min_time = min_time
+        self.max_time = max_time
         self.Nthalf = int(self.Nt / 2)
         self.oversample = oversample
 
@@ -1245,14 +1290,31 @@ class WDMSettings(DomainSettingsBase):
         return (Nf, Nt, wavelet_duration)
     
     @property
+    def active_slice_f(
+        self,
+    ) -> slice:
+        return slice(self.ind_min_f, self.ind_max_f + 1)
+    
+    @property
+    def active_slice_t(
+        self,
+    ) -> slice:
+        return slice(self.ind_min_t, self.ind_max_t + 1)
+
+    @property
     def active_slice(
         self,
     ) -> slice:
-        return slice(self.ind_min, self.ind_max + 1)
+        return (self.active_slice_f, self.active_slice_t)
     
     @property
     def Nf_active(self) -> int:
-        sl = self.active_slice
+        sl = self.active_slice_f
+        return sl.stop - sl.start
+
+    @property
+    def Nt_active(self) -> int:
+        sl = self.active_slice_t
         return sl.stop - sl.start
 
     def __eq__(self, value):
@@ -1263,23 +1325,30 @@ class WDMSettings(DomainSettingsBase):
         return (self.Nf, self.Nt)
     
     @property
+    def basis_shape_active(self) -> tuple:
+        return (self.Nf_active, self.Nt_active)
+    
+    @property
     def t_td_arr(self) -> np.ndarray:
-        return self.xp.arange(self.N) * self.data_dt
+        _tmp = self.xp.arange(self.N) * self.data_dt
+        tmp = _tmp[(_tmp >= self.ind_min_t * self.layer_dt) & (_tmp <= self.ind_max_t * self.layer_dt)]
+        return tmp
     
     @property
     def t_arr(self) -> np.ndarray:
-        return self.xp.arange(self.Nt) * self.layer_dt
+        return self.xp.arange(self.Nt)[self.active_slice_t] * self.layer_dt
 
     @property
     def f_arr(self) -> np.ndarray:
-        return self.xp.arange(self.Nf) * self.layer_df
+        return self.xp.arange(self.Nf)[self.active_slice_f] * self.layer_df
     
     @property
     def f_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.Nf + 1) * self.layer_df
+        return (self.xp.arange(self.Nf_active + 1) + self.ind_min_f) * self.layer_df
     @property
     def t_arr_edges(self) -> np.ndarray:
-        return self.xp.arange(self.Nt + 1) * self.layer_dt
+
+        return (self.xp.arange(self.Nt_active + 1) + self.ind_min_t) * self.layer_dt
 
     def phitilde(self, omega, dOmega):
         insDOM = 1. / np.sqrt(dOmega)
@@ -1329,9 +1398,10 @@ class WDMSettings(DomainSettingsBase):
 
         return m_in * int(self.Nt / 2) + self.xp.arange( -int(self.Nt / 2) + 1,  int(self.Nt / 2))[None, :]
         
-    def window_norm(self) -> float:
-        dOmega_s = np.pi / self.Nf
-        (2 * np.pi) / self.N 
+    # def window_norm(self) -> float:
+    #     dOmega_s = np.pi / self.Nf
+    #     (2 * np.pi) / self.N 
+
     def setup_window(self):  # , forward: bool= True):
 
         # *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
@@ -1371,10 +1441,10 @@ class WDMSettings(DomainSettingsBase):
         # set it to the closest frequency bin
         self.min_freq_input = value
         if value is not None:
-            self.ind_min = int(np.ceil(value / self.layer_df))
+            self.ind_min_f = int(np.ceil(value / self.layer_df))
         else:
-            self.ind_min = 0
-        self._min_freq = self.ind_min * self.layer_df
+            self.ind_min_f = 0
+        self._min_freq = self.ind_min_f * self.layer_df
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -1389,40 +1459,107 @@ class WDMSettings(DomainSettingsBase):
         # set it to the closest frequency bin
         self.max_freq_input = value
         if value is not None:
-            self.ind_max = int(value / self.layer_df)
+            self.ind_max_f = int(value / self.layer_df)
         else:
-            self.ind_max = (self.N - 1)
-        self._max_freq = self.ind_max * self.layer_df
+            self.ind_max_f = (self.Nf - 1)
+        self._max_freq = self.ind_max_f * self.layer_df
 
     @property
-    def ind_min(self) -> int:
-        return self._ind_min
-    
-    @ind_min.setter
-    def ind_min(self, ind_min: int):
-        if ind_min is None:
-            ind_min = 0
-        self._ind_min = ind_min
+    def min_time(self) -> float:
+        return self._min_time
+
+    @min_time.setter
+    def min_time(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError("min_time must be non-negative.")
+
+        # self._min_time = value
+        # set it to the closest time bin
+        self.min_time_input = value
+
+        if value is not None:
+            self.ind_min_t = int(np.ceil(value / self.layer_dt))
+        else:
+            self.ind_min_t = 0
+        self._min_time = self.ind_min_t * self.layer_dt
 
     @property
-    def ind_max(self) -> int:
-        return self._ind_max
+    def max_time(self) -> Optional[float]:
+        return self._max_time
+
+    @max_time.setter
+    def max_time(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError("max_time must be non-negative.")
+
+        # self._max_time = value
+        # set it to the closest time bin
+        self.max_time_input = value
+        if value is not None:
+            self.ind_max_t = int(value / self.layer_dt)
+        else:
+            self.ind_max_t = (self.Nt - 1)
+        self._max_time = self.ind_max_t * self.layer_dt
+
+    @property
+    def ind_min_f(self) -> int:
+        return self._ind_min_f
     
-    @ind_max.setter
-    def ind_max(self, ind_max: int):
-        if ind_max is None:
-            ind_max = self.N - 1
-        self._ind_max = ind_max
+    @ind_min_f.setter
+    def ind_min_f(self, ind_min_f: int):
+        if ind_min_f is None:
+            ind_min_f = 0
+        self._ind_min_f = ind_min_f
+
+    @property
+    def ind_max_f(self) -> int:
+        return self._ind_max_f
+    
+    @ind_max_f.setter
+    def ind_max_f(self, ind_max_f: int):
+        if ind_max_f is None:
+            ind_max_f = self.Nf - 1
+        self._ind_max_f = ind_max_f
+
+    @property
+    def ind_min_t(self) -> int:
+        return self._ind_min_t
+    
+    @ind_min_t.setter
+    def ind_min_t(self, ind_min_t: int):
+        if ind_min_t is None:
+            ind_min_t = 0
+        self._ind_min_t = ind_min_t
+
+    @property
+    def ind_max_t(self) -> int:
+        return self._ind_max_t
+    
+    @ind_max_t.setter
+    def ind_max_t(self, ind_max_t: int):
+        if ind_max_t is None:
+            ind_max_t = self.Nt - 1
+        self._ind_max_t = ind_max_t
 
     @property
     def frequency_layer_mask(self) -> Optional[np.ndarray]:
         mask = self.xp.zeros(self.Nf, dtype=bool)
-        mask[self.active_slice] = True
+        mask[self.active_slice_f] = True
+        return mask
+    
+    @property
+    def time_layer_mask(self) -> Optional[np.ndarray]:
+        mask = self.xp.zeros(self.Nt, dtype=bool)
+        mask[self.active_slice_t] = True
         return mask
         
     @property
     def f_ind_array(self) -> np.ndarray:
-        return self.xp.arange(self.ind_min, self.ind_max + 1)
+        return self.xp.arange(self.ind_min_f, self.ind_max_f + 1)
+
+    @property
+    def t_ind_array(self) -> np.ndarray:
+        return self.xp.arange(self.ind_min_t, self.ind_max_t + 1)
 
     @staticmethod
     def get_associated_class():
@@ -1443,7 +1580,9 @@ class WDMSettings(DomainSettingsBase):
             omega=self.omega, 
             min_freq=self.min_freq, 
             max_freq=self.max_freq, 
-            force_backend=self.force_backend
+            min_time=self.min_time, 
+            max_time=self.max_time, 
+            force_backend=self.backend
         )
 
     @property
@@ -1482,11 +1621,22 @@ class WDMSignal(WDMSettings, DomainBase):
         DomainBase.__init__(self, arr)
 
         # freq layers
-        if self.arr.shape[-2] != self.Nf_active:
-            assert arr.shape[-2] == self.Nf
+        if self.arr.shape[-2] != self.Nf_active or self.arr.shape[-1] != self.Nt_active:
+            if self.arr.shape[-2] != self.Nf_active:
+                assert arr.shape[-2] == self.Nf
+                f_slice = self.active_slice_f
+            else:
+                f_slice = slice(None)
+
+            if self.arr.shape[-1] != self.Nt_active:
+                assert arr.shape[-1] == self.Nt
+                t_slice = self.active_slice_t
+            else:
+                t_slice = slice(None)
+
             _arr = self._arr.copy()
             del self._arr
-            self.arr = _arr[:, self.active_slice]
+            self.arr = _arr[:, f_slice, t_slice]
 
     @property
     def settings(self) -> WDMSettings:
@@ -1639,7 +1789,7 @@ class WDMSignal(WDMSettings, DomainBase):
         else:
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
-    def heatmap(self, index: int = None, mag: bool = False, fig=None, ax=None, cax=None, add_cax=False, **kwargs):
+    def heatmap(self, index: int = None, mag: bool = False, fig=None, ax=None, cax=None, add_cax=False, log: bool = False, **kwargs):
         # if fig is not None or ax is not None:
         #     if fig is None or ax is None:
         #         raise ValueError("If providing fig or ax, must provide both.")
@@ -1657,12 +1807,14 @@ class WDMSignal(WDMSettings, DomainBase):
 
             for i, (ax_i, channel)  in enumerate(zip(ax, ["X", "Y", "Z"])):
                 z = self.arr[i]
-                x, y = self.t_arr_edges, self.f_arr_edges[self.ind_min:self.ind_max + 2]
+                x, y = self.t_arr_edges, self.f_arr_edges
                 x = self.get(x)
                 y = self.get(y)
                 z = self.get(z)
                 if mag:
                     z = np.abs(z)
+                if log:
+                    z = np.log10(np.abs(z))
                 sc = ax_i.pcolormesh(
                     x, y, z, 
                     # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
@@ -1673,12 +1825,14 @@ class WDMSignal(WDMSettings, DomainBase):
         else:
             assert index is not None and fig is not None and ax is not None
             z = self.arr[index]
-            x, y = self.t_arr_edges, self.f_arr_edges[self.ind_min:self.ind_max + 2]
+            x, y = self.t_arr_edges, self.f_arr_edges
             x = self.get(x)
             y = self.get(y)
             z = self.get(z)
             if mag:
                 z = np.abs(z)
+            if log:
+                z = np.log10(np.abs(z))
             sc = ax.pcolormesh(
                 x, y, z, 
                 # extent=[self.t_arr.min(), self.t_arr.max(), self.f_arr.min(), self.f_arr.max()], 
@@ -1692,7 +1846,6 @@ class WDMSignal(WDMSettings, DomainBase):
             fig.colorbar(sc, cax=cax)
         
         plt.subplots_adjust(right=0.85, hspace=0.1)
-
         return fig, ax
 
 import h5py
@@ -1710,8 +1863,10 @@ class WDMLookupTable(WDMSettings):
             g.attrs["Nt"] = self.Nt
             g.attrs["Nt_generate"] = self.sub_settings.Nt
             g.attrs["data_dt"] = self.data_dt
-            g.attrs["max_freq"] = self.ind_min
-            g.attrs["min_freq"] = self.ind_max
+            g.attrs["max_freq"] = self.max_freq
+            g.attrs["min_freq"] = self.min_freq
+            g.attrs["max_time"] = self.max_time
+            g.attrs["min_time"] = self.min_time
             g.attrs["m_ref"] = self.m_ref
             g.attrs["n_ref"] = self.n_ref
             g.attrs["nchannels"] = self.nchannels
@@ -1750,7 +1905,21 @@ class WDMLookupTable(WDMSettings):
 
                 input_kwargs["min_freq"] = min_freq
                 input_kwargs["max_freq"] = max_freq
+            else:
+                input_args = (
+                    g.attrs["Nf"],
+                    g.attrs["Nt"],
+                    g.attrs["data_dt"] 
+                )
+                nchannels = g.attrs["nchannels"]
 
+                input_kwargs = dict(
+                    min_freq = g.attrs["min_freq"],
+                    max_freq = g.attrs["max_freq"],
+                    min_time = g.attrs["min_time"],
+                    max_time = g.attrs["max_time"],
+                    force_backend=force_backend,
+                )
             settings = WDMSettings(*input_args, **input_kwargs)
             return WDMLookupTable(settings, nchannels, store_path=fp)
 
@@ -2004,8 +2173,8 @@ class WDMLookupTable(WDMSettings):
         is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
             ms_to_use = (ms + m_diff).astype(int)
-            keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use <= self.Nf + 1)]
-            
+            keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use < self.Nf)]
+
             assert ms[keep_now].max() <= self.Nf + 1
             assert ms[keep_now].min() >= 0
             try:

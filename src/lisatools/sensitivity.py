@@ -1021,7 +1021,7 @@ class SensitivityMatrixBase:
         skip_inv_det: bool = False,
     ) -> None:
         self.basis_settings = settings
-        self.data_shape = self.basis_settings.basis_shape
+        self.data_shape = self.basis_settings.basis_shape_active
 
         self.do_inv_det = not skip_inv_det
 
@@ -1195,7 +1195,7 @@ class SensitivityMatrixBase:
 
             else:
                 _flattened_arr = np.asarray(sens_mat, dtype=object).flatten()
-                _sens_mat = xp.zeros((num_components,) + self.basis_settings.basis_shape)
+                _sens_mat = xp.zeros((num_components,) + self.basis_settings.basis_shape_active)
                 for i, matrix_member in enumerate(_flattened_arr):
                     # calculate it
                     if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
@@ -1209,7 +1209,7 @@ class SensitivityMatrixBase:
                     else:
                         raise ValueError
             # setup in array form
-            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + self.basis_settings.basis_shape)
+            self._sens_mat = _sens_mat.reshape(tuple(outer_shape) + self.basis_settings.basis_shape_active)
 
         else:
             raise ValueError("Must input array or list.")
@@ -2097,7 +2097,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     def _fill_matrix(self, c00, c11, c22, c01, c02, c12):
         """Fill the full 3x3 sensitivity matrix from its 6 unique elements."""
         xp = self.xp
-        shape = self.basis_settings.basis_shape
+        shape = self.basis_settings.basis_shape_active
 
         # Reshape views (no copy)
         c00 = c00.reshape(shape)
@@ -2237,7 +2237,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         inverse_matrix = self._fill_matrix(i00, i11, i22, i01, i02, i12)
 
-        return inverse_matrix, det.reshape(self.basis_settings.basis_shape)
+        return inverse_matrix, det.reshape(self.basis_settings.basis_shape_active)
 
     def compute_inverse_det(self, matrix_in: np.ndarray | cp.ndarray) -> tuple:
         """

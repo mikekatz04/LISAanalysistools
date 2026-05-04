@@ -654,16 +654,14 @@ class AnalysisContainerArray:
             self.data_length = self.m * self.n
             self.end_shape = (self.m, self.n)
 
+        self.gpus = gpus
         if gpus is not None:
-            self.xp = cp
             if isinstance(gpus, list):
                 if len(gpus) > 1:
                     raise NotImplementedError
                 self.xp.cuda.runtime.setDevice(gpus[0])
             elif isinstance(gpus, int):
                 self.xp.cuda.runtime.setDevice(gpus)
-        else:
-            self.xp = xp = np
 
         ac_tmp = acs.flatten()[0]
         self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[: -len(ac_tmp.sens_mat.data_shape)]
@@ -693,17 +691,16 @@ class AnalysisContainerArray:
                 self.gpu_map[split] = 0
             self.split_map[split] = i
             self.linear_data_arr.append(
-                xp.zeros(
+                self.xp.zeros(
                     self.data_length * self.nchannels * len(split),
                     dtype=self.data_dtype,
                 )
             )
             self.linear_psd_arr.append(
-                xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=complex)
+                self.xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=complex)
             )
 
         self.num_acs = len(acs.flatten())
-        self.gpus = gpus
         self.reset_linear_data_arr()
         self.reset_linear_psd_arr()
 

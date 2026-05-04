@@ -35,6 +35,7 @@ from fastlisaresponse.tdionfly import GBTDIonTheFly
 from fastlisaresponse.tdiconfig import TDIConfig
 from lisatools.detector import DefaultOrbits
 from lisatools.utils.constants import *
+from lisatools.utils.utility import AET
 
 from lisatools.domains import WAVELET_DURATION, TDSignal, TDSettings, FDSignal, FDSettings, WDMSignal, WDMSettings, WDMLookupTable
 from fastlisaresponse.gbcomps import GBWDMComputations
@@ -44,7 +45,7 @@ force_backend = "cpu"
 xp = np if force_backend == "cpu" else cp
 orbits = DefaultOrbits(force_backend=force_backend)
 orbits.configure(linear_interp_setup=True)
-tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
+tdi_config = TDIConfig("1st generation", force_backend=force_backend)
 dt = 2.5
 Tobs = 2 * YRSID_SI
 
@@ -175,27 +176,6 @@ t_wdm = wdm_settings.t_arr
 # # plt.show()
 # # breakpoint()
 # plt.close()
-gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
-breakpoint()
-
-def get_quadratic_coefficients(p1, p2, p3):
-    """
-    Calculates coefficients a, b, c for y = ax^2 + bx + c
-    given three points (x1, y1), (x2, y2), (x3, y3).
-    """
-    x1, y1 = p1
-    x2, y2 = p2
-    x3, y3 = p3
-
-    # Common denominator for all coefficients
-    denom = (x1 - x2) * (x1 - x3) * (x2 - x3)
-
-    # Direct calculation of a, b, and c
-    a = (x1 * (y3 - y2) + x2 * (y1 - y3) + x3 * (y2 - y1)) / denom
-    b = (x1**2 * (y2 - y3) + x2**2 * (y3 - y1) + x3**2 * (y1 - y2)) / denom
-    c = (x1**2 * (x2 * y3 - x3 * y2) + x1 * (x3**2 * y2 - x2**2 * y3) + x2 * x3 * y1 * (x2 - x3)) / denom
-
-    return a, b, c
 
 num_bin = 1
 
@@ -206,22 +186,45 @@ tdi_t_arr = data_t_arr[keep]
 ind = int(3e-3 / wdm_settings.layer_df) + 3
 num = 10
 
-f_max = 30e-3
-f_min = 0.1e-3
+f_max = None  # 30e-3
+f_min = None  # 0.1e-3
 
 del wdm_settings
-wdm_settings = wdm_set = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, force_backend=force_backend)
-    
+_wdm_settings = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, force_backend=force_backend)
+t_min = None  # 20 * _wdm_settings.layer_dt
+t_max = None  # (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
+wdm_settings = wdm_set = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, max_time=t_max, min_time=t_min, force_backend=force_backend)
+t_ref = int(Nt / 2) * wdm_settings.layer_dt
+
+gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, t_ref, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
+
+template_fill = xp.zeros(3 * np.prod(wdm_settings.basis_shape), dtype=float)
+
+amp = np.full(num_bin, 1.0e-22)
+f0 = np.full(num_bin, 18.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
+fdot = np.full(num_bin, 1e-14)
+fddot = np.full(num_bin, 0.0)
+phi0 = np.full(num_bin, 0.0)
+inc = np.full(num_bin, np.pi / 3.)
+psi = np.full(num_bin, 0.0)
+lam = np.full(num_bin, 4.0982342019)
+beta = np.full(num_bin, 0.05)
+params = np.array([amp, f0, fdot, fddot, phi0, inc, psi, lam, beta]).T
+
+from lisatools.sensitivity import XYZ2SensitivityMatrix, AET1SensitivityMatrix
+from lisatools.detector import sangria, scirdv1
+from lisatools.datacontainer import DataResidualArray
+from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
+
+freqs = np.fft.rfftfreq(wdm_settings.N, wdm_settings.data_dt)
+fd_set = FDSettings(freqs.shape[0], freqs[1] - freqs[0])
+sens_mat_fd = AET1SensitivityMatrix(fd_set, model=scirdv1)
+sens_mat_wdm = AET1SensitivityMatrix(wdm_set, model=scirdv1)
+wdm_dat = DataResidualArray(WDMSignal(np.zeros((3,) + wdm_set.basis_shape), wdm_set))
+wdm_holder = AnalysisContainerArray([AnalysisContainer(wdm_dat, sens_mat_wdm)])
+
+gb_comps.fill_global_wdm(template_fill, params, wdm_holder, data_index=None)
 for i in range(0, num)[:1]:
-    amp = np.full(num_bin, 1.0e-22)
-    f0 = np.full(num_bin, 25.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
-    fdot = np.full(num_bin, 1e-14)
-    fddot = np.full(num_bin, 0.0)
-    phi0 = np.full(num_bin, 0.0)
-    inc = np.full(num_bin, np.pi / 3.)
-    psi = np.full(num_bin, 0.0)
-    lam = np.full(num_bin, 4.0982342019)
-    beta = np.full(num_bin, 0.25)
 
     t_ref = int(Nt / 2) * wdm_settings.layer_dt
     gb_gen = GBTDIonTheFly(
@@ -356,12 +359,6 @@ for i in range(0, num)[:1]:
     
     f_deriv = residual_frequency + tdi_frequency #  + layer_base_freq
 
-    ac, bc, cc, = get_quadratic_coefficients(
-        (gb_gen_down_1.t_arr.squeeze(), residual_phase_down), 
-        (gb_gen_deriv.t_arr.squeeze(), residual_phase_mid), 
-        (gb_gen_up_1.t_arr.squeeze(), residual_phase_up), 
-    )
-
     residual_fdot = 4 * (residual_phase_up - 2 * residual_phase_mid + residual_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
     # 4? from a 1 / 2**2 maybe?
     tdi_fdot = 4 * (tdi_phase_up - 2 * tdi_phase_mid + tdi_phase_down) / (deriv_delta_t ** 2) / (2 * np.pi)
@@ -382,13 +379,15 @@ for i in range(0, num)[:1]:
 
     # pi/2 PHASE SHIFT !!!!!!!!!!!!!!!!!!!!!!!!!
     phi_t = (tdi_phase_mid + ref_phase_mid)[0] + np.pi / 2. #  (np.angle(output_deriv.X).squeeze())# [:-2] # % (2 * np.pi)
-    freq_t = f_deriv.copy().squeeze()# [:-1]
-    fdot_t = fdot_deriv.copy().squeeze()# [:]
+    freq_t = f_deriv.copy().squeeze() # np.full_like(phi_t, f0[0])  # 
+    fdot_t = np.full_like(freq_t, fdot[0])  # 
     amp_t = np.abs(output_deriv.X).squeeze()# [:-2]
 
-    n_arr = xp.arange(wdm_settings.Nt)[1:-1]# [:-2]
+    n_arr = xp.arange(wdm_settings.Nt)[wdm_settings.active_slice_t][1:-1]
+    n_min = wdm_settings.ind_min_t
+    m_min = wdm_settings.ind_min_f
 
-    wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=1)
+    wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=2)
 
     gb_fill_wave = xp.zeros((wdm_set.Nf, wdm_set.Nt))
     keep_m = (m_layers >= 0) & (m_layers < wdm_settings.Nf)
@@ -460,19 +459,18 @@ for i in range(0, num)[:1]:
 # fd_from_wdm = wdm_from_fd.transform(fd_set)
 
 # td_from_td = wdm_from_fd.transform(fd_set)
+breakpoint()
+from copy import deepcopy
 
-from lisatools.sensitivity import XYZ2SensitivityMatrix
-from lisatools.detector import sangria, scirdv1
-from lisatools.datacontainer import DataResidualArray
-from lisatools.analysiscontainer import AnalysisContainer
+wdm_set_here = WDMSettings(wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt, min_freq=0.1e-3, max_freq=30e-3, min_time=20 * wdm_set.layer_dt, max_time = (wdm_set.Nt - 20) * wdm_set.layer_dt)
+fd_set_here = FDSettings(fd_set.N, fd_set.df, min_freq=0.1e-3, max_freq=30e-3)
+wdm_aet = DataResidualArray(WDMSignal(np.asarray(AET(*td.wdmtransform(wdm_set_here))), wdm_set_here))
+fd_aet = DataResidualArray(FDSignal(np.asarray(AET(*td.fft(fd_set_here, apply_dt=True))), fd_set_here))
 
-sens_mat_fd = XYZ2SensitivityMatrix(fd_set, model=scirdv1)
-sens_mat_wdm = XYZ2SensitivityMatrix(wdm_set, model=scirdv1)
-data_res_wdm = DataResidualArray(wdm_from_td, signal_domain=wdm_set)
-data_res_fd = DataResidualArray(fd_from_td, signal_domain=fd_set)
-
-analysis_wdm = AnalysisContainer(data_res_wdm, sens_mat_wdm)
-analysis_fd = AnalysisContainer(data_res_fd, sens_mat_fd)
+sens_mat_wdm_here = AET1SensitivityMatrix(wdm_set_here, model=scirdv1)
+sens_mat_fd_here = AET1SensitivityMatrix(fd_set_here, model=scirdv1)
+analysis_wdm = AnalysisContainer(wdm_aet, sens_mat_wdm_here)
+analysis_fd = AnalysisContainer(fd_aet, sens_mat_fd_here)
 ip_wdm = analysis_wdm.inner_product()
 ip_fd = analysis_fd.inner_product()
 breakpoint()
