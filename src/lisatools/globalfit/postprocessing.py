@@ -272,8 +272,10 @@ class BackendConsumer:
             ess: int (optional). Effective sample size
         """
         all_act = self.compute_auto_correlation_time(**act_kwargs)
-        max_act = int(max(np.max(act) for act in all_act.values()))
+        max_act = int(np.ceil(max(np.max(act) for act in all_act.values())))
         logger.debug(f"Thinning factor: {max_act}")
+
+        breakpoint()
 
         self._thinned_chains = {}
         self._thinned_inds = {}
@@ -348,7 +350,7 @@ class BackendConsumer:
         if branch is not None:
             if branch not in self.branches:
                 raise ValueError(f"Branch '{branch}' not found in backend.")
-            if branch not in self.transform_containers:
+            if branch not in self.transform_containers or self.transform_containers[branch] is None:
                 logger.warning(f"No TransformContainer found for branch '{branch}'. Returning input samples.")
                 return samples
             return self.transform_containers[branch].transform_base_parameters(samples)
@@ -540,6 +542,7 @@ _SETTINGS_TO_METADATA: Dict[str, str] = {
     "run_waveform_model_code_link": "waveform_model_code_link",
     "run_quality":                  "quality",
     "run_comment":                  "comment",
+    "submission_folder":            "submission_parent_folder"
 }
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
@@ -564,6 +567,7 @@ class RunMetadata:
     noise_model_code_link: str
     waveform_model: str
     waveform_model_code_link: str
+    submission_parent_folder: str
 
     # user-supplied — optional
     codename: str = "Erebor"
@@ -663,7 +667,15 @@ class RunMetadata:
         d.update(self._web_extras)
         return d
     
-
+    @property
+    def submission_folder(self) -> str:
+        """Return the full path to the submission folder for this run."""
+        
+        run_type, run_id = self.version.split("_")
+        return os.path.join(self.submission_parent_folder, run_type, run_id)
+        
+        #return os.path.join(self.submission_parent_folder, f"{self.codename}_v{self.version}")
+    
 class SubmissionWriter(BackendConsumer):
     """
     BackendConsumer subclass that produces L3C-compliant HDF5 submission files and JSON manifests.
@@ -674,11 +686,12 @@ class SubmissionWriter(BackendConsumer):
     def __init__(self, 
                  curr: CurrentInfoGlobalFit = None,
                  backend: HDFBackend | str = None,
+                 ess: int = 10000,
                  detection_criteria: DetectionCriteria = None):
 
         super().__init__(curr=curr, backend=backend)
 
-        self.samples, self.inds = self.process_samples(ess=10000, return_inds=True)
+        self.samples, self.inds = self.process_samples(ess=ess, return_inds=True)
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
 

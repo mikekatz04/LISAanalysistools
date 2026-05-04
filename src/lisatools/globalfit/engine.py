@@ -140,6 +140,7 @@ class GeneralSettings(Settings):
     run_version: Optional[str] = None
     run_contact: Optional[str] = None
     run_code_link: Optional[str] = None
+    submission_folder: Optional[str] = None
     run_input_data_link: Optional[str] = None
     run_input_reference: Optional[str] = None
     run_noise_model: Optional[str] = None
