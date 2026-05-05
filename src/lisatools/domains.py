@@ -279,14 +279,13 @@ class TDSignal(DomainBase, TDSettings):
             f"backend={self.backend_name.split('_')[-1]})"
         )
     
-    def fft(self, settings=None, window=None, apply_dt=True):
+    def fft(self, settings=None, window=None):
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         df = 1 / (self.N * self.dt)
 
-        factor = 1.0 if not apply_dt else self.dt
-        fd_arr = self.xp.fft.rfft(self.arr * window) * factor
+        fd_arr = self.xp.fft.rfft(self.arr * window) * self.dt
         if settings is not None:
             assert isinstance(settings, FDSettings)
             assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
@@ -352,7 +351,7 @@ class TDSignal(DomainBase, TDSettings):
         assert isinstance(settings, WDMSettings)
 
         # go to frequency domain then wavelets
-        return self.fft(settings=None, window=window, apply_dt=False).transform(settings)
+        return self.fft(settings=None, window=window).transform(settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
         if window is None:
@@ -364,7 +363,7 @@ class TDSignal(DomainBase, TDSettings):
             return self.settings.associated_class(self.arr * window, self.settings)
 
         elif isinstance(new_domain, FDSettings):
-            return self.fft(settings=new_domain, window=window, apply_dt=True)
+            return self.fft(settings=new_domain, window=window)
         
         elif isinstance(new_domain, STFTSettings):
 
@@ -558,7 +557,7 @@ class FDSignal(FDSettings, DomainBase):
         _arr = np.pad(arr, ((0, 0), (self.ind_min - 1, self.N - 1 - self.ind_max)), mode="constant", constant_values=0.0)
         return _arr
 
-    def ifft(self, settings=None, window=None, apply_dt=True):
+    def ifft(self, settings=None, window=None):
 
         arr_in = self.arr.copy()
         
@@ -569,9 +568,16 @@ class FDSignal(FDSettings, DomainBase):
         if window is None:
             window = self.xp.ones(arr_in.shape, dtype=float)
 
-        Tobs = 1 / self.df
-        factor = 1.0 if not apply_dt else self.dt
-        td_arr = self.xp.fft.irfft(arr_in * window) / factor
+        _tmp = self.xp.fft.irfft(arr_in * window)
+        
+        if settings is None:
+            Tobs = 1 / self.df
+            Nobs = _tmp.shape[-1]
+            dt = Tobs / Nobs
+            settings = TDSettings(Nobs, dt)
+
+        td_arr = _tmp / settings.dt
+        return TDSignal(td_arr, settings)
     
     def __repr__(self) -> str:
         return (
@@ -622,47 +628,15 @@ class FDSignal(FDSettings, DomainBase):
         m = self.xp.repeat(self.xp.arange(0, settings.Nf)[:, None], settings.Nt, axis=-1)
         n = self.xp.tile(self.xp.arange(settings.Nt), (settings.Nf, 1))
 
-        m_special = self.xp.repeat(self.xp.arange(0, settings.Nf + 1)[:, None], settings.Nt - 1, axis=-1)
+        m_special = self.xp.repeat(self.xp.arange(0, settings.Nf + 1)[:, None], settings.Nt, axis=-1)
         
         # removed zero frequency and mirrored
         # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
         k = settings.get_shift_map(m_special)
-        k = self.xp.concatenate([self.xp.zeros((k.shape[0], 1), dtype=int), k], axis=1)
-   
+        k[k < 0] = np.abs(k[k < 0])
+        k[(k > int(settings.N / 2))] = settings.N - k[(k > int(settings.N / 2))]
         base_window = (settings.window[:])
-        dc_window = (settings.dc_layer_window[:])
-        # TODO: check if this is right?!?!
-        max_freq_window = (settings.max_freq_layer_window[:])
-
-        if not is_psd:
-            # TODO: check this !!!
-            k[-1] -= 1
-            keep_dc_layer = (k[0] >= 0)
-            keep_dc_layer[0] = False
-            keep_nyquist_layer = (k[-1] < self.N - 1)
-            keep_nyquist_layer[0] = False
-
-            k_in = k.copy()
-
-            # this to make indexing work
-            k[0, ~keep_dc_layer] = 0
-            k[-1, ~keep_nyquist_layer] = 0
-
-            assert np.sum(keep_dc_layer) == int(settings.Nt / 2)
-            assert np.sum(keep_nyquist_layer) == int(settings.Nt / 2)
-
-            # multiply by  2 / settings.layer_df for forward transform
-            # forward transform for signals requires additional factor (2/Nf)
-            base_window *= 2 / settings.Nf
-            dc_window *= 2 / settings.Nf
-            max_freq_window *= 2 / settings.Nf
-
-        else:
-            k[:] = np.abs(k[:])
-            k[(k > self.N - 2)] = (self.N - 1) - (k[(k > self.N - 2)] - (self.N - 1))
-            dc_window[:] = base_window[:]
-            max_freq_window[:] = base_window[:]
-
+    
         arr_in = self.arr.copy()
         
         if self.ind_min != 0 or self.ind_max != self.N - 1:
@@ -671,12 +645,9 @@ class FDSignal(FDSettings, DomainBase):
 
         # it is 2 because the max frequency would be at 1, but it removes that (?)
         before_ifft = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
-        before_ifft = arr_in[:, k]
-
-        if not is_psd:
-            before_ifft[:, 0, ~keep_dc_layer] = 0.0
-            before_ifft[:, -1, ~keep_nyquist_layer] = 0.0
-            before_ifft[:, :, 0] = 0.0
+        # remove dt factor
+        # TODO: ADD CHECK that wdm data_dt is same as this fd dt
+        before_ifft = arr_in[:, k] / settings.data_dt
 
         before_ifft2 = before_ifft.copy()
 
@@ -690,9 +661,7 @@ class FDSignal(FDSettings, DomainBase):
             # max_freq_window *= 2 / settings.Nf
             
             tmp_arr = before_ifft[:, :, 1:]  # removes dc component for transforms
-            tmp_arr[:, 1:-1] *= (base_window[None, None, :]) ** 2  # remove factor of Nf over 2
-            tmp_arr[:, 0] *= (dc_window) ** 2  # remove factor of Nf over 2
-            tmp_arr[:, -1] *= (max_freq_window) ** 2  # remove factor of Nf over 2
+            tmp_arr[:] *= (base_window[None, None, :]) ** 2  # remove factor of Nf over 2
             psd_sum_tmp = tmp_arr.sum(axis=-1)  #  * self.df 
 
             psd_sum_tmp[1:-1] /= (2 * settings.Nt * settings.Nt)
@@ -708,34 +677,36 @@ class FDSignal(FDSettings, DomainBase):
             wdmpsd_out = wdmpsd[:, settings.active_slice_f, settings.active_slice_t]
             return wdmpsd_out
 
-        before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
-        before_ifft[:, 0, 1:] *= dc_window
-        before_ifft[:, -1, 1:] *= max_freq_window
-
-        after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
+        before_ifft[:] *= base_window[None, None, :]
+        
+        after_ifft = self.xp.fft.ifft(before_ifft, axis=-1) * before_ifft.shape[-1]  # same as Nt
         
         is_m_plus_n_even = (((m + n) % 2 == 0)) 
-        _new_arr = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
-
+        
         # TODO: fix this
 
         if self.backend.uses_cupy:
             # some issue with cupy and xp.real/imag
             cache = self.xp.fft.config.get_plan_cache()
             cache.clear()
-
-        _new_arr[:, is_m_plus_n_even] = self.xp.real(after_ifft[:, :-1][:, is_m_plus_n_even])
-        _new_arr[:, (~is_m_plus_n_even)] = (-1) ** (m[(~is_m_plus_n_even)]) * self.xp.imag(after_ifft[:, :-1][:, (~is_m_plus_n_even)])
         
-        # Robbie says this is okay
-        # TODO: fix this 
-        _new_arr[:, 0, 0::2] = self.xp.asarray(np.real(self.get(after_ifft[:, 0, 0::2]))) * np.sqrt(2.)
-        _new_arr[:, 0, 1::2] = self.xp.asarray(np.real(self.get(after_ifft[:, -1, 0::2]))) * np.sqrt(2.)
+        tmp_w_mn = self.xp.zeros((self.nchannels, settings.Nf + 1, settings.Nt), dtype=float)
+        kappa = 2 * np.sqrt(np.pi) / settings.Nf
+        m_here = np.concatenate([m, np.full((1, settings.Nt), settings.Nf)], axis=0)
+        n_here = np.concatenate([n, np.array([np.arange(settings.Nt)])], axis=0)
+        set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
+        tmp_w_mn[:, ~set_zero] = kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero]) * after_ifft[:, ~set_zero]))
+        
+        w_mn = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
+        w_mn[:, 1:] = tmp_w_mn[:, 1:-1]
+        w_mn[:, 0, 0::2] = tmp_w_mn[:, 0, 0::2] / np.sqrt(2.)
+        w_mn[:, 0, 1::2] = tmp_w_mn[:, settings.Nf, 0::2] / np.sqrt(2.)
 
-        if return_transpose_time_axis_first:
-            output = _new_arr[:, settings.active_slice_f, settings.active_slice_t].transpose(0, 2, 1).copy()
-        else:
-            output = _new_arr[:, settings.active_slice_f, settings.active_slice_t]
+        # if return_transpose_time_axis_first:
+        #     output = w_mn[:, settings.active_slice_f, settings.active_slice_t].transpose(0, 2, 1).copy()
+        # else:
+        
+        output = w_mn[:, settings.active_slice_f, settings.active_slice_t]
 
         return WDMSignal(output, settings=settings)
 
@@ -747,7 +718,7 @@ class FDSignal(FDSettings, DomainBase):
             return self.settings.associated_class(self.arr * window, self.settings)
 
         elif isinstance(new_domain, TDSettings):
-            return self.ifft(settings=new_domain, window=window, apply_dt=True)
+            return self.ifft(settings=new_domain, window=window)
         
         elif isinstance(new_domain, STFTSettings):
             raise NotImplementedError
@@ -1218,9 +1189,7 @@ class WDMSettings(DomainSettingsBase):
         t0: float = 0.0,
         oversample: int = 16,
         window: Optional[np.ndarray] = None,
-        dc_layer_window: Optional[np.ndarray] = None,
-        max_freq_layer_window: Optional[np.ndarray] = None,
-        norm: Optional[float] = None, 
+        # norm: Optional[float] = None, 
         omega: Optional[np.ndarray] = None,
         min_freq: Optional[float] = None,
         max_freq: Optional[float] = None,
@@ -1254,17 +1223,13 @@ class WDMSettings(DomainSettingsBase):
         if window is None:
             self.setup_window()
         else:
-            assert norm is not None, "Must provide norm if providing window."
+            # assert norm is not None, "Must provide norm if providing window."
             assert omega is not None, "Must provide omega if providing window."
-            assert dc_layer_window is not None, "Must provide dc_layer_window if providing window."
-            assert max_freq_layer_window is not None, "Must provide max_freq_layer_window if providing window."
-            assert len(window) == self.Nt - 1
+            assert len(window) == self.Nt
             self.window = window
-            self.dc_layer_window = dc_layer_window
-            self.max_freq_layer_window = max_freq_layer_window
-            self.norm = norm
+            # self.norm = norm
             self.omega = omega
-
+    
     @staticmethod
     def adjust_to_even_bins(t_min: float, t_max: float, dt: float, Tobs: float, num_linspace: Optional[int]=1000, verbose: Optional[bool] = False) -> Tuple[int, int, float]:
         Nf = -1
@@ -1363,6 +1328,15 @@ class WDMSettings(DomainSettingsBase):
         z[(np.abs(omega) < A)] = insDOM
         #breakpoint()
         return z
+    
+    def get_Cmn(self, m: np.array[int], n: np.array[int]) -> np.array[int]:
+        m_in = self.xp.atleast_1d(m)    
+        n_in = self.xp.atleast_1d(n)    
+        output = np.zeros(m_in.shape, dtype=complex)
+        is_even = ((m_in + n_in) % 2) == 0
+        output[is_even] = 1.0
+        output[~is_even] = 1j
+        return output
 
     def wavelet(self, N: int, in_fd: Optional[bool] = True) -> np.ndarray:
         raise NotImplementedError
@@ -1396,7 +1370,7 @@ class WDMSettings(DomainSettingsBase):
         else:
             raise ValueError("m must be 1D or 2D array.")
 
-        return m_in * int(self.Nt / 2) + self.xp.arange( -int(self.Nt / 2) + 1,  int(self.Nt / 2))[None, :]
+        return m_in * int(self.Nt / 2) + self.xp.arange(-int(self.Nt / 2),  int(self.Nt / 2))[None, :]
         
     # def window_norm(self) -> float:
     #     dOmega_s = np.pi / self.Nf
@@ -1410,23 +1384,17 @@ class WDMSettings(DomainSettingsBase):
         # IMAG(DX,0) =  0.0
         T = self.data_dt * self.N
         dOmega_s = np.pi / self.Nf
-        self.omega = omega =  2 * np.pi / self.N * (self.xp.arange(self.Nt - 1) - int(self.Nt / 2) + 1)
+        self.omega = omega =  2 * np.pi / self.N * (self.xp.arange(-int(self.Nt / 2),  int(self.Nt / 2)))
         phif = self.phitilde(omega, dOmega_s)
-        self.norm = np.sqrt((np.sum(phif ** 2)) * 2. / self.N)
-        self.window = phif / self.norm
+        self.window = phif
+
+        # 2 * sqrt(pi) / Nf
 
         # we apply this outside the window setup so the window is the same for forward and backward
         # if forward:
         #     self.window *= 2. / self.Nf
 
         assert 0.0 in omega
-
-        self.ind_middle = self.xp.argwhere(omega == 0.0).squeeze().item()
-
-        self.dc_layer_window = self.window.copy()
-        self.dc_layer_window[self.ind_middle] /= 2.0
-        self.max_freq_layer_window = self.window.copy()
-        self.max_freq_layer_window[self.ind_middle] /= 2.0
 
     @property
     def min_freq(self) -> float:
@@ -1574,9 +1542,7 @@ class WDMSettings(DomainSettingsBase):
         return dict(
             oversample=self.oversample, 
             window=self.window, 
-            dc_layer_window=self.dc_layer_window,
-            max_freq_layer_window=self.max_freq_layer_window,
-            norm=self.norm, 
+            # norm=self.norm, 
             omega=self.omega, 
             min_freq=self.min_freq, 
             max_freq=self.max_freq, 
@@ -1616,6 +1582,18 @@ class WDMSettings(DomainSettingsBase):
 
 
 class WDMSignal(WDMSettings, DomainBase):
+
+    # TEST back and forth
+    # tmp_dat = np.zeros(wdm_set.N)
+    # tmp_dat[0] = 1.0
+    # _frq = np.fft.rfftfreq(wdm_set.N, wdm_set.data_dt)
+    # tmp_dat_td = TDSignal(tmp_dat, TDSettings(wdm_set.N, wdm_set.data_dt))
+    # tmp_dat_fd = tmp_dat_td.fft(FDSettings(_frq.shape[0], _frq[1] - _frq[0]))
+    # tmp_dat_check_fd = tmp_dat_fd.wdmtransform(wdm_set).wdm_to_fd(tmp_dat_fd.settings)
+    # tmp_dat_check_td = tmp_dat_td.wdmtransform(wdm_set).wdm_to_td()
+    # assert np.allclose((_tmp := tmp_dat_check_td[:, 0]), np.ones_like(_tmp))
+    # assert np.allclose((_tmp := tmp_dat_check_td[:, 1:]), np.zeros_like(_tmp))
+
     def __init__(self, arr, settings: WDMSettings):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
@@ -1648,7 +1626,10 @@ class WDMSignal(WDMSettings, DomainBase):
             f"NT={self.NT}, NF={self.NF}, oversample={self.oversample}, "
             f"backend={self.backend_name.split('_')[-1]})"
         )
-
+    
+    def wdm_to_td(self, settings=None, window=None):
+        return self.wdm_to_fd(settings=None).ifft(settings=settings, window=window)
+    
     def wdm_to_fd(self, settings=None, window=None):
         
         if settings is None:
@@ -1668,75 +1649,45 @@ class WDMSignal(WDMSettings, DomainBase):
         m = self.xp.repeat(self.xp.arange(0, self.Nf)[:, None], self.Nt, axis=-1)
         n = self.xp.tile(self.xp.arange(self.Nt), (self.Nf, 1))
 
-        m_special = self.xp.repeat(self.xp.arange(0, self.Nf + 1)[:, None], self.Nt - 1, axis=-1)
+        m_special = self.xp.repeat(self.xp.arange(0, self.Nf + 1)[:, None], self.Nt, axis=-1)
         
-        _new_arr = self.arr.copy()
+        tmp_w_mn = self.xp.zeros((self.nchannels, self.Nf + 1, self.Nt))
+        tmp_w_mn[:, 1:-1] = self.arr[:, 1:]
+        
+        # dc layer
+        tmp_w_mn[:, 0, 0::2] = self.arr[:, 0, 0::2] * np.sqrt(2)
+        # max freq layer
+        tmp_w_mn[:, self.Nf, 0::2] = self.arr[:, 0, 1::2] * np.sqrt(2)
 
-
+        lambda_coef = np.sqrt(np.pi)  #  / self.data_dt
+        
         # we are going to try to write this as the reverse of the forward
-       
-        after_ifft = self.xp.zeros((self.nchannels, self.Nf + 1, self.Nt), dtype=complex)
-
-        is_m_plus_n_even = (((m + n) % 2 == 0))[None, :]
-        # _new_arr = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
-        # _new_arr[:, is_m_plus_n_even] = self.xp.real(after_ifft)[:, :-1][:, is_m_plus_n_even]
-        # _new_arr[:, (~is_m_plus_n_even)] = (-1) ** (m[(~is_m_plus_n_even)]) * self.xp.imag(after_ifft)[:, :-1][:, (~is_m_plus_n_even)]
+        m_here = self.xp.concatenate([m, self.xp.full((1, self.Nt), self.Nf)], axis=0)
+        n_here = self.xp.concatenate([n, self.xp.array([self.xp.arange(self.Nt)])], axis=0)
         
-        # # Robbie says this is okay
-        # _new_arr[:, 0, 0::2] = np.real(after_ifft[:, 0, 0::2]) * np.sqrt(2.)
-        # _new_arr[:, 0, 1::2] = np.real(after_ifft[:, -1, 0::2]) * np.sqrt(2.)
-        _n_arr = np.arange(0, self.Nt)
-        after_ifft[:, 1:-1] = (_new_arr[:, 1:] * (is_m_plus_n_even[:, 1:])) + (1j * _new_arr[:, 1:] * (~is_m_plus_n_even[:, 1:]) * (-1.) ** (-m[None, 1:]))
-        after_ifft[:, 0, :] = _new_arr[:, 0, ((2 * _n_arr) % self.Nt)] / np.sqrt(2.)
-        after_ifft[:, -1, :] = _new_arr[:, 0, ((2 * _n_arr) % self.Nt) + 1] / np.sqrt(2.)
+        arr_fd = self.xp.zeros((self.nchannels, settings.N), dtype=complex)
+        g_arr = tmp_w_mn * self.get_Cmn(m_here, n_here) * (-1) ** ((m_here + 1) * n_here) 
+
+        W_m = self.xp.fft.ifft(g_arr, axis=-1)
         
-        before_ifft = self.xp.fft.fft(after_ifft, axis=-1)
-
-        # leave out 2 / self.layer_df for reverse transform
-        base_window = self.window[:]  # * 2 / self.layer_df  
-        dc_window = self.dc_layer_window  # * 2 / self.layer_df
-        # TODO: check if this is right?!?!
-        max_freq_window = self.max_freq_layer_window  # * 2 / settings.layer_df
+        v = lambda_coef * base_window * W_m
         
-        back_before_ifft = before_ifft.copy()
-        
-        keep_roll = ((_x := np.arange(self.Nf + 1)) % 2 == 0) & (_x != 0) & (_x != self.Nf)
-        # roll ifft
-        before_ifft[:, keep_roll] = np.roll(before_ifft[:, keep_roll], self.Nthalf, axis=-1)
-        before_ifft[:, 1:-1, 1:] *= base_window[None, None, :]
-        before_ifft[:, 1:-1, 0] = 0.0  # set DC component to zero
-
-        # dc window
-        fft_result_keep_dc = (np.arange(self.Nt) % self.Nt)[0::2]
-        window_keep_dc = base_window[self.Nthalf - 1:]  # right half of window
-        before_ifft[:, 0, fft_result_keep_dc] *= window_keep_dc
-
-        # nyquist window
-        fft_result_keep_ny = (np.arange(self.Nt + 1) % self.Nt)[0::2][1:]
-        window_keep_ny = base_window[:self.Nthalf]  # left half of window
-        before_ifft[:, -1, fft_result_keep_ny] *= window_keep_ny
-
-        # before_ifft = self.arr[:, k]
-        output_arr = self.xp.zeros((self.nchannels, settings.N), dtype=complex)
-
         k = self.get_shift_map(m_special)
-        k = self.xp.concatenate([-self.xp.ones((k.shape[0], 1), dtype=int), k], axis=1)
         
-        # to match Robbie/Tyson implementation
-        fft_result_keep_ny = (np.arange(self.Nt + 1) % self.Nt)[0::2][1:]
-        k[0] = -1
-        k[0, 0::2] = np.arange(self.Nthalf)
+        k_even_m = k[0::2]
+        k_odd_m = k[1::2]
+        
+        # for checking, but slow so commenting out
+        # assert np.unique(k_even_m).shape[0] == np.prod(k_even_m.shape)
+        # assert np.unique(k_odd_m).shape[0] == np.prod(k_odd_m.shape)
+        keep_k_even = (k_even_m >= 0) & (k_even_m < settings.N)
+        keep_k_odd = (k_odd_m >= 0) & (k_odd_m < settings.N)
+        arr_fd[:, k_even_m[keep_k_even]] += v[:, 0::2][:, keep_k_even]
+        arr_fd[:, k_odd_m[keep_k_odd]] += v[:, 1::2][:, keep_k_odd]
 
-        k[-1] = -1
-        k[-1, 0::2] = np.roll(np.arange(settings.N - self.Nthalf, settings.N), 1)
-
-        # TODO: vectorize
-        for j in range(self.nchannels):
-            for k_i, val in zip(k.flatten(), before_ifft[j].flatten()):
-                if k_i >= 0 and k_i < settings.N:
-                    output_arr[j, k_i] += val
-
-        return FDSignal(output_arr, settings)
+        # add dt factor for units
+        arr_fd *= self.data_dt
+        return FDSignal(arr_fd, settings)
         breakpoint()
         prefactors = self.xp.zeros((self.nchannels, self.Nf + 1, self.Nt), dtype=complex)
         is_m_plus_n_even = (((m + n) % 2 == 0))[None, :]
@@ -1771,13 +1722,13 @@ class WDMSignal(WDMSettings, DomainBase):
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         if isinstance(new_domain, TDSettings):
-            return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window, apply_dt=False)
+            return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window)
         
         elif isinstance(new_domain, FDSettings):
             return self.wdm_to_fd(settings=new_domain, window=window)
 
         elif isinstance(new_domain, STFTSettings):
-            return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None, apply_dt=False).stft(settings=new_domain, window=window)
+            return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None).stft(settings=new_domain, window=window)
         
         elif isinstance(new_domain, WDMSettings):
             if new_domain == self.settings:

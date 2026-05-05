@@ -194,6 +194,20 @@ _wdm_settings = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, force_ba
 t_min = None  # 20 * _wdm_settings.layer_dt
 t_max = None  # (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
 wdm_settings = wdm_set = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, max_time=t_max, min_time=t_min, force_backend=force_backend)
+
+tmp_dat = np.zeros(wdm_set.N)
+tmp_dat[0] = 1.0
+_frq = np.fft.rfftfreq(wdm_set.N, wdm_set.data_dt)
+tmp_dat_td = TDSignal(tmp_dat, TDSettings(wdm_set.N, wdm_set.data_dt))
+tmp_dat_fd = tmp_dat_td.fft(FDSettings(_frq.shape[0], _frq[1] - _frq[0]))
+check_1 = tmp_dat_td.fft().ifft()
+tmp_dat_check_td_1 = tmp_dat_fd.wdmtransform(wdm_set).wdm_to_fd(tmp_dat_fd.settings).ifft()
+tmp_dat_check_td = tmp_dat_td.wdmtransform(wdm_set).wdm_to_td()
+breakpoint()
+assert np.allclose((_tmp := tmp_dat_check_td[:, 0]), np.ones_like(_tmp))
+assert np.allclose((_tmp := tmp_dat_check_td[:, 1:]), np.zeros_like(_tmp))
+breakpoint()
+
 t_ref = int(Nt / 2) * wdm_settings.layer_dt
 
 gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, t_ref, orbits=orbits, tdi_config=tdi_config, force_backend=force_backend)
@@ -461,6 +475,12 @@ for i in range(0, num)[:1]:
 # td_from_td = wdm_from_fd.transform(fd_set)
 breakpoint()
 from copy import deepcopy
+
+tmp_dat = np.zeros(wdm_set.N)
+tmp_dat[0] = 1.0
+_frq = np.fft.rfftfreq(wdm_set.N, wdm_set.data_dt)
+tmp_dat_fd = TDSignal(tmp_dat, TDSettings(wdm_set.N, wdm_set.data_dt)).fft(FDSettings(_frq.shape[0], _frq[1] - _frq[0]))
+tmp_dat_check_fd = tmp_dat_fd.wdmtransform(wdm_set).wdm_to_fd(tmp_dat_fd.settings)
 
 wdm_set_here = WDMSettings(wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt, min_freq=0.1e-3, max_freq=30e-3, min_time=20 * wdm_set.layer_dt, max_time = (wdm_set.Nt - 20) * wdm_set.layer_dt)
 fd_set_here = FDSettings(fd_set.N, fd_set.df, min_freq=0.1e-3, max_freq=30e-3)
