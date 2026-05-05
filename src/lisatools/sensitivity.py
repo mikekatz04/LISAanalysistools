@@ -1199,12 +1199,21 @@ class SensitivityMatrixBase:
                 for i, matrix_member in enumerate(_flattened_arr):
                     # calculate it
                     if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
-                        _sens_mat[i, :] = get_sensitivity(
-                            self.basis_settings,
-                            *self.sens_args,
-                            sens_fn=matrix_member,
-                            **self.sens_kwargs.flatten()[i],
-                        )
+                        try:
+                            _sens_mat[i, :] = get_sensitivity(
+                                self.basis_settings,
+                                *self.sens_args,
+                                sens_fn=matrix_member,
+                                **self.sens_kwargs.flatten()[i],
+                            )
+                        except ValueError:
+                            breakpoint()
+                            _sens_mat[i, :] = get_sensitivity(
+                                self.basis_settings,
+                                *self.sens_args,
+                                sens_fn=matrix_member,
+                                **self.sens_kwargs.flatten()[i],
+                            )
 
                     else:
                         raise ValueError
@@ -1701,11 +1710,16 @@ def get_sensitivity(
         # f2 = integrand[:, :, 2]
         # PSD = simpson_3_integral = h*(f0 + 4.0*f1 + f2)/6.0
         # 0.25 is fudge factor from tysons code
-        f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
-        psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
+        # f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
+        # psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
         
-        psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
-        PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
+        # psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
+        # PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
+        f_c = basis_settings.f_arr
+
+        # STATIONARY
+        PSD_layer = 1 / 2 * sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
+        PSD = xp.repeat(PSD_layer[:, None], basis_settings.Nt_active, axis=-1)
 
     else:
         raise ValueError(

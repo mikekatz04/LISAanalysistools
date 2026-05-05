@@ -1410,6 +1410,8 @@ class WDMSettings(DomainSettingsBase):
         self.min_freq_input = value
         if value is not None:
             self.ind_min_f = int(np.ceil(value / self.layer_df))
+            if self.ind_min_f < 0:
+                self.ind_min_f = 0
         else:
             self.ind_min_f = 0
         self._min_freq = self.ind_min_f * self.layer_df
@@ -1428,6 +1430,8 @@ class WDMSettings(DomainSettingsBase):
         self.max_freq_input = value
         if value is not None:
             self.ind_max_f = int(value / self.layer_df)
+            if self.ind_max_f > (self.Nf - 1):
+                self.ind_max_f = (self.Nf - 1)
         else:
             self.ind_max_f = (self.Nf - 1)
         self._max_freq = self.ind_max_f * self.layer_df
@@ -1447,6 +1451,8 @@ class WDMSettings(DomainSettingsBase):
 
         if value is not None:
             self.ind_min_t = int(np.ceil(value / self.layer_dt))
+            if self.ind_min_t < 0:
+                self.ind_min_t = 0
         else:
             self.ind_min_t = 0
         self._min_time = self.ind_min_t * self.layer_dt
@@ -1465,8 +1471,11 @@ class WDMSettings(DomainSettingsBase):
         self.max_time_input = value
         if value is not None:
             self.ind_max_t = int(value / self.layer_dt)
+            if self.ind_max_t > (self.Nt - 1):
+                self.ind_max_t = (self.Nt - 1)
         else:
             self.ind_max_t = (self.Nt - 1)
+
         self._max_time = self.ind_max_t * self.layer_dt
 
     @property
@@ -1557,7 +1566,7 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def differential_component(self) -> float:
-        return 1.0
+        return 1. / (self.N * self.data_dt)  # df
 
     @property
     def total_terms(self) -> int:
@@ -1589,8 +1598,10 @@ class WDMSignal(WDMSettings, DomainBase):
     # _frq = np.fft.rfftfreq(wdm_set.N, wdm_set.data_dt)
     # tmp_dat_td = TDSignal(tmp_dat, TDSettings(wdm_set.N, wdm_set.data_dt))
     # tmp_dat_fd = tmp_dat_td.fft(FDSettings(_frq.shape[0], _frq[1] - _frq[0]))
-    # tmp_dat_check_fd = tmp_dat_fd.wdmtransform(wdm_set).wdm_to_fd(tmp_dat_fd.settings)
+    # check_1 = tmp_dat_td.fft().ifft()
+    # tmp_dat_check_td_1 = tmp_dat_fd.wdmtransform(wdm_set).wdm_to_fd(tmp_dat_fd.settings).ifft()
     # tmp_dat_check_td = tmp_dat_td.wdmtransform(wdm_set).wdm_to_td()
+
     # assert np.allclose((_tmp := tmp_dat_check_td[:, 0]), np.ones_like(_tmp))
     # assert np.allclose((_tmp := tmp_dat_check_td[:, 1:]), np.zeros_like(_tmp))
 
@@ -1660,7 +1671,7 @@ class WDMSignal(WDMSettings, DomainBase):
         tmp_w_mn[:, self.Nf, 0::2] = self.arr[:, 0, 1::2] * np.sqrt(2)
 
         lambda_coef = np.sqrt(np.pi)  #  / self.data_dt
-        
+
         # we are going to try to write this as the reverse of the forward
         m_here = self.xp.concatenate([m, self.xp.full((1, self.Nt), self.Nf)], axis=0)
         n_here = self.xp.concatenate([n, self.xp.array([self.xp.arange(self.Nt)])], axis=0)
