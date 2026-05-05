@@ -357,7 +357,7 @@ class BackendConsumer:
         
         transformed = {}
         for b, s in samples.items():
-            if b in self.transform_containers:
+            if b in self.transform_containers and self.transform_containers[b] is not None:
                 transformed[b] = self.transform_containers[b].transform_base_parameters(s)
             else:
                 logger.warning(f"No TransformContainer found for branch '{b}'. Returning input samples for this branch.")
@@ -542,7 +542,7 @@ _SETTINGS_TO_METADATA: Dict[str, str] = {
     "run_waveform_model_code_link": "waveform_model_code_link",
     "run_quality":                  "quality",
     "run_comment":                  "comment",
-    "submission_folder":            "submission_parent_folder"
+    "submission_folder":            "submission_parent_folder",
 }
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────

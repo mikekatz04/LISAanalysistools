@@ -32,7 +32,7 @@ from .moves import GFCombineMove, GlobalFitMove
 from .recipe import Recipe
 from .state import GFState
 from .utils import BasicResidualacsLikelihood
-from .postprocessing import SubmissionWriter
+from .postprocessing import SubmissionWriter, RunMetadata
 
 
 class CurrentInfoGlobalFit:
@@ -707,6 +707,9 @@ class GlobalFit:
                 state.log_like
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
+
+            breakpoint()
+            rm = RunMetadata.from_curr(self.curr)
 
             sampler_mix.run_mcmc(state, 20, thin_by=1, progress=True, store=True)
 
