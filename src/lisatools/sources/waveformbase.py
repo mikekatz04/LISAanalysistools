@@ -482,6 +482,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         t0_here = times_in[0]
         dt_here = self.dt #float(times_in[2] - times_in[0])
+        
 
         if output_domain == "TD":
             return TDSignal(
@@ -806,6 +807,76 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         return shifted_t_arr, tdis
 
+
+    def _apply_response_batch(
+        self,
+        t_arr: np.ndarray | cp.ndarray,
+        h_plus: np.ndarray | cp.ndarray,
+        h_cross: np.ndarray | cp.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Apply the TDI response to a batch of sources.
+
+        Args:
+            t_arr: Time array relative to zero (output of wave_gen_batch), shape (Nbatch, Ntimes).
+            h_plus: Plus polarization, shape (Nbatch, Ntimes).
+            h_cross: Cross polarization, shape (Nbatch, Ntimes).
+            ra: Right ascension in radians, shape (Nbatch,).
+            dec: Declination in radians, shape (Nbatch,).
+            merger_time: Time of merger in seconds (relative to waveform_t0), shape (Nbatch,).
+
+        Returns:
+            Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
+        """
+        
+        shifted_t_arr = t_arr + merger_time[:, None] + self.waveform_t0
+        # add 500 seconds to the end to prevent problems with the response
+
+        # pad both sides with zeros by num_pad
+        num_pad = int(self.buffer_time / self.dt)
+
+        pad_idx = self.xp.arange(1, num_pad + 1)[None, :]
+        shifted_t_arr = self.xp.concatenate(
+            [
+                shifted_t_arr[:, 0:1] - self.dt * pad_idx,
+                shifted_t_arr,
+                shifted_t_arr[:, -1:] + self.dt * pad_idx,
+            ],
+            axis=-1,
+        )
+
+        h_plus = self.xp.pad(h_plus, ((0, 0), (num_pad, num_pad)), mode="edge")
+        h_cross = self.xp.pad(h_cross, ((0, 0), (num_pad, num_pad)), mode="edge")
+
+        self.response.num_pts = shifted_t_arr.shape[-1]
+
+        strain = h_plus + 1j * h_cross
+
+        self.response.get_projections(
+            strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
+        )
+
+        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)).transpose(1, 0, 2)  # (Nbatch, num_channels, Ntimes)
+
+        tdis = tdis[:, :, num_pad:-num_pad]
+        shifted_t_arr = shifted_t_arr[:, num_pad:-num_pad]
+
+        t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
+        shifted_t_arr += t_arr_shift[:, None]
+
+        start_inds = self.xp.maximum(
+            0, self.xp.rint((self.data_t0 - shifted_t_arr[:, 0]) / self.dt).astype(int)
+        )
+        start_ind = int(start_inds.max())
+
+        if start_ind > 0:
+            shifted_t_arr = shifted_t_arr[:, start_ind:]
+            tdis = tdis[:, :, start_ind:]
+
+        return shifted_t_arr, tdis
+
     def _call_single(
         self,
         *args,
@@ -838,26 +909,28 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         """
         times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, ra, dec, merger_time, **kwargs)
 
-        Nbatch = times_batch.shape[0]
+        # Nbatch = times_batch.shape[0]
 
-        all_times = []
-        all_channels = []
+        # all_times = []
+        # all_channels = []
 
-        for i in range(Nbatch):
+        # for i in range(Nbatch):
 
-            times_i, channels_i = self._apply_response_single(
-                times_batch[i],
-                hplus_batch[i],
-                hcross_batch[i],
-                float(ra[i]),
-                float(dec[i]),
-                float(merger_time[i]),
-            )
+        #     times_i, channels_i = self._apply_response_single(
+        #         times_batch[i],
+        #         hplus_batch[i],
+        #         hcross_batch[i],
+        #         float(ra[i]),
+        #         float(dec[i]),
+        #         float(merger_time[i]),
+        #     )
 
-            all_times.append(times_i)
-            all_channels.append(channels_i)
+        #     all_times.append(times_i)
+        #     all_channels.append(channels_i)
 
-        return self.xp.stack(all_times), self.xp.stack(all_channels)
+        # return self.xp.stack(all_times), self.xp.stack(all_channels)
+
+        return self._apply_response_batch(times_batch, hplus_batch, hcross_batch, ra, dec, merger_time)
 
     def compute_tdi_channels(
         self,
