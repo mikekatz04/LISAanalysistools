@@ -171,7 +171,6 @@ def inner_product(
         # fix nan in first spot if it is there
         if inv_psd_tmp.ndim == 1:
             ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
-            inv_psd_tmp = inv_psd_tmp[ind_start:]
             sig_component_1 = temp1[ind_start:]
             sig_component_2 = temp2[ind_start:]
             inv_psd_component = inv_psd_tmp[ind_start:]
