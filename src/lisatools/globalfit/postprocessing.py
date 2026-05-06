@@ -108,8 +108,13 @@ def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
     return out
 
 def _seconds_to_l3c_datetime(t: float) -> str:
-    """Convert a UTC timestamp in seconds to the L3C format yyyy.mm.dd.hh.mm.ss."""
-    dt = datetime.fromtimestamp(t, tz=timezone.utc)
+    """Convert a UTC timestamp in seconds with respect to LISA_EPOCH_TCB to the L3C format yyyy.mm.dd.hh.mm.ss."""
+    from lisaconstants import LISA_EPOCH_TCB
+
+    format_str = "%Y-%m-%dT%H:%M:%S.%f"
+    lisa_epoch_seconds = datetime.strptime(LISA_EPOCH_TCB, format_str).timestamp()
+
+    dt = datetime.fromtimestamp(t + lisa_epoch_seconds, tz=timezone.utc)
     return dt.strftime("%Y.%m.%d.%H.%M.%S")
 
 
@@ -614,7 +619,7 @@ class RunMetadata:
         merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
 
         instance = cls(**merged)
-
+        breakpoint()
         instance.obs_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.effective_duration = _seconds_to_duration_str(gi.Tobs)
