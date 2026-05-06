@@ -411,8 +411,8 @@ for i in range(0, num)[:1]:
     gb_fill_wave[m_layers[keep_m], xp.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1)[keep_m]] = wdm_coeffs[keep_m]
     # gb_fill_wave[:] = xp.roll(gb_fill_wave, 2, axis=-1)
 
-    # gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
-    gb_fill_wave = WDMSignal(template_fill.reshape((3,) + wdm_settings.basis_shape), wdm_settings)
+    gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
+    # gb_fill_wave = WDMSignal(template_fill.reshape((3,) + wdm_settings.basis_shape), wdm_settings)
     
     # fdot_deriv = (phase_up - 2 * phase_mid + phase_up) / (deriv_delta_t * deriv_delta_t) / (2 * np.pi)
     plt.close()
