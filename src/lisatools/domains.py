@@ -633,55 +633,42 @@ class FDSignal(FDSettings, DomainBase):
         # removed zero frequency and mirrored
         # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
         k = settings.get_shift_map(m_special)
-        k[k < 0] = np.abs(k[k < 0])
-        k[(k > int(settings.N / 2))] = settings.N - k[(k > int(settings.N / 2))]
+        neg_k = (k < 0)
+        over_k = (k > int(settings.N / 2))
+        k[neg_k] = np.abs(k[neg_k])
+        k[over_k] = settings.N - k[over_k]
         base_window = (settings.window[:])
-    
+
         arr_in = self.arr.copy()
         
         if self.ind_min != 0 or self.ind_max != self.N - 1:
             warnings.warn("Doing an ifft with a trimmed frequency domain array. Zero-padding.")
             arr_in = self.pad_array(arr_in)
 
-        # it is 2 because the max frequency would be at 1, but it removes that (?)
-        before_ifft = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
-        # remove dt factor
-        # TODO: ADD CHECK that wdm data_dt is same as this fd dt
         before_ifft = arr_in[:, k] / settings.data_dt
 
-        before_ifft2 = before_ifft.copy()
+        if not is_psd:
+            herm = neg_k | over_k
+            if herm.any():
+                before_ifft[:, herm] = self.xp.conj(before_ifft[:, herm])
 
         if is_psd:
-            # eq. 19 in arxiv.org/pdf/2009.00043
-            # window is squared
-
-            # try this 
-            # base_window *= 2 / settings.Nf
-            # dc_window *= 2 / settings.Nf
-            # max_freq_window *= 2 / settings.Nf
-            
-            tmp_arr = before_ifft[:, :, 1:]  # removes dc component for transforms
-            tmp_arr[:] *= (base_window[None, None, :]) ** 2  # remove factor of Nf over 2
-            psd_sum_tmp = tmp_arr.sum(axis=-1)  #  * self.df 
-
-            psd_sum_tmp[1:-1] /= (2 * settings.Nt * settings.Nt)
-            psd_sum_tmp[0] /= (settings.Nt * settings.Nt)
-            psd_sum_tmp[-1] /= (settings.Nt * settings.Nt)
+            tmp_arr = before_ifft.copy()
+            tmp_arr[:] *= (base_window[None, None, :]) ** 2 * np.pi * settings.data_dt
+            psd_sum_tmp = tmp_arr.sum(axis=-1)
+            psd_sum_tmp /= settings.Nf * settings.Nt   # = N
 
             wdmpsd = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
 
             wdmpsd[:, 1:] = psd_sum_tmp[:, 1:settings.Nf, None]          # regular layers
             wdmpsd[:, 0, 0::2] = psd_sum_tmp[:, 0, None]           # DC at even rows
-            wdmpsd[:, 0, 1::2] = psd_sum_tmp[:, settings.Nf, None]  
-            
+            wdmpsd[:, 0, 1::2] = psd_sum_tmp[:, settings.Nf, None]
+
             wdmpsd_out = wdmpsd[:, settings.active_slice_f, settings.active_slice_t]
             return wdmpsd_out
 
         before_ifft[:] *= base_window[None, None, :]
-        
-        after_ifft = self.xp.fft.ifft(before_ifft, axis=-1) * before_ifft.shape[-1]  # same as Nt
-        
-        is_m_plus_n_even = (((m + n) % 2 == 0)) 
+        after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
         
         # TODO: fix this
 
@@ -691,11 +678,11 @@ class FDSignal(FDSettings, DomainBase):
             cache.clear()
         
         tmp_w_mn = self.xp.zeros((self.nchannels, settings.Nf + 1, settings.Nt), dtype=float)
-        kappa = 2 * np.sqrt(np.pi) / settings.Nf
+        kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
         m_here = np.concatenate([m, np.full((1, settings.Nt), settings.Nf)], axis=0)
         n_here = np.concatenate([n, np.array([np.arange(settings.Nt)])], axis=0)
         set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
-        tmp_w_mn[:, ~set_zero] = kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero]) * after_ifft[:, ~set_zero]))
+        tmp_w_mn[:, ~set_zero] = kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[:, ~set_zero])
         
         w_mn = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
         w_mn[:, 1:] = tmp_w_mn[:, 1:-1]
@@ -1177,7 +1164,7 @@ class STFTSignal(STFTSettings, DomainBase):
 
 WAVELET_BANDWIDTH = 6.51041666666667e-5
 WAVELET_DURATION = 7680.0
-WAVELET_FILTER_CONSTANT = 6
+WAVELET_FILTER_CONSTANT = 4
 
 
 class WDMSettings(DomainSettingsBase):
@@ -1218,7 +1205,7 @@ class WDMSettings(DomainSettingsBase):
 
         self.dOmega = 2 * np.pi * self.layer_df
         self.A = 0.0
-        self.WAVELET_FILTER_CONSTANT = 6  # window roll-off parameter
+        self.WAVELET_FILTER_CONSTANT = 4  # window roll-off parameter
         
         if window is None:
             self.setup_window()
@@ -1384,6 +1371,8 @@ class WDMSettings(DomainSettingsBase):
         # IMAG(DX,0) =  0.0
         T = self.data_dt * self.N
         dOmega_s = np.pi / self.Nf
+
+        self.A = dOmega_s / 4.0
         self.omega = omega =  2 * np.pi / self.N * (self.xp.arange(-int(self.Nt / 2),  int(self.Nt / 2)))
         phif = self.phitilde(omega, dOmega_s)
         self.window = phif
@@ -1566,7 +1555,7 @@ class WDMSettings(DomainSettingsBase):
     
     @property
     def differential_component(self) -> float:
-        return 1. / (self.N * self.data_dt)  # df
+        return 0.25
 
     @property
     def total_terms(self) -> int:
@@ -1670,19 +1659,18 @@ class WDMSignal(WDMSettings, DomainBase):
         # max freq layer
         tmp_w_mn[:, self.Nf, 0::2] = self.arr[:, 0, 1::2] * np.sqrt(2)
 
-        lambda_coef = np.sqrt(np.pi)  #  / self.data_dt
+        lambda_coef = np.sqrt(np.pi / self.data_dt)
 
-        # we are going to try to write this as the reverse of the forward
         m_here = self.xp.concatenate([m, self.xp.full((1, self.Nt), self.Nf)], axis=0)
         n_here = self.xp.concatenate([n, self.xp.array([self.xp.arange(self.Nt)])], axis=0)
-        
-        arr_fd = self.xp.zeros((self.nchannels, settings.N), dtype=complex)
-        g_arr = tmp_w_mn * self.get_Cmn(m_here, n_here) * (-1) ** ((m_here + 1) * n_here) 
 
-        W_m = self.xp.fft.ifft(g_arr, axis=-1)
-        
+        arr_fd = self.xp.zeros((self.nchannels, settings.N), dtype=complex)
+        g_arr = tmp_w_mn * self.get_Cmn(m_here, n_here) * (-1) ** ((m_here + 1) * n_here)
+
+        W_m = self.xp.fft.fft(g_arr, axis=-1)
+
         v = lambda_coef * base_window * W_m
-        
+
         k = self.get_shift_map(m_special)
         
         k_even_m = k[0::2]
