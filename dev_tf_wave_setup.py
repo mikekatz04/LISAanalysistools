@@ -476,8 +476,13 @@ for i in range(0, num)[:1]:
 
 from copy import deepcopy
 
-wdm_set_here = WDMSettings(wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt, min_freq=0.1e-3, max_freq=30e-3, min_time=0.0, max_time = 1e300)
-fd_set_here = FDSettings(fd_set.N, fd_set.df, min_freq=0.1e-3, max_freq=30e-3)
+min_freq = (int(f0[0] / wdm_set.layer_df) - 5) * wdm_set.layer_df
+max_freq = (int(f0[0] / wdm_set.layer_df) + 5) * wdm_set.layer_df
+t_min = 5 * _wdm_settings.layer_dt
+t_max = (_wdm_settings.Nt - 5) * _wdm_settings.layer_dt
+
+wdm_set_here = WDMSettings(wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt, min_freq=min_freq, max_freq=max_freq, min_time=t_min, max_time = t_max)
+fd_set_here = FDSettings(fd_set.N, fd_set.df, min_freq=min_freq, max_freq=max_freq)
 wdm_aet = DataResidualArray(WDMSignal(np.asarray(AET(*td.wdmtransform(wdm_set_here))), wdm_set_here))
 fd_aet = DataResidualArray(FDSignal(np.asarray(AET(*td.fft(fd_set_here))), fd_set_here))
 
