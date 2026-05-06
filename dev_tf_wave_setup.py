@@ -61,7 +61,7 @@ from lisatools.analysiscontainer import AnalysisContainer
 # breakpoint()
 tukey_alpha = 0.00
 
-store_path = "./wdm_lookup_test_8.h5"
+store_path = "./wdm_lookup_new_test_3.h5"
 if os.path.exists(store_path):
     wdm_lookup_table = WDMLookupTable.from_file(store_path, force_backend=force_backend)
     wdm_settings = WDMSettings(*wdm_lookup_table.args, **wdm_lookup_table.kwargs)
@@ -87,10 +87,10 @@ else:
     time_layers = wdm_settings.Nt
     td_window = xp.asarray(tukey(wdm_settings.Nf * time_layers, alpha=tukey_alpha))
     m_ref = int(3e-3 / wdm_settings.layer_df)
-    norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.01, wdm_settings, m_ref=m_ref, num_layers_diff=3)
-    fdot_vals = WDMLookupTable.apply_eps_fdot(0.01, wdm_settings, fdot_max_factor=1.0) 
+    norm_freq_single_layer, m_diffs, _ = WDMLookupTable.apply_eps_frequency(0.02, wdm_settings, m_ref=m_ref, num_layers_diff=3)
+    fdot_vals = np.array([0.0])  # WDMLookupTable.apply_eps_fdot(0.01, wdm_settings, fdot_max_factor=1.0) 
 
-    wdm_lookup_table = WDMLookupTable(wdm_settings, 3, norm_freq_single_layer=norm_freq_single_layer, m_diffs=m_diffs, fdot_vals=fdot_vals, m_ref=m_ref, time_layers=time_layers, batch_size_gen=1, td_window=td_window, store_path=store_path)
+    wdm_lookup_table = WDMLookupTable(wdm_settings, 3, norm_freq_single_layer=norm_freq_single_layer, m_diffs=m_diffs, fdot_vals=fdot_vals, m_ref=m_ref, time_layers=time_layers, batch_size_gen=5, td_window=td_window, store_path=store_path)
 
 # f_arr = xp.linspace(wdm_lookup_table.f_vals.min(), wdm_lookup_table.f_vals.max(), 100)
 #xp.random.uniform(wdm_settings.f_arr.min(), wdm_settings.f_arr.max(), 10)
@@ -191,8 +191,8 @@ f_min = None  # 0.1e-3
 
 del wdm_settings
 _wdm_settings = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, force_backend=force_backend)
-t_min = 20 * _wdm_settings.layer_dt
-t_max = (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
+t_min = None  # 20 * _wdm_settings.layer_dt
+t_max = None  # (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
 wdm_settings = wdm_set = WDMSettings(Nf, Nt, dt, max_freq=f_max, min_freq=f_min, max_time=t_max, min_time=t_min, force_backend=force_backend)
 
 # tmp_dat = np.zeros(wdm_set.N)
@@ -237,8 +237,9 @@ sens_mat_wdm = AET1SensitivityMatrix(wdm_set, model=scirdv1)
 wdm_dat = DataResidualArray(WDMSignal(np.zeros((3,) + wdm_set.basis_shape), wdm_set))
 wdm_holder = AnalysisContainerArray([AnalysisContainer(wdm_dat, sens_mat_wdm)])
 
-# gb_comps.fill_global_wdm(template_fill, params, wdm_holder, data_index=None)
+gb_comps.fill_global_wdm(template_fill, params, wdm_holder, data_index=None)
 for i in range(0, num)[:1]:
+    tmp_diff = 500.0
 
     t_ref = int(Nt / 2) * wdm_settings.layer_dt
     gb_gen = GBTDIonTheFly(
@@ -269,7 +270,7 @@ for i in range(0, num)[:1]:
     )
 
     gb_gen_down_1 = GBTDIonTheFly(
-        (t_td_wdm - 1e-5 * t_td_wdm[-1]), 
+        (t_td_wdm - tmp_diff),  # 1e-5 * t_td_wdm[-1]), 
         Tobs,
         t_ref,
         1. / dt,
@@ -282,7 +283,7 @@ for i in range(0, num)[:1]:
     )
 
     gb_gen_up_1 = GBTDIonTheFly(
-        (t_td_wdm + 1e-5 * t_td_wdm[-1]), 
+        (t_td_wdm + tmp_diff),  #  + 1e-5 * t_td_wdm[-1]), 
         Tobs,
         t_ref,
         1. / dt,
@@ -294,8 +295,10 @@ for i in range(0, num)[:1]:
         force_backend=force_backend,
     )
 
-    output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+    print("\n\n")
     output_deriv = gb_gen_deriv(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+    
+    output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
     output_down_1 = gb_gen_down_1(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
     output_up_1 = gb_gen_up_1(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
     
@@ -394,7 +397,7 @@ for i in range(0, num)[:1]:
     # pi/2 PHASE SHIFT !!!!!!!!!!!!!!!!!!!!!!!!!
     phi_t = (tdi_phase_mid + ref_phase_mid)[0] + np.pi / 2. #  (np.angle(output_deriv.X).squeeze())# [:-2] # % (2 * np.pi)
     freq_t = f_deriv.copy().squeeze() # np.full_like(phi_t, f0[0])  # 
-    fdot_t = np.full_like(freq_t, fdot[0])  # 
+    fdot_t = np.full_like(freq_t, 0.0)  # sfdot[0])  # 
     amp_t = np.abs(output_deriv.X).squeeze()# [:-2]
 
     n_arr = xp.arange(wdm_settings.Nt)[wdm_settings.active_slice_t][1:-1]
@@ -408,7 +411,8 @@ for i in range(0, num)[:1]:
     gb_fill_wave[m_layers[keep_m], xp.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1)[keep_m]] = wdm_coeffs[keep_m]
     # gb_fill_wave[:] = xp.roll(gb_fill_wave, 2, axis=-1)
 
-    gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
+    # gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
+    gb_fill_wave = WDMSignal(template_fill.reshape((3,) + wdm_settings.basis_shape), wdm_settings)
     
     # fdot_deriv = (phase_up - 2 * phase_mid + phase_up) / (deriv_delta_t * deriv_delta_t) / (2 * np.pi)
     plt.close()
@@ -441,11 +445,7 @@ for i in range(0, num)[:1]:
     cax1.set_ylabel("WDM Coeff")
     cax2.set_ylabel("log10(abs(delta))")
     # fig.savefig(f"wdm_check_3_alpha_{tukey_alpha}.png")
-    check1 = wdm_from_td[0, :, 10:-10]
-    check2 = gb_fill_wave[0, :, 10:-10]
-    keep = np.where(check2)
-    overlap = np.sum(check1 * check2) / np.sqrt(np.sum(check1 * check1) * np.sum(check2 * check2))
-
+    
     for cut in [1, 20, 100, 200, 500, 1000]:
         check3 = wdm_from_td[0, :, cut:-cut]
         check4 = gb_fill_wave[0, :, cut:-cut]
@@ -458,7 +458,7 @@ for i in range(0, num)[:1]:
     # fig.savefig(f"f0_{f0_check:.2e}_fdot_{fdot0_check:.2e}_phi0_{phi0:.2g}zoom_center.png")
     # plt.show()
     plt.close()
-    breakpoint()
+    # breakpoint()
 
     # breakpoint()
     # exit()

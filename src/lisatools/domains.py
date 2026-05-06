@@ -1832,6 +1832,7 @@ class WDMLookupTable(WDMSettings):
             g.attrs["m_ref"] = self.m_ref
             g.attrs["n_ref"] = self.n_ref
             g.attrs["nchannels"] = self.nchannels
+            breakpoint()
             g.create_dataset("table_sin", data=self.get(self.table_sin))
             g.create_dataset("table_cos", data=self.get(self.table_cos))
             g.create_dataset("fdot_vals", data=self.get(self.fdot_vals))
@@ -1980,7 +1981,7 @@ class WDMLookupTable(WDMSettings):
                 
                 wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
                 wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
-
+            
                 for m_i, m_diff in enumerate(m_diffs):
                     m_current = self.m_ref + m_diff
                     sin_coeff = wave_sin_wdm[:, self.m_ref - m_diff, self.n_ref] 
@@ -2009,7 +2010,7 @@ class WDMLookupTable(WDMSettings):
             
             self.table_sin = _table_sin
             self.table_cos = _table_cos
-
+            breakpoint()
             # freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
             # freqs_norm = self.f_ref - freqs
             if store_path is not None:
@@ -2115,7 +2116,6 @@ class WDMLookupTable(WDMSettings):
         
     def get_table_coeffs(self, f_norm: np.ndarray, fdot_arr: np.ndarray):
         # ms = (f_arr // self.layer_df).astype(int)
-
         if self.run_fdot:
             sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
             cos_coeffs = self.table_cos_interpolate(f_norm, fdot_arr)
@@ -2134,6 +2134,7 @@ class WDMLookupTable(WDMSettings):
         m_map = -self.xp.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
         is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
         for i, m_diff in enumerate(range(-num_m_layers, num_m_layers + 1)):
+
             ms_to_use = (ms + m_diff).astype(int)
             keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use < self.Nf)]
 
@@ -2145,8 +2146,7 @@ class WDMLookupTable(WDMSettings):
                 breakpoint()
             assert self.xp.all((fdot_arr[keep_now] >= self.fdot_vals.min()) & (fdot_arr[keep_now] <= self.fdot_vals.max()))
             f_norm = (f_arr[keep_now] - ms_to_use[keep_now] * self.layer_df)
-            m_diff = (f_norm / self.layer_df).astype(int)
-
+            
             _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_norm, fdot_arr[keep_now])
             is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0)) 
 
