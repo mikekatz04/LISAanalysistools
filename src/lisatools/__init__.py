@@ -32,13 +32,14 @@ from . import cutils, utils
 
 from gpubackendtools import get_backend, has_backend, get_first_backend
 from gpubackendtools import Globals
-from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend
+from .cutils import LISAToolsCpuBackend, LISAToolsCuda11xBackend, LISAToolsCuda12xBackend, LISAToolsCuda13xBackend
 
 
 add_backends = {
     "lisatools_cpu": LISAToolsCpuBackend,
     "lisatools_cuda11x": LISAToolsCuda11xBackend,
     "lisatools_cuda12x": LISAToolsCuda12xBackend,
+    "lisatools_cuda13x": LISAToolsCuda13xBackend,
 }
 
 Globals().backends_manager.add_backends(add_backends)
