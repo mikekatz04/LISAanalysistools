@@ -17,7 +17,7 @@ import logging
 
 from eryn.backends import HDFBackend as eryn_Backend
 from eryn.moves.tempering import make_ladder
-from eryn.prior import ProbDistContainer, uniform_dist
+from eryn.prior import ProbDistContainer, uniform_dist, log_uniform
 from eryn.state import State as ErynState
 from eryn.state import Branch as ErynBranch
 from eryn.utils import TransformContainer
@@ -230,12 +230,23 @@ def gpc_to_mpc(x):
     """
     return x * 1e3
 
+def mT_Q(M, Q):
+    """
+    Transform from total mass and mass ratio m1/m2 to m1 and m2.
+    """
+    m2 = M / (1 + Q)
+    m1 = Q * m2
+    assert np.all(m1 >= m2), "m1 should be the larger mass"
+    return m1, m2
+
 
 from bbhx.utils.transform import mT_q, LISA_to_SSB
 from eryn.moves import Move
 
 from ..hdfbackend import MBHHDFBackend
 from ..state import MBHState
+
+
 
 
 @dataclasses.dataclass
@@ -262,23 +273,9 @@ class MBHSetup(Setup):
 
     def init_sampling_info(self):
 
-        # input_basis = [
-        #     "logM",
-        #     "q",
-        #     "s1z",
-        #     "s2z",
-        #     "dist",
-        #     "phi_ref",
-        #     "cos_iota",
-        #     "lam",
-        #     "sin_beta",
-        #     "psi",
-        #     "t_ref",
-        # ]
-
         input_basis = [
             "logM",
-            "q",
+            "Q",
             "s1z",
             "s2z",
             "dist",
@@ -294,7 +291,7 @@ class MBHSetup(Setup):
 
             output_basis = [
                 "logM",
-                "q",
+                "Q",
                 "s1z",
                 "s2z",
                 "dist",
@@ -310,11 +307,10 @@ class MBHSetup(Setup):
 
             mbh_transform_fn_in = {
                 "logM": np.exp,
-                #"logq": np.exp,
                 "dist": gpc_to_mpc,
                 "cos_iota": np.arccos,
                 "sin_beta": np.arcsin,
-                ("logM", "q"): mT_q,
+                ("logM", "Q"): mT_Q,
                 ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
                 ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
             }
@@ -337,7 +333,7 @@ class MBHSetup(Setup):
         if self.priors is None:
             priors_mbh = {
                 "logM": uniform_dist(np.log(1e5), np.log(1e8)),
-                "q": uniform_dist(0.1, 0.999999999),
+                "Q": log_uniform(1., 10.),
                 "s1z": uniform_dist(-0.99999999, +0.99999999),
                 "s2z": uniform_dist(-0.99999999, +0.99999999),
                 "dist": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
