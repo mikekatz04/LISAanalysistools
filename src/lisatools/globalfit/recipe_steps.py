@@ -244,6 +244,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
 
     logM = np.log(m1 + m2)
     q = m2 / m1
+    Q = m1 / m2
     logq = np.log(q)
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
@@ -268,7 +269,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
     sin_beta_L = np.sin(beta_L)
 
-    return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
 
 
 def subtract_initial_signal(
