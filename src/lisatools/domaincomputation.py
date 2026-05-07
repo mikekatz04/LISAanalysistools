@@ -267,7 +267,6 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             start_times=start_times,
             **kwargs,
         )
-
         d_d_per_binary = self.d_d[data_index]
         like_out = -1.0 / 2.0 * (d_d_per_binary + h_h_out - 2 * d_h_out).real
         return like_out
@@ -423,7 +422,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
     @property
     def domain_args(self):
         return [
-            self.settings.N,
+            self.settings.N_active,
             self.num_channels,
             self.settings.min_freq,
             self.settings.max_freq,
