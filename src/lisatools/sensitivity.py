@@ -1955,7 +1955,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         else:
             self.window_normalization = 1.0
         
-        logger.info(f"Window normalization factor: {self.window_normalization}")
+        #logger.info(f"Window normalization factor: {self.window_normalization}")
         
     def _init_basis_settings(self):
         """Initialize basis settings from domain settings."""
