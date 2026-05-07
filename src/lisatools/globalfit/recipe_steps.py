@@ -352,6 +352,7 @@ def build_psd_moves(
         psd_transform_fn=psd_info.transform_fn,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
+        use_gpu=True,
     )
 
     psd_search_move = PSDMove(
@@ -438,6 +439,9 @@ class GBWaveformDict(typing.TypedDict):
     start_freq_ind: int
     tdi_channel_setup: str
     tdi2: bool
+    window: None | str
+    window_alpha: float
+
 
 def build_gb_moves(
     engine_info: Setup,
@@ -511,7 +515,9 @@ def build_gb_moves(
         use_c_implementation=True,
         start_freq_ind=data_start_freq_ind,
         tdi_channel_setup=gb_info.tdi_setup,
-        tdi2=gb_info.use_tdi2
+        tdi2=gb_info.use_tdi2, 
+        window=general_info.window_type,
+        window_alpha=general_info.window_alpha
     )
 
     #* Get band information
@@ -604,7 +610,7 @@ def build_gb_moves(
         data_start_freq_ind,
         acs.end_shape[0],
         acs,
-        general_info.domain_settings.f_arr,
+        acs.settings.f_arr,
         band_edges,
         band_N_vals,
         gpu_priors,
@@ -623,6 +629,7 @@ def build_gb_moves(
         force_backend=general_info.gpu_backend,
         nfriends=nwalkers,
         temperature_control=temperature_control,
+        use_gpu=True, 
         **gb_info.group_proposal_kwargs
        
     )
