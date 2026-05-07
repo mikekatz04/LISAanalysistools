@@ -1820,7 +1820,6 @@ class WDMLookupTable(WDMSettings):
             g.attrs["m_ref"] = self.m_ref
             g.attrs["n_ref"] = self.n_ref
             g.attrs["nchannels"] = self.nchannels
-            breakpoint()
             g.create_dataset("table_sin", data=self.get(self.table_sin))
             g.create_dataset("table_cos", data=self.get(self.table_cos))
             g.create_dataset("fdot_vals", data=self.get(self.fdot_vals))
@@ -1998,7 +1997,7 @@ class WDMLookupTable(WDMSettings):
             
             self.table_sin = _table_sin
             self.table_cos = _table_cos
-            breakpoint()
+
             # freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
             # freqs_norm = self.f_ref - freqs
             if store_path is not None:
@@ -2126,8 +2125,8 @@ class WDMLookupTable(WDMSettings):
             ms_to_use = (ms + m_diff).astype(int)
             keep_now = self.xp.arange(ms_to_use.shape[0])[(ms_to_use >= 0) & (ms_to_use < self.Nf)]
 
-            assert ms[keep_now].max() <= self.Nf + 1
-            assert ms[keep_now].min() >= 0
+            assert ms_to_use[keep_now].max() <= self.Nf + 1
+            assert ms_to_use[keep_now].min() >= 0
             try:
                 assert self.xp.all((f_arr[keep_now] >= 0.0) & (f_arr[keep_now] <= self.f_arr.max()))
             except AssertionError:
@@ -2137,16 +2136,26 @@ class WDMLookupTable(WDMSettings):
             
             _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_norm, fdot_arr[keep_now])
             is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0)) 
+            is_m_even = (ms_to_use[keep_now] % 2 == 0)
 
             sin_coeffs = self.xp.zeros_like(_sin_coeffs)
             cos_coeffs = self.xp.zeros_like(_cos_coeffs)
             
-            sin_coeffs[~is_m_plus_n_even] = _sin_coeffs[~is_m_plus_n_even]
-            cos_coeffs[~is_m_plus_n_even] = _cos_coeffs[~is_m_plus_n_even]
+            sin_coeffs[~is_m_plus_n_even & is_m_even] = _sin_coeffs[~is_m_plus_n_even & is_m_even]
+            cos_coeffs[~is_m_plus_n_even & is_m_even] = -_cos_coeffs[~is_m_plus_n_even & is_m_even]
 
-            sin_coeffs[is_m_plus_n_even] = _cos_coeffs[is_m_plus_n_even]
-            cos_coeffs[is_m_plus_n_even] = -_sin_coeffs[is_m_plus_n_even]
-            
+            sin_coeffs[~is_m_plus_n_even & ~is_m_even] = _sin_coeffs[~is_m_plus_n_even & ~is_m_even]
+            cos_coeffs[~is_m_plus_n_even & ~is_m_even] = _cos_coeffs[~is_m_plus_n_even & ~is_m_even]
+
+            if np.any(np.abs(_sin_coeffs) > 1e-3):
+                breakpoint()
+                
+            sin_coeffs[is_m_plus_n_even & is_m_even] = _cos_coeffs[is_m_plus_n_even & is_m_even]
+            cos_coeffs[is_m_plus_n_even & is_m_even] = _sin_coeffs[is_m_plus_n_even & is_m_even]
+
+            sin_coeffs[is_m_plus_n_even & ~is_m_even] = -_cos_coeffs[is_m_plus_n_even & ~is_m_even]
+            cos_coeffs[is_m_plus_n_even & ~is_m_even] = _sin_coeffs[is_m_plus_n_even & ~is_m_even]
+
             # keep1 = (~is_m_plus_n_even & ~is_m_odd)
             # sin_coeffs[keep1] = _sin_coeffs[keep1]
             # cos_coeffs[keep1] = _cos_coeffs[keep1]
@@ -2165,6 +2174,7 @@ class WDMLookupTable(WDMSettings):
 
             # TODO: idk if this is right NEED TO CHECK
             wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * self.xp.sin(phi_arr[keep_now]) + cos_coeffs * self.xp.cos(phi_arr[keep_now]))
+
             m_map[keep_now, i] = ms_to_use[keep_now]
         return wdm_coeffs_out, m_map
     

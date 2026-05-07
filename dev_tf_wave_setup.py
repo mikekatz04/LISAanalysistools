@@ -61,7 +61,7 @@ from lisatools.analysiscontainer import AnalysisContainer
 # breakpoint()
 tukey_alpha = 0.00
 
-store_path = "./wdm_lookup_new_test_3.h5"
+store_path = "./wdm_lookup_new_test_5.h5"
 if os.path.exists(store_path):
     wdm_lookup_table = WDMLookupTable.from_file(store_path, force_backend=force_backend)
     wdm_settings = WDMSettings(*wdm_lookup_table.args, **wdm_lookup_table.kwargs)
@@ -214,30 +214,36 @@ gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, t_ref, orbits=orbits, tdi_c
 
 template_fill = xp.zeros(3 * np.prod(wdm_settings.basis_shape), dtype=float)
 
-amp = np.full(num_bin, 1.0e-22)
-f0 = np.full(num_bin, 18.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
-fdot = np.full(num_bin, 1e-14)
+amp = np.full(num_bin, 7.0e-23)
+f0 = np.full(num_bin, 12.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
+fdot = np.full(num_bin, 1e-15)
 fddot = np.full(num_bin, 0.0)
-phi0 = np.full(num_bin, 0.0)
-inc = np.full(num_bin, np.pi / 3.)
-psi = np.full(num_bin, 0.0)
-lam = np.full(num_bin, 4.0982342019)
-beta = np.full(num_bin, 0.05)
+phi0 = np.full(num_bin, 2.09802430298)
+inc = np.full(num_bin, 0.23984234)
+psi = np.full(num_bin, 1.234019814)
+lam = np.full(num_bin, 4.09808143)
+beta = np.full(num_bin, 0.7090)
 params = np.array([amp, f0, fdot, fddot, phi0, inc, psi, lam, beta]).T
 
-from lisatools.sensitivity import XYZ2SensitivityMatrix, AET1SensitivityMatrix
+from lisatools.sensitivity import XYZ2SensitivityMatrix, AET1SensitivityMatrix, XYZ1SensitivityMatrix
 from lisatools.detector import sangria, scirdv1
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
 
 freqs = np.fft.rfftfreq(wdm_settings.N, wdm_settings.data_dt)
 fd_set = FDSettings(freqs.shape[0], freqs[1] - freqs[0])
-sens_mat_fd = AET1SensitivityMatrix(fd_set, model=scirdv1)
-sens_mat_wdm = AET1SensitivityMatrix(wdm_set, model=scirdv1)
+sens_mat_fd = XYZ1SensitivityMatrix(fd_set, model=scirdv1)
+sens_mat_wdm = XYZ1SensitivityMatrix(wdm_set, model=scirdv1)
 wdm_dat = DataResidualArray(WDMSignal(np.zeros((3,) + wdm_set.basis_shape), wdm_set))
 wdm_holder = AnalysisContainerArray([AnalysisContainer(wdm_dat, sens_mat_wdm)])
 
 gb_comps.fill_global_wdm(template_fill, params, wdm_holder, data_index=None)
+gb_comps.fill_global_wdm(wdm_holder.linear_data_arr[0], params, wdm_holder, data_index=None)
+check_ll = gb_comps.get_ll_wdm(params, wdm_holder, data_index=None, noise_index=None)
+check_opt_snr = gb_comps.h_h_out[0].item() ** (1/2)
+holder_ip = wdm_holder[0].inner_product()  # source_only=True)
+breakpoint()
+
 for i in range(0, num)[:1]:
     tmp_diff = 500.0
 
@@ -404,6 +410,7 @@ for i in range(0, num)[:1]:
     n_min = wdm_settings.ind_min_t
     m_min = wdm_settings.ind_min_f
 
+    # breakpoint()
     wdm_coeffs, m_layers = wdm_lookup_table.get_wdm_coeffs(amp_t, phi_t, freq_t, fdot_t, n_arr, num_m_layers=2)
 
     gb_fill_wave = xp.zeros((wdm_set.Nf, wdm_set.Nt))
@@ -476,20 +483,41 @@ for i in range(0, num)[:1]:
 
 from copy import deepcopy
 
-min_freq = (int(f0[0] / wdm_set.layer_df) - 5) * wdm_set.layer_df
-max_freq = (int(f0[0] / wdm_set.layer_df) + 5) * wdm_set.layer_df
-t_min = 5 * _wdm_settings.layer_dt
-t_max = (_wdm_settings.Nt - 5) * _wdm_settings.layer_dt
+min_freq = 0.1e-3 # (int(f0[0] / wdm_set.layer_df) - 5) * wdm_set.layer_df
+max_freq = 30e-3 # (int(f0[0] / wdm_set.layer_df) + 5) * wdm_set.layer_df
+t_min =  None  # 20 * _wdm_settings.layer_dt
+t_max = None  # (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
+
 
 wdm_set_here = WDMSettings(wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt, min_freq=min_freq, max_freq=max_freq, min_time=t_min, max_time = t_max)
 fd_set_here = FDSettings(fd_set.N, fd_set.df, min_freq=min_freq, max_freq=max_freq)
 wdm_aet = DataResidualArray(WDMSignal(np.asarray(AET(*td.wdmtransform(wdm_set_here))), wdm_set_here))
 fd_aet = DataResidualArray(FDSignal(np.asarray(AET(*td.fft(fd_set_here))), fd_set_here))
+wdm_xyz = DataResidualArray(WDMSignal(td.wdmtransform(wdm_set_here), wdm_set_here))
+fd_xyz = DataResidualArray(FDSignal(td.fft(fd_set_here), fd_set_here))
 
-sens_mat_wdm_here = AET1SensitivityMatrix(wdm_set_here, model=scirdv1)
-sens_mat_fd_here = AET1SensitivityMatrix(fd_set_here, model=scirdv1)
-analysis_wdm = AnalysisContainer(wdm_aet, sens_mat_wdm_here)
-analysis_fd = AnalysisContainer(fd_aet, sens_mat_fd_here)
-ip_wdm = analysis_wdm.inner_product()
-ip_fd = analysis_fd.inner_product()
+wdm_dat_here = DataResidualArray(WDMSignal(wdm_dat[:], wdm_set_here))
+
+sens_mat_wdm_here_xyz = XYZ1SensitivityMatrix(wdm_set_here, model=scirdv1)
+sens_mat_fd_here_xyz = XYZ1SensitivityMatrix(fd_set_here, model=scirdv1)
+
+sens_mat_wdm_here_aet = AET1SensitivityMatrix(wdm_set_here, model=scirdv1)
+sens_mat_fd_here_aet = AET1SensitivityMatrix(fd_set_here, model=scirdv1)
+
+analysis_wdm_aet = AnalysisContainer(wdm_aet, sens_mat_wdm_here_aet)
+analysis_fd_aet = AnalysisContainer(fd_aet, sens_mat_fd_here_aet)
+ip_wdm_aet = analysis_wdm_aet.inner_product()
+ip_fd_aet = analysis_fd_aet.inner_product()
+
+analysis_wdm_xyz = AnalysisContainer(wdm_xyz, sens_mat_wdm_here_xyz)
+analysis_fd_xyz = AnalysisContainer(fd_xyz, sens_mat_fd_here_xyz)
+ip_wdm_xyz = analysis_wdm_xyz.inner_product()
+ip_fd_xyz = analysis_fd_xyz.inner_product()
+
+template_ip_wdm_xyz = analysis_wdm_xyz.template_snr(wdm_dat_here)[0] ** 2
+
+gb_comps.d_d = analysis_wdm_xyz.inner_product()
+check_ll_2 = gb_comps.get_ll_wdm(params, wdm_holder, data_index=None, noise_index=None)
+
+template_ll_wdm_xyz = analysis_wdm_xyz.likelihood(wdm_dat_here)
 breakpoint()

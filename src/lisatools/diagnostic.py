@@ -169,17 +169,17 @@ def inner_product(
             inv_psd_tmp = func_apply(inv_psd_tmp)  # should be the same for sig1 and sig2 if they have the method
         
         # fix nan in first spot if it is there
-        if inv_psd_tmp.ndim == 1:
-            ind_start = 1 if np.isnan(inv_psd_tmp[0]) else 0
+        if True:  # inv_psd_tmp.ndim == 1 or :
+            ind_start = 1 if np.any(np.isnan(inv_psd_tmp[0])) else 0
             sig_component_1 = temp1[ind_start:]
             sig_component_2 = temp2[ind_start:]
             inv_psd_component = inv_psd_tmp[ind_start:]
 
-        elif inv_psd_tmp.ndim == 2:
-            ind_start = 1 if np.isnan(inv_psd_tmp[0, 0]) else 0
-            sig_component_1 = temp1[:, ind_start:]
-            sig_component_2 = temp2[:, ind_start:]
-            inv_psd_component = inv_psd_tmp[:, ind_start:]
+        # elif inv_psd_tmp.ndim == 2:
+        #     ind_start = 1 if np.isnan(inv_psd_tmp[0, 0]) else 0
+        #     sig_component_1 = temp1[ind_start:]
+        #     sig_component_2 = temp2[ind_start:]
+        #     inv_psd_component = inv_psd_tmp[ind_start:]
 
         else:
             raise ValueError(f"Component PSDs must be 1D or 2D. This has ndim {inv_psd_component.ndim}.")

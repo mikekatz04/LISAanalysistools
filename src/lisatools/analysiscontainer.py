@@ -611,6 +611,7 @@ class AnalysisContainerArray:
         self,
         analysis_containers: AnalysisContainer | List[AnalysisContainer] | np.ndarray,
         gpus: list | int | None = None,
+        complex_psd: bool = False,
     ) -> None:
 
         if isinstance(analysis_containers, AnalysisContainer):
@@ -670,6 +671,10 @@ class AnalysisContainerArray:
             self.data_dtype = float
         else:
             self.data_dtype = complex
+
+        self.noise_dtype = float if not complex_psd else complex
+        if complex_psd:
+            raise NotImplementedError
             
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory
@@ -697,7 +702,7 @@ class AnalysisContainerArray:
                 )
             )
             self.linear_psd_arr.append(
-                self.xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=complex)
+                self.xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=self.noise_dtype)
             )
 
         self.num_acs = len(acs.flatten())
