@@ -830,8 +830,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         Returns:
             Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
         """
-        
-        shifted_t_arr = t_arr + merger_time[:, None] + self.waveform_t0
+        shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
         # add 500 seconds to the end to prevent problems with the response
 
         # pad both sides with zeros by num_pad
@@ -896,9 +895,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def _call_batched(
         self,
         *args,
-        ra: np.ndarray,
-        dec: np.ndarray,
-        merger_time: np.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Handle batched waveform generation and return a Tuple of times and channels.
@@ -935,9 +934,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def compute_tdi_channels(
         self,
         *args,
-        ra: float | np.ndarray = None,
-        dec: float | np.ndarray = None,
-        merger_time: float | np.ndarray = None,
+        ra: float | np.ndarray | cp.ndarray = None,
+        dec: float | np.ndarray | cp.ndarray = None,
+        merger_time: float | np.ndarray | cp.ndarray = None,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Time domain TDI channels computation. In the case of multiple sources, the TDI response is applied sequentially to each source and the results are stacked together.
