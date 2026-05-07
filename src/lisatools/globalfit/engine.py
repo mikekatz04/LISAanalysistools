@@ -48,7 +48,6 @@ class Setup:
         self._settings_class = type(settings_holder)
         self.settings = settings_holder
 
-        # had a better way to do this but it stopped allowing for pickle
         self._settings_names = [field.name for field in dataclasses.fields(self._settings_class)]
         self._settings_args_names = [
             field.name
@@ -57,14 +56,14 @@ class Setup:
                 field.default == dataclasses.MISSING
                 and field.default_factory == dataclasses.MISSING
             )
-        ]  # args
+        ]
         self._settings_kwargs_names = [
             field.name
             for field in dataclasses.fields(self._settings_class)
             if (
                 field.default != dataclasses.MISSING or field.default_factory != dataclasses.MISSING
             )
-        ]  # kwargs
+        ]
         _args = tuple([getattr(settings_holder, key) for key in self._settings_args_names])
         _kwargs = {key: getattr(settings_holder, key) for key in self._settings_kwargs_names}
         self._settings_class.__init__(self, *_args, **_kwargs)
@@ -92,7 +91,7 @@ class Settings:
     transform: Optional[TransformContainer] = None
     priors: Optional[ProbDistContainer] = None
     periodic: Optional[dict] = None
-    nleaves_max: Optional[int] = None  # TODO: need to make higher
+    nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
     ndim: Optional[int] = None
     betas: Optional[np.ndarray] = None
@@ -124,18 +123,16 @@ class GeneralSettings(Settings):
     winalpha: float = None
     gpus: typing.List[int] = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
-    # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
-    # noise_model: Optional[LISAModel] = None
     data_processor: Optional[BaseProcessingStep] = None
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
     catalogue: typing.Optional[dict] = None
-    # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
-    # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
-
-    # file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
-    # file_information["mbh_search_file"] = file_store_dir + base_file_name + "_mbh_search_tmp_file.h5"
+    # ---- Galactic foreground geometry (fixed, not inferred) ----
+    # If None, the galactic foreground is disabled in the likelihood.
+    # Keys: R_d [kpc], z_d [kpc], alpha0 [rad], beta0 [rad],
+    #       N_lambda (int, default 90), N_beta (int, default 60)
+    galactic_grid_kwargs: Optional[typing.Dict[str, typing.Any]] = None
 
 
 from .loginfo import init_logger
@@ -144,15 +141,16 @@ from .loginfo import init_logger
 class GeneralSetup(Setup, GeneralSettings):
     def __init__(self, general_settings: GeneralSettings):
 
-        # had a better way to do this but it stopped allowing for pickle
         Setup.__init__(self, general_settings)
 
         level = logging.DEBUG
         name = "GeneralSetup"
-        # Ensure artifacts dir exists before creating log file handler
         if not os.path.exists(self.artifacts_file_dir):
             os.makedirs(self.artifacts_file_dir)
-        self.logger = init_logger(filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir)
+        self.logger = init_logger(
+            filename="general_setup.log", level=level, name=name,
+            log_dir=self.artifacts_file_dir
+        )
 
         self.init_setup()
 
@@ -160,9 +158,6 @@ class GeneralSetup(Setup, GeneralSettings):
     def main_file_path(self) -> str:
         return self.file_store_dir + self.base_file_name + "_" + self.main_file_key + ".h5"
 
-    # def __getattr__(self, attr: str) -> typing.Any:
-    #     if hasattr(self.gb_settings, attr):
-    #         return getattr(self.gb_settings, attr)
     @property
     def artifacts_file_dir(self) -> str:
         return self.file_store_dir + self.base_file_name + "_artifacts/"
@@ -172,8 +167,6 @@ class GeneralSetup(Setup, GeneralSettings):
             raise ValueError("Must provide file_store_dir settings for GeneralSetup.")
         if self.base_file_name is None:
             raise ValueError("Must provide base_file_name settings for GeneralSetup.")
-        # if self.data_input_path is None:
-        #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
         self.force_backend = "cuda12x" if self.gpus is not None else "cpu"
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
@@ -181,7 +174,7 @@ class GeneralSetup(Setup, GeneralSettings):
         if not os.path.exists(self.artifacts_file_dir):
             os.makedirs(self.artifacts_file_dir)
             self.logger.debug(f"Created artifacts directory")
-                          
+
         self.init_data_information()
 
     def init_orbit_information(self):
@@ -190,22 +183,18 @@ class GeneralSetup(Setup, GeneralSettings):
             self.gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
         else:
             if self.gpu_orbits is None and self.force_backend == "cuda12x":
-                # TODO: make better
                 raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
     def init_data_information(self):
 
-        # load data #todo add here not in file
         if self.data_processor is None:
             raise ValueError("Must provide data_processor for GeneralSetup.")
 
         data_processor = self.data_processor(**(self.processor_init_kwargs or {}))
 
-        # preprocess data
         if self.fixed_psd_kwargs is None:
-
             self.fixed_psd_kwargs = dict(
-                psd_params=[15e-12, 3e-15],  # default scirdv1
+                psd_params=[15e-12, 3e-15],
                 galfor_params=None,
             )
 
@@ -221,14 +210,14 @@ class GeneralSetup(Setup, GeneralSettings):
         else:
             preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
 
-        # output the preprocess kwargs to the logger for transparency
         for key, value in preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
-        # now extract `normalize` if present
+
         normalize_window = preprocess_kwargs.pop("normalize", False)
-        
         if normalize_window:
-            self.logger.warning("Window normalization is turned off for now, setting `normalize_window` to False.")
+            self.logger.warning(
+                "Window normalization is turned off for now, setting `normalize_window` to False."
+            )
             normalize_window = False
 
         times, _ = data_processor.process(**preprocess_kwargs)
@@ -245,7 +234,6 @@ class GeneralSetup(Setup, GeneralSettings):
             self.basis_kwargs = dict(
                 big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq
             )
-
             domain_settings = get_stft_settings(
                 times=times,
                 **self.basis_kwargs,
@@ -255,18 +243,16 @@ class GeneralSetup(Setup, GeneralSettings):
             window, _ = windowfun(self.wintype, nperseg, alpha=self.winalpha)
             plot_kwargs_list = [
                 dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
-                dict(channel=0, plot_type="fd", time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
-                dict(channel=0, plot_type="td", freq_bin=0, filename=self.artifacts_file_dir + "td_data.png"),
-                ]
+                dict(channel=0, plot_type="fd",   time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
+                dict(channel=0, plot_type="td",   freq_bin=0, filename=self.artifacts_file_dir + "td_data.png"),
+            ]
 
         elif self.basis_domain == "fd":
             from ..domains import FDSettings
 
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
-
             self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
-
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
             window, _ = windowfun(self.wintype, Nt, alpha=self.winalpha)
             plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
@@ -274,17 +260,12 @@ class GeneralSetup(Setup, GeneralSettings):
         else:
             raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
 
-        # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
-        # self.logger.debug(f"Window factor for normalization: {window_factor}")
-
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
         )
-        
+
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
-
-        # use logger to output domain info
 
         for key, value in domain_settings.__dict__.items():
             self.logger.info(f"Domain setting: {key} = {value}")
@@ -297,11 +278,10 @@ class GeneralSetup(Setup, GeneralSettings):
                     armlength=orbits.armlength,
                     force_backend="cuda12x",
                 )
-            # self.gpu_orbits.configure()
 
         self.init_orbit_information()
 
-        # todo make it flexible when adding also AET backend.
+        # ---- Sensitivity backend ----
         self.sensitivity_backend = XYZSensitivityBackend(
             orbits=self.gpu_orbits,
             settings=domain_settings,
@@ -309,36 +289,87 @@ class GeneralSetup(Setup, GeneralSettings):
             **self.sensitivity_init_kwargs,
         )
 
-        # if self.noise_model.name == 'sangria':
-        #     if "A" in self.channels:
-        #         sens_fns = [
-        #             'A1TDISens',
-        #             'E1TDISens',
-        #         ]
-        #         self.sensitivity_matrix = AE1SensitivityMatrix
-        #     elif "X" in self.channels:
-        #         sens_fns = XYZ1SensitivityMatrix
-        #         self.sensitivity_matrix = XYZ1SensitivityMatrix
+        # ---- Galactic grid — initialized once, never recomputed during inference ----
+        # Only the spectral envelope params (Amp, alpha, f_1, f_knee, f_2)
+        # are inferred; the sky geometry (R_d, z_d, alpha0, beta0) is fixed here.
+        if self.galactic_grid_kwargs is not None:
+            self._init_galactic_grid(domain_settings)
 
-        # elif self.noise_model.name == 'mojito':
+    def _init_galactic_grid(self, domain_settings):
+        """
+        Compute the fixed galactic sky geometry and attach it to the sensitivity backend.
 
-        #     if "A" in self.channels:
-        #         sens_fns = [
-        #             'A2TDISens',
-        #             'E2TDISens',
-        #             'T2TDISens',
-        #         ][:len(self.channels)]
-        #         self.sensitivity_matrix = AET2SensitivityMatrix if len(self.channels) == 3 else AE2SensitivityMatrix
-        #     else:
+        Called once during setup.  After this call, sensitivity_backend.pycpp_sensitivity_matrix
+        has gal_R_avg wired in and will include the galactic foreground in every likelihood
+        evaluation automatically, scaled by the per-walker spectral parameters passed via
+        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all.
 
-        #         sens_fns = XYZ2SensitivityMatrix
-        #         self.sensitivity_matrix = XYZ2SensitivityMatrix
+        Args:
+            domain_settings: Domain settings object (STFTSettings or FDSettings),
+                             used to extract the segment centre times array.
+        """
+        gkw = self.galactic_grid_kwargs
 
-        # self.new_sens_mat = NewSensitivityMatrix(
-        #         orbits=self.orbits,
-        #         noise_model=self.noise_model,
-        #         sens_fns=sens_fns,
-        # )
+        # Validate required keys
+        for key in ("R_d", "z_d", "alpha0", "beta0"):
+            if key not in gkw:
+                raise ValueError(
+                    f"galactic_grid_kwargs must contain '{key}'. "
+                    f"Got keys: {list(gkw.keys())}"
+                )
+
+        self.logger.info(
+            f"Initializing galactic grid: R_d={gkw['R_d']} kpc, z_d={gkw['z_d']} kpc, "
+            f"alpha0={gkw['alpha0']:.4f} rad, beta0={gkw['beta0']:.4f} rad"
+        )
+
+        # Build host-side quadrature geometry
+        setup = self.sensitivity_backend.backend.GalacticGridSetup()
+        setup.compute(
+            N_lambda=gkw.get('N_lambda', 90),
+            N_beta=gkw.get('N_beta', 60),
+        )
+
+        self.logger.info(
+            f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}"
+        )
+
+        # Get segment centre times from domain settings.
+        # For STFT: domain_settings.t_arr contains the segment centres.
+        # For FD: there is only one time bin; pass a length-1 array at t=0.
+        if hasattr(domain_settings, 't_arr'):
+            t_arr = domain_settings.t_arr
+        else:
+            t_arr = np.array([0.0])
+            self.logger.warning(
+                "FD domain detected — using t=0 for galactic sky average. "
+                "This is correct only for stationary (non-cyclostationary) analyses."
+            )
+
+        # xp is cupy on GPU, numpy on CPU
+        xp = self.sensitivity_backend.xp
+
+        # Initialize the galactic grid on the sensitivity backend.
+        # This calls GalacticGrid::initialize(R_d, z_d, times, N_times) on the C++ side,
+        # which computes and stores weights and R_avg — then wires R_avg into the
+        # C++ XYZSensitivityMatrix so get_noise_covariance can access it.
+        self.sensitivity_backend.initialize_galactic_grid(
+            times=xp.asarray(t_arr),
+            R_d=float(gkw['R_d']),
+            z_d=float(gkw['z_d']),
+            R_vals_quad=xp.asarray(setup.R_vals_quad),
+            z_vals_quad=xp.asarray(setup.z_vals_quad),
+            quad_weights=xp.asarray(setup.quad_weights),
+            cos_beta_ecl=xp.asarray(setup.cos_beta_ecl),
+            lam_ecl=xp.asarray(setup.lam_ecl),
+            beta_ecl=xp.asarray(setup.beta_ecl),
+            N_quad=setup.N_quad,
+            N_sky=setup.N_sky,
+            alpha0=float(gkw['alpha0']),
+            beta0=float(gkw['beta0']),
+        )
+
+        self.logger.info("Galactic grid initialized and attached to sensitivity backend.")
 
 
 @dataclasses.dataclass
@@ -346,7 +377,6 @@ class GlobalFitSettings:
     source_info: typing.Dict[str, Setup]
     general_info: GeneralSetup
     rank_info: RankInfo
-    # TODO: add to adocs current args for these
     setup_function: typing.Callable[(...), None]
 
 
@@ -377,23 +407,16 @@ class GlobalFitEngine(EnsembleSampler):
         self.analysis_container_arr = analysis_container_arr
 
     def get_model(self):
-        """Get ``Model`` object from sampler
-
-        The model object is used to pass necessary information to the
-        proposals. This method can be used to retrieve the ``model`` used
-        in the sampler from outside the sampler.
+        """Get ``Model`` object from sampler.
 
         Returns:
-            :class:`Model`: ``Model`` object used by sampler.
-
+            :class:`GlobalFitInfo`: model object used by the sampler.
         """
-        # Set up a wrapper around the relevant model functions
         if self.pool is not None:
             map_fn = self.pool.map
         else:
             map_fn = map
 
-        # setup model framework for passing necessary items
         model = GlobalFitInfo(
             self.analysis_container_arr,
             map_fn,

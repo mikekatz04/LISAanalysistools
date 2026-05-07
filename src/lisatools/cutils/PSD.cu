@@ -12,7 +12,6 @@
 // ============================================================================
 // Type Aliases
 // ============================================================================
-using cmplx = gcmplx::complex<double>;
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define XYZSensitivityMatrix XYZSensitivityMatrixGPU
@@ -177,18 +176,27 @@ void NoiseLevels::get_isi_oms_noise(double *S_oms, double f, double Soms_d_in, d
  * @param f Frequency in Hz.
  * @param Amp Amplitude parameter.
  * @param alpha Spectral slope parameter.
- * @param slope_1 Exponential cutoff slope.
+ * @param f_1 Exponential scale frequency.
  * @param f_knee Knee frequency.
- * @param slope_2 Hyperbolic tangent slope.
+ * @param f_2 Hyperbolic tangent scale frequency.
  * @return Galactic foreground PSD.
  */
 CUDA_DEVICE
-void NoiseLevels::get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double slope_1, double f_knee, double slope_2)
+void NoiseLevels::get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double f_1, double f_knee, double f_2)
 {
-    *S_gal = Amp * exp(-pow(f, alpha) * slope_1) * pow(f, -7.0/3.0) 
-           * 0.5 * (1.0 + tanh(-(f - f_knee) * slope_2));
-}
+    double omega_f = 2.0 * M_PI * f;
+    double x       = omega_f * 8.338892595063376;
 
+    // Transfer function: 4*(x*sin(x))^2 * 4*sin(2x)^2
+    double transfer = 4.0 * (x * sin(x)) * (x * sin(x))
+                    * 4.0 * sin(2.0 * x) * sin(2.0 * x);
+
+    // Galactic foreground PSD shape
+        double psd_gal = Amp * exp(-pow(f / f_1, alpha)) * pow(f, -7.0 / 3.0)
+            * 0.5 * (1.0 + tanh(-(f - f_knee) / f_2));
+
+    *S_gal = psd_gal * transfer;
+}
 // ============================================================================
 // 3x3 Hermitian Matrix Operations
 // ============================================================================
@@ -300,7 +308,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *like_contrib, double *f_arr, cmplx *data_in,
     int *data_index_all, int *time_index_all,
     double *Soms_d_in_all, double *Sa_a_in_all,
-    double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all,
+    double *Amp_all, double *alpha_all, double *f_1_all, double *f_knee_all, double *f_2_all,
     double *spline_in_isi_oms_all, double *spline_in_testmass_all,
     double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds, 
     XYZSensitivityMatrix &sensitivity_matrix)
@@ -313,7 +321,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 #endif
 
     // Per-thread variables
-    double Soms_d_in, Sa_a_in, Amp, alpha, slope_1, f_knee, slope_2;
+    double Soms_d_in, Sa_a_in, Amp, alpha, f_1, f_knee, f_2;
     double f;
     int data_index, time_index;
     cmplx d_X, d_Y, d_Z;
@@ -358,9 +366,9 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
         Sa_a_in = Sa_a_in_all[psd_i];
         Amp = Amp_all[psd_i];
         alpha = alpha_all[psd_i];
-        slope_1 = slope_1_all[psd_i];
+        f_1 = f_1_all[psd_i];
         f_knee = f_knee_all[psd_i];
-        slope_2 = slope_2_all[psd_i];
+        f_2 = f_2_all[psd_i];
 
         // Initialize reduction
         like_vals[tid] = 0.0;
@@ -403,7 +411,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
             sensitivity_matrix.get_noise_covariance(
                 f, time_index,
                 Soms_d_in, Sa_a_in,
-                Amp, alpha, slope_1, f_knee, slope_2,
+                Amp, alpha, f_1, f_knee, f_2,
                 spline_in_testmass, spline_in_isi_oms,
                 &c00, &c01, &c02, &c11, &c12, &c22
             );
@@ -538,7 +546,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     double *like_contrib_final, double *f_arr, cmplx *data, 
     int *data_index_all, int *time_index_all,
     double *Soms_d_in_all, double *Sa_a_in_all, 
-    double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
+    double *Amp_all, double *alpha_all, double *f_1_all, double *f_knee_all, double *f_2_all, 
     double *spline_in_testmass_all, double *spline_in_isi_oms_all,
     double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds)
 {
@@ -560,7 +568,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     psd_likelihood_xyz_kernel<<<grid, NUM_THREADS_LIKE>>>(
         like_contrib, f_arr, data, data_index_all, time_index_all,
         Soms_d_in_all, Sa_a_in_all,
-        Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
+        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
         differential_component, num_freqs, num_times, dips_mask, num_psds, *dev_ptr);
         
@@ -578,7 +586,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
     psd_likelihood_xyz_kernel(
         like_contrib_final, f_arr, data, data_index_all, time_index_all,
         Soms_d_in_all, Sa_a_in_all,
-        Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
+        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all,
         spline_in_testmass_all, spline_in_isi_oms_all,
         differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
 #endif
@@ -812,43 +820,52 @@ CUDA_DEVICE
 void XYZSensitivityMatrix::get_noise_covariance(
     double f, int time_index,
     double Soms_d_in, double Sa_a_in,
-    double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+    double Amp, double alpha, double f_1, double f_knee, double f_2,
     double spline_in_testmass, double spline_in_isi_oms,
     double *c00, cmplx *c01, cmplx *c02,
     double *c11, cmplx *c12, double *c22)
 {
-    // Get noise transfer functions
     double oms_xx, oms_yy, oms_zz, tm_xx, tm_yy, tm_zz;
     cmplx oms_xy, oms_xz, oms_yz, tm_xy, tm_xz, tm_yz;
-    
-    get_noise_tfs(f, 
+
+    get_noise_tfs(f,
                   &oms_xx, &oms_xy, &oms_xz, &oms_yy, &oms_yz, &oms_zz,
-                  &tm_xx, &tm_xy, &tm_xz, &tm_yy, &tm_yz, &tm_zz, 
+                  &tm_xx, &tm_xy, &tm_xz, &tm_yy, &tm_yz, &tm_zz,
                   time_index);
 
-    // Calculate Noise PSDs
-    double S_tm, S_isi_oms, S_gal;
+    double S_tm, S_isi_oms;
     noise_levels.get_testmass_noise(&S_tm, f, Sa_a_in, spline_in_testmass);
     noise_levels.get_isi_oms_noise(&S_isi_oms, f, Soms_d_in, spline_in_isi_oms);
-    noise_levels.get_galactic_foreground(&S_gal, f, Amp, alpha, slope_1, f_knee, slope_2);
 
-    // Build Covariance Matrix C (3x3 Hermitian, upper triangle)
-    // Diagonal elements are real
-    *c00 = (oms_xx * S_isi_oms + tm_xx * S_tm);
-    *c11 = (oms_yy * S_isi_oms + tm_yy * S_tm);
-    *c22 = (oms_zz * S_isi_oms + tm_zz * S_tm);
-    
-    // Off-diagonal elements are complex
-    *c01 = (oms_xy * S_isi_oms + tm_xy * S_tm);
-    *c02 = (oms_xz * S_isi_oms + tm_xz * S_tm);
-    *c12 = (oms_yz * S_isi_oms + tm_yz * S_tm);
+    *c00 = oms_xx * S_isi_oms + tm_xx * S_tm;
+    *c11 = oms_yy * S_isi_oms + tm_yy * S_tm;
+    *c22 = oms_zz * S_isi_oms + tm_zz * S_tm;
+    *c01 = oms_xy * S_isi_oms + tm_xy * S_tm;
+    *c02 = oms_xz * S_isi_oms + tm_xz * S_tm;
+    *c12 = oms_yz * S_isi_oms + tm_yz * S_tm;
+
+    // Galactic foreground: R_avg[time_index * 6 + k] * S_gal(f)
+    // R_avg is fixed (shared across walkers); S_gal computed inline per walker
+    if (use_galactic && gal_R_avg != nullptr)
+    {
+        double S_gal;
+        noise_levels.get_galactic_foreground(&S_gal, f, Amp, alpha, f_1, f_knee, f_2);
+
+        int base = time_index * 6;
+        *c00 += gal_R_avg[base + 0] * S_gal;
+        *c01 += cmplx(gal_R_avg[base + 1] * S_gal, 0.0);
+        *c02 += cmplx(gal_R_avg[base + 2] * S_gal, 0.0);
+        *c11 += gal_R_avg[base + 3] * S_gal;
+        *c12 += cmplx(gal_R_avg[base + 4] * S_gal, 0.0);
+        *c22 += gal_R_avg[base + 5] * S_gal;
+    }
 }
 
 CUDA_KERNEL
 void get_noise_covariance_kernel(
     double *frequencies, int *time_indices,
     double Soms_d_in, double Sa_a_in,
-    double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+    double Amp, double alpha, double f_1, double f_knee, double f_2,
     double *spline_in_testmass_arr, double *spline_in_isi_oms_arr, 
     double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
     double *c11_arr, cmplx *c12_arr, double *c22_arr,
@@ -896,7 +913,7 @@ void get_noise_covariance_kernel(
             sensitivity_matrix.get_noise_covariance(
                 f, time_index,
                 Soms_d_in, Sa_a_in,
-                Amp, alpha, slope_1, f_knee, slope_2,
+                Amp, alpha, f_1, f_knee, f_2,
                 spline_in_testmass, spline_in_isi_oms,
                 &c00_arr[out_idx], &c01_arr[out_idx], &c02_arr[out_idx],
                 &c11_arr[out_idx], &c12_arr[out_idx], &c22_arr[out_idx]
@@ -908,7 +925,7 @@ void get_noise_covariance_kernel(
 void XYZSensitivityMatrix::get_noise_covariance_arr(
     double *freqs, int *time_indices,
     double Soms_d_in, double Sa_a_in,
-    double Amp, double alpha, double slope_1, double f_knee, double slope_2,
+    double Amp, double alpha, double f_1, double f_knee, double f_2,
     double *spline_in_testmass_arr, double *spline_in_isi_oms_arr, 
     double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
     double *c11_arr, cmplx *c12_arr, double *c22_arr,
@@ -931,7 +948,7 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
     get_noise_covariance_kernel<<<grid, block>>>(
         freqs, time_indices,
         Soms_d_in, Sa_a_in,
-        Amp, alpha, slope_1, f_knee, slope_2,
+        Amp, alpha, f_1, f_knee, f_2,
         spline_in_testmass_arr, spline_in_isi_oms_arr,
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
@@ -946,7 +963,7 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
     get_noise_covariance_kernel(
         freqs, time_indices,
         Soms_d_in, Sa_a_in,
-        Amp, alpha, slope_1, f_knee, slope_2,
+        Amp, alpha, f_1, f_knee, f_2,
         spline_in_testmass_arr, spline_in_isi_oms_arr,
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
@@ -1027,6 +1044,21 @@ void XYZSensitivityMatrix::get_inverse_det_arr(
 #endif
 }
 
+// ============================================================================
+// Galactic foreground attachment (host-only)
+// ============================================================================
+
+void XYZSensitivityMatrix::set_galactic_grid(double *d_R_avg)
+{
+    gal_R_avg    = d_R_avg;
+    use_galactic = (d_R_avg != nullptr);
+}
+
+void XYZSensitivityMatrix::disable_galactic_grid()
+{
+    gal_R_avg    = nullptr;
+    use_galactic = false;
+}
 // ============================================================================
 // pdf calculation from sangria psd file
 // ============================================================================
@@ -1271,36 +1303,36 @@ CUDA_CALLABLE_MEMBER void lisanoises(double *Spm, double *Sop, double f, double 
     //     printf("%.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e %.12e \n", frq, Sa_a_in, Soms_d_in, Sa_a, Sa_d, Sa_nu, *Spm, Soms_d, Soms_nu, *Sop);
 }
 
-CUDA_CALLABLE_MEMBER double SGal(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double SGal(double fr, double Amp, double alpha, double f_1, double kn, double f_2)
 {
-    double Sgal_out = (Amp * exp(-(pow(fr, alpha)) * sl1) * (pow(fr, (-7.0 / 3.0))) * 0.5 * (1.0 + tanh(-(fr - kn) * sl2)));
+    double Sgal_out = (Amp * exp(-pow(fr / f_1, alpha)) * (pow(fr, (-7.0 / 3.0))) * 0.5 * (1.0 + tanh(-(fr - kn) / f_2)));
     return Sgal_out;
 }
 
-CUDA_CALLABLE_MEMBER double GalConf(double fr, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double GalConf(double fr, double Amp, double alpha, double f_1, double kn, double f_2)
 {
-    double Sgal_int = SGal(fr, Amp, alpha, sl1, kn, sl2);
+    double Sgal_int = SGal(fr, Amp, alpha, f_1, kn, f_2);
     return Sgal_int;
 }
 
-CUDA_CALLABLE_MEMBER double WDconfusionX(double f, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double WDconfusionX(double f, double Amp, double alpha, double f_1, double kn, double f_2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double t = 4.0 * pow(x, 2) * pow(sin(x), 2);
 
-    double Sg_sens = GalConf(f, Amp, alpha, sl1, kn, sl2);
+    double Sg_sens = GalConf(f, Amp, alpha, f_1, kn, f_2);
 
     // t = 4 * x**2 * xp.sin(x)**2 * (1.0 if obs == 'X' else 1.5)
     return t * Sg_sens;
 }
 
-CUDA_CALLABLE_MEMBER double WDconfusionAE(double f, double Amp, double alpha, double sl1, double kn, double sl2)
+CUDA_CALLABLE_MEMBER double WDconfusionAE(double f, double Amp, double alpha, double f_1, double kn, double f_2)
 {
-    double SgX = WDconfusionX(f, Amp, alpha, sl1, kn, sl2);
+    double SgX = WDconfusionX(f, Amp, alpha, f_1, kn, f_2);
     return 1.5 * SgX;
 }
 
-CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
+CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double f_1, const double kn, const double f_2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double Sa_d, Sop;
@@ -1320,13 +1352,13 @@ CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in, con
 
     if (Amp > 0.0)
     {
-        Sens += GalConf(f, Amp, alpha, sl1, kn, sl2);
+        Sens += GalConf(f, Amp, alpha, f_1, kn, f_2);
     }
 
     return Sens;
 }
 
-CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double sl1, const double kn, const double sl2)
+CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double f_1, const double kn, const double f_2)
 {
     double x = 2.0 * M_PI * lisaLT * f;
     double Spm, Sop;
@@ -1337,7 +1369,7 @@ CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, 
 
     if (Amp > 0.0)
     {
-        Sa += WDconfusionAE(f, Amp, alpha, sl1, kn, sl2);
+        Sa += WDconfusionAE(f, Amp, alpha, f_1, kn, f_2);
     }
 
     return Sa;
@@ -1345,14 +1377,14 @@ CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, 
 }
 
 CUDA_CALLABLE_MEMBER
-double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in, double Amp, double alpha, double sl1, double kn, double sl2)
+double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in, double Amp, double alpha, double f_1, double kn, double f_2)
 {
     double A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
     double A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
     double E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
     double E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
-    double Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-    double Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+    double Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, f_1, kn, f_2);
+    double Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, f_1, kn, f_2);
 
     double inner_product = (4.0 * ((gcmplx::conj(d_A) * d_A / Sn_A) + (gcmplx::conj(d_E) * d_E / Sn_E)).real() * df);
     return -1.0 / 2.0 * inner_product - (log(Sn_A) + log(Sn_E));
@@ -1361,7 +1393,7 @@ double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_S
 
 
 CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, double df, int data_length, int num_data, int num_psds)
+                               double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
 {
     #ifdef __CUDACC__
     CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
@@ -1369,7 +1401,7 @@ CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data
     int bid = blockIdx.x;
     int num_blocks = gridDim.x;
     int data_index;
-    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2;
+    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2;
     cmplx d_A, d_E;
     double f, Sn_A, Sn_E;
     double inner_product;
@@ -1384,9 +1416,9 @@ CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data
         E_Sa_a_in = E_Sa_a_in_all[psd_i];
         Amp = Amp_all[psd_i];
         alpha = alpha_all[psd_i];
-        sl1 = sl1_all[psd_i];
+        f_1 = f_1_all[psd_i];
         kn = kn_all[psd_i];
-        sl2 = sl2_all[psd_i];
+        f_2 = f_2_all[psd_i];
 
         for (int i = threadIdx.x; i < NUM_THREADS_LIKE; i += blockDim.x)
         {
@@ -1404,7 +1436,7 @@ CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data
                 f = df; // TODO switch this?
             }
 
-            like_vals[tid] += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2);
+            like_vals[tid] += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2);
         }
         CUDA_SYNC_THREADS;
 
@@ -1429,11 +1461,11 @@ CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data
 }
 
 void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                               double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, double df, int data_length, int num_data, int num_psds)
+                               double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
 {
     int data_index;
     double _tmp_like_val = 0.0;
-    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2;
+    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2;
     cmplx d_A, d_E;
     double f, Sn_A, Sn_E;
     double inner_product;
@@ -1448,9 +1480,9 @@ void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data
         E_Sa_a_in = E_Sa_a_in_all[psd_i];
         Amp = Amp_all[psd_i];
         alpha = alpha_all[psd_i];
-        sl1 = sl1_all[psd_i];
+        f_1 = f_1_all[psd_i];
         kn = kn_all[psd_i];
-        sl2 = sl2_all[psd_i];
+        f_2 = f_2_all[psd_i];
 
         for (int i = 0; i < data_length; i += 1)
         {
@@ -1462,7 +1494,7 @@ void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data
                 f = df; // TODO switch this?
             }
 
-            _tmp_like_val += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2);
+            _tmp_like_val += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2);
         }
         like_vals[psd_i] = _tmp_like_val;
     }
@@ -1470,7 +1502,7 @@ void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data
 
 
 void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
-                         double *Amp_all, double *alpha_all, double *sl1_all, double *kn_all, double *sl2_all, double df, int data_length, int num_data, int num_psds)
+                         double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
 {
     #ifdef __CUDACC__
     double *like_contrib;
@@ -1482,7 +1514,7 @@ void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data,
     dim3 grid(num_blocks, num_psds, 1);
 
     psd_likelihood<<<grid, NUM_THREADS_LIKE>>>(like_contrib, f_arr, data, data_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
-                                               Amp_all, alpha_all, sl1_all, kn_all, sl2_all, df, data_length, num_data, num_psds);
+                                               Amp_all, alpha_all, f_1_all, kn_all, f_2_all, df, data_length, num_data, num_psds);
 
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
@@ -1495,7 +1527,7 @@ void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data,
     gpuErrchk(cudaFree(like_contrib));
     #else
     psd_likelihood_cpu(like_contrib_final, f_arr, data, data_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
-                                               Amp_all, alpha_all, sl1_all, kn_all, sl2_all, df, data_length, num_data, num_psds);
+                                               Amp_all, alpha_all, f_1_all, kn_all, f_2_all, df, data_length, num_data, num_psds);
 
     #endif
 }
@@ -1503,7 +1535,7 @@ void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data,
 
 #define NUM_THREADS_LIKE 256
 CUDA_KERNEL void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
-                               double Amp, double alpha, double sl1, double kn, double sl2, int num_f)
+                               double Amp, double alpha, double f_1, double kn, double f_2, int num_f)
 {
     int noise_index;
     double f, Sn_A, Sn_E;
@@ -1523,12 +1555,12 @@ CUDA_KERNEL void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, 
         A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
         E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
         E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
-        Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-        Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+        Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, f_1, kn, f_2);
+        Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, f_1, kn, f_2);
 
         // if (Sn_A != Sn_A)
         // {
-        //     printf("BADDDDD: %d %e %e %e %e %e %e %e %e\n", f_i, f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+        //     printf("BADDDDD: %d %e %e %e %e %e %e %e %e\n", f_i, f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, f_1, kn, f_2);
         // }
 
         Sn_A_out[f_i] = Sn_A;
@@ -1537,19 +1569,19 @@ CUDA_KERNEL void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, 
 }
 
 void get_psd_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
-                               double Amp, double alpha, double sl1, double kn, double sl2, int num_f)
+                               double Amp, double alpha, double f_1, double kn, double f_2, int num_f)
 {
     #ifdef __CUDACC__
     int num_blocks = std::ceil((num_f + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
 
     get_psd_val<<<num_blocks, NUM_THREADS_LIKE>>>(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
-                                               Amp, alpha, sl1, kn, sl2, num_f);
+                                               Amp, alpha, f_1, kn, f_2, num_f);
 
     cudaDeviceSynchronize();
     gpuErrchk(cudaGetLastError());
     #else
      get_psd_val(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
-                                               Amp, alpha, sl1, kn, sl2, num_f);
+                                               Amp, alpha, f_1, kn, f_2, num_f);
 
     #endif
 }

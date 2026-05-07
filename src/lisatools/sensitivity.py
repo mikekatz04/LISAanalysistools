@@ -1742,7 +1742,6 @@ class XYZSensitivityBackend:
 
 
 class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
-    """Helper class for sensitivity matrix with c++ backend."""
 
     def __init__(
         self,
@@ -1752,8 +1751,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         use_splines: bool = False,
         force_backend: Optional[str] = "cpu",
         mask_percentage: Optional[float] = None,
+        # --- new ---
+        galactic_grid: Optional[Any] = None,  # GalacticGridWrap instance or None
     ):
-
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
 
@@ -1775,11 +1775,17 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
 
+        # galactic grid — stored as reference, not owned
+        self._galactic_grid = galactic_grid
+
         self._setup()
+
+        # attach galactic grid to C++ object if provided
+        if self._galactic_grid is not None:
+            self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
 
     @property
     def kwargs(self):
-        """Keyword arguments for class initialization."""
         return {
             "orbits": self.orbits,
             "settings": self.basis_settings,
@@ -1787,6 +1793,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "use_splines": self.use_splines,
             "force_backend": "cpu" if self.backend.xp == np else "gpu",
             "mask_percentage": self.mask_percentage,
+            "galactic_grid": self._galactic_grid,  # propagate to copies
         }
 
     @property
@@ -1863,7 +1870,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         # Manually copy attributes
         for key, value in self.__dict__.items():
-            if key in ("_backend", "pycpp_sensitivity_matrix"):
+            if key in ("_backend", "pycpp_sensitivity_matrix", "_galactic_grid"):
                 # Don't deepcopy backend objects - just reference
                 setattr(new_obj, key, value)
             elif key == "orbits":
@@ -2216,9 +2223,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Sa_in_all: np.ndarray | cp.ndarray,
         Amp_in_all: np.ndarray | cp.ndarray,
         alpha_in_all: np.ndarray | cp.ndarray,
-        sl1_in_all: np.ndarray | cp.ndarray,
+        f_1_in_all: np.ndarray | cp.ndarray,
         kn_in_all: np.ndarray | cp.ndarray,
-        sl2_in_all: np.ndarray | cp.ndarray,
+        f_2_in_all: np.ndarray | cp.ndarray,
         knots_position_all: np.ndarray | cp.ndarray = None,
         knots_amplitude_all: np.ndarray | cp.ndarray = None,
     ) -> np.ndarray | cp.ndarray:
@@ -2232,9 +2239,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             Sa_in_all: Acceleration noise levels for each walker. Shape (num_psds)
             Amp_in_all: Galactic foreground amplitude for each walker. Shape (num_psds)
             alpha_in_all: Galactic foreground alpha for each walker. Shape (num_psds)
-            sl1_in_all: First galactic foreground slope parameter for each walker. Shape (num_psds)
+            f_1_in_all: First galactic foreground scale-frequency parameter for each walker. Shape (num_psds)
             kn_in_all: Galactic foreground knee frequency parameter for each walker. Shape (num_psds)
-            sl2_in_all: Second galactic foreground slope parameter for each walker. Shape (num_psds)
+            f_2_in_all: Second galactic foreground scale-frequency parameter for each walker. Shape (num_psds)
             knots_position_all: Positions of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
             knots_amplitude_all: Amplitudes of spline knots for noise modeling. Shape (2 * num_psds, num_knots)
 
@@ -2270,9 +2277,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             xp.asarray(Sa_in_all),
             xp.asarray(Amp_in_all),
             xp.asarray(alpha_in_all),
-            xp.asarray(sl1_in_all),
+            xp.asarray(f_1_in_all),
             xp.asarray(kn_in_all),
-            xp.asarray(sl2_in_all),
+            xp.asarray(f_2_in_all),
             xp.asarray(splines_weights_isi_oms),
             xp.asarray(splines_weights_testmass),
             self.basis_settings.differential_component,
@@ -2305,6 +2312,76 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         smoothed_matrix[..., mask] = _smoothed[..., mask]
 
         return smoothed_matrix
+    
+    def initialize_galactic_grid(
+        self,
+        times: np.ndarray,
+        R_d: float,
+        z_d: float,
+        R_vals_quad: np.ndarray,
+        z_vals_quad: np.ndarray,
+        quad_weights: np.ndarray,
+        cos_beta_ecl: np.ndarray,
+        lam_ecl: np.ndarray,
+        beta_ecl: np.ndarray,
+        N_quad: int,
+        N_sky: int,
+        alpha0: float,
+        beta0: float,
+    ) -> None:
+        """
+        Build the GalacticGridWrap, compute fixed sky weights and R_avg, and
+        attach to the C++ sensitivity matrix.  Call once before inference.
+
+        The grid is stored on self and propagated to any copies made via __call__.
+
+        Args:
+            times:        Segment centre times (N_times,)
+            R_d:          Disk radial scale length [kpc]
+            z_d:          Disk vertical scale height [kpc]
+            R_vals_quad:  (N_quad * N_sky,) galactocentric radii
+            z_vals_quad:  (N_quad * N_sky,) heights above disk
+            quad_weights: (N_quad,) Gauss-Legendre weights
+            cos_beta_ecl: (N_sky,) cos(beta) for solid-angle weighting
+            lam_ecl:      (N_sky,) ecliptic longitudes
+            beta_ecl:     (N_sky,) ecliptic latitudes
+            N_quad:       Number of quadrature nodes (16)
+            N_sky:        Number of sky pixels
+            alpha0:       LISA orbit initial phase (rad)
+            beta0:        LISA orbit inclination (rad)
+        """
+        xp = self.xp
+
+        GalWrap = self.backend.GalacticGridWrap
+
+        self._galactic_grid = GalWrap(
+            xp.asarray(R_vals_quad),
+            xp.asarray(z_vals_quad),
+            xp.asarray(quad_weights),
+            xp.asarray(cos_beta_ecl),
+            xp.asarray(lam_ecl),
+            xp.asarray(beta_ecl),
+            N_quad,
+            N_sky,
+            alpha0,
+            beta0,
+            self.num_times,
+            self.num_freqs,
+        )
+
+        self._galactic_grid.initialize_wrap(
+            xp.asarray(times),
+            R_d,
+            z_d,
+            len(times),
+        )
+
+        self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
+
+    def disable_galactic_grid(self) -> None:
+        """Detach galactic foreground from the likelihood."""
+        self._galactic_grid = None
+        self.pycpp_sensitivity_matrix.disable_galactic_grid()
 
     def __call__(
         self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None
@@ -2345,3 +2422,4 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         )
 
         return new_sens_mat
+    

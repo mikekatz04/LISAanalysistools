@@ -46,7 +46,6 @@ dependencies = [
   "astropy",
   "scikit-learn",
   "cudakima",
-  "install>=0.0.1",
 ]
 
 

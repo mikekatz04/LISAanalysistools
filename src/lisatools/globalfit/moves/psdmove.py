@@ -247,8 +247,8 @@ class PSDMove(GlobalFitMove, StretchMove):
         Amp_all = cp.asarray(galfor_pars[:, 0])
         kn_all = cp.asarray(galfor_pars[:, 1])
         alpha_all = cp.asarray(galfor_pars[:, 2])
-        sl1_all = cp.asarray(galfor_pars[:, 3])
-        sl2_all = cp.asarray(galfor_pars[:, 4])
+        f_1_all = cp.asarray(galfor_pars[:, 3])
+        f_2_all = cp.asarray(galfor_pars[:, 4])
 
         ll = self.sensitivity_backend.compute_log_like(
             data,
@@ -257,9 +257,9 @@ class PSDMove(GlobalFitMove, StretchMove):
             Sa_a_in_all,
             Amp_all,
             alpha_all,
-            sl1_all,
+            f_1_all,
             kn_all,
-            sl2_all,
+            f_2_all,
             knots_positions,
             knots_amplitudes,
         )
