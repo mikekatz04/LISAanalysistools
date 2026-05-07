@@ -700,6 +700,8 @@ class SubmissionWriter(BackendConsumer):
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
 
+        self.run_metadata = RunMetadata.from_curr(self.curr)
+
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
 
 class DetectionCriteria(ABC):
