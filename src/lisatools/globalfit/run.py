@@ -708,14 +708,13 @@ class GlobalFit:
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
+            #breakpoint()
+
+            sampler_mix.run_mcmc(state, 10, thin_by=1, progress=True, store=True)
+
             breakpoint()
-            rm = RunMetadata.from_curr(self.curr)
 
-            sampler_mix.run_mcmc(state, 20, thin_by=1, progress=True, store=True)
-
-            breakpoint()
-
-            submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=10_000)
+            submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
 
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

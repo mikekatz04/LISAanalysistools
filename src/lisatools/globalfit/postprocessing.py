@@ -108,8 +108,13 @@ def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
     return out
 
 def _seconds_to_l3c_datetime(t: float) -> str:
-    """Convert a UTC timestamp in seconds to the L3C format yyyy.mm.dd.hh.mm.ss."""
-    dt = datetime.fromtimestamp(t, tz=timezone.utc)
+    """Convert a UTC timestamp in seconds with respect to LISA_EPOCH_TCB to the L3C format yyyy.mm.dd.hh.mm.ss."""
+    from lisaconstants import LISA_EPOCH_TCB
+
+    format_str = "%Y-%m-%dT%H:%M:%S.%f"
+    lisa_epoch_seconds = datetime.strptime(LISA_EPOCH_TCB, format_str).timestamp()
+
+    dt = datetime.fromtimestamp(t + lisa_epoch_seconds, tz=timezone.utc)
     return dt.strftime("%Y.%m.%d.%H.%M.%S")
 
 
@@ -204,6 +209,9 @@ class BackendConsumer:
         for branch in self.branches:
             self._cold_chains[branch] = all_chains[branch][:, :1]
             self._cold_inds[branch] = all_inds[branch][:, :1]
+
+        self._cold_log_prior = self.backend.get_log_prior()[:, :1]
+        self._cold_log_likelihood = self.backend.get_log_like()[:, :1]
 
     @property
     def configured(self) -> bool:
@@ -301,6 +309,9 @@ class BackendConsumer:
             self._thinned_chains[branch] = tmp[-ess:]
             self._thinned_inds[branch] = tmp_inds[-ess:]
 
+        self._thinned_log_prior = self._cold_log_prior[discard::max_act].flatten()[-ess:]
+        self._thinned_log_likelihood = self._cold_log_likelihood[discard::max_act].flatten()[-ess:]
+
         self.ess = ess
 
     @property
@@ -309,6 +320,25 @@ class BackendConsumer:
             raise ValueError("Thinned samples have not been computed yet")
 
         return self._thinned_chains
+
+    @property
+    def thinned_inds(self) -> Dict[str, np.ndarray]:
+        if not hasattr(self, "_thinned_inds"):
+            raise ValueError("Thinned samples have not been computed yet")
+
+        return self._thinned_inds
+
+    @property
+    def thinned_log_prior(self) -> np.ndarray:
+        if not hasattr(self, "_thinned_log_prior"):
+            raise ValueError("Thinned log prior has not been computed yet")
+        return self._thinned_log_prior
+
+    @property
+    def thinned_log_likelihood(self) -> np.ndarray:
+        if not hasattr(self, "_thinned_log_likelihood"):
+            raise ValueError("Thinned log likelihood has not been computed yet")
+        return self._thinned_log_likelihood
 
     def get_independent_samples(
         self,
@@ -328,12 +358,16 @@ class BackendConsumer:
             if branch not in self.branches:
                 raise ValueError(f"Branch '{branch}' not found in thinned chains.")
             if return_inds:
-                return self._thinned_chains[branch], self._thinned_inds[branch]
-            return self._thinned_chains[branch]
-        if return_inds:
-            return self._thinned_chains, self._thinned_inds
-        return self._thinned_chains
-    
+                out = (self.thinned_chains[branch], self.thinned_inds[branch])
+            else:
+                out = (self.thinned_chains[branch], )
+        else:
+            if return_inds:
+                out = (self.thinned_chains, self.thinned_inds)
+            else:
+                out = (self.thinned_chains, )
+        return out + (self.thinned_log_prior, self.thinned_log_likelihood)
+
     def transform(self, samples: dict | np.ndarray, branch: str | None = None) -> dict | np.ndarray:
         """
         Apply the TransformContainer for the specified samples to the given samples.
@@ -364,7 +398,7 @@ class BackendConsumer:
 
         return transformed
     
-    def process_samples(self, discard: int | float = 0.0, ess: int = 10000, return_inds: bool = False) -> dict | Tuple[dict, dict]:
+    def process_samples(self, discard: int | float = 0.0, ess: int = 10000, return_inds: bool = False) -> Tuple[dict, Optional[dict], np.ndarray, np.ndarray]:
         """
         Convenience method to run the end-to-end processing pipeline, starting from the raw samples.
 
@@ -374,19 +408,19 @@ class BackendConsumer:
             return_inds: bool (optional). Whether to return the corresponding inds arrays.
 
         Returns:
-            dict of branch to transformed samples, or a tuple of (samples_dict, inds_dict) if return_inds is True.
+            tuple: (transformed_samples, inds, log_prior, log_likelihood)
         """
         if not self.configured:
             self.store_cold_chains()
 
-        samples, inds = self.get_independent_samples(discard=discard, ess=ess, return_inds=True)
+        samples, inds, log_prior, log_likelihood = self.get_independent_samples(discard=discard, ess=ess, return_inds=True)
 
         transformed_samples = self.transform(samples)
 
         if return_inds:
-            return transformed_samples, inds
+            return transformed_samples, inds, log_prior, log_likelihood
 
-        return transformed_samples
+        return transformed_samples, log_prior, log_likelihood
 
 
 # ——— Plotter ──────────────────────────────────────────────────────────────————
@@ -537,9 +571,9 @@ _SETTINGS_TO_METADATA: Dict[str, str] = {
     "run_input_reference":          "input_reference",
     "run_noise_model":              "noise_model",
     "run_noise_model_code_link":    "noise_model_code_link",
-    "run_waveform_model":           "waveform_model",
-    "run_waveform_model_code_link": "waveform_model_code_link",
-    "run_quality":                  "quality",
+    # "run_waveform_model":           "waveform_model",
+    # "run_waveform_model_code_link": "waveform_model_code_link",
+    # "run_quality":                  "quality",
     "run_comment":                  "comment",
     "submission_folder":            "submission_parent_folder",
 }
@@ -564,13 +598,13 @@ class RunMetadata:
     input_reference: str
     noise_model: str
     noise_model_code_link: str
-    waveform_model: str
-    waveform_model_code_link: str
+    # waveform_model: str
+    # waveform_model_code_link: str
     submission_parent_folder: str
 
     # user-supplied — optional
     codename: str = "Erebor"
-    quality: str = "nominal"
+    #quality: str = ""
     comment: str = ""
 
     # set after detection is complete
@@ -613,7 +647,6 @@ class RunMetadata:
         merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
 
         instance = cls(**merged)
-
         instance.obs_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.effective_duration = _seconds_to_duration_str(gi.Tobs)
@@ -646,15 +679,15 @@ class RunMetadata:
             "observation_period_begin": self.obs_begin,
             "observation_period_end": self.obs_end,
             "effective_observation_duration": self.effective_duration,
-            "quality": self.quality,
+            #"quality": self.quality,
             "searched_source_types_list": self.searched_source_types,
             "found_source_types_list": self.found_source_types,
             "noise_model": self.noise_model,
             "noise_model_code_link": self.noise_model_code_link,
             "noise_model_config_file_link": "",
-            "waveform_model": self.waveform_model,
-            "waveform_model_code_link": self.waveform_model_code_link,
-            "waveform_model_config_file_link": "",
+            # "waveform_model": self.waveform_model,
+            # "waveform_model_code_link": self.waveform_model_code_link,
+            # "waveform_model_config_file_link": "",
             "tdi_channels": self.tdi_channels,
             "list_of_detected_sources": ", ".join(self.found_source_types),
             "comment": self.comment,
@@ -674,6 +707,24 @@ class RunMetadata:
         return os.path.join(self.submission_parent_folder, run_type, run_id)
         
         #return os.path.join(self.submission_parent_folder, f"{self.codename}_v{self.version}")
+
+@dataclasses.dataclass
+class SourceMetadata:
+    """Holds metadata for a detected source, to be included in the L3C submission manifest."""
+    source_type: str
+    frequency_ranges: list[tuple[float, float]] # = dataclasses.field(default_factory=list)
+    waveform_model: str
+    waveform_model_code_link: str
+    waveform_model_config: dict # = dataclasses.field(default_factory=dict)
+
+    detection_statistic: list[float] # = dataclasses.field(default_factory=list)
+    quality_flags: list[int] # = dataclasses.field(default_factory=list)
+
+    prior_model: str = ""
+    prior_model_code_link: str = ""
+    prior_model_config: dict = dataclasses.field(default_factory=dict)
+
+    comment: str = ""
     
 class SubmissionWriter(BackendConsumer):
     """
@@ -690,9 +741,11 @@ class SubmissionWriter(BackendConsumer):
 
         super().__init__(curr=curr, backend=backend)
 
-        self.samples, self.inds = self.process_samples(ess=ess, return_inds=True)
+        self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(ess=ess, return_inds=True) # todo missing prior and likelihood
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
+
+        self.run_metadata = RunMetadata.from_curr(self.curr)
 
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
 
