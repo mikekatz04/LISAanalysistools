@@ -661,7 +661,7 @@ class GlobalFit:
                 plots=["base", "tempering"],
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
-                discard=0.1,
+                discard=0.4,
                 truths=self.curr.get_truths_dict(),
             )
 
