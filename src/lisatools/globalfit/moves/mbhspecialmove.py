@@ -95,6 +95,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
         branch_name: str,
         coords_shape: tuple,
         waveform_gen_kwargs: dict,
+        likelihood_kwargs: dict,
         num_repeats: int,
         transform_fn: TransformContainer,
         priors: ProbDistContainer,
@@ -102,6 +103,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
         Tmax: float = np.inf,
         betas_all: np.ndarray = None,
         permute_every: int = 20,
+        run_async: bool = False,
         run_threaded: bool = False,
         **kwargs
     ):
@@ -118,8 +120,9 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
             waveform_gen,
             branch_name,
             coords_shape,
-            waveform_gen_kwargs,
             waveform_gen_method,
+            waveform_gen_kwargs,
+            likelihood_kwargs,
             num_repeats,
             transform_fn,
             priors,
@@ -127,6 +130,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
             Tmax,
             betas_all,
             permute_every,
+            run_async,
             run_threaded,
             waveform_like_method,
             **kwargs
