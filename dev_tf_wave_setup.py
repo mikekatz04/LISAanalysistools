@@ -45,11 +45,11 @@ force_backend = "cpu"
 xp = np if force_backend == "cpu" else cp
 orbits = DefaultOrbits(force_backend=force_backend)
 orbits.configure(linear_interp_setup=True)
-tdi_config = TDIConfig("1st generation", force_backend=force_backend)
+tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
 dt = 2.5
 Tobs = 2 * YRSID_SI
 
-N_sparse = 256
+N_sparse = 128
 t_tdi = xp.linspace(0.0, Tobs, N_sparse + 2)[1:-1]
 
 from lisatools.sensitivity import XYZ2SensitivityMatrix
@@ -214,15 +214,15 @@ gb_comps = GBWDMComputations(wdm_lookup_table, Tobs, t_ref, orbits=orbits, tdi_c
 
 template_fill = xp.zeros(3 * np.prod(wdm_settings.basis_shape), dtype=float)
 
-amp = np.full(num_bin, 7.0e-23)
-f0 = np.full(num_bin, 12.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
-fdot = np.full(num_bin, 1e-15)
+amp = np.full(num_bin, 8.0e-23)
+f0 = np.full(num_bin, 20.0e-3)  # (ind + i / num) * wdm_settings.layer_df)
+fdot = np.full(num_bin, 1e-13)
 fddot = np.full(num_bin, 0.0)
 phi0 = np.full(num_bin, 2.09802430298)
 inc = np.full(num_bin, 0.23984234)
 psi = np.full(num_bin, 1.234019814)
 lam = np.full(num_bin, 4.09808143)
-beta = np.full(num_bin, 0.7090)
+beta = np.full(num_bin, 0.090)
 params = np.array([amp, f0, fdot, fddot, phi0, inc, psi, lam, beta]).T
 
 from lisatools.sensitivity import XYZ2SensitivityMatrix, AET1SensitivityMatrix, XYZ1SensitivityMatrix
@@ -232,17 +232,21 @@ from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArra
 
 freqs = np.fft.rfftfreq(wdm_settings.N, wdm_settings.data_dt)
 fd_set = FDSettings(freqs.shape[0], freqs[1] - freqs[0])
-sens_mat_fd = XYZ1SensitivityMatrix(fd_set, model=scirdv1)
-sens_mat_wdm = XYZ1SensitivityMatrix(wdm_set, model=scirdv1)
+sens_mat_fd = XYZ2SensitivityMatrix(fd_set, model=scirdv1)
+sens_mat_wdm = XYZ2SensitivityMatrix(wdm_set, model=scirdv1)
 wdm_dat = DataResidualArray(WDMSignal(np.zeros((3,) + wdm_set.basis_shape), wdm_set))
 wdm_holder = AnalysisContainerArray([AnalysisContainer(wdm_dat, sens_mat_wdm)])
 
 gb_comps.fill_global_wdm(template_fill, params, wdm_holder, data_index=None)
 gb_comps.fill_global_wdm(wdm_holder.linear_data_arr[0], params, wdm_holder, data_index=None)
+
+holder_ip = wdm_holder[0].inner_product()  # source_only=True)
+
+gb_comps.d_d = holder_ip
 check_ll = gb_comps.get_ll_wdm(params, wdm_holder, data_index=None, noise_index=None)
 check_opt_snr = gb_comps.h_h_out[0].item() ** (1/2)
-holder_ip = wdm_holder[0].inner_product()  # source_only=True)
-breakpoint()
+
+assert np.allclose(check_ll, 0.0)
 
 for i in range(0, num)[:1]:
     tmp_diff = 500.0
@@ -250,6 +254,18 @@ for i in range(0, num)[:1]:
     t_ref = int(Nt / 2) * wdm_settings.layer_dt
     gb_gen = GBTDIonTheFly(
         t_tdi, 
+        Tobs,
+        t_ref,
+        1. / dt,
+        num_bin,
+        n_params=9,
+        tdi_config=tdi_config,
+        orbits=orbits,
+        tdi_chan="XYZ",
+        force_backend=force_backend,
+    )
+    gb_gen_fuller = GBTDIonTheFly(
+        np.linspace(t_tdi[0], t_tdi[-1], 16384), 
         Tobs,
         t_ref,
         1. / dt,
@@ -303,8 +319,15 @@ for i in range(0, num)[:1]:
 
     print("\n\n")
     output_deriv = gb_gen_deriv(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
-    
-    output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+    import time
+    st = time.perf_counter()
+    num = 10
+    for _ in range(num):
+        output = gb_gen(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+    et = time.perf_counter()
+    print("main gen + spline fit", (et - st) / num)
+    output_fuller = gb_gen_fuller(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
+
     output_down_1 = gb_gen_down_1(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
     output_up_1 = gb_gen_up_1(amp, f0, fdot, fddot, phi0, inc, psi, lam, beta, return_spline=True)
     
@@ -318,12 +341,14 @@ for i in range(0, num)[:1]:
 
     # breakpoint()
     tdi_output = np.zeros((num_bin, 3, len(data_t_arr))) 
-
+    tdi_output_fuller = np.zeros((num_bin, 3, len(data_t_arr))) 
     # t_tdi = 
     tdi_output[:, :, keep]= output.eval_tdi(tdi_t_arr)
+    tdi_output_fuller[:, :, keep]= output_fuller.eval_tdi(tdi_t_arr)
     from scipy.signal.windows import tukey
 
     td = TDSignal(tdi_output[0, :3], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
+    td_fuller = TDSignal(tdi_output_fuller[0, :3], settings=TDSettings(tdi_output.shape[-1], dt, force_backend=force_backend))
 
     # y[:, 0] = 1.0
     # y[:, 1:] = 0.0
@@ -491,15 +516,17 @@ t_max = None  # (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
 
 wdm_set_here = WDMSettings(wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt, min_freq=min_freq, max_freq=max_freq, min_time=t_min, max_time = t_max)
 fd_set_here = FDSettings(fd_set.N, fd_set.df, min_freq=min_freq, max_freq=max_freq)
-wdm_aet = DataResidualArray(WDMSignal(np.asarray(AET(*td.wdmtransform(wdm_set_here))), wdm_set_here))
-fd_aet = DataResidualArray(FDSignal(np.asarray(AET(*td.fft(fd_set_here))), fd_set_here))
-wdm_xyz = DataResidualArray(WDMSignal(td.wdmtransform(wdm_set_here), wdm_set_here))
-fd_xyz = DataResidualArray(FDSignal(td.fft(fd_set_here), fd_set_here))
+wdm_aet = DataResidualArray(WDMSignal(np.asarray(AET(*td_fuller.wdmtransform(wdm_set_here))), wdm_set_here))
+fd_aet = DataResidualArray(FDSignal(np.asarray(AET(*td_fuller.fft(fd_set_here))), fd_set_here))
+wdm_xyz = DataResidualArray(WDMSignal(td_fuller.wdmtransform(wdm_set_here), wdm_set_here))
+fd_xyz = DataResidualArray(FDSignal(td_fuller.fft(fd_set_here), fd_set_here))
+
+wdm_sparse_xyz = DataResidualArray(WDMSignal(td.wdmtransform(wdm_set_here), wdm_set_here))
 
 wdm_dat_here = DataResidualArray(WDMSignal(wdm_dat[:], wdm_set_here))
 
-sens_mat_wdm_here_xyz = XYZ1SensitivityMatrix(wdm_set_here, model=scirdv1)
-sens_mat_fd_here_xyz = XYZ1SensitivityMatrix(fd_set_here, model=scirdv1)
+sens_mat_wdm_here_xyz = XYZ2SensitivityMatrix(wdm_set_here, model=scirdv1)
+sens_mat_fd_here_xyz = XYZ2SensitivityMatrix(fd_set_here, model=scirdv1)
 
 sens_mat_wdm_here_aet = AET1SensitivityMatrix(wdm_set_here, model=scirdv1)
 sens_mat_fd_here_aet = AET1SensitivityMatrix(fd_set_here, model=scirdv1)
@@ -511,13 +538,32 @@ ip_fd_aet = analysis_fd_aet.inner_product()
 
 analysis_wdm_xyz = AnalysisContainer(wdm_xyz, sens_mat_wdm_here_xyz)
 analysis_fd_xyz = AnalysisContainer(fd_xyz, sens_mat_fd_here_xyz)
+wdm_holder_new = AnalysisContainerArray([analysis_wdm_xyz])
+
 ip_wdm_xyz = analysis_wdm_xyz.inner_product()
 ip_fd_xyz = analysis_fd_xyz.inner_product()
-
-template_ip_wdm_xyz = analysis_wdm_xyz.template_snr(wdm_dat_here)[0] ** 2
+template_sparse_ll_wdm_xyz = analysis_wdm_xyz.template_likelihood(wdm_sparse_xyz)
+template_sparse_ip_wdm_xyz = analysis_wdm_xyz.template_inner_product(wdm_sparse_xyz)
+noise_weighted_overlap = analysis_wdm_xyz.template_inner_product(wdm_sparse_xyz, normalize=True)
 
 gb_comps.d_d = analysis_wdm_xyz.inner_product()
-check_ll_2 = gb_comps.get_ll_wdm(params, wdm_holder, data_index=None, noise_index=None)
 
-template_ll_wdm_xyz = analysis_wdm_xyz.likelihood(wdm_dat_here)
+template_ip_wdm_xyz = analysis_wdm_xyz.template_inner_product(wdm_dat_here)
+template_ll_wdm_xyz = analysis_wdm_xyz.template_likelihood(wdm_dat_here)
+breakpoint()
+check_ll_2 = gb_comps.get_ll_wdm(params, wdm_holder_new, data_index=None, noise_index=None)
+assert np.allclose(template_ll_wdm_xyz, check_ll_2)
+
+print("\n\n\nSTARTING TIMING")
+num_repeats = 100
+params_repeat = np.repeat(params, num_repeats, axis=0)
+params_repeat[:, 0] *= 1.2
+import time
+st = time.perf_counter()
+num = 5
+for _ in range(num):
+    check_ll_3 = gb_comps.get_ll_wdm(params_repeat, wdm_holder_new, data_index=None, noise_index=None)
+
+et = time.perf_counter()
+print((et - st) / num)
 breakpoint()
