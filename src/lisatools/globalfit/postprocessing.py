@@ -275,7 +275,6 @@ class BackendConsumer:
         max_act = int(np.ceil(max(np.max(act) for act in all_act.values())))
         logger.debug(f"Thinning factor: {max_act}")
 
-        breakpoint()
 
         self._thinned_chains = {}
         self._thinned_inds = {}
