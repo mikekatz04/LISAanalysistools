@@ -92,13 +92,14 @@ void XYZSensitivityMatrixWrap::get_noise_tfs_wrap(array_type<double> freqs,
     );
 }
 
-void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data, 
+void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contrib_final, array_type<double> f_arr, array_type<std::complex<double>> data,
                           array_type<int> data_index_all, array_type<int> time_index_all,
-                          array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all, 
-                          array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all, 
+                          array_type<double> Soms_d_in_all, array_type<double> Sa_a_in_all,
+                          array_type<double> Amp_all, array_type<double> alpha_all, array_type<double> slope_1_all, array_type<double> f_knee_all, array_type<double> slope_2_all,
                           array_type<double> spline_in_isi_oms_all, array_type<double> spline_in_testmass_all,
-                          double differential_component, int num_freqs, int num_times, 
-                          array_type<bool> dips_mask, int num_psds)
+                          double differential_component, int num_freqs, int num_times,
+                          array_type<bool> dips_mask, int num_psds,
+                          bool run_async)
 {
     int total_tf_pairs = num_times * num_freqs;
     sensitivity_matrix->psd_likelihood_wrap(
@@ -116,11 +117,12 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(array_type<double> like_contr
         return_pointer_and_check_length(slope_2_all, "slope_2_all", num_psds, 1),
         return_pointer_and_check_length(spline_in_isi_oms_all, "spline_in_isi_oms_all", num_psds * num_freqs, 1),
         return_pointer_and_check_length(spline_in_testmass_all, "spline_in_testmass_all", num_psds * num_freqs, 1),
-        differential_component, 
-        num_freqs, 
-        num_times, 
+        differential_component,
+        num_freqs,
+        num_times,
         return_pointer_and_check_length(dips_mask, "dips_mask", num_times * num_freqs, 1),
-        num_psds
+        num_psds,
+        run_async
     );
 }
 
@@ -347,7 +349,16 @@ void detector_part(py::module &m) {
     .def(py::init<array_type<double>, array_type<double>, int, double, int, bool, double>(),
             py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
     .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
-    .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
+    .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap,
+         py::arg("like_contrib_final"), py::arg("f_arr"), py::arg("data"),
+         py::arg("data_index_all"), py::arg("time_index_all"),
+         py::arg("Soms_d_in_all"), py::arg("Sa_a_in_all"),
+         py::arg("Amp_all"), py::arg("alpha_all"), py::arg("slope_1_all"), py::arg("f_knee_all"), py::arg("slope_2_all"),
+         py::arg("spline_in_isi_oms_all"), py::arg("spline_in_testmass_all"),
+         py::arg("differential_component"), py::arg("num_freqs"), py::arg("num_times"),
+         py::arg("dips_mask"), py::arg("num_psds"),
+         py::arg("run_async") = false,
+         "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
     .def("get_inverse_det_wrap", &XYZSensitivityMatrixWrap::get_inverse_det_wrap, "Batch invert 3x3 Hermitian matrices and compute determinants.")
     .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
@@ -392,6 +403,11 @@ void domains_part(py::module &m) {
          py::arg("data"), py::arg("invC"),
          py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
     .def("compute_likelihood_terms", &STFTDomainWrap::compute_likelihood_terms,
+         py::arg("d_h_out"), py::arg("h_h_out"), py::arg("template_vals"),
+         py::arg("start_times"), py::arg("start_freqs"), py::arg("num_binaries"),
+         py::arg("data_index"), py::arg("noise_index"),
+         py::arg("n_t_template"), py::arg("n_f_template"),
+         py::arg("run_async") = false,
          "Compute (d|h) and (h|h) likelihood terms for a batch of binaries.");
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
@@ -407,6 +423,11 @@ void domains_part(py::module &m) {
          py::arg("data"), py::arg("invC"),
          py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
     .def("compute_likelihood_terms", &FDDomainWrap::compute_likelihood_terms,
+         py::arg("d_h_out"), py::arg("h_h_out"), py::arg("template_vals"),
+         py::arg("start_freqs"), py::arg("num_binaries"),
+         py::arg("data_index"), py::arg("noise_index"),
+         py::arg("n_f_template"),
+         py::arg("run_async") = false,
          "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (FD).");
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)

@@ -640,6 +640,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
     Tmax: maximum temperature for the temperature control.
     betas_all: array of betas for all leaves and temperatures. Shape is (nleaves_max, ntemps). If None, betas will be initialized as in TemperatureControl.
     permute_every: number of repeats after which to permute the walkers during a temperature swap. 
+    run_async: whether to run the waveform generation and likelihood computation asynchronously for each GPU. If True, the synchronization will happen on the python side after the kernel calls. 
     run_threaded: whether to run the waveform generation and likelihood computation in separate threads for each GPU.
     waveform_like_method: name of the method of the waveform generator class to use for generating the waveforms for likelihood computation. If None, will use the same method as waveform_gen_method.
     """
@@ -659,6 +660,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         Tmax: float = np.inf,
         betas_all: np.ndarray = None,
         permute_every: int = 20,
+        run_async: bool = False,
         run_threaded: bool = False,
         waveform_like_method: str = None,
         **kwargs
@@ -681,7 +683,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             **kwargs
         )
 
-        MultiGPUMoveBase.__init__(self, dcga, run_threaded=run_threaded)
+        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
 
         self.waveform_gen = waveform_gen
         self.waveform_gen_method = waveform_gen_method
@@ -809,6 +811,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             data_intra_per_split=data_intra_index_per_split,
             noise_intra_per_split=data_intra_index_per_split,
             likelihood_args_per_split=likelihood_args_per_split,
+            likelihood_kwargs={'run_async': self.run_async},
             run_threaded=self.run_threaded,
         )
 

@@ -406,6 +406,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         galfor_transform_fn: TransformContainer = None,
         permute_every: int = 20,
         tolerance: float = 0.0,
+        run_async: bool = False,
         run_threaded: bool = False,
         **kwargs,
     ):
@@ -425,7 +426,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
             tolerance=tolerance,
             **kwargs,
         )
-        MultiGPUMoveBase.__init__(self, dcga, run_threaded=run_threaded)
+        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
 
     def psd_log_like(self, x: list[np.ndarray], supps=None, **sens_kwargs):
         """ """
@@ -455,6 +456,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
             data_intra_index_per_split,
             data_intra_index_per_split,
             likelihood_args_per_split,
+            likelihood_kwargs={'run_async': self.run_async},
             run_threaded=self.run_threaded,
         )
 
