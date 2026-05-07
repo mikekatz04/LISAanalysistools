@@ -88,8 +88,17 @@ if(LISATOOLS_WITH_CPU)
     VERBATIM
     )
 
+  add_custom_command(
+    OUTPUT "galactic_response.cxx"
+    COMMENT "Copy galactic_response.cu to galactic_response.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/galactic_response.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/galactic_response.cxx"
+    DEPENDS "galactic_response.cu"
+    VERBATIM
+    )
+
   # Add L1Detector.cxx to the sources
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx)
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx galactic_response.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
   
@@ -108,7 +117,7 @@ endif()
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
   # Add L1Detector.cu to the GPU sources
-  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu)
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu galactic_response.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
   
