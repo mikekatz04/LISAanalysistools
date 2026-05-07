@@ -155,17 +155,17 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # d - h -> need to add removal waveforms
         # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         removal_waveforms = self.get_waveform_here(coords)
-        ll_tmp2 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        # ll_tmp2 = self.acs.likelihood(
+        #     source_only=True
+        # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.remove_signal_from_residual(removal_waveforms, data_index=None)
         del removal_waveforms
         #if xp is not np:
         free_gpu_memory()
 
-        ll_tmp3 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        # ll_tmp3 = self.acs.likelihood(
+        #     source_only=True
+        # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
     def remove_cold_chain_sources(self, coords):
         """
@@ -179,17 +179,17 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # d - h -> need to add removal waveforms
         # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         removal_waveforms = self.get_waveform_here(coords)
-        ll_tmp2 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        # ll_tmp2 = self.acs.likelihood(
+        #     source_only=True
+        # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.add_signal_to_residual(removal_waveforms, data_index=None)
         del removal_waveforms
         #if xp is not np:
         free_gpu_memory()
 
-        ll_tmp3 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        # ll_tmp3 = self.acs.likelihood(
+        #     source_only=True
+        # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
     def get_waveform_here(self, coords: np.ndarray) -> DomainBaseArray | list[DomainBase]:
         """Get the waveforms for the given source coordinates.
@@ -378,7 +378,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     model.random.choice(np.arange(len(self.moves)), p=self.move_weights)
                 ]
 
-                logger.debug(f"move here: {move_here.__class__.__name__}")
+                # logger.debug(f"move here: {move_here.__class__.__name__}")
 
                 # Split the ensemble in half and iterate over these two halves.
                 accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
@@ -495,8 +495,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 }
 
                 fancy_swap = (repeat % self.permute_every == 0) and (repeat > 0)
-                if fancy_swap:
-                    logger.debug(f"Permuting walkers before swap.")
+                #if fancy_swap:
+                    # logger.debug(f"Permuting walkers before swap.")
                 compute_log_like = self.log_like_for_fancy_swaping
 
                 # TODO: check permute make sure it is okay
