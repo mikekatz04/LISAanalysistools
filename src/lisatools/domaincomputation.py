@@ -337,9 +337,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
     def _create_cpp_domain(self):
         self._cpp_domain = self.backend.STFTDomainWrap(*self.domain_args)
-        logger.debug("Initialized STFTDomainWrap with arguments: %s", self.domain_args)
         self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8], window_alpha=self.window_alpha)
-        logger.debug("Initialized STFTFresnelWrap with arguments: %s", self.domain_args[:8], window_alpha=self.window_alpha)
 
     @property
     def cpp_fresnel(self):
@@ -436,7 +434,6 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
     def _create_cpp_domain(self):
         self._cpp_domain = self.backend.FDDomainWrap(*self.domain_args)
-        logger.debug("Initialized FDDomainWrap with arguments: %s", self.domain_args)
 
     def compute_signal_likelihood_terms(
         self,

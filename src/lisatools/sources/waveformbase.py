@@ -113,6 +113,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         stft_dt: float = None,
         freq_min: float = 1e-5,
         freq_max: float = 1.0,
+        fft_batch_size: int = 1,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -151,6 +152,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         self.freq_min = freq_min
         self.freq_max = freq_max
+        self.fft_batch_size = fft_batch_size
 
     @property
     def wrapper_kwargs(self) -> dict:
@@ -166,6 +168,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             "stft_dt": self.nperseg * self.dt if self.nperseg else None,
             "freq_min": self.freq_min,
             "freq_max": self.freq_max,
+            "fft_batch_size": self.fft_batch_size,
             "force_backend": self.force_backend,
         }
 
@@ -575,11 +578,28 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         """
         num_binaries = signal_in.shape[0]
         n = signal_in.shape[-1]
+        
+        outer_shape = signal_in.shape[:-1]
 
         window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
-        windowed = signal_in * window
+        # In-place windowing: avoids a (num_binaries, num_channels, N_data) copy.
+        # signal_in is the padded array from build_common_grid and is not used after this call.
+        signal_in *= window
 
-        signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
+        # Loop over sources instead of one batched rfft to prevent oom errors from large FFTs
+        n_freqs_full = n // 2 + 1
+        signal_fd = self.xp.empty(
+            (*outer_shape, n_freqs_full), dtype=self.xp.complex128
+        )
+
+        fft_batch_size = getattr(self, "fft_batch_size", 1)  
+
+        for i in range(0, num_binaries, fft_batch_size):
+            start = i
+            end = min(i + fft_batch_size, num_binaries)
+
+            signal_fd[start:end] = self.xp.fft.rfft(signal_in[start:end], axis=-1) * self.dt
+
         freqs = self.xp.fft.rfftfreq(n, d=self.dt)
 
         keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
@@ -663,6 +683,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         stft_dt: float = None,
         freq_min: float = 1e-5,
         freq_max: float = 1.0,
+        fft_batch_size: int = 1,
         signal_duration: float = None,
         buffer_time: int = 5000,
         run_async: bool = False,
@@ -680,6 +701,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             stft_dt=stft_dt,
             freq_min=freq_min,
             freq_max=freq_max,
+            fft_batch_size=fft_batch_size,
             force_backend=force_backend,
         )
 
@@ -985,6 +1007,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         stft_dt: float = None,
         freq_min: float = 0.0,
         freq_max: float = 1.0,
+        fft_batch_size: int = 1,
         zero_inclination: bool = False,
         force_backend: str = "cpu",
     ) -> None:
@@ -1005,6 +1028,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
             stft_dt=stft_dt,
             freq_min=freq_min,
             freq_max=freq_max,
+            fft_batch_size=fft_batch_size,
             force_backend=force_backend,
         )
 
