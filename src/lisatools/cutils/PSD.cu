@@ -12,7 +12,6 @@
 // ============================================================================
 // Type Aliases
 // ============================================================================
-using cmplx = gcmplx::complex<double>;
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define XYZSensitivityMatrix XYZSensitivityMatrixGPU
@@ -173,19 +172,27 @@ void NoiseLevels::get_isi_oms_noise(double* S_oms, double f, double Soms_d_in,
  * @param f Frequency in Hz.
  * @param Amp Amplitude parameter.
  * @param alpha Spectral slope parameter.
- * @param slope_1 Exponential cutoff slope.
+ * @param f_1 Exponential scale frequency.
  * @param f_knee Knee frequency.
- * @param slope_2 Hyperbolic tangent slope.
+ * @param f_2 Hyperbolic tangent scale frequency.
  * @return Galactic foreground PSD.
  */
 CUDA_DEVICE
-void NoiseLevels::get_galactic_foreground(double* S_gal, double f, double Amp,
-                                          double alpha, double slope_1,
-                                          double f_knee, double slope_2) {
-  *S_gal = Amp * exp(-pow(f, alpha) * slope_1) * pow(f, -7.0 / 3.0) * 0.5 *
-           (1.0 + tanh(-(f - f_knee) * slope_2));
-}
+void NoiseLevels::get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double f_1, double f_knee, double f_2)
+{
+    double omega_f = 2.0 * M_PI * f;
+    double x       = omega_f * 8.338892595063376;
 
+    // Transfer function: 4*(x*sin(x))^2 * 4*sin(2x)^2
+    double transfer = 4.0 * (x * sin(x)) * (x * sin(x))
+                    * 4.0 * sin(2.0 * x) * sin(2.0 * x);
+
+    // Galactic foreground PSD shape
+        double psd_gal = Amp * exp(-pow(f / f_1, alpha)) * pow(f, -7.0 / 3.0)
+            * 0.5 * (1.0 + tanh(-(f - f_knee) / f_2));
+
+    *S_gal = psd_gal * transfer;
+}
 // ============================================================================
 // 3x3 Hermitian Matrix Operations
 // ============================================================================
@@ -291,38 +298,39 @@ double quadratic_form(cmplx d_X, cmplx d_Y, cmplx d_Z, double i00, cmplx i01,
  * @param num_psds Number of PSD configurations (batch size).
  */
 CUDA_KERNEL void psd_likelihood_xyz_kernel(
-    double* like_contrib, double* f_arr, cmplx* data_in, int* data_index_all,
-    int* time_index_all, double* Soms_d_in_all, double* Sa_a_in_all,
-    double* Amp_all, double* alpha_all, double* slope_1_all, double* f_knee_all,
-    double* slope_2_all, double* spline_in_isi_oms_all,
-    double* spline_in_testmass_all, double differential_component,
-    int num_freqs, int num_times, bool* dips_mask, int num_psds,
-    XYZSensitivityMatrix sensitivity_matrix) {
-  int tid;
-#ifdef __CUDACC__
-  tid = threadIdx.x;
+    double *like_contrib, double *f_arr, cmplx *data_in,
+    int *data_index_all, int *time_index_all,
+    double *Soms_d_in_all, double *Sa_a_in_all,
+    double *Amp_all, double *alpha_all, double *f_1_all, double *f_knee_all, double *f_2_all,
+    double *spline_in_isi_oms_all, double *spline_in_testmass_all,
+    double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds, 
+    XYZSensitivityMatrix sensitivity_matrix)
+{
+    int tid;
+#ifdef __CUDACC__ 
+    tid = threadIdx.x;
 #else
   tid = 0;
 #endif
 
-  // Per-thread variables
-  double Soms_d_in, Sa_a_in, Amp, alpha, slope_1, f_knee, slope_2;
-  double f;
-  int data_index, time_index;
-  cmplx d_X, d_Y, d_Z;
+    // Per-thread variables
+    double Soms_d_in, Sa_a_in, Amp, alpha, f_1, f_knee, f_2;
+    double f;
+    int data_index, time_index;
+    cmplx d_X, d_Y, d_Z;
+    
+    // Covariance matrix elements (Upper triangle of 3x3 Hermitian)
+    double c00, c11, c22;
+    cmplx c01, c02, c12;
+    // Inverse elements
+    double i00, i11, i22, det;
+    cmplx i01, i02, i12;
 
-  // Covariance matrix elements (Upper triangle of 3x3 Hermitian)
-  double c00, c11, c22;
-  cmplx c01, c02, c12;
-  // Inverse elements
-  double i00, i11, i22, det;
-  cmplx i01, i02, i12;
-
-  int start_psd, incr_psd;
-  int start_idx, incr_idx;
-
-  // Total number of (time, frequency) pairs to sum over
-  int total_tf_pairs = num_times * num_freqs;
+    int start_psd, incr_psd;
+    int start_idx, incr_idx;
+    
+    // Total number of (time, frequency) pairs to sum over
+    int total_tf_pairs = num_times * num_freqs;
 
 #ifdef __CUDACC__
   start_psd = blockIdx.y;
@@ -337,27 +345,28 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 #endif
 
 #ifdef __CUDACC__
-  CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
-  CUDA_SHARED double compensation[NUM_THREADS_LIKE];
-#endif
+    CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
+    CUDA_SHARED double compensation[NUM_THREADS_LIKE];
+#endif 
 
-  // Loop over PSDs
-  for (int psd_i = start_psd; psd_i < num_psds; psd_i += incr_psd) {
-    data_index = data_index_all[psd_i];
+    // Loop over PSDs
+    for (int psd_i = start_psd; psd_i < num_psds; psd_i += incr_psd)
+    {
+        data_index = data_index_all[psd_i];
 
-    // Noise parameters for this PSD
-    Soms_d_in = Soms_d_in_all[psd_i];
-    Sa_a_in = Sa_a_in_all[psd_i];
-    Amp = Amp_all[psd_i];
-    alpha = alpha_all[psd_i];
-    slope_1 = slope_1_all[psd_i];
-    f_knee = f_knee_all[psd_i];
-    slope_2 = slope_2_all[psd_i];
+        // Noise parameters for this PSD
+        Soms_d_in = Soms_d_in_all[psd_i];
+        Sa_a_in = Sa_a_in_all[psd_i];
+        Amp = Amp_all[psd_i];
+        alpha = alpha_all[psd_i];
+        f_1 = f_1_all[psd_i];
+        f_knee = f_knee_all[psd_i];
+        f_2 = f_2_all[psd_i];
 
-    // Initialize reduction
-    like_vals[tid] = 0.0;
-    compensation[tid] = 0.0;
-
+        // Initialize reduction
+        like_vals[tid] = 0.0;
+        compensation[tid] = 0.0;
+        
 #ifdef __CUDACC__
     CUDA_SYNC_THREADS;
     start_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -367,77 +376,76 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
     incr_idx = 1;
 #endif
 
-    // Loop over flattened (time, frequency) index
-    // Layout: idx = t_idx * num_freqs + f_idx (time-major, matches data layout)
-    // Adjacent threads access adjacent memory locations → coalesced
-    for (int idx = start_idx; idx < total_tf_pairs; idx += incr_idx) {
-      int t_idx = idx / num_freqs;
-      int f_idx = idx % num_freqs;
+        // Loop over flattened (time, frequency) index
+        // Layout: idx = t_idx * num_freqs + f_idx (time-major, matches data layout)
+        // Adjacent threads access adjacent memory locations → coalesced
+        for (int idx = start_idx; idx < total_tf_pairs; idx += incr_idx)
+        {
+            int t_idx = idx / num_freqs;
+            int f_idx = idx % num_freqs;
+            
+            time_index = time_index_all[t_idx];
+            f = f_arr[f_idx];
 
-      time_index = time_index_all[t_idx];
-      f = f_arr[f_idx];
+            // Skip masked dip frequencies
+            if (dips_mask[t_idx * num_freqs + f_idx]) {
+                continue;
+            }
 
-      // Skip masked dip frequencies
-      if (dips_mask[t_idx * num_freqs + f_idx]) {
-        continue;
-      }
+            if (f == 0.0)
+            {
+                f = f_arr[f_idx + 1]; // Avoid zero frequency 
+            }
+            
+            double spline_in_isi_oms = spline_in_isi_oms_all[psd_i * num_freqs + f_idx];
+            double spline_in_testmass = spline_in_testmass_all[psd_i * num_freqs + f_idx];
 
-      if (f == 0.0) {
-        f = f_arr[f_idx + 1];  // Avoid zero frequency
-      }
+            // Get noise covariance matrix for this (time, frequency) pair
+            sensitivity_matrix.get_noise_covariance(
+                f, time_index,
+                Soms_d_in, Sa_a_in,
+                Amp, alpha, f_1, f_knee, f_2,
+                spline_in_testmass, spline_in_isi_oms,
+                &c00, &c01, &c02, &c11, &c12, &c22
+            );
 
-      double spline_in_isi_oms =
-          spline_in_isi_oms_all[psd_i * num_freqs + f_idx];
-      double spline_in_testmass =
-          spline_in_testmass_all[psd_i * num_freqs + f_idx];
+            // Invert C -> C^-1
+            invert_3x3_hermitian(c00, c01, c02, c11, c12, c22, 
+                                 i00, i01, i02, i11, i12, i22, det);
+            
+            // Guard against invalid determinant (would cause NaN in log)
+            if (det == 0.0 || !isfinite(det)) {
+                // printf("Invalid det: %e at f=%.3e Hz, t_idx=%d, psd_i=%d\n", det, f, t_idx, psd_i);
+                continue;  // Skip this frequency point
+            }
 
-      // Get noise covariance matrix for this (time, frequency) pair
-      sensitivity_matrix.get_noise_covariance(
-          f, time_index, Soms_d_in, Sa_a_in, Amp, alpha, slope_1, f_knee,
-          slope_2, spline_in_testmass, spline_in_isi_oms, &c00, &c01, &c02,
-          &c11, &c12, &c22);
+            // Get Data: layout is walker-major, channel-major, then time-frequency
+            // linear_data_arr layout: [walker0_ch0_data, walker0_ch1_data, walker0_ch2_data, walker1_ch0_data, ...]
+            // For walker data_index, channel c, element idx:
+            // position = data_index * 3 * total_tf_pairs + c * total_tf_pairs + idx
+            int base_idx = data_index * 3 * total_tf_pairs;
+            d_X = data_in[base_idx + idx];
+            d_Y = data_in[base_idx + total_tf_pairs + idx];
+            d_Z = data_in[base_idx + 2 * total_tf_pairs + idx];
 
-      // Invert C -> C^-1
-      invert_3x3_hermitian(c00, c01, c02, c11, c12, c22, i00, i01, i02, i11,
-                           i12, i22, det);
+            // Compute Quadratic Form: d^H * C^-1 * d
+            double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
+            
+            // Guard against invalid quadratic form
+            if (!isfinite(Q) || Q < 0.0) {
+                // printf("Invalid Q: %e at f=%.3e Hz, t_idx=%d, psd_i=%d\n", Q, f, t_idx, psd_i);
+                continue;  // Skip this frequency point
+            }
 
-      // Guard against invalid determinant (would cause NaN in log)
-      if (det == 0.0 || !isfinite(det)) {
-        // printf("Invalid det: %e at f=%.3e Hz, t_idx=%d, psd_i=%d\n", det, f,
-        // t_idx, psd_i);
-        continue;  // Skip this frequency point
-      }
-
-      // Get Data: layout is walker-major, channel-major, then time-frequency
-      // linear_data_arr layout: [walker0_ch0_data, walker0_ch1_data,
-      // walker0_ch2_data, walker1_ch0_data, ...] For walker data_index, channel
-      // c, element idx: position = data_index * 3 * total_tf_pairs + c *
-      // total_tf_pairs + idx
-      int base_idx = data_index * 3 * total_tf_pairs;
-      d_X = data_in[base_idx + idx];
-      d_Y = data_in[base_idx + total_tf_pairs + idx];
-      d_Z = data_in[base_idx + 2 * total_tf_pairs + idx];
-
-      // Compute Quadratic Form: d^H * C^-1 * d
-      double Q = quadratic_form(d_X, d_Y, d_Z, i00, i01, i02, i11, i12, i22);
-
-      // Guard against invalid quadratic form
-      if (!isfinite(Q) || Q < 0.0) {
-        // printf("Invalid Q: %e at f=%.3e Hz, t_idx=%d, psd_i=%d\n", Q, f,
-        // t_idx, psd_i);
-        continue;  // Skip this frequency point
-      }
-
-      // Likelihood Accumulation
-      double term =
-          -0.5 * (4.0 * differential_component * Q) - log(std::abs(det));
-      // Kahan Summation
-      double y = term - compensation[tid];
-      double t = like_vals[tid] + y;
-      compensation[tid] = (t - like_vals[tid]) - y;
-      like_vals[tid] = t;
-      // like_vals[tid] += term;
-    }
+            // Likelihood Accumulation
+            double term = -0.5 * (4.0 * differential_component * Q) - log(std::abs(det));
+            // Kahan Summation
+            double y = term - compensation[tid];
+            double t = like_vals[tid] + y;
+            compensation[tid] = (t - like_vals[tid]) - y;
+            like_vals[tid] = t;
+            // like_vals[tid] += term;
+        }
 #ifdef __CUDACC__
     CUDA_SYNC_THREADS;
 
@@ -527,8 +535,8 @@ CUDA_KERNEL void like_sum_from_contrib(double* like_contrib_final,
 void XYZSensitivityMatrix::psd_likelihood_wrap(
     double* like_contrib_final, double* f_arr, cmplx* data, int* data_index_all,
     int* time_index_all, double* Soms_d_in_all, double* Sa_a_in_all,
-    double* Amp_all, double* alpha_all, double* slope_1_all, double* f_knee_all,
-    double* slope_2_all, double* spline_in_testmass_all,
+    double* Amp_all, double* alpha_all, double* f_1_all, double* f_knee_all,
+    double* f_2_all, double* spline_in_testmass_all,
     double* spline_in_isi_oms_all, double differential_component, int num_freqs,
     int num_times, bool* dips_mask, int num_psds, bool run_async) {
   int total_tf_pairs = num_times * num_freqs;
@@ -559,7 +567,7 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
 
   psd_likelihood_xyz_kernel<<<grid, NUM_THREADS_LIKE>>>(
       like_contrib, f_arr, data, data_index_all, time_index_all, Soms_d_in_all,
-      Sa_a_in_all, Amp_all, alpha_all, slope_1_all, f_knee_all, slope_2_all,
+      Sa_a_in_all, Amp_all, alpha_all,f_1_all, f_knee_all, f_2_all,
       spline_in_testmass_all, spline_in_isi_oms_all, differential_component,
       num_freqs, num_times, dips_mask, num_psds, *this);
 
@@ -581,12 +589,13 @@ void XYZSensitivityMatrix::psd_likelihood_wrap(
   }
   // gpuErrchk(cudaFree(dev_ptr));
 #else
-  // CPU Fallback
-  psd_likelihood_xyz_kernel(
-      like_contrib_final, f_arr, data, data_index_all, time_index_all,
-      Soms_d_in_all, Sa_a_in_all, Amp_all, alpha_all, slope_1_all, f_knee_all,
-      slope_2_all, spline_in_testmass_all, spline_in_isi_oms_all,
-      differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
+    // CPU Fallback
+    psd_likelihood_xyz_kernel(
+        like_contrib_final, f_arr, data, data_index_all, time_index_all,
+        Soms_d_in_all, Sa_a_in_all,
+        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all,
+        spline_in_testmass_all, spline_in_isi_oms_all,
+        differential_component, num_freqs, num_times, dips_mask, num_psds, *this);
 #endif
 }
 
@@ -803,52 +812,74 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(
 
 CUDA_DEVICE
 void XYZSensitivityMatrix::get_noise_covariance(
-    double f, int time_index, double Soms_d_in, double Sa_a_in, double Amp,
-    double alpha, double slope_1, double f_knee, double slope_2,
-    double spline_in_testmass, double spline_in_isi_oms, double* c00,
-    cmplx* c01, cmplx* c02, double* c11, cmplx* c12, double* c22) {
-  // Get noise transfer functions
-  double oms_xx, oms_yy, oms_zz, tm_xx, tm_yy, tm_zz;
-  cmplx oms_xy, oms_xz, oms_yz, tm_xy, tm_xz, tm_yz;
+    double f, int time_index,
+    double Soms_d_in, double Sa_a_in,
+    double Amp, double alpha, double f_1, double f_knee, double f_2,
+    double spline_in_testmass, double spline_in_isi_oms,
+    double *c00, cmplx *c01, cmplx *c02,
+    double *c11, cmplx *c12, double *c22)
+{
+    double oms_xx, oms_yy, oms_zz, tm_xx, tm_yy, tm_zz;
+    cmplx oms_xy, oms_xz, oms_yz, tm_xy, tm_xz, tm_yz;
 
-  get_noise_tfs(f, &oms_xx, &oms_xy, &oms_xz, &oms_yy, &oms_yz, &oms_zz, &tm_xx,
-                &tm_xy, &tm_xz, &tm_yy, &tm_yz, &tm_zz, time_index);
+    get_noise_tfs(f,
+                  &oms_xx, &oms_xy, &oms_xz, &oms_yy, &oms_yz, &oms_zz,
+                  &tm_xx, &tm_xy, &tm_xz, &tm_yy, &tm_yz, &tm_zz,
+                  time_index);
 
-  // Calculate Noise PSDs
-  double S_tm, S_isi_oms, S_gal;
-  noise_levels.get_testmass_noise(&S_tm, f, Sa_a_in, spline_in_testmass);
-  noise_levels.get_isi_oms_noise(&S_isi_oms, f, Soms_d_in, spline_in_isi_oms);
-  noise_levels.get_galactic_foreground(&S_gal, f, Amp, alpha, slope_1, f_knee,
-                                       slope_2);
+    double S_tm, S_isi_oms;
+    noise_levels.get_testmass_noise(&S_tm, f, Sa_a_in, spline_in_testmass);
+    noise_levels.get_isi_oms_noise(&S_isi_oms, f, Soms_d_in, spline_in_isi_oms);
 
-  // Build Covariance Matrix C (3x3 Hermitian, upper triangle)
-  // Diagonal elements are real
-  *c00 = (oms_xx * S_isi_oms + tm_xx * S_tm) * window_factor;
-  *c11 = (oms_yy * S_isi_oms + tm_yy * S_tm) * window_factor;
-  *c22 = (oms_zz * S_isi_oms + tm_zz * S_tm) * window_factor;
+    *c00 = oms_xx * S_isi_oms + tm_xx * S_tm;
+    *c11 = oms_yy * S_isi_oms + tm_yy * S_tm;
+    *c22 = oms_zz * S_isi_oms + tm_zz * S_tm;
+    *c01 = oms_xy * S_isi_oms + tm_xy * S_tm;
+    *c02 = oms_xz * S_isi_oms + tm_xz * S_tm;
+    *c12 = oms_yz * S_isi_oms + tm_yz * S_tm;
 
-  // Off-diagonal elements are complex
-  *c01 = (oms_xy * S_isi_oms + tm_xy * S_tm) * window_factor;
-  *c02 = (oms_xz * S_isi_oms + tm_xz * S_tm) * window_factor;
-  *c12 = (oms_yz * S_isi_oms + tm_yz * S_tm) * window_factor;
+    // Galactic foreground: R_avg[time_index * 6 + k] * S_gal(f)
+    // R_avg is fixed (shared across walkers); S_gal computed inline per walker
+    if (use_galactic && gal_R_avg != nullptr)
+    {
+        double S_gal;
+        noise_levels.get_galactic_foreground(&S_gal, f, Amp, alpha, f_1, f_knee, f_2);
+
+        int base = time_index * 6;
+        *c00 += gal_R_avg[base + 0] * S_gal;
+        *c01 += cmplx(gal_R_avg[base + 1] * S_gal, 0.0);
+        *c02 += cmplx(gal_R_avg[base + 2] * S_gal, 0.0);
+        *c11 += gal_R_avg[base + 3] * S_gal;
+        *c12 += cmplx(gal_R_avg[base + 4] * S_gal, 0.0);
+        *c22 += gal_R_avg[base + 5] * S_gal;
+      
+    }
+  
+  *c00 *= window_factor;
+  *c11 *= window_factor;
+  *c22 *= window_factor;
+  *c01 *= window_factor;
+  *c02 *= window_factor;
+  *c12 *= window_factor;
 }
 
 CUDA_KERNEL
-void get_noise_covariance_kernel(double* frequencies, int* time_indices,
-                                 double Soms_d_in, double Sa_a_in, double Amp,
-                                 double alpha, double slope_1, double f_knee,
-                                 double slope_2, double* spline_in_testmass_arr,
-                                 double* spline_in_isi_oms_arr, double* c00_arr,
-                                 cmplx* c01_arr, cmplx* c02_arr,
-                                 double* c11_arr, cmplx* c12_arr,
-                                 double* c22_arr, int num_freqs, int num_times,
-                                 XYZSensitivityMatrix* sensitivity_matrix) {
-  // Memory layout: output[t_idx * num_freqs + f_idx]
-  // Frequencies are the fast-varying dimension for coalesced access
-
-  int start_freq, end_freq, increment_freq;
-  int start_time, end_time, increment_time;
-  double spline_in_testmass, spline_in_isi_oms;
+void get_noise_covariance_kernel(
+    double *frequencies, int *time_indices,
+    double Soms_d_in, double Sa_a_in,
+    double Amp, double alpha, double f_1, double f_knee, double f_2,
+    double *spline_in_testmass_arr, double *spline_in_isi_oms_arr, 
+    double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
+    double *c11_arr, cmplx *c12_arr, double *c22_arr,
+    int num_freqs, int num_times,
+    XYZSensitivityMatrix &sensitivity_matrix)
+{
+    // Memory layout: output[t_idx * num_freqs + f_idx]
+    // Frequencies are the fast-varying dimension for coalesced access
+    
+    int start_freq, end_freq, increment_freq;
+    int start_time, end_time, increment_time;
+    double spline_in_testmass, spline_in_isi_oms;
 
 #ifdef __CUDACC__
   // X dimension for frequencies (fast), Y dimension for times (slow)
@@ -868,59 +899,80 @@ void get_noise_covariance_kernel(double* frequencies, int* time_indices,
   increment_time = 1;
 #endif
 
-  for (int t_idx = start_time; t_idx < end_time; t_idx += increment_time) {
-    int time_index = time_indices[t_idx];
-    int base_out_idx = t_idx * num_freqs;
+    for (int t_idx = start_time; t_idx < end_time; t_idx += increment_time)
+    {
+        int time_index = time_indices[t_idx];
+        int base_out_idx = t_idx * num_freqs;
 
-    for (int f_idx = start_freq; f_idx < end_freq; f_idx += increment_freq) {
-      double f = frequencies[f_idx];
-      int out_idx = base_out_idx + f_idx;
+        for (int f_idx = start_freq; f_idx < end_freq; f_idx += increment_freq)
+        {
+            double f = frequencies[f_idx];
+            int out_idx = base_out_idx + f_idx;
 
-      spline_in_testmass = spline_in_testmass_arr[f_idx];
-      spline_in_isi_oms = spline_in_isi_oms_arr[f_idx];
+            spline_in_testmass = spline_in_testmass_arr[f_idx];
+            spline_in_isi_oms = spline_in_isi_oms_arr[f_idx];
 
-      sensitivity_matrix->get_noise_covariance(
-          f, time_index, Soms_d_in, Sa_a_in, Amp, alpha, slope_1, f_knee,
-          slope_2, spline_in_testmass, spline_in_isi_oms, &c00_arr[out_idx],
-          &c01_arr[out_idx], &c02_arr[out_idx], &c11_arr[out_idx],
-          &c12_arr[out_idx], &c22_arr[out_idx]);
+            sensitivity_matrix.get_noise_covariance(
+                f, time_index,
+                Soms_d_in, Sa_a_in,
+                Amp, alpha, f_1, f_knee, f_2,
+                spline_in_testmass, spline_in_isi_oms,
+                &c00_arr[out_idx], &c01_arr[out_idx], &c02_arr[out_idx],
+                &c11_arr[out_idx], &c12_arr[out_idx], &c22_arr[out_idx]
+            );
+        }
     }
   }
 }
 
 void XYZSensitivityMatrix::get_noise_covariance_arr(
-    double* freqs, int* time_indices, double Soms_d_in, double Sa_a_in,
-    double Amp, double alpha, double slope_1, double f_knee, double slope_2,
-    double* spline_in_testmass_arr, double* spline_in_isi_oms_arr,
-    double* c00_arr, cmplx* c01_arr, cmplx* c02_arr, double* c11_arr,
-    cmplx* c12_arr, double* c22_arr, int num_freqs, int num_times) {
+    double *freqs, int *time_indices,
+    double Soms_d_in, double Sa_a_in,
+    double Amp, double alpha, double f_1, double f_knee, double f_2,
+    double *spline_in_testmass_arr, double *spline_in_isi_oms_arr, 
+    double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
+    double *c11_arr, cmplx *c12_arr, double *c22_arr,
+    int num_freqs, int num_times)
+{
 #ifdef __CUDACC__
-  // 2D grid: X for frequencies (coalesced), Y for time indices
-  // Use more threads in X for better coalescing
-  dim3 block(32, 8);  // 32 threads in freq dimension for warp coalescing
-  dim3 grid((num_freqs + block.x - 1) / block.x,
-            (num_times + block.y - 1) / block.y);
-
-  // Copy self to GPU
-  XYZSensitivityMatrix* sensitivity_matrix_gpu;
-  gpuErrchk(cudaMalloc(&sensitivity_matrix_gpu, sizeof(XYZSensitivityMatrix)));
-  gpuErrchk(cudaMemcpy(sensitivity_matrix_gpu, this,
-                       sizeof(XYZSensitivityMatrix), cudaMemcpyHostToDevice));
-
-  get_noise_covariance_kernel<<<grid, block>>>(
-      freqs, time_indices, Soms_d_in, Sa_a_in, Amp, alpha, slope_1, f_knee,
-      slope_2, spline_in_testmass_arr, spline_in_isi_oms_arr, c00_arr, c01_arr,
-      c02_arr, c11_arr, c12_arr, c22_arr, num_freqs, num_times,
-      sensitivity_matrix_gpu);
-
-  cudaDeviceSynchronize();
-  gpuErrchk(cudaGetLastError());
-  gpuErrchk(cudaFree(sensitivity_matrix_gpu));
+    // 2D grid: X for frequencies (coalesced), Y for time indices
+    // Use more threads in X for better coalescing
+    dim3 block(32, 8);  // 32 threads in freq dimension for warp coalescing
+    dim3 grid(
+        (num_freqs + block.x - 1) / block.x,
+        (num_times + block.y - 1) / block.y
+    );
+    
+    // Copy self to GPU
+    XYZSensitivityMatrix *sensitivity_matrix_gpu;
+    gpuErrchk(cudaMalloc(&sensitivity_matrix_gpu, sizeof(XYZSensitivityMatrix)));
+    gpuErrchk(cudaMemcpy(sensitivity_matrix_gpu, this, sizeof(XYZSensitivityMatrix), cudaMemcpyHostToDevice));
+    
+    get_noise_covariance_kernel<<<grid, block>>>(
+        freqs, time_indices,
+        Soms_d_in, Sa_a_in,
+        Amp, alpha, f_1, f_knee, f_2,
+        spline_in_testmass_arr, spline_in_isi_oms_arr,
+        c00_arr, c01_arr, c02_arr,
+        c11_arr, c12_arr, c22_arr,
+        num_freqs, num_times,
+        *sensitivity_matrix_gpu
+    );
+    
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaFree(sensitivity_matrix_gpu));
 #else
-  get_noise_covariance_kernel(
-      freqs, time_indices, Soms_d_in, Sa_a_in, Amp, alpha, slope_1, f_knee,
-      slope_2, spline_in_testmass_arr, spline_in_isi_oms_arr, c00_arr, c01_arr,
-      c02_arr, c11_arr, c12_arr, c22_arr, num_freqs, num_times, this);
+    get_noise_covariance_kernel(
+        freqs, time_indices,
+        Soms_d_in, Sa_a_in,
+        Amp, alpha, f_1, f_knee, f_2,
+        spline_in_testmass_arr, spline_in_isi_oms_arr,
+        c00_arr, c01_arr, c02_arr,
+        c11_arr, c12_arr, c22_arr,
+        num_freqs, num_times,
+        *this
+    );
 #endif
 }
 
@@ -977,6 +1029,21 @@ void XYZSensitivityMatrix::get_inverse_det_arr(double* c00_arr, cmplx* c01_arr,
 #endif
 }
 
+// ============================================================================
+// Galactic foreground attachment (host-only)
+// ============================================================================
+
+void XYZSensitivityMatrix::set_galactic_grid(double *d_R_avg)
+{
+    gal_R_avg    = d_R_avg;
+    use_galactic = (d_R_avg != nullptr);
+}
+
+void XYZSensitivityMatrix::disable_galactic_grid()
+{
+    gal_R_avg    = nullptr;
+    use_galactic = false;
+}
 // ============================================================================
 // pdf calculation from sangria psd file
 // ============================================================================
@@ -1223,105 +1290,91 @@ CUDA_CALLABLE_MEMBER void lisanoises(double* Spm, double* Sop, double f,
   //     *Sop);
 }
 
-CUDA_CALLABLE_MEMBER double SGal(double fr, double Amp, double alpha,
-                                 double sl1, double kn, double sl2) {
-  double Sgal_out =
-      (Amp * exp(-(pow(fr, alpha)) * sl1) * (pow(fr, (-7.0 / 3.0))) * 0.5 *
-       (1.0 + tanh(-(fr - kn) * sl2)));
-  return Sgal_out;
+CUDA_CALLABLE_MEMBER double SGal(double fr, double Amp, double alpha, double f_1, double kn, double f_2)
+{
+    double Sgal_out = (Amp * exp(-pow(fr / f_1, alpha)) * (pow(fr, (-7.0 / 3.0))) * 0.5 * (1.0 + tanh(-(fr - kn) / f_2)));
+    return Sgal_out;
 }
 
-CUDA_CALLABLE_MEMBER double GalConf(double fr, double Amp, double alpha,
-                                    double sl1, double kn, double sl2) {
-  double Sgal_int = SGal(fr, Amp, alpha, sl1, kn, sl2);
-  return Sgal_int;
+CUDA_CALLABLE_MEMBER double GalConf(double fr, double Amp, double alpha, double f_1, double kn, double f_2)
+{
+    double Sgal_int = SGal(fr, Amp, alpha, f_1, kn, f_2);
+    return Sgal_int;
 }
 
-CUDA_CALLABLE_MEMBER double WDconfusionX(double f, double Amp, double alpha,
-                                         double sl1, double kn, double sl2) {
-  double x = 2.0 * M_PI * lisaLT * f;
-  double t = 4.0 * pow(x, 2) * pow(sin(x), 2);
+CUDA_CALLABLE_MEMBER double WDconfusionX(double f, double Amp, double alpha, double f_1, double kn, double f_2)
+{
+    double x = 2.0 * M_PI * lisaLT * f;
+    double t = 4.0 * pow(x, 2) * pow(sin(x), 2);
 
-  double Sg_sens = GalConf(f, Amp, alpha, sl1, kn, sl2);
+    double Sg_sens = GalConf(f, Amp, alpha, f_1, kn, f_2);
 
   // t = 4 * x**2 * xp.sin(x)**2 * (1.0 if obs == 'X' else 1.5)
   return t * Sg_sens;
 }
 
-CUDA_CALLABLE_MEMBER double WDconfusionAE(double f, double Amp, double alpha,
-                                          double sl1, double kn, double sl2) {
-  double SgX = WDconfusionX(f, Amp, alpha, sl1, kn, sl2);
-  return 1.5 * SgX;
+CUDA_CALLABLE_MEMBER double WDconfusionAE(double f, double Amp, double alpha, double f_1, double kn, double f_2)
+{
+    double SgX = WDconfusionX(f, Amp, alpha, f_1, kn, f_2);
+    return 1.5 * SgX;
 }
 
-CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in,
-                                     const double Sa_a_in, const double Amp,
-                                     const double alpha, const double sl1,
-                                     const double kn, const double sl2) {
-  double x = 2.0 * M_PI * lisaLT * f;
-  double Sa_d, Sop;
-  bool return_relative_frequency = false;
-  lisanoises(&Sa_d, &Sop, f, Soms_d_in, Sa_a_in, return_relative_frequency);
+CUDA_CALLABLE_MEMBER double lisasens(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double f_1, const double kn, const double f_2)
+{
+    double x = 2.0 * M_PI * lisaLT * f;
+    double Sa_d, Sop;
+    bool return_relative_frequency = false;
+    lisanoises(&Sa_d, &Sop, f, Soms_d_in, Sa_a_in, return_relative_frequency);
 
-  double ALL_m = sqrt(4.0 * Sa_d + Sop);
-  // Average the antenna response
-  double AvResp = sqrt(5.);
-  // Projection effect
-  double Proj = 2.0 / sqrt(3.);
-  // Approximative transfert function
-  double f0 = 1.0 / (2.0 * lisaLT);
-  double a = 0.41;
-  double T = sqrt(1. + pow((f / (a * f0)), 2));
-  double Sens = pow((AvResp * Proj * T * ALL_m / lisaL), 2);
+    double ALL_m = sqrt(4.0 * Sa_d + Sop);
+    // Average the antenna response
+    double AvResp = sqrt(5.);
+    // Projection effect
+    double Proj = 2.0 / sqrt(3.);
+    // Approximative transfert function
+    double f0 = 1.0 / (2.0 * lisaLT);
+    double a = 0.41;
+    double T = sqrt(1. + pow((f / (a * f0)), 2));
+    double Sens = pow((AvResp * Proj * T * ALL_m / lisaL), 2);
 
-  if (Amp > 0.0) {
-    Sens += GalConf(f, Amp, alpha, sl1, kn, sl2);
-  }
+    if (Amp > 0.0)
+    {
+        Sens += GalConf(f, Amp, alpha, f_1, kn, f_2);
+    }
 
-  return Sens;
+    return Sens;
 }
 
-CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in,
-                                        const double Sa_a_in, const double Amp,
-                                        const double alpha, const double sl1,
-                                        const double kn, const double sl2) {
-  double x = 2.0 * M_PI * lisaLT * f;
-  double Spm, Sop;
-  bool return_relative_frequency = true;
-  lisanoises(&Spm, &Sop, f, Soms_d_in, Sa_a_in, return_relative_frequency);
+CUDA_CALLABLE_MEMBER double noisepsd_AE(const double f, const double Soms_d_in, const double Sa_a_in, const double Amp, const double alpha, const double f_1, const double kn, const double f_2)
+{
+    double x = 2.0 * M_PI * lisaLT * f;
+    double Spm, Sop;
+    bool return_relative_frequency = true;
+    lisanoises(&Spm, &Sop, f, Soms_d_in, Sa_a_in, return_relative_frequency);
 
-  double Sa =
-      (8.0 * (sin(x) * sin(x)) *
-       (2.0 * Spm * (3.0 + 2.0 * cos(x) + cos(2 * x)) + Sop * (2.0 + cos(x))));
+    double Sa = (8.0 * (sin(x) * sin(x)) * (2.0 * Spm * (3.0 + 2.0 * cos(x) + cos(2 * x)) + Sop * (2.0 + cos(x))));
 
-  if (Amp > 0.0) {
-    Sa += WDconfusionAE(f, Amp, alpha, sl1, kn, sl2);
-  }
+    if (Amp > 0.0)
+    {
+        Sa += WDconfusionAE(f, Amp, alpha, f_1, kn, f_2);
+    }
 
-  return Sa;
-  //,
+    return Sa;
+    //,
 }
 
 CUDA_CALLABLE_MEMBER
-double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E,
-                           double A_Soms_d_in, double A_Sa_a_in,
-                           double E_Soms_d_in, double E_Sa_a_in, double Amp,
-                           double alpha, double sl1, double kn, double sl2) {
-  double A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
-  double A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
-  double E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
-  double E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
-  double Sn_A =
-      noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-  double Sn_E =
-      noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in, double Amp, double alpha, double f_1, double kn, double f_2)
+{
+    double A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
+    double A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
+    double E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
+    double E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
+    double Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, f_1, kn, f_2);
+    double Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, f_1, kn, f_2);
 
-  double inner_product =
-      (4.0 *
-       ((gcmplx::conj(d_A) * d_A / Sn_A) + (gcmplx::conj(d_E) * d_E / Sn_E))
-           .real() *
-       df);
-  return -1.0 / 2.0 * inner_product - (log(Sn_A) + log(Sn_E));
+    double inner_product = (4.0 * ((gcmplx::conj(d_A) * d_A / Sn_A) + (gcmplx::conj(d_E) * d_E / Sn_E)).real() * df);
+    return -1.0 / 2.0 * inner_product - (log(Sn_A) + log(Sn_E));
 }
 
 CUDA_KERNEL void psd_likelihood(double* like_contrib, double* f_arr,
@@ -1387,53 +1440,114 @@ CUDA_KERNEL void psd_likelihood(double* like_contrib, double* f_arr,
     }
     CUDA_SYNC_THREADS;
 
-    if (tid == 0) {
-      like_contrib[psd_i * num_blocks + bid] = like_vals[0];
+
+CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+                               double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
+{
+    #ifdef __CUDACC__
+    CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int num_blocks = gridDim.x;
+    int data_index;
+    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2;
+    cmplx d_A, d_E;
+    double f, Sn_A, Sn_E;
+    double inner_product;
+    double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
+    for (int psd_i = blockIdx.y; psd_i < num_psds; psd_i += gridDim.y)
+    {
+        data_index = data_index_all[psd_i];
+
+        A_Soms_d_in = A_Soms_d_in_all[psd_i];
+        A_Sa_a_in = A_Sa_a_in_all[psd_i];
+        E_Soms_d_in = E_Soms_d_in_all[psd_i];
+        E_Sa_a_in = E_Sa_a_in_all[psd_i];
+        Amp = Amp_all[psd_i];
+        alpha = alpha_all[psd_i];
+        f_1 = f_1_all[psd_i];
+        kn = kn_all[psd_i];
+        f_2 = f_2_all[psd_i];
+
+        for (int i = threadIdx.x; i < NUM_THREADS_LIKE; i += blockDim.x)
+        {
+            like_vals[i] = 0.0;
+        }
+        CUDA_SYNC_THREADS;
+
+        for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < data_length; i += blockDim.x * gridDim.x)
+        {
+            d_A = data[(data_index * 2 + 0) * data_length + i];
+            d_E = data[(data_index * 2 + 1) * data_length + i];
+            f = f_arr[i];
+            if (f == 0.0)
+            {
+                f = df; // TODO switch this?
+            }
+
+            like_vals[tid] += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2);
+        }
+        CUDA_SYNC_THREADS;
+
+        for (unsigned int s = 1; s < blockDim.x; s *= 2)
+        {
+            if (tid % (2 * s) == 0)
+            {
+                like_vals[tid] += like_vals[tid + s];
+                // if ((bin_i == 1) && (blockIdx.x == 0) && (channel_i == 0) && (s == 1))
+            }
+            CUDA_SYNC_THREADS;
+        }
+        CUDA_SYNC_THREADS;
+
+        if (tid == 0)
+        {
+            like_contrib[psd_i * num_blocks + bid] = like_vals[0];
+        }
+        CUDA_SYNC_THREADS;
     }
     CUDA_SYNC_THREADS;
   }
 #endif
 }
 
-void psd_likelihood_cpu(double* like_vals, double* f_arr, cmplx* data,
-                        int* data_index_all, double* A_Soms_d_in_all,
-                        double* A_Sa_a_in_all, double* E_Soms_d_in_all,
-                        double* E_Sa_a_in_all, double* Amp_all,
-                        double* alpha_all, double* sl1_all, double* kn_all,
-                        double* sl2_all, double df, int data_length,
-                        int num_data, int num_psds) {
-  int data_index;
-  double _tmp_like_val = 0.0;
-  double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn,
-      sl2;
-  cmplx d_A, d_E;
-  double f, Sn_A, Sn_E;
-  double inner_product;
-  double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
-  for (int psd_i = 0; psd_i < num_psds; psd_i += 1) {
-    _tmp_like_val = 0.0;
-    data_index = data_index_all[psd_i];
-    A_Soms_d_in = A_Soms_d_in_all[psd_i];
-    A_Sa_a_in = A_Sa_a_in_all[psd_i];
-    E_Soms_d_in = E_Soms_d_in_all[psd_i];
-    E_Sa_a_in = E_Sa_a_in_all[psd_i];
-    Amp = Amp_all[psd_i];
-    alpha = alpha_all[psd_i];
-    sl1 = sl1_all[psd_i];
-    kn = kn_all[psd_i];
-    sl2 = sl2_all[psd_i];
+void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+                               double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
+{
+    int data_index;
+    double _tmp_like_val = 0.0;
+    double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2;
+    cmplx d_A, d_E;
+    double f, Sn_A, Sn_E;
+    double inner_product;
+    double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
+    for (int psd_i = 0; psd_i < num_psds; psd_i += 1)
+    {
+        _tmp_like_val = 0.0;
+        data_index = data_index_all[psd_i];
+        A_Soms_d_in = A_Soms_d_in_all[psd_i];
+        A_Sa_a_in = A_Sa_a_in_all[psd_i];
+        E_Soms_d_in = E_Soms_d_in_all[psd_i];
+        E_Sa_a_in = E_Sa_a_in_all[psd_i];
+        Amp = Amp_all[psd_i];
+        alpha = alpha_all[psd_i];
+        f_1 = f_1_all[psd_i];
+        kn = kn_all[psd_i];
+        f_2 = f_2_all[psd_i];
 
-    for (int i = 0; i < data_length; i += 1) {
-      d_A = data[(data_index * 2 + 0) * data_length + i];
-      d_E = data[(data_index * 2 + 1) * data_length + i];
-      f = f_arr[i];
-      if (f == 0.0) {
-        f = df;  // TODO switch this?
-      }
+        for (int i = 0; i < data_length; i += 1)
+        {
+            d_A = data[(data_index * 2 + 0) * data_length + i];
+            d_E = data[(data_index * 2 + 1) * data_length + i];
+            f = f_arr[i];
+            if (f == 0.0)
+            {
+                f = df; // TODO switch this?
+            }
 
-      _tmp_like_val +=
-          get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in,
-                              E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2);
+            _tmp_like_val += get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, f_1, kn, f_2);
+        }
+        like_vals[psd_i] = _tmp_like_val;
     }
     like_vals[psd_i] = _tmp_like_val;
   }
@@ -1449,17 +1563,20 @@ void psd_likelihood_wrap(double* like_contrib_final, double* f_arr, cmplx* data,
 #ifdef __CUDACC__
   double* like_contrib;
 
-  int num_blocks =
-      std::ceil((data_length + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
+void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
+                         double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
+{
+    #ifdef __CUDACC__
+    double *like_contrib;
+
+    int num_blocks = std::ceil((data_length + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
 
   gpuErrchk(cudaMalloc(&like_contrib, num_psds * num_blocks * sizeof(double)));
 
   dim3 grid(num_blocks, num_psds, 1);
 
-  psd_likelihood<<<grid, NUM_THREADS_LIKE>>>(
-      like_contrib, f_arr, data, data_index_all, A_Soms_d_in_all, A_Sa_a_in_all,
-      E_Soms_d_in_all, E_Sa_a_in_all, Amp_all, alpha_all, sl1_all, kn_all,
-      sl2_all, df, data_length, num_data, num_psds);
+    psd_likelihood<<<grid, NUM_THREADS_LIKE>>>(like_contrib, f_arr, data, data_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
+                                               Amp_all, alpha_all, f_1_all, kn_all, f_2_all, df, data_length, num_data, num_psds);
 
   cudaDeviceSynchronize();
   gpuErrchk(cudaGetLastError());
@@ -1470,25 +1587,21 @@ void psd_likelihood_wrap(double* like_contrib_final, double* f_arr, cmplx* data,
   cudaDeviceSynchronize();
   gpuErrchk(cudaGetLastError());
 
-  gpuErrchk(cudaFree(like_contrib));
-#else
-  psd_likelihood_cpu(like_contrib_final, f_arr, data, data_index_all,
-                     A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all,
-                     E_Sa_a_in_all, Amp_all, alpha_all, sl1_all, kn_all,
-                     sl2_all, df, data_length, num_data, num_psds);
+    gpuErrchk(cudaFree(like_contrib));
+    #else
+    psd_likelihood_cpu(like_contrib_final, f_arr, data, data_index_all, A_Soms_d_in_all, A_Sa_a_in_all, E_Soms_d_in_all, E_Sa_a_in_all,
+                                               Amp_all, alpha_all, f_1_all, kn_all, f_2_all, df, data_length, num_data, num_psds);
 
 #endif
 }
 
 #define NUM_THREADS_LIKE 256
-CUDA_KERNEL void get_psd_val(double* Sn_A_out, double* Sn_E_out, double* f_arr,
-                             double A_Soms_d_in, double A_Sa_a_in,
-                             double E_Soms_d_in, double E_Sa_a_in, double Amp,
-                             double alpha, double sl1, double kn, double sl2,
-                             int num_f) {
-  int noise_index;
-  double f, Sn_A, Sn_E;
-  double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
+CUDA_KERNEL void get_psd_val(double *Sn_A_out, double *Sn_E_out, double *f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
+                               double Amp, double alpha, double f_1, double kn, double f_2, int num_f)
+{
+    int noise_index;
+    double f, Sn_A, Sn_E;
+    double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
 #ifdef __CUDACC__
   int start = blockIdx.x * blockDim.x + threadIdx.x;
   int incr = gridDim.x * blockDim.x;
@@ -1496,43 +1609,41 @@ CUDA_KERNEL void get_psd_val(double* Sn_A_out, double* Sn_E_out, double* f_arr,
   int start = 0;
   int incr = 1;
 #endif
-  for (int f_i = start; f_i < num_f; f_i += incr) {
-    f = f_arr[f_i];
+    for (int f_i = start; f_i < num_f; f_i += incr)
+    {
+        f = f_arr[f_i];
+        
+        A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
+        A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
+        E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
+        E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
+        Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, f_1, kn, f_2);
+        Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, f_1, kn, f_2);
 
-    A_Soms_d_val = A_Soms_d_in * A_Soms_d_in;
-    A_Sa_a_val = A_Sa_a_in * A_Sa_a_in;
-    E_Soms_d_val = E_Soms_d_in * E_Soms_d_in;
-    E_Sa_a_val = E_Sa_a_in * E_Sa_a_in;
-    Sn_A = noisepsd_AE(f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-    Sn_E = noisepsd_AE(f, E_Soms_d_val, E_Sa_a_val, Amp, alpha, sl1, kn, sl2);
+        // if (Sn_A != Sn_A)
+        // {
+        //     printf("BADDDDD: %d %e %e %e %e %e %e %e %e\n", f_i, f, A_Soms_d_val, A_Sa_a_val, Amp, alpha, f_1, kn, f_2);
+        // }
 
-    // if (Sn_A != Sn_A)
-    // {
-    //     printf("BADDDDD: %d %e %e %e %e %e %e %e %e\n", f_i, f, A_Soms_d_val,
-    //     A_Sa_a_val, Amp, alpha, sl1, kn, sl2);
-    // }
-
-    Sn_A_out[f_i] = Sn_A;
-    Sn_E_out[f_i] = Sn_E;
-  }
+        Sn_A_out[f_i] = Sn_A;
+        Sn_E_out[f_i] = Sn_E;
+    }
 }
 
-void get_psd_val_wrap(double* Sn_A_out, double* Sn_E_out, double* f_arr,
-                      double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in,
-                      double E_Sa_a_in, double Amp, double alpha, double sl1,
-                      double kn, double sl2, int num_f) {
-#ifdef __CUDACC__
-  int num_blocks = std::ceil((num_f + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
+void get_psd_val_wrap(double *Sn_A_out, double *Sn_E_out, double *f_arr, double A_Soms_d_in, double A_Sa_a_in, double E_Soms_d_in, double E_Sa_a_in,
+                               double Amp, double alpha, double f_1, double kn, double f_2, int num_f)
+{
+    #ifdef __CUDACC__
+    int num_blocks = std::ceil((num_f + NUM_THREADS_LIKE - 1) / NUM_THREADS_LIKE);
 
-  get_psd_val<<<num_blocks, NUM_THREADS_LIKE>>>(
-      Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
-      Amp, alpha, sl1, kn, sl2, num_f);
+    get_psd_val<<<num_blocks, NUM_THREADS_LIKE>>>(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
+                                               Amp, alpha, f_1, kn, f_2, num_f);
 
-  cudaDeviceSynchronize();
-  gpuErrchk(cudaGetLastError());
-#else
-  get_psd_val(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in,
-              E_Sa_a_in, Amp, alpha, sl1, kn, sl2, num_f);
+    cudaDeviceSynchronize();
+    gpuErrchk(cudaGetLastError());
+    #else
+     get_psd_val(Sn_A_out, Sn_E_out, f_arr, A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in,
+                                               Amp, alpha, f_1, kn, f_2, num_f);
 
 #endif
 }
