@@ -821,7 +821,8 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             run_threaded=self.run_threaded,
         ) 
 
-        self.dcga.synchronize()
+        if not self.run_async:
+            self.dcga.synchronize()
 
         likelihoods = self.dcga.compute_signal_likelihood(
             positions_per_split=positions_per_split,

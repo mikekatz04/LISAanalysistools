@@ -95,7 +95,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
         branch_name: str,
         coords_shape: tuple,
         waveform_gen_kwargs: dict,
-        likelihood_kwargs: dict,
+        waveform_like_kwargs: dict,
         num_repeats: int,
         transform_fn: TransformContainer,
         priors: ProbDistContainer,
@@ -115,6 +115,9 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
         if not hasattr(waveform_gen, waveform_like_method):
             raise ValueError(f"Waveform generator must have method {waveform_like_method} for TDMBHSpecialMove.")
 
+        if 'synchronize' not in waveform_like_kwargs:
+            waveform_like_kwargs['synchronize'] = not run_async
+
         super().__init__(
             dcga,
             waveform_gen,
@@ -122,7 +125,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
             coords_shape,
             waveform_gen_method,
             waveform_gen_kwargs,
-            likelihood_kwargs,
+            waveform_like_kwargs,
             num_repeats,
             transform_fn,
             priors,
