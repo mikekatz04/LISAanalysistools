@@ -1868,34 +1868,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     def time_indices(self, x):
         self._time_indices = x
 
-    def __deepcopy__(self, memo):
-        """Custom deepcopy to handle unpicklable backend objects."""
-        from copy import copy
-
-        # Create a new instance without calling __init__
-        cls = self.__class__
-        new_obj = cls.__new__(cls)
-
-        # Copy the memo to avoid infinite recursion
-        memo[id(self)] = new_obj
-
-        # Manually copy attributes
-        for key, value in self.__dict__.items():
-            if key in ("_backend", "pycpp_sensitivity_matrix"):
-                # Don't deepcopy backend objects - just reference
-                setattr(new_obj, key, value)
-            elif key == "orbits":
-                # Shallow copy orbits (share the same backend)
-                setattr(new_obj, key, copy(value))
-            elif key == "spline_interpolant":
-                # Shallow copy spline interpolant
-                setattr(new_obj, key, copy(value))
-            else:
-                # Deepcopy everything else
-                setattr(new_obj, key, deepcopy(value, memo))
-
-        return new_obj
-
     def get_averaged_ltts(self):
         # first, compute the average ltts and their differences.
         # check if we need multiple time points
@@ -1972,7 +1944,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             else:
                 # Deepcopy everything else
                 setattr(new_obj, key, deepcopy(value, memo))
-    
+        
+        return new_obj
+
     def _setup_window(self):
         """Setup window values for the c++ backend."""
         if self.window_values is not None:

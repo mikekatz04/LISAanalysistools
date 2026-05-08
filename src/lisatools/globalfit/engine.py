@@ -312,6 +312,7 @@ class GeneralSetup(Setup, GeneralSettings):
             **self.sensitivity_init_kwargs,
         )
 
+
         # ---- Galactic grid — initialized once, never recomputed during inference ----
         # Only the spectral envelope params (Amp, alpha, f_1, f_knee, f_2)
         # are inferred; the sky geometry (R_d, z_d, alpha0, beta0) is fixed here.
