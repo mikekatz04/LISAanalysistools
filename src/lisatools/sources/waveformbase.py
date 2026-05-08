@@ -359,28 +359,17 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         num_bin = left_edges.shape[0]
         max_grid_length = int(grid_length.max())
 
-        # STFT batching guard: the C++ kernel uses a single num_times for ALL
-        # sources in the batch.  When walkers have different merger times, a
-        # source with a late t_idx combined with the source driving
-        # max_grid_length can push t_idx[i] + num_times beyond NT, causing an
-        # OOB read from data_arr → garbage (d|h) → logL ≈ -5e10.
-        # Clip max_grid_length so every source's window stays inside the data.
+        # STFT per-source safety mask: #todo not really sure we need this, will come back later
+        safe_samples_per_source = None
         if self.analysis_domain == "STFT":
             NT = self.domain_settings.N // self.nperseg
             segment_dt = self.dt * self.nperseg
             t_idx = self.xp.rint(
                 (left_edges - self.data_t0) / segment_dt
             ).astype(int)
-            safe_segments = max(int(NT) - int(t_idx.max()), 0)
-            original_max_grid_length = max_grid_length
-            max_grid_length = min(max_grid_length, safe_segments * self.nperseg)
-            if max_grid_length < original_max_grid_length:
-                logger.debug(
-                    f"build_common_grid STFT clip: NT={NT}, t_idx_max={int(t_idx.max())}, "
-                    f"safe_segments={safe_segments}, "
-                    f"max_grid_length {original_max_grid_length} → {max_grid_length} "
-                    f"(t_idx range [{int(t_idx.min())}, {int(t_idx.max())}])"
-                )
+            safe_samples_per_source = (
+                self.xp.maximum(NT - t_idx, 0) * self.nperseg
+            )[:, None, None]  # (num_bin, 1, 1) for broadcasting with grid_time_indices
 
         # create a common grid
         padded_signals = self.xp.zeros(
@@ -394,6 +383,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         # Mask off indices that would push out of bounds (just in case)
         valid = (grid_time_indices >= 0) & (grid_time_indices < max_grid_length)
+        if safe_samples_per_source is not None:
+            valid = valid & (grid_time_indices < safe_samples_per_source)
 
         batch_indices = self.xp.arange(num_bin)[:, None, None]
         channel_indices = self.xp.arange(channels.shape[1])[None, :, None]
@@ -839,14 +830,14 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         shifted_t_arr = self.xp.concatenate(
             [
-                shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
+                #shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
                 shifted_t_arr,
                 shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1),
             ]
         )
 
-        h_plus = self.xp.pad(h_plus, (num_pad, num_pad), mode="edge")
-        h_cross = self.xp.pad(h_cross, (num_pad, num_pad), mode="edge")
+        h_plus = self.xp.pad(h_plus, (0, num_pad), mode="edge")
+        h_cross = self.xp.pad(h_cross, (0, num_pad), mode="edge")
 
         self.response.num_pts = shifted_t_arr.shape[-1]
 
@@ -858,8 +849,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
 
         # trim the invalid points
-        tdis = tdis[:, num_pad:-num_pad]
-        shifted_t_arr = shifted_t_arr[num_pad:-num_pad]
+        shifted_t_arr = shifted_t_arr[:-num_pad]
+        tdis[:, :num_pad] = 0.0  # zero out the corrupted points at the start
+        tdis = tdis[:, :-num_pad]
 
         # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
         t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
@@ -905,15 +897,14 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         pad_idx = self.xp.arange(1, num_pad + 1)[None, :]
         shifted_t_arr = self.xp.concatenate(
             [
-                shifted_t_arr[:, 0:1] - self.dt * pad_idx,
                 shifted_t_arr,
                 shifted_t_arr[:, -1:] + self.dt * pad_idx,
             ],
             axis=-1,
         )
 
-        h_plus = self.xp.pad(h_plus, ((0, 0), (num_pad, num_pad)), mode="edge")
-        h_cross = self.xp.pad(h_cross, ((0, 0), (num_pad, num_pad)), mode="edge")
+        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_pad)), mode="edge")
+        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_pad)), mode="edge")
 
         self.response.num_pts = shifted_t_arr.shape[-1]
 
@@ -925,8 +916,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)).transpose(1, 0, 2)  # (Nbatch, num_channels, Ntimes)
 
-        tdis = tdis[:, :, num_pad:-num_pad]
-        shifted_t_arr = shifted_t_arr[:, num_pad:-num_pad]
+        tdis = tdis[:, :, :-num_pad] # remove the padded points at the end, which contain garbage data
+        tdis[:, :, :num_pad] = 0.0  # zero out the corrupted points at the start
+        shifted_t_arr = shifted_t_arr[:, :-num_pad]
 
         t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
         shifted_t_arr += t_arr_shift[:, None]
