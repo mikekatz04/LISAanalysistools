@@ -1653,8 +1653,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] - (N_vals_in / 2) < 0):
             breakpoint()
         
-        ac_data_arr_in = model.analysis_container_arr.linear_data_arr.copy()
-        ll_before_update = model.analysis_container_arr.likelihood().copy()
+        # ac_data_arr_in = model.analysis_container_arr.linear_data_arr.copy()
+        # ll_before_update = model.analysis_container_arr.likelihood().copy()
         self.gb.generate_global_template(
             params_in,
             walkers_in,

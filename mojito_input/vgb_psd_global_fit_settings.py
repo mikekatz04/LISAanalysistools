@@ -86,7 +86,7 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves
+from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves, setup_state_for_injection
 from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 
 ################
@@ -109,8 +109,14 @@ def setup_recipe(
     ntemps: int = general_info.ntemps
     gpus: list[int] = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
+
+    #* =============================== INJECT SOURCES =================================
+    # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+    # spread = np.array([1e-4, 1e-5, 1e-14, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4])
+    # setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
+
     
-    #* ================================= BUILD MOVES ================================= 
+    #* ================================= BUILD MOVES ==================================
     num_repeats_psd = 60
     permute_every_psd = 50
     psd_search_move, psd_pe_move = build_psd_moves(
