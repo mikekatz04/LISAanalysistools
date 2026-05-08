@@ -325,6 +325,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         end_times = times[:, -1]
 
         if self.analysis_domain == "STFT":
+
             left_edges_i = self.xp.digitize(start_times, self.stft_t_arr)
             right_edges_i = self.xp.digitize(end_times, self.stft_t_arr)
             left_edges = self.stft_t_arr[left_edges_i - 1]
