@@ -463,7 +463,19 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     logger.debug(f"new logl: {logl[0]}")
 
                     if np.any(logl < -1e9):
+                        tmp_ll = np.full_like(data_index, -1e300, dtype=float)
+
                         breakpoint()
+                        
+                        for i, (coords_in_now, data_index_now) in enumerate(zip(new_points_in, data_index)):
+                            tmp_ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
+                                *coords_in_now,
+                                waveform_kwargs=self.waveform_gen_kwargs,
+                                signal_gen = getattr(self.waveform_gen, self.waveform_gen_method),
+                                **self.waveform_like_kwargs,
+                                source_only=True,
+                                propagate_data_res_kwargs=False
+                            )
 
                     logp = logp.reshape(self.ntemps, nwalkers_here)
                     prev_logp_here = prev_logp[inds == split].reshape(self.ntemps, nwalkers_here)
