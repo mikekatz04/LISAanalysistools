@@ -325,13 +325,14 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         end_times = times[:, -1]
 
         if self.analysis_domain == "STFT":
-
+            # Use integer STFT-segment indices from stft_t_arr.  digitize caps
+            # right_edges_i at len(stft_t_arr)=NT so each source's individual
+            # grid_length is naturally bounded to the data end.
             left_edges_i = self.xp.digitize(start_times, self.stft_t_arr)
             right_edges_i = self.xp.digitize(end_times, self.stft_t_arr)
             left_edges = self.stft_t_arr[left_edges_i - 1]
-
             grid_length = (right_edges_i - left_edges_i + 1) * self.nperseg
-
+            
         elif self.analysis_domain == "FD":
             left_edges = self.xp.full(shape=start_times.shape, fill_value=self.data_t0)
             grid_length = self.xp.full(shape=start_times.shape, fill_value=self.domain_settings.N)
@@ -358,16 +359,45 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         num_bin = left_edges.shape[0]
         max_grid_length = int(grid_length.max())
 
+        # STFT batching guard: the C++ kernel uses a single num_times for ALL
+        # sources in the batch.  When walkers have different merger times, a
+        # source with a late t_idx combined with the source driving
+        # max_grid_length can push t_idx[i] + num_times beyond NT, causing an
+        # OOB read from data_arr → garbage (d|h) → logL ≈ -5e10.
+        # Clip max_grid_length so every source's window stays inside the data.
+        if self.analysis_domain == "STFT":
+            NT = self.domain_settings.N // self.nperseg
+            segment_dt = self.dt * self.nperseg
+            t_idx = self.xp.rint(
+                (left_edges - self.data_t0) / segment_dt
+            ).astype(int)
+            safe_segments = max(int(NT) - int(t_idx.max()), 0)
+            max_grid_length = min(max_grid_length, safe_segments * self.nperseg)
+
         # create a common grid
         padded_signals = self.xp.zeros(
             (channels.shape[:-1] + (max_grid_length,)), dtype=channels.dtype
         )  # shape (num_bin, num_channels, max_grid_length)
 
-        # now use advanced indexing to place each signal in the correct position on the common grid
+        # Use rint() to guard against floating-point truncation
+        grid_time_indices = self.xp.rint(
+            (times[:, None, :] - left_edges[:, None, None]) / self.dt
+        ).astype(int)
+
+        # Mask off indices that would push out of bounds (just in case)
+        valid = (grid_time_indices >= 0) & (grid_time_indices < max_grid_length)
+
         batch_indices = self.xp.arange(num_bin)[:, None, None]
         channel_indices = self.xp.arange(channels.shape[1])[None, :, None]
-        grid_time_indices = ((times[:, None, :] - left_edges[:, None, None]) / self.dt).astype(int)
-        padded_signals[batch_indices, channel_indices, grid_time_indices] = channels
+        
+        # Clip before scatter so out-of-range time indices don't wrap or fault.
+        # `valid` already marks those entries False, so zeroed by where() below.
+        safe_time_indices = self.xp.clip(
+            grid_time_indices, 0, max(max_grid_length - 1, 0)
+        )
+        padded_signals[batch_indices, channel_indices, safe_time_indices] = channels
+
+        padded_signals = self.xp.where(valid, padded_signals, 0)
 
         return left_edges, padded_signals
 
