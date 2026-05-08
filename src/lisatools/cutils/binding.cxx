@@ -408,9 +408,9 @@ void detector_part(py::module &m) {
 #else
     py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapCPU")
 #endif
-    .def(py::init<array_type<double>, array_type<double>, int, double, int, bool>(),
+    .def(py::init<array_type<double>, array_type<double>, int, double, int, bool, double>(),
          py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"),
-         py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"))
+         py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor"))
     .def("set_galactic_grid", &XYZSensitivityMatrixWrap::set_galactic_grid,
          py::arg("gal_wrap"),
          "Attach a GalacticGridWrap (already initialized) to include the galactic\n"

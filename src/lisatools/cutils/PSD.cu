@@ -12,6 +12,7 @@
 // ============================================================================
 // Type Aliases
 // ============================================================================
+using cmplx = gcmplx::complex<double>;
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define XYZSensitivityMatrix XYZSensitivityMatrixGPU
@@ -923,7 +924,6 @@ void get_noise_covariance_kernel(
         }
     }
   }
-}
 
 void XYZSensitivityMatrix::get_noise_covariance_arr(
     double *freqs, int *time_indices,
@@ -1377,69 +1377,6 @@ double get_full_like_value(double f, double df, cmplx d_A, cmplx d_E, double A_S
     return -1.0 / 2.0 * inner_product - (log(Sn_A) + log(Sn_E));
 }
 
-CUDA_KERNEL void psd_likelihood(double* like_contrib, double* f_arr,
-                                cmplx* data, int* data_index_all,
-                                double* A_Soms_d_in_all, double* A_Sa_a_in_all,
-                                double* E_Soms_d_in_all, double* E_Sa_a_in_all,
-                                double* Amp_all, double* alpha_all,
-                                double* sl1_all, double* kn_all,
-                                double* sl2_all, double df, int data_length,
-                                int num_data, int num_psds) {
-#ifdef __CUDACC__
-  CUDA_SHARED double like_vals[NUM_THREADS_LIKE];
-  int tid = threadIdx.x;
-  int bid = blockIdx.x;
-  int num_blocks = gridDim.x;
-  int data_index;
-  double A_Soms_d_in, A_Sa_a_in, E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn,
-      sl2;
-  cmplx d_A, d_E;
-  double f, Sn_A, Sn_E;
-  double inner_product;
-  double A_Soms_d_val, A_Sa_a_val, E_Soms_d_val, E_Sa_a_val;
-  for (int psd_i = blockIdx.y; psd_i < num_psds; psd_i += gridDim.y) {
-    data_index = data_index_all[psd_i];
-
-    A_Soms_d_in = A_Soms_d_in_all[psd_i];
-    A_Sa_a_in = A_Sa_a_in_all[psd_i];
-    E_Soms_d_in = E_Soms_d_in_all[psd_i];
-    E_Sa_a_in = E_Sa_a_in_all[psd_i];
-    Amp = Amp_all[psd_i];
-    alpha = alpha_all[psd_i];
-    sl1 = sl1_all[psd_i];
-    kn = kn_all[psd_i];
-    sl2 = sl2_all[psd_i];
-
-    for (int i = threadIdx.x; i < NUM_THREADS_LIKE; i += blockDim.x) {
-      like_vals[i] = 0.0;
-    }
-    CUDA_SYNC_THREADS;
-
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < data_length;
-         i += blockDim.x * gridDim.x) {
-      d_A = data[(data_index * 2 + 0) * data_length + i];
-      d_E = data[(data_index * 2 + 1) * data_length + i];
-      f = f_arr[i];
-      if (f == 0.0) {
-        f = df;  // TODO switch this?
-      }
-
-      like_vals[tid] +=
-          get_full_like_value(f, df, d_A, d_E, A_Soms_d_in, A_Sa_a_in,
-                              E_Soms_d_in, E_Sa_a_in, Amp, alpha, sl1, kn, sl2);
-    }
-    CUDA_SYNC_THREADS;
-
-    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
-      if (tid % (2 * s) == 0) {
-        like_vals[tid] += like_vals[tid + s];
-        // if ((bin_i == 1) && (blockIdx.x == 0) && (channel_i == 0) && (s ==
-        // 1))
-      }
-      CUDA_SYNC_THREADS;
-    }
-    CUDA_SYNC_THREADS;
-
 
 CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
                                double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
@@ -1507,9 +1444,9 @@ CUDA_KERNEL void psd_likelihood(double *like_contrib, double *f_arr, cmplx *data
         CUDA_SYNC_THREADS;
     }
     CUDA_SYNC_THREADS;
+    #endif
   }
-#endif
-}
+
 
 void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
                                double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)
@@ -1549,19 +1486,8 @@ void psd_likelihood_cpu(double *like_vals, double *f_arr, cmplx *data, int *data
         }
         like_vals[psd_i] = _tmp_like_val;
     }
-    like_vals[psd_i] = _tmp_like_val;
   }
-}
 
-void psd_likelihood_wrap(double* like_contrib_final, double* f_arr, cmplx* data,
-                         int* data_index_all, double* A_Soms_d_in_all,
-                         double* A_Sa_a_in_all, double* E_Soms_d_in_all,
-                         double* E_Sa_a_in_all, double* Amp_all,
-                         double* alpha_all, double* sl1_all, double* kn_all,
-                         double* sl2_all, double df, int data_length,
-                         int num_data, int num_psds) {
-#ifdef __CUDACC__
-  double* like_contrib;
 
 void psd_likelihood_wrap(double *like_contrib_final, double *f_arr, cmplx *data, int *data_index_all, double *A_Soms_d_in_all, double *A_Sa_a_in_all, double *E_Soms_d_in_all, double *E_Sa_a_in_all,
                          double *Amp_all, double *alpha_all, double *f_1_all, double *kn_all, double *f_2_all, double df, int data_length, int num_data, int num_psds)

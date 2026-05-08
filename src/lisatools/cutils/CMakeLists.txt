@@ -94,6 +94,9 @@ if(LISATOOLS_WITH_CPU)
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/galactic_response.cu"
             "${CMAKE_CURRENT_BINARY_DIR}/galactic_response.cxx"
     DEPENDS "galactic_response.cu"
+    VERBATIM
+    )
+    
   # Copy domains.cu to domains.cxx for CPU build
   add_custom_command(
     OUTPUT "domains.cxx"
