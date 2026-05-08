@@ -372,7 +372,15 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
                 (left_edges - self.data_t0) / segment_dt
             ).astype(int)
             safe_segments = max(int(NT) - int(t_idx.max()), 0)
+            original_max_grid_length = max_grid_length
             max_grid_length = min(max_grid_length, safe_segments * self.nperseg)
+            if max_grid_length < original_max_grid_length:
+                logger.debug(
+                    f"build_common_grid STFT clip: NT={NT}, t_idx_max={int(t_idx.max())}, "
+                    f"safe_segments={safe_segments}, "
+                    f"max_grid_length {original_max_grid_length} → {max_grid_length} "
+                    f"(t_idx range [{int(t_idx.min())}, {int(t_idx.max())}])"
+                )
 
         # create a common grid
         padded_signals = self.xp.zeros(
@@ -390,14 +398,19 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         batch_indices = self.xp.arange(num_bin)[:, None, None]
         channel_indices = self.xp.arange(channels.shape[1])[None, :, None]
         
-        # Clip before scatter so out-of-range time indices don't wrap or fault.
-        # `valid` already marks those entries False, so zeroed by where() below.
+        # Zero out channel values whose source time falls outside max_grid_length
+        # BEFORE scattering.  valid has shape (num_bin, 1, num_times) and channels
+        # has shape (num_bin, num_channels, num_times) — broadcasting works along
+        # the channel axis.  This avoids a shape mismatch from applying where()
+        # post-scatter on the (num_bin, num_channels, max_grid_length) output array.
+        channels_to_scatter = self.xp.where(valid, channels, 0)
+
+        # Clip indices so the scatter never writes outside the allocated array;
+        # the zeroed channels above ensure those positions carry no signal.
         safe_time_indices = self.xp.clip(
             grid_time_indices, 0, max(max_grid_length - 1, 0)
         )
-        padded_signals[batch_indices, channel_indices, safe_time_indices] = channels
-
-        padded_signals = self.xp.where(valid, padded_signals, 0)
+        padded_signals[batch_indices, channel_indices, safe_time_indices] = channels_to_scatter
 
         return left_edges, padded_signals
 
