@@ -89,10 +89,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         self.priors = priors
         self.waveform_gen_kwargs = waveform_gen_kwargs
         self.waveform_like_kwargs = waveform_like_kwargs
-        moves_tmp = [move[0] for move in inner_moves]
-        move_weights = [move[1] for move in inner_moves]
+        moves_tmp = [move[0] if isinstance(move, tuple) else move for move in inner_moves]
+        move_weights = [move[1] if isinstance(move, tuple) else 1.0 for move in inner_moves]
         self.moves = moves_tmp
-        self.move_weights = move_weights
+        self.move_weights = move_weights / np.sum(move_weights)
 
         self.temperature_controls = [None for _ in range(self.nleaves_max)]
         for i in range(self.nleaves_max):
@@ -159,13 +159,16 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         #     source_only=True
         # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.remove_signal_from_residual(removal_waveforms, data_index=None)
+
+        # sync everything before freeing memory
+        if xp is not np:
+            for gpu in self.acs.gpus:
+                xp.cuda.runtime.setDevice(gpu)
+                xp.cuda.runtime.deviceSynchronize()                                                                                                                                                                                                                                                      
+                
         del removal_waveforms
         #if xp is not np:
         free_gpu_memory()
-
-        # ll_tmp3 = self.acs.likelihood(
-        #     source_only=True
-        # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
 
     def remove_cold_chain_sources(self, coords):
         """
@@ -183,6 +186,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         #     source_only=True
         # )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         self.acs.add_signal_to_residual(removal_waveforms, data_index=None)
+        
+        if xp is not np:
+            for gpu in self.acs.gpus:
+                xp.cuda.runtime.setDevice(gpu)
+                xp.cuda.runtime.deviceSynchronize()  
+
         del removal_waveforms
         #if xp is not np:
         free_gpu_memory()
@@ -296,7 +305,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         new_state = deepcopy(state)
 
-        self.acs = model.analysis_container_arr
+        # self.acs = model.analysis_container_arr
         self.check_add_skip_swap_info(state)
 
         # mapping information
@@ -357,7 +366,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            # logger.debug(f"prev_logl: {prev_logl}. elapsed: {time.time() - tic}")
+            logger.debug(f"prev_logl: {prev_logl[0]}.")
+
+            if np.any(prev_logl < -1e9):
+                breakpoint()
 
             prev_logp = (
                 self.priors[self.branch_name]
@@ -448,6 +460,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
 
+                    logger.debug(f"new logl: {logl[0]}")
+
+                    if np.any(logl < -1e9):
+                        breakpoint()
+
                     logp = logp.reshape(self.ntemps, nwalkers_here)
                     prev_logp_here = prev_logp[inds == split].reshape(self.ntemps, nwalkers_here)
 
@@ -459,6 +476,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     logP = temperature_control_here.compute_log_posterior_tempered(logl, logp)
 
                     lnpdiff = factors + logP - prev_logP_here
+
+                    logger.debug(f"lnpdiff: {lnpdiff[0]}.")
 
                     keep = lnpdiff > np.log(model.random.rand(self.ntemps, nwalkers_here))
 
@@ -552,6 +571,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
         free_gpu_memory()
+        logger.debug(f"ACS likelihood: {current_ll}.")
+        if np.any(current_ll < -1e9):
+            breakpoint()
         # TODO: add check with last used logl
 
         current_lp = (
@@ -586,7 +608,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
         # breakpoint()
-        logger.debug(f"accepted fraction: {self.accepted / self.num_proposals}. elapsed: {time.time() - tic}")
+        logger.debug(f"mean accepted fraction: {np.mean(self.accepted[0] / self.num_proposals)}. elapsed: {time.time() - tic}")
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
@@ -805,6 +827,8 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             positions_per_split=positions_per_split,
             run_threaded=self.run_threaded,
         ) 
+
+        self.dcga.synchronize()
 
         likelihoods = self.dcga.compute_signal_likelihood(
             positions_per_split=positions_per_split,
