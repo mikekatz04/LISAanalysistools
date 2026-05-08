@@ -24,6 +24,7 @@ from lisatools.detector import EqualArmlengthOrbits, Orbits
 
 from ..analysiscontainer import AnalysisContainerArray
 from ..detector import LISAModel, sangria
+from ..domains import TDSettings
 from ..sensitivity import (
     AE1SensitivityMatrix,
     AE2SensitivityMatrix,
@@ -85,11 +86,11 @@ class Setup:
 
 @dataclasses.dataclass
 class Settings:
-    Tobs: float = None
-    dt: float = None
-    initialize_kwargs: dict = None
+    Tobs: float | None = None
+    dt: float | None = None
+    initialize_kwargs: dict | None = None
     transform: Optional[TransformContainer] = None
-    priors: Optional[ProbDistContainer] = None
+    priors: Optional[typing.Dict[str,ProbDistContainer]] = None
     periodic: Optional[dict] = None
     nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
@@ -103,30 +104,34 @@ class Settings:
 
 @dataclasses.dataclass
 class GeneralSettings(Settings):
-    Tobs: float = None
-    dt: float = None
-    file_store_dir: str = None
-    base_file_name: str = None
+    Tobs: float | None = None
+    dt: float | None = None
+    file_store_dir: str | None = None
+    base_file_name: str | None = None
     main_file_key: Optional[str] = "parameter_estimation_main"
     past_file_for_start: Optional[str] = None
-    orbits: Orbits = None
-    gpu_orbits: Orbits = None
+    orbits: Orbits | None = None
+    gpu_orbits: Orbits | None = None
     basis_domain: str = "stft"
-    start_freq: float = None
-    end_freq: float = None
-    stft_dt: float = None
-    random_seed: int = None
-    backup_iter: int = None
-    nwalkers: int = None
-    ntemps: int = None
-    wintype: str = "tukey"
-    winalpha: float = None
-    gpus: typing.List[int] = None
-    fixed_psd_kwargs: typing.Dict[str, typing.Any] = None
+    start_freq: float | None = None
+    end_freq: float | None = None
+    stft_dt: float | None = None
+    random_seed: int | None = None
+    backup_iter: int | None = None
+    nwalkers: int | None = None
+    ntemps: int | None = None
+    window_type: str = "tukey"
+    window_taper_duration: float | None = None
+    gpu_backend: str = "cuda12x"
+    gpus: typing.List[int] | None = None
+    fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
+    # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
+    # noise_model: Optional[LISAModel] = None
     data_processor: Optional[BaseProcessingStep] = None
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
+    normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
     # ---- Galactic foreground geometry (fixed, not inferred) ----
     # If None, the galactic foreground is disabled in the likelihood.
@@ -168,7 +173,7 @@ class GeneralSetup(Setup, GeneralSettings):
         if self.base_file_name is None:
             raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
-        self.force_backend = "cuda12x" if self.gpus is not None else "cpu"
+        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu" 
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
         if not os.path.exists(self.artifacts_file_dir):
@@ -180,9 +185,10 @@ class GeneralSetup(Setup, GeneralSettings):
     def init_orbit_information(self):
         if self.orbits is None:
             self.orbits = EqualArmlengthOrbits()
-            self.gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+            self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.gpu_backend)
         else:
-            if self.gpu_orbits is None and self.force_backend == "cuda12x":
+            if self.gpu_orbits is None and self.force_backend == self.gpu_backend:
+                # TODO: make better
                 raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
     def init_data_information(self):
@@ -197,6 +203,8 @@ class GeneralSetup(Setup, GeneralSettings):
                 psd_params=[15e-12, 3e-15],
                 galfor_params=None,
             )
+
+        self.logger.info(f"Using fixed PSD kwargs: {self.fixed_psd_kwargs}")
 
         default_preprocess_kwargs = dict(
             plot_folder=self.artifacts_file_dir,
@@ -213,17 +221,10 @@ class GeneralSetup(Setup, GeneralSettings):
         for key, value in preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
 
-        normalize_window = preprocess_kwargs.pop("normalize", False)
-        if normalize_window:
-            self.logger.warning(
-                "Window normalization is turned off for now, setting `normalize_window` to False."
-            )
-            normalize_window = False
-
         times, _ = data_processor.process(**preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
-        self.data_t0 = float(times[0])
+        self.data_td_settings = TDSettings(*data_processor.td_signal.settings.args, force_backend=self.force_backend)
         self.catalogue = getattr(data_processor, 'catalogue', {})
 
         if self.basis_domain == "stft":
@@ -240,7 +241,10 @@ class GeneralSetup(Setup, GeneralSettings):
                 force_backend=self.force_backend,
             )
             nperseg = domain_settings.get_nperseg(dt)
-            window, _ = windowfun(self.wintype, nperseg, alpha=self.winalpha)
+            
+            self.window_alpha = self.window_taper_duration / (nperseg * dt)
+            window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
+
             plot_kwargs_list = [
                 dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
                 dict(channel=0, plot_type="fd",   time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
@@ -252,17 +256,32 @@ class GeneralSetup(Setup, GeneralSettings):
 
             df = 1.0 / (Nt * dt)
             Nf = Nt // 2 + 1
+
+            self.window_alpha = self.window_taper_duration / (Nt * dt)
             self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
             domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
-            window, _ = windowfun(self.wintype, Nt, alpha=self.winalpha)
+
+            self.window_alpha = self.window_taper_duration / (Nt * dt)
+            window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
             plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
 
         else:
             raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
 
+        # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
+        # self.logger.debug(f"Window factor for normalization: {window_factor}")
+
+        self.logger.debug(f"Applying window {self.window_type} with alpha: {self.window_alpha}")
         self.input_data_residual_array, orbits = data_processor.pour(
-            settings=domain_settings, window=window, normalize=normalize_window, return_orbits=True
+            settings=domain_settings, window=window, return_orbits=True
         )
+        
+        if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
+            self.input_data_residual_array.data_length = len(domain_settings.f_arr) #! use acs.data_shape[0]
+            self.input_data_residual_array._store_time_and_frequency_information(
+                df = domain_settings.df,
+                f_arr = domain_settings.f_arr
+            ) 
 
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
@@ -272,11 +291,14 @@ class GeneralSetup(Setup, GeneralSettings):
 
         if orbits is not None:
             self.orbits = orbits
-            if self.force_backend == "cuda12x":
+            orbits_kwargs = orbits.kwargs
+           
+            if self.force_backend == self.gpu_backend:
+                orbits_kwargs["force_backend"] = self.gpu_backend
+                self.logger.debug(f"Initializing GPU orbits with kwargs: {orbits_kwargs}")
+                  
                 self.gpu_orbits = data_processor.orbits_class(
-                    filename=orbits.filename,
-                    armlength=orbits.armlength,
-                    force_backend="cuda12x",
+                    *orbits.args, **orbits_kwargs
                 )
 
         self.init_orbit_information()
@@ -286,6 +308,7 @@ class GeneralSetup(Setup, GeneralSettings):
             orbits=self.gpu_orbits,
             settings=domain_settings,
             force_backend=self.force_backend,
+            window_values=window if self.normalize_window else None,
             **self.sensitivity_init_kwargs,
         )
 

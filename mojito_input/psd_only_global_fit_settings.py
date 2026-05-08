@@ -1,56 +1,59 @@
+import logging
+import shutil
+
 import h5py
 import numpy as np
-import shutil
-import logging
 
 try:
     import cupy as cp
+
     gpu_available = True
 except (ModuleNotFoundError, ImportError) as e:
     import numpy as cp
+
     gpu_available = True
 
-from lisatools.detector import EqualArmlengthOrbits
-from lisatools.utils.constants import *
+from eryn.moves import CombineMove, StretchMove
+from eryn.prior import ProbDistContainer, uniform_dist
+
 from eryn.state import BranchSupplemental
-from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
-from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
-
-from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
-from lisatools.globalfit.state import MBHState, EMRIState, GBState
-
-from lisatools.globalfit.generatefuncs import *
-from lisatools.utils.utility import AET
-from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
-
-from lisatools.globalfit.stock.erebor import (
-    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings
-)
-
-from eryn.prior import uniform_dist
 from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
-
-from eryn.moves import StretchMove
-from lisatools.sampling.moves.skymodehop import SkyMove
-
-from eryn.moves import CombineMove
-from lisatools.globalfit.moves import (
-    GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove,
-    GBSpecialRJPriorMove, MBHSpecialMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
-)
-from lisatools.globalfit.galaxyglobal import make_gmm
-from lisatools.globalfit.moves import GlobalFitMove
-from lisatools.utils.utility import tukey
-
-from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-
 from eryn.utils.updates import Update
 
+from lisatools.detector import EqualArmlengthOrbits, L1Orbits
+
+from lisatools.globalfit.engine import GeneralSettings, GeneralSetup, GlobalFitSettings, RankInfo
+from lisatools.globalfit.generatefuncs import *
 from lisatools.globalfit.preprocessing import L1ProcessingStep
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, build_psd_moves
+from lisatools.globalfit.recipe_steps import PERecipeStep, SearchRecipeStep, build_psd_moves
+from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
+from lisatools.globalfit.state import AllGFBranchInfo, EMRIState, GBState, GFBranchInfo, MBHState
+from lisatools.globalfit.stock.erebor import (
+    GalForSettings,
+    GalForSetup,
+    GBSettings,
+    GBSetup,
+    MBHSettings,
+    MBHSetup,
+    PSDSettings,
+    PSDSetup,
+)
+from lisatools.globalfit.utils import AllSetupInfoTransfer, SetupInfoTransfer
+from lisatools.sampling.moves.skymodehop import SkyMove
+from lisatools.sampling.prior import (
+    AmplitudeFrequencySNRPrior,
+    AmplitudeFromSNR,
+    GBPriorWrap,
+    SNRPrior,
+)
+from lisatools.utils.constants import *
+from lisatools.utils.constants import YRSID_SI
+from lisatools.utils.utility import AET, tukey
+
+# from global_fit_input.global_fit_settings import get_global_fit_settings
+
+
+# from bbhx.utils.transform import *
 
 
 def ten_to_the_x(x):
@@ -175,32 +178,77 @@ def get_general_erebor_settings() -> GeneralSetup:
     from lisatools.utils.constants import YRSID_SI
     Tobs =  YRSID_SI 
     dt = 2.5
+    start_freq = 1e-4
+    end_freq = 2.9e-2
 
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
     base_file_name = "psd_noise_gal"
     file_store_dir = "/work/fpozzoli/test_lisatools/LISAanalysistools/" + "mojito_output/"
 
-    gpus = [cp.cuda.runtime.getDevice()]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
 
     nwalkers = 30
     ntemps = 4
 
-    winalpha = 0.1
-    wintype = "tukey"
+    # Restrict JAX to only see the target GPU — must be set before JAX backend init
+    import jax
 
-    basis_domain = "stft"
-    stft_dt = 7 * 24 * 3600.0  # 1 week segments
+    jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
+    # few.get_backend('cuda12x')
+    backend = "cuda12x" if gpus is not None else "cpu"
+    nwalkers = 30
+    ntemps = 4
+
+    window_type = "tukey"
+    window_taper_duration = 0.1 * 7 * 24 * 3600.0
+    normalize_window = True
+
+    basis_domain = "stft"  # fd
+    stft_dt = 7 * 24 * 3600.0 if basis_domain == "stft" else None  # how many hours
 
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=['noise','gb'],
-        source_ids={'gb': [0]},
+        source_types=["noise"],
         verbose=True,
         do_plots=True,
+        orbits_class=L1Orbits,
+        orbits_kwargs=dict(force_backend=backend, frame="icrs"),
     )
 
-    preprocess_kwargs = dict(normalize=True)
+    downsample_kwargs = {
+        "target_fs": 1 / dt,  # Hz — target sampling rate (None = no downsampling).
+        "window": (
+            "kaiser",
+            31.0,
+        ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+    }
+
+    highpass_kwargs = {
+        "cutoff": 1e-5,  # Hz — highpass cutoff frequency
+        "order": 2,  # Butterworth filter order
+        "zero_phase": True,
+    }
+
+    lowpass_kwargs = {
+        "cutoff": 1e-1,  # Hz — lowpass cutoff frequency
+        "order": 2,  # Butterworth filter order
+        "zero_phase": True,
+    }
+
+    trim_kwargs = {
+        "duration": 200 * 3600,  # seconds — duration to trim from each end
+        "is_percent": False,  # If True, 'duration' is interpreted as a percentage of the total signal length
+        "trimming_type": "from_each_end",  # "from_each_end" or "from_start"
+    }
+
+    preprocess_kwargs = dict(
+        highpass_kwargs=highpass_kwargs,
+        lowpass_kwargs=lowpass_kwargs,
+        trim_kwargs=trim_kwargs,
+        downsample_kwargs=downsample_kwargs,
+        Tobs=Tobs,
+    )
 
     sensitivity_init_kwargs = dict(
         tdi_generation=2,
@@ -220,27 +268,28 @@ def get_general_erebor_settings() -> GeneralSetup:
         beta0=2.384498,   # Initial constellation rotation β0 [rad]
         N_lambda=90, # sky grid longitude points
         N_beta=60,   # sky grid latitude points
-    )
+
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=1e-4,
-        end_freq=0.029,
+        start_freq=start_freq,
+        end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
-        random_seed=103209,
+        random_seed=12345,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        winalpha=winalpha,
-        wintype=wintype,
+        window_type=window_type,
+        window_taper_duration=window_taper_duration,
         gpus=gpus,
         data_processor=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
+        normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
         galactic_grid_kwargs=galactic_grid_kwargs,
     )
@@ -256,7 +305,10 @@ def get_global_fit_settings(copy_settings_file=False):
     if copy_settings_file:
         shutil.copy(
             __file__,
-            general_setup.file_store_dir + general_setup.base_file_name + "_" + __file__.split("/")[-1]
+            general_setup.file_store_dir
+            + general_setup.base_file_name
+            + "_"
+            + __file__.split("/")[-1],
         )
 
     ###############################
@@ -266,10 +318,10 @@ def get_global_fit_settings(copy_settings_file=False):
     head_rank = 1
     main_rank = 0
 
-    rank_info = RankInfo(
-        head_rank=head_rank,
-        main_rank=main_rank,
-    )
+    # run results rank will be next available rank if used
+    # gmm_ranks will be all other ranks
+
+    rank_info = RankInfo(head_rank=head_rank, main_rank=main_rank)
 
     ##################################
     ###  PSD + GalFor Settings  ######

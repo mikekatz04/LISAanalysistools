@@ -140,7 +140,7 @@ class L1DataLoader:
             "SOBHB": "sobhb_cat_mojito_lite_processed_MT.hdf5",
         }
 
-    def load_single_binary(self, group: h5py.Group, binary_id: int) -> dict:
+    def load_single_binary(self, group: h5py.Group, binary_id: int, source_type: str) -> dict:
         """
         Load a single binary source from the given HDF5 group.
 
@@ -154,13 +154,17 @@ class L1DataLoader:
         params = {}
         for key in group.keys():
             try:
-                ds = group[key]
+                if source_type in ["VGB", "GB"]:
+                    ds = group[key][:]
+                else:
+                    ds = group[key][binary_id]
+                    
                 if ds.dtype.kind == "O":  # object type (e.g. variable-length strings)
-                    val = ds[binary_id]
+                    val = ds
                     if isinstance(val, bytes):
                         val = val.decode()
                 else:
-                    val = ds[binary_id][()]
+                    val = ds[()]
                 params[key] = val
             except Exception as e:
                 raise e
@@ -206,10 +210,11 @@ class L1DataLoader:
         for source_type in self.source_types:
 
             subfolder = os.path.join(self.data_folder, source_type, "L1")
-            ids = self.source_ids.get(source_type, [])
 
             if source_type in ["GB", "VGB"]:
                 ids = [0]  # only one file for GB/VGB
+            else:
+                ids = self.source_ids.get(source_type, [])            
 
             if not isinstance(ids, list):
                 ids = [ids]
@@ -232,7 +237,7 @@ class L1DataLoader:
                 file_path = find_file(subfolder, source_type, source_id)
 
                 self.catalogue[source_type][source_id] = self.load_single_binary(
-                    binary_params, source_id
+                    binary_params, source_id, source_type
                 )
                 if self.verbose:
                     logger.info(
@@ -386,7 +391,9 @@ class SignalProcessor:
         """{'X': arr, 'Y': arr, 'Z': arr} -> ndarray (n_ch, N)"""
         return np.vstack([mp_data[ch] for ch in self._CHANNEL_NAMES if ch in mp_data])
 
-    def _filter_via_mp(self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True):
+    def _filter_via_mp(
+        self, *, low=None, high=None, order=2, filter_type="butterworth", zero_phase=True
+    ):
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.filter(low=low, high=high, order=order, filter_type=filter_type, zero_phase=zero_phase)
         return self._from_mp_dict(mp.data)
@@ -546,6 +553,17 @@ class SignalProcessor:
         np.ndarray
             Downsampled data array.
         """
+        if target_fs == self.fs:
+            if self.verbose:
+                logger.info(
+                    f"Target sampling frequency is the same as current fs ({self.fs} Hz). No downsampling applied."
+                )
+            return self.data
+        elif target_fs > self.fs:
+            raise ValueError(
+                f"Target sampling frequency ({target_fs} Hz) must be less than current fs ({self.fs} Hz) for downsampling."
+            )
+
         mp = MPSignalProcessor(self._to_mp_dict(), fs=self.fs)
         mp.downsample(target_fs=target_fs, window=window, padtype=padtype)
         self.data = self._from_mp_dict(mp.data)
@@ -783,7 +801,6 @@ class BaseProcessingStep(SignalProcessor):
         self,
         settings: DomainSettingsBase,
         window: Optional[np.ndarray | str] = None,
-        normalize: bool = False,
         return_orbits: bool = False,
     ) -> DataResidualArray | tuple[DataResidualArray, Orbits]:
         """
@@ -792,7 +809,6 @@ class BaseProcessingStep(SignalProcessor):
         Args:
             settings (DomainSettingsBase): Settings for the domain.
             window (Optional[np.ndarray | str], optional): Window to apply to the data. Defaults to None.
-            normalize (bool, optional): Whether to normalize the data with the window. Defaults to False.
             return_orbits (bool, optional): Whether to return the orbits instance along with the domain. Defaults to False.
 
         Returns:
@@ -805,19 +821,6 @@ class BaseProcessingStep(SignalProcessor):
             input_signal_domain=self.td_signal.settings,
             window=window,
         )
-
-        if window is not None and normalize:
-            if isinstance(window, str):
-                raise NotImplementedError(
-                    "Normalization with string-specified windows is not implemented yet."
-                )
-
-            logger.info("Normalizing data with window norm.")
-            window_norm = np.sum(window**2)
-            N = window.shape[0]
-            factor = float(np.sqrt(window_norm / N))
-            data_residual_array.data_res_arr.arr /= factor
-            logger.info(f"Applied normalization factor to the frequency domain data: {factor:.3e}")
 
         if return_orbits:
             return data_residual_array, self.orbits

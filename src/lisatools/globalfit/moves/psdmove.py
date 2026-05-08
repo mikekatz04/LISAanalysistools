@@ -4,6 +4,7 @@ from copy import deepcopy
 import logging
 
 import numpy as np
+
 try:
     import cupy as cp
 except (ModuleNotFoundError, ImportError):
@@ -16,137 +17,19 @@ from eryn.utils.transform import TransformContainer
 # from ..utils import new_sens_mat
 from tqdm import tqdm
 
-from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba
-
-from ... import get_backend
-from ...analysiscontainer import AnalysisContainerArray
-from ...sensitivity import XYZSensitivityBackend
-from ..moves import GlobalFitMove
-from ..state import GFState
 from .globalfitmove import GlobalFitMove
+from .multigpumove import MultiGPUMoveBase
+from ..state import GFState
+from ...analysiscontainer import AnalysisContainerArray
+from ...domaincomputation import DomainComputationGroupArray
+from ...sensitivity import XYZSensitivityBackend
 
 logger = logging.getLogger(__name__)
-
-# def psd_log_like_ae(x, freqs, data, df, data_length, supps=None, **sens_kwargs):
-#     if supps is None:
-#         raise ValueError("Must provide supps to identify the data streams.")
-
-#     # TODO: get right backend inside the function
-#     psd_likelihood = get_backend("gpu").psd_likelihood
-
-#     wi = supps["walker_inds"]
-
-#     # TODO: better way so avoid order issues?
-#     psd_pars = x[0]
-#     if len(x) == 1:
-#         galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
-#     else:
-#         galfor_pars = x[1]
-
-#     A_data = data[0]
-#     E_data = data[1]
-
-#     data_index_all = cp.asarray(wi).astype(np.int32)
-#     ll = cp.zeros(psd_pars.shape[0])
-#     A_Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-#     A_Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-#     E_Soms_d_in_all = cp.asarray(psd_pars[:, 2])
-#     E_Sa_a_in_all = cp.asarray(psd_pars[:, 3])
-#     Amp_all = cp.asarray(galfor_pars[:, 0])
-#     kn_all = cp.asarray(galfor_pars[:, 1])
-#     alpha_all = cp.asarray(galfor_pars[:, 2])
-#     sl1_all = cp.asarray(galfor_pars[:, 3])
-#     sl2_all = cp.asarray(galfor_pars[:, 4])
-#     num_data = 1
-#     num_psds = psd_pars.shape[0]
-
-#     psd_likelihood(
-#         ll,
-#         freqs,
-#         data,
-#         data_index_all,
-#         A_Soms_d_in_all,
-#         A_Sa_a_in_all,
-#         E_Soms_d_in_all,
-#         E_Sa_a_in_all,
-#         Amp_all,
-#         alpha_all,
-#         sl1_all,
-#         kn_all,
-#         sl2_all,
-#         df,
-#         data_length,
-#         num_data,
-#         num_psds,
-#     )
-
-#     # # galfor_pars = None
-#     # ll2 = xp.zeros_like(ll)
-#     # for i, (psd_pars_i, galfor_pars_i) in enumerate(zip(psd_pars, galfor_pars)):
-#     #     psd = [
-#     #         get_sensitivity(freqs, model=psd_pars_i[:2], foreground_params=galfor_pars_i, **sens_kwargs),
-#     #         get_sensitivity(freqs, model=psd_pars_i[2:], foreground_params=galfor_pars_i, **sens_kwargs)
-#     #     ]
-#     #     psd[0][0] = psd[0][1]
-#     #     psd[1][0] = psd[1][1]
-
-#     #     # inner_product = 4 * df * (xp.sum(data[0][wi].conj() * data[0][wi] / psd[0]) + xp.sum(data[1][wi].conj() * data[1][wi] / psd[1])).real
-#     #     inner_product = 4 * df * (xp.sum(data[0].conj() * data[0] / psd[0]) + xp.sum(data[1].conj() * data[1] / psd[1])).real
-#     #     ll2[i] = -1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd)))
-#     # assert np.allclose(ll.get(), ll2.get())
-#     return ll.get()
-
-
-# def psd_log_like_xyz(x, freqs, data, df, data_length, supps=None, tdi2=False, **sens_kwargs):
-#     if supps is None:
-#         raise ValueError("Must provide supps to identify the data streams.")
-
-#     wi = supps["walker_inds"]
-
-#     # TODO: better way so avoid order issues?
-#     psd_pars = x[0]
-#     if len(x) == 1:
-#         galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
-#     else:
-#         galfor_pars = x[1]
-
-#     data_index_all = cp.asarray(wi).astype(np.int32)
-#     # ll = cp.zeros(psd_pars.shape[0])
-#     Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-#     Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-#     Amp_all = cp.asarray(galfor_pars[:, 0])
-#     kn_all = cp.asarray(galfor_pars[:, 1])
-#     alpha_all = cp.asarray(galfor_pars[:, 2])
-#     sl1_all = cp.asarray(galfor_pars[:, 3])
-#     sl2_all = cp.asarray(galfor_pars[:, 4])
-#     num_data = 1
-#     num_psds = psd_pars.shape[0]
-
-#     ll = psd_likelihood_numba(
-#         freqs,
-#         data,
-#         data_index_all,
-#         Soms_d_in_all,
-#         Sa_a_in_all,
-#         Amp_all,
-#         alpha_all,
-#         sl1_all,
-#         kn_all,
-#         sl2_all,
-#         df,
-#         data_length,
-#         tdi2=tdi2,
-#     )
-
-#     return ll.get()
-
-
-# TODO: temperature swap permutation
 
 
 class PSDMove(GlobalFitMove, StretchMove):
     """
-    Move for sampling over PSD parameters. Can also include galactic foreground parameters if desired. 
+    Move for sampling over PSD parameters. Can also include galactic foreground parameters if desired.
 
     Args:
         acs: AnalysisContainerArray containing the data and sensitivity information.
@@ -156,11 +39,13 @@ class PSDMove(GlobalFitMove, StretchMove):
         max_logl_mode: if True, will keep running the move until the maximum log likelihood does not change for a certain number of checks. This is useful for finding the maximum likelihood point.
         psd_kwargs: additional keyword arguments for the psd_log_like function.
         sensitivity_backend: instance of XYZSensitivityBackend to use for computing the likelihood.
-        psd_transform_fn: TransformContainer for transforming the PSD parameters. 
+        psd_transform_fn: TransformContainer for transforming the PSD parameters.
         galfor_transform_fn: TransformContainer for transforming the galactic foreground parameters.
         permute_every: number of repeats after which to permute the walkers during a temperature swap. This helps with the mixing of the chains.
+        tolerance: minimum allowed distance between spline knot positions in the sensitivity model. 
         **kwargs: additional keyword arguments for the Move class.
     """
+
     def __init__(
         self,
         acs: AnalysisContainerArray,
@@ -173,6 +58,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         psd_transform_fn: TransformContainer = None,
         galfor_transform_fn: TransformContainer = None,
         permute_every: int = 20,
+        tolerance: float = 0.0,
         **kwargs,
     ):
 
@@ -190,83 +76,122 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.galfor_transform_fn = galfor_transform_fn
 
         self.permute_every = permute_every
+        self.tolerance = tolerance
 
-    def psd_log_like(self, x, data, supps=None, **sens_kwargs):
-        """ """
+    def transform_coords(self, coords: list[np.ndarray], return_cupy: bool = False) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """
+        Prepare the coordinates for the move. This can include transforming the parameters if necessary.
+
+        Args:
+            coords: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
+            return_cupy: if True, will return the transformed coordinates as cupy arrays for use on the GPU. If False, will return numpy arrays.
+        Returns:
+            A tuple containing the transformed PSD parameters and galactic foreground parameters (if present) in the target array library.
+        """
+
+        if self.psd_transform_fn is not None:
+            psd_pars = self.psd_transform_fn.both_transforms(coords[0])
+        else:
+            psd_pars = coords[0]
+
+        if len(coords) == 1:
+            galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
+        else:
+            if self.galfor_transform_fn is not None:
+                galfor_pars = self.galfor_transform_fn.both_transforms(coords[1])
+            else:
+                galfor_pars = coords[1]
+
+        if return_cupy:
+            psd_pars = self.xp.asarray(psd_pars)
+            galfor_pars = self.xp.asarray(galfor_pars)
+
+        return psd_pars, galfor_pars
+
+    def prepare_likelihood_inputs(
+        self, psd_pars: np.ndarray | cp.ndarray, galfor_pars: np.ndarray | cp.ndarray
+    ) -> tuple:
+        """
+        Prepare the inputs for the likelihood computation. This can include placing the data on the correct device and formatting the parameters as needed.
+        """
+
+        xp = self.xp  # Use the appropriate array library (numpy or cupy)
+
+        Soms_d_in_all = xp.ascontiguousarray(psd_pars[:, 0])
+        Sa_a_in_all = xp.ascontiguousarray(psd_pars[:, 1])
+
+        if self.sensitivity_backend.use_splines:
+            knots_positions = xp.asarray(psd_pars[:, 3::2])
+            knots_amplitudes = xp.asarray(psd_pars[:, 2:-1:2])
+            half = knots_positions.shape[1] // 2  # Get the mid of the array
+            # put the 2 noise levels on the batch axis
+            spline_knots_amplitude = xp.stack(
+                (knots_amplitudes[:, :half], knots_amplitudes[:, half:])
+            )
+            spline_knots_position = xp.stack(
+                (knots_positions[:, :half], knots_positions[:, half:])
+            )
+
+            # Sort
+            sort_indices = xp.argsort(spline_knots_position, axis=2)
+            # Apply the same indices to both arrays
+            spline_knots_position = xp.take_along_axis(
+                spline_knots_position, sort_indices, axis=2
+            )
+            spline_knots_amplitude = xp.take_along_axis(
+                spline_knots_amplitude, sort_indices, axis=2
+            )
+            # now check if any knot position is not too close together
+        else:
+            spline_knots_position = None
+            spline_knots_amplitude = None
+
+        galfor_pars_c = xp.ascontiguousarray(galfor_pars.T)
+        likelihood_args = (
+            Soms_d_in_all,
+            Sa_a_in_all,
+            *galfor_pars_c,
+            spline_knots_position,
+            spline_knots_amplitude,
+        )
+
+        return likelihood_args
+
+    def psd_log_like(self, x: list[np.ndarray], supps=None, **sens_kwargs) -> np.ndarray:
+        """
+        Internal method to compute the log likelihood for the PSD parameters. This is called by the compute_log_like method after preparing the coordinates and priors. It uses the sensitivity backend to compute the likelihood based on the current parameters and the data.
+
+        Args:
+            x: list of numpy arrays containing the parameters for the move. The first element should be the PSD parameters, and the second element (if present) should be the galactic foreground parameters.
+            supps: supplemental information for the likelihood computation, such as walker indices.
+            **sens_kwargs: additional keyword arguments to pass to the sensitivity backend for likelihood computation.
+        Returns:
+            A numpy array containing the log likelihood values for each set of parameters.
+        """
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
 
         wi = supps["walker_inds"]
+        data_index_all = self.xp.asarray(wi).astype(np.int32)
 
-        # TODO: better way so avoid order issues?
-        if self.psd_transform_fn is not None:
-            psd_pars = self.psd_transform_fn.both_transforms(x[0])
-        else:
-            psd_pars = x[0]
+        psd_pars, galfor_pars = self.transform_coords(x, return_cupy=True)
 
-        if len(x) == 1:
-            galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
-        else:
-            if self.galfor_transform_fn is not None:
-                galfor_pars = self.galfor_transform_fn.both_transforms(x[1])
-            else:
-                galfor_pars = x[1]
-
-        data_index_all = cp.asarray(wi).astype(np.int32)
-        # ll = cp.zeros(psd_pars.shape[0])
-        Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-        Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-
-        if self.sensitivity_backend.use_splines:
-            knots_positions = cp.asarray(psd_pars[:, 2::2])
-            knots_amplitudes = cp.asarray(psd_pars[:, 3::2])
-
-            # put the 2 noise levels on the batch axis
-            n_knots = int(knots_positions.shape[1] / 2)
-
-            oms_positions, oms_amplitudes = (
-                knots_positions[:, :n_knots],
-                knots_amplitudes[:, :n_knots],
-            )
-            testmass_positions, testmass_amplitudes = (
-                knots_positions[:, n_knots:],
-                knots_amplitudes[:, n_knots:],
-            )
-
-            knots_positions = cp.vstack([oms_positions, testmass_positions])
-            knots_amplitudes = cp.vstack([oms_amplitudes, testmass_amplitudes])
-
-            # now check if any knot position is not in ascending order
-            invalid_knots = cp.any(cp.diff(knots_positions, axis=1) < 0, axis=1)
-
-        else:
-            knots_positions = None
-            knots_amplitudes = None
-            invalid_knots = cp.zeros(psd_pars.shape[0], dtype=bool)
-
-        Amp_all = cp.asarray(galfor_pars[:, 0])
-        kn_all = cp.asarray(galfor_pars[:, 1])
-        alpha_all = cp.asarray(galfor_pars[:, 2])
-        f_1_all = cp.asarray(galfor_pars[:, 3])
-        f_2_all = cp.asarray(galfor_pars[:, 4])
+        likelihood_args = self.prepare_likelihood_inputs(psd_pars, galfor_pars)
 
         ll = self.sensitivity_backend.compute_log_like(
-            data,
-            data_index_all,
-            Soms_d_in_all,
-            Sa_a_in_all,
-            Amp_all,
-            alpha_all,
-            f_1_all,
-            kn_all,
-            f_2_all,
-            knots_positions,
-            knots_amplitudes,
+            self.acs.linear_data_arr[0], data_index_all, *likelihood_args
         )
+
+        if likelihood_args[-2] is not None and likelihood_args[-1] is not None:
+            invalid_knots = self.xp.any(
+                self.xp.diff(10 ** likelihood_args[-2], axis=2) < self.tolerance, axis=(0, 2)
+            )
+        else:
+            invalid_knots = self.xp.zeros(psd_pars.shape[0], dtype=bool)
 
         ll[invalid_knots] = -1e300
 
-        return ll.get() if hasattr(ll, "get") else ll
+        return ll.get() if hasattr(ll, "get") else ll 
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
         if logp is None:
@@ -288,41 +213,13 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         supps = supps[logp_keep]
 
-        tmp_logl = self.psd_log_like(
-            input_args, self.acs.linear_data_arr[0], supps=supps, **self.psd_kwargs
-        )
+        tmp_logl = self.psd_log_like(input_args, supps=supps, **self.psd_kwargs)
 
         logl[logp_keep] = tmp_logl
 
         self.prev_logl = logl.copy()
 
         return logl, None
-
-    # def compute_log_prior(self, coords, inds=None, supps=None, branch_supps=None):
-
-    #     ntemps, nwalkers, _, _ = coords[list(coords.keys())[0]].shape
-
-    #     logp = np.zeros((ntemps, nwalkers))
-    #     for key in ["galfor", "psd"]:
-    #         ntemps, nwalkers, nleaves_max, ndim = coords[key].shape
-    #         if nleaves_max > 1:
-    #             raise NotImplementedError
-
-    #         logp_contrib = self.priors[key].logpdf(coords[key].reshape(-1, ndim)).reshape(ntemps, nwalkers, nleaves_max).sum(axis=-1)
-    #         logp[:] += logp_contrib
-
-    #     # now that everything is lined up
-    #     breakpoint()
-    #     nleaves_max_gb = inds["gb"].shape[-1]
-    #     gb_inds_tiled = cp.tile(cp.asarray(inds["gb"][0][None, :]), (ntemps, 1, 1))
-    #     gb_coords = cp.tile(cp.asarray(coords["gb"][0]), (ntemps, 1, 1, 1))[gb_inds_tiled]
-    #     walker_inds = cp.repeat(cp.arange(ntemps * nwalkers)[:, None], nleaves_max_gb, axis=-1).reshape(ntemps, nwalkers, nleaves_max_gb)[gb_inds_tiled]
-    #     logp_per_bin = cp.zeros((ntemps, nwalkers, nleaves_max_gb))
-    #     logp_per_bin[gb_inds_tiled] = self.gpu_priors["gb"].logpdf(gb_coords, psds=self.acs.lisasens_list[0][0],walker_inds=walker_inds)
-    #     logp[:] += logp_per_bin.sum(axis=-1).get()
-
-    #     cp.get_default_memory_pool().free_all_blocks()
-    #     return logp
 
     def compute_log_prior(self, branches_coords, *args, **kwargs):
         # wait to get ntemps, nwalkers
@@ -345,7 +242,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         new_state, accepted = super(PSDMove, self).propose(model, state)
 
         if move_i % self.permute_every == 0:
-            logger.debug(f"Permuting walkers before swap")
             x = new_state.branches_coords
             logl = new_state.log_like
             logp = new_state.log_prior
@@ -402,7 +298,7 @@ class PSDMove(GlobalFitMove, StretchMove):
                 if changed_once:
                     num_so_far += 1
 
-            print(max_logl, num_so_far, num_checks)
+            # print(max_logl, num_so_far, num_checks)
             # breakpoint()
 
         return state, accepted
@@ -445,12 +341,6 @@ class PSDMove(GlobalFitMove, StretchMove):
             model.random,
         )
 
-        # state.acs.set_psd_vals(
-        #     state.branches["psd"].coords[0, :, 0],
-        #     overall_inds=np.arange(state.branches["psd"].shape[1]),
-        #     foreground_params=state.branches["galfor"].coords[0, :, 0]
-        # )
-        # avs_vals = state.acs.get_ll(include_psd_info=True).copy()
         if self.max_logl_mode:
             tmp_state, accepted = self.run_move_max_likelihood(tmp_model, tmp_state)
 
@@ -477,9 +367,23 @@ class PSDMove(GlobalFitMove, StretchMove):
             else:
                 galfor_params = None
 
-            new_sens = self.sensitivity_backend(
-                f"walker_{w}", psd_params, galfor_params=galfor_params
-            )
+            gpu = self.acs.gpu_map[w]
+            if self.acs.gpus is not None:
+                with self.xp.cuda.Device(gpu):
+                    new_sens = self.sensitivity_backend(
+                        f"walker_{w}",
+                        psd_params,
+                        galfor_params=galfor_params,
+                        transform_fn=self.psd_transform_fn,
+                    )
+            else:
+                new_sens = self.sensitivity_backend(
+                    f"walker_{w}",
+                    psd_params,
+                    galfor_params=galfor_params,
+                    transform_fn=self.psd_transform_fn,
+                )
+
             self.acs[w].sens_mat = new_sens
 
         self.acs.reset_linear_psd_arr()
@@ -487,3 +391,90 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         new_state.log_like[0] = after_vals
         return new_state, accepted
+
+
+class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
+    def __init__(
+        self,
+        dcga: DomainComputationGroupArray,
+        priors,
+        *args,
+        num_repeats: int = 1,
+        max_logl_mode: bool = False,
+        psd_kwargs: dict = {},
+        psd_transform_fn: TransformContainer = None,
+        galfor_transform_fn: TransformContainer = None,
+        permute_every: int = 20,
+        tolerance: float = 0.0,
+        run_async: bool = False,
+        run_threaded: bool = False,
+        **kwargs,
+    ):
+
+        PSDMove.__init__(
+            self,
+            dcga.acs,
+            priors,
+            *args,
+            num_repeats=num_repeats,
+            max_logl_mode=max_logl_mode,
+            psd_kwargs=psd_kwargs,
+            sensitivity_backend=dcga.computation_groups[0].sensitivity_backend,
+            psd_transform_fn=psd_transform_fn,
+            galfor_transform_fn=galfor_transform_fn,
+            permute_every=permute_every,
+            tolerance=tolerance,
+            **kwargs,
+        )
+        MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
+
+    def psd_log_like(self, x: list[np.ndarray], supps=None, **sens_kwargs):
+        """ """
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        wi = supps["walker_inds"]
+
+        psd_pars, galfor_pars = self.transform_coords(x, return_cupy=False)
+
+        data_index_all = np.asarray(wi).astype(np.int32)
+
+        positions_per_split, data_intra_index_per_split, _ = self.dcga.unpack_indices(data_index_all)
+        coords_per_split = self.dcga.unpack_coords(positions_per_split, (psd_pars, galfor_pars))
+
+        data_intra_index_per_split, coords_per_split = self.dcga.place_on_device(
+            items=(data_intra_index_per_split, coords_per_split)
+        )
+
+        likelihood_args_per_split = self.dcga._loop_operation(
+            operation=self.prepare_likelihood_inputs,
+            operation_args_per_split=coords_per_split,
+        )
+
+        ll = self.dcga.compute_psd_likelihood(
+            positions_per_split,
+            data_intra_index_per_split,
+            data_intra_index_per_split,
+            likelihood_args_per_split,
+            likelihood_kwargs={'run_async': self.run_async},
+            run_threaded=self.run_threaded,
+        )
+
+        # now check if any knot position is not too close together
+        if self.sensitivity_backend.use_splines:
+            invalid_knots_mask = np.zeros(psd_pars.shape[0], dtype=bool)
+            for i, likelihood_args in enumerate(likelihood_args_per_split):
+                if likelihood_args is None:
+                    continue
+                spline_knots_position = (
+                    likelihood_args[-2].get()
+                    if hasattr(likelihood_args[-2], "get")
+                    else likelihood_args[-2]
+                )
+
+                invalid_knots_mask[positions_per_split[i]] = np.any(
+                    np.diff(10**spline_knots_position, axis=2) < self.tolerance, axis=(0, 2)
+                )
+            ll[invalid_knots_mask] = -1e300
+
+        return ll

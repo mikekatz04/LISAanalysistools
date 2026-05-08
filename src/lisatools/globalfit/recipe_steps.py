@@ -1,23 +1,30 @@
+import time
 import logging
-from typing import Callable
+import typing
+from copy import deepcopy
+from dataclasses import dataclass
 
 import numpy as np
+import cupy as cp
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
 
 from bbhx.utils.transform import SSB_to_LISA
+from gbgpu.gbgpu import GBGPU
 from eryn.moves.tempering import TemperatureControl, make_ladder
+from eryn.prior import ProbDistContainer
 
-from ..sources.utils import icrs_to_ecliptic
-from .engine import Setup
-from .moves import PSDMove, ResidualAddOneRemoveOneMove
+from ..sources.utils import icrs_to_ecliptic, evolve_galactic_binary
+from .engine import Setup, GlobalFitEngine
+from .moves import PSDMove, ResidualAddOneRemoveOneMove, GBSpecialRJPriorMove, GBSpecialRJSerialSearchMCMC, GBSpecialRJRefitMove
+from .moves.gbspecialstretch import GBSpecialBase
 from .recipe import RecipeStep, BaseRecipeStep
 from .run import CurrentInfoGlobalFit
 from .state import GFState
+from .stock.erebor import GBSetup, GeneralSetup
 
 logger = logging.getLogger(__name__)
-
 
 class SearchRecipeStep(BaseRecipeStep):
     """
@@ -36,12 +43,86 @@ class PERecipeStep(BaseRecipeStep):
         return False
 
 
+class RJRecipeStep(BaseRecipeStep):
+
+    def __init__(
+        self, 
+        *args, 
+        convergence_iter: int = 5, 
+        thin_by: int = 1, 
+        **kwargs
+    ):
+        RecipeStep.__init__(self, *args, **kwargs)
+        self.convergence_iter = convergence_iter
+        self.thin_by = thin_by
+
+    def stopping_function(
+        self, 
+        i, 
+        sample, 
+        sampler: GlobalFitEngine
+    ) -> bool:
+
+        if not hasattr(self, "st"):
+            self.st = time.perf_counter()
+
+        current_iter = sampler.backend.iteration
+
+        assert isinstance(current_iter, (int, np.integer))
+        
+        stop = False
+        if current_iter > self.convergence_iter:
+            #? Actual convergence should be related to the same number of sources above SNR XX for Y itterations
+            nleaves_cc = sampler.backend.get_nleaves(branch_names=["gb"], temp_index=0)["gb"]
+
+            # do not include most recent
+            nleaves_cc_max_old = nleaves_cc[:-self.convergence_iter].max()
+            nleaves_cc_max_new = nleaves_cc[-self.convergence_iter:].max()
+
+            if nleaves_cc_max_old >= nleaves_cc_max_new:
+                stop = True
+
+            else:
+                stop = False
+
+            
+            dur = (time.perf_counter() - self.st) / 3600.0  # hours
+            print(f"Previous nleaves: {nleaves_cc_max_old} --> new nleaves: {nleaves_cc_max_new}")
+            print(f"TIME SINCE START: {dur} hours")
+
+        return stop
+        
+    def setup_run(
+        self, 
+        iteration, 
+        last_sample, 
+        sampler: GlobalFitEngine
+    ):
+        # TODO: maybe make this the default setup
+        sampler.moves = self.moves
+        sampler.weights = self.weights
+        sampler.yield_step = self.thin_by
+        sampler.checkpoint_step = self.thin_by
+        # sampler.override_thin_by = self.thin_by --> # TODO check this one
+        
+        for move in self.moves: 
+            if sampler.periodic is not None and move.periodic is None:
+                print(f"Setting periodicity of move {move} to {sampler.periodic}")
+                move.periodic = sampler.periodic
+            if sampler.temperature_control is not None and move.temperature_control is None:
+                print(f"Setting temperature control of move {move} to {sampler.temperature_control}")
+                move.temperature_control = sampler.temperature_control
+            
+            # TODO: do we also need to set these? I think the current settings setup has ntemps covered, not sure about temp_cntrl            
+            # move.ntemps = sampler.ntemps 
+            
+
 def scatter_around_injection(
     state: GFState,
     branch_name: str,
     injection_params: np.ndarray,
     spread: float | np.ndarray,
-    reverse_transform: Callable | None = None,
+    reverse_transform: typing.Callable | None = None,
     betas: np.ndarray | None = None,
 ):
     """
@@ -119,6 +200,8 @@ def scatter_around_injection(
     else:
         raise ValueError(f"spread must be scalar, 1-D, 2-D, or 3-D; got shape {spread.shape}")
 
+    if betas is not None:
+        logger.info(f"Scaling initial covariance by betas: {betas}")
     for leaf in range(nleaves_init):
         center = injection_sampling[leaf]
         leaf_cov = covs[leaf]
@@ -134,7 +217,7 @@ def scatter_around_injection(
         state.branches_inds[branch_name][:, :, leaf] = True
 
 
-def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
+def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
     """Convert a single Mojito MBHB catalogue entry to MBH sampling basis.
 
     The sampling basis is:
@@ -161,6 +244,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
 
     logM = np.log(m1 + m2)
     q = m2 / m1
+    logq = np.log(q)
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
     s2z = float(catalogue_entry["SecondarySpinCompZ"])
@@ -172,7 +256,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     ra = float(catalogue_entry["RightAscension"])
     dec = float(catalogue_entry["Declination"])
     psi_icrs = float(catalogue_entry["PolarisationAngle"])
-    psi_ssb, lam_ecl, beta_ecl = icrs_to_ecliptic(psi_icrs, ra, dec)
+    lam_ecl, beta_ecl, psi_ssb = icrs_to_ecliptic(ra, dec, psi_icrs)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
     logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
@@ -187,10 +271,96 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
 
 
+def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
+    """Converts the (V)GB catalogue entries to the sampling basis. 
+    The index 0 in f0 and phi0 refer to the frequency and phase at the start of the data.
+
+    The sampling basis is:
+    ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+
+    Parameters
+    ----------
+    catalogue_entry : dict
+        Dictionary of catalogue parameters for all (V)GBs, as
+        stored by ``L1DataLoader.catalogue['(V)GB'][source_id]``.
+
+    Returns
+    -------
+    np.ndarray
+        Parameter vector of shape ``(8,)`` in the (V)GB sampling basis
+        (LISA frame for sky/time parameters).
+    """
+    amp = np.array(catalogue_entry["Amplitude"])
+    logA = np.log(amp)
+    
+    f_ref = np.array(catalogue_entry["GW22FrequencySourceFrame"])
+    fdot = np.array(catalogue_entry["GW22FrequencyDerivativeSourceFrame"])
+    phi_ref = np.array(catalogue_entry["TrueAnomaly"])
+    t_ref = np.unique(np.array(catalogue_entry["TimeReferenceSSBFrame"]))
+    
+    assert len(t_ref) == 1
+    t_ref = t_ref.item()
+    t_init = t_ref + 850.5 + trim_duration
+    
+    f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot)
+    
+    f0_mHz = f_init * 1e3
+    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"])) % (np.pi)
+
+    ra = np.array(catalogue_entry["RightAscension"])
+    dec = np.array(catalogue_entry["Declination"])
+    psi_icrs = np.array(catalogue_entry["PolarisationAngle"])
+    lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
+
+    lam_ecl = lam_ecl % (2 * np.pi)
+    sin_beta_ecl = np.sin(beta_ecl)
+
+    return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_ecl, lam_ecl, sin_beta_ecl]).T
+
+
+def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None):
+    """Initialize 'branch_name' walkers from catalogue injection parameters"""
+
+    catalogue = getattr(curr.general_info, "catalogue", {})
+    catalogue = catalogue.get(source_type, {})
+    if catalogue:
+        injection_params_list = []
+        for source_id in sorted(catalogue.keys()):
+            entry = catalogue[source_id]
+            
+            func_name = f"{branch_name}_catalogue_to_sampling_basis"
+            conversion_func = globals().get(func_name)
+
+            assert conversion_func and callable(conversion_func), f"catalogue_to_sampling_basis function for {branch_name} was not found."
+            assert curr.general_info.preprocess_kwargs
+            sampling_params = conversion_func(entry, curr.general_info.preprocess_kwargs["trim_kwargs"]["duration"])
+
+            injection_params_list.append(sampling_params)
+
+        injection_params = np.array(injection_params_list)
+        
+        ndim = state.branches_coords[branch_name].shape[-1]
+        if injection_params.ndim == 3:
+            injection_params = injection_params.reshape(-1, ndim)
+
+        if subset_inds is not None:
+            injection_params = injection_params[subset_inds, :]
+        
+        # Store injection truths for diagnostic plots
+        try:
+            setattr(curr.source_info[branch_name], "injection", injection_params)
+        except AttributeError:
+            logger.warning(f"No injection data is saved for {branch_name}.")
+
+        scatter_around_injection(
+            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas")
+        )
+
+
 def subtract_initial_signal(
     acs: AnalysisContainerArray,
     state: GFState,
-    wave_gen: Callable,
+    wave_gen: typing.Callable,
     source_name: str,
     source_info: Setup,
 ):
@@ -213,6 +383,7 @@ def subtract_initial_signal(
     else:
         logger.info(f"No initial signals for {source_name}")
 
+    #breakpoint()
 
 def build_psd_moves(
     engine_info: Setup,
@@ -251,8 +422,8 @@ def build_psd_moves(
     psd_pe_move : PSDMove
     """
     general_info = curr.general_info
-    nwalkers = general_info.nwalkers
-    ntemps = general_info.ntemps
+    nwalkers: int = general_info.nwalkers
+    ntemps: int = general_info.ntemps
     psd_info = curr.source_info["psd"]
 
     effective_ndim = engine_info.ndims["psd"]
@@ -267,6 +438,7 @@ def build_psd_moves(
         psd_transform_fn=psd_info.transform_fn,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
+        use_gpu=True,
     )
 
     psd_search_move = PSDMove(
@@ -286,7 +458,7 @@ def build_mbh_moves_phenom(
     priors: dict, 
     state: GFState,
     permute_every: int = 20,
-    ) -> tuple[Callable, ResidualAddOneRemoveOneMove]:
+    ) -> tuple[typing.Callable, ResidualAddOneRemoveOneMove]:
     """Build MBH PE move using ``PhenomTHMTDIWaveform`` + ``ResidualAddOneRemoveOneMove``.
 
     Sets ``state.sub_states['mbh'].betas_all`` as a side effect.
@@ -314,18 +486,21 @@ def build_mbh_moves_phenom(
     ntemps = curr.general_info.ntemps
 
     wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
+    # breakpoint()
+    subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
-    subtract_initial_signal(acs, state, wave_gen, "mbh", mbh_info)
-
-    betas_all = np.tile(make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1))
+    if mbh_info.betas is None:
+        mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
+    betas_all = np.tile(mbh_info.betas, (mbh_info.nleaves_max, 1))
     state.sub_states["mbh"].betas_all = betas_all
+    logger.debug(f"MBH betas: {mbh_info.betas}")
 
     coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
 
     mbh_move_args = (
         "mbh",  # branch_name
         coords_shape,
-        wave_gen,
+        wave_gen.get_signals_for_residuals,
         # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs
         dict(propagate_data_res_kwargs=False),  # waveform_like_kwargs
@@ -340,3 +515,292 @@ def build_mbh_moves_phenom(
     mbh_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
     return wave_gen, mbh_pe_move
+
+
+@dataclass
+class GBWaveformDict(typing.TypedDict):
+    dt: float
+    T: float
+    use_c_implementation: bool
+    start_freq_ind: int
+    tdi_channel_setup: str
+    tdi2: bool
+    window: None | str
+    window_alpha: float
+
+
+def build_gb_moves(
+    engine_info: Setup,
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state: GFState,
+    *,
+    num_repeats: int = 60,
+    permute_every: int = 50,
+    Tmax: float = 1e6,
+) -> typing.Tuple[typing.List[GBSpecialBase], typing.List[GBSpecialBase]]:
+    """Build GB search and PE moves.
+
+    Both moves share the same ``acs``, ``priors``, and
+    ``TemperatureControl`` instance, so updates to ``acs`` (e.g. signal
+    subtraction by another branch) are visible to both moves at runtime.
+
+    Parameters
+    ----------
+    engine_info :
+        Engine info object exposing ``ndims``.
+    curr : CurrentInfoGlobalFit
+        Current run info; reads ``source_info["gb"]`` and ``general_info``.
+    acs :
+        Shared analysis container (passed by reference).
+    priors : dict
+        Shared priors dict (passed by reference).
+    num_repeats : int, optional
+        Number of internal GB move repeats. Default 60.
+    Tmax : float, optional
+        Maximum temperature for ``TemperatureControl``. Default 1e6.
+
+    Returns
+    -------
+    gb_search_moves : List[GBSpecialBase]
+    gb_pe_moves : List[GBSpecialBase]
+    """    
+    gb_info: GBSetup = curr.source_info["gb"]
+    general_info: GeneralSetup = curr.general_info
+    nwalkers: int = general_info.nwalkers
+    ntemps: int = general_info.ntemps
+    data_start_freq_ind = int(acs.start_freq_ind[0])
+    
+    gb_betas = gb_info.betas
+    gpus: list[int] = general_info.gpus
+    
+    #* Setting up gbgpu on correct backend and gpu(s) for correct orbits and timeshift
+    from gbgpu.gbgpu import GBGPU
+    import gbgpu 
+    from ..detector import L1Orbits
+    _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
+    _gb_backend.set_cuda_device(gpus[0])
+    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.orbits, t0=gb_info.t0)
+    cp.cuda.runtime.setDevice(gpus[0])
+    gb.gpus = gpus
+
+    logger.debug(f"GBGPU initialized at t0 = {gb_info.t0}")
+    
+    #* Make sure that priors are evaluated on gpus
+    gpu_priors_in = deepcopy(priors["gb"].priors_in)
+    for _, item in gpu_priors_in.items():
+        item.use_cupy = True
+    gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
+    
+    nleaves_max_gb = state.branches["gb"].shape[-2]
+
+    waveform_kwargs = GBWaveformDict(
+        dt=general_info.dt,
+        T=1/getattr(acs.settings, "df"),
+        use_c_implementation=True,
+        start_freq_ind=data_start_freq_ind,
+        tdi_channel_setup=gb_info.tdi_setup,
+        tdi2=gb_info.use_tdi2, 
+        window=general_info.window_type,
+        window_alpha=general_info.window_alpha
+    )
+
+    #* Get band information
+    band_edges = gb_info.band_edges
+    band_N_vals = gb_info.band_N_vals
+    assert band_edges is not None
+    assert band_N_vals is not None
+
+    #* This checks if the initialization has any gbs in it (when injecting gbs) and adjusts acs accordingly
+    if state.branches["gb"].inds[0].sum() > 0:
+
+        coords_out_gb = state.branches["gb"].coords[0,
+            state.branches["gb"].inds[0]
+        ]
+        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
+        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
+        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
+        
+        check = priors["gb"].logpdf(coords_out_gb)
+        if np.any(np.isinf(check)):
+            breakpoint()
+            raise ValueError("Starting priors are inf. If injecting, try reducing spread.")
+
+        coords_in_in = gb_info.transform.both_transforms(coords_out_gb)
+
+        band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+
+        walker_vals = np.tile(
+            np.arange(nwalkers), (nleaves_max_gb, 1)
+        ).transpose((1, 0))[state.branches["gb"].inds[0]]
+
+        data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
+
+        data_index = cp.asarray(data_index_1).astype(
+            cp.int32
+        )
+        # goes in as -h
+        factors = -cp.ones_like(data_index, dtype=cp.float64)
+
+        N_vals = band_N_vals[band_inds]
+
+        logger.info("Removing GBs from residuals")
+        template_in = deepcopy(acs.linear_data_arr)
+        gb.generate_global_template(
+            coords_in_in,
+            data_index,
+            acs.linear_data_arr,
+            data_length=acs.data_length,
+            factors=factors,
+            data_splits=acs.gpu_map,
+            N=N_vals,
+            **waveform_kwargs,
+        )
+        max_diff_templates = cp.abs(template_in[0]-acs.linear_data_arr[0]).max()
+        del template_in
+        logger.debug(f"The difference in residuals in/out = {max_diff_templates:5e}")
+
+    #* Check if we need to adjust the band temps, and adjust if required
+    adjust_temps = False
+    state_band_info = getattr(state, "band_info", None)
+    if state_band_info is not None:
+        band_info_check = deepcopy(state_band_info)
+        adjust_temps = True
+        #    del state.band_info
+
+    band_temps = np.tile(np.asarray(gb_betas), (len(band_edges) - 1, 1))
+    state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
+    if adjust_temps:
+        state.sub_states["gb"].band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
+
+    # TODO Check if the block below is needed... I.e., do we need band_inds in brach supplemental?
+    # band_inds_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+    # N_vals_in = np.zeros((ntemps, nwalkers, nleaves_max_gb), dtype=int)
+
+    # if state.branches["gb"].inds.sum() > 0:
+    #     f_in = state.branches["gb"].coords[state.branches["gb"].inds][:, 1] / 1e3
+    #     band_inds_in[state.branches["gb"].inds] = np.searchsorted(band_edges, f_in, side="right") - 1
+    #     N_vals_in[state.branches["gb"].inds] = band_N_vals[band_inds_in[state.branches["gb"].inds]]
+
+    # branch_supp_base_shape = (ntemps, nwalkers, nleaves_max_gb)
+    # state.branches["gb"].branch_supplemental = BranchSupplemental(
+    #     {"N_vals": N_vals_in, "band_inds": band_inds_in}, base_shape=branch_supp_base_shape, copy=True
+    # )
+
+    #* Assembling args and kwargs
+    gb_move_args = (
+        gb,
+        priors,
+        data_start_freq_ind,
+        acs.end_shape[0],
+        acs,
+        acs.settings.f_arr,
+        band_edges,
+        band_N_vals,
+        gpu_priors,
+    )
+
+    effective_ndim = engine_info.ndims["gb"]
+    temperature_control = TemperatureControl(
+        effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
+    )
+    gb_move_kwargs = dict(
+        waveform_kwargs=waveform_kwargs,
+        parameter_transforms=gb_info.transform,
+        provide_betas=True,
+        skip_supp_names_update=["group_move_points"],
+        random_seed=general_info.random_seed,
+        force_backend=general_info.gpu_backend,
+        nfriends=nwalkers,
+        temperature_control=temperature_control,
+        use_gpu=True, 
+        **gb_info.group_proposal_kwargs
+       
+    )
+
+    #* ============================================= SEARCH MOVES =============================================
+    gb_search_prune_move = GBSpecialRJPriorMove(
+        *gb_move_args, 
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior_search",
+        use_prior_removal=True,  
+        phase_maximize=False,  
+        ranks_needed=0,
+        run_swaps=True, 
+        gpus=[],
+        **gb_move_kwargs 
+    )
+    gb_search_prune_move.accepted = np.zeros((ntemps, nwalkers))
+    
+    gb_search_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        is_rj_prop=True,
+        run_swaps=False, 
+        name="rj_fstat_mcmc_search",
+        phase_maximize=True, 
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
+    )
+    gb_search_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
+
+    gb_search_refit_move = GBSpecialRJRefitMove(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        is_rj_prop=True,
+        run_swaps=False, 
+        name="rj_refit_search",
+        fp=general_info.main_file_path,
+        phase_maximize=True,  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
+    )
+    gb_search_refit_move.accepted = np.zeros((ntemps, nwalkers))
+    
+    gb_search_moves = [gb_search_fstat_mcmc_move, gb_search_prune_move] # gb_search_refit_move, Refit currently not used for search
+    
+    #* ============================================= PARAMETER ESTIMATION MOVES =============================================
+    gb_pe_prior_move = GBSpecialRJPriorMove(
+        *gb_move_args, 
+        rj_proposal_distribution=gpu_priors,
+        name="rj_prior",
+        use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
+        phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        run_swaps=True, 
+        gpus=[],
+        **gb_move_kwargs
+    )
+    gb_pe_prior_move.accepted = np.zeros((ntemps, nwalkers))
+
+    gb_pe_fstat_mcmc_move = GBSpecialRJSerialSearchMCMC(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        run_swaps=True, 
+        name="rj_fstat_mcmc",
+        phase_maximize=False, 
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
+    )
+    gb_pe_fstat_mcmc_move.accepted = np.zeros((ntemps, nwalkers))
+
+    gb_pe_refit_move = GBSpecialRJRefitMove(
+        *gb_move_args, 
+        rj_proposal_distribution=None,
+        run_swaps=True, 
+        name="rj_refit",
+        fp=general_info.main_file_path,
+        phase_maximize=False,  # gb_info["pe_info"]["rj_phase_maximize"],
+        ranks_needed=0,
+        gpus=[],
+        **gb_move_kwargs
+    )
+    gb_pe_refit_move.accepted = np.zeros((ntemps, nwalkers))
+    
+    gb_pe_moves = [gb_pe_prior_move, gb_pe_refit_move, gb_pe_fstat_mcmc_move]
+
+    return gb_search_moves, gb_pe_moves

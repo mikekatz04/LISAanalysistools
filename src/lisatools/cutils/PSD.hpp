@@ -1,8 +1,9 @@
 #ifndef __PSD_HPP__
 #define __PSD_HPP__
-#include "gbt_global.h"
-#include "cuda_complex.hpp"
+
 #include <iostream>
+#include "cuda_complex.hpp"
+#include "gbt_global.h"
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
 #define XYZSensitivityMatrix XYZSensitivityMatrixGPU
@@ -19,28 +20,32 @@
 // ============================================================================
 
 class NoiseLevels {
-public:
-    bool return_relative_frequency;
-    bool use_splines;
-    double f_knee_tm;
-    double f_break_tm;
-    double f_knee_oms;
+ public:
+  bool return_relative_frequency;
+  bool use_splines;
+  double f_knee_tm;
+  double f_break_tm;
+  double f_knee_oms;
 
-    NoiseLevels(bool return_relative_frequency_, bool use_splines_,
-                double f_knee_tm_, double f_break_tm_, double f_knee_oms_)
-    {
-        return_relative_frequency = return_relative_frequency_;
-        use_splines               = use_splines_;
-        f_knee_tm                 = f_knee_tm_;
-        f_break_tm                = f_break_tm_;
-        f_knee_oms                = f_knee_oms_;
-    };
+  NoiseLevels(bool return_relative_frequency_, bool use_splines_,
+              double f_knee_tm_, double f_break_tm_, double f_knee_oms_) {
+    return_relative_frequency = return_relative_frequency_;
+    use_splines = use_splines_;
+    f_knee_tm = f_knee_tm_;
+    f_break_tm = f_break_tm_;
+    f_knee_oms = f_knee_oms_;
+  };
 
-    CUDA_DEVICE void get_testmass_noise(double *S_tm, double f, double Sa_a_in, double spline_in_testmass);
-    CUDA_DEVICE void get_isi_oms_noise(double *S_isi_oms, double f, double Soms_d_in, double spline_in_isi_oms);
-    CUDA_DEVICE void get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double f_1, double f_knee, double f_2);
+  CUDA_DEVICE void get_testmass_noise(double* S_tm, double f, double Sa_a_in,
+                                      double spline_in_testmass);
+  CUDA_DEVICE void get_isi_oms_noise(double* S_isi_oms, double f,
+                                     double Soms_d_in,
+                                     double spline_in_isi_oms);
+  CUDA_DEVICE void get_galactic_foreground(double* S_gal, double f, double Amp,
+                                           double alpha, double f_1,
+                                           double f_knee, double f_2);
 
-    void dealloc() {};
+  void dealloc(){};
 };
 
 // ============================================================================
@@ -57,6 +62,7 @@ public:
     int     n_links;
     int     left_mosas[3];
     int     generation;
+    double window_factor;
 
     NoiseLevels noise_levels;
 
@@ -69,7 +75,7 @@ public:
     // ---- constructor ----
     XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_,
                          int n_times_, double armlength_,
-                         int generation_, bool spline_noise_)
+                         int generation_, bool spline_noise_, double window_factor_)
         : noise_levels(true, spline_noise_, .4e-3, 8e-3, 2.0e-3)
     {
         averaged_ltts_arr = averaged_ltts_arr_;
@@ -81,6 +87,7 @@ public:
         left_mosas[0]     = 12;
         left_mosas[1]     = 23;
         left_mosas[2]     = 31;
+        window_factor     = window_factor_;
         // galactic foreground disabled by default
         gal_R_avg    = nullptr;
         use_galactic = false;
@@ -132,7 +139,7 @@ public:
         double *Amp_all, double *alpha_all, double *f_1_all, double *f_knee_all, double *f_2_all,
         double *spline_in_isi_oms_all, double *spline_in_testmass_all,
         double differential_component, int num_freqs, int num_times,
-        bool *dips_mask, int num_psds);
+        bool *dips_mask, int num_psds, bool run_async = false);
 
     void get_noise_covariance_arr(
         double *freqs, int *time_indices,

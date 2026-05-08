@@ -109,35 +109,32 @@ def setup_recipe(
     gpus: list[int] = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
     
-    #* ================================= BUILD MOVES ================================= 
-    num_repeats_psd = 500 # standard = 60   
-    permute_every_psd = 50 # standard = 50
-    psd_search_move, psd_pe_move = build_psd_moves(
-                                        engine_info, curr, acs, priors, 
-                                        num_repeats=num_repeats_psd,
-                                        permute_every=permute_every_psd
-                                    )
+    # #* ================================= BUILD MOVES ================================= 
     gb_search_moves, gb_pe_moves = build_gb_moves(
-                                        engine_info, curr, acs, priors, state
-                                    )
+        engine_info, curr, acs, priors, state
+    )
 
-    #! add move to see if it all still works
-    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    # recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
-
-    #* ================================= SETUP SEARCH ================================= 
-    all_search_moves = [psd_search_move] + gb_search_moves
-    gf_search_move = GFCombineMove(moves=all_search_moves, verbose=True, share_temperature_control=False)
-    gf_search_move.accepted = np.zeros((ntemps, nwalkers))
+    # #* ================================= SETUP SEARCH ================================= 
+    gb_search_weights = [0.8, 0.2]
+    recipe.add_recipe_component(
+        RJRecipeStep(
+            moves=gb_search_moves, 
+            weights=gb_search_weights,
+            convergence_iter=10
+        ), 
+        name="gb search"
+    )
     
-    #? This can also be done with RJRecipeStep, e.g., to set convergence_iter = 5 but could make the search too long
-    recipe.add_recipe_component(SearchRecipeStep(moves=[gf_search_move]), name="gb + psd search")
-    
-    
-    #* ========================== SETUP PARAMETER ESTIMATION ========================== 
-    # all_pe_moves = gb_pe_moves + [psd_pe_move]
-    # pe_weights = [0.6, 0.08, 0.02, 0.3]
-    # recipe.add_recipe_component(RJRecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=5, convergence_iter=100), name="gb pe")
+    # #* ========================== SETUP PARAMETER ESTIMATION ========================== 
+    gb_pe_weights = [0.6, 0.2, 0.2]
+    recipe.add_recipe_component(
+        RJRecipeStep(
+            moves=gb_pe_moves, 
+            weights=gb_pe_weights, 
+            convergence_iter=500
+        ), 
+        name="gb pe"
+    )
 
 
 #######################
@@ -146,10 +143,10 @@ def setup_recipe(
 
 
 def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
-    delta_safe = 1e-5
+    delta_safe = 1e-9
 
     A_lims = [10**(-23.2), 1e-20]
-    f0_lims = [0.014, 0.022] 
+    f0_lims = [0.014, 0.022]  #! TODO: will be reset during band initialization anyway
     
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
@@ -164,18 +161,18 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     start_freq = general_set.domain_settings.min_freq 
     end_freq = general_set.domain_settings.max_freq 
 
-    oversample = 2
+    oversample = 4
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
     start_freq_ind = int(start_freq * general_set.Tobs)
     
-    try:
-        data_start_time = getattr(general_set.orbits, 'sc_t0')
-    except AttributeError:
-        data_start_time = 97729089.327664 + 850.5
-    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["trim_duration"]
-    
+    # try:
+    #     data_start_time = getattr(general_set.orbits, 'sc_t0')
+    # except AttributeError:
+    data_start_time = 97729089.327664 + 850.5
+    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["duration"]
+
     initialize_kwargs = dict(force_backend=general_set.gpu_backend)
     
     gb_settings = GBSettings(
@@ -201,7 +198,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=8000,
+        nleaves_max=40,
         nleaves_min=0,
         ndim=8,
         log_dir=general_set.file_store_dir
@@ -253,19 +250,18 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 
 def get_general_erebor_settings() -> GeneralSetup:    
     
-    Tobs = 9.0 * YRSID_SI / 12.0
+    Tobs = 0.75 * YRSID_SI
     dt = 2.5
-    start_freq = 5e-5
-    end_freq = 1e-1
+    start_freq, end_freq = [0.01940, 0.01999] # [0.0138032364, 0.0220867393] # 
 
     head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
     data_input_path = head_dir
-    base_file_name = "gb_foreground"
+    base_file_name = "gb_high_freq"
     file_store_dir = head_dir + "gf_outputs/"
     
-    delete_previous_test_run = True
+    delete_previous_test_run = False
     if delete_previous_test_run:
-        os.remove(file_store_dir+"gb_foreground_testing.h5")
+        os.remove(file_store_dir+"gb_high_freq_fd_parameter_estimation_main.h5")
     
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
@@ -289,15 +285,15 @@ def get_general_erebor_settings() -> GeneralSetup:
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic") #icrs
+        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic", armlength=2493162305.42235) #icrs
     )
 
     downsample_kwargs = {
-        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
-        "window": (
-            "kaiser",
-            31.0,
-        ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
+        "target_fs": 0.,  # Hz — target sampling rate (None = no downsampling).
+        # "window": (
+        #     "kaiser",
+        #     31.0,
+        # ),  # Kaiser window beta parameter (higher = more aggressive anti-aliasing)
     }
 
     highpass_kwargs = {
@@ -403,7 +399,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    psd_setup = get_psd_erebor_settings(general_setup)
+    # psd_setup = get_psd_erebor_settings(general_setup)
 
     ##################################
     ##################################
@@ -412,7 +408,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    galfor_setup = get_galfor_erebor_settings(general_setup)
+    # galfor_setup = get_galfor_erebor_settings(general_setup)
 
     ##################################
     ##################################
@@ -430,8 +426,8 @@ def get_global_fit_settings(copy_settings_file=False):
     global_settings = GlobalFitSettings(
         source_info={
             "gb": gb_setup,
-            "psd": psd_setup,
-            "galfor": galfor_setup,
+            # "psd": psd_setup,
+            # "galfor": galfor_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,

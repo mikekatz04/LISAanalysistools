@@ -1,6 +1,7 @@
 #include "Detector.hpp"
 #include "PSD.hpp"
 #include "galactic_response.hpp"
+#include "domains.hpp"
 #include <string>
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -92,7 +93,7 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(
     array_type<double> f_1_all, array_type<double> f_knee_all, array_type<double> f_2_all,
     array_type<double> spline_in_isi_oms_all, array_type<double> spline_in_testmass_all,
     double differential_component, int num_freqs, int num_times,
-    array_type<bool> dips_mask, int num_psds)
+    array_type<bool> dips_mask, int num_psds, bool run_async)
 {
     int total_tf_pairs = num_times * num_freqs;
     sensitivity_matrix->psd_likelihood_wrap(
@@ -111,9 +112,11 @@ void XYZSensitivityMatrixWrap::psd_likelihood_wrap(
         return_pointer_and_check_length(spline_in_isi_oms_all,  "spline_in_isi_oms_all",  num_psds * num_freqs, 1),
         return_pointer_and_check_length(spline_in_testmass_all, "spline_in_testmass_all", num_psds * num_freqs, 1),
         differential_component,
-        num_freqs, num_times,
+        num_freqs,
+        num_times,
         return_pointer_and_check_length(dips_mask, "dips_mask", num_times * num_freqs, 1),
-        num_psds
+        num_psds,
+        run_async
     );
 }
 
@@ -415,7 +418,16 @@ void detector_part(py::module &m) {
     .def("disable_galactic_grid", &XYZSensitivityMatrixWrap::disable_galactic_grid,
          "Detach galactic grid (equivalent to set_galactic_grid(None)).")
     .def("get_noise_tfs_wrap",        &XYZSensitivityMatrixWrap::get_noise_tfs_wrap)
-    .def("psd_likelihood_wrap",       &XYZSensitivityMatrixWrap::psd_likelihood_wrap)
+    .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap,
+         py::arg("like_contrib_final"), py::arg("f_arr"), py::arg("data"),
+         py::arg("data_index_all"), py::arg("time_index_all"),
+         py::arg("Soms_d_in_all"), py::arg("Sa_a_in_all"),
+         py::arg("Amp_all"), py::arg("alpha_all"), py::arg("f_1_all"), py::arg("f_knee_all"), py::arg("f_2_all"),
+         py::arg("spline_in_isi_oms_all"), py::arg("spline_in_testmass_all"),
+         py::arg("differential_component"), py::arg("num_freqs"), py::arg("num_times"),
+         py::arg("dips_mask"), py::arg("num_psds"),
+         py::arg("run_async") = false,
+         "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap)
     .def("get_inverse_det_wrap",      &XYZSensitivityMatrixWrap::get_inverse_det_wrap)
     .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
@@ -428,15 +440,73 @@ void detector_part(py::module &m) {
 #else
     py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixCPU")
 #endif
-    .def(py::init<double *, double *, int, double, int, bool>(),
-         py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"),
-         py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"));
+    .def(py::init<double *, double *, int, double, int, bool, double>(),
+            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
+    ;
 
-    // ---- Legacy free functions ----
-    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap);
-    m.def("get_psd_val_legacy_wrap",    &get_psd_val_legacy_wrap);
-    m.def("psd_likelihood",             &psd_likelihood_binding);
-    m.def("compute_logpdf",             &compute_logpdf_binding);
+    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
+    m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap, "Legacy PSD val wrapping");
+    m.def("psd_likelihood", &psd_likelihood_binding, "PSD likelihood computation");
+    m.def("compute_logpdf", &compute_logpdf_binding, "Compute log PDF from GMM");
+}
+
+
+void domains_part(py::module &m) {
+    m.attr("TDI_XYZ") = TDI_XYZ;
+    m.attr("TDI_AET") = TDI_AET;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<STFTDomainWrap>(m, "STFTDomainWrapGPU")
+#else
+    py::class_<STFTDomainWrap>(m, "STFTDomainWrapCPU")
+#endif
+    .def(py::init<int, int, int, double, double, double, double, double,
+                  array_type<std::complex<double>>, array_type<std::complex<double>>,
+                  int, int, int>(),
+         py::arg("num_times"), py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("t0"), py::arg("f_min"), py::arg("f_max"),
+         py::arg("dt"), py::arg("df"),
+         py::arg("data"), py::arg("invC"),
+         py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
+    .def("compute_likelihood_terms", &STFTDomainWrap::compute_likelihood_terms,
+         py::arg("d_h_out"), py::arg("h_h_out"), py::arg("template_vals"),
+         py::arg("start_times"), py::arg("start_freqs"), py::arg("num_binaries"),
+         py::arg("data_index"), py::arg("noise_index"),
+         py::arg("n_t_template"), py::arg("n_f_template"),
+         py::arg("run_async") = false,
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries.");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<FDDomainWrap>(m, "FDDomainWrapGPU")
+#else
+    py::class_<FDDomainWrap>(m, "FDDomainWrapCPU")
+#endif
+    .def(py::init<int, int, double, double, double,
+                  array_type<std::complex<double>>, array_type<std::complex<double>>,
+                  int, int, int>(),
+         py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("f_min"), py::arg("f_max"), py::arg("df"),
+         py::arg("data"), py::arg("invC"),
+         py::arg("num_data"), py::arg("num_noise"), py::arg("tdi_type"))
+    .def("compute_likelihood_terms", &FDDomainWrap::compute_likelihood_terms,
+         py::arg("d_h_out"), py::arg("h_h_out"), py::arg("template_vals"),
+         py::arg("start_freqs"), py::arg("num_binaries"),
+         py::arg("data_index"), py::arg("noise_index"),
+         py::arg("n_f_template"),
+         py::arg("run_async") = false,
+         "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (FD).");
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapGPU")
+#else
+    py::class_<STFTFresnelWrap>(m, "STFTFresnelWrapCPU")
+#endif
+    .def(py::init<int, int, int, double, double, double, double, double, double>(),
+         py::arg("num_times"), py::arg("num_freqs"), py::arg("num_channels"),
+         py::arg("t0"), py::arg("f_min"), py::arg("f_max"),
+         py::arg("dt"), py::arg("df"), py::arg("window_alpha") = 0.0)
+    .def("compute_fourier_values", &STFTFresnelWrap::compute_fourier_values,
+         "Compute Fresnel-based Fourier values for a batch of binaries.");
 }
 
 
@@ -444,9 +514,11 @@ PYBIND11_MODULE(pycppdetector, m) {
     m.doc() = "Orbits/Detector C++ plug-in";
 
     detector_part(m);
-    m.def("check_orbits",       &check_orbits);
-    m.def("get_module_path_cpp", &get_module_path);
-    m.def("check_12",           &check_12);
+    domains_part(m);
+    m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
+
+    m.def("get_module_path_cpp", &get_module_path, "Returns the file path of the module");
+    m.def("check_12", &check_12, "Check12");
 
     try {
         std::string path_at_init = m.attr("__file__").cast<std::string>();

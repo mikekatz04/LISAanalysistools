@@ -17,7 +17,7 @@ if not logger.handlers:
     logger.propagate = False
 
 
-GPU_BACKEND = "cuda13x"
+GPU_BACKEND = "cuda12x"
 try:
     import lisatools
     lisatools.get_backend("lisatools_" + GPU_BACKEND)
@@ -70,6 +70,7 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
+from lisatools.datacontainer import DataResidualArray
 
 # import few
 
@@ -85,7 +86,7 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves
+from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves, setup_state_for_injection
 from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 
 ################
@@ -108,36 +109,39 @@ def setup_recipe(
     ntemps: int = general_info.ntemps
     gpus: list[int] = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
-    
-    #* ================================= BUILD MOVES ================================= 
-    num_repeats_psd = 500 # standard = 60   
-    permute_every_psd = 50 # standard = 50
-    psd_search_move, psd_pe_move = build_psd_moves(
-                                        engine_info, curr, acs, priors, 
-                                        num_repeats=num_repeats_psd,
-                                        permute_every=permute_every_psd
-                                    )
-    gb_search_moves, gb_pe_moves = build_gb_moves(
-                                        engine_info, curr, acs, priors, state
-                                    )
 
-    #! add move to see if it all still works
-    # recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
-    # recipe.add_recipe_component(PERecipeStep(moves=[psd_pe_move]), name="psd pe")
+    #* =============================== INJECT SOURCES =================================
+    # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+    # spread = np.array([1e-4, 1e-5, 1e-14, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4])
+    # setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
+
+    
+    #* ================================= BUILD MOVES ==================================
+    num_repeats_psd = 60
+    permute_every_psd = 50
+    psd_search_move, psd_pe_move = build_psd_moves(
+        engine_info, curr, acs, priors, 
+        num_repeats=num_repeats_psd,
+        permute_every=permute_every_psd
+    )
+    gb_search_moves, gb_pe_moves = build_gb_moves(
+        engine_info, curr, acs, priors, state
+    )
 
     #* ================================= SETUP SEARCH ================================= 
     all_search_moves = [psd_search_move] + gb_search_moves
-    gf_search_move = GFCombineMove(moves=all_search_moves, verbose=True, share_temperature_control=False)
+    all_search_weights = [0.5, 0.4, 0.1]
+    gf_search_move = GFCombineMove(moves=all_search_moves, weights=all_search_weights, verbose=True, share_temperature_control=False)
     gf_search_move.accepted = np.zeros((ntemps, nwalkers))
     
-    #? This can also be done with RJRecipeStep, e.g., to set convergence_iter = 5 but could make the search too long
-    recipe.add_recipe_component(SearchRecipeStep(moves=[gf_search_move]), name="gb + psd search")
-    
+    recipe.add_recipe_component(RJRecipeStep(moves=[gf_search_move], convergence_iter=10), name="gb + psd search")
+    # search_weights = [0.8, 0.2]
+    # recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
     
     #* ========================== SETUP PARAMETER ESTIMATION ========================== 
-    # all_pe_moves = gb_pe_moves + [psd_pe_move]
-    # pe_weights = [0.6, 0.08, 0.02, 0.3]
-    # recipe.add_recipe_component(RJRecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=5, convergence_iter=100), name="gb pe")
+    all_pe_moves = gb_pe_moves + [psd_pe_move]
+    pe_weights = [0.6, 0.08, 0.02, 0.3]
+    recipe.add_recipe_component(RJRecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=1, convergence_iter=100), name="gb pe")
 
 
 #######################
@@ -146,36 +150,38 @@ def setup_recipe(
 
 
 def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
-    delta_safe = 1e-5
+    delta_safe = 1e-9
 
     A_lims = [10**(-23.2), 1e-20]
-    f0_lims = [0.014, 0.022] 
+    f0_lims = [1e-4, 0.023] # reset by band limits
     
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
     
-    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")]
+    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")] # also reset in band limits
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
     lam_lims = [0.0, 2 * np.pi]
     beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
-    start_freq = general_set.domain_settings.min_freq 
-    end_freq = general_set.domain_settings.max_freq 
+    input_data_arr: DataResidualArray = general_set.input_data_residual_array
+    input_data_arr.settings
+    start_freq = float(input_data_arr.settings.f_arr[0])
+    end_freq = float(input_data_arr.settings.f_arr[-1])
 
-    oversample = 2
+    oversample = 4
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
     start_freq_ind = int(start_freq * general_set.Tobs)
     
-    try:
-        data_start_time = getattr(general_set.orbits, 'sc_t0')
-    except AttributeError:
-        data_start_time = 97729089.327664 + 850.5
-    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["trim_duration"]
-    
+    # try:
+    #     data_start_time = getattr(general_set.orbits, 'sc_t0')
+    # except AttributeError:
+    data_start_time = 97729089.327664 + 850.5
+    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["duration"]
+
     initialize_kwargs = dict(force_backend=general_set.gpu_backend)
     
     gb_settings = GBSettings(
@@ -197,11 +203,11 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         t0=t0_gbs,
         tdi_setup="XYZ",
         use_tdi2=True,
-        Tobs=general_set.Tobs,
+        Tobs=float(1/input_data_arr.settings.df),
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=8000,
+        nleaves_max=300,
         nleaves_min=0,
         ndim=8,
         log_dir=general_set.file_store_dir
@@ -253,23 +259,19 @@ def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
 
 def get_general_erebor_settings() -> GeneralSetup:    
     
-    Tobs = 9.0 * YRSID_SI / 12.0
-    dt = 2.5
-    start_freq = 5e-5
-    end_freq = 1e-1
+    Tobs = 0.75 * YRSID_SI
+    dt = 5.0
+    start_freq, end_freq = [5e-5, 0.025] # [0.0138032364, 0.0220867393] # 
 
-    head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
-    data_input_path = head_dir
-    base_file_name = "gb_foreground"
-    file_store_dir = head_dir + "gf_outputs/"
-    
-    delete_previous_test_run = True
-    if delete_previous_test_run:
-        os.remove(file_store_dir+"gb_foreground_testing.h5")
+    # head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
+    head_dir = "/workspace/rrondeel/erebor/outputs/testing/"
+    data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
+    base_file_name = "vgb_psd"
+    file_store_dir = head_dir 
     
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
-    nwalkers = 32
+    nwalkers = 8
     ntemps = 24
 
     window_type = "tukey"
@@ -284,16 +286,16 @@ def get_general_erebor_settings() -> GeneralSetup:
     
     processor_init_kwargs = dict(
         L1_folder=data_input_path,
-        source_types=['noise', 'gb'], # 'mbhb', 'vgb',
-        source_ids=dict(gb=source_ids),
+        source_types=['noise', 'vgb'], # 'mbhb', 'gb',
+        source_ids=dict(vgb=source_ids),
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic") #icrs
+        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic", armlength=2493162305.42235) #icrs
     )
 
     downsample_kwargs = {
-        "target_fs": 0.2,  # Hz — target sampling rate (None = no downsampling).
+        "target_fs": 1/dt,  # Hz — target sampling rate (None = no downsampling).
         "window": (
             "kaiser",
             31.0,
@@ -325,7 +327,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         downsample_kwargs=downsample_kwargs,
         Tobs=Tobs,
     )
-
+    
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02) # use_splines=True
 
     general_settings = GeneralSettings(
@@ -412,7 +414,7 @@ def get_global_fit_settings(copy_settings_file=False):
     ##################################
 
 
-    galfor_setup = get_galfor_erebor_settings(general_setup)
+    # galfor_setup = get_galfor_erebor_settings(general_setup)
 
     ##################################
     ##################################
@@ -431,7 +433,7 @@ def get_global_fit_settings(copy_settings_file=False):
         source_info={
             "gb": gb_setup,
             "psd": psd_setup,
-            "galfor": galfor_setup,
+            # "galfor": galfor_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,

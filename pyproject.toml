@@ -87,8 +87,8 @@ optional-dependencies.sampling = [
 
 optional-dependencies.testing = [
   "eryn",
-  "gbgpu",
   "corner",
+  "gpubackendtools>=0.0.16",
 ]
 
 optional-dependencies.dev = [
@@ -138,9 +138,11 @@ sdist.include = [
   "src/lisatools/git_version.py",                 #@SKIP_PLUGIN@
   "src/lisatools_backend_cuda11x/git_version.py",
   "src/lisatools_backend_cuda12x/git_version.py",
+  "src/lisatools_backend_cuda13x/git_version.py",
   "src/lisatools_backend_cpu/libdetector.a",
   "src/lisatools_backend_cuda11x/libdetector_gpu.a",
   "src/lisatools_backend_cuda12x/libdetector_gpu.a",
+  "src/lisatools_backend_cuda13x/libdetector_gpu.a",
   "tests/",
   "src/lisatools/cutils/Detector.cu",
   "src/lisatools/cutils/pycppdetector.pyx",
@@ -149,6 +151,8 @@ sdist.include = [
   "src/lisatools/cutils/global.hpp",
   "src/lisatools/cutils/binding.cxx",
   "src/lisatools/cutils/binding.hpp",
+  "src/lisatools/cutils/lisatools_sources.cmake",
+  "src/lisatools/cutils/lisatools_sources.cmake.in",
 ]
 sdist.exclude = [
   ".devcontainer/",
@@ -185,6 +189,11 @@ report.omit = [
   "*/lisatools/tests/*.py",
   "*/lisatools/git_version.py",
   "*/lisatools_backend_*/git_version.py",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
 ]
 
 [tool.uv.sources]
