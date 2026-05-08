@@ -872,7 +872,7 @@ void get_noise_covariance_kernel(
     double *c00_arr, cmplx *c01_arr, cmplx *c02_arr,
     double *c11_arr, cmplx *c12_arr, double *c22_arr,
     int num_freqs, int num_times,
-    XYZSensitivityMatrix &sensitivity_matrix)
+    XYZSensitivityMatrix* sensitivity_matrix)
 {
     // Memory layout: output[t_idx * num_freqs + f_idx]
     // Frequencies are the fast-varying dimension for coalesced access
@@ -912,7 +912,7 @@ void get_noise_covariance_kernel(
             spline_in_testmass = spline_in_testmass_arr[f_idx];
             spline_in_isi_oms = spline_in_isi_oms_arr[f_idx];
 
-            sensitivity_matrix.get_noise_covariance(
+            sensitivity_matrix->get_noise_covariance(
                 f, time_index,
                 Soms_d_in, Sa_a_in,
                 Amp, alpha, f_1, f_knee, f_2,
@@ -956,7 +956,7 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
         num_freqs, num_times,
-        *sensitivity_matrix_gpu
+        sensitivity_matrix_gpu
     );
     
     cudaDeviceSynchronize();
@@ -971,7 +971,7 @@ void XYZSensitivityMatrix::get_noise_covariance_arr(
         c00_arr, c01_arr, c02_arr,
         c11_arr, c12_arr, c22_arr,
         num_freqs, num_times,
-        *this
+        this
     );
 #endif
 }
