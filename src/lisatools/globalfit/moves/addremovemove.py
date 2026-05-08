@@ -460,23 +460,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
 
-                    logger.debug(f"new logl: {logl[0]}")
-
-                    if np.any(logl < -1e9):
-                        tmp_ll = np.full_like(data_index, -1e300, dtype=float)
-
-                        breakpoint()
-                        
-                        for i, (coords_in_now, data_index_now) in enumerate(zip(new_points_in, data_index)):
-                            tmp_ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
-                                *coords_in_now,
-                                waveform_kwargs=self.waveform_gen_kwargs,
-                                signal_gen = getattr(self.waveform_gen, self.waveform_gen_method),
-                                **self.waveform_like_kwargs,
-                                source_only=True,
-                                propagate_data_res_kwargs=False
-                            )
-
                     logp = logp.reshape(self.ntemps, nwalkers_here)
                     prev_logp_here = prev_logp[inds == split].reshape(self.ntemps, nwalkers_here)
 
@@ -488,8 +471,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     logP = temperature_control_here.compute_log_posterior_tempered(logl, logp)
 
                     lnpdiff = factors + logP - prev_logP_here
-
-                    logger.debug(f"lnpdiff: {lnpdiff[0]}.")
 
                     keep = lnpdiff > np.log(model.random.rand(self.ntemps, nwalkers_here))
 
@@ -583,8 +564,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
         free_gpu_memory()
-        logger.debug(f"ACS likelihood: {current_ll}.")
         if np.any(current_ll < -1e9):
+            # keep a safe guard here
             breakpoint()
         # TODO: add check with last used logl
 
