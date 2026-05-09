@@ -80,6 +80,8 @@ class L1DataLoader:
         Additional keyword arguments for the orbits class.
     verbose : bool, optional
         Verbosity flag. Default is True.
+    store_individual_timeseries : bool, optional
+        Whether to store individual timeseries for each source type and ID. Default is False.
     """
 
     def __init__(
@@ -90,6 +92,7 @@ class L1DataLoader:
         orbits_class: Orbits = L1Orbits,
         orbits_kwargs: dict = None,
         verbose: bool = True,
+        store_individual_timeseries: bool = False,  # whether to store individual timeseries for each source type and ID
     ):
         self.data_folder = os.path.join(L1_folder, "data")
         self.catalogues_folder = os.path.join(L1_folder, "catalogues")
@@ -114,7 +117,7 @@ class L1DataLoader:
         self.orbits_class = orbits_class
         self.orbits_kwargs = orbits_kwargs
         self.verbose = verbose
-
+        self.store_individual_timeseries = store_individual_timeseries
         if self.verbose:
             logger.info(f"L1DataLoader initialized with data folder: {self.data_folder}")
             logger.info(f"Source types to load: {self.source_types}")
@@ -174,7 +177,7 @@ class L1DataLoader:
         raise NotImplementedError("_open method should be implemented in subclasses.")
     
     @property
-    def individual_timeseries(self) -> dict:
+    def individual_timeseries(self) -> dict | None:
         """
         Property to access individual timeseries for each source type and ID.
 
@@ -182,7 +185,7 @@ class L1DataLoader:
             dict: A dictionary containing individual timeseries for each source type and ID.
         """
         if not hasattr(self, "_individual_timeseries"):
-            self._individual_timeseries = {}
+            return None
         return self._individual_timeseries
 
     def load_data(self) -> tuple:
@@ -198,7 +201,8 @@ class L1DataLoader:
         """
         xyz = None
 
-        _individual_timeseries = {}  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
+        if self.store_individual_timeseries:
+            _individual_timeseries = {}  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
 
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
@@ -225,10 +229,11 @@ class L1DataLoader:
                 logger.info(f"TDI time step: {tdi_dt} seconds")
                 logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
 
-            _individual_timeseries["NOISE"] = xyz.T.copy()  # store the noise timeseries separately if needed
-            _individual_timeseries["PSD_MATRIX"] = noise_covariance 
-            _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
-            _individual_timeseries["PSD_TIMES"] = noise_times
+            if self.store_individual_timeseries:
+                _individual_timeseries["NOISE"] = xyz.T.copy()  # store the noise timeseries separately if needed
+                _individual_timeseries["PSD_MATRIX"] = noise_covariance 
+                _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
+                _individual_timeseries["PSD_TIMES"] = noise_times
 
         for source_type in self.source_types:
 
@@ -289,14 +294,16 @@ class L1DataLoader:
                             tdi_times == _tdi_times
                         ).all(), "Time arrays do not match between files."
 
-                    _individual_timeseries[f"{source_type}_{source_id}"] = _xyz.T.copy()  # store individual timeseries for this source
+                    if self.store_individual_timeseries:
+                        _individual_timeseries[f"{source_type}_{source_id}"] = _xyz.T.copy()  # store individual timeseries for this source
 
         xyz = xyz.T  # Transpose to have shape (n_channels, n_times)
         assert (
             xyz.shape[1] == tdi_times.shape[0]
         ), "Data time dimension does not match time array length."
 
-        self._individual_timeseries = _individual_timeseries  # store the individual timeseries for potential further use
+        if self.store_individual_timeseries:
+            self._individual_timeseries = _individual_timeseries  # store the individual timeseries for potential further use
 
         return tdi_times, tdi_fs, xyz, orbits
     
@@ -903,6 +910,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         orbits_class: Orbits = L1Orbits,
         orbits_kwargs: dict = None,
         verbose: bool = True,
+        store_individual_timeseries: bool = False,
         do_plots: bool = False,
     ):
         L1DataLoader.__init__(
@@ -913,6 +921,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
             orbits_class=orbits_class,
             orbits_kwargs=orbits_kwargs,
             verbose=verbose,
+            store_individual_timeseries=store_individual_timeseries,
         )
 
         times, fs, data_xyz, orbits = self.load_data()
@@ -928,7 +937,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         """
         Apply identical processing to the main data and all individual timeseries.
         """
-        if hasattr(self, "individual_timeseries"):
+        if hasattr(self, "individual_timeseries") and self.individual_timeseries is not None:
             for key, ts_data in self.individual_timeseries.items():
                 if "PSD" in key:  # skip processing for PSD data
                     continue
@@ -944,7 +953,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
 
         processed_times, processed_data = super().process(*args, **kwargs)
 
-        if hasattr(self, "individual_timeseries"):
+        if hasattr(self, "individual_timeseries") and self.individual_timeseries is not None:
             self.individual_timeseries["TIMES"] = processed_times  # store the processed times as well
             self.individual_timeseries["COMBINED"] = processed_data
         

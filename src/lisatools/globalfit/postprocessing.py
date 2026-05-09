@@ -501,8 +501,10 @@ class GlobalFitPlotter:
         """
         Convert the raw timeseries data into characteristic strain. We keep only the X channel for plotting.
         """
-        if not hasattr(self.curr.general_info.data_processor, "individual_timeseries"):
-            raise ValueError("Data processor does not have individual_timeseries attribute.")
+        if not hasattr(self.curr.general_info.data_processor, "individual_timeseries") or self.curr.general_info.data_processor.individual_timeseries is None:
+            
+            logger.warning("No individual timeseries found in data processor. Skipping input data conversion for plotting.")
+            return {}
         
         out = {}
         
@@ -517,6 +519,8 @@ class GlobalFitPlotter:
         combined_char_strain = to_characteristic_strain(freqs_h, power_avg)
         out["freqs"] = freqs_h
         out["combined"] = combined_char_strain
+
+        del freqs, periodogram, power_avg # free memory as we don't need the raw periodogram anymore
 
         logger.info("Converted input data to characteristic strain for plotting.")
 
@@ -535,8 +539,38 @@ class GlobalFitPlotter:
             char_strain = to_characteristic_strain(freqs, periodogram)
             
             out[k.lower()] = CubicSpline(freqs, char_strain)(freqs_h)
+            
+            del freqs, periodogram, char_strain # free memory as we don't need the raw periodogram anymore
 
+        del data_components # free memory as we don't need the raw timeseries anymore
+        import gc; gc.collect()
+
+        return out
+    
+    def save_input_data(self, converted_data: dict=None):
+        """
+        Dump the converted input data to a h5 file for later plotting in the web dashboard.
+        """
+        if converted_data is None:
+            converted_data = self.convert_input_data_for_plotting()
+
+        if len(converted_data) == 0:
+            logger.warning("No converted data to save for plotting.")
+            return
+
+        parts = self.curr.general_info.version.split("_", 1)
+        if len(parts) == 2:
+            run_type, run_id = parts
+            filepath = os.path.join(self.curr.general_info.submission_folder, run_type, run_id, "input_data.h5")
+            
+        filepath = os.path.join(self.curr.general_info.submission_folder, self.curr.general_info.version, "input_data.h5")
         
+        with h5py.File(filepath, "w") as f:
+            for k, v in converted_data.items():
+                f.create_dataset(k, data=v)
+
+                logger.info(f"Saved converted input data component '{k}' to {filepath}")
+
 
 # ─── Metadata extractors ─────────────────────────────────────────────────────
 
@@ -800,9 +834,6 @@ class RunMetadata:
         logger.info(f"Reconstructing sensitivity backend of class '{sensitivity_class_name}' with kwargs: {sensitivity_kwargs} and domain settings: {domain_settings}")
 
         return sensitivity_class(orbits=orbits, settings=domain_settings, **sensitivity_kwargs)
-        
-
-
 
     def to_web_dict(self) -> dict:
         """Return a richer dict for web display, extending the L3C dict with run config."""
