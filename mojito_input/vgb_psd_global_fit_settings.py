@@ -17,7 +17,7 @@ if not logger.handlers:
     logger.propagate = False
 
 
-GPU_BACKEND = "cuda13x"
+GPU_BACKEND = "cuda12x"
 try:
     import lisatools
     lisatools.get_backend("lisatools_" + GPU_BACKEND)
@@ -70,6 +70,7 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
+from lisatools.datacontainer import DataResidualArray
 
 # import few
 
@@ -85,7 +86,7 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves
+from lisatools.globalfit.recipe_steps import SearchRecipeStep, PERecipeStep, RJRecipeStep, build_psd_moves, build_gb_moves, setup_state_for_injection
 from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 
 ################
@@ -108,8 +109,14 @@ def setup_recipe(
     ntemps: int = general_info.ntemps
     gpus: list[int] = curr.general_info.gpus
     cp.cuda.runtime.setDevice(gpus[0])
+
+    #* =============================== INJECT SOURCES =================================
+    # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+    # spread = np.array([1e-4, 1e-5, 1e-14, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4])
+    # setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
+
     
-    #* ================================= BUILD MOVES ================================= 
+    #* ================================= BUILD MOVES ==================================
     num_repeats_psd = 60
     permute_every_psd = 50
     psd_search_move, psd_pe_move = build_psd_moves(
@@ -158,8 +165,10 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     lam_lims = [0.0, 2 * np.pi]
     beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
-    start_freq = float(general_set.domain_settings.f_arr[0])
-    end_freq = float(general_set.domain_settings.f_arr[-1])
+    input_data_arr: DataResidualArray = general_set.input_data_residual_array
+    input_data_arr.settings
+    start_freq = float(input_data_arr.settings.f_arr[0])
+    end_freq = float(input_data_arr.settings.f_arr[-1])
 
     oversample = 4
     extra_buffer = 5
@@ -194,7 +203,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         t0=t0_gbs,
         tdi_setup="XYZ",
         use_tdi2=True,
-        Tobs=float(1/general_set.domain_settings.df),
+        Tobs=float(1/input_data_arr.settings.df),
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         # Transform, Priors, Periodic (handled later!)
@@ -254,10 +263,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 5.0
     start_freq, end_freq = [5e-5, 0.025] # [0.0138032364, 0.0220867393] # 
 
-    head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
-    data_input_path = head_dir
+    # head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
+    head_dir = "/workspace/rrondeel/erebor/outputs/testing/"
+    data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
     base_file_name = "vgb_psd"
-    file_store_dir = head_dir + "gf_outputs/"
+    file_store_dir = head_dir 
     
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
@@ -317,7 +327,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         downsample_kwargs=downsample_kwargs,
         Tobs=Tobs,
     )
-
+    
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02) # use_splines=True
 
     general_settings = GeneralSettings(

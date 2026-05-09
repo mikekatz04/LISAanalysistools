@@ -113,6 +113,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         stft_dt: float = None,
         freq_min: float = 1e-5,
         freq_max: float = 1.0,
+        fft_batch_size: int = 1,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -151,6 +152,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         self.freq_min = freq_min
         self.freq_max = freq_max
+        self.fft_batch_size = fft_batch_size
 
     @property
     def wrapper_kwargs(self) -> dict:
@@ -166,6 +168,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             "stft_dt": self.nperseg * self.dt if self.nperseg else None,
             "freq_min": self.freq_min,
             "freq_max": self.freq_max,
+            "fft_batch_size": self.fft_batch_size,
             "force_backend": self.force_backend,
         }
 
@@ -322,12 +325,14 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         end_times = times[:, -1]
 
         if self.analysis_domain == "STFT":
+            # Use integer STFT-segment indices from stft_t_arr.  digitize caps
+            # right_edges_i at len(stft_t_arr)=NT so each source's individual
+            # grid_length is naturally bounded to the data end.
             left_edges_i = self.xp.digitize(start_times, self.stft_t_arr)
             right_edges_i = self.xp.digitize(end_times, self.stft_t_arr)
             left_edges = self.stft_t_arr[left_edges_i - 1]
-
             grid_length = (right_edges_i - left_edges_i + 1) * self.nperseg
-
+            
         elif self.analysis_domain == "FD":
             left_edges = self.xp.full(shape=start_times.shape, fill_value=self.data_t0)
             grid_length = self.xp.full(shape=start_times.shape, fill_value=self.domain_settings.N)
@@ -354,16 +359,49 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         num_bin = left_edges.shape[0]
         max_grid_length = int(grid_length.max())
 
+        # STFT per-source safety mask: #todo not really sure we need this, will come back later
+        safe_samples_per_source = None
+        if self.analysis_domain == "STFT":
+            NT = self.domain_settings.N // self.nperseg
+            segment_dt = self.dt * self.nperseg
+            t_idx = self.xp.rint(
+                (left_edges - self.data_t0) / segment_dt
+            ).astype(int)
+            safe_samples_per_source = (
+                self.xp.maximum(NT - t_idx, 0) * self.nperseg
+            )[:, None, None]  # (num_bin, 1, 1) for broadcasting with grid_time_indices
+
         # create a common grid
         padded_signals = self.xp.zeros(
             (channels.shape[:-1] + (max_grid_length,)), dtype=channels.dtype
         )  # shape (num_bin, num_channels, max_grid_length)
 
-        # now use advanced indexing to place each signal in the correct position on the common grid
+        # Use rint() to guard against floating-point truncation
+        grid_time_indices = self.xp.rint(
+            (times[:, None, :] - left_edges[:, None, None]) / self.dt
+        ).astype(int)
+
+        # Mask off indices that would push out of bounds (just in case)
+        valid = (grid_time_indices >= 0) & (grid_time_indices < max_grid_length)
+        if safe_samples_per_source is not None:
+            valid = valid & (grid_time_indices < safe_samples_per_source)
+
         batch_indices = self.xp.arange(num_bin)[:, None, None]
         channel_indices = self.xp.arange(channels.shape[1])[None, :, None]
-        grid_time_indices = ((times[:, None, :] - left_edges[:, None, None]) / self.dt).astype(int)
-        padded_signals[batch_indices, channel_indices, grid_time_indices] = channels
+        
+        # Zero out channel values whose source time falls outside max_grid_length
+        # BEFORE scattering.  valid has shape (num_bin, 1, num_times) and channels
+        # has shape (num_bin, num_channels, num_times) — broadcasting works along
+        # the channel axis.  This avoids a shape mismatch from applying where()
+        # post-scatter on the (num_bin, num_channels, max_grid_length) output array.
+        channels_to_scatter = self.xp.where(valid, channels, 0)
+
+        # Clip indices so the scatter never writes outside the allocated array;
+        # the zeroed channels above ensure those positions carry no signal.
+        safe_time_indices = self.xp.clip(
+            grid_time_indices, 0, max(max_grid_length - 1, 0)
+        )
+        padded_signals[batch_indices, channel_indices, safe_time_indices] = channels_to_scatter
 
         return left_edges, padded_signals
 
@@ -482,6 +520,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         t0_here = times_in[0]
         dt_here = self.dt #float(times_in[2] - times_in[0])
+        
 
         if output_domain == "TD":
             return TDSignal(
@@ -574,11 +613,28 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         """
         num_binaries = signal_in.shape[0]
         n = signal_in.shape[-1]
+        
+        outer_shape = signal_in.shape[:-1]
 
         window = tukey(n, alpha=self.tukey_alpha, xp=self.xp)
-        windowed = signal_in * window
+        # In-place windowing: avoids a (num_binaries, num_channels, N_data) copy.
+        # signal_in is the padded array from build_common_grid and is not used after this call.
+        signal_in *= window
 
-        signal_fd = self.xp.fft.rfft(windowed, axis=-1) * self.dt
+        # Loop over sources instead of one batched rfft to prevent oom errors from large FFTs
+        n_freqs_full = n // 2 + 1
+        signal_fd = self.xp.empty(
+            (*outer_shape, n_freqs_full), dtype=self.xp.complex128
+        )
+
+        fft_batch_size = getattr(self, "fft_batch_size", 1)  
+
+        for i in range(0, num_binaries, fft_batch_size):
+            start = i
+            end = min(i + fft_batch_size, num_binaries)
+
+            signal_fd[start:end] = self.xp.fft.rfft(signal_in[start:end], axis=-1) * self.dt
+
         freqs = self.xp.fft.rfftfreq(n, d=self.dt)
 
         keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
@@ -662,6 +718,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         stft_dt: float = None,
         freq_min: float = 1e-5,
         freq_max: float = 1.0,
+        fft_batch_size: int = 1,
         signal_duration: float = None,
         buffer_time: int = 5000,
         run_async: bool = False,
@@ -679,6 +736,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             stft_dt=stft_dt,
             freq_min=freq_min,
             freq_max=freq_max,
+            fft_batch_size=fft_batch_size,
             force_backend=force_backend,
         )
 
@@ -772,14 +830,14 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         shifted_t_arr = self.xp.concatenate(
             [
-                shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
+                #shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
                 shifted_t_arr,
                 shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1),
             ]
         )
 
-        h_plus = self.xp.pad(h_plus, (num_pad, num_pad), mode="edge")
-        h_cross = self.xp.pad(h_cross, (num_pad, num_pad), mode="edge")
+        h_plus = self.xp.pad(h_plus, (0, num_pad), mode="edge")
+        h_cross = self.xp.pad(h_cross, (0, num_pad), mode="edge")
 
         self.response.num_pts = shifted_t_arr.shape[-1]
 
@@ -791,8 +849,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
 
         # trim the invalid points
-        tdis = tdis[:, num_pad:-num_pad]
-        shifted_t_arr = shifted_t_arr[num_pad:-num_pad]
+        shifted_t_arr = shifted_t_arr[:-num_pad]
+        tdis[:, :num_pad] = 0.0  # zero out the corrupted points at the start
+        tdis = tdis[:, :-num_pad]
 
         # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
         t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
@@ -803,6 +862,75 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         if start_ind > 0:
             shifted_t_arr = shifted_t_arr[start_ind:]
             tdis = tdis[:, start_ind:]
+
+        return shifted_t_arr, tdis
+
+
+    def _apply_response_batch(
+        self,
+        t_arr: np.ndarray | cp.ndarray,
+        h_plus: np.ndarray | cp.ndarray,
+        h_cross: np.ndarray | cp.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
+    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        """Apply the TDI response to a batch of sources.
+
+        Args:
+            t_arr: Time array relative to zero (output of wave_gen_batch), shape (Nbatch, Ntimes).
+            h_plus: Plus polarization, shape (Nbatch, Ntimes).
+            h_cross: Cross polarization, shape (Nbatch, Ntimes).
+            ra: Right ascension in radians, shape (Nbatch,).
+            dec: Declination in radians, shape (Nbatch,).
+            merger_time: Time of merger in seconds (relative to waveform_t0), shape (Nbatch,).
+
+        Returns:
+            Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
+        """
+        shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
+        # add 500 seconds to the end to prevent problems with the response
+
+        # pad both sides with zeros by num_pad
+        num_pad = int(self.buffer_time / self.dt)
+
+        pad_idx = self.xp.arange(1, num_pad + 1)[None, :]
+        shifted_t_arr = self.xp.concatenate(
+            [
+                shifted_t_arr,
+                shifted_t_arr[:, -1:] + self.dt * pad_idx,
+            ],
+            axis=-1,
+        )
+
+        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_pad)), mode="edge")
+        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_pad)), mode="edge")
+
+        self.response.num_pts = shifted_t_arr.shape[-1]
+
+        strain = h_plus + 1j * h_cross
+
+        self.response.get_projections(
+            strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
+        )
+
+        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)).transpose(1, 0, 2)  # (Nbatch, num_channels, Ntimes)
+
+        tdis = tdis[:, :, :-num_pad] # remove the padded points at the end, which contain garbage data
+        tdis[:, :, :num_pad] = 0.0  # zero out the corrupted points at the start
+        shifted_t_arr = shifted_t_arr[:, :-num_pad]
+
+        t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
+        shifted_t_arr += t_arr_shift[:, None]
+
+        start_inds = self.xp.maximum(
+            0, self.xp.rint((self.data_t0 - shifted_t_arr[:, 0]) / self.dt).astype(int)
+        )
+        start_ind = int(start_inds.max())
+
+        if start_ind > 0:
+            shifted_t_arr = shifted_t_arr[:, start_ind:]
+            tdis = tdis[:, :, start_ind:]
 
         return shifted_t_arr, tdis
 
@@ -825,9 +953,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def _call_batched(
         self,
         *args,
-        ra: np.ndarray,
-        dec: np.ndarray,
-        merger_time: np.ndarray,
+        ra: np.ndarray | cp.ndarray,
+        dec: np.ndarray | cp.ndarray,
+        merger_time: np.ndarray | cp.ndarray,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Handle batched waveform generation and return a Tuple of times and channels.
@@ -838,33 +966,35 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         """
         times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, ra, dec, merger_time, **kwargs)
 
-        Nbatch = times_batch.shape[0]
+        # Nbatch = times_batch.shape[0]
 
-        all_times = []
-        all_channels = []
+        # all_times = []
+        # all_channels = []
 
-        for i in range(Nbatch):
+        # for i in range(Nbatch):
 
-            times_i, channels_i = self._apply_response_single(
-                times_batch[i],
-                hplus_batch[i],
-                hcross_batch[i],
-                float(ra[i]),
-                float(dec[i]),
-                float(merger_time[i]),
-            )
+        #     times_i, channels_i = self._apply_response_single(
+        #         times_batch[i],
+        #         hplus_batch[i],
+        #         hcross_batch[i],
+        #         float(ra[i]),
+        #         float(dec[i]),
+        #         float(merger_time[i]),
+        #     )
 
-            all_times.append(times_i)
-            all_channels.append(channels_i)
+        #     all_times.append(times_i)
+        #     all_channels.append(channels_i)
 
-        return self.xp.stack(all_times), self.xp.stack(all_channels)
+        # return self.xp.stack(all_times), self.xp.stack(all_channels)
+
+        return self._apply_response_batch(times_batch, hplus_batch, hcross_batch, ra, dec, merger_time)
 
     def compute_tdi_channels(
         self,
         *args,
-        ra: float | np.ndarray = None,
-        dec: float | np.ndarray = None,
-        merger_time: float | np.ndarray = None,
+        ra: float | np.ndarray | cp.ndarray = None,
+        dec: float | np.ndarray | cp.ndarray = None,
+        merger_time: float | np.ndarray | cp.ndarray = None,
         **kwargs,
     ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """Time domain TDI channels computation. In the case of multiple sources, the TDI response is applied sequentially to each source and the results are stacked together.
@@ -913,6 +1043,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         stft_dt: float = None,
         freq_min: float = 0.0,
         freq_max: float = 1.0,
+        fft_batch_size: int = 1,
         zero_inclination: bool = False,
         force_backend: str = "cpu",
     ) -> None:
@@ -933,6 +1064,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
             stft_dt=stft_dt,
             freq_min=freq_min,
             freq_max=freq_max,
+            fft_batch_size=fft_batch_size,
             force_backend=force_backend,
         )
 

@@ -714,6 +714,12 @@ class AnalysisContainerArray:
         self.reset_linear_data_arr()
         self.reset_linear_psd_arr()
 
+    def synchronize(self):
+        if self.gpus is not None:
+            for gpu in self.gpus:
+                with self.xp.cuda.device.Device(gpu):
+                    self.xp.cuda.runtime.deviceSynchronize()
+
     def zero_out_data_arr(self):
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
@@ -1111,8 +1117,13 @@ class AnalysisContainerArray:
                     sign * templates_i
                 )
 
-            if self.gpus is not None:                                                                                                                                                                                                                                                              
-                self.xp.get_default_memory_pool().free_all_blocks()
+            self.synchronize()  # make sure all operations are done before freeing memory
+
+            if self.gpus is not None:        
+                for gpu in self.gpus:   
+                    self.xp.cuda.runtime.setDevice(gpu)                                                                                                                                                                                                                                             
+                    self.xp.get_default_memory_pool().free_all_blocks()
+                
                 self.xp.cuda.runtime.setDevice(main_gpu)    
             
             return
@@ -1160,10 +1171,14 @@ class AnalysisContainerArray:
             else:
                 raise ValueError(f"Unknown domain type for template {i}: {type(template_settings)}")
             
+        self.synchronize()  # make sure all operations are done before freeing memory
         # restore GPU device
         if self.gpus is not None:
-            self.xp.get_default_memory_pool().free_all_blocks()
-            self.xp.cuda.runtime.setDevice(main_gpu)
+            for gpu in self.gpus:
+                self.xp.cuda.runtime.setDevice(gpu)                                                                                                                                                                                                                                                   
+                self.xp.get_default_memory_pool().free_all_blocks()
+            
+            self.xp.cuda.runtime.setDevice(main_gpu)    
 
         return
 

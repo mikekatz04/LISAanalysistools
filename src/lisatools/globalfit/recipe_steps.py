@@ -15,7 +15,7 @@ from gbgpu.gbgpu import GBGPU
 from eryn.moves.tempering import TemperatureControl, make_ladder
 from eryn.prior import ProbDistContainer
 
-from ..sources.utils import icrs_to_ecliptic
+from ..sources.utils import icrs_to_ecliptic, evolve_galactic_binary
 from .engine import Setup, GlobalFitEngine
 from .moves import PSDMove, ResidualAddOneRemoveOneMove, GBSpecialRJPriorMove, GBSpecialRJSerialSearchMCMC, GBSpecialRJRefitMove
 from .moves.gbspecialstretch import GBSpecialBase
@@ -217,7 +217,7 @@ def scatter_around_injection(
         state.branches_inds[branch_name][:, :, leaf] = True
 
 
-def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
+def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
     """Convert a single Mojito MBHB catalogue entry to MBH sampling basis.
 
     The sampling basis is:
@@ -244,6 +244,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
 
     logM = np.log(m1 + m2)
     q = m2 / m1
+    Q = m1 / m2
     logq = np.log(q)
 
     s1z = float(catalogue_entry["PrimarySpinCompZ"])
@@ -268,7 +269,93 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
     sin_beta_L = np.sin(beta_L)
 
-    return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+
+
+def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
+    """Converts the (V)GB catalogue entries to the sampling basis. 
+    The index 0 in f0 and phi0 refer to the frequency and phase at the start of the data.
+
+    The sampling basis is:
+    ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+
+    Parameters
+    ----------
+    catalogue_entry : dict
+        Dictionary of catalogue parameters for all (V)GBs, as
+        stored by ``L1DataLoader.catalogue['(V)GB'][source_id]``.
+
+    Returns
+    -------
+    np.ndarray
+        Parameter vector of shape ``(8,)`` in the (V)GB sampling basis
+        (LISA frame for sky/time parameters).
+    """
+    amp = np.array(catalogue_entry["Amplitude"])
+    logA = np.log(amp)
+    
+    f_ref = np.array(catalogue_entry["GW22FrequencySourceFrame"])
+    fdot = np.array(catalogue_entry["GW22FrequencyDerivativeSourceFrame"])
+    phi_ref = np.array(catalogue_entry["TrueAnomaly"])
+    t_ref = np.unique(np.array(catalogue_entry["TimeReferenceSSBFrame"]))
+    
+    assert len(t_ref) == 1
+    t_ref = t_ref.item()
+    t_init = t_ref + 850.5 + trim_duration
+    
+    f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot)
+    
+    f0_mHz = f_init * 1e3
+    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"])) % (np.pi)
+
+    ra = np.array(catalogue_entry["RightAscension"])
+    dec = np.array(catalogue_entry["Declination"])
+    psi_icrs = np.array(catalogue_entry["PolarisationAngle"])
+    lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
+
+    lam_ecl = lam_ecl % (2 * np.pi)
+    sin_beta_ecl = np.sin(beta_ecl)
+
+    return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_ecl, lam_ecl, sin_beta_ecl]).T
+
+
+def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None):
+    """Initialize 'branch_name' walkers from catalogue injection parameters"""
+
+    catalogue = getattr(curr.general_info, "catalogue", {})
+    catalogue = catalogue.get(source_type, {})
+    if catalogue:
+        injection_params_list = []
+        for source_id in sorted(catalogue.keys()):
+            entry = catalogue[source_id]
+            
+            func_name = f"{branch_name}_catalogue_to_sampling_basis"
+            conversion_func = globals().get(func_name)
+
+            assert conversion_func and callable(conversion_func), f"catalogue_to_sampling_basis function for {branch_name} was not found."
+            assert curr.general_info.preprocess_kwargs
+            sampling_params = conversion_func(entry, curr.general_info.preprocess_kwargs["trim_kwargs"]["duration"])
+
+            injection_params_list.append(sampling_params)
+
+        injection_params = np.array(injection_params_list)
+        
+        ndim = state.branches_coords[branch_name].shape[-1]
+        if injection_params.ndim == 3:
+            injection_params = injection_params.reshape(-1, ndim)
+
+        if subset_inds is not None:
+            injection_params = injection_params[subset_inds, :]
+        
+        # Store injection truths for diagnostic plots
+        try:
+            setattr(curr.source_info[branch_name], "injection", injection_params)
+        except AttributeError:
+            logger.warning(f"No injection data is saved for {branch_name}.")
+
+        scatter_around_injection(
+            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas")
+        )
 
 
 def subtract_initial_signal(
@@ -352,6 +439,7 @@ def build_psd_moves(
         psd_transform_fn=psd_info.transform_fn,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
+        use_gpu=True,
     )
 
     psd_search_move = PSDMove(
@@ -438,6 +526,9 @@ class GBWaveformDict(typing.TypedDict):
     start_freq_ind: int
     tdi_channel_setup: str
     tdi2: bool
+    window: None | str
+    window_alpha: float
+
 
 def build_gb_moves(
     engine_info: Setup,
@@ -511,7 +602,9 @@ def build_gb_moves(
         use_c_implementation=True,
         start_freq_ind=data_start_freq_ind,
         tdi_channel_setup=gb_info.tdi_setup,
-        tdi2=gb_info.use_tdi2
+        tdi2=gb_info.use_tdi2, 
+        window=general_info.window_type,
+        window_alpha=general_info.window_alpha
     )
 
     #* Get band information
@@ -520,55 +613,54 @@ def build_gb_moves(
     assert band_edges is not None
     assert band_N_vals is not None
 
-    #* This checks if the initialization has any gbs in it and adjusts acs accordingly
-    # if state.branches["gb"].inds[0].sum() > 0:
+    #* This checks if the initialization has any gbs in it (when injecting gbs) and adjusts acs accordingly
+    if state.branches["gb"].inds[0].sum() > 0:
+
+        coords_out_gb = state.branches["gb"].coords[0,
+            state.branches["gb"].inds[0]
+        ]
+        coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
+        coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
+        coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
         
-    #     coords_out_gb = state.branches["gb"].coords[0,
-    #         state.branches["gb"].inds[0]
-    #     ]
+        check = priors["gb"].logpdf(coords_out_gb)
+        if np.any(np.isinf(check)):
+            breakpoint()
+            raise ValueError("Starting priors are inf. If injecting, try reducing spread.")
 
-    #     coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
-    #     coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
-    #     coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
-        
-    #     check = priors["gb"].logpdf(coords_out_gb)
-    #     if np.any(np.isinf(check)):
-    #         raise ValueError("Starting priors are inf.")
+        coords_in_in = gb_info.transform.both_transforms(coords_out_gb)
 
-    #     coords_in_in = gb_info.transform.both_transforms(coords_out_gb)
+        band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
 
-    #     band_inds = np.searchsorted(band_edges, coords_in_in[:, 1], side="right") - 1
+        walker_vals = np.tile(
+            np.arange(nwalkers), (nleaves_max_gb, 1)
+        ).transpose((1, 0))[state.branches["gb"].inds[0]]
 
-    #     walker_vals = np.tile(
-    #         np.arange(nwalkers), (nleaves_max_gb, 1)
-    #     ).transpose((1, 0))[state.branches["gb"].inds[0]]
+        data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
 
-    #     data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
+        data_index = cp.asarray(data_index_1).astype(
+            cp.int32
+        )
+        # goes in as -h
+        factors = -cp.ones_like(data_index, dtype=cp.float64)
 
-    #     data_index = cp.asarray(data_index_1).astype(
-    #         cp.int32
-    #     )
-    #     # goes in as -h
-    #     factors = -cp.ones_like(data_index, dtype=cp.float64)
+        N_vals = band_N_vals[band_inds]
 
-    #     N_vals = band_N_vals[band_inds]
-
-    #     logger.debug("Generating global GB template")
-    #     # TODO: add test to make sure that the genertor send in the general information matches this one
-    #     gb.gpus = gpus
-    #     template_in: cp.ndarray = acs.linear_data_arr
-    #     gb.generate_global_template(
-    #         coords_in_in,
-    #         data_index,
-    #         acs.linear_data_arr,
-    #         data_length=acs.data_length,
-    #         factors=factors,
-    #         data_splits=acs.gpu_map,
-    #         N=N_vals,
-    #         **waveform_kwargs,
-    #     )
-    #     max_diff_templates = cp.abs(template_in-acs.linear_data_arr).max()
-    #     logger.debug(f"Global GB template generated with max template in/out diff = {max_diff_templates:5e}")
+        logger.info("Removing GBs from residuals")
+        template_in = deepcopy(acs.linear_data_arr)
+        gb.generate_global_template(
+            coords_in_in,
+            data_index,
+            acs.linear_data_arr,
+            data_length=acs.data_length,
+            factors=factors,
+            data_splits=acs.gpu_map,
+            N=N_vals,
+            **waveform_kwargs,
+        )
+        max_diff_templates = cp.abs(template_in[0]-acs.linear_data_arr[0]).max()
+        del template_in
+        logger.debug(f"The difference in residuals in/out = {max_diff_templates:5e}")
 
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False
@@ -604,7 +696,7 @@ def build_gb_moves(
         data_start_freq_ind,
         acs.end_shape[0],
         acs,
-        general_info.domain_settings.f_arr,
+        acs.settings.f_arr,
         band_edges,
         band_N_vals,
         gpu_priors,
@@ -623,6 +715,7 @@ def build_gb_moves(
         force_backend=general_info.gpu_backend,
         nfriends=nwalkers,
         temperature_control=temperature_control,
+        use_gpu=True, 
         **gb_info.group_proposal_kwargs
        
     )

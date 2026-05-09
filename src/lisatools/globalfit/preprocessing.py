@@ -140,7 +140,7 @@ class L1DataLoader:
             "SOBHB": "sobhb_cat_mojito_lite_processed_MT.hdf5",
         }
 
-    def load_single_binary(self, group: h5py.Group, binary_id: int) -> dict:
+    def load_single_binary(self, group: h5py.Group, binary_id: int, source_type: str) -> dict:
         """
         Load a single binary source from the given HDF5 group.
 
@@ -154,13 +154,17 @@ class L1DataLoader:
         params = {}
         for key in group.keys():
             try:
-                ds = group[key]
+                if source_type in ["VGB", "GB"]:
+                    ds = group[key][:]
+                else:
+                    ds = group[key][binary_id]
+                    
                 if ds.dtype.kind == "O":  # object type (e.g. variable-length strings)
-                    val = ds[binary_id]
+                    val = ds
                     if isinstance(val, bytes):
                         val = val.decode()
                 else:
-                    val = ds[binary_id][()]
+                    val = ds[()]
                 params[key] = val
             except Exception as e:
                 raise e
@@ -256,7 +260,7 @@ class L1DataLoader:
                 file_path = find_file(subfolder, source_type, source_id)
 
                 self.catalogue[source_type][source_id] = self.load_single_binary(
-                    binary_params, source_id
+                    binary_params, source_id, source_type
                 )
                 if self.verbose:
                     logger.info(

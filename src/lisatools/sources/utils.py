@@ -576,7 +576,7 @@ def ecliptic_to_icrs(
     (ra, dec, optional psi).
 
     The sky angles are converted according to the convention document LISA-DDPC-SEG-TN-007, sec 5.4.2:
-    .. math::
+    ..math::
 
         \\sin(\\delta) = \\sin(\\beta) \\cos(\\epsilon) + \\cos(\\beta) \\sin(\\epsilon) \\sin(\\lambda)
         \\cos(\\alpha) = \\cos(\\beta) \\cos(\\lambda) / \\cos(\\delta)
@@ -652,3 +652,44 @@ def ecliptic_to_icrs(
         return out_fun(ra), out_fun(dec), out_fun(psi)
 
     return out_fun(ra), out_fun(dec)
+
+
+def evolve_galactic_binary(
+    t_start: float, 
+    t_end: float, 
+    f_start: float | np.ndarray, 
+    phi_start: float | np.ndarray, 
+    fdot_start: float | np.ndarray, 
+    fddot: float | np.ndarray = 0.0,
+    Mc: Optional[float | np.ndarray] = None
+) -> (
+    Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
+):
+    """Evolves one or more galactic binaries from its initial starting parameters to some set of final parameters for a given starting and end time.
+    If Mc is provided, the binary is evolved using gravitationally driven quadrupolar radiation. Otherwise, a linear approximation is used.
+
+    Args:
+        t_start (float): Start/initial time of the binaries before evolving.
+        t_end (float): End/final time of the binaries after evolving.
+        f_start (float | np.ndarray): Start/initial frequency of the binaries before evolving.
+        phi_start (float | np.ndarray): Start/initial phase of the binaries before evolving.
+        fdot_start (float | np.ndarray): Start/initial frequency derivative of the binary before evolving. Only evolves when chirp mass Mc is provided or fddot is not zero.
+        fddot (float | np.ndarray): Second order frequency derivative of the binary. Standard value is 0.0
+        Mc (float | np.ndarray | None): The chrip mass of the binary to evolve the binary using gravitationally driven quadrupolar radiation. Standard is None.
+        
+    Returns:
+        Tuple of (f_end, phi_end, fdot_end).
+        (Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray])
+    """ 
+    
+    if Mc is None:
+       delta_t = t_end - t_start
+       fdot_end = fdot_start + fddot * delta_t
+       f_end = f_start + fdot_start * delta_t + 1/2 * fddot * delta_t ** 2
+       phi_end = phi_start + 2 * np.pi * (f_start * delta_t + 1/2 * fdot_start * delta_t ** 2 + 1/6 * fddot * delta_t ** 3) 
+       phi_end = phi_end % (2 * np.pi)
+       return f_end, phi_end, fdot_end
+       
+    else:
+        raise NotImplementedError("Currently, the galactic binaries can only be evolved using the linear approximation")
+       

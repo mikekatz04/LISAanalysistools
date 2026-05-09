@@ -267,7 +267,6 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             start_times=start_times,
             **kwargs,
         )
-
         d_d_per_binary = self.d_d[data_index]
         like_out = -1.0 / 2.0 * (d_d_per_binary + h_h_out - 2 * d_h_out).real
         return like_out
@@ -338,9 +337,7 @@ class STFTComputationGroup(BaseDomainComputationGroup):
 
     def _create_cpp_domain(self):
         self._cpp_domain = self.backend.STFTDomainWrap(*self.domain_args)
-        logger.debug("Initialized STFTDomainWrap with arguments: %s", self.domain_args)
         self._cpp_fresnel = self.backend.STFTFresnelWrap(*self.domain_args[:8], window_alpha=self.window_alpha)
-        logger.debug("Initialized STFTFresnelWrap with arguments: %s", self.domain_args[:8], window_alpha=self.window_alpha)
 
     @property
     def cpp_fresnel(self):
@@ -423,7 +420,7 @@ class FDComputationGroup(BaseDomainComputationGroup):
     @property
     def domain_args(self):
         return [
-            self.settings.N,
+            self.settings.N_active,
             self.num_channels,
             self.settings.min_freq,
             self.settings.max_freq,
@@ -437,7 +434,6 @@ class FDComputationGroup(BaseDomainComputationGroup):
 
     def _create_cpp_domain(self):
         self._cpp_domain = self.backend.FDDomainWrap(*self.domain_args)
-        logger.debug("Initialized FDDomainWrap with arguments: %s", self.domain_args)
 
     def compute_signal_likelihood_terms(
         self,
