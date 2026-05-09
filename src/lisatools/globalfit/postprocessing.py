@@ -27,6 +27,7 @@ from eryn.utils import get_integrated_act
 
 if TYPE_CHECKING:
     from .run import CurrentInfoGlobalFit
+    from ..sensitivity import XYZSensitivityBackend
 
 logger = getLogger(__name__)
 # ─── Parameter metadata ───────────────────────────────────────────────────────
@@ -536,28 +537,45 @@ class GlobalFitPlotter:
 
 # ─── Metadata extractors ─────────────────────────────────────────────────────
 
-def _extract_sensitivity_metadata(gi) -> dict:
+def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
     """Extract noise model configuration from the initialised sensitivity backend."""
-    backend = gi.sensitivity_backend
-    return {
+    backend: XYZSensitivityBackend = gi.sensitivity_backend
+
+    kwargs = backend.kwargs.copy()
+
+    domain_class = kwargs['settings'].class_.__name__
+    domain_args = kwargs['settings'].args.copy()
+    domain_kwargs = kwargs['settings'].kwargs.copy()
+    domain_kwargs["force_backend"] = "cpu"
+
+    kwargs.pop("orbits")
+    kwargs.pop("settings")
+    kwargs["force_backend"] = "cpu"
+
+    domain_metadata = {
+        "class": domain_class,
+        "args": domain_args,
+        "kwargs": domain_kwargs,
+    }  
+
+    sensitivity_metadata ={
         "class": type(backend).__name__,
-        "tdi_generation": backend.tdi_generation,
-        "use_splines": backend.use_splines,
-        "spline_order": backend.spline_order,
-        "mask_percentage": backend.mask_percentage,
+        "kwargs": kwargs,
     }
+
+    return domain_metadata, sensitivity_metadata    
 
 
 def _extract_orbit_metadata(gi) -> dict:
     """Extract orbit configuration from the initialised orbits object."""
     orbits = gi.orbits
+    kwargs = orbits.kwargs.copy()
+    kwargs['force_backend'] = "cpu"
     out = {
         "class": type(orbits).__name__,
-        "filename": orbits.filename,
-        "armlength_m": float(orbits.armlength),
+        "kwargs": kwargs,
     }
-    if hasattr(orbits, "frame"):
-        out["frame"] = orbits.frame
+    
     return out
 
 
@@ -653,6 +671,9 @@ class RunMetadata:
         instance.tdi_channels = _infer_tdi_channels(curr)
         instance.searched_source_types = get_source_types(curr)
 
+        domain_metadata, sensitivity_metadata = _extract_sensitivity_metadata(gi)
+        orbits_metadata = _extract_orbit_metadata(gi)
+
         instance._web_extras = {
             "Tobs_s": float(gi.Tobs),
             "dt_s": float(gi.dt),
@@ -661,8 +682,8 @@ class RunMetadata:
             "end_freq_hz": float(gi.end_freq) if gi.end_freq is not None else None,
             "nwalkers": gi.nwalkers,
             "ntemps": gi.ntemps,
-            "sensitivity_backend": _extract_sensitivity_metadata(gi),
-            "orbits": _extract_orbit_metadata(gi),
+            "sensitivity_backend": sensitivity_metadata,
+            "orbits": orbits_metadata,
         }
         return instance
 
