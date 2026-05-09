@@ -146,6 +146,7 @@ class PhenomTHMWaveformBase(JaxBase):
         start_freq: float = None,
         ref_freq: float = None,
         use_reference_time: bool = True,
+        use_coalescence_time: bool = True,
     ) -> None:
         
         JaxBase.__init__(self)
@@ -160,6 +161,7 @@ class PhenomTHMWaveformBase(JaxBase):
         self.start_freq = jnp.asarray(start_freq) if start_freq is not None else None
         self.ref_freq = jnp.asarray(ref_freq) if ref_freq is not None else None
         self.use_reference_time = use_reference_time
+        self.ref_time = jnp.asarray(0.0)  if use_coalescence_time else None
 
     @property
     def phenom_kwargs(self) -> dict:
@@ -180,6 +182,7 @@ class PhenomTHMWaveformBase(JaxBase):
             "start_freq": self.start_freq,
             "ref_freq": self.ref_freq,
             "use_reference_time": self.use_reference_time,
+            "use_coalescence_time": self.ref_time is not None,
             }
         
     
@@ -244,7 +247,7 @@ class PhenomTHMWaveformBase(JaxBase):
         ref_freq = self._to_jax(ref_freq) if ref_freq is not None else self.ref_freq
 
         if self.use_reference_time:
-            ref_time = self._to_jax(-merger_time)
+            ref_time = self._to_jax(-merger_time) if self.ref_time is None else self.ref_time
             return {'t_ref': ref_time, 'f_min': start_freq}
         else:
             return {'f_min': start_freq, 'f_ref': ref_freq}
@@ -269,6 +272,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         start_freq: float = None,
         ref_freq: float = None,
         use_reference_time: bool = True,
+        use_coalescence_time: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -286,6 +290,7 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
             start_freq=start_freq,
             ref_freq=ref_freq,
             use_reference_time=use_reference_time,
+            use_coalescence_time=use_coalescence_time,
         )
 
     @property
@@ -463,6 +468,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
         start_freq: float = None,
         ref_freq: float = None,
         use_reference_time: bool = True,
+        use_coalescence_time: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -480,6 +486,7 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
             start_freq=start_freq,
             ref_freq=ref_freq,
             use_reference_time=use_reference_time,
+            use_coalescence_time=use_coalescence_time,
         )
 
     @property
