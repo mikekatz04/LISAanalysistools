@@ -188,6 +188,10 @@ class BackendConsumer:
         if not hasattr(self, "_curr"):
             raise AttributeError("BackendConsumer was not initialized with a curr object.")
         return self._curr
+    
+    @property
+    def branches(self) -> List[str]:
+        return self.backend.branch_names
 
     @property
     def ndims(self) -> dict:
@@ -220,10 +224,6 @@ class BackendConsumer:
     @property
     def configured(self) -> bool:
         return hasattr(self, "_cold_chains")
-
-    @property
-    def branches(self) -> List[str]:
-        return self.backend.branch_names
 
     @property
     def cold_chains(self) -> Dict[str, np.ndarray]:
@@ -558,12 +558,12 @@ class GlobalFitPlotter:
             logger.warning("No converted data to save for plotting.")
             return
 
-        parts = self.curr.general_info.version.split("_", 1)
+        parts = self.curr.general_info.global_fit_version.split("_", 1)
         if len(parts) == 2:
             run_type, run_id = parts
-            filepath = os.path.join(self.curr.general_info.submission_folder, run_type, run_id, "input_data.h5")
+            filepath = os.path.join(self.curr.general_info.submission_parent_folder, run_type, run_id, "input_data.h5")
             
-        filepath = os.path.join(self.curr.general_info.submission_folder, self.curr.general_info.version, "input_data.h5")
+        filepath = os.path.join(self.curr.general_info.submission_parent_folder, self.curr.general_info.global_fit_version, "input_data.h5")
         
         with h5py.File(filepath, "w") as f:
             for k, v in converted_data.items():
@@ -616,47 +616,7 @@ def _extract_orbit_metadata(gi) -> dict:
     return out
 
 
-# Maps GeneralSettings attribute names → RunMetadata __init__ parameter names.
-_SETTINGS_TO_METADATA: Dict[str, str] = {
-    "run_codename":                 "codename",
-    "run_version":                  "version",
-    "run_contact":                  "contact",
-    "run_code_link":                "code_link",
-    "run_input_data_link":          "input_data_link",
-    "run_input_reference":          "input_reference",
-    "run_noise_model":              "noise_model",
-    "run_noise_model_code_link":    "noise_model_code_link",
-    "run_comment":                  "comment",
-    "submission_folder":            "submission_parent_folder",
-}
-
-# Maps RunMetadata attribute names -> L3C spec keys.
-_METADATA_TO_L3C: Dict[str, str] = {
-    "codename": "global_fit_codename",
-    "version": "global_fit_version",
-    "contact": "global_fit_contact",
-    "input_data_link": "input_data_link",
-    "input_reference": "input_reference",
-    "code_link": "global_fit_code_link",
-    "obs_begin": "observation_period_begin",
-    "obs_end": "observation_period_end",
-    "time_step": "time_step",
-    "num_times": "number_of_time_samples",
-    "effective_duration": "effective_observation_duration",
-    "searched_source_types": "searched_source_types_list",
-    "found_source_types": "found_source_types_list",
-    "noise_model": "noise_model",
-    "noise_model_code_link": "noise_model_code_link",
-    "tdi_channels": "tdi_channels",
-    "domain_settings_metadata": "domain_metadata",
-    "orbits_metadata": "orbits_metadata",
-    "sensitivity_metadata": "sensitivity_metadata",
-    "preprocessing_metadata": "preprocessing_metadata",
-    "comment": "comment",
-}
-
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
-
 
 @dataclasses.dataclass
 class RunMetadata:
@@ -668,35 +628,31 @@ class RunMetadata:
     """
 
     # user-supplied — required
-    version: str
-    contact: str
-    code_link: str
-    input_data_link: str
-    input_reference: str
-    noise_model: str
-    noise_model_code_link: str
-    submission_parent_folder: str
-    domain_settings_metadata: dict
-    orbits_metadata: dict
-    sensitivity_metadata: dict
-    preprocessing_metadata: dict
-
-    # user-supplied — optional
-    codename: str = "Erebor"
-    #quality: str = ""
+    global_fit_version: str = ""
+    global_fit_contact: str = ""
+    global_fit_code_link: str = ""
+    input_data_link: str = ""
+    input_reference: str = ""
+    noise_model: str = ""
+    noise_model_code_link: str = ""
+    domain_metadata: dict = dataclasses.field(default_factory=dict)
+    orbits_metadata: dict = dataclasses.field(default_factory=dict)
+    sensitivity_metadata: dict = dataclasses.field(default_factory=dict)
+    preprocessing_metadata: dict = dataclasses.field(default_factory=dict)
+    submission_parent_folder: str = ""
+    
+    # auto-populated from curr or defaults
+    submission_timestamp: str = ""
+    global_fit_codename: str = "Erebor"
     comment: str = ""
-
-    # set after detection is complete
-    found_source_types: List[str] = dataclasses.field(default_factory=list)
-
-    # auto-populated from curr
-    obs_begin: str = ""
-    obs_end: str = ""
+    found_source_types_list: List[str] = dataclasses.field(default_factory=list)
+    observation_period_begin: str = ""
+    observation_period_end: str = ""
     time_step: float = 0.0
-    num_times: int = 0
-    effective_duration: str = ""
+    number_of_time_samples: int = 0
+    effective_observation_duration: str = ""
     tdi_channels: List[str] = dataclasses.field(default_factory=list)
-    searched_source_types: List[str] = dataclasses.field(default_factory=list)
+    searched_source_types_list: List[str] = dataclasses.field(default_factory=list)
 
     # extra info for web display (not part of L3C spec)
     _web_extras: Dict[str, Any] = dataclasses.field(default_factory=dict, repr=False)
@@ -716,32 +672,33 @@ class RunMetadata:
         """
         gi = curr.general_info
 
-        # Pull non-None metadata values from GeneralSettings; user_fields wins.
-        auto = {
-            meta_name: getattr(gi, settings_name)
-            for settings_name, meta_name in _SETTINGS_TO_METADATA.items()
-            if getattr(gi, settings_name, None) is not None
-        }
+        # Map L3C-named properties directly from `gi`
+        auto = {}
+        for attr in cls.__dataclass_fields__.keys():
+            if hasattr(gi, attr) and getattr(gi, attr, None) is not None:
+                auto[attr] = getattr(gi, attr)
+                
         merged = {**auto, **user_fields}
 
         # Derive noise_model from the backend class name when not explicitly set.
         merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
 
         instance = cls(**merged)
-        instance.obs_begin = _seconds_to_l3c_datetime(gi.data_t0)
-        instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
+        instance.submission_timestamp = datetime.now(tz=timezone.utc).isoformat()
+        instance.observation_period_begin = _seconds_to_l3c_datetime(gi.data_t0)
+        instance.observation_period_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.time_step = float(gi.dt)
-        instance.num_times = int(gi.data_td_settings.N)
-        instance.effective_duration = _seconds_to_duration_str(gi.Tobs)
+        instance.number_of_time_samples = int(gi.data_td_settings.N)
+        instance.effective_observation_duration = _seconds_to_duration_str(gi.Tobs)
         instance.tdi_channels = _infer_tdi_channels(curr)
-        instance.searched_source_types = get_source_types(curr)
+        instance.searched_source_types_list = get_source_types(curr)
 
         domain_metadata, sensitivity_metadata = _extract_sensitivity_metadata(gi)
         orbits_metadata = _extract_orbit_metadata(gi)
-        instance.domain_settings_metadata = domain_metadata
+        instance.domain_metadata = domain_metadata
         instance.sensitivity_metadata = sensitivity_metadata
         instance.orbits_metadata = orbits_metadata
-        instance.preprocessing_metadata = gi.preprocess_kwargs
+        instance.preprocessing_metadata = getattr(gi, "preprocess_kwargs", {})
 
         instance._web_extras = {
             "Tobs_s": float(gi.Tobs),
@@ -757,19 +714,22 @@ class RunMetadata:
 
     def to_l3c_dict(self) -> dict:
         """Return a dict matching the l2_output_metadata template keys exactly."""
-        d = {l3c_key: getattr(self, attr_name) for attr_name, l3c_key in _METADATA_TO_L3C.items()}
-        d["global_fit_release_date"] = datetime.now(tz=timezone.utc).strftime("%Y.%m.%d")
-        d["noise_model_config_file_link"] = ""
-        d["list_of_detected_sources"] = ", ".join(self.found_source_types)
+        d = {}
+        for attr in self.__dataclass_fields__.keys():
+            if not attr.startswith("_"):
+                d[attr] = getattr(self, attr)
+                
+        d["global_fit_release_date"] = self.submission_timestamp
+        if "noise_model_config_file_link" not in d:
+            d["noise_model_config_file_link"] = ""
+        d["list_of_detected_sources"] = ", ".join(self.found_source_types_list)
         return d
     
     @classmethod
     def from_l3c_dict(cls, d: dict) -> "RunMetadata":
         """Construct RunMetadata from a dict matching the l2_output_metadata template keys."""
-        # reverse mapping L3C -> Internal Attrs
-        reversed_mapping = {v: k for k, v in _METADATA_TO_L3C.items()}
         
-        user_fields = {reversed_mapping[k]: v for k, v in d.items() if k in reversed_mapping}
+        user_fields = {k: v for k, v in d.items() if k in cls.__dataclass_fields__ and not k.startswith("_")}
         # supply missing required fields if not present in the output JSON
         if "submission_parent_folder" not in user_fields:
             user_fields["submission_parent_folder"] = ""
@@ -848,10 +808,15 @@ class RunMetadata:
         parts = self.version.split("_", 1)
         if len(parts) == 2:
             run_type, run_id = parts
-            return os.path.join(self.submission_parent_folder, run_type, run_id)
-            
-        return os.path.join(self.submission_parent_folder, self.version)
+        else:
+            run_type = self.version
+            run_id = "v0"
+            logger.warning(f"Version string '{self.version}' does not follow expected format 'type_id'. Using run_type='{run_type}' and run_id='{run_id}' for submission folder naming.")
 
+        folder_name = f"{run_type}_{self.codename}_{run_id}_{self.submission_timestamp}"
+
+        return os.path.join(self.submission_parent_folder, folder_name)
+            
 @dataclasses.dataclass
 class SourceMetadata:
     """Holds metadata for a detected source, to be included in the L3C submission manifest."""
@@ -861,13 +826,25 @@ class SourceMetadata:
     waveform_model_code_link: str
     waveform_model_config: dict # = dataclasses.field(default_factory=dict)
 
-    detection_statistic: list[float] # = dataclasses.field(default_factory=list)
-    quality_flags: list[int] # = dataclasses.field(default_factory=list)
+    detection_statistic: list[float] = dataclasses.field(default_factory=list)
+    quality_flags: list[int] = dataclasses.field(default_factory=list)
 
     prior_model: str = ""
     prior_model_code_link: str = ""
     prior_model_config: dict = dataclasses.field(default_factory=dict)
 
+    posterior_files: list[str] = dataclasses.field(default_factory=list) # links to the posterior samples for this source, to be included after the run
+    comment: str = ""
+
+@dataclasses.dataclass
+class StochasticMetadata:
+    """Holds metadata for the overall stochastic component of the data"""
+    
+    prior_model: str = ""
+    prior_model_code_link: str = ""
+    prior_model_config: dict = dataclasses.field(default_factory=dict)
+
+    posterior_files: list[str] = dataclasses.field(default_factory=list) # links to the posterior samples for this source, to be included after the run
     comment: str = ""
     
 class SubmissionWriter(BackendConsumer):

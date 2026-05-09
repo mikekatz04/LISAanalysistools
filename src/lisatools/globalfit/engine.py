@@ -140,19 +140,18 @@ class GeneralSettings(Settings):
     galactic_grid_kwargs: Optional[typing.Dict[str, typing.Any]] = None
 
     # --- run metadata (propagated to RunMetadata.from_curr) ---
-    run_codename: Optional[str] = None
-    run_version: Optional[str] = None
-    run_contact: Optional[str] = None
-    run_code_link: Optional[str] = None
-    submission_folder: Optional[str] = None
-    run_input_data_link: Optional[str] = None
-    run_input_reference: Optional[str] = None
-    run_noise_model: Optional[str] = None
-    run_noise_model_code_link: Optional[str] = None
+    global_fit_codename: Optional[str] = None
+    global_fit_version: Optional[str] = None
+    global_fit_contact: Optional[str] = None
+    global_fit_code_link: Optional[str] = None
+    submission_parent_folder: Optional[str] = None
+    input_data_link: Optional[str] = None
+    input_reference: Optional[str] = None
+    noise_model: Optional[str] = None
+    noise_model_code_link: Optional[str] = None
     run_waveform_model: Optional[str] = None
     run_waveform_model_code_link: Optional[str] = None
-    run_quality: Optional[str] = None
-    run_comment: Optional[str] = None
+    comment: Optional[str] = None
 
 
 from .loginfo import init_logger
@@ -426,6 +425,7 @@ class GlobalFitSettings:
     general_info: GeneralSetup
     rank_info: RankInfo
     setup_function: typing.Callable[(...), None]
+    source_metadata: typing.Dict[str, dataclasses.dataclass] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
