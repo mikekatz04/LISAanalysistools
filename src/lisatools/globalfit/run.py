@@ -359,14 +359,15 @@ class GlobalFit:
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
+                psd_params = self.curr.source_info["psd"].transform_fn.both_transforms(psd_params) if self.curr.source_info["psd"].transform_fn is not None else psd_params
                 # need to generalize for other stochastic functions
                 if "galfor" in state.branches_coords.keys():
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
+                    galfor_params = self.curr.source_info["galfor"].transform_fn.both_transforms(galfor_params) if self.curr.source_info["galfor"].transform_fn is not None else galfor_params
                 else:
                     galfor_params = None
                 sens_here = self.curr.general_info.sensitivity_backend(
-                    f"walker_{w}", psd_params, transform_fn=self.curr.source_info["psd"].transform_fn, 
-                                               galfor_params=galfor_params
+                    f"walker_{w}", psd_params, galfor_params=galfor_params
                 )
             else:
                 # TODO: update this
