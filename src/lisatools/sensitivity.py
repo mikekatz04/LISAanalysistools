@@ -2466,15 +2466,30 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self._galactic_grid = None
         self.pycpp_sensitivity_matrix.disable_galactic_grid()
 
+    def build_spline_arrays(self, spline_params: np.ndarray) -> tuple:
+        """Build spline arrays for the c++ backend from the input PSD parameters."""
+        
+        spline_params = self.xp.atleast_2d(spline_params)
+
+        spline_knots_position = spline_params[:, 1::2]
+        spline_knots_amplitude = spline_params[:, 0:-1:2]
+        half = spline_knots_position.shape[1] // 2
+        spline_knots_amplitude = self.xp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
+        spline_knots_position = self.xp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
+
+        #todo should we sort the knots
+
+        return spline_knots_position, spline_knots_amplitude
+
     def __call__(
-        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None, transform_fn: TransformContainer = None
+        self, name: str, psd_params: np.ndarray, galfor_params: np.ndarray = None
     ) -> XYZSensitivityBackend:
         """
         Update the internal sensitivity matrix with new noise parameters and return to be used in a AnalysisContainer.
 
         Args:
             psd_params: Array of PSD parameters in order [Soms_d, Sa_a, (optional spline params...)]
-            galfor_params: Array of galactic foreground parameters in order [Amp, alpha, sl1, kn, sl2].
+            galfor_params: Array of galactic foreground parameters in order [Amp, alpha, f_1, kn, f_2].
 
         Returns:
             self: a configured copy of the sensitivity matrix backend.
@@ -2484,18 +2499,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.name = name
 
-        if self.use_splines:
-            if transform_fn is None:
-                raise ValueError("A transform container is needed when using splines for fitting the noise.")
-            spline_params = transform_fn.both_transforms(psd_params, copy=True, return_transpose=False) 
-            spline_params = cp.atleast_2d( spline_params )
-            spline_knots_position = spline_params[:,3::2]
-            spline_knots_amplitude = spline_params[:,2:-1:2]
-            half = spline_knots_position.shape[1] // 2
-            spline_knots_amplitude = cp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
-            spline_knots_position = cp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
-            Soms_d = spline_params[:,0].squeeze()
-            Sa_a = spline_params[:,1].squeeze()
+        if self.use_splines: #assume transformed input.
+            Soms_d = psd_params[0]
+            Sa_a = psd_params[1]
+
+            spline_knots_position, spline_knots_amplitude = self.build_spline_arrays(psd_params[2:])
+
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
@@ -2503,7 +2512,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             Sa_a = psd_params[1]
 
         if galfor_params is None:
-            galfor_params = np.zeros(5)
+            galfor_params = self.xp.zeros(5)
 
         new_sens_mat.set_sensitivity_matrix(
             Soms_d, Sa_a, spline_knots_position, spline_knots_amplitude, *galfor_params
