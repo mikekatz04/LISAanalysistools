@@ -362,8 +362,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         nwalkers = len(self.acs)
         for w in range(nwalkers):
             psd_params = new_state.branches_coords["psd"][0, w, 0]
+            psd_params = self.psd_transform_fn.both_transforms(psd_params) if self.psd_transform_fn is not None else psd_params
             if "galfor" in new_state.branches_coords:
                 galfor_params = new_state.branches_coords["galfor"][0, w, 0]
+                galfor_params = self.galfor_transform_fn.both_transforms(galfor_params) if self.galfor_transform_fn is not None else galfor_params
             else:
                 galfor_params = None
 
@@ -374,7 +376,6 @@ class PSDMove(GlobalFitMove, StretchMove):
                         f"walker_{w}",
                         psd_params,
                         galfor_params=galfor_params,
-                        transform_fn=self.psd_transform_fn,
                     )
             else:
                 new_sens = self.sensitivity_backend(
