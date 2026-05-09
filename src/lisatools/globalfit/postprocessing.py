@@ -11,6 +11,7 @@ JSON manifests for web dashboard display.
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import json
 import os
 from abc import ABC, abstractmethod
@@ -28,7 +29,9 @@ from eryn.utils import get_integrated_act
 if TYPE_CHECKING:
     from .run import CurrentInfoGlobalFit
     from ..sensitivity import XYZSensitivityBackend
-
+    from ..detector import Orbits
+    from ..domains import DomainSettingsBase, TDSettings
+    
 logger = getLogger(__name__)
 # ─── Parameter metadata ───────────────────────────────────────────────────────
 
@@ -543,7 +546,7 @@ def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
 
     kwargs = backend.kwargs.copy()
 
-    domain_class = kwargs['settings'].class_.__name__
+    domain_class = kwargs['settings'].__class__.__name__
     domain_args = kwargs['settings'].args.copy()
     domain_kwargs = kwargs['settings'].kwargs.copy()
     domain_kwargs["force_backend"] = "cpu"
@@ -589,11 +592,33 @@ _SETTINGS_TO_METADATA: Dict[str, str] = {
     "run_input_reference":          "input_reference",
     "run_noise_model":              "noise_model",
     "run_noise_model_code_link":    "noise_model_code_link",
-    # "run_waveform_model":           "waveform_model",
-    # "run_waveform_model_code_link": "waveform_model_code_link",
-    # "run_quality":                  "quality",
     "run_comment":                  "comment",
     "submission_folder":            "submission_parent_folder",
+}
+
+# Maps RunMetadata attribute names -> L3C spec keys.
+_METADATA_TO_L3C: Dict[str, str] = {
+    "codename": "global_fit_codename",
+    "version": "global_fit_version",
+    "contact": "global_fit_contact",
+    "input_data_link": "input_data_link",
+    "input_reference": "input_reference",
+    "code_link": "global_fit_code_link",
+    "obs_begin": "observation_period_begin",
+    "obs_end": "observation_period_end",
+    "time_step": "time_step",
+    "num_times": "number_of_time_samples",
+    "effective_duration": "effective_observation_duration",
+    "searched_source_types": "searched_source_types_list",
+    "found_source_types": "found_source_types_list",
+    "noise_model": "noise_model",
+    "noise_model_code_link": "noise_model_code_link",
+    "tdi_channels": "tdi_channels",
+    "domain_settings_metadata": "domain_metadata",
+    "orbits_metadata": "orbits_metadata",
+    "sensitivity_metadata": "sensitivity_metadata",
+    "preprocessing_metadata": "preprocessing_metadata",
+    "comment": "comment",
 }
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
@@ -616,9 +641,11 @@ class RunMetadata:
     input_reference: str
     noise_model: str
     noise_model_code_link: str
-    # waveform_model: str
-    # waveform_model_code_link: str
     submission_parent_folder: str
+    domain_settings_metadata: dict
+    orbits_metadata: dict
+    sensitivity_metadata: dict
+    preprocessing_metadata: dict
 
     # user-supplied — optional
     codename: str = "Erebor"
@@ -628,15 +655,17 @@ class RunMetadata:
     # set after detection is complete
     found_source_types: List[str] = dataclasses.field(default_factory=list)
 
-    # auto-populated from curr — not set at init
-    obs_begin: str = dataclasses.field(default="", init=False)
-    obs_end: str = dataclasses.field(default="", init=False)
-    effective_duration: str = dataclasses.field(default="", init=False)
-    tdi_channels: List[str] = dataclasses.field(default_factory=list, init=False)
-    searched_source_types: List[str] = dataclasses.field(default_factory=list, init=False)
+    # auto-populated from curr
+    obs_begin: str = ""
+    obs_end: str = ""
+    time_step: float = 0.0
+    num_times: int = 0
+    effective_duration: str = ""
+    tdi_channels: List[str] = dataclasses.field(default_factory=list)
+    searched_source_types: List[str] = dataclasses.field(default_factory=list)
 
     # extra info for web display (not part of L3C spec)
-    _web_extras: Dict[str, Any] = dataclasses.field(default_factory=dict, init=False, repr=False)
+    _web_extras: Dict[str, Any] = dataclasses.field(default_factory=dict, repr=False)
 
     @classmethod
     def from_curr(cls, curr: CurrentInfoGlobalFit, **user_fields) -> "RunMetadata":
@@ -667,12 +696,18 @@ class RunMetadata:
         instance = cls(**merged)
         instance.obs_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.obs_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
+        instance.time_step = float(gi.dt)
+        instance.num_times = int(gi.data_td_settings.N)
         instance.effective_duration = _seconds_to_duration_str(gi.Tobs)
         instance.tdi_channels = _infer_tdi_channels(curr)
         instance.searched_source_types = get_source_types(curr)
 
         domain_metadata, sensitivity_metadata = _extract_sensitivity_metadata(gi)
         orbits_metadata = _extract_orbit_metadata(gi)
+        instance.domain_settings_metadata = domain_metadata
+        instance.sensitivity_metadata = sensitivity_metadata
+        instance.orbits_metadata = orbits_metadata
+        instance.preprocessing_metadata = gi.preprocess_kwargs
 
         instance._web_extras = {
             "Tobs_s": float(gi.Tobs),
@@ -682,37 +717,92 @@ class RunMetadata:
             "end_freq_hz": float(gi.end_freq) if gi.end_freq is not None else None,
             "nwalkers": gi.nwalkers,
             "ntemps": gi.ntemps,
-            "sensitivity_backend": sensitivity_metadata,
-            "orbits": orbits_metadata,
         }
+
         return instance
 
     def to_l3c_dict(self) -> dict:
         """Return a dict matching the l2_output_metadata template keys exactly."""
-        return {
-            "global_fit_codename": self.codename,
-            "global_fit_version": self.version,
-            "global_fit_release_date": datetime.now(tz=timezone.utc).strftime("%Y.%m.%d"),
-            "global_fit_contact": self.contact,
-            "input_data_link": self.input_data_link,
-            "input_reference": self.input_reference,
-            "global_fit_code_link": self.code_link,
-            "observation_period_begin": self.obs_begin,
-            "observation_period_end": self.obs_end,
-            "effective_observation_duration": self.effective_duration,
-            #"quality": self.quality,
-            "searched_source_types_list": self.searched_source_types,
-            "found_source_types_list": self.found_source_types,
-            "noise_model": self.noise_model,
-            "noise_model_code_link": self.noise_model_code_link,
-            "noise_model_config_file_link": "",
-            # "waveform_model": self.waveform_model,
-            # "waveform_model_code_link": self.waveform_model_code_link,
-            # "waveform_model_config_file_link": "",
-            "tdi_channels": self.tdi_channels,
-            "list_of_detected_sources": ", ".join(self.found_source_types),
-            "comment": self.comment,
-        }
+        d = {l3c_key: getattr(self, attr_name) for attr_name, l3c_key in _METADATA_TO_L3C.items()}
+        d["global_fit_release_date"] = datetime.now(tz=timezone.utc).strftime("%Y.%m.%d")
+        d["noise_model_config_file_link"] = ""
+        d["list_of_detected_sources"] = ", ".join(self.found_source_types)
+        return d
+    
+    @classmethod
+    def from_l3c_dict(cls, d: dict) -> "RunMetadata":
+        """Construct RunMetadata from a dict matching the l2_output_metadata template keys."""
+        # reverse mapping L3C -> Internal Attrs
+        reversed_mapping = {v: k for k, v in _METADATA_TO_L3C.items()}
+        
+        user_fields = {reversed_mapping[k]: v for k, v in d.items() if k in reversed_mapping}
+        # supply missing required fields if not present in the output JSON
+        if "submission_parent_folder" not in user_fields:
+            user_fields["submission_parent_folder"] = ""
+            
+        instance = cls(**user_fields)
+
+        return instance
+    
+    def get_orbits(self) -> Orbits:
+        """Reconstruct the Orbits object from the stored metadata."""
+        
+        if not self.orbits_metadata:
+            raise ValueError("No orbits metadata found.")
+        
+        orbits_class_name = self.orbits_metadata["class"]
+        orbits_kwargs = self.orbits_metadata["kwargs"]
+        orbits_class = getattr(importlib.import_module("lisatools.detector"), orbits_class_name)
+
+        logger.info(f"Reconstructing Orbits object of class '{orbits_class_name}' with kwargs: {orbits_kwargs}")
+
+        orbits = orbits_class(**orbits_kwargs)
+        orbits.configure(linear_interp_setup=True)
+
+        return orbits
+    
+    def get_domain_settings(self) -> DomainSettingsBase:
+        """Reconstruct the DomainSettings object from the stored metadata."""
+        
+        if not self.domain_settings_metadata:
+            raise ValueError("No domain settings metadata found.")
+        
+        domain_class_name = self.domain_settings_metadata["class"]
+        domain_args = self.domain_settings_metadata["args"]
+        domain_kwargs = self.domain_settings_metadata["kwargs"]
+        domain_class = getattr(importlib.import_module("lisatools.domains"), domain_class_name)
+
+        logger.info(f"Reconstructing DomainSettings object of class '{domain_class_name}' with args: {domain_args} and kwargs: {domain_kwargs}")
+
+        return domain_class(*domain_args, **domain_kwargs)
+    
+    def get_data_td_settings(self) -> TDSettings:
+        """Reconstruct the data TDSettings object from the stored metadata."""
+        
+        logger.info(f"Reconstructing TDSettings object with t0: {self.obs_begin}, N: {self.num_times}, dt: {self.time_step}")
+        return TDSettings(t0=self.obs_begin, N = self.num_times, dt=self.time_step, force_backend="cpu")
+    
+    def get_sensitivity_matrix(self, orbits: Optional[Orbits] = None, domain_settings: Optional[DomainSettingsBase] = None) -> XYZSensitivityBackend:
+        """Reconstruct the sensitivity matrix from the stored metadata.
+        
+        """
+
+        orbits = orbits or self.get_orbits()
+        domain_settings = domain_settings or self.get_domain_settings()
+
+        if not self.sensitivity_metadata:
+            raise ValueError("No sensitivity metadata found.")
+        
+        sensitivity_class_name = self.sensitivity_metadata["class"]
+        sensitivity_kwargs = self.sensitivity_metadata["kwargs"]
+        sensitivity_class = getattr(importlib.import_module("lisatools.sensitivity"), sensitivity_class_name)
+
+        logger.info(f"Reconstructing sensitivity backend of class '{sensitivity_class_name}' with kwargs: {sensitivity_kwargs} and domain settings: {domain_settings}")
+
+        return sensitivity_class(orbits=orbits, settings=domain_settings, **sensitivity_kwargs)
+        
+
+
 
     def to_web_dict(self) -> dict:
         """Return a richer dict for web display, extending the L3C dict with run config."""
@@ -724,10 +814,12 @@ class RunMetadata:
     def submission_folder(self) -> str:
         """Return the full path to the submission folder for this run."""
         
-        run_type, run_id = self.version.split("_")
-        return os.path.join(self.submission_parent_folder, run_type, run_id)
-        
-        #return os.path.join(self.submission_parent_folder, f"{self.codename}_v{self.version}")
+        parts = self.version.split("_", 1)
+        if len(parts) == 2:
+            run_type, run_id = parts
+            return os.path.join(self.submission_parent_folder, run_type, run_id)
+            
+        return os.path.join(self.submission_parent_folder, self.version)
 
 @dataclasses.dataclass
 class SourceMetadata:

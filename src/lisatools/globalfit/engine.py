@@ -185,6 +185,10 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def data_t0(self) -> float:
         return self.data_td_settings.t0
+    
+    @property
+    def data_dt(self) -> float:
+        return self.data_td_settings.dt
 
     def init_setup(self):
         if self.file_store_dir is None:
@@ -244,6 +248,7 @@ class GeneralSetup(Setup, GeneralSettings):
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
         self.data_td_settings = TDSettings(*data_processor.td_signal.settings.args, force_backend=self.force_backend)
+        self.Tobs = Nt * dt
         self.catalogue = getattr(data_processor, 'catalogue', {})
 
         if self.basis_domain == "stft":
