@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
+from cudakima import AkimaInterpolant1D
 import h5py
 import numpy as np
 import requests
@@ -31,7 +32,6 @@ SC = [1, 2, 3]
 LINKS = [12, 23, 31, 13, 32, 21]
 
 LINEAR_INTERP_TIMESTEP = 600.00  # sec (0.25 hr)
-
 
 class Orbits(LISAToolsParallelModule, ABC):
     """LISA Orbit Base Class
@@ -906,6 +906,7 @@ class L1Orbits(Orbits):
 
         # Interpolate positions from their native time grid to target grid
         # _pos_data is (N_pos, 3_sc, 3_xyz)
+
         pos_interp_shape = (len(t_arr), 3, 3)
         pos_interpolated = np.zeros(pos_interp_shape)
         vel_interpolated = np.zeros(pos_interp_shape)
@@ -921,13 +922,11 @@ class L1Orbits(Orbits):
                 pos_splines[isc][icoord] = cs
                 pos_interpolated[:, isc, icoord] = cs(t_arr)
 
-                del cs
-
                 # interpolate velocities as well
-                cs = interpolate.CubicSpline(self.sc_t_base, self.v_base[:, isc, icoord])
-                vel_interpolated[:, isc, icoord] = cs(t_arr)
+                v_cs = interpolate.CubicSpline(self.sc_t_base, self.v_base[:, isc, icoord])
+                vel_interpolated[:, isc, icoord] = v_cs(t_arr)
 
-                del cs
+                del v_cs
 
         # Calculate unit vectors
         # Link order: 12, 23, 31, 13, 32, 21
@@ -938,15 +937,17 @@ class L1Orbits(Orbits):
         rec_indices = [x - 1 for x in self.link_space_craft_r]
         emit_indices = [x - 1 for x in self.link_space_craft_e]
 
+        akima_interpolant = AkimaInterpolant1D(use_gpu=False, order='cubic')
+
         for i in range(6):
             rec_idx = rec_indices[i]
             emit_idx = emit_indices[i]
 
             # Interpolate LTT for this link
-            cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
-            ltt_i = cs_ltt(t_arr)
-
-            del cs_ltt
+            # cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
+            # ltt_i = cs_ltt(t_arr)
+            # try to save memory
+            ltt_i = akima_interpolant(t_arr, self.ltt_t, self.ltt[:, i])
 
             # Emission time
             t_emit = t_arr - ltt_i
@@ -999,6 +1000,10 @@ class L1Orbits(Orbits):
             ]
         else:
             self.pycppdetector_args = None
+
+        # call garbage collection to free memory from large arrays no longer needed
+        import gc
+        gc.collect()
 
     # def _setup(self):
     #     """Override base class _setup - we load data in `_load_mojito_data` instead."""

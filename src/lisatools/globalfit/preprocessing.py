@@ -191,6 +191,11 @@ class L1DataLoader:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
             file_path = find_file(subfolder, "NOISE", 00)
 
+            if orbits is None:
+                orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                orbits.configure(linear_interp_setup=True)                
+
+
             with self._open(file_path) as f:
                 xyz = f.tdis.xyz_doppler[:]
 
@@ -198,10 +203,7 @@ class L1DataLoader:
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
                 tdi_times = f.tdis.time_sampling.t()
 
-            if orbits is None:
-                orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-                orbits.configure(linear_interp_setup=True)
-                logger.info(f"Initialized orbits from NOISE file: {file_path}")
+                logger.info(f"Initialized orbits from NOISE file.")
 
             self.source_types.remove("NOISE")
 
@@ -262,7 +264,7 @@ class L1DataLoader:
                         if orbits is None:
                             orbits: Orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
                             orbits.configure(linear_interp_setup=True)
-                            logger.info(f"Initialized orbits from {source_type} file: {file_path}")
+                            logger.info(f"Initialized orbits from {source_type} file.")
 
                     else:
                         xyz += _xyz
