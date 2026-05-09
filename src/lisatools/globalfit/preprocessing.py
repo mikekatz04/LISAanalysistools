@@ -185,6 +185,7 @@ class L1DataLoader:
                 - orbits (Orbits): An instance of the Orbits class initialized with the loaded data.
         """
         xyz = None
+        orbits: Orbits = None
 
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
@@ -197,8 +198,11 @@ class L1DataLoader:
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
                 tdi_times = f.tdis.time_sampling.t()
 
-            orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-            orbits.configure(linear_interp_setup=True)
+            if orbits is None:
+                orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                orbits.configure(linear_interp_setup=True)
+                logger.info(f"Initialized orbits from NOISE file: {file_path}")
+
             self.source_types.remove("NOISE")
 
             if self.verbose:
@@ -255,8 +259,10 @@ class L1DataLoader:
                         tdi_times = _tdi_times
                         tdi_fs = _tdi_fs
 
-                        orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-                        orbits.configure(linear_interp_setup=True)
+                        if orbits is None:
+                            orbits: Orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                            orbits.configure(linear_interp_setup=True)
+                            logger.info(f"Initialized orbits from {source_type} file: {file_path}")
 
                     else:
                         xyz += _xyz
@@ -270,6 +276,8 @@ class L1DataLoader:
         assert (
             xyz.shape[1] == tdi_times.shape[0]
         ), "Data time dimension does not match time array length."
+        
+        assert orbits is not None, "Orbits were not initialized from any file."
 
         return tdi_times, tdi_fs, xyz, orbits
 

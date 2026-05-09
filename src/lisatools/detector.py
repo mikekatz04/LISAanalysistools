@@ -921,9 +921,13 @@ class L1Orbits(Orbits):
                 pos_splines[isc][icoord] = cs
                 pos_interpolated[:, isc, icoord] = cs(t_arr)
 
+                del cs
+
                 # interpolate velocities as well
                 cs = interpolate.CubicSpline(self.sc_t_base, self.v_base[:, isc, icoord])
                 vel_interpolated[:, isc, icoord] = cs(t_arr)
+
+                del cs
 
         # Calculate unit vectors
         # Link order: 12, 23, 31, 13, 32, 21
@@ -941,6 +945,8 @@ class L1Orbits(Orbits):
             # Interpolate LTT for this link
             cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
             ltt_i = cs_ltt(t_arr)
+
+            del cs_ltt
 
             # Emission time
             t_emit = t_arr - ltt_i
@@ -967,7 +973,7 @@ class L1Orbits(Orbits):
         self.v = self.xp.asarray(vel_interpolated)
         self.n = self.xp.asarray(n_interpolated)
 
-        # make sure base spacecraft and link inormation is ready
+        # make sure base spacecraft and link information is ready
         lsr = np.asarray(self.link_space_craft_r).copy().astype(np.int32)
         lse = np.asarray(self.link_space_craft_e).copy().astype(np.int32)
         ll = np.asarray(self.LINKS).copy().astype(np.int32)
