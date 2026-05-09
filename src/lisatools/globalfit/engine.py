@@ -139,6 +139,21 @@ class GeneralSettings(Settings):
     #       N_lambda (int, default 90), N_beta (int, default 60)
     galactic_grid_kwargs: Optional[typing.Dict[str, typing.Any]] = None
 
+    # --- run metadata (propagated to RunMetadata.from_curr) ---
+    run_codename: Optional[str] = None
+    run_version: Optional[str] = None
+    run_contact: Optional[str] = None
+    run_code_link: Optional[str] = None
+    submission_folder: Optional[str] = None
+    run_input_data_link: Optional[str] = None
+    run_input_reference: Optional[str] = None
+    run_noise_model: Optional[str] = None
+    run_noise_model_code_link: Optional[str] = None
+    run_waveform_model: Optional[str] = None
+    run_waveform_model_code_link: Optional[str] = None
+    run_quality: Optional[str] = None
+    run_comment: Optional[str] = None
+
 
 from .loginfo import init_logger
 
@@ -166,6 +181,14 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def artifacts_file_dir(self) -> str:
         return self.file_store_dir + self.base_file_name + "_artifacts/"
+
+    @property
+    def data_t0(self) -> float:
+        return self.data_td_settings.t0
+    
+    @property
+    def data_dt(self) -> float:
+        return self.data_td_settings.dt
 
     def init_setup(self):
         if self.file_store_dir is None:
@@ -225,6 +248,7 @@ class GeneralSetup(Setup, GeneralSettings):
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
         self.data_td_settings = TDSettings(*data_processor.td_signal.settings.args, force_backend=self.force_backend)
+        self.Tobs = Nt * dt
         self.catalogue = getattr(data_processor, 'catalogue', {})
 
         if self.basis_domain == "stft":
