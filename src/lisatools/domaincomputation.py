@@ -135,6 +135,8 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
             sensitivity_backend_kwargs["orbits"] = self._orbits
             self._sensitivity_backend = sensitivity_backend.__class__(**sensitivity_backend_kwargs)
 
+            #todo figure what to do for the galaxy modulation.
+
     def __repr__(self):
         split_index = getattr(self, "split_index", None)
         return f"BaseDomainComputationGroup with split index {split_index} and TDI type {self.tdi_type}"

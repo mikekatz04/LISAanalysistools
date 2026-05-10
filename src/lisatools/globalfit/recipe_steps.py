@@ -671,6 +671,7 @@ def build_gb_moves(
         #    del state.band_info
 
     band_temps = np.tile(np.asarray(gb_betas), (len(band_edges) - 1, 1))
+    #print(f"")
     state.sub_states["gb"].initialize_band_information(nwalkers, ntemps, band_edges, band_temps)
     if adjust_temps:
         state.sub_states["gb"].band_info["band_temps"][:] = band_info_check["band_temps"][0, :]
