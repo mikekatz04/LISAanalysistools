@@ -149,6 +149,11 @@ class CurrentInfoGlobalFit:
     def source_info(self):
         """Source-specific configuration information."""
         return self.current_info.source_info
+    
+    @property
+    def source_metadata(self) -> dict:
+        """Metadata information for all sources."""
+        return self.current_info.source_metadata
 
     @property
     def rank_info(self):
@@ -709,17 +714,18 @@ class GlobalFit:
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
-            breakpoint()
             gf_plotter = GlobalFitPlotter(curr=self.curr)
             gf_plotter.save_input_data()
 
             meta = RunMetadata.from_curr(self.curr)
 
-            sampler_mix.run_mcmc(state, 10, thin_by=1, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 5, thin_by=1, progress=True, store=True)
 
-            breakpoint()
+            # breakpoint()
 
             submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
+
+            submission_writer.write_submission()
 
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 

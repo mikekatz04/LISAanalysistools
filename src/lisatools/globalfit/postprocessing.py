@@ -10,6 +10,7 @@ JSON manifests for web dashboard display.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import dataclasses
 import importlib
 import json
@@ -25,6 +26,9 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from eryn.backends import HDFBackend
 from eryn.utils import get_integrated_act
+
+from ..utils.utility import windowfun
+from ..domains import FDSettings, STFTSettings
 
 if TYPE_CHECKING:
     from .run import CurrentInfoGlobalFit
@@ -57,28 +61,32 @@ _GB_PARAM_INFO: Dict[str, ParameterInfo] = {
 }
 
 _MBH_PARAM_INFO: Dict[str, ParameterInfo] = {
-    "logM": ParameterInfo("mass1", r"$M_1\,[M_\odot]$", "solMass"),
-    "q": ParameterInfo("mass2", r"$M_2\,[M_\odot]$", "solMass"),
-    "s1z": ParameterInfo("spin1", r"$a_1$", "dimensionless"),
-    "s2z": ParameterInfo("spin2", r"$a_2$", "dimensionless"),
-    "dist": ParameterInfo("distance", r"$d_L\,[\mathrm{Gpc}]$", "Gpc"),
-    "phi_ref": ParameterInfo("phase_at_coalescence", r"$\phi_c\,[\mathrm{rad}]$", "rad"),
-    "cos_iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
+    "m1": ParameterInfo("mass1", r"$m_1\,[M_\odot]$", "solMass"),
+    "m2": ParameterInfo("mass2", r"$m_2\,[M_\odot]$", "solMass"),
+    "s1z": ParameterInfo("spin1", r"$s_{1z}$", "dimensionless"),
+    "s2z": ParameterInfo("spin2", r"$s_{2z}$", "dimensionless"),
+    "distance": ParameterInfo("luminosity_distance", r"$d_L\,[\mathrm{Gpc}]$", "Gpc"),
+    "phi_ref": ParameterInfo("reference_phase", r"$\phi_{\mathrm{ref}}\,[\mathrm{rad}]$", "rad"),
+    "iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
     "psi": ParameterInfo("polarization", r"$\psi\,[\mathrm{rad}]$", "rad"),
-    "lam": ParameterInfo("ecliptic_longitude", r"$\lambda\,[\mathrm{rad}]$", "rad"),
-    "sin_beta": ParameterInfo("ecliptic_latitude", r"$\beta\,[\mathrm{rad}]$", "rad"),
-    "t_plunge": ParameterInfo("coalescence_time", r"$t_c\,[\mathrm{s}]$", "s"),
+    "ra": ParameterInfo("right_ascension", r"$\alpha\,[\mathrm{rad}]$", "rad"),
+    "dec": ParameterInfo("declination", r"$\delta\,[\mathrm{rad}]$", "rad"),
+    "t_c": ParameterInfo("coalescence_time", r"$t_c\,[\mathrm{s}]$", "s"),
 }
 
-_PARAM_INFO_REGISTRY: Dict[str, Dict[str, ParameterInfo]] = {
+_NOISE_PARAM_INFO: Dict[str, ParameterInfo] = {
+    "S_oms": ParameterInfo("S_oms", r"$S_{\mathrm{oms}}\,[\mathrm{m}\mathrm{Hz}^{-1/2}]$", "m Hz^{-1/2}"),
+    "S_tm": ParameterInfo("S_tm", r"$S_{\mathrm{tm}}\,[\mathrm{m}\mathrm{s}^{-2}\mathrm{Hz}^{-1/2}]$", "m s^{-2} Hz^{-1/2}"),
+} 
+#todo extend to splines
+
+# todo add galactic foreground
+
+PARAMETER_INFO_REGISTRY: Dict[str, Dict[str, ParameterInfo]] = {
     "gb": _GB_PARAM_INFO,
     "mbh": _MBH_PARAM_INFO,
-}
-
-# Parameters omitted from L3C output (filled constants unused by analysts)
-_EXCLUDE_REGISTRY: Dict[str, set] = {
-    "gb": {"fddot"},
-    "mbh": set(),
+    "psd": _NOISE_PARAM_INFO,
+    # add entries for other source types as needed
 }
 
 # Corrections applied after TransformContainer to fix waveform-gen vs L3C unit mismatches.
@@ -86,7 +94,7 @@ _EXCLUDE_REGISTRY: Dict[str, set] = {
 # L3C requires distance in Gpc, so we invert here.
 _OUTPUT_CORRECTIONS_REGISTRY: Dict[str, Dict[str, Callable]] = {
     "gb": {},
-    "mbh": {"dist": lambda x: x * 1e-3},
+    "mbh": {"distance": lambda x: x * 1e-3},
 }
 
 source_types_names = dict(
@@ -501,7 +509,7 @@ class GlobalFitPlotter:
         """
         Convert the raw timeseries data into characteristic strain. We keep only the X channel for plotting.
         """
-        if not hasattr(self.curr.general_info.data_processor, "individual_timeseries") or self.curr.general_info.data_processor.individual_timeseries is None:
+        if not hasattr(self.curr.general_info.data_processor, "_individual_timeseries"):
             
             logger.warning("No individual timeseries found in data processor. Skipping input data conversion for plotting.")
             return {}
@@ -581,12 +589,13 @@ def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
     kwargs = backend.kwargs.copy()
 
     domain_class = kwargs['settings'].__class__.__name__
-    domain_args = kwargs['settings'].args.copy()
+    domain_args = deepcopy(kwargs['settings'].args)
     domain_kwargs = kwargs['settings'].kwargs.copy()
     domain_kwargs["force_backend"] = "cpu"
 
     kwargs.pop("orbits")
     kwargs.pop("settings")
+    kwargs.pop("window_values")
     kwargs["force_backend"] = "cpu"
 
     domain_metadata = {
@@ -617,9 +626,23 @@ def _extract_orbit_metadata(gi) -> dict:
 
 
 # ─── RunMetadata ──────────────────────────────────────────────────────────────
+@dataclasses.dataclass
+class MetadataBase:
+    """
+Base class for metadata objects, providing common utilities.
+    """
+    def to_dict(self) -> dict:
+        """Convert the dataclass to a dict, excluding private fields."""
+        return {k: getattr(self, k) for k in self.__dataclass_fields__.keys() if not k.startswith("_")}
+
+    def to_json(self, filepath: str):
+        """Save the metadata to a JSON file at the specified path."""
+        with open(filepath, "w") as f:
+            json.dump(self.to_dict(), f, indent=4)
+        logger.info(f"Saved metadata to {filepath}")
 
 @dataclasses.dataclass
-class RunMetadata:
+class RunMetadata(MetadataBase):
     """
     Holds all metadata for a global fit run.
 
@@ -650,6 +673,9 @@ class RunMetadata:
     observation_period_end: str = ""
     time_step: float = 0.0
     number_of_time_samples: int = 0
+    window_type: str = "tukey"
+    window_alpha: float = 0.1
+    preprocess_kwargs: dict = dataclasses.field(default_factory=dict)
     effective_observation_duration: str = ""
     tdi_channels: List[str] = dataclasses.field(default_factory=list)
     searched_source_types_list: List[str] = dataclasses.field(default_factory=list)
@@ -684,7 +710,7 @@ class RunMetadata:
         merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
 
         instance = cls(**merged)
-        instance.submission_timestamp = datetime.now(tz=timezone.utc).isoformat()
+        instance.submission_timestamp = datetime.now(tz=timezone.utc).isoformat(timespec='seconds') #stop at seconds for cleaner display
         instance.observation_period_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.observation_period_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.time_step = float(gi.dt)
@@ -692,6 +718,8 @@ class RunMetadata:
         instance.effective_observation_duration = _seconds_to_duration_str(gi.Tobs)
         instance.tdi_channels = _infer_tdi_channels(curr)
         instance.searched_source_types_list = get_source_types(curr)
+
+        _ = instance.preprocess_kwargs.pop("plot_folder", None) # not relevant for the metadata
 
         domain_metadata, sensitivity_metadata = _extract_sensitivity_metadata(gi)
         orbits_metadata = _extract_orbit_metadata(gi)
@@ -712,23 +740,37 @@ class RunMetadata:
 
         return instance
 
-    def to_l3c_dict(self) -> dict:
+    def _to_l3c_dict(self) -> dict:
         """Return a dict matching the l2_output_metadata template keys exactly."""
-        d = {}
-        for attr in self.__dataclass_fields__.keys():
-            if not attr.startswith("_"):
-                d[attr] = getattr(self, attr)
+        
+        d = self.to_dict()
                 
         d["global_fit_release_date"] = self.submission_timestamp
         if "noise_model_config_file_link" not in d:
             d["noise_model_config_file_link"] = ""
         d["list_of_detected_sources"] = ", ".join(self.found_source_types_list)
+        
         return d
+
     
     @classmethod
-    def from_l3c_dict(cls, d: dict) -> "RunMetadata":
-        """Construct RunMetadata from a dict matching the l2_output_metadata template keys."""
+    def from_submission(cls, submission: str | dict) -> "RunMetadata":
+        """
+        Construct RunMetadata from a submission matching the l2_output_metadata template keys.
         
+        Args:
+            submission: Either a dict containing the metadata fields, or a path to a JSON file containing the metadata.
+
+        Returns:
+            RunMetadata instance with fields populated from the submission.
+        """
+        
+        if isinstance(submission, str):
+            with open(submission, "r") as f:
+                d = json.load(f)
+        else:
+            d = submission
+
         user_fields = {k: v for k, v in d.items() if k in cls.__dataclass_fields__ and not k.startswith("_")}
         # supply missing required fields if not present in the output JSON
         if "submission_parent_folder" not in user_fields:
@@ -738,8 +780,16 @@ class RunMetadata:
 
         return instance
     
-    def get_orbits(self) -> Orbits:
-        """Reconstruct the Orbits object from the stored metadata."""
+    def get_orbits(self, filename: str) -> Orbits:
+        """
+        Reconstruct the Orbits object from the stored metadata.
+
+        Args:
+            filename: str. Path to the the file containing the orbits information. For the Mojito datasets, any file would work.
+        
+        Returns:
+            Orbits object reconstructed from the stored metadata.
+        """
         
         if not self.orbits_metadata:
             raise ValueError("No orbits metadata found.")
@@ -750,7 +800,7 @@ class RunMetadata:
 
         logger.info(f"Reconstructing Orbits object of class '{orbits_class_name}' with kwargs: {orbits_kwargs}")
 
-        orbits = orbits_class(**orbits_kwargs)
+        orbits = orbits_class(filename=filename, **orbits_kwargs)
         orbits.configure(linear_interp_setup=True)
 
         return orbits
@@ -758,12 +808,12 @@ class RunMetadata:
     def get_domain_settings(self) -> DomainSettingsBase:
         """Reconstruct the DomainSettings object from the stored metadata."""
         
-        if not self.domain_settings_metadata:
+        if not self.domain_metadata:
             raise ValueError("No domain settings metadata found.")
         
-        domain_class_name = self.domain_settings_metadata["class"]
-        domain_args = self.domain_settings_metadata["args"]
-        domain_kwargs = self.domain_settings_metadata["kwargs"]
+        domain_class_name = self.domain_metadata["class"]
+        domain_args = self.domain_metadata["args"]
+        domain_kwargs = self.domain_metadata["kwargs"]
         domain_class = getattr(importlib.import_module("lisatools.domains"), domain_class_name)
 
         logger.info(f"Reconstructing DomainSettings object of class '{domain_class_name}' with args: {domain_args} and kwargs: {domain_kwargs}")
@@ -776,12 +826,21 @@ class RunMetadata:
         logger.info(f"Reconstructing TDSettings object with t0: {self.obs_begin}, N: {self.num_times}, dt: {self.time_step}")
         return TDSettings(t0=self.obs_begin, N = self.num_times, dt=self.time_step, force_backend="cpu")
     
-    def get_sensitivity_matrix(self, orbits: Optional[Orbits] = None, domain_settings: Optional[DomainSettingsBase] = None) -> XYZSensitivityBackend:
+    def get_sensitivity_matrix(self, orbits: Optional[Orbits] = None, filename: str = None, domain_settings: Optional[DomainSettingsBase] = None) -> XYZSensitivityBackend:
         """Reconstruct the sensitivity matrix from the stored metadata.
         
-        """
+        Args:
+            orbits: Optional Orbits object. If not provided, it will be reconstructed from the stored metadata using `get_orbits()`.
+            filename: Optional str. Path to the file containing the orbits information, needed if `orbits` is not provided.
+            domain_settings: Optional DomainSettings object. If not provided, it will be reconstructed from the stored metadata using `get_domain_settings()`.
 
-        orbits = orbits or self.get_orbits()
+        Returns:
+            XYZSensitivityBackend object reconstructed from the stored metadata.
+        """
+        if orbits is None and filename is None:
+            raise ValueError("Must provide either an Orbits object or a filename to reconstruct it from.")
+        
+        orbits = orbits or self.get_orbits(filename=filename)
         domain_settings = domain_settings or self.get_domain_settings()
 
         if not self.sensitivity_metadata:
@@ -793,32 +852,53 @@ class RunMetadata:
 
         logger.info(f"Reconstructing sensitivity backend of class '{sensitivity_class_name}' with kwargs: {sensitivity_kwargs} and domain settings: {domain_settings}")
 
-        return sensitivity_class(orbits=orbits, settings=domain_settings, **sensitivity_kwargs)
+        if isinstance(domain_settings, FDSettings):
+            N = self.number_of_time_samples
+
+        elif isinstance(domain_settings, STFTSettings):
+            N = domain_settings.get_nperseg(self.time_step)
+
+        else:
+            raise NotImplementedError(f"Domain settings of type '{type(domain_settings).__name__}' not supported")
+
+        window_values, _ = windowfun(self.window_type, N, alpha=self.window_alpha)
+
+        return sensitivity_class(orbits=orbits, settings=domain_settings, window_values=window_values, **sensitivity_kwargs)
 
     def to_web_dict(self) -> dict:
         """Return a richer dict for web display, extending the L3C dict with run config."""
-        d = self.to_l3c_dict()
+        d = self._to_l3c_dict()
         d.update(self._web_extras)
         return d
+
+    @property
+    def run_type(self) -> str:
+        """Extract the run type from the global_fit_version string."""
+        parts = self.global_fit_version.split("_", 1)
+        if len(parts) == 2:
+            return parts[0]
+        logger.warning(f"Version string '{self.global_fit_version}' does not follow expected format 'type_id'. Using entire version string as run_type.")
+        return self.global_fit_version
+
+    @property
+    def run_id(self) -> str:
+        """Extract the run id from the global_fit_version string."""
+        parts = self.global_fit_version.split("_", 1)
+        if len(parts) == 2:
+            return parts[1]
+        logger.warning(f"Version string '{self.global_fit_version}' does not follow expected format 'type_id'. Using 'v0' as default run_id.")
+        return "v0"
     
     @property
     def submission_folder(self) -> str:
         """Return the full path to the submission folder for this run."""
         
-        parts = self.version.split("_", 1)
-        if len(parts) == 2:
-            run_type, run_id = parts
-        else:
-            run_type = self.version
-            run_id = "v0"
-            logger.warning(f"Version string '{self.version}' does not follow expected format 'type_id'. Using run_type='{run_type}' and run_id='{run_id}' for submission folder naming.")
-
-        folder_name = f"{run_type}_{self.codename}_{run_id}_{self.submission_timestamp}"
+        folder_name = f"{self.run_type}_{self.global_fit_codename}_{self.run_id}_{self.submission_timestamp}"
 
         return os.path.join(self.submission_parent_folder, folder_name)
             
 @dataclasses.dataclass
-class SourceMetadata:
+class SourceMetadata(MetadataBase):
     """Holds metadata for a detected source, to be included in the L3C submission manifest."""
     source_type: str
     frequency_ranges: list[tuple[float, float]] # = dataclasses.field(default_factory=list)
@@ -837,7 +917,7 @@ class SourceMetadata:
     comment: str = ""
 
 @dataclasses.dataclass
-class StochasticMetadata:
+class StochasticMetadata(MetadataBase):
     """Holds metadata for the overall stochastic component of the data"""
     
     prior_model: str = ""
@@ -865,8 +945,128 @@ class SubmissionWriter(BackendConsumer):
         self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(ess=ess, return_inds=True) # todo missing prior and likelihood
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
-
         self.run_metadata = RunMetadata.from_curr(self.curr)
+
+    @property
+    def submission_folder(self) -> str:
+        """Return the full path to the submission folder for this run."""
+        return self.run_metadata.submission_folder
+
+    @property
+    def posterior_folder(self) -> dict[str, str]:
+        """Return the full paths to the posterior folders for each branch."""
+        if not hasattr(self, "_folders"):
+            raise ValueError("Folders have not been created yet. Call create_folders() first.")
+        return self._folders
+
+    def create_folders(self):
+        """Create the submission folder and any necessary subfolders."""
+        
+        os.makedirs(self.submission_folder, exist_ok=True)
+        logger.info(f"Created submission folder at {self.submission_folder}")
+
+        self._folders = {}
+
+        for branch in self.branches:
+            source_name = source_types_names[branch]
+
+            subfolder_name = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriordir"
+
+            subfolder_path = os.path.join(self.submission_folder, subfolder_name)
+            os.makedirs(subfolder_path, exist_ok=True)
+            logger.info(f"Created subfolder for branch '{branch}' at {subfolder_path}")
+
+            self._folders[branch] = subfolder_path
+
+    def save_posteriors(self):
+        """Save the posterior samples for each detected source in the required format."""
+        
+        # todo need a way to have ids
+        for branch in self.branches:
+            source_name = source_types_names[branch]
+            samples = self.samples[branch]
+            inds = self.inds[branch]
+
+            parameter_info: list[ParameterInfo] = list(PARAMETER_INFO_REGISTRY[branch].values())
+            
+            parameter_names = [p.l3c_name for p in parameter_info]
+            latex_names = [p.latex_name for p in parameter_info]
+            units = [p.unit for p in parameter_info]
+
+            metadata: SourceMetadata | StochasticMetadata = self.curr.source_metadata[branch]
+            
+            metadata.parameter_info = parameter_names
+            metadata.parameter_units = units
+            
+            metadata.detection_statistic = self.detection_criteria.detection_statistics(samples, inds).tolist()
+
+            posterior_files = []
+
+            MAX_SOURCES_PER_BATCH = 500
+
+            num_leaves = samples.shape[1]
+            for i in range(0, num_leaves, MAX_SOURCES_PER_BATCH):
+                leaves = slice(i, min(i + MAX_SOURCES_PER_BATCH, num_leaves))
+        
+                samples_here = samples[:, leaves, :]
+                num_sources_here = samples_here.shape[1]
+
+                samples_dict = {name: samples_here[..., i] for i, name in enumerate(parameter_names)}
+                samples_dict["log_prior"] = self.log_prior
+                samples_dict["log_likelihood"] = self.log_likelihood
+
+                transform = _OUTPUT_CORRECTIONS_REGISTRY[branch]
+                for key, func in transform.items():
+                    if key in samples_dict:
+                        samples_dict[key] = func(samples_dict[key])
+                        logger.info(f"Applied output correction for parameter '{key}' in branch '{branch}'")
+
+                # save to h5 file
+                filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriors_{num_sources_here}_{i}_{self.run_metadata.submission_timestamp}.h5"  
+                filepath = os.path.join(self.posterior_folder[branch], filename)
+                with h5py.File(filepath, "w") as f:
+                    for param, values in samples_dict.items():
+                        f.create_dataset(param, data=values)
+               
+                logger.info(f"Saved posterior samples for branch '{branch}', leaves {leaves} to {filepath}")
+                posterior_files.append(filepath)
+
+            metadata.posterior_files = posterior_files
+
+            # now save the metadata for this source
+            metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_{self.run_metadata.submission_timestamp}"
+
+            metadata_h5_filepath = os.path.join(self.run_metadata.submission_folder, f"{metadata_base_filename}.h5")
+            metadata_json_filepath = os.path.join(self.run_metadata.submission_folder, f"{metadata_base_filename}.json")
+
+            with h5py.File(metadata_h5_filepath, "w") as f:
+                # save all metadata fields as attributes
+                for field in dataclasses.fields(metadata):
+                    value = getattr(metadata, field.name)
+                    if isinstance(value, (str, int, float)):
+                        f.attrs[field.name] = value
+                    elif isinstance(value, list):
+                        f.attrs[field.name] = json.dumps(value)  # save lists as JSON strings
+                    elif isinstance(value, dict):
+                        f.attrs[field.name] = json.dumps(value)  # save dicts as JSON strings
+                    else:
+                        logger.warning(f"Unsupported metadata field type for '{field.name}': {type(value)}. Skipping this field.")
+
+            logger.info(f"Saved metadata for branch '{branch}' to {metadata_h5_filepath}")
+
+            metadata.to_json(metadata_json_filepath)
+            logger.info(f"Saved metadata for branch '{branch}' to {metadata_json_filepath}")
+
+    def write_submission(self):
+        """Run the full submission writing pipeline."""
+        self.create_folders()
+        self.save_posteriors()
+
+        # finally save the overall run metadata
+        run_metadata_filepath = os.path.join(self.submission_folder, "global_metadata.json")
+        self.run_metadata.to_json(run_metadata_filepath)
+        logger.info(f"Saved overall run metadata to {run_metadata_filepath}")
+        
 
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
 
@@ -903,10 +1103,26 @@ class OccupancyDetectionCriteria(DetectionCriteria):
     def __init__(self, min_occupancy: float = 0.5):
         self.min_occupancy = min_occupancy
 
+    def detection_statistics(self, samples: np.ndarray, inds: np.ndarray) -> np.ndarray:
+        """
+        Compute the occupancy of each leaf across the independent samples.
+
+        Args:
+            samples: (n_independent, nleaves_max, ndim). Not used in this strategy but included for interface consistency.
+            inds: (n_independent, nleaves_max) bool
+
+        Returns:
+            Occupancy array of shape (nleaves_max,), with values in [0, 1].
+        """
+
+        return inds.mean(axis=0)
+
     def detect(self, samples: np.ndarray, inds: np.ndarray) -> np.ndarray:
-        n_steps, n_walkers, n_leaves = inds.shape[:3]
-        flat_inds = inds.reshape(n_steps * n_walkers, n_leaves)
-        occupancy = flat_inds.mean(axis=0)
+        
+        if not (0 <= self.min_occupancy <= 1):
+            raise ValueError(f"min_occupancy must be in [0, 1], got {self.min_occupancy}")
+        occupancy = self.detection_statistics(samples, inds)
+
         return occupancy >= self.min_occupancy
 
 
