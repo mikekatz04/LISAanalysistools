@@ -10,32 +10,32 @@ JSON manifests for web dashboard display.
 
 from __future__ import annotations
 
-from copy import deepcopy
 import dataclasses
 import importlib
 import json
 import os
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from datetime import datetime, timezone
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
-from tqdm import tqdm
 
 import h5py
 import numpy as np
-from scipy.interpolate import CubicSpline
 from eryn.backends import HDFBackend
 from eryn.utils import get_integrated_act
+from scipy.interpolate import CubicSpline
+from tqdm import tqdm
 
+from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
-from ..domains import FDSettings, STFTSettings
 
 if TYPE_CHECKING:
-    from .run import CurrentInfoGlobalFit
-    from ..sensitivity import XYZSensitivityBackend
     from ..detector import Orbits
     from ..domains import DomainSettingsBase, TDSettings
-    
+    from ..sensitivity import XYZSensitivityBackend
+    from .run import CurrentInfoGlobalFit
+
 logger = getLogger(__name__)
 # ─── Parameter metadata ───────────────────────────────────────────────────────
 
@@ -75,10 +75,16 @@ _MBH_PARAM_INFO: Dict[str, ParameterInfo] = {
 }
 
 _NOISE_PARAM_INFO: Dict[str, ParameterInfo] = {
-    "S_oms": ParameterInfo("S_oms", r"$S_{\mathrm{oms}}\,[\mathrm{m}\mathrm{Hz}^{-1/2}]$", "m Hz^{-1/2}"),
-    "S_tm": ParameterInfo("S_tm", r"$S_{\mathrm{tm}}\,[\mathrm{m}\mathrm{s}^{-2}\mathrm{Hz}^{-1/2}]$", "m s^{-2} Hz^{-1/2}"),
-} 
-#todo extend to splines
+    "S_oms": ParameterInfo(
+        "S_oms", r"$S_{\mathrm{oms}}\,[\mathrm{m}\mathrm{Hz}^{-1/2}]$", "m Hz^{-1/2}"
+    ),
+    "S_tm": ParameterInfo(
+        "S_tm",
+        r"$S_{\mathrm{tm}}\,[\mathrm{m}\mathrm{s}^{-2}\mathrm{Hz}^{-1/2}]$",
+        "m s^{-2} Hz^{-1/2}",
+    ),
+}
+# todo extend to splines
 
 # todo add galactic foreground
 
@@ -95,16 +101,21 @@ PARAMETER_INFO_REGISTRY: Dict[str, Dict[str, ParameterInfo]] = {
 _OUTPUT_CORRECTIONS_REGISTRY: Dict[str, Dict[str, Callable]] = {
     "gb": {},
     "mbh": {"distance": lambda x: x * 1e-3},
+    "psd": {},
+    "galfor": {},
 }
 
 source_types_names = dict(
-    gb="GB",
+    gb="GB",  # todo: separate the verification binaries into their own source type
     mbh="MBHB",
     emri="EMRI",
     sobh="SOBHB",
+    psd="NOISE",
+    galfor="STOCHASTIC",  # todo: should we merge noise and stochastic together under a common "stochastic" source type?
 )
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
     """Get the list of source types searched for in this run, inferred from curr."""
@@ -116,8 +127,9 @@ def get_source_types(curr: CurrentInfoGlobalFit) -> List[str]:
             out.append(source_types_names[s])
         else:
             logger.debug(f"Excluding source type '{s}' from metadata")
-    
+
     return out
+
 
 def _seconds_to_l3c_datetime(t: float) -> str:
     """Convert a UTC timestamp in seconds with respect to LISA_EPOCH_TCB to the L3C format yyyy.mm.dd.hh.mm.ss."""
@@ -179,13 +191,12 @@ class BackendConsumer:
             self.backend = HDFBackend(filename=curr.main_file_path, read_only=True)
         else:
             raise ValueError("Must provide either curr or backend.")
-        
+
         if curr is not None:
             self._curr = curr
 
             self.from_curr()
 
-    
     def from_curr(self):
         """
         Extract any additional info needed from curr to configure the consumer for post-processing.
@@ -196,7 +207,7 @@ class BackendConsumer:
         if not hasattr(self, "_curr"):
             raise AttributeError("BackendConsumer was not initialized with a curr object.")
         return self._curr
-    
+
     @property
     def branches(self) -> List[str]:
         return self.backend.branch_names
@@ -208,12 +219,16 @@ class BackendConsumer:
     @property
     def nleaves_max(self) -> dict:
         return self.backend.nleaves_max
-    
+
     @property
     def transform_containers(self) -> dict:
         """Return the TransformContainer for each branch, if present."""
 
-        _transforms = {name: self.curr.source_info[name].transform for name in self.branches if hasattr(self.curr.source_info[name], "transform")}
+        _transforms = {
+            name: self.curr.source_info[name].transform
+            for name in self.branches
+            if hasattr(self.curr.source_info[name], "transform")
+        }
         return _transforms
 
     def store_cold_chains(self):
@@ -292,9 +307,9 @@ class BackendConsumer:
             ess: int (optional). Effective sample size
         """
         all_act = self.compute_auto_correlation_time(**act_kwargs)
-        max_act = int(np.ceil(max(np.max(act) for act in all_act.values())))
+        max_act = int(np.round(max(np.max(act) for act in all_act.values())))
+        max_act = max(1, max_act)  # ensure at least 1
         logger.debug(f"Thinning factor: {max_act}")
-
 
         self._thinned_chains = {}
         self._thinned_inds = {}
@@ -372,12 +387,12 @@ class BackendConsumer:
             if return_inds:
                 out = (self.thinned_chains[branch], self.thinned_inds[branch])
             else:
-                out = (self.thinned_chains[branch], )
+                out = (self.thinned_chains[branch],)
         else:
             if return_inds:
                 out = (self.thinned_chains, self.thinned_inds)
             else:
-                out = (self.thinned_chains, )
+                out = (self.thinned_chains,)
         return out + (self.thinned_log_prior, self.thinned_log_likelihood)
 
     def transform(self, samples: dict | np.ndarray, branch: str | None = None) -> dict | np.ndarray:
@@ -396,21 +411,27 @@ class BackendConsumer:
             if branch not in self.branches:
                 raise ValueError(f"Branch '{branch}' not found in backend.")
             if branch not in self.transform_containers or self.transform_containers[branch] is None:
-                logger.warning(f"No TransformContainer found for branch '{branch}'. Returning input samples.")
+                logger.warning(
+                    f"No TransformContainer found for branch '{branch}'. Returning input samples."
+                )
                 return samples
             return self.transform_containers[branch].transform_base_parameters(samples)
-        
+
         transformed = {}
         for b, s in samples.items():
             if b in self.transform_containers and self.transform_containers[b] is not None:
                 transformed[b] = self.transform_containers[b].transform_base_parameters(s)
             else:
-                logger.warning(f"No TransformContainer found for branch '{b}'. Returning input samples for this branch.")
+                logger.warning(
+                    f"No TransformContainer found for branch '{b}'. Returning input samples for this branch."
+                )
                 transformed[b] = s
 
         return transformed
-    
-    def process_samples(self, discard: int | float = 0.0, ess: int = 10000, return_inds: bool = False) -> Tuple[dict, Optional[dict], np.ndarray, np.ndarray]:
+
+    def process_samples(
+        self, discard: int | float = 0.0, ess: int = 10000, return_inds: bool = False
+    ) -> Tuple[dict, Optional[dict], np.ndarray, np.ndarray]:
         """
         Convenience method to run the end-to-end processing pipeline, starting from the raw samples.
 
@@ -425,7 +446,9 @@ class BackendConsumer:
         if not self.configured:
             self.store_cold_chains()
 
-        samples, inds, log_prior, log_likelihood = self.get_independent_samples(discard=discard, ess=ess, return_inds=True)
+        samples, inds, log_prior, log_likelihood = self.get_independent_samples(
+            discard=discard, ess=ess, return_inds=True
+        )
 
         transformed_samples = self.transform(samples)
 
@@ -437,22 +460,24 @@ class BackendConsumer:
 
 # ——— Plotter ──────────────────────────────────────────────────────────────————
 
+
 def to_periodogram(x: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Convert a timeseries to a periodogram (frequency, power) pair.
+    """
+    Convert a timeseries to a periodogram (frequency, power) pair.
 
-        Uses a Tukey window and proper normalization to produce a one-sided PSD estimate.
-        """
-        from scipy.signal import windows
+    Uses a Tukey window and proper normalization to produce a one-sided PSD estimate.
+    """
+    from scipy.signal import windows
 
-        window = windows.tukey(len(x), alpha=0.1)
-        x_windowed = x * window
-        freqs = np.fft.rfftfreq(len(x), dt)
-        norm = 2 / (dt * np.sum(window**2))  # "two-sided" normalization
-        periodogram = np.abs(np.fft.rfft(x_windowed) * dt)**2 * norm
+    window = windows.tukey(len(x), alpha=0.1)
+    x_windowed = x * window
+    freqs = np.fft.rfftfreq(len(x), dt)
+    norm = 2 / (dt * np.sum(window**2))  # "two-sided" normalization
+    periodogram = np.abs(np.fft.rfft(x_windowed) * dt) ** 2 * norm
 
-        return freqs, periodogram
-    
+    return freqs, periodogram
+
+
 def to_characteristic_strain(freqs: np.ndarray, periodogram: np.ndarray) -> np.ndarray:
     """
     Convert a periodogram to characteristic strain.
@@ -461,10 +486,11 @@ def to_characteristic_strain(freqs: np.ndarray, periodogram: np.ndarray) -> np.n
     """
     return np.sqrt(freqs * periodogram)
 
+
 def log_decimate(freqs, power, f_min=None, f_max=None, decimation_factor=10):
     """
     Logarithmically decimate the periodogram by a given factor.
-    
+
     Args:
         freqs: Array of frequencies (must be sorted)
         power: Array of power values
@@ -480,14 +506,16 @@ def log_decimate(freqs, power, f_min=None, f_max=None, decimation_factor=10):
 
     mask = (freqs >= f_min) & (freqs <= f_max)
     freqs = freqs[mask]
-    power = power[mask, ...] 
+    power = power[mask, ...]
 
     # Create decimated frequency array
     n_points = len(freqs)
     n_decimated = max(1, n_points // decimation_factor)
-    
-    decimated_indices = np.unique(np.round(np.logspace(0, np.log10(n_points - 1), n_decimated)).astype(int))
-    
+
+    decimated_indices = np.unique(
+        np.round(np.logspace(0, np.log10(n_points - 1), n_decimated)).astype(int)
+    )
+
     decimated_freqs = freqs[decimated_indices]
     decimated_power = power[decimated_indices]
 
@@ -498,37 +526,51 @@ class GlobalFitPlotter:
     """
     Produce summary plots at the end of a global fit run, including posterior predictive plots and corner plots.
     """
-    def __init__(self,
-                 curr: CurrentInfoGlobalFit):
+
+    def __init__(self, curr: CurrentInfoGlobalFit):
 
         self.curr = curr
 
         # corner plots: separated per leaf, joint over all leaves color coded by snr
 
-    def convert_input_data_for_plotting(self,):
+    def convert_input_data_for_plotting(
+        self,
+    ):
         """
         Convert the raw timeseries data into characteristic strain. We keep only the X channel for plotting.
         """
         if not hasattr(self.curr.general_info.data_processor, "_individual_timeseries"):
-            
-            logger.warning("No individual timeseries found in data processor. Skipping input data conversion for plotting.")
+
+            logger.warning(
+                "No individual timeseries found in data processor. Skipping input data conversion for plotting."
+            )
             return {}
-        
+
         out = {}
-        
+
         data_components = self.curr.general_info.data_processor.individual_timeseries
 
         times, combined = data_components.pop("TIMES"), data_components.pop("COMBINED")[0]
 
         dt = times[1] - times[0]
         freqs, periodogram = to_periodogram(combined, dt)
-        freqs_h, power_avg = log_decimate(freqs, periodogram, f_min=self.curr.general_info.start_freq, f_max=self.curr.general_info.end_freq, decimation_factor=100)
+        freqs_h, power_avg = log_decimate(
+            freqs,
+            periodogram,
+            f_min=self.curr.general_info.start_freq,
+            f_max=self.curr.general_info.end_freq,
+            decimation_factor=100,
+        )
 
         combined_char_strain = to_characteristic_strain(freqs_h, power_avg)
         out["freqs"] = freqs_h
         out["combined"] = combined_char_strain
 
-        del freqs, periodogram, power_avg # free memory as we don't need the raw periodogram anymore
+        del (
+            freqs,
+            periodogram,
+            power_avg,
+        )  # free memory as we don't need the raw periodogram anymore
 
         logger.info("Converted input data to characteristic strain for plotting.")
 
@@ -537,25 +579,35 @@ class GlobalFitPlotter:
         _ = data_components.pop("PSD_TIMES")
 
         noise_amplitude = to_characteristic_strain(covariance_frequencies, covariance_matrix)
-        out["noise_amplitude_estimate"] = CubicSpline(covariance_frequencies, noise_amplitude)(freqs_h)
+        out["noise_amplitude_estimate"] = CubicSpline(covariance_frequencies, noise_amplitude)(
+            freqs_h
+        )
 
         logger.info("Converted noise covariance to characteristic strain for plotting.")
 
-        for k, v in tqdm(data_components.items(), desc="Converting components to characteristic strain"):
-            
+        for k, v in tqdm(
+            data_components.items(), desc="Converting components to characteristic strain"
+        ):
+
             freqs, periodogram = to_periodogram(v[0], dt)
             char_strain = to_characteristic_strain(freqs, periodogram)
-            
-            out[k.lower()] = CubicSpline(freqs, char_strain)(freqs_h)
-            
-            del freqs, periodogram, char_strain # free memory as we don't need the raw periodogram anymore
 
-        del data_components # free memory as we don't need the raw timeseries anymore
-        import gc; gc.collect()
+            out[k.lower()] = CubicSpline(freqs, char_strain)(freqs_h)
+
+            del (
+                freqs,
+                periodogram,
+                char_strain,
+            )  # free memory as we don't need the raw periodogram anymore
+
+        del data_components  # free memory as we don't need the raw timeseries anymore
+        import gc
+
+        gc.collect()
 
         return out
-    
-    def save_input_data(self, converted_data: dict=None):
+
+    def save_input_data(self, converted_data: dict = None):
         """
         Dump the converted input data to a h5 file for later plotting in the web dashboard.
         """
@@ -569,10 +621,16 @@ class GlobalFitPlotter:
         parts = self.curr.general_info.global_fit_version.split("_", 1)
         if len(parts) == 2:
             run_type, run_id = parts
-            filepath = os.path.join(self.curr.general_info.submission_parent_folder, run_type, run_id, "input_data.h5")
-            
-        filepath = os.path.join(self.curr.general_info.submission_parent_folder, self.curr.general_info.global_fit_version, "input_data.h5")
-        
+            filepath = os.path.join(
+                self.curr.general_info.submission_parent_folder, run_type, run_id, "input_data.h5"
+            )
+
+        filepath = os.path.join(
+            self.curr.general_info.submission_parent_folder,
+            self.curr.general_info.global_fit_version,
+            "input_data.h5",
+        )
+
         with h5py.File(filepath, "w") as f:
             for k, v in converted_data.items():
                 f.create_dataset(k, data=v)
@@ -582,15 +640,16 @@ class GlobalFitPlotter:
 
 # ─── Metadata extractors ─────────────────────────────────────────────────────
 
+
 def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
     """Extract noise model configuration from the initialised sensitivity backend."""
     backend: XYZSensitivityBackend = gi.sensitivity_backend
 
     kwargs = backend.kwargs.copy()
 
-    domain_class = kwargs['settings'].__class__.__name__
-    domain_args = deepcopy(kwargs['settings'].args)
-    domain_kwargs = kwargs['settings'].kwargs.copy()
+    domain_class = kwargs["settings"].__class__.__name__
+    domain_args = deepcopy(kwargs["settings"].args)
+    domain_kwargs = kwargs["settings"].kwargs.copy()
     domain_kwargs["force_backend"] = "cpu"
 
     kwargs.pop("orbits")
@@ -602,26 +661,26 @@ def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
         "class": domain_class,
         "args": domain_args,
         "kwargs": domain_kwargs,
-    }  
+    }
 
-    sensitivity_metadata ={
+    sensitivity_metadata = {
         "class": type(backend).__name__,
         "kwargs": kwargs,
     }
 
-    return domain_metadata, sensitivity_metadata    
+    return domain_metadata, sensitivity_metadata
 
 
 def _extract_orbit_metadata(gi) -> dict:
     """Extract orbit configuration from the initialised orbits object."""
     orbits = gi.orbits
     kwargs = orbits.kwargs.copy()
-    kwargs['force_backend'] = "cpu"
+    kwargs["force_backend"] = "cpu"
     out = {
         "class": type(orbits).__name__,
         "kwargs": kwargs,
     }
-    
+
     return out
 
 
@@ -629,17 +688,21 @@ def _extract_orbit_metadata(gi) -> dict:
 @dataclasses.dataclass
 class MetadataBase:
     """
-Base class for metadata objects, providing common utilities.
+    Base class for metadata objects, providing common utilities.
     """
+
     def to_dict(self) -> dict:
         """Convert the dataclass to a dict, excluding private fields."""
-        return {k: getattr(self, k) for k in self.__dataclass_fields__.keys() if not k.startswith("_")}
+        return {
+            k: getattr(self, k) for k in self.__dataclass_fields__.keys() if not k.startswith("_")
+        }
 
     def to_json(self, filepath: str):
         """Save the metadata to a JSON file at the specified path."""
         with open(filepath, "w") as f:
             json.dump(self.to_dict(), f, indent=4)
         logger.info(f"Saved metadata to {filepath}")
+
 
 @dataclasses.dataclass
 class RunMetadata(MetadataBase):
@@ -663,7 +726,7 @@ class RunMetadata(MetadataBase):
     sensitivity_metadata: dict = dataclasses.field(default_factory=dict)
     preprocessing_metadata: dict = dataclasses.field(default_factory=dict)
     submission_parent_folder: str = ""
-    
+
     # auto-populated from curr or defaults
     submission_timestamp: str = ""
     global_fit_codename: str = "Erebor"
@@ -703,14 +766,16 @@ class RunMetadata(MetadataBase):
         for attr in cls.__dataclass_fields__.keys():
             if hasattr(gi, attr) and getattr(gi, attr, None) is not None:
                 auto[attr] = getattr(gi, attr)
-                
+
         merged = {**auto, **user_fields}
 
         # Derive noise_model from the backend class name when not explicitly set.
         merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
 
         instance = cls(**merged)
-        instance.submission_timestamp = datetime.now().isoformat(timespec='seconds') #stop at seconds for cleaner display
+        instance.submission_timestamp = datetime.now().isoformat(
+            timespec="seconds"
+        )  # stop at seconds for cleaner display
         instance.observation_period_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.observation_period_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.time_step = float(gi.dt)
@@ -719,7 +784,7 @@ class RunMetadata(MetadataBase):
         instance.tdi_channels = _infer_tdi_channels(curr)
         instance.searched_source_types_list = get_source_types(curr)
 
-        _ = instance.preprocess_kwargs.pop("plot_folder", None) # not relevant for the metadata
+        _ = instance.preprocess_kwargs.pop("plot_folder", None)  # not relevant for the metadata
 
         domain_metadata, sensitivity_metadata = _extract_sensitivity_metadata(gi)
         orbits_metadata = _extract_orbit_metadata(gi)
@@ -742,93 +807,110 @@ class RunMetadata(MetadataBase):
 
     def _to_l3c_dict(self) -> dict:
         """Return a dict matching the l2_output_metadata template keys exactly."""
-        
+
         d = self.to_dict()
-                
+
         d["global_fit_release_date"] = self.submission_timestamp
         if "noise_model_config_file_link" not in d:
             d["noise_model_config_file_link"] = ""
         d["list_of_detected_sources"] = ", ".join(self.found_source_types_list)
-        
+
         return d
 
-    
     @classmethod
     def from_submission(cls, submission: str | dict) -> "RunMetadata":
         """
         Construct RunMetadata from a submission matching the l2_output_metadata template keys.
-        
+
         Args:
             submission: Either a dict containing the metadata fields, or a path to a JSON file containing the metadata.
 
         Returns:
             RunMetadata instance with fields populated from the submission.
         """
-        
+
         if isinstance(submission, str):
             with open(submission, "r") as f:
                 d = json.load(f)
         else:
             d = submission
 
-        user_fields = {k: v for k, v in d.items() if k in cls.__dataclass_fields__ and not k.startswith("_")}
+        user_fields = {
+            k: v for k, v in d.items() if k in cls.__dataclass_fields__ and not k.startswith("_")
+        }
         # supply missing required fields if not present in the output JSON
         if "submission_parent_folder" not in user_fields:
             user_fields["submission_parent_folder"] = ""
-            
+
         instance = cls(**user_fields)
 
         return instance
-    
+
     def get_orbits(self, filename: str) -> Orbits:
         """
         Reconstruct the Orbits object from the stored metadata.
 
         Args:
             filename: str. Path to the the file containing the orbits information. For the Mojito datasets, any file would work.
-        
+
         Returns:
             Orbits object reconstructed from the stored metadata.
         """
-        
+
         if not self.orbits_metadata:
             raise ValueError("No orbits metadata found.")
-        
+
         orbits_class_name = self.orbits_metadata["class"]
         orbits_kwargs = self.orbits_metadata["kwargs"]
         orbits_class = getattr(importlib.import_module("lisatools.detector"), orbits_class_name)
 
-        logger.info(f"Reconstructing Orbits object of class '{orbits_class_name}' with kwargs: {orbits_kwargs}")
+        logger.info(
+            f"Reconstructing Orbits object of class '{orbits_class_name}' with kwargs: {orbits_kwargs}"
+        )
 
         orbits = orbits_class(filename=filename, **orbits_kwargs)
         orbits.configure(linear_interp_setup=True)
 
         return orbits
-    
+
     def get_domain_settings(self) -> DomainSettingsBase:
         """Reconstruct the DomainSettings object from the stored metadata."""
-        
+
         if not self.domain_metadata:
             raise ValueError("No domain settings metadata found.")
-        
+
         domain_class_name = self.domain_metadata["class"]
         domain_args = self.domain_metadata["args"]
         domain_kwargs = self.domain_metadata["kwargs"]
         domain_class = getattr(importlib.import_module("lisatools.domains"), domain_class_name)
 
-        logger.info(f"Reconstructing DomainSettings object of class '{domain_class_name}' with args: {domain_args} and kwargs: {domain_kwargs}")
+        logger.info(
+            f"Reconstructing DomainSettings object of class '{domain_class_name}' with args: {domain_args} and kwargs: {domain_kwargs}"
+        )
 
         return domain_class(*domain_args, **domain_kwargs)
-    
+
     def get_data_td_settings(self) -> TDSettings:
         """Reconstruct the data TDSettings object from the stored metadata."""
-        
-        logger.info(f"Reconstructing TDSettings object with t0: {self.obs_begin}, N: {self.num_times}, dt: {self.time_step}")
-        return TDSettings(t0=self.obs_begin, N = self.num_times, dt=self.time_step, force_backend="cpu")
-    
-    def get_sensitivity_matrix(self, orbits: Optional[Orbits] = None, filename: str = None, domain_settings: Optional[DomainSettingsBase] = None) -> XYZSensitivityBackend:
+
+        logger.info(
+            f"Reconstructing TDSettings object with t0: {self.observation_period_begin}, N: {self.number_of_time_samples}, dt: {self.time_step}"
+        )
+        return TDSettings(
+            t0=self.observation_period_begin,
+            N=self.number_of_time_samples,
+            dt=self.time_step,
+            force_backend="cpu",
+        )
+
+    def get_sensitivity_matrix(
+        self,
+        orbits: Optional[Orbits] = None,
+        filename: str = None,
+        domain_settings: Optional[DomainSettingsBase] = None,
+    ) -> XYZSensitivityBackend:
         """Reconstruct the sensitivity matrix from the stored metadata.
-        
+
         Args:
             orbits: Optional Orbits object. If not provided, it will be reconstructed from the stored metadata using `get_orbits()`.
             filename: Optional str. Path to the file containing the orbits information, needed if `orbits` is not provided.
@@ -838,19 +920,25 @@ class RunMetadata(MetadataBase):
             XYZSensitivityBackend object reconstructed from the stored metadata.
         """
         if orbits is None and filename is None:
-            raise ValueError("Must provide either an Orbits object or a filename to reconstruct it from.")
-        
+            raise ValueError(
+                "Must provide either an Orbits object or a filename to reconstruct it from."
+            )
+
         orbits = orbits or self.get_orbits(filename=filename)
         domain_settings = domain_settings or self.get_domain_settings()
 
         if not self.sensitivity_metadata:
             raise ValueError("No sensitivity metadata found.")
-        
+
         sensitivity_class_name = self.sensitivity_metadata["class"]
         sensitivity_kwargs = self.sensitivity_metadata["kwargs"]
-        sensitivity_class = getattr(importlib.import_module("lisatools.sensitivity"), sensitivity_class_name)
+        sensitivity_class = getattr(
+            importlib.import_module("lisatools.sensitivity"), sensitivity_class_name
+        )
 
-        logger.info(f"Reconstructing sensitivity backend of class '{sensitivity_class_name}' with kwargs: {sensitivity_kwargs} and domain settings: {domain_settings}")
+        logger.info(
+            f"Reconstructing sensitivity backend of class '{sensitivity_class_name}' with kwargs: {sensitivity_kwargs} and domain settings: {domain_settings}"
+        )
 
         if isinstance(domain_settings, FDSettings):
             N = self.number_of_time_samples
@@ -859,11 +947,18 @@ class RunMetadata(MetadataBase):
             N = domain_settings.get_nperseg(self.time_step)
 
         else:
-            raise NotImplementedError(f"Domain settings of type '{type(domain_settings).__name__}' not supported")
+            raise NotImplementedError(
+                f"Domain settings of type '{type(domain_settings).__name__}' not supported"
+            )
 
         window_values, _ = windowfun(self.window_type, N, alpha=self.window_alpha)
 
-        return sensitivity_class(orbits=orbits, settings=domain_settings, window_values=window_values, **sensitivity_kwargs)
+        return sensitivity_class(
+            orbits=orbits,
+            settings=domain_settings,
+            window_values=window_values,
+            **sensitivity_kwargs,
+        )
 
     def to_web_dict(self) -> dict:
         """Return a richer dict for web display, extending the L3C dict with run config."""
@@ -877,7 +972,9 @@ class RunMetadata(MetadataBase):
         parts = self.global_fit_version.split("_", 1)
         if len(parts) == 2:
             return parts[0]
-        logger.warning(f"Version string '{self.global_fit_version}' does not follow expected format 'type_id'. Using entire version string as run_type.")
+        logger.warning(
+            f"Version string '{self.global_fit_version}' does not follow expected format 'type_id'. Using entire version string as run_type."
+        )
         return self.global_fit_version
 
     @property
@@ -886,25 +983,31 @@ class RunMetadata(MetadataBase):
         parts = self.global_fit_version.split("_", 1)
         if len(parts) == 2:
             return parts[1]
-        logger.warning(f"Version string '{self.global_fit_version}' does not follow expected format 'type_id'. Using 'v0' as default run_id.")
+        logger.warning(
+            f"Version string '{self.global_fit_version}' does not follow expected format 'type_id'. Using 'v0' as default run_id."
+        )
         return "v0"
-    
+
     @property
     def submission_folder(self) -> str:
         """Return the full path to the submission folder for this run."""
-        
-        folder_name = f"{self.run_type}_{self.global_fit_codename}_{self.run_id}_{self.submission_timestamp}"
+
+        folder_name = (
+            f"{self.run_type}_{self.global_fit_codename}_{self.run_id}_{self.submission_timestamp}"
+        )
 
         return os.path.join(self.submission_parent_folder, folder_name)
-            
+
+
 @dataclasses.dataclass
 class SourceMetadata(MetadataBase):
     """Holds metadata for a detected source, to be included in the L3C submission manifest."""
+
     source_type: str
-    frequency_ranges: list[tuple[float, float]] # = dataclasses.field(default_factory=list)
+    frequency_ranges: list[tuple[float, float]]  # = dataclasses.field(default_factory=list)
     waveform_model: str
     waveform_model_code_link: str
-    waveform_model_config: dict # = dataclasses.field(default_factory=dict)
+    waveform_model_config: dict  # = dataclasses.field(default_factory=dict)
 
     detection_statistic: list[float] = dataclasses.field(default_factory=list)
     quality_flags: list[int] = dataclasses.field(default_factory=list)
@@ -913,20 +1016,29 @@ class SourceMetadata(MetadataBase):
     prior_model_code_link: str = ""
     prior_model_config: dict = dataclasses.field(default_factory=dict)
 
-    posterior_files: list[str] = dataclasses.field(default_factory=list) # links to the posterior samples for this source, to be included after the run
+    posterior_files: list[str] = dataclasses.field(
+        default_factory=list
+    )  # links to the posterior samples for this source, to be included after the run
     comment: str = ""
+
 
 @dataclasses.dataclass
 class StochasticMetadata(MetadataBase):
     """Holds metadata for the overall stochastic component of the data"""
-    
+
+    model_config: dict
+    frequency_ranges: list[tuple[float, float]]
+
     prior_model: str = ""
     prior_model_code_link: str = ""
     prior_model_config: dict = dataclasses.field(default_factory=dict)
 
-    posterior_files: list[str] = dataclasses.field(default_factory=list) # links to the posterior samples for this source, to be included after the run
+    posterior_files: list[str] = dataclasses.field(
+        default_factory=list
+    )  # links to the posterior samples for this source, to be included after the run
     comment: str = ""
-    
+
+
 class SubmissionWriter(BackendConsumer):
     """
     BackendConsumer subclass that produces L3C-compliant HDF5 submission files and JSON manifests.
@@ -934,15 +1046,20 @@ class SubmissionWriter(BackendConsumer):
     This class is responsible for applying the detection criteria to identify genuine sources,
     and for writing the final outputs in the required formats.
     """
-    def __init__(self, 
-                 curr: CurrentInfoGlobalFit = None,
-                 backend: HDFBackend | str = None,
-                 ess: int = 10000,
-                 detection_criteria: DetectionCriteria = None):
+
+    def __init__(
+        self,
+        curr: CurrentInfoGlobalFit = None,
+        backend: HDFBackend | str = None,
+        ess: int = 10000,
+        detection_criteria: DetectionCriteria = None,
+    ):
 
         super().__init__(curr=curr, backend=backend)
 
-        self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(ess=ess, return_inds=True) # todo missing prior and likelihood
+        self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(
+            ess=ess, return_inds=True
+        )  # todo missing prior and likelihood
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
         self.run_metadata = RunMetadata.from_curr(self.curr)
@@ -961,7 +1078,7 @@ class SubmissionWriter(BackendConsumer):
 
     def create_folders(self):
         """Create the submission folder and any necessary subfolders."""
-        
+
         os.makedirs(self.submission_folder, exist_ok=True)
         logger.info(f"Created submission folder at {self.submission_folder}")
 
@@ -980,25 +1097,31 @@ class SubmissionWriter(BackendConsumer):
 
     def save_posteriors(self):
         """Save the posterior samples for each detected source in the required format."""
-        
+        from tqdm import tqdm
+
         # todo need a way to have ids
-        for branch in self.branches:
+        for branch in tqdm(self.branches, desc="Saving posteriors"):
+            logger.info(f"Saving posteriors for branch {branch}")
+
             source_name = source_types_names[branch]
             samples = self.samples[branch]
             inds = self.inds[branch]
 
             parameter_info: list[ParameterInfo] = list(PARAMETER_INFO_REGISTRY[branch].values())
-            
+
             parameter_names = [p.l3c_name for p in parameter_info]
             latex_names = [p.latex_name for p in parameter_info]
             units = [p.unit for p in parameter_info]
 
             metadata: SourceMetadata | StochasticMetadata = self.curr.source_metadata[branch]
-            
+
             metadata.parameter_info = parameter_names
             metadata.parameter_units = units
-            
-            metadata.detection_statistic = self.detection_criteria.detection_statistics(samples, inds).tolist()
+
+            if isinstance(metadata, SourceMetadata):
+                metadata.detection_statistic = self.detection_criteria.detection_statistics(
+                    samples, inds
+                ).tolist()
 
             posterior_files = []
 
@@ -1007,11 +1130,14 @@ class SubmissionWriter(BackendConsumer):
             num_leaves = samples.shape[1]
             for i in range(0, num_leaves, MAX_SOURCES_PER_BATCH):
                 leaves = slice(i, min(i + MAX_SOURCES_PER_BATCH, num_leaves))
-        
+
                 samples_here = samples[:, leaves, :]
                 num_sources_here = samples_here.shape[1]
+                logger.debug(f"Number of sources in this batch: {num_sources_here}")
 
-                samples_dict = {name: samples_here[..., i] for i, name in enumerate(parameter_names)}
+                samples_dict = {
+                    name: samples_here[..., i] for i, name in enumerate(parameter_names)
+                }
                 samples_dict["log_prior"] = self.log_prior
                 samples_dict["log_likelihood"] = self.log_likelihood
 
@@ -1019,16 +1145,42 @@ class SubmissionWriter(BackendConsumer):
                 for key, func in transform.items():
                     if key in samples_dict:
                         samples_dict[key] = func(samples_dict[key])
-                        logger.info(f"Applied output correction for parameter '{key}' in branch '{branch}'")
+                        logger.info(
+                            f"Applied output correction for parameter '{key}' in branch '{branch}'"
+                        )
 
                 # save to h5 file
-                filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriors_{num_sources_here}_{i}_{self.run_metadata.submission_timestamp}.h5"  
+                filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriors_{num_sources_here}_{i}_{self.run_metadata.submission_timestamp}.h5"
                 filepath = os.path.join(self.posterior_folder[branch], filename)
                 with h5py.File(filepath, "w") as f:
-                    for param, values in samples_dict.items():
-                        f.create_dataset(param, data=values)
-               
-                logger.info(f"Saved posterior samples for branch '{branch}', leaves {leaves} to {filepath}")
+                    for leaf in range(num_sources_here):
+
+                        param_data = []
+                        param_names = []
+                        for name, values in samples_dict.items():
+                            _value = (
+                                values[:, leaf] if len(values.shape) == 2 else values
+                            )  # log_prior and log_likelihood are (n_samples,) while parameters are (n_samples, nleaves)
+                            param_data.append(_value)
+                            param_names.append(name)
+
+                        dtype = [(name, "f8") for name in param_names]
+                        structured_array = np.zeros(len(param_data[0]), dtype=dtype)
+
+                        for name, data in zip(param_names, param_data):
+                            structured_array[name] = data
+
+                        f.create_dataset(f"posterior_{i + leaf}", data=structured_array)
+
+                        # g = f.create_group(f"posterior_{i + leaf}")
+                        # for param, values in samples_dict.items():
+                        #     print(values.shape)
+                        #     _value = values[:, leaf] if len(values.shape) == 2 else values # log_prior and log_likelihood are (n_samples,) while parameters are (n_samples, nleaves)
+                        #     g.create_dataset(param, data=_value)
+
+                logger.info(
+                    f"Saved posterior samples for branch '{branch}', leaves {leaves} to {filepath}"
+                )
                 posterior_files.append(filepath)
 
             metadata.posterior_files = posterior_files
@@ -1036,8 +1188,12 @@ class SubmissionWriter(BackendConsumer):
             # now save the metadata for this source
             metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_{self.run_metadata.submission_timestamp}"
 
-            metadata_h5_filepath = os.path.join(self.run_metadata.submission_folder, f"{metadata_base_filename}.h5")
-            metadata_json_filepath = os.path.join(self.run_metadata.submission_folder, f"{metadata_base_filename}.json")
+            metadata_h5_filepath = os.path.join(
+                self.run_metadata.submission_folder, f"{metadata_base_filename}.h5"
+            )
+            metadata_json_filepath = os.path.join(
+                self.run_metadata.submission_folder, f"{metadata_base_filename}.json"
+            )
 
             with h5py.File(metadata_h5_filepath, "w") as f:
                 # save all metadata fields as attributes
@@ -1050,7 +1206,9 @@ class SubmissionWriter(BackendConsumer):
                     elif isinstance(value, dict):
                         f.attrs[field.name] = json.dumps(value)  # save dicts as JSON strings
                     else:
-                        logger.warning(f"Unsupported metadata field type for '{field.name}': {type(value)}. Skipping this field.")
+                        logger.warning(
+                            f"Unsupported metadata field type for '{field.name}': {type(value)}. Skipping this field."
+                        )
 
             logger.info(f"Saved metadata for branch '{branch}' to {metadata_h5_filepath}")
 
@@ -1066,9 +1224,10 @@ class SubmissionWriter(BackendConsumer):
         run_metadata_filepath = os.path.join(self.submission_folder, "global_metadata.json")
         self.run_metadata.to_json(run_metadata_filepath)
         logger.info(f"Saved overall run metadata to {run_metadata_filepath}")
-        
+
 
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
+
 
 class DetectionCriteria(ABC):
     """
@@ -1118,7 +1277,7 @@ class OccupancyDetectionCriteria(DetectionCriteria):
         return inds.mean(axis=0)
 
     def detect(self, samples: np.ndarray, inds: np.ndarray) -> np.ndarray:
-        
+
         if not (0 <= self.min_occupancy <= 1):
             raise ValueError(f"min_occupancy must be in [0, 1], got {self.min_occupancy}")
         occupancy = self.detection_statistics(samples, inds)

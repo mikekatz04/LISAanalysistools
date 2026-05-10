@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections import namedtuple
 import os
+from collections import namedtuple
 from typing import Optional
 
 import h5py
@@ -90,7 +90,7 @@ class Settings:
     dt: float | None = None
     initialize_kwargs: dict | None = None
     transform: Optional[TransformContainer] = None
-    priors: Optional[typing.Dict[str,ProbDistContainer]] = None
+    priors: Optional[typing.Dict[str, ProbDistContainer]] = None
     periodic: Optional[dict] = None
     nleaves_max: Optional[int] = None
     nleaves_min: Optional[int] = None
@@ -167,8 +167,7 @@ class GeneralSetup(Setup, GeneralSettings):
         if not os.path.exists(self.artifacts_file_dir):
             os.makedirs(self.artifacts_file_dir)
         self.logger = init_logger(
-            filename="general_setup.log", level=level, name=name,
-            log_dir=self.artifacts_file_dir
+            filename="general_setup.log", level=level, name=name, log_dir=self.artifacts_file_dir
         )
 
         self.init_setup()
@@ -184,7 +183,7 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def data_t0(self) -> float:
         return self.data_td_settings.t0
-    
+
     @property
     def data_dt(self) -> float:
         return self.data_td_settings.dt
@@ -195,7 +194,7 @@ class GeneralSetup(Setup, GeneralSettings):
         if self.base_file_name is None:
             raise ValueError("Must provide base_file_name settings for GeneralSetup.")
 
-        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu" 
+        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu"
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
         if not os.path.exists(self.artifacts_file_dir):
@@ -246,9 +245,11 @@ class GeneralSetup(Setup, GeneralSettings):
         times, _ = data_processor.process(**self.preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
-        self.data_td_settings = TDSettings(*data_processor.td_signal.settings.args, force_backend=self.force_backend)
+        self.data_td_settings = TDSettings(
+            *data_processor.td_signal.settings.args, force_backend=self.force_backend
+        )
         self.Tobs = Nt * dt
-        self.catalogue = getattr(data_processor, 'catalogue', {})
+        self.catalogue = getattr(data_processor, "catalogue", {})
 
         if self.basis_domain == "stft":
             from ..domains import get_stft_settings
@@ -264,14 +265,26 @@ class GeneralSetup(Setup, GeneralSettings):
                 force_backend=self.force_backend,
             )
             nperseg = domain_settings.get_nperseg(dt)
-            
+
             self.window_alpha = self.window_taper_duration / (nperseg * dt)
             window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
 
             plot_kwargs_list = [
-                dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
-                dict(channel=0, plot_type="fd",   time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
-                dict(channel=0, plot_type="td",   freq_bin=0, filename=self.artifacts_file_dir + "td_data.png"),
+                dict(
+                    channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"
+                ),
+                dict(
+                    channel=0,
+                    plot_type="fd",
+                    time_bin=0,
+                    filename=self.artifacts_file_dir + "fd_data.png",
+                ),
+                dict(
+                    channel=0,
+                    plot_type="td",
+                    freq_bin=0,
+                    filename=self.artifacts_file_dir + "td_data.png",
+                ),
             ]
 
         elif self.basis_domain == "fd":
@@ -298,13 +311,14 @@ class GeneralSetup(Setup, GeneralSettings):
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, return_orbits=True
         )
-        
-        if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
-            self.input_data_residual_array.data_length = len(domain_settings.f_arr) #! use acs.data_shape[0]
+
+        if self.basis_domain == "fd":  # TODO check if this is also necessary for STFT or TD
+            self.input_data_residual_array.data_length = len(
+                domain_settings.f_arr
+            )  #! use acs.data_shape[0]
             self.input_data_residual_array._store_time_and_frequency_information(
-                df = domain_settings.df,
-                f_arr = domain_settings.f_arr
-            ) 
+                df=domain_settings.df, f_arr=domain_settings.f_arr
+            )
 
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
@@ -315,14 +329,12 @@ class GeneralSetup(Setup, GeneralSettings):
         if orbits is not None:
             self.orbits = orbits
             orbits_kwargs = orbits.kwargs
-           
+
             if self.force_backend == self.gpu_backend:
                 orbits_kwargs["force_backend"] = self.gpu_backend
                 self.logger.debug(f"Initializing GPU orbits with kwargs: {orbits_kwargs}")
-                  
-                self.gpu_orbits = data_processor.orbits_class(
-                    *orbits.args, **orbits_kwargs
-                )
+
+                self.gpu_orbits = data_processor.orbits_class(*orbits.args, **orbits_kwargs)
 
         self.init_orbit_information()
 
@@ -334,7 +346,6 @@ class GeneralSetup(Setup, GeneralSettings):
             window_values=window if self.normalize_window else None,
             **self.sensitivity_init_kwargs,
         )
-
 
         # ---- Galactic grid — initialized once, never recomputed during inference ----
         # Only the spectral envelope params (Amp, alpha, f_1, f_knee, f_2)
@@ -361,8 +372,7 @@ class GeneralSetup(Setup, GeneralSettings):
         for key in ("R_d", "z_d", "alpha0", "beta0"):
             if key not in gkw:
                 raise ValueError(
-                    f"galactic_grid_kwargs must contain '{key}'. "
-                    f"Got keys: {list(gkw.keys())}"
+                    f"galactic_grid_kwargs must contain '{key}'. " f"Got keys: {list(gkw.keys())}"
                 )
 
         self.logger.info(
@@ -373,18 +383,16 @@ class GeneralSetup(Setup, GeneralSettings):
         # Build host-side quadrature geometry
         setup = self.sensitivity_backend.backend.GalacticGridSetup()
         setup.compute(
-            N_lambda=gkw.get('N_lambda', 90),
-            N_beta=gkw.get('N_beta', 60),
+            N_lambda=gkw.get("N_lambda", 90),
+            N_beta=gkw.get("N_beta", 60),
         )
 
-        self.logger.info(
-            f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}"
-        )
+        self.logger.info(f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}")
 
         # Get segment centre times from domain settings.
         # For STFT: domain_settings.t_arr contains the segment centres.
         # For FD: there is only one time bin; pass a length-1 array at t=0.
-        if hasattr(domain_settings, 't_arr'):
+        if hasattr(domain_settings, "t_arr"):
             t_arr = domain_settings.t_arr
         else:
             t_arr = np.array([0.0])
@@ -402,8 +410,8 @@ class GeneralSetup(Setup, GeneralSettings):
         # C++ XYZSensitivityMatrix so get_noise_covariance can access it.
         self.sensitivity_backend.initialize_galactic_grid(
             times=xp.asarray(t_arr),
-            R_d=float(gkw['R_d']),
-            z_d=float(gkw['z_d']),
+            R_d=float(gkw["R_d"]),
+            z_d=float(gkw["z_d"]),
             R_vals_quad=xp.asarray(setup.R_vals_quad),
             z_vals_quad=xp.asarray(setup.z_vals_quad),
             quad_weights=xp.asarray(setup.quad_weights),
@@ -412,8 +420,8 @@ class GeneralSetup(Setup, GeneralSettings):
             beta_ecl=xp.asarray(setup.beta_ecl),
             N_quad=setup.N_quad,
             N_sky=setup.N_sky,
-            alpha0=float(gkw['alpha0']),
-            beta0=float(gkw['beta0']),
+            alpha0=float(gkw["alpha0"]),
+            beta0=float(gkw["beta0"]),
         )
 
         self.logger.info("Galactic grid initialized and attached to sensitivity backend.")
@@ -425,7 +433,9 @@ class GlobalFitSettings:
     general_info: GeneralSetup
     rank_info: RankInfo
     setup_function: typing.Callable[(...), None]
-    source_metadata: typing.Dict[str, dataclasses.dataclass] = dataclasses.field(default_factory=dict)
+    source_metadata: typing.Dict[str, dataclasses.dataclass] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclasses.dataclass

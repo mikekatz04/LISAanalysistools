@@ -161,7 +161,7 @@ class L1DataLoader:
                     ds = group[key][:]
                 else:
                     ds = group[key][binary_id]
-                    
+
                 if ds.dtype.kind == "O":  # object type (e.g. variable-length strings)
                     val = ds
                     if isinstance(val, bytes):
@@ -175,7 +175,7 @@ class L1DataLoader:
 
     def _open(self, file_path: str) -> MojitoL1File:
         raise NotImplementedError("_open method should be implemented in subclasses.")
-    
+
     @property
     def individual_timeseries(self) -> dict | None:
         """
@@ -203,7 +203,9 @@ class L1DataLoader:
         orbits: Orbits = None
 
         if self.store_individual_timeseries:
-            _individual_timeseries = {}  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
+            _individual_timeseries = (
+                {}
+            )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
 
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
@@ -211,8 +213,8 @@ class L1DataLoader:
 
             if orbits is None:
                 orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
-                orbits.configure(linear_interp_setup=True)         
-                logger.info(f"Initialized orbits from NOISE file.")       
+                orbits.configure(linear_interp_setup=True)
+                logger.info(f"Initialized orbits from NOISE file.")
 
             with self._open(file_path) as f:
                 xyz = f.tdis.xyz_doppler[:]
@@ -230,12 +232,14 @@ class L1DataLoader:
                 logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
 
             if self.store_individual_timeseries:
-                noise_covariance = f.noise_estimates.xyz[:] / (f.laser_frequency ** 2)
+                noise_covariance = f.noise_estimates.xyz[:] / (f.laser_frequency**2)
                 noise_frequencies = f.noise_estimates.freq_sampling.f()
                 noise_times = f.noise_estimates.time_sampling.t()
-                
-                _individual_timeseries["NOISE"] = xyz.T.copy()  # store the noise timeseries separately if needed
-                _individual_timeseries["PSD_MATRIX"] = noise_covariance 
+
+                _individual_timeseries["NOISE"] = (
+                    xyz.T.copy()
+                )  # store the noise timeseries separately if needed
+                _individual_timeseries["PSD_MATRIX"] = noise_covariance
                 _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
                 _individual_timeseries["PSD_TIMES"] = noise_times
 
@@ -246,7 +250,7 @@ class L1DataLoader:
             if source_type in ["GB", "VGB"]:
                 ids = [0]  # only one file for GB/VGB
             else:
-                ids = self.source_ids.get(source_type, [])            
+                ids = self.source_ids.get(source_type, [])
 
             if not isinstance(ids, list):
                 ids = [ids]
@@ -288,7 +292,9 @@ class L1DataLoader:
                         tdi_fs = _tdi_fs
 
                         if orbits is None:
-                            orbits: Orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                            orbits: Orbits = self.orbits_class(
+                                file_path, **(self.orbits_kwargs or {})
+                            )
                             orbits.configure(linear_interp_setup=True)
                             logger.info(f"Initialized orbits from {source_type} file.")
 
@@ -301,20 +307,24 @@ class L1DataLoader:
                         ).all(), "Time arrays do not match between files."
 
                     if self.store_individual_timeseries:
-                        _individual_timeseries[f"{source_type}_{source_id}"] = _xyz.T.copy()  # store individual timeseries for this source
+                        _individual_timeseries[f"{source_type}_{source_id}"] = (
+                            _xyz.T.copy()
+                        )  # store individual timeseries for this source
 
         xyz = xyz.T  # Transpose to have shape (n_channels, n_times)
         assert (
             xyz.shape[1] == tdi_times.shape[0]
         ), "Data time dimension does not match time array length."
-        
+
         assert orbits is not None, "Orbits were not initialized from any file."
 
         if self.store_individual_timeseries:
-            self._individual_timeseries = _individual_timeseries  # store the individual timeseries for potential further use
+            self._individual_timeseries = (
+                _individual_timeseries  # store the individual timeseries for potential further use
+            )
 
         return tdi_times, tdi_fs, xyz, orbits
-    
+
     def dump_individual_timeseries(self, file_path: str, delete_after_dump: bool = False):
         """
         Dump the individual timeseries for each source type and ID to a .h5 file for debugging or further analysis.
@@ -350,6 +360,7 @@ class L1DataLoader:
                         subgrp.create_dataset(param_key, data=param_value)
         if self.verbose:
             logger.info(f"Dumped catalogue parameters to {file_path}")
+
 
 class SangriaDataLoader:
     """
@@ -962,10 +973,13 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         processed_times, processed_data = super().process(*args, **kwargs)
 
         if hasattr(self, "individual_timeseries") and self.individual_timeseries is not None:
-            self.individual_timeseries["TIMES"] = processed_times  # store the processed times as well
+            self.individual_timeseries["TIMES"] = (
+                processed_times  # store the processed times as well
+            )
             self.individual_timeseries["COMBINED"] = processed_data
-        
+
         return processed_times, processed_data
+
 
 class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
     """
@@ -989,4 +1003,6 @@ class SangriaProcessingStep(SangriaDataLoader, BaseProcessingStep):
         BaseProcessingStep.__init__(self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots)
 
         self.orbits = None  # no orbital information available in Sangria files
-        self.individual_timeseries = {}  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis
+        self.individual_timeseries = (
+            {}
+        )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis

@@ -27,12 +27,12 @@ from ..analysiscontainer import AnalysisContainer, AnalysisContainerArray
 from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
-from .stock.erebor import Setup
 from .moves import GFCombineMove, GlobalFitMove
+from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter
 from .recipe import Recipe
 from .state import GFState
+from .stock.erebor import Setup
 from .utils import BasicResidualacsLikelihood
-from .postprocessing import SubmissionWriter, RunMetadata, GlobalFitPlotter
 
 
 class CurrentInfoGlobalFit:
@@ -149,7 +149,7 @@ class CurrentInfoGlobalFit:
     def source_info(self):
         """Source-specific configuration information."""
         return self.current_info.source_info
-    
+
     @property
     def source_metadata(self) -> dict:
         """Metadata information for all sources."""
@@ -170,7 +170,7 @@ class CurrentInfoGlobalFit:
         return {
             name: setup.injection
             for name, setup in self.source_info.items()
-            if hasattr(setup, 'injection') and setup.injection is not None
+            if hasattr(setup, "injection") and setup.injection is not None
         }
 
 
@@ -223,7 +223,9 @@ class GlobalFit:
         name = "GlobalFit"
         artifacts_dir = self.curr.general_info.artifacts_file_dir
         setup_root_file_handler(artifacts_dir, level=level)
-        self.logger = init_logger(filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir)
+        self.logger = init_logger(
+            filename="global_fit.log", level=level, name=name, log_dir=artifacts_dir
+        )
 
         if self.rank == self.main_rank:
             dump_settings(self.curr.settings_dict, artifacts_dir)
@@ -365,11 +367,19 @@ class GlobalFit:
             # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
-                psd_params = self.curr.source_info["psd"].transform_fn.both_transforms(psd_params) if self.curr.source_info["psd"].transform_fn is not None else psd_params
+                psd_params = (
+                    self.curr.source_info["psd"].transform_fn.both_transforms(psd_params)
+                    if self.curr.source_info["psd"].transform_fn is not None
+                    else psd_params
+                )
                 # need to generalize for other stochastic functions
                 if "galfor" in state.branches_coords.keys():
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
-                    galfor_params = self.curr.source_info["galfor"].transform_fn.both_transforms(galfor_params) if self.curr.source_info["galfor"].transform_fn is not None else galfor_params
+                    galfor_params = (
+                        self.curr.source_info["galfor"].transform_fn.both_transforms(galfor_params)
+                        if self.curr.source_info["galfor"].transform_fn is not None
+                        else galfor_params
+                    )
                 else:
                     galfor_params = None
                 sens_here = self.curr.general_info.sensitivity_backend(
@@ -387,7 +397,7 @@ class GlobalFit:
 
         gpus = general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
-        
+
         for name, source_info in self.curr.source_info.items():
             if name not in self.curr.engine_info.branch_names:
                 continue
@@ -463,7 +473,10 @@ class GlobalFit:
                     for key, value in self.curr.source_info[name]["priors"].items():
                         priors[key] = value
 
-                    if "periodic" in self.curr.source_info[name] and self.curr.source_info[name]["periodic"] is not None:
+                    if (
+                        "periodic" in self.curr.source_info[name]
+                        and self.curr.source_info[name]["periodic"] is not None
+                    ):
                         for key, value in self.curr.source_info[name]["periodic"].items():
                             periodic[key] = value
 
@@ -701,9 +714,7 @@ class GlobalFit:
                 stopping_fn=self.recipe,
                 stopping_iterations=1,
             )
-            _tmp_move.temperature_control.swaps_accepted = np.zeros(
-                (self.ntemps - 1), dtype=int
-            )
+            _tmp_move.temperature_control.swaps_accepted = np.zeros((self.ntemps - 1), dtype=int)
 
             self.recipe.backend = backend
             backend.add_recipe(self.recipe)
