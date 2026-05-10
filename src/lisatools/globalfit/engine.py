@@ -236,14 +236,14 @@ class GeneralSetup(Setup, GeneralSettings):
         )
 
         if self.preprocess_kwargs is None:
-            preprocess_kwargs = default_preprocess_kwargs
+            self.preprocess_kwargs = default_preprocess_kwargs
         else:
-            preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
+            self.preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
 
-        for key, value in preprocess_kwargs.items():
+        for key, value in self.preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
 
-        times, _ = data_processor.process(**preprocess_kwargs)
+        times, _ = data_processor.process(**self.preprocess_kwargs)
         dt = data_processor.td_signal.settings.dt
         Nt = len(times)
         self.data_td_settings = TDSettings(*data_processor.td_signal.settings.args, force_backend=self.force_backend)
