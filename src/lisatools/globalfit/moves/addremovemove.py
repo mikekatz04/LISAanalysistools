@@ -366,9 +366,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            logger.debug(f"prev_logl: {prev_logl[0]}.")
-
-            if np.any(prev_logl < -1e9):
+            if np.any(prev_logl < -1e11):
                 breakpoint()
 
             prev_logp = (
