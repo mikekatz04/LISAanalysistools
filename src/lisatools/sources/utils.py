@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 from eryn.utils import TransformContainer
@@ -11,8 +11,14 @@ from ..detector import LISAModel
 from ..diagnostic import snr as snr_func
 from ..sensitivity import A1TDISens, Sensitivity
 from ..utils.constants import *
+from ..utils.utility import get_array_module
 from .waveformbase import AETTDIWaveform, SNRWaveform
 
+if TYPE_CHECKING:
+    try:
+        import cupy as cp
+    except (ImportError, ModuleNotFoundError):
+        import numpy as cp
 
 class CalculationController:
     """Wrapper class to controll investigative computations.
@@ -484,10 +490,10 @@ def return_float(x: np.ndarray | float) -> float:
 
 
 def icrs_to_ecliptic(
-    ra: float | np.ndarray, dec: float | np.ndarray, psi: Optional[float | np.ndarray] = None
+    ra: float | np.ndarray | cp.ndarray, dec: float | np.ndarray | cp.ndarray, psi: Optional[float | np.ndarray | cp.ndarray] = None
 ) -> (
-    Tuple[float | np.ndarray, float | np.ndarray]
-    | Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
+    Tuple[float | np.ndarray | cp.ndarray, float | np.ndarray | cp.ndarray]
+    | Tuple[float | np.ndarray | cp.ndarray, float | np.ndarray | cp.ndarray, float | np.ndarray | cp.ndarray]
 ):
     """
     Convert ICRS angles (ra, dec, optional psi) to ecliptic coordinates
@@ -523,40 +529,42 @@ def icrs_to_ecliptic(
     )
     out_fun = return_float if scalar_output else return_input
 
-    ra = np.asarray(ra, dtype=float)
-    dec = np.asarray(dec, dtype=float)
+    xp = np if scalar_output else get_array_module(ra)
 
-    cos_dec = np.cos(dec)
-    sin_dec = np.sin(dec)
-    cos_ra = np.cos(ra)
-    sin_ra = np.sin(ra)
-    cos_eps = np.cos(EPS_RAD)
-    sin_eps = np.sin(EPS_RAD)
+    ra = xp.asarray(ra, dtype=float)
+    dec = xp.asarray(dec, dtype=float)
+
+    cos_dec = xp.cos(dec)
+    sin_dec = xp.sin(dec)
+    cos_ra = xp.cos(ra)
+    sin_ra = xp.sin(ra)
+    cos_eps = xp.cos(EPS_RAD)
+    sin_eps = xp.sin(EPS_RAD)
 
     sin_beta = sin_dec * cos_eps - cos_dec * sin_eps * sin_ra
-    beta = np.arcsin(sin_beta)
+    beta = xp.arcsin(sin_beta)
 
-    cos_beta = np.cos(beta)
-    eps_cos_beta = np.finfo(float).eps
-    safe_cos_beta = np.where(
-        np.abs(cos_beta) < eps_cos_beta,
-        np.copysign(eps_cos_beta, cos_beta),
+    cos_beta = xp.cos(beta)
+    eps_cos_beta = xp.finfo(float).eps
+    safe_cos_beta = xp.where(
+        xp.abs(cos_beta) < eps_cos_beta,
+        xp.copysign(eps_cos_beta, cos_beta),
         cos_beta,
     )
     inv_cos_beta = 1.0 / safe_cos_beta
 
     cos_lambda = cos_dec * cos_ra * inv_cos_beta
     sin_lambda = (sin_dec * sin_eps + cos_dec * cos_eps * sin_ra) * inv_cos_beta
-    lambd = np.arctan2(sin_lambda, cos_lambda) % (2 * np.pi)
+    lambd = xp.arctan2(sin_lambda, cos_lambda) % (2 * xp.pi)
 
     if psi is not None:
-        psi = np.asarray(psi, dtype=float)
+        psi = xp.asarray(psi, dtype=float)
 
         cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * cos_dec)
         sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
 
-        deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-        psi_ecliptic = (psi - deltapsi) % np.pi
+        deltapsi = xp.arctan2(sindeltapsi, cosdeltapsi)
+        psi_ecliptic = (psi - deltapsi) % xp.pi
 
         return out_fun(lambd), out_fun(beta), out_fun(psi_ecliptic)
 
@@ -564,12 +572,12 @@ def icrs_to_ecliptic(
 
 
 def ecliptic_to_icrs(
-    lambd: float | np.ndarray,
-    beta: float | np.ndarray,
-    psi_ecliptic: Optional[float | np.ndarray] = None,
+    lambd: float | np.ndarray | cp.ndarray,
+    beta: float | np.ndarray | cp.ndarray,
+    psi_ecliptic: Optional[float | np.ndarray | cp.ndarray] = None,
 ) -> (
-    Tuple[float | np.ndarray, float | np.ndarray]
-    | Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
+    Tuple[float | np.ndarray |cp.ndarray, float | np.ndarray |cp.ndarray]
+    | Tuple[float | np.ndarray |cp.ndarray, float | np.ndarray |cp.ndarray, float | np.ndarray |cp.ndarray]
 ):
     """
     Convert ecliptic coordinates (lambda, beta, optional psi_ecliptic) to ICRS angles
@@ -606,39 +614,40 @@ def ecliptic_to_icrs(
         and (psi_ecliptic is None or isinstance(psi_ecliptic, float))
     )
     out_fun = return_float if scalar_output else return_input
+    xp = np if scalar_output else get_array_module(lambd)
 
-    lambd = np.asarray(lambd, dtype=float)
-    beta = np.asarray(beta, dtype=float)
+    lambd = xp.asarray(lambd, dtype=float)
+    beta = xp.asarray(beta, dtype=float)
 
-    cos_beta = np.cos(beta)
-    sin_beta = np.sin(beta)
-    cos_lambda = np.cos(lambd)
-    sin_lambda = np.sin(lambd)
-    cos_eps = np.cos(EPS_RAD)
-    sin_eps = np.sin(EPS_RAD)
+    cos_beta = xp.cos(beta)
+    sin_beta = xp.sin(beta)
+    cos_lambda = xp.cos(lambd)
+    sin_lambda = xp.sin(lambd)
+    cos_eps = xp.cos(EPS_RAD)
+    sin_eps = xp.sin(EPS_RAD)
 
     sin_dec = sin_beta * cos_eps + cos_beta * sin_eps * sin_lambda
-    dec = np.arcsin(sin_dec)
-    cos_dec = np.cos(dec)
-    eps_float = np.finfo(float).eps
-    safe_cos_dec = np.where(
-        np.abs(cos_dec) < eps_float,
-        np.copysign(eps_float, cos_dec),
+    dec = xp.arcsin(sin_dec)
+    cos_dec = xp.cos(dec)
+    eps_float = xp.finfo(float).eps
+    safe_cos_dec = xp.where(
+        xp.abs(cos_dec) < eps_float,
+        xp.copysign(eps_float, cos_dec),
         cos_dec,
     )
     inv_cos_dec = 1.0 / safe_cos_dec
 
     cos_ra = cos_beta * cos_lambda * inv_cos_dec
     sin_ra = (-sin_beta * sin_eps + cos_beta * cos_eps * sin_lambda) * inv_cos_dec
-    ra = np.arctan2(sin_ra, cos_ra) % (2 * np.pi)
+    ra = xp.arctan2(sin_ra, cos_ra) % (2 * xp.pi)
 
     if psi_ecliptic is not None:
-        psi_ecliptic = np.asarray(psi_ecliptic, dtype=float)
+        psi_ecliptic = xp.asarray(psi_ecliptic, dtype=float)
 
-        cos_beta = np.cos(beta)
-        safe_cos_beta = np.where(
-            np.abs(cos_beta) < eps_float,
-            np.copysign(eps_float, cos_beta),
+        cos_beta = xp.cos(beta)
+        safe_cos_beta = xp.where(
+            xp.abs(cos_beta) < eps_float,
+            xp.copysign(eps_float, cos_beta),
             cos_beta,
         )
         inv_cos_beta = 1.0 / safe_cos_beta
@@ -646,8 +655,8 @@ def ecliptic_to_icrs(
         cosdeltapsi = inv_cos_beta * (sin_eps * sin_dec * sin_ra + cos_eps * cos_dec)
         sindeltapsi = -inv_cos_beta * sin_eps * cos_ra
 
-        deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-        psi = (psi_ecliptic + deltapsi) % np.pi
+        deltapsi = xp.arctan2(sindeltapsi, cosdeltapsi)
+        psi = (psi_ecliptic + deltapsi) % xp.pi
 
         return out_fun(ra), out_fun(dec), out_fun(psi)
 

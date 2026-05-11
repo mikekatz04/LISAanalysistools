@@ -88,6 +88,7 @@ class GBSetup(Setup, GBSettings):
                 r"$f_0$": f_ms_to_s,
                 r"$\cos\iota$": np.arccos,
                 r"$\sin\beta$": np.arcsin,
+                (r"$\lambda$", r"$\sin\beta$", r"$\psi$"): ecliptic_to_icrs
             }
 
             output_basis = [
@@ -629,6 +630,7 @@ class PSDSettings(Settings):
     transform_fn: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None 
     nknots: Optional[int] = None
+    num_prop_repeats: int = 50
 
 
 class PSDSetup(Setup):
