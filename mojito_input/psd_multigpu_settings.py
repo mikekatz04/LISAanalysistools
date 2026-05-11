@@ -142,6 +142,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         ndim=2,
         injection=injection,
         log_dir=general_set.file_store_dir,
+        num_prop_repeats=50,
     )
 
     psd_metadata = StochasticMetadata(

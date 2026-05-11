@@ -112,8 +112,8 @@ def setup_recipe(
 
     #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
-    # spread = np.array([1e-4, 1e-5, 1e-14, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4])
-    # setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
+    spread = np.array([1e-4, 1e-5, 1e-14, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4])
+    setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
 
     
     #* ================================= BUILD MOVES ==================================
@@ -183,6 +183,11 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["duration"]
 
     initialize_kwargs = dict(force_backend=general_set.gpu_backend)
+
+    ntemps = general_set.ntemps
+    # geometric spacing 
+    betas = 1 / 1.2 ** np.arange(ntemps)
+    betas[-1] = 0.0001
     
     gb_settings = GBSettings(
         A_lims=A_lims,
@@ -210,6 +215,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         nleaves_max=300,
         nleaves_min=0,
         ndim=8,
+        betas=betas,
         log_dir=general_set.file_store_dir
         # Betas, Other_tempering_kwargs, Branch_state, Branch_backend, Log_dir (handled later!)
     )
@@ -264,15 +270,22 @@ def get_general_erebor_settings() -> GeneralSetup:
     start_freq, end_freq = [5e-5, 0.025] # [0.0138032364, 0.0220867393] # 
 
     # head_dir = "/sps/lisaf/crondeel/Erebor_dev/_data_sets/mojito/"
-    head_dir = "/workspace/rrondeel/erebor/outputs/testing/"
-    data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
-    base_file_name = "vgb_psd"
-    file_store_dir = head_dir 
+    # head_dir = "/workspace/rrondeel/erebor/outputs/testing/"
+    # data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
+    # base_file_name = "vgb_psd"
+    # file_store_dir = head_dir 
+
+    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
+    base_file_name = 'vgb_0' #"test_mbh_18_with_covariance"
+    file_store_dir = head_dir + "mojito_output/"
     
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
+    import jax
+    jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
     nwalkers = 8
-    ntemps = 24
+    ntemps = 10
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
