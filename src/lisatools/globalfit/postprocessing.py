@@ -31,6 +31,7 @@ from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
 
 if TYPE_CHECKING:
+    from ..analysiscontainer import AnalysisContainerArray, AnalysisContainer
     from ..detector import Orbits
     from ..domains import DomainSettingsBase, TDSettings
     from ..sensitivity import XYZSensitivityBackend
@@ -797,6 +798,7 @@ class RunMetadata(MetadataBase):
         instance.sensitivity_metadata = sensitivity_metadata
         instance.orbits_metadata = orbits_metadata
         instance.preprocessing_metadata = preprocess_kwargs
+        instance.input_data_link = os.path.join(instance.submission_folder, "input_data.h5")
 
         instance.found_source_types_list = get_source_types(curr)  # todo: for now we assume all searched sources are found; use detection results to populate this
 
@@ -1002,6 +1004,12 @@ class RunMetadata(MetadataBase):
         folder_name = (
             f"{self.run_type}_{self.global_fit_codename}_{self.run_id}_{self.submission_timestamp}"
         )
+
+        if not os.path.exists(os.path.join(self.submission_parent_folder, folder_name)):
+            logger.warning(
+                f"Submission folder '{folder_name}' does not exist in parent folder '{self.submission_parent_folder}'. Creating it."
+            )
+            os.makedirs(os.path.join(self.submission_parent_folder, folder_name))
 
         return os.path.join(self.submission_parent_folder, folder_name)
 
@@ -1231,6 +1239,29 @@ class SubmissionWriter(BackendConsumer):
         run_metadata_filepath = os.path.join(self.submission_folder, "global_metadata.json")
         self.run_metadata.to_json(run_metadata_filepath)
         logger.info(f"Saved overall run metadata to {run_metadata_filepath}")
+
+
+# === Save residuals ====
+
+def save_residuals(acs: AnalysisContainerArray, filepath: str, is_residuals: bool = True):
+    """
+    Save residuals from the analysis container array to a file.
+    
+    Args:
+        acs: AnalysisContainerArray containing the residuals to save.
+        filepath: Path to the file where the residuals should be saved.
+        is_residuals: Whether the data being saved are residuals (True) or the input data (False).
+    """
+
+    num = len(acs) if is_residuals else 1
+    label = "residual" if is_residuals else "input_data"
+
+    with h5py.File(filepath, "w") as f:
+        for i, ac in enumerate(acs.acs[:num]):
+            residual_array = ac.data_res_arr.data_res_arr.arr #shape: (num_channels, *(basis_domain_shape))
+            if hasattr(residual_array, 'get'):
+                residual_array = residual_array.get()  # convert from GPU array if necessary. 
+            f.create_dataset(f"{label}_{i}", data=residual_array)
 
 
 # ─── DetectionCriteria ────────────────────────────────────────────────────────
