@@ -81,7 +81,7 @@ def setup_recipe(
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     Tmax: float = 1.0e6
-    permute_every: int = 30
+    permute_every: int = 40
 
     mbh_info = curr.source_info["mbh"]
     psd_info = curr.source_info["psd"]
@@ -181,7 +181,7 @@ def setup_recipe(
 
     #* =========== GB ============== *#
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
-    spread = np.array([1e-9, 1e-11, 1e-17, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
+    spread = np.array([1e-10, 1e-11, 1e-17, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
     setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
 
     _, gb_pe_moves = build_gb_moves(
@@ -239,7 +239,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         ndim=2,
         injection=injection,
         log_dir=general_set.file_store_dir,
-        num_prop_repeats=50,
+        num_prop_repeats=70,
     )
 
     psd_metadata = StochasticMetadata(
@@ -256,7 +256,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceMetadata]:
 
     waveform_model = "GBGPU"
-    waveform_model_code_link = "https://github.com/Erebor-L2D/GBGPU/tree/cd1l-run0"
+    waveform_model_code_link = "https://github.com/Erebor-L2D/GBGPU/tree/cdl1-run0"
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
 
     delta_safe = 1e-9
@@ -346,7 +346,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         ndim=8,
         betas=betas,
         log_dir=general_set.file_store_dir,
-        group_proposal_kwargs=dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=70)
+        group_proposal_kwargs=dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=40)
     )
 
     gb_setup = GBSetup(gb_settings)
@@ -375,7 +375,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
 def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     waveform_model = "PhenomTHMTDIWaveform"
-    waveform_model_code_link = "https://github.com/Erebor-L2D"
+    waveform_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sources/bbh/waveform.py#L130://github.com/Erebor-L2D"
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
     frequency_ranges = [(general_set.start_freq, general_set.end_freq)]
 
@@ -432,7 +432,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=3,
         nleaves_min=3,
         ndim=11,
-        num_prop_repeats=30,
+        num_prop_repeats=10,
         log_dir=general_set.file_store_dir,
         betas=betas,
     )
@@ -459,16 +459,18 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "CDL1run1_v1"
+    global_fit_version = "CDL1run1_v2"
     global_fit_contact = "ereborl2d@googlegroups.com"
-    global_fit_code_link = "https://github.com/Erebor-L2D"
+    global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
-    global_fit_noise_model_code_link = "https://github.com/Erebor-L2D" #todo populate repositories
-    comment = "making a shorter run to have something for tomorrow"
+    global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
+    comment = "new test run for mbhb+vgb+noise after fixing the parameter conversions."
 
     submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+
+    num_iterations = 300
 
     source_ids = [18, 5, 16]
 
@@ -549,6 +551,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
     general_settings = GeneralSettings(
+        num_iterations=num_iterations,
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
