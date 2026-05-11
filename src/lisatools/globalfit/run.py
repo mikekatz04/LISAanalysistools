@@ -17,6 +17,7 @@ except (ModuleNotFoundError, ImportError):
         "Please install cupy and a compatible CUDA version for GPU acceleration."
     )
 
+from logging import getLogger
 import typing
 
 from eryn.state import BranchSupplemental
@@ -28,13 +29,14 @@ from .engine import EngineInfo, GeneralSetup, GlobalFitEngine, GlobalFitSettings
 from .hdfbackend import GFHDFBackend, save_to_backend_asynchronously_and_plot
 from .loginfo import dump_settings, init_logger, setup_root_file_handler
 from .moves import GFCombineMove, GlobalFitMove
-from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter
+from .postprocessing import GlobalFitPlotter, RunMetadata, SubmissionWriter, save_residuals
 from .recipe import Recipe
 from .state import GFState
 from .stock.erebor import Setup
 from .utils import BasicResidualacsLikelihood
 
 
+logger = getLogger(__name__)
 class CurrentInfoGlobalFit:
     """Manages the current state and configuration information for a global fit run.
 
@@ -677,12 +679,15 @@ class GlobalFit:
             _tmp_move = StretchMove(live_dangerously=True)
             # permute False is there for the PSD sampling for now
 
+            truths = self.curr.get_truths_dict()
+            _ = truths.pop("gb", None)
+
             plot_container = PlotContainer(
-                plots=["base", "tempering"],
+                plots=["base", "tempering", "rj", "advanced"],
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.4,
-                truths=self.curr.get_truths_dict(),
+                truths=truths,
             )
 
             sampler_mix = GlobalFitEngine(
@@ -730,13 +735,17 @@ class GlobalFit:
 
             meta = RunMetadata.from_curr(self.curr)
 
+            save_residuals(acs, meta.input_data_link, is_residuals=False)
+            logger.info("Input data saved.")
+
             sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
 
-            # breakpoint()
-
             submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
-
             submission_writer.write_submission()
+
+            save_residuals(acs, os.path.join(meta.submission_folder, "residuals.h5"), is_residuals=True)
+
+            logger.info("Residuals saved.")
 
             self.comm.send({"finish_run": True}, dest=self.results_rank)
 
