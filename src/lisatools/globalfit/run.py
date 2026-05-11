@@ -730,7 +730,7 @@ class GlobalFit:
 
             meta = RunMetadata.from_curr(self.curr)
 
-            sampler_mix.run_mcmc(state, 5, thin_by=1, progress=True, store=True)
+            sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
 
             # breakpoint()
 

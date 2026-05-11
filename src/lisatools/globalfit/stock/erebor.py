@@ -51,9 +51,10 @@ class GBSettings(Settings):
     iter_count_per_resample: Optional[int] = 10
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
-    t0: Optional[float] = 0.0
-    tdi_setup: Optional[str] = "XYZ" # other options are AET and AE. 
-    use_tdi2: Optional[bool] = True
+    waveform_kwargs: dict = dataclasses.field(default_factory=dict)
+    # t0: Optional[float] = 0.0
+    # tdi_setup: Optional[str] = "XYZ" # other options are AET and AE. 
+    # use_tdi2: Optional[bool] = True
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -138,15 +139,15 @@ class GBSetup(Setup, GBSettings):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
-        self.waveform_kwargs = dict(
-            dt=self.dt,
-            T=self.Tobs,
-            use_c_implementation=True,
-            oversample=self.oversample,
-            start_freq_ind=self.start_freq_ind,
-            tdi_channel_setup=self.tdi_setup,
-            tdi2=self.use_tdi2
-        )
+        # self.waveform_kwargs = dict(
+        #     dt=self.dt,
+        #     T=self.Tobs,
+        #     use_c_implementation=True,
+        #     oversample=self.oversample,
+        #     start_freq_ind=self.start_freq_ind,
+        #     tdi_channel_setup=self.tdi_setup,
+        #     tdi2=self.use_tdi2
+        # )
 
         if self.group_proposal_kwargs is None:
             self.group_proposal_kwargs: typing.Dict[str, Any] = dict(

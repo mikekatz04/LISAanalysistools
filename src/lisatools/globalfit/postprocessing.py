@@ -224,12 +224,17 @@ class BackendConsumer:
     def transform_containers(self) -> dict:
         """Return the TransformContainer for each branch, if present."""
 
-        _transforms = {
-            name: self.curr.source_info[name].transform
-            for name in self.branches
-            if hasattr(self.curr.source_info[name], "transform")
-        }
-        return _transforms
+        if not hasattr(self, '_transforms'):
+            self._transforms = {}
+            for name in self.branches:
+                if hasattr(self.curr.source_info[name], "transform"):
+                        self._transforms[name] = deepcopy(self.curr.source_info[name].transform)
+                        self._transforms[name].fill_dict = None
+                else:
+                    logger.warning(f"No TransformContainer found for branch '{name}'.")
+                    self._transforms[name] = None
+
+        return self._transforms
 
     def store_cold_chains(self):
         """Extract cold chains and inds for all branches and cache them."""
@@ -738,7 +743,6 @@ class RunMetadata(MetadataBase):
     number_of_time_samples: int = 0
     window_type: str = "tukey"
     window_alpha: float = 0.1
-    preprocess_kwargs: dict = dataclasses.field(default_factory=dict)
     effective_observation_duration: str = ""
     tdi_channels: List[str] = dataclasses.field(default_factory=list)
     searched_source_types_list: List[str] = dataclasses.field(default_factory=list)
@@ -784,14 +788,17 @@ class RunMetadata(MetadataBase):
         instance.tdi_channels = _infer_tdi_channels(curr)
         instance.searched_source_types_list = get_source_types(curr)
 
-        _ = instance.preprocess_kwargs.pop("plot_folder", None)  # not relevant for the metadata
+        preprocess_kwargs = getattr(gi, "preprocess_kwargs", {})
+        _ = preprocess_kwargs.pop("plot_folder", None)  # not relevant for the metadata
 
         domain_metadata, sensitivity_metadata = _extract_sensitivity_metadata(gi)
         orbits_metadata = _extract_orbit_metadata(gi)
         instance.domain_metadata = domain_metadata
         instance.sensitivity_metadata = sensitivity_metadata
         instance.orbits_metadata = orbits_metadata
-        instance.preprocessing_metadata = getattr(gi, "preprocess_kwargs", {})
+        instance.preprocessing_metadata = preprocess_kwargs
+
+        instance.found_source_types_list = get_source_types(curr)  # todo: for now we assume all searched sources are found; use detection results to populate this
 
         instance._web_extras = {
             "Tobs_s": float(gi.Tobs),

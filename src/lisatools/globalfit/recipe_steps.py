@@ -580,13 +580,14 @@ def build_gb_moves(
     from gbgpu.gbgpu import GBGPU
     import gbgpu 
     from ..detector import L1Orbits
-    _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
-    _gb_backend.set_cuda_device(gpus[0])
-    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.orbits, t0=gb_info.t0)
+    # _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
+    # _gb_backend.set_cuda_device(gpus[0])
     cp.cuda.runtime.setDevice(gpus[0])
+    gb = GBGPU(**gb_info.initialize_kwargs)
+    # cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
 
-    logger.debug(f"GBGPU initialized at t0 = {gb_info.t0}")
+    logger.debug(f"GBGPU initialized at t0 = {gb_info.initialize_kwargs['t0']}")
     
     #* Make sure that priors are evaluated on gpus
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
@@ -596,16 +597,16 @@ def build_gb_moves(
     
     nleaves_max_gb = state.branches["gb"].shape[-2]
 
-    waveform_kwargs = GBWaveformDict(
-        dt=general_info.dt,
-        T=1/getattr(acs.settings, "df"),
-        use_c_implementation=True,
-        start_freq_ind=data_start_freq_ind,
-        tdi_channel_setup=gb_info.tdi_setup,
-        tdi2=gb_info.use_tdi2, 
-        window=general_info.window_type,
-        window_alpha=general_info.window_alpha
-    )
+    # waveform_kwargs = GBWaveformDict(
+    #     dt=general_info.dt,
+    #     T=1/getattr(acs.settings, "df"),
+    #     use_c_implementation=True,
+    #     start_freq_ind=data_start_freq_ind,
+    #     tdi_channel_setup=gb_info.tdi_setup,
+    #     tdi2=gb_info.use_tdi2, 
+    #     window=general_info.window_type,
+    #     window_alpha=general_info.window_alpha
+    # )
 
     #* Get band information
     band_edges = gb_info.band_edges
@@ -656,7 +657,7 @@ def build_gb_moves(
             factors=factors,
             data_splits=acs.gpu_map,
             N=N_vals,
-            **waveform_kwargs,
+            **gb_info.waveform_kwargs,
         )
         max_diff_templates = cp.abs(template_in[0]-acs.linear_data_arr[0]).max()
         del template_in
@@ -708,7 +709,7 @@ def build_gb_moves(
         effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
     )
     gb_move_kwargs = dict(
-        waveform_kwargs=waveform_kwargs,
+        waveform_kwargs=gb_info.waveform_kwargs,
         parameter_transforms=gb_info.transform,
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],

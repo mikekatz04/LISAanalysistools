@@ -7,6 +7,7 @@ from copy import deepcopy
 from inspect import Attribute
 from types import ModuleType
 from typing import Optional, Union, Tuple
+from tqdm import tqdm
 
 import numpy as np
 import numpy
@@ -1923,7 +1924,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # that way the recalculation technically only changes newly found sources
                 have_not_run_in_model = True
                 previous_inds = band_sorter.inds.copy()
-                for move_i in range(num_proposals_here):
+                for move_i in tqdm(range(self.num_repeat_proposals), desc="gb update"):
                     is_rj_now = bool(np.random.choice([0, 1], p=[0.97, 0.03]))
 
                     if band_sorter.inds[source_map_now].sum() == 0:
