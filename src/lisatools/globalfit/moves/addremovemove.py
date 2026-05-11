@@ -367,7 +367,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
 
             if np.any(prev_logl < -1e11):
-                breakpoint()
+                logger.warning(f"Very low log likelihood encountered in propose: {prev_logl.min()}. This could be a sign of numerical issues.")
 
             prev_logp = (
                 self.priors[self.branch_name]
@@ -564,7 +564,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         free_gpu_memory()
         if np.any(current_ll < -1e9):
             # keep a safe guard here
-            breakpoint()
+            logger.warning(f"Very low log likelihood encountered after propose: {current_ll.min()}. This could be a sign of numerical issues.")
+            #breakpoint()
         # TODO: add check with last used logl
 
         current_lp = (
