@@ -31,6 +31,7 @@ from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
 
 if TYPE_CHECKING:
+    from eryn.utils.transform import TransformContainer
     from ..analysiscontainer import AnalysisContainerArray, AnalysisContainer
     from ..detector import Orbits
     from ..domains import DomainSettingsBase, TDSettings
@@ -54,6 +55,7 @@ _GB_PARAM_INFO: Dict[str, ParameterInfo] = {
     "A": ParameterInfo("amplitude", r"$A$", "dimensionless"),
     "f0": ParameterInfo("frequency", r"$f_0\,[\mathrm{Hz}]$", "Hz"),
     "fdot": ParameterInfo("frequency_dot", r"$\dot{f}\,[\mathrm{Hz\,s^{-1}}]$", "Hz/s"),
+    "fddot": ParameterInfo("frequency_double_dot", r"$\ddot{f}\,[\mathrm{Hz\,s^{-2}}]$", "Hz/s^2"),
     "phi0": ParameterInfo("initial_phase", r"$\phi_0\,[\mathrm{rad}]$", "rad"),
     "iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
     "psi": ParameterInfo("polarization", r"$\psi\,[\mathrm{rad}]$", "rad"),
@@ -85,20 +87,12 @@ _NOISE_PARAM_INFO: Dict[str, ParameterInfo] = {
         "m s^{-2} Hz^{-1/2}",
     ),
 }
-# todo extend to splines
-"""
-r'$\log_{10} A_{\rm gal}$',
-    r'$\log_{10} f_{\rm knee}$',
-    r'$\alpha_{\rm gal}$',
-    r'$\log_{10} f_1$',
-    r'$\log_{10} f_2$',
-"""
 
 _GALFOR_PARAM_INFO: Dict[str, ParameterInfo] = {
     "A_gal": ParameterInfo("galactic_amplitude", r"$A_{\mathrm{gal}}$", "dimensionless"),
-    "f_knee": ParameterInfo("galactic_knee_frequency", r"$f_{\mathrm{knee}}\,[\mathrm{Hz}]$", "Hz"),
     "alpha_gal": ParameterInfo("galactic_spectral_index", r"$\alpha_{\mathrm{gal}}$", "dimensionless"),
     "f_1": ParameterInfo("galactic_freq_1", r"$f_1\,[\mathrm{Hz}]$", "Hz"),
+    "f_knee": ParameterInfo("galactic_knee_frequency", r"$f_{\mathrm{knee}}\,[\mathrm{Hz}]$", "Hz"),
     "f_2": ParameterInfo("galactic_freq_2", r"$f_2\,[\mathrm{Hz}]$", "Hz"),
 }
 
@@ -120,6 +114,13 @@ _OUTPUT_CORRECTIONS_REGISTRY: Dict[str, Dict[str, Callable]] = {
     "mbh": {"distance": lambda x: x * 1e-3},
     "psd": {},
     "galfor": {},
+}
+
+_REMOVED_PARAMS_REGISTRY: Dict[str, List[str]] = {
+    "gb": ["frequency_double_dot"],
+    "mbh": [],
+    "psd": [],
+    "galfor": [],
 }
 
 source_types_names = dict(
@@ -230,23 +231,23 @@ class BackendConsumer:
         return self.backend.branch_names
 
     @property
-    def ndims(self) -> dict:
+    def ndims(self) -> dict[str, int]:
         return self.backend.ndims
 
     @property
-    def nleaves_max(self) -> dict:
+    def nleaves_max(self) -> dict[str, int]:
         return self.backend.nleaves_max
 
     @property
-    def transform_containers(self) -> dict:
+    def transform_containers(self) -> dict[str, TransformContainer | None]:
         """Return the TransformContainer for each branch, if present."""
 
         if not hasattr(self, '_transforms'):
             self._transforms = {}
             for name in self.branches:
-                if hasattr(self.curr.source_info[name], "transform"):
+                if hasattr(self.curr.source_info[name], "transform") and self.curr.source_info[name].transform is not None:
                         self._transforms[name] = deepcopy(self.curr.source_info[name].transform)
-                        self._transforms[name].fill_dict = None
+                        #self._transforms[name].fill_dict = None
                 else:
                     logger.warning(f"No TransformContainer found for branch '{name}'.")
                     self._transforms[name] = None
@@ -437,12 +438,12 @@ class BackendConsumer:
                     f"No TransformContainer found for branch '{branch}'. Returning input samples."
                 )
                 return samples
-            return self.transform_containers[branch].transform_base_parameters(samples)
+            return self.transform_containers[branch].both_transforms(samples)
 
         transformed = {}
         for b, s in samples.items():
             if b in self.transform_containers and self.transform_containers[b] is not None:
-                transformed[b] = self.transform_containers[b].transform_base_parameters(s)
+                transformed[b] = self.transform_containers[b].both_transforms(s)
             else:
                 logger.warning(
                     f"No TransformContainer found for branch '{b}'. Returning input samples for this branch."
@@ -1190,6 +1191,12 @@ class SubmissionWriter(BackendConsumer):
                         param_data = []
                         param_names = []
                         for name, values in samples_dict.items():
+                            if name in _REMOVED_PARAMS_REGISTRY[branch]:
+                                logger.info(
+                                    f"Parameter '{name}' is marked for removal in branch '{branch}'. Skipping this parameter in the output."
+                                )
+                                continue
+
                             _value = (
                                 values[:, leaf] if len(values.shape) == 2 else values
                             )  # log_prior and log_likelihood are (n_samples,) while parameters are (n_samples, nleaves)
