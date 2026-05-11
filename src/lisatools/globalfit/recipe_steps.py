@@ -537,8 +537,6 @@ def build_gb_moves(
     priors: dict,
     state: GFState,
     *,
-    num_repeats: int = 60,
-    permute_every: int = 50,
     Tmax: float = 1e6,
 ) -> typing.Tuple[typing.List[GBSpecialBase], typing.List[GBSpecialBase]]:
     """Build GB search and PE moves.
