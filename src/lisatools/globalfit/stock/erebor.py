@@ -627,7 +627,7 @@ class PSDSettings(Settings):
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 4
-    transform_fn: Optional[TransformContainer] = None
+    transform: Optional[TransformContainer] = None
     injection: Optional[np.ndarray] = None 
     nknots: Optional[int] = None
     num_prop_repeats: int = 50
@@ -691,6 +691,7 @@ class PSDSetup(Setup):
 @dataclasses.dataclass
 class GalForSettings(Settings):
     galfor_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
+    transform: Optional[TransformContainer] = None
     nleaves_max: int = 1
     nleaves_min: int = 1
     ndim: int = 5

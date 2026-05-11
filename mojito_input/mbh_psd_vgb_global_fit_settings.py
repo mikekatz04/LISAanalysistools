@@ -96,7 +96,7 @@ def setup_recipe(
         num_repeats=psd_info.num_prop_repeats,
         permute_every=permute_every,
         live_dangerously=True,
-        psd_transform_fn=psd_info.transform_fn,
+        psd_transform_fn=psd_info.transform,
         temperature_control=temperature_control,
         use_gpu=True,
         run_async=True,
@@ -301,7 +301,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
     ntemps = general_set.ntemps
     # geometric spacing 
     betas = 1 / 1.2 ** np.arange(ntemps)
-    betas[-1] = 0.0001
+    # betas[-1] = 0.0001
 
     data_start_freq_ind = int(input_data_arr.settings.f_arr[0] / input_data_arr.settings.df)
 
@@ -311,7 +311,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         use_c_implementation=True,
         start_freq_ind=data_start_freq_ind,
         tdi_channel_setup="XYZ",
-        use_tdi2=True,
+        tdi2=True,
         oversample=oversample,
         window=general_set.window_type,
         window_alpha=general_set.window_alpha
@@ -341,12 +341,12 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=300,
+        nleaves_max=100,
         nleaves_min=0,
         ndim=8,
         betas=betas,
         log_dir=general_set.file_store_dir,
-        # Betas, Other_tempering_kwargs, Branch_state, Branch_backend, Log_dir (handled later!)
+        group_proposal_kwargs=dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=70)
     )
 
     gb_setup = GBSetup(gb_settings)
@@ -429,13 +429,12 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         dt=general_set.dt,
         initialize_kwargs=waveform_init_kwargs,
         waveform_kwargs=waveform_runtime_kwargs,
-        nleaves_max=1,
-        nleaves_min=1,
+        nleaves_max=3,
+        nleaves_min=3,
         ndim=11,
-        num_prop_repeats=50,
+        num_prop_repeats=30,
         log_dir=general_set.file_store_dir,
         betas=betas,
-        inner_moves=[StretchMove(),]
     )
 
     wf_metadata = waveform_init_kwargs.copy()
@@ -460,22 +459,23 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "run0_v10"
+    global_fit_version = "CDL1run1_v1"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D" #todo populate repositories
+    comment = "making a shorter run to have something for tomorrow"
 
     submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    source_ids = [18]
+    source_ids = [18, 5, 16]
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 2.9e-2
+    end_freq = 2.5e-2
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
@@ -490,8 +490,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 8
-    ntemps = 16
+    nwalkers = 30
+    ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
@@ -578,6 +578,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         noise_model=global_fit_noise_model,
         noise_model_code_link=global_fit_noise_model_code_link,
         submission_parent_folder=submission_folder,
+        comment=comment
     )
 
     general_setup = GeneralSetup(general_settings)

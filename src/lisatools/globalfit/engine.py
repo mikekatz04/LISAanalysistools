@@ -104,6 +104,7 @@ class Settings:
 
 @dataclasses.dataclass
 class GeneralSettings(Settings):
+    num_iterations: int | None = 500
     Tobs: float | None = None
     dt: float | None = None
     file_store_dir: str | None = None

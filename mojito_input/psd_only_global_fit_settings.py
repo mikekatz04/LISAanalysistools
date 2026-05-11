@@ -268,6 +268,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         beta0=2.384498,   # Initial constellation rotation β0 [rad]
         N_lambda=90, # sky grid longitude points
         N_beta=60,   # sky grid latitude points
+    )
 
 
     general_settings = GeneralSettings(
@@ -346,7 +347,6 @@ def get_global_fit_settings(copy_settings_file=False):
     curr_info = CurrentInfoGlobalFit(global_settings)
 
     return curr_info
-
 
 if __name__ == "__main__":
     settings = get_global_fit_settings()

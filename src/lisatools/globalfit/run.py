@@ -370,16 +370,16 @@ class GlobalFit:
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
                 psd_params = (
-                    self.curr.source_info["psd"].transform_fn.both_transforms(psd_params)
-                    if self.curr.source_info["psd"].transform_fn is not None
+                    self.curr.source_info["psd"].transform.both_transforms(psd_params)
+                    if self.curr.source_info["psd"].transform is not None
                     else psd_params
                 )
                 # need to generalize for other stochastic functions
                 if "galfor" in state.branches_coords.keys():
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
                     galfor_params = (
-                        self.curr.source_info["galfor"].transform_fn.both_transforms(galfor_params)
-                        if self.curr.source_info["galfor"].transform_fn is not None
+                        self.curr.source_info["galfor"].transform.both_transforms(galfor_params)
+                        if self.curr.source_info["galfor"].transform is not None
                         else galfor_params
                     )
                 else:
@@ -683,7 +683,7 @@ class GlobalFit:
             _ = truths.pop("gb", None)
 
             plot_container = PlotContainer(
-                plots=["base", "tempering", "rj", "advanced"],
+                plots=["base", "tempering"],
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.4,
@@ -738,7 +738,7 @@ class GlobalFit:
             save_residuals(acs, meta.input_data_link, is_residuals=False)
             logger.info("Input data saved.")
 
-            sampler_mix.run_mcmc(state, 500, thin_by=1, progress=True, store=True)
+            sampler_mix.run_mcmc(state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
 
             submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
             submission_writer.write_submission()

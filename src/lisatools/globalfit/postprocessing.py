@@ -55,10 +55,10 @@ _GB_PARAM_INFO: Dict[str, ParameterInfo] = {
     "f0": ParameterInfo("frequency", r"$f_0\,[\mathrm{Hz}]$", "Hz"),
     "fdot": ParameterInfo("frequency_dot", r"$\dot{f}\,[\mathrm{Hz\,s^{-1}}]$", "Hz/s"),
     "phi0": ParameterInfo("initial_phase", r"$\phi_0\,[\mathrm{rad}]$", "rad"),
-    "cos_iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
+    "iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
     "psi": ParameterInfo("polarization", r"$\psi\,[\mathrm{rad}]$", "rad"),
-    "lam": ParameterInfo("ecliptic_longitude", r"$\lambda\,[\mathrm{rad}]$", "rad"),
-    "sin_beta": ParameterInfo("ecliptic_latitude", r"$\beta\,[\mathrm{rad}]$", "rad"),
+    "ra": ParameterInfo("right_ascension", r"$\alpha\,[\mathrm{rad}]$", "rad"),
+    "dec": ParameterInfo("declination", r"$\delta\,[\mathrm{rad}]$", "rad"),
 }
 
 _MBH_PARAM_INFO: Dict[str, ParameterInfo] = {
@@ -86,6 +86,21 @@ _NOISE_PARAM_INFO: Dict[str, ParameterInfo] = {
     ),
 }
 # todo extend to splines
+"""
+r'$\log_{10} A_{\rm gal}$',
+    r'$\log_{10} f_{\rm knee}$',
+    r'$\alpha_{\rm gal}$',
+    r'$\log_{10} f_1$',
+    r'$\log_{10} f_2$',
+"""
+
+_GALFOR_PARAM_INFO: Dict[str, ParameterInfo] = {
+    "A_gal": ParameterInfo("galactic_amplitude", r"$A_{\mathrm{gal}}$", "dimensionless"),
+    "f_knee": ParameterInfo("galactic_knee_frequency", r"$f_{\mathrm{knee}}\,[\mathrm{Hz}]$", "Hz"),
+    "alpha_gal": ParameterInfo("galactic_spectral_index", r"$\alpha_{\mathrm{gal}}$", "dimensionless"),
+    "f_1": ParameterInfo("galactic_freq_1", r"$f_1\,[\mathrm{Hz}]$", "Hz"),
+    "f_2": ParameterInfo("galactic_freq_2", r"$f_2\,[\mathrm{Hz}]$", "Hz"),
+}
 
 # todo add galactic foreground
 
@@ -93,6 +108,7 @@ PARAMETER_INFO_REGISTRY: Dict[str, Dict[str, ParameterInfo]] = {
     "gb": _GB_PARAM_INFO,
     "mbh": _MBH_PARAM_INFO,
     "psd": _NOISE_PARAM_INFO,
+    "galfor": _GALFOR_PARAM_INFO,
     # add entries for other source types as needed
 }
 
@@ -662,6 +678,7 @@ def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
     kwargs.pop("settings")
     kwargs.pop("window_values")
     kwargs["force_backend"] = "cpu"
+    kwargs.pop("galactic_grid") if "galactic_grid" in kwargs else None
 
     domain_metadata = {
         "class": domain_class,
