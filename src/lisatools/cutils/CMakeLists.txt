@@ -114,7 +114,7 @@ if(LISATOOLS_WITH_CPU)
 
   # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp  PSD.hpp domains.hpp)
+                                        Detector.hpp  PSD.hpp domains.hpp galactic_response.hpp)
 
   pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
@@ -134,7 +134,7 @@ if(LISATOOLS_WITH_GPU)
 
   # Add L1Detector.hpp to header files
   target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp PSD.hpp domains.hpp)
+                                        Detector.hpp PSD.hpp domains.hpp galactic_response.hpp)
 
   pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
