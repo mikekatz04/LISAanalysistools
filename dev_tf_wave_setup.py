@@ -258,7 +258,6 @@ for i in range(0, num)[:1]:
         t_ref,
         1. / dt,
         num_bin,
-        n_params=9,
         tdi_config=tdi_config,
         orbits=orbits,
         tdi_chan="XYZ",
@@ -270,7 +269,7 @@ for i in range(0, num)[:1]:
         t_ref,
         1. / dt,
         num_bin,
-        n_params=9,
+
         tdi_config=tdi_config,
         orbits=orbits,
         tdi_chan="XYZ",
@@ -284,7 +283,6 @@ for i in range(0, num)[:1]:
         t_ref,
         1. / dt,
         num_bin,
-        n_params=9,
         tdi_config=tdi_config,
         orbits=orbits,
         tdi_chan="XYZ",
@@ -297,7 +295,6 @@ for i in range(0, num)[:1]:
         t_ref,
         1. / dt,
         num_bin,
-        n_params=9,
         tdi_config=tdi_config,
         orbits=orbits,
         tdi_chan="XYZ",
@@ -310,7 +307,6 @@ for i in range(0, num)[:1]:
         t_ref,
         1. / dt,
         num_bin,
-        n_params=9,
         tdi_config=tdi_config,
         orbits=orbits,
         tdi_chan="XYZ",
@@ -443,8 +439,8 @@ for i in range(0, num)[:1]:
     gb_fill_wave[m_layers[keep_m], xp.repeat(n_arr[:, None], m_layers.shape[-1], axis=-1)[keep_m]] = wdm_coeffs[keep_m]
     # gb_fill_wave[:] = xp.roll(gb_fill_wave, 2, axis=-1)
 
-    gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
-    # gb_fill_wave = WDMSignal(template_fill.reshape((3,) + wdm_settings.basis_shape), wdm_settings)
+    # gb_fill_wave = WDMSignal(np.asarray([gb_fill_wave, gb_fill_wave]), wdm_settings)
+    gb_fill_wave = WDMSignal(template_fill.reshape((3,) + wdm_settings.basis_shape), wdm_settings)
     
     # fdot_deriv = (phase_up - 2 * phase_mid + phase_up) / (deriv_delta_t * deriv_delta_t) / (2 * np.pi)
     plt.close()
@@ -488,9 +484,9 @@ for i in range(0, num)[:1]:
     # fig.savefig(f"f0_{f0_check:.2e}_fdot_{fdot0_check:.2e}_phi0_{phi0:.2g}_main.png")
     # ax1.set_xlim((int(wdm_settings.Nt / 2) - 10) * wdm_settings.layer_dt, (int(wdm_settings.Nt / 2) + 10) * wdm_settings.layer_dt)
     # fig.savefig(f"f0_{f0_check:.2e}_fdot_{fdot0_check:.2e}_phi0_{phi0:.2g}zoom_center.png")
-    # plt.show()
+    plt.show()
     plt.close()
-    # breakpoint()
+    breakpoint()
 
     # breakpoint()
     # exit()
@@ -508,8 +504,8 @@ for i in range(0, num)[:1]:
 
 from copy import deepcopy
 
-min_freq = 0.1e-3 # (int(f0[0] / wdm_set.layer_df) - 5) * wdm_set.layer_df
-max_freq = 30e-3 # (int(f0[0] / wdm_set.layer_df) + 5) * wdm_set.layer_df
+min_freq = None  # 0.1e-3 # (int(f0[0] / wdm_set.layer_df) - 5) * wdm_set.layer_df
+max_freq = None  # 30e-3 # (int(f0[0] / wdm_set.layer_df) + 5) * wdm_set.layer_df
 t_min =  None  # 20 * _wdm_settings.layer_dt
 t_max = None  # (_wdm_settings.Nt - 20) * _wdm_settings.layer_dt
 
@@ -550,10 +546,10 @@ gb_comps.d_d = analysis_wdm_xyz.inner_product()
 
 template_ip_wdm_xyz = analysis_wdm_xyz.template_inner_product(wdm_dat_here)
 template_ll_wdm_xyz = analysis_wdm_xyz.template_likelihood(wdm_dat_here)
-breakpoint()
+
 check_ll_2 = gb_comps.get_ll_wdm(params, wdm_holder_new, data_index=None, noise_index=None)
 assert np.allclose(template_ll_wdm_xyz, check_ll_2)
-
+breakpoint()
 print("\n\n\nSTARTING TIMING")
 num_repeats = 100
 params_repeat = np.repeat(params, num_repeats, axis=0)

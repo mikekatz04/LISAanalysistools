@@ -285,7 +285,7 @@ class TDSignal(DomainBase, TDSettings):
 
         df = 1 / (self.N * self.dt)
 
-        fd_arr = self.xp.fft.rfft(self.arr * window) * self.dt
+        fd_arr = self.xp.fft.rfft(self.arr * window, axis=-1) * self.dt
         if settings is not None:
             assert isinstance(settings, FDSettings)
             assert settings.df == df, f"Provided FDSettings has df={settings.df}, but expected df={df} based on TDSettings."
@@ -295,7 +295,7 @@ class TDSignal(DomainBase, TDSettings):
         else:
             fd_settings = FDSettings(fd_arr.shape[-1], df, force_backend=self.backend)
         
-        fd_arr_in = fd_arr[..., fd_settings.ind_min:fd_settings.ind_max + 1]
+        fd_arr_in = fd_arr[..., fd_settings.active_slice]
         return FDSignal(fd_arr_in, fd_settings)
 
     def stft(self, settings=None, window=None):
@@ -415,7 +415,7 @@ class FDSettings(DomainSettingsBase):
             self.ind_min = int(np.ceil(value / self.df))
         else:
             self.ind_min = 0
-        self._min_freq = self.ind_min * self.df
+        self._min_freq = value
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -433,7 +433,7 @@ class FDSettings(DomainSettingsBase):
             self.ind_max = int(value / self.df)
         else:
             self.ind_max = (self.N - 1)
-        self._max_freq = self.ind_max * self.df
+        self._max_freq = value
 
     @property
     def ind_min(self) -> int:
@@ -502,8 +502,8 @@ class FDSettings(DomainSettingsBase):
         return (
             (value.N == self.N)
             and (value.df == self.df)
-            and (self.xp.isclose(value.min_freq, self.min_freq))
-            and (self.xp.isclose(value.max_freq, self.max_freq))
+            and ((value.min_freq is None) or (self.min_freq is None) or (self.xp.isclose(value.min_freq, self.min_freq)))
+            and ((value.max_freq is None) or (self.max_freq is None) or (self.xp.isclose(value.max_freq, self.max_freq)))
         )
 
     @property
@@ -540,7 +540,6 @@ class FDSignal(FDSettings, DomainBase):
         except:
             breakpoint()
         DomainBase.__init__(self, arr)
-
         if self.arr.shape[-1] != self.N_active:
             assert arr.shape[-1] == self.N
             _arr = self._arr.copy()
@@ -568,7 +567,7 @@ class FDSignal(FDSettings, DomainBase):
         if window is None:
             window = self.xp.ones(arr_in.shape, dtype=float)
 
-        _tmp = self.xp.fft.irfft(arr_in * window)
+        _tmp = self.xp.fft.irfft(arr_in * window, axis=-1)
         
         if settings is None:
             Tobs = 1 / self.df
@@ -823,7 +822,7 @@ class STFTSettings(DomainSettingsBase):
             self.ind_min = int(np.ceil(value / self.df))
         else:
             self.ind_min = 0
-        self._min_freq = self.ind_min * self.df
+        self._min_freq = value
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -841,7 +840,7 @@ class STFTSettings(DomainSettingsBase):
             self.ind_max = int(value / self.df)
         else:
             self.ind_max = (self.NF - 1)
-        self._max_freq = self.ind_max * self.df
+        self._max_freq = value
 
     @property
     def ind_min(self) -> int:
@@ -1193,6 +1192,7 @@ class WDMSettings(DomainSettingsBase):
         self.Tobs = self.N * self.data_dt
         self.layer_dt = self.Nf * self.data_dt
         self.layer_df = 1. / (2. * self.Nf * self.data_dt)
+        self.t0 = t0
 
         # these have to come after layer_df b/c setters
         # sets ind_min and ind_max
@@ -1270,7 +1270,22 @@ class WDMSettings(DomainSettingsBase):
         return sl.stop - sl.start
 
     def __eq__(self, value):
-        return (value.Nt == self.Nt) and (value.Nf == self.Nf) and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) and (value.data_dt == self.data_dt)
+        return (
+            (value.Nt == self.Nt) and (value.Nf == self.Nf) 
+            and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) 
+            and (value.data_dt == self.data_dt)
+            and (value.ind_min_t == self.ind_min_t)
+            and (value.ind_max_t == self.ind_max_t)
+            and (value.ind_min_f == self.ind_min_f)
+            and (value.ind_max_f == self.ind_max_f)
+        )
+    
+    def eq_without_inds(self, value):
+        return (
+            (value.Nt == self.Nt) and (value.Nf == self.Nf) 
+            and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) 
+            and (value.data_dt == self.data_dt)
+        )
 
     @property
     def basis_shape(self) -> tuple:
@@ -1403,7 +1418,7 @@ class WDMSettings(DomainSettingsBase):
                 self.ind_min_f = 0
         else:
             self.ind_min_f = 0
-        self._min_freq = self.ind_min_f * self.layer_df
+        self._min_freq = value
 
     @property
     def max_freq(self) -> Optional[float]:
@@ -1423,7 +1438,7 @@ class WDMSettings(DomainSettingsBase):
                 self.ind_max_f = (self.Nf - 1)
         else:
             self.ind_max_f = (self.Nf - 1)
-        self._max_freq = self.ind_max_f * self.layer_df
+        self._max_freq = value
 
     @property
     def min_time(self) -> float:
@@ -1444,7 +1459,7 @@ class WDMSettings(DomainSettingsBase):
                 self.ind_min_t = 0
         else:
             self.ind_min_t = 0
-        self._min_time = self.ind_min_t * self.layer_dt
+        self._min_time = value
 
     @property
     def max_time(self) -> Optional[float]:
@@ -1465,7 +1480,7 @@ class WDMSettings(DomainSettingsBase):
         else:
             self.ind_max_t = (self.Nt - 1)
 
-        self._max_time = self.ind_max_t * self.layer_dt
+        self._max_time = value
 
     @property
     def ind_min_f(self) -> int:
@@ -1623,7 +1638,7 @@ class WDMSignal(WDMSettings, DomainBase):
     def __repr__(self) -> str:
         return (
             f"WDMSignal(Tobs={self.Tobs}, dt={self.data_dt}, t0={self.t0}, "
-            f"NT={self.NT}, NF={self.NF}, oversample={self.oversample}, "
+            f"Nt={self.Nt}, Nf={self.Nf}, oversample={self.oversample}, "
             f"backend={self.backend_name.split('_')[-1]})"
         )
     
@@ -1813,10 +1828,16 @@ class WDMLookupTable(WDMSettings):
             g.attrs["Nt"] = self.Nt
             g.attrs["Nt_generate"] = self.sub_settings.Nt
             g.attrs["data_dt"] = self.data_dt
-            g.attrs["max_freq"] = self.max_freq
-            g.attrs["min_freq"] = self.min_freq
-            g.attrs["max_time"] = self.max_time
-            g.attrs["min_time"] = self.min_time
+
+            if self.max_freq is not None:
+                g.attrs["max_freq"] = self.max_freq
+            if self.min_freq is not None:
+                g.attrs["min_freq"] = self.min_freq
+            if self.max_time is not None:
+                g.attrs["max_time"] = self.max_time
+            if self.min_time is not None:
+                g.attrs["min_time"] = self.min_time
+
             g.attrs["m_ref"] = self.m_ref
             g.attrs["n_ref"] = self.n_ref
             g.attrs["nchannels"] = self.nchannels
@@ -1856,6 +1877,7 @@ class WDMLookupTable(WDMSettings):
                 input_kwargs["min_freq"] = min_freq
                 input_kwargs["max_freq"] = max_freq
             else:
+                
                 input_args = (
                     g.attrs["Nf"],
                     g.attrs["Nt"],
@@ -1863,11 +1885,27 @@ class WDMLookupTable(WDMSettings):
                 )
                 nchannels = g.attrs["nchannels"]
 
+                min_freq = None
+                if "min_freq" in g.attrs:
+                    min_freq = g.attrs["min_freq"]
+
+                max_freq = None
+                if "max_freq" in g.attrs:
+                    max_freq = g.attrs["max_freq"]
+
+                min_time = None
+                if "min_time" in g.attrs:
+                    min_time = g.attrs["min_time"]
+
+                max_time = None
+                if "max_time" in g.attrs:
+                    max_time = g.attrs["max_time"]
+
                 input_kwargs = dict(
-                    min_freq = g.attrs["min_freq"],
-                    max_freq = g.attrs["max_freq"],
-                    min_time = g.attrs["min_time"],
-                    max_time = g.attrs["max_time"],
+                    min_freq = min_freq,
+                    max_freq = max_freq,
+                    min_time = min_time,
+                    max_time = max_time,
                     force_backend=force_backend,
                 )
             settings = WDMSettings(*input_args, **input_kwargs)
@@ -1988,7 +2026,7 @@ class WDMLookupTable(WDMSettings):
                 print(inds, total_f_fdot_vals)
 
             # TODO: verify if there is a minus sign needed here and below
-            freqs =  (_f_vals.reshape(-1, 2) +  self.xp.asarray(m_diffs)[:, None, None] * self.layer_df).transpose(1, 0, 2).reshape(self.fdot_steps, -1)
+            # freqs =  (_f_vals.reshape(-1, self.fdot_steps) +  self.xp.asarray(m_diffs)[:, None, None] * self.layer_df).transpose(1, 0, 2).reshape(self.fdot_steps, -1)
             _table_sin = _table_sin.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).copy()
             _table_cos = _table_cos.reshape(len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(1, 0, 2).reshape(self.fdot_steps, self.f_steps).copy()
 
