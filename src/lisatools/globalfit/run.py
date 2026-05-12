@@ -733,17 +733,10 @@ class GlobalFit:
             gf_plotter = GlobalFitPlotter(curr=self.curr)
             gf_plotter.save_input_data()
 
-            meta = RunMetadata.from_curr(self.curr)
-
-            save_residuals(acs, meta.input_data_link, is_residuals=False)
-            logger.info("Input data saved.")
-
             sampler_mix.run_mcmc(state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
 
             submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
-            submission_writer.write_submission()
-
-            save_residuals(acs, os.path.join(meta.submission_folder, "residuals.h5"), is_residuals=True)
+            submission_writer.write_submission(acs)
 
             logger.info("Residuals saved.")
 
