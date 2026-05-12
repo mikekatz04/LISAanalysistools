@@ -334,7 +334,9 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
 
             assert conversion_func and callable(conversion_func), f"catalogue_to_sampling_basis function for {branch_name} was not found."
             assert curr.general_info.preprocess_kwargs
-            sampling_params = conversion_func(entry, curr.general_info.preprocess_kwargs["trim_kwargs"]["duration"])
+
+            trim_duration = curr.general_info.data_t0 - curr.general_info.data_processor.original_t0
+            sampling_params = conversion_func(entry, trim_duration=trim_duration)
 
             injection_params_list.append(sampling_params)
 

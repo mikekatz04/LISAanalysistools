@@ -471,6 +471,13 @@ class SignalProcessor:
         self.verbose = verbose
         self.do_plots = do_plots
 
+        self._original_t0 = float(times[0])  # store original t0 for reference in case of trimming
+
+    @property
+    def original_t0(self) -> float:
+        """Original start time of the data before any trimming."""
+        return self._original_t0
+
     def _to_mp_dict(self):
         """ndarray (n_ch, N) -> {'X': arr, 'Y': arr, 'Z': arr}"""
         return {ch: self.data[i] for i, ch in enumerate(self._CHANNEL_NAMES[: self.data.shape[0]])}
