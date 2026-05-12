@@ -730,13 +730,16 @@ class GlobalFit:
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)
             self.recipe.setup_first_recipe_step(sampler_mix.iteration, state, sampler_mix)
 
-            gf_plotter = GlobalFitPlotter(curr=self.curr)
-            gf_plotter.save_input_data()
+            if self.curr.general_info.submission_parent_folder is not None:
+                gf_plotter = GlobalFitPlotter(curr=self.curr)
+                gf_plotter.save_input_data()
 
             sampler_mix.run_mcmc(state, self.curr.general_info.num_iterations, thin_by=1, progress=True, store=True)
 
-            submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
-            submission_writer.write_submission(acs)
+            if self.curr.general_info.submission_parent_folder is not None:
+                self.logger.debug(f"saving submission to {self.curr.general_info.submission_parent_folder}")
+                submission_writer = SubmissionWriter(backend=backend, curr=self.curr, ess=20_000)
+                submission_writer.write_submission(acs)
 
             logger.info("Residuals saved.")
 

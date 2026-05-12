@@ -131,10 +131,131 @@ source_types_names = dict(
     emri="EMRI",
     sobh="SOBHB",
     psd="NOISE",
-    galfor="STOCHASTIC",  # todo: should we merge noise and stochastic together under a common "stochastic" source type?
+    galfor="NOISE",  # todo: should we merge noise and stochastic together under a common "stochastic" source type?
 )
 
 MAX_SOURCES_PER_BATCH = 500
+
+
+def _apply_output_corrections(branch: str, samples_dict: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Apply branch-specific output corrections to a posterior mapping."""
+
+    corrected = dict(samples_dict)
+    transform = _OUTPUT_CORRECTIONS_REGISTRY[branch]
+
+    for key, func in transform.items():
+        if key in corrected:
+            corrected[key] = func(corrected[key])
+            logger.info(
+                f"Applied output correction for parameter '{key}' in branch '{branch}'"
+            )
+
+    return corrected
+
+
+def _filter_removed_params(branch: str, samples_dict: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Remove parameters that should not be written for the given branch."""
+
+    removed_params = set(_REMOVED_PARAMS_REGISTRY[branch])
+    filtered = {}
+
+    for name, values in samples_dict.items():
+        if name in removed_params:
+            logger.info(
+                f"Parameter '{name}' is marked for removal in branch '{branch}'. Skipping this parameter in the output."
+            )
+            continue
+        filtered[name] = values
+
+    return filtered
+
+
+def _samples_dict_to_structured_array(samples_dict: dict[str, np.ndarray]) -> np.ndarray:
+    """Convert a posterior mapping into a structured NumPy array."""
+
+    if not samples_dict:
+        raise ValueError("Cannot build a structured array from an empty posterior mapping.")
+
+    param_names = list(samples_dict.keys())
+    param_data = [samples_dict[name] for name in param_names]
+    dtype = [(name, "f8") for name in param_names]
+    structured_array = np.zeros(len(param_data[0]), dtype=dtype)
+
+    for name, data in zip(param_names, param_data):
+        structured_array[name] = data
+
+    return structured_array
+
+
+def _save_metadata_attributes(h5obj: h5py.File | h5py.Group, metadata: MetadataBase) -> None:
+    """Save dataclass metadata fields as HDF5 attributes."""
+
+    for field in dataclasses.fields(metadata):
+        value = getattr(metadata, field.name)
+        if isinstance(value, (str, int, float)):
+            h5obj.attrs[field.name] = value
+        elif isinstance(value, list):
+            h5obj.attrs[field.name] = json.dumps(value)
+        elif isinstance(value, dict):
+            h5obj.attrs[field.name] = json.dumps(value)
+        else:
+            logger.warning(
+                f"Unsupported metadata field type for '{field.name}': {type(value)}. Skipping this field."
+            )
+
+
+def _save_posterior_dataset(
+    h5obj: h5py.File | h5py.Group,
+    source_label: str,
+    samples_dict: dict[str, np.ndarray],
+) -> None:
+    """Write one posterior dataset into an open HDF5 object."""
+
+    h5obj.create_dataset(source_label, data=_samples_dict_to_structured_array(samples_dict))
+
+
+def _build_leaf_samples_dict(
+    samples_here: np.ndarray,
+    parameter_names: list[str],
+    leaf: int,
+    branch: str,
+    log_prior: np.ndarray,
+    log_likelihood: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Build one leaf's posterior mapping and apply corrections/filtering."""
+
+    samples_dict = {name: samples_here[..., i] for i, name in enumerate(parameter_names)}
+    samples_dict["logprior"] = log_prior
+    samples_dict["loglikelihood"] = log_likelihood
+    samples_dict = _apply_output_corrections(branch, samples_dict)
+    samples_dict = _filter_removed_params(branch, samples_dict)
+
+    return {
+        name: values[:, leaf] if len(values.shape) == 2 else values
+        for name, values in samples_dict.items()
+    }
+
+
+def _build_stochastic_samples_dict(
+    samples: np.ndarray,
+    parameter_names: list[str],
+    branches_here: list[str],
+    log_prior: np.ndarray,
+    log_likelihood: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Build the combined posterior mapping for stochastic branches."""
+
+    samples_dict = {name: samples[:, 0, i] for i, name in enumerate(parameter_names)}
+    samples_dict["logprior"] = log_prior
+    samples_dict["loglikelihood"] = log_likelihood
+
+    combined: dict[str, np.ndarray] = {}
+    for branch in branches_here:
+        branch_samples = _apply_output_corrections(branch, samples_dict)
+        branch_samples = _filter_removed_params(branch, branch_samples)
+        combined.update(branch_samples)
+
+    return combined
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1172,7 +1293,6 @@ class SubmissionWriter(BackendConsumer):
                 samples, inds
             ).tolist()
 
-        posterior_files = []
         posterior_files_map: dict[str, str] = {} # map each individual source to the relevant posterior file. posterior file will be repeated if there are multiple sources in the same block
 
         num_leaves = samples.shape[1]
@@ -1183,20 +1303,6 @@ class SubmissionWriter(BackendConsumer):
             num_sources_here = samples_here.shape[1]
             logger.debug(f"Number of sources in this batch: {num_sources_here}")
 
-            samples_dict = {
-                name: samples_here[..., i] for i, name in enumerate(parameter_names)
-            }
-            samples_dict["logprior"] = self.log_prior
-            samples_dict["loglikelihood"] = self.log_likelihood
-
-            transform = _OUTPUT_CORRECTIONS_REGISTRY[branch]
-            for key, func in transform.items():
-                if key in samples_dict:
-                    samples_dict[key] = func(samples_dict[key])
-                    logger.info(
-                        f"Applied output correction for parameter '{key}' in branch '{branch}'"
-                    )
-
             # save to h5 file
             filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_posteriors_{num_sources_here}_{leaf_count}_{self.run_metadata.submission_timestamp}.h5"
             filepath = os.path.join(self.posterior_folders[branch], filename)
@@ -1205,37 +1311,23 @@ class SubmissionWriter(BackendConsumer):
 
                     source_label = f"posterior_{leaf_count + leaf}" # todo change this. we also need an estimation of the frequency for GB...
 
-                    param_data = []
-                    param_names = []
-                    for name, values in samples_dict.items():
-                        if name in _REMOVED_PARAMS_REGISTRY[branch]:
-                            logger.info(
-                                f"Parameter '{name}' is marked for removal in branch '{branch}'. Skipping this parameter in the output."
-                            )
-                            continue
-
-                        _value = (
-                            values[:, leaf] if len(values.shape) == 2 else values
-                        )  # log_prior and log_likelihood are (n_samples,) while parameters are (n_samples, nleaves)
-                        param_data.append(_value)
-                        param_names.append(name)
-
-                    dtype = [(name, "f8") for name in param_names]
-                    structured_array = np.zeros(len(param_data[0]), dtype=dtype)
-
-                    for name, data in zip(param_names, param_data):
-                        structured_array[name] = data
-
-                    f.create_dataset(source_label, data=structured_array)
+                    leaf_samples = _build_leaf_samples_dict(
+                        samples_here=samples_here,
+                        parameter_names=parameter_names,
+                        leaf=leaf,
+                        branch=branch,
+                        log_prior=self.log_prior,
+                        log_likelihood=self.log_likelihood,
+                    )
+                    _save_posterior_dataset(f, source_label, leaf_samples)
 
                     posterior_files_map[source_label] = filepath # we store the relative paths
 
             logger.info(
                 f"Saved posterior samples for branch '{branch}', leaves {leaves} to {filepath}"
             )
-            posterior_files.append(filepath)
 
-        metadata.posterior_files = posterior_files
+        metadata.posterior_files = list(posterior_files_map.values())
 
         # now save the metadata for this source
         metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{source_name}_{self.run_metadata.submission_timestamp}"
@@ -1255,20 +1347,7 @@ class SubmissionWriter(BackendConsumer):
             for j, (source_idx, posterior_file_path) in enumerate(posterior_files_map.items()):
                 posterior_group.create_dataset(source_idx, data=str(posterior_file_path))
                 detection_statistic_group.create_dataset(source_idx, data=float(metadata.detection_statistics[j]))
-
-            # save all metadata fields as attributes
-            for field in dataclasses.fields(metadata):
-                value = getattr(metadata, field.name)
-                if isinstance(value, (str, int, float)):
-                    f.attrs[field.name] = value
-                elif isinstance(value, list):
-                    f.attrs[field.name] = json.dumps(value)  # save lists as JSON strings
-                elif isinstance(value, dict):
-                    f.attrs[field.name] = json.dumps(value)  # save dicts as JSON strings
-                else:
-                    logger.warning(
-                        f"Unsupported metadata field type for '{field.name}': {type(value)}. Skipping this field."
-                    )
+            _save_metadata_attributes(f, metadata)
 
         logger.info(f"Saved metadata for branch '{branch}' to {metadata_h5_filepath}")
 
@@ -1283,7 +1362,90 @@ class SubmissionWriter(BackendConsumer):
             logger.info("No stochastic component detected in the branches. Skipping stochastic posterior saving.")
             return
 
+        # check if both psd and galfor are present and store everything together
+        elif "psd" in self.branches and "galfor" in self.branches:
+            branches_here = ["psd", "galfor"]
+
+        # if only one of them is present, we save it as the stochastic posterior
+        else:
+            branch = "psd" if "psd" in self.branches else "galfor"
+            branches_here = [branch]
         
+        samples, inds = [], []
+        parameter_info = []
+        metadata_list = []
+
+        for branch in branches_here:
+            _samples = self.samples[branch]
+            _inds = self.inds[branch]
+            _parameter_info = list(PARAMETER_INFO_REGISTRY[branch].values())
+            _metadata = self.curr.source_metadata[branch]
+
+            samples.append(_samples)
+            inds.append(_inds)
+            parameter_info.extend(_parameter_info)
+            metadata_list.append(_metadata)
+            
+        samples = np.concatenate(samples, axis=-1)
+        inds = np.concatenate(inds, axis=-1)
+
+        parameter_names = [p.l3c_name for p in parameter_info]
+        latex_names = [p.latex_name for p in parameter_info]
+        units = [p.unit for p in parameter_info]
+        metadata: StochasticMetadata = StochasticMetadata(
+            model_config={branch: metadata_list[i].model_config for i, branch in enumerate(branches_here)},
+            frequency_ranges=metadata_list[0].frequency_ranges,  # we assume the same frequency ranges for all stochastic branches; this can be relaxed if needed
+            prior_model=" ,".join(set(m.prior_model for m in metadata_list)),
+            prior_model_code_link=" ,".join(set(m.prior_model_code_link for m in metadata_list)),
+            prior_model_config={branch: metadata_list[i].prior_model_config for i, branch in enumerate(branches_here)},
+            comment=" ,".join(m.comment for m in metadata_list if m.comment)
+        )
+
+        metadata.parameter_info = parameter_names
+        metadata.parameter_units = units
+
+        if samples.shape[1] > 1:
+            raise NotImplementedError("multiple leaves detected, not implemented yet")
+
+        samples_dict = _build_stochastic_samples_dict(
+            samples=samples,
+            parameter_names=parameter_names,
+            branches_here=branches_here,
+            log_prior=self.log_prior,
+            log_likelihood=self.log_likelihood,
+        )
+        param_names = list(samples_dict.keys())
+        structured_array = _samples_dict_to_structured_array(samples_dict)
+
+        effective_branch_name = "noise" #todo or stochastic?
+        filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_posteriors_{self.run_metadata.submission_timestamp}.h5"
+        filepath = os.path.join(self.posterior_folders[branches_here[0]], filename)
+
+        with h5py.File(os.path.join(self.run_metadata.submission_folder, filepath), "w") as f:
+            group = f.create_group(name=effective_branch_name)
+            group.attrs["labels"] = ", ".join(param_names)
+            group.attrs["npars"] = len(param_names)
+            group.attrs["nsamples"] = len(structured_array)
+            group.create_dataset("posterior", data=structured_array)
+
+        metadata.posterior_file = filepath # we store the relative path to the posterior file in the metadata        
+        metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_{self.run_metadata.submission_timestamp}"
+        metadata_h5_filepath = os.path.join(
+            self.run_metadata.submission_folder, f"{metadata_base_filename}.h5"
+        )
+        metadata_json_filepath = os.path.join(
+            self.run_metadata.submission_folder, f"{metadata_base_filename}.json"
+        )
+        with h5py.File(metadata_h5_filepath, "w") as f:
+            noise_group = f.create_group(name=effective_branch_name)
+            posterior_group = noise_group.create_group(name="posterior_file")
+            posterior_group.create_dataset("posterior", data=str(filepath))
+            _save_metadata_attributes(f, metadata)
+
+        logger.info(f"Saved metadata for stochastic branch(es) to {metadata_h5_filepath}")
+
+        metadata.to_json(metadata_json_filepath)
+        logger.info(f"Saved metadata for  stochastic branch(es) to {metadata_json_filepath}")
 
     def save_data_and_residuals(self, acs: AnalysisContainerArray):
         """Save the input data and residuals to h5 files in the submission folder."""
