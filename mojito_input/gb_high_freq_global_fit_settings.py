@@ -149,18 +149,10 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     
     assert start_freq and end_freq and general_set.preprocess_kwargs
     start_freq_ind = int(start_freq * Tobs)
-    
-    data_start_time = MOJITO_REFERENCE_TIME + 850.5 # catalogue reference time + additional timeshift before data starts
-    trim_duration = general_set.preprocess_kwargs["trim_kwargs"]["duration"]
-    if trim_duration < 1.0:
-        trim_duration = trim_duration * Tobs
-    
-    logger.info(f"Trim duration in seconds is {trim_duration}")
-    t0_gbs = data_start_time + trim_duration
 
     initialize_kwargs = dict(
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
-        t0=t0_gbs,
+        t0=general_set.data_t0,
         force_backend=general_set.gpu_backend
         )
 
@@ -173,10 +165,10 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     search_kwargs = dict(
         nwalkers = 32,
         ntemps = 24,
-        shutoff_band_iteration = 5,
+        shutoff_band_iteration = 2,
         shutoff_frequency_threshold = None, # 4e-3 
-        burn_1 = 200,
-        nsteps_1 = 200,
+        burn_1 = 500,
+        nsteps_1 = 500,
         snr_threshold = 8.0,
         burn_2 = 500,
         nsteps_2 = 500,
@@ -254,14 +246,14 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
 def get_general_erebor_settings() -> GeneralSetup:
 
     global_fit_codename = "erebor"
-    global_fit_version = "TEST_highf_gb_v1"
+    global_fit_version = "TEST_highf_gb_v2"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D" #todo populate repositories
-    comment = "Testing equatorial coordinates to obtain results on 2nd highest GB. "
+    comment = "Testing equatorial coordinates to obtain results on 2nd highest GB. Now with correct t0"
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0

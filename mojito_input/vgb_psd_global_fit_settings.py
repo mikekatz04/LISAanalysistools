@@ -95,6 +95,8 @@ from lisatools.globalfit.priors.gbpriors import get_fdot_mojito
 
 #############
 
+MOJITO_REFERENCE_TIME = 97729089.327664
+
 
 def setup_recipe(
     recipe: Recipe, 
@@ -168,32 +170,57 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
-    lam_lims = [0.0, 2 * np.pi]
-    beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
+    alpha_lims = [0.0, 2 * np.pi]
+    delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    input_data_arr.settings
     start_freq = float(input_data_arr.settings.f_arr[0])
     end_freq = float(input_data_arr.settings.f_arr[-1])
+
+    Tobs = 1/getattr(input_data_arr.settings, "df")
 
     oversample = 4
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
     start_freq_ind = int(start_freq * general_set.Tobs)
-    
-    # try:
-    #     data_start_time = getattr(general_set.orbits, 'sc_t0')
-    # except AttributeError:
-    data_start_time = 97729089.327664 + 850.5
-    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["duration"]
 
-    initialize_kwargs = dict(force_backend=general_set.gpu_backend)
+    initialize_kwargs = dict(
+        orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
+        t0=general_set.data_t0,
+        force_backend=general_set.gpu_backend
+        )
 
-    ntemps = general_set.ntemps
     # geometric spacing 
-    betas = 1 / 1.2 ** np.arange(ntemps)
+    betas = 1 / 1.2 ** np.arange(general_set.ntemps)
     betas[-1] = 0.0001
+    
+    data_start_freq_ind = int(input_data_arr.settings.f_arr[0] / input_data_arr.settings.df)
+    
+    search_kwargs = dict(
+        nwalkers = 32,
+        ntemps = 24,
+        shutoff_band_iteration = 5,
+        shutoff_frequency_threshold = None, # 4e-3 
+        burn_1 = 200,
+        nsteps_1 = 200,
+        snr_threshold = 8.0,
+        burn_2 = 500,
+        nsteps_2 = 500,
+        refit_start_iteration = 5
+    )
+    
+    waveform_kwargs = dict(
+        dt=general_set.dt,
+        T=Tobs,
+        use_c_implementation=True,
+        start_freq_ind=data_start_freq_ind,
+        tdi_channel_setup="XYZ",
+        tdi2=True,
+        oversample=oversample,
+        window=general_set.window_type,
+        window_alpha=general_set.window_alpha
+    )
     
     gb_settings = GBSettings(
         A_lims=A_lims,
@@ -203,27 +230,29 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
         phi0_lims=phi0_lims,
         iota_lims=iota_lims,
         psi_lims=psi_lims,
-        lam_lims=lam_lims,
-        beta_lims=beta_lims,
+        alpha_lims=alpha_lims,
+        delta_lims=delta_lims,
         start_freq=start_freq,
         end_freq=end_freq,
         oversample=oversample,
         extra_buffer=extra_buffer,
         # Start_resample_iter, Iter_count_per_resample, !group_proposal_kwargs (handled later?)
         start_freq_ind=start_freq_ind,
-        t0=t0_gbs,
-        tdi_setup="XYZ",
-        use_tdi2=True,
-        Tobs=float(1/input_data_arr.settings.df),
+        # t0=t0_gbs,
+        # tdi_setup="XYZ",
+        # use_tdi2=True,
+        Tobs=Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
+        waveform_kwargs=waveform_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=300,
+        nleaves_max=100,
         nleaves_min=0,
         ndim=8,
         betas=betas,
-        log_dir=general_set.file_store_dir
-        # Betas, Other_tempering_kwargs, Branch_state, Branch_backend, Log_dir (handled later!)
+        log_dir=general_set.file_store_dir,
+        num_repeat_proposals=50, 
+        search_kwargs=search_kwargs        
     )
 
     gb_setup = GBSetup(gb_settings)

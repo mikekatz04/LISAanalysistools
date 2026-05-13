@@ -271,8 +271,8 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
-    lam_lims = [0.0, 2 * np.pi]
-    beta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
+    alpha_lims = [0.0, 2 * np.pi]
+    delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
     # input_data_arr.settings
@@ -285,16 +285,9 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
     start_freq_ind = int(start_freq * general_set.Tobs)
     
-    # try:
-    #     data_start_time = getattr(general_set.orbits, 'sc_t0')
-    # except AttributeError:
-    data_start_time = MOJITO_REFERENCE_TIME + 850.5
-    t0_gbs = data_start_time + general_set.preprocess_kwargs["trim_kwargs"]["duration"]
-
-
     initialize_kwargs = dict(
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
-        t0=t0_gbs,
+        t0=general_set.data_t0,
         force_backend=general_set.gpu_backend
         )
 
@@ -305,6 +298,19 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
 
     data_start_freq_ind = int(input_data_arr.settings.f_arr[0] / input_data_arr.settings.df)
 
+    search_kwargs = dict(
+        nwalkers = 32,
+        ntemps = 24,
+        shutoff_band_iteration = 5,
+        shutoff_frequency_threshold = None, # 4e-3 
+        burn_1 = 200,
+        nsteps_1 = 200,
+        snr_threshold = 8.0,
+        burn_2 = 500,
+        nsteps_2 = 500,
+        refit_start_iteration = 5
+    )
+    
     waveform_kwargs = dict(
         dt=general_set.dt,
         T=1/input_data_arr.settings.df,
@@ -325,8 +331,8 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         phi0_lims=phi0_lims,
         iota_lims=iota_lims,
         psi_lims=psi_lims,
-        lam_lims=lam_lims,
-        beta_lims=beta_lims,
+        alpha_lims=alpha_lims,
+        delta_lims=delta_lims,
         start_freq=start_freq,
         end_freq=end_freq,
         oversample=oversample,
@@ -346,7 +352,9 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         ndim=8,
         betas=betas,
         log_dir=general_set.file_store_dir,
-        group_proposal_kwargs=dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=40)
+        # group_proposal_kwargs=dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=40)
+        num_repeat_proposals=40,
+        search_kwargs=search_kwargs
     )
 
     gb_setup = GBSetup(gb_settings)
