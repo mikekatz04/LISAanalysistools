@@ -365,8 +365,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            if np.any(prev_logl < -1e11):
-                logger.warning(f"Very low log likelihood encountered in propose: {prev_logl.min()}. This could be a sign of numerical issues.")
+            if np.any(prev_logl < -1e7):
+                #logger.warning(f"Very low log likelihood encountered in propose: {prev_logl.min()}. This could be a sign of numerical issues.")
+                breakpoint()
 
             prev_logp = (
                 self.priors[self.branch_name]
@@ -453,6 +454,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         data_index=data_index,
                         # constants_index=data_index,
                     )
+                    if np.any(logl[~np.isinf(logp)] < -1e7):
+                        #logger.warning(f"Very low log likelihood encountered in propose: {logl[~np.isinf(logp)].min()}. This could be a sign of numerical issues.")
+                        breakpoint()
                     # print(f"new logl: {logl}. elapsed: {time.time() - tic}")
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
@@ -561,10 +565,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
         self.free_gpu_memory()
-        if np.any(current_ll < -1e9):
-            # keep a safe guard here
-            logger.warning(f"Very low log likelihood encountered after propose: {current_ll.min()}. This could be a sign of numerical issues.")
-            #breakpoint()
+        
         # TODO: add check with last used logl
 
         current_lp = (
