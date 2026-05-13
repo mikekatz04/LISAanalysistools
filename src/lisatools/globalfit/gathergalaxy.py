@@ -1,6 +1,7 @@
 import multiprocessing as mp
 import os
 import time
+import logging
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
@@ -13,6 +14,8 @@ from gbgpu.gbgpu import GBGPU
 from gbgpu.utils.utility import get_N
 
 from lisatools.utils.constants import *
+
+logger = logging.getLogger(__name__)
 
 
 class GBGrouping:
@@ -1511,9 +1514,9 @@ def gather_gb_samples(
             binaries_base_sample_batch_in = transform_fn.both_transforms(
                 binaries_base_sample[start_ind:end_ind]
             )
-            if fd[0] != 0.0:
-                print("Need to work on if start_freq_ind is not zero, things will likely break later.")
-                print("It seems to be working, ignore for now.")
+            # if fd[0] != 0.0:
+            #     print("Need to work on if start_freq_ind is not zero, things will likely break later.")
+            #     print("It seems to be working, ignore for now.")
                 # raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             assert "start_freq_ind" in waveform_kwargs
@@ -1530,7 +1533,7 @@ def gather_gb_samples(
             ll_diff[start_ind:end_ind] = (
                 gb.add_remove.real / np.sqrt(gb.add_add.real * gb.remove_remove.real)
             ).get()
-            print(start_ind, len(inds_split) - 1)
+            logger.debug(f"{start_ind=}, {(len(inds_split) - 1)=}")
 
         for i, keep_map_i in enumerate(keep_map):
             # TODO: check this?
@@ -1600,7 +1603,7 @@ def gather_gb_samples(
                 breakpoint()
 
             keep_groups.append(group)
-        print(f"samp_i: {samp_i + 1}, num: {gb_inds_tmp.sum()}")
+        logger.debug(f"samp_i: {samp_i + 1}, num: {gb_inds_tmp.sum()}")
 
     current_number = len(keep_groups)
     final_number = -1
@@ -1676,10 +1679,10 @@ def gather_gb_samples(
             base_bins_in = transform_fn.both_transforms(base_bins[start_ind:end_ind])
             test_bins_in = transform_fn.both_transforms(test_bins[start_ind:end_ind])
 
-            if fd[0] != 0.0:
+            # if fd[0] != 0.0:
                 # breakpoint()
-                print("Need to work on if start_freq_ind is not zero, things will likely break later.")
-                print("It seems to be working, ignore for now.")
+                # print("Need to work on if start_freq_ind is not zero, things will likely break later.")
+                # print("It seems to be working, ignore for now.")
                 # raise NotImplementedError("Need to work on if start_freq_ind is not zero.")
 
             _ = gb.swap_likelihood_difference(
@@ -1723,9 +1726,9 @@ def gather_gb_samples(
             new_groups_3[i] = -1
             keep_groups[i] = None
 
-        print("before step:", len(keep_groups))
+        logger.info(f"before step: {len(keep_groups)}")
         keep_groups = [tmp for tmp in keep_groups if tmp is not None]
-        print("after step:", len(keep_groups))
+        logger.info(f"after step: {len(keep_groups)}")
         final_number = len(keep_groups)
         num_in_group = [len(group_i) for group_i in keep_groups]
 

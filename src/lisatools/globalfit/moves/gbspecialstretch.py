@@ -1255,7 +1255,7 @@ class BandSorter(LISAToolsParallelModule):
         num_bands = len(self.band_edges) - 1
         band_counts = np.zeros((self.ntemps, self.nwalkers, num_bands), dtype=int)
         band_counts[uni_temp_inds.get(), uni_walker_inds.get(), uni_band_inds.get()] = (
-            uni_special_counts.get()
+            getattr(uni_special_counts, "get")()
         )
 
         return {"band_counts": band_counts}
@@ -1290,11 +1290,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         gpu_priors,
         *args,
         waveform_kwargs={},
-        parameter_transforms=None,
+        parameter_transforms: Optional[TransformContainer] = None,
         snr_lim=1e-10,
         rj_proposal_distribution=None,
         is_rj_prop=False,
-        num_repeat_proposals=300,
+        num_repeat_proposals=100,
         name=None,
         use_prior_removal=False,
         phase_maximize=False,
@@ -1302,15 +1302,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         gpus=[],
         num_band_preload=20000,
         run_swaps=True,
-        # TODO: make this adjustable?
         max_data_store_size=6000,
         force_backend=None,
-        **kwargs,
+        **search_kwargs,
     ):
         # return_gpu is a kwarg for the stretch move
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         GlobalFitMove.__init__(self, name=name)
-        GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs)
+        Move.__init__(self, *args, return_gpu=True)
+        # GroupStretchMove.__init__(self, *args, return_gpu=True)
 
         self.force_backend = force_backend
         self.ranks_needed = ranks_needed
@@ -1374,6 +1374,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.band_N_vals = self.xp.asarray(band_N_vals)
         
         self.num_proposals = 0
+        self.search_kwargs = search_kwargs
         
 
     def setup(self, model, branches):
@@ -1993,7 +1994,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 1: info_mat_transforms_global[r"$f_0$"],
                                 2: lambda x: x * fdot_scale,
                                 5: info_mat_transforms_global[r"$\cos\iota$"],
-                                8: info_mat_transforms_global[r"$\sin\beta$"],
+                                8: info_mat_transforms_global[r"$\sin\delta$"],
                             }
 
                             # transform fdot
@@ -2494,7 +2495,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 #     print(tmp)
                 self.mempool.free_all_blocks()
                 # update prop counter
-                logger.info(f"For {self.name}, we still have to run {still_to_run.sum()} proposals.")
+                # logger.info(f"For {self.name}, we still have to run {still_to_run.sum()} proposals.")
             # add back in all sources in the cold-chain
             # residual from this group
             # llaf1 = model.analysis_container_arr.likelihood()
@@ -3224,7 +3225,7 @@ def para_log_like(
     xp = gb.backend.xp
 
     x_tmp = transform_fn.both_transforms(x, xp=xp)
-    # need to get just f, fdot, fddot, lam, beta
+    # need to get just f, fdot, fddot, alpha, delta
     data_index = xp.full(x.shape[0], walker_max, dtype=xp.int32)
     if fstat:
         x_in = x_tmp[:, xp.array([1, 2, 3, 7, 8])]
@@ -3529,15 +3530,16 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         return gb_search_func
 
     def setup(self, model, branches):
-        nwalkers: int = 30
-        ntemps: int = 24
-        shutoff_band_iteration: int = 2
-        shutoff_frequency_threshold: float = None # 4e-3 
-        burn_1: int = 100
-        nsteps_1: int = 100
-        snr_threshold: float = 8.0
-        burn_2: int = 500
-        nsteps_2: int = 500
+        # self.search_kwargs
+        nwalkers: int = self.search_kwargs["nwalkers"]
+        ntemps: int = self.search_kwargs["ntemps"]
+        shutoff_band_iteration: int = self.search_kwargs["shutoff_band_iteration"]
+        shutoff_frequency_threshold: float = self.search_kwargs["shutoff_frequency_threshold"]
+        burn_1: int = self.search_kwargs["burn_1"]
+        nsteps_1: int = self.search_kwargs["nsteps_1"]
+        snr_threshold: float = self.search_kwargs["snr_threshold"]
+        burn_2: int = self.search_kwargs["burn_2"]
+        nsteps_2: int = self.search_kwargs["nsteps_2"]
         
         # FOR FAST TESTING/DEBUGGING
         # import pickle
@@ -3546,13 +3548,13 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         # rj_dist = ProbDistContainer(
         #     {
-        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
         #         r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
         #         r"$\psi$": uniform_dist(0.0, np.pi),
         #     },
         #     use_cupy=True,
         # )
-        # rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"])
+        # rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"])
         # return
         
         # run paraensemble MCMC.
@@ -3768,7 +3770,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # )
 
         samples_2 = samples_2.transpose(1, 0, 2, 3)
-        # np.save("/sps/lisaf/crondeel/packages/junk_folder/samples_test.npy", samples_2)
+        # np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples.npy", samples_2)
 
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[
@@ -3776,22 +3778,35 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         ]
 
         if self.xp.isnan(samples_2_tmp).any() or self.xp.isinf(samples_2_tmp).any():
-            breakpoint()
-            raise ValueError(
-                f"samples_2_tmp contains NaN or Inf before GMM fitting. "
-                f"NaN count: {self.xp.isnan(samples_2_tmp).sum()}, "
-                f"Inf count: {self.xp.isinf(samples_2_tmp).sum()}"
+            logger.warning(
+                f"samples_2_tmp contains NaN or Inf before GMM fitting. \
+                NaN count: {self.xp.isnan(samples_2_tmp).sum()}. \
+                Inf count: {self.xp.isinf(samples_2_tmp).sum()}. \
+                Skipping search..."
             )
+            return
+            # breakpoint()
+            # raise ValueError(
+            #     f"samples_2_tmp contains NaN or Inf before GMM fitting. "
+            #     f"NaN count: {self.xp.isnan(samples_2_tmp).sum()}, "
+            #     f"Inf count: {self.xp.isinf(samples_2_tmp).sum()}"
+            # )
 
         ranges = samples_2_tmp.max(axis=1) - samples_2_tmp.min(axis=1)  # (n_groups, n_features)
         degenerate = (ranges == 0)
         if degenerate.any():
             bad_groups, bad_feats = self.xp.where(degenerate)
-            breakpoint()
-            raise ValueError(
-                f"Degenerate features (zero range) in groups {bad_groups} "
-                f"for features {bad_feats}. transform_to_gmm_basis will produce NaN."
+            logger.warning(
+                f"Degenerate features (zero range) in groups {bad_groups} \
+                for features {bad_feats}. transform_to_gmm_basis will produce NaN. \
+                Skipping search..."
             )
+            return
+            # breakpoint()
+            # raise ValueError(
+            #     f"Degenerate features (zero range) in groups {bad_groups} "
+            #     f"for features {bad_feats}. transform_to_gmm_basis will produce NaN."
+            # )
         
         full_gmm = vec_fit_gmm_min_bic(
             samples_2_tmp,
@@ -3810,13 +3825,13 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         rj_dist = ProbDistContainer(
             {
-                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
                 r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
                 r"$\psi$": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"])
+        rj_dist.reset_key_order([r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"])
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)
@@ -3898,8 +3913,8 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         GBSpecialBase.__init__(self, *args, **kwargs)
 
     def setup(self, model, branches):
-        samples_keep = 5
-        nwalkers = 30
+        samples_keep = self.search_kwargs["refit_start_iteration"]
+        nwalkers = self.search_kwargs["nwalkers"]
         num_compare_samples = 1
         # FOR FAST TESTING/DEBUGGING
         # import pickle
@@ -3908,13 +3923,13 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         # rj_dist = ProbDistContainer(
         #     {
-        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+        #         (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
         #         r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
         #         r"$\psi$": uniform_dist(0.0, np.pi),
         #     },
         #     use_cupy=True,
         # )
-        # rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+        # rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
         # self.rj_proposal_distribution = {"gb": rj_dist}
         # return
         # run paraensemble MCMC.
@@ -3951,6 +3966,22 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         num_in_groups = np.asarray([len(tmp) for tmp in groups])
         keep = num_in_groups > nwalkers * samples_keep / 2
 
+        logger.info(
+            f"Groups passing sample count filter: {keep.sum()} / {len(keep)}. "
+            f"num_in_groups: {num_in_groups}"
+        )
+        
+        if not keep.any():
+            logger.warning(
+                f"No groups have enough samples (threshold={nwalkers * samples_keep / 2:.0f}). "
+                f"Max samples in any group: {num_in_groups.max()}. "
+                f"Reverting to priors."
+            )
+            self.rj_proposal_distribution = {
+                "gb": self.priors if not self.backend.uses_cuda else self.gpu_priors
+            }
+            return
+
         max_num_source = max([tmp.shape[0] for tmp in groups])
         samples = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
         for i, group in enumerate(groups):
@@ -3958,13 +3989,24 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         samples_fin = samples[keep]
         num_in_groups_fin = num_in_groups[keep]
+
+        if len(num_in_groups_fin) == 0 or num_in_groups_fin.min() == num_in_groups_fin.max():
+            logger.warning(
+                f"Cannot construct step range from num_in_groups_fin={num_in_groups_fin}. "
+                f"Reverting to priors..."
+            )
+            self.rj_proposal_distribution = {
+                "gb": self.priors if not self.backend.uses_cuda else self.gpu_priors
+            }
+            return
+
         cp.cuda.runtime.setDevice(gpu)
         output_info = []
         step = 5
         steps = np.arange(num_in_groups_fin.min(), num_in_groups_fin.max(), step)
         if steps[-1] < num_in_groups_fin.max().item():
             steps = np.concatenate([steps, np.array([num_in_groups_fin.max().item()])])
-        breakpoint()
+
         weights_all = []
         means_all = []
         covs_all = []
@@ -3979,18 +4021,29 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             
             if np.isnan(samples_here).any():
                 nan_groups = np.where(np.isnan(samples_here).any(axis=(1, 2)))[0]
-                raise ValueError(
-                    f"NaN padding leaked into samples_here at start={start}. "
-                    f"Affected groups (local indices): {nan_groups}. "
-                    f"num_in_groups for those groups: {num_in_groups_fin[here][nan_groups]}"
+                logger.warning(
+                    f"NaN padding leaked into samples_here at start={start}. \
+                    Affected groups (local indices): {nan_groups}. \
+                    num_in_groups for those groups: {num_in_groups_fin[here][nan_groups]} \
+                    Skipping Refit..."
                 )
+                return
+                # raise ValueError(
+                #     f"NaN padding leaked into samples_here at start={start}. "
+                #     f"Affected groups (local indices): {nan_groups}. "
+                #     f"num_in_groups for those groups: {num_in_groups_fin[here][nan_groups]}"
+                # )
 
             ranges = samples_here.max(axis=1) - samples_here.min(axis=1)
             if (ranges == 0).any():
                 bad = np.where((ranges == 0))
-                raise ValueError(
-                    f"Degenerate features at start={start}: groups={bad[0]}, features={bad[1]}"
+                logger.warning(
+                    f"Degenerate features at start={start}: groups={bad[0]}, features={bad[1]} \
+                    Skipping Refit..."
                 )
+                # raise ValueError(
+                #     f"Degenerate features at start={start}: groups={bad[0]}, features={bad[1]}"
+                # )
             
             weights, means, covs, invcovs, dets, mins, maxs = vec_fit_gmm_min_bic(
                 cp.asarray(samples_here),
@@ -4008,9 +4061,8 @@ class GBSpecialRJRefitMove(GBSpecialBase):
             dets_all += dets
             mins_all += mins
             maxs_all += maxs
-            print(start, end)
+            # logger.info(start, end)
         
-        breakpoint()
         full_gmm = FullGaussianMixtureModel(
             weights_all,
             means_all,
@@ -4025,13 +4077,13 @@ class GBSpecialRJRefitMove(GBSpecialBase):
         logger.info(f"Runtime GMM Refit: {round(time.perf_counter() - st)}")
         rj_dist = ProbDistContainer(
             {
-                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\lambda$", r"$\sin\beta$"): full_gmm,
+                (r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\cos\iota$", r"$\alpha$", r"$\sin\delta$"): full_gmm,
                 r"$\phi_0$": uniform_dist(0.0, 2 * np.pi),
                 r"$\psi$": uniform_dist(0.0, np.pi),
             },
             use_cupy=True,
         )
-        rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+        rj_dist.key_order = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
         # if self.ranks_needed == 0:
         #     gmms = [GMMFit(samples_2[i].get().reshape(-1, 8)) for i in range(samples_2.shape[0])[:10]]
         #     gmm_info = gather_gmms(gmms)
@@ -4058,10 +4110,11 @@ def get_param_limits(array): # can be used for debugging of coordinate values
     num_params = array.shape[-1]
     
     if num_params == 8:
-        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
     if num_params == 9:
-        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
-
+        param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
+    else:
+        param_labels = num_params * [""]
     for i, param_label in enumerate(param_labels):
         param_values = array[..., i]
         min_array_i = param_values.min()

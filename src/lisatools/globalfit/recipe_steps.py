@@ -289,7 +289,7 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     -------
     np.ndarray
         Parameter vector of shape ``(8,)`` in the (V)GB sampling basis
-        (LISA frame for sky/time parameters).
+        (ICRS or LISA frame for sky/time parameters).
     """
     amp = np.array(catalogue_entry["Amplitude"])
     logA = np.log(amp)
@@ -308,15 +308,15 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     f0_mHz = f_init * 1e3
     cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"])) % (np.pi)
 
-    ra = np.array(catalogue_entry["RightAscension"])
-    dec = np.array(catalogue_entry["Declination"])
+    ra = np.array(catalogue_entry["RightAscension"]) # alpha
+    dec = np.array(catalogue_entry["Declination"]) # delta
     psi_icrs = np.array(catalogue_entry["PolarisationAngle"])
-    lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
+    # lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
 
-    lam_ecl = lam_ecl % (2 * np.pi)
-    sin_beta_ecl = np.sin(beta_ecl)
+    alpha = ra % (2 * np.pi)
+    sin_delta = np.sin(dec)
 
-    return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_ecl, lam_ecl, sin_beta_ecl]).T
+    return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_icrs, alpha, sin_delta]).T
 
 
 def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None):
@@ -718,7 +718,8 @@ def build_gb_moves(
         nfriends=nwalkers,
         temperature_control=temperature_control,
         use_gpu=True, 
-        **gb_info.group_proposal_kwargs
+        num_repeat_proposals=gb_info.num_repeat_proposals,
+        **gb_info.search_kwargs
        
     )
 

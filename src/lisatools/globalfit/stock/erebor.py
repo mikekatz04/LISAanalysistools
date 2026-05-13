@@ -41,15 +41,16 @@ class GBSettings(Settings):
     phi0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     iota_lims: typing.List[float] = dataclasses.field(default_factory=list)
     psi_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    lam_lims: typing.List[float] = dataclasses.field(default_factory=list)
-    beta_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    alpha_lims: typing.List[float] = dataclasses.field(default_factory=list)
+    delta_lims: typing.List[float] = dataclasses.field(default_factory=list)
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
     oversample: int = 4
     extra_buffer: int = 5
     start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
-    group_proposal_kwargs: Optional[dict] = None
+    num_repeat_proposals: int = 100
+    search_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
     waveform_kwargs: dict = dataclasses.field(default_factory=dict)
     # t0: Optional[float] = 0.0
@@ -80,21 +81,20 @@ class GBSetup(Setup, GBSettings):
     def init_sampling_info(self):
 
         input_basis = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", 
-                       r"$\cos\iota$", r"$\psi$", r"$\lambda$", r"$\sin\beta$"]
+                       r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
 
         if self.transform is None:
             gb_transform_fn_in = {
                 r"$\log A$": np.exp,
                 r"$f_0$": f_ms_to_s,
                 r"$\cos\iota$": np.arccos,
-                r"$\sin\beta$": np.arcsin,
-                (r"$\lambda$", r"$\sin\beta$", r"$\psi$"): ecliptic_to_icrs
+                r"$\sin\delta$": np.arcsin,
             }
 
             output_basis = [
                 r"$\log A$", r"$f_0$", r"$\dot{f}$", 
                 r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", 
-                r"$\psi$", r"$\lambda$", r"$\sin\beta$"
+                r"$\psi$", r"$\alpha$", r"$\sin\delta$"
             ]
             
             gb_fill_dict = {r"$\ddot{f}$": 0.0}
@@ -107,7 +107,7 @@ class GBSetup(Setup, GBSettings):
             )
 
         if self.periodic is None:
-            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\lambda$": 2 * np.pi}}
+            self.periodic = {"gb": {r"$\phi_0$": 2*np.pi, r"$\psi$": np.pi, r"$\alpha$": 2 * np.pi}}
 
         if self.priors is None:
             priors_gb = {
@@ -117,8 +117,8 @@ class GBSetup(Setup, GBSettings):
                 input_basis[3]: uniform_dist(self.phi0_lims[0], self.phi0_lims[1]),
                 input_basis[4]: uniform_dist(*np.cos(self.iota_lims)),
                 input_basis[5]: uniform_dist(self.psi_lims[0], self.psi_lims[1]),
-                input_basis[6]: uniform_dist(self.lam_lims[0], self.lam_lims[1]),
-                input_basis[7]: uniform_dist(*np.sin(self.beta_lims)),
+                input_basis[6]: uniform_dist(self.alpha_lims[0], self.alpha_lims[1]),
+                input_basis[7]: uniform_dist(*np.sin(self.delta_lims)),
             }
 
             self.priors = {"gb": ProbDistContainer(priors_gb)}
@@ -150,9 +150,20 @@ class GBSetup(Setup, GBSettings):
         #     tdi2=self.use_tdi2
         # )
 
-        if self.group_proposal_kwargs is None:
-            self.group_proposal_kwargs: typing.Dict[str, Any] = dict(
-                n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=200
+        # self.group_proposal_kwargs = dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=70)
+        
+        if self.search_kwargs is None:
+            self.search_kwargs: typing.Dict[str, Any] = dict(
+                nwalkers = 32,
+                ntemps = 24,
+                shutoff_band_iteration = 5,
+                shutoff_frequency_threshold = None, # 4e-3 
+                burn_1 = 200,
+                nsteps_1 = 200,
+                snr_threshold = 8.0,
+                burn_2 = 500,
+                nsteps_2 = 500,
+                refit_start_iteration = 5 
             )
 
     # def __getattr__(self, attr: str) -> typing.Any:
