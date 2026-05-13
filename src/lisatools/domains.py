@@ -13,8 +13,6 @@ from scipy import interpolate, signal, special
 
 try:
     import cupy as cp
-    import cupyx.scipy.signal as cupyx_signal
-    from cupyx.scipy import special as cupy_special
 
     CUPY_AVAILABLE = True
 
@@ -59,6 +57,7 @@ class DomainBase:
         xp = get_array_module(arr)
 
         if CUPY_AVAILABLE and xp != np:
+            import cupyx.scipy.signal as cupyx_signal
             self._stft = cupyx_signal.stft
         else:
             self._stft = signal.stft
