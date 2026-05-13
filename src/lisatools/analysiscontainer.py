@@ -1108,8 +1108,12 @@ class AnalysisContainerArray:
             for i, (di, si) in enumerate(zip(data_index, start_index)):
                 if self.gpus is not None:
                     gpu = self.gpu_map[di]
+                    t_i = templates[i]
+                    if isinstance(t_i, self.xp.ndarray) and not t_i.flags['C_CONTIGUOUS']:
+                        with self.xp.cuda.Device(t_i.device.id):
+                            t_i = self.xp.ascontiguousarray(t_i)
                     self.xp.cuda.runtime.setDevice(gpu)
-                    templates_i = self.xp.asarray(templates[i])
+                    templates_i = self.xp.asarray(t_i)
                 else:
                     templates_i = templates[i]
 
@@ -1156,6 +1160,11 @@ class AnalysisContainerArray:
 
             if self.gpus is not None:
                 gpu = self.gpu_map[di]
+                # Make contiguous on the source device before cross-device copy.
+                # CuPy cannot copy non-contiguous arrays between devices.
+                if isinstance(template_arr, self.xp.ndarray) and not template_arr.flags['C_CONTIGUOUS']:
+                    with self.xp.cuda.Device(template_arr.device.id):
+                        template_arr = self.xp.ascontiguousarray(template_arr)
                 self.xp.cuda.runtime.setDevice(gpu)
                 template_arr = self.xp.asarray(template_arr)
                 # template_settings = template_settings.__class__(*template_settings.args, **template_settings.kwargs)  # make sure settings are on the correct device

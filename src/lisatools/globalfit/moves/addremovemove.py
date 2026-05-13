@@ -28,12 +28,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from ...sources.waveformbase import TDWaveformBase
     from ...domaincomputation import DomainComputationGroupArray
-
-def free_gpu_memory():
-    if xp is not np:
-        xp.get_default_memory_pool().free_all_blocks()
     
-
 class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     """
     Move that handles adding and removing sources to and from the residuals stored in the analysis container array.
@@ -130,6 +125,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 if tmp_move.periodic is None:
                     tmp_move.periodic = periodic
 
+    def free_gpu_memory(self):
+        if self.xp is not np:
+            self.xp.get_default_memory_pool().free_all_blocks()
+
     def check_add_skip_swap_info(self, state):
 
         if self.temperature_controls[0].skip_swap_branches is not None:
@@ -168,7 +167,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 
         del removal_waveforms
         #if xp is not np:
-        free_gpu_memory()
+        self.free_gpu_memory()
 
     def remove_cold_chain_sources(self, coords):
         """
@@ -194,7 +193,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         del removal_waveforms
         #if xp is not np:
-        free_gpu_memory()
+        self.free_gpu_memory()
 
         # ll_tmp3 = self.acs.likelihood(
         #     source_only=True
@@ -218,7 +217,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         """
         #if xp is not np:
-        free_gpu_memory()
+        self.free_gpu_memory()
 
         waveforms = []
         for i in range(coords.shape[0]):
@@ -380,7 +379,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
 
             # fix this need to compute prev_logl for all walkers
-            free_gpu_memory()
+            self.free_gpu_memory()
             for repeat in tqdm(range(self.num_repeats), desc=f"{self.branch_name} update, leaf {leaf}"):
 
                 # pick move
@@ -539,7 +538,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
             # add back cold chain sources
-            free_gpu_memory()
+            self.free_gpu_memory()
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
@@ -561,7 +560,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.acs.likelihood()
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
-        free_gpu_memory()
+        self.free_gpu_memory()
         if np.any(current_ll < -1e9):
             # keep a safe guard here
             logger.warning(f"Very low log likelihood encountered after propose: {current_ll.min()}. This could be a sign of numerical issues.")
@@ -577,7 +576,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         new_state.log_like[0] = current_ll
         # new_state.log_prior[0] = current_lp
-        free_gpu_memory()
+        self.free_gpu_memory()
         if not hasattr(self, "best_last_ll"):
             self.best_last_ll = current_ll.max()
             self.low_last_ll = current_ll.min()
@@ -633,7 +632,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 new_contrib[1] += add_waveforms[1]
 
         self.acs.swap_out_in_base_data(old_contrib, new_contrib)
-        free_gpu_memory()
+        self.free_gpu_memory()
 
 class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBase):
     """
@@ -718,13 +717,20 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
                 raise ValueError("Waveform generator must have a 'kwargs' attribute that contains the keyword arguments to initialize the waveform generator.")    
             
             with self.dcga.device_context(device):
-                init_kwargs = self.waveform_gen.kwargs.copy()
-                if "orbits" in init_kwargs:
-                    init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
+                if i == 0:
+                    # Reuse the initial waveform generator for the first split to save memory
+                    self._waveform_generators.append(self.waveform_gen)
+                else:
+                    init_kwargs = self.waveform_gen.kwargs.copy()
+                    if "orbits" in init_kwargs:
+                        init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
 
-                self._waveform_generators.append(
-                    self.waveform_gen.__class__(**init_kwargs)
-                )
+                    self._waveform_generators.append(
+                        self.waveform_gen.__class__(**init_kwargs)
+                    )
+
+    def free_gpu_memory(self):
+        self.dcga.free_gpu_memory()
 
     @property
     def waveform_generators(self) -> list:
@@ -769,7 +775,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         """Get the waveforms for the given source coordinates.
 
         """
-        free_gpu_memory()
+        self.free_gpu_memory()
 
         data_index = np.arange(coords.shape[0], dtype=np.int32)
 
@@ -835,8 +841,7 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         # Release waveform GPU arrays (signal_out) held by likelihood_args_per_split.
         # synchronize() inside compute_signal_likelihood cannot free them because this
         # local variable is still alive at that point.
-        del likelihood_args_per_split
-        free_gpu_memory()
+        # del likelihood_args_per_split
 
         likelihoods = np.where(np.isfinite(likelihoods), likelihoods, -1e300)
         return likelihoods

@@ -130,10 +130,17 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         sensitivity_backend_kwargs = sensitivity_backend.kwargs.copy()
 
         with self.group_device_context():
-            self._orbits = sensitivity_backend.orbits.__class__(*sensitivity_backend.orbits.args, **sensitivity_backend.orbits.kwargs)
+            # Check if the sensitivity matrix array lives on the same device
+            # (or CPU equivalent default). Using split_index == 0 ensures
+            # the original instance mapped to device 0 is reused on device 0.
+            if self.split_index == 0:
+                self._orbits = sensitivity_backend.orbits
+                self._sensitivity_backend = sensitivity_backend
+            else:
+                self._orbits = sensitivity_backend.orbits.__class__(*sensitivity_backend.orbits.args, **sensitivity_backend.orbits.kwargs)
 
-            sensitivity_backend_kwargs["orbits"] = self._orbits
-            self._sensitivity_backend = sensitivity_backend.__class__(**sensitivity_backend_kwargs)
+                sensitivity_backend_kwargs["orbits"] = self._orbits
+                self._sensitivity_backend = sensitivity_backend.__class__(**sensitivity_backend_kwargs)
 
             #todo figure what to do for the galaxy modulation.
 
@@ -598,12 +605,12 @@ class DomainComputationGroupArray:
                 yield "cpu"
 
         else:
-            device_id = self.gpus.index(device)
+            # device_id = self.gpus.index(device)
 
             # GPU context - set context to the specified GPU device
-            with jax.default_device(jax.devices("gpu")[device_id]):
-                with self.xp.cuda.Device(device):
-                    yield f"gpu: {device}"
+            # with jax.default_device(jax.devices("gpu")[device_id]):
+            with self.xp.cuda.Device(device):
+                yield f"gpu: {device}"
 
     def restore_main_device(self):
         """Restores the main device context after GPU computations, and calls ``xp.get_default_memory_pool().free_all_blocks()`` to clear GPU memory.
@@ -628,6 +635,16 @@ class DomainComputationGroupArray:
             for device in self.gpus:
                 with self.device_context(device):
                     self.xp.cuda.runtime.deviceSynchronize()
+
+    def free_gpu_memory(self):
+        """Frees GPU memory on all devices by calling ``xp.get_default_memory_pool().free_all_blocks()`` for each device.
+
+        Notes:
+            This method should be called after performing computations on multiple GPU devices to ensure that GPU memory is freed and available for future computations.
+        """
+        if self.gpus is not None:
+            for device in self.gpus:
+                with self.device_context(device):
                     self.xp.get_default_memory_pool().free_all_blocks()
 
     def _to_host(self, arr: np.ndarray | cp.ndarray) -> np.ndarray:
@@ -851,7 +868,6 @@ class DomainComputationGroupArray:
             if len(positions) > 0:
                 output[positions] = self._to_host(all_logls[split_id])
 
-        self.synchronize()
         return output
 
     def compute_psd_likelihood(
