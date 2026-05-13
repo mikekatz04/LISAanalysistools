@@ -6,7 +6,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from cudakima import AkimaInterpolant1D
 import h5py
 import numpy as np
 import requests
@@ -937,18 +936,16 @@ class L1Orbits(Orbits):
         rec_indices = [x - 1 for x in self.link_space_craft_r]
         emit_indices = [x - 1 for x in self.link_space_craft_e]
 
-        akima_interpolant = AkimaInterpolant1D(use_gpu=False, order='cubic')
 
         for i in range(6):
             rec_idx = rec_indices[i]
             emit_idx = emit_indices[i]
 
             # Interpolate LTT for this link
-            # cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
-            # ltt_i = cs_ltt(t_arr)
+            cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
+            ltt_i = cs_ltt(t_arr)
             # try to save memory
-            ltt_i = akima_interpolant(t_arr, self.ltt_t, self.ltt[:, i])
-
+            del cs_ltt
             # Emission time
             t_emit = t_arr - ltt_i
 
