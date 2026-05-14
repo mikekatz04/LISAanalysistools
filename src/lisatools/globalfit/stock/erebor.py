@@ -197,7 +197,7 @@ class GBSetup(Setup, GBSettings):
         min_N = get_N(1e-30, self.start_freq, self.Tobs, oversample=self.oversample).item()
         band_N_vals_reverse_order = [current_N]
 
-        current_freq = self.end_freq
+        current_freq = self.end_freq - self.df / 2
         last_freq = self.end_freq
         while current_freq > self.start_freq + min_N * self.df:
             current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df

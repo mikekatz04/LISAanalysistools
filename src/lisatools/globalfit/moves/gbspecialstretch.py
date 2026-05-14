@@ -1310,7 +1310,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         GlobalFitMove.__init__(self, name=name)
         Move.__init__(self, *args, return_gpu=True)
-        # GroupStretchMove.__init__(self, *args, return_gpu=True)
+        # kwargs_group = dict(
+        #     n_iter_update=1,
+        #     live_dangerously=True,
+        #     a=1.75,
+        #     num_repeat_proposals=200,
+        #     nfriends=32
+        # )
+        # GroupStretchMove.__init__(self, *args, return_gpu=True, **kwargs_group)
 
         self.force_backend = force_backend
         self.ranks_needed = ranks_needed
@@ -3262,7 +3269,7 @@ def para_log_like(
             data_splits=np.array([gb.gpus[0]]),
             phase_marginalize=phase_maximize,
             return_cupy=True,
-            # N=256,
+            # N=512,
             **waveform_kwargs,
         )
         # breakpoint()
@@ -3530,7 +3537,6 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         return gb_search_func
 
     def setup(self, model, branches):
-        # self.search_kwargs
         nwalkers: int = self.search_kwargs["nwalkers"]
         ntemps: int = self.search_kwargs["ntemps"]
         shutoff_band_iteration: int = self.search_kwargs["shutoff_band_iteration"]
@@ -3703,6 +3709,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
                 self.found_source_in_band = np.vstack([self.found_source_in_band, shutoff_temp])
         
         logger.info(f"Found a source in {groups_running_now.sum()} out of {groups_running_now.shape[0]} active bands")
+        breakpoint()
         if not np.any(groups_running_now):
             logger.info("Did not find any new sources.")
             return
@@ -3770,7 +3777,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # )
 
         samples_2 = samples_2.transpose(1, 0, 2, 3)
-        # np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples.npy", samples_2)
+        np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples_check.npy", samples_2)
 
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[
@@ -4111,7 +4118,7 @@ def get_param_limits(array): # can be used for debugging of coordinate values
     
     if num_params == 8:
         param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
-    if num_params == 9:
+    elif num_params == 9:
         param_labels = [r"$\log A$", r"$f_0$", r"$\dot{f}$", r"$\ddot{f}$", r"$\phi_0$", r"$\cos\iota$", r"$\psi$", r"$\alpha$", r"$\sin\delta$"]
     else:
         param_labels = num_params * [""]

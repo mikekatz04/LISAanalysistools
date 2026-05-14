@@ -139,8 +139,8 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
     
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    start_freq = float(input_data_arr.settings.f_arr[0])
-    end_freq = float(input_data_arr.settings.f_arr[-1])
+    start_freq = float(input_data_arr.settings.f_arr.min())
+    end_freq = float(input_data_arr.settings.f_arr.max())
     
     Tobs = 1/getattr(input_data_arr.settings, "df")
 
@@ -167,8 +167,8 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         ntemps = 24,
         shutoff_band_iteration = 2,
         shutoff_frequency_threshold = None, # 4e-3 
-        burn_1 = 500,
-        nsteps_1 = 500,
+        burn_1 = 1000,
+        nsteps_1 = 300,
         snr_threshold = 8.0,
         burn_2 = 500,
         nsteps_2 = 500,
@@ -257,7 +257,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
-    start_freq, end_freq = [0.019349, 0.0200433]
+    start_freq, end_freq = [0.019337, 0.0200433]
 
     head_dir = "/workspace/rrondeel/erebor/"
     data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
@@ -340,7 +340,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         end_freq=end_freq,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
-        random_seed=103213943,
+        random_seed=5701424,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
