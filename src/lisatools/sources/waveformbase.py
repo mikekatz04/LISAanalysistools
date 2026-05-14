@@ -901,7 +901,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
         # add 500 seconds to the end to prevent problems with the response
 
-        # pad both sides with zeros by num_pad
+        # pad with zeros by num_pad
         num_pad = int(self.buffer_time / self.dt)
 
         pad_idx_right = self.xp.arange(1, num_pad + 1)[None, :]
@@ -909,7 +909,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         shifted_t_arr = self.xp.concatenate(
             [
-                shifted_t_arr[:, 0:1] - self.dt * pad_idx_left,
+                #shifted_t_arr[:, 0:1] - self.dt * pad_idx_left,
                 shifted_t_arr,
                 shifted_t_arr[:, -1:] + self.dt * pad_idx_right,
             ],
@@ -918,7 +918,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         # condition the signal with a small taper at the start to mitigate edge effects in the response
         num_orig_pts = h_plus.shape[-1]
-        taper_points = 1000
+        taper_points = num_pad
         alpha = taper_points / num_orig_pts
         window_orig = tukey(num_orig_pts, alpha=alpha, xp=self.xp)
         window_orig[num_orig_pts//2:] = 1.0  # Only taper the start!
@@ -927,8 +927,8 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         h_cross = h_cross * window_orig[None, :]
 
         # Pad zeros to both the front (buffer) and the back
-        h_plus = self.xp.pad(h_plus, ((0, 0), (num_pad, num_pad)), mode="constant", constant_values=0.0)
-        h_cross = self.xp.pad(h_cross, ((0, 0), (num_pad, num_pad)), mode="constant", constant_values=0.0)
+        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_pad)), mode="constant", constant_values=0.0)
+        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_pad)), mode="constant", constant_values=0.0)
 
         num_pts = shifted_t_arr.shape[-1]
         self.response.num_pts = num_pts
@@ -943,8 +943,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         if len(tdis.shape) == 3:
             tdis = tdis.transpose(1, 0, 2)
 
-        tdis = tdis[..., num_pad:-num_pad] # remove the padded points
-        shifted_t_arr = shifted_t_arr[:, num_pad:-num_pad]
+        tdis = tdis[..., :-num_pad] # remove the padded points
+        tdis[..., :num_pad] = 0.0  # zero out the corrupted points at the start
+        shifted_t_arr = shifted_t_arr[:, :-num_pad]
 
         t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
         shifted_t_arr += t_arr_shift[:, None]

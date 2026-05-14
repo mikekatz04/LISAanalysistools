@@ -24,6 +24,7 @@ from .globalfitmove import GlobalFitMove
 from .multigpumove import MultiGPUMoveBase
 
 logger = logging.getLogger(__name__)
+DEBUG_MODE = False
 
 if TYPE_CHECKING:
     from ...sources.waveformbase import TDWaveformBase
@@ -365,9 +366,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            if np.any(prev_logl < -1e7):
-                #logger.warning(f"Very low log likelihood encountered in propose: {prev_logl.min()}. This could be a sign of numerical issues.")
-                breakpoint()
+            if np.any(prev_logl < -1e8):
+                if DEBUG_MODE:
+                    breakpoint()
+                else:
+                    logger.warning("Debug mode is off, continuing without breaking.")
 
             prev_logp = (
                 self.priors[self.branch_name]
@@ -454,9 +457,12 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                         data_index=data_index,
                         # constants_index=data_index,
                     )
-                    if np.any(logl[~np.isinf(logp)] < -1e7):
+                    if np.any(logl[~np.isinf(logp)] < -1e8):
                         #logger.warning(f"Very low log likelihood encountered in propose: {logl[~np.isinf(logp)].min()}. This could be a sign of numerical issues.")
-                        breakpoint()
+                        if DEBUG_MODE:
+                            breakpoint()
+                        else:
+                            logger.warning("Debug mode is off, continuing without breaking.")
                     # print(f"new logl: {logl}. elapsed: {time.time() - tic}")
 
                     logl = logl.reshape(self.ntemps, nwalkers_here)
