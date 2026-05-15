@@ -1,3 +1,5 @@
+"""Diagnostic plot helpers used by global-fit run reporting."""
+
 import corner
 import matplotlib.pyplot as plt
 import numpy as np
@@ -6,6 +8,15 @@ import numpy as np
 
 
 def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=None):
+    """Produce a corner plot of MBH samples (one trace per leaf).
+
+    Args:
+        mbh_reader: HDF backend with the MBH chain.
+        num_leaves: Number of MBH leaves to plot.
+        discard: Burn-in steps to discard.
+        save_file: Path to write the figure to. If ``None``, no save occurs.
+        fig: Optional existing :class:`matplotlib.figure.Figure` to reuse.
+    """
 
     plt.close()
     fig2, ax2 = plt.subplots(1, 1)
@@ -70,6 +81,13 @@ def produce_mbh_plots(mbh_reader, num_leaves, discard=0, save_file=None, fig=Non
 
 
 def produce_sky_plot(current_info, save_file=None, fig=None):
+    """Produce an all-source sky-localization plot (GB / MBH / etc.).
+
+    Args:
+        current_info: Global-fit info object exposing the per-source readers.
+        save_file: Optional output path.
+        fig: Optional existing :class:`matplotlib.figure.Figure` to draw onto.
+    """
 
     ll_gb_ind_max = current_info.gb_info["cc_ll"].argmax()
     gb_lam, gb_sinbeta = current_info.gb_info["cc_params"][ll_gb_ind_max, :, np.array([6, 7])][
@@ -107,6 +125,14 @@ def produce_sky_plot(current_info, save_file=None, fig=None):
 
 
 def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
+    """Produce diagnostic plots of the galactic-binary chain (frequency / SNR / count).
+
+    Args:
+        gb_reader: HDF backend with the GB chain.
+        discard: Burn-in steps to discard.
+        save_file: Optional output path.
+        fig: Optional existing :class:`matplotlib.figure.Figure` to draw onto.
+    """
     plt.close()
     nl = gb_reader.get_nleaves()
     ll = gb_reader.get_log_like()
@@ -140,6 +166,14 @@ def produce_gbs_plots(gb_reader, discard=0, save_file=None, fig=None):
 
 
 def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
+    """Produce diagnostic plots of the PSD / galactic-foreground chain.
+
+    Args:
+        psd_reader: HDF backend with the PSD chain.
+        discard: Burn-in steps to discard.
+        save_file: Optional output path.
+        fig: Optional existing :class:`matplotlib.figure.Figure` to draw onto.
+    """
     if fig is not None:
         plt.close()
 
@@ -173,6 +207,15 @@ def produce_psd_plots(psd_reader, discard=0, save_file=None, fig=None):
 
 
 def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=False, **kwargs):
+    """Render a combined diagnostic figure summarizing the current fit.
+
+    Args:
+        current_info: Global-fit info object.
+        save_file: Optional output path.
+        add_mbhs: If ``True``, overlay the current MBH templates.
+        add_gbs: If ``True``, overlay the current galactic-binary templates.
+        **kwargs: Forwarded to the per-component plotting helpers.
+    """
     generated_info_0 = current_info.get_data_psd(
         only_max_ll=True, include_gbs=False, include_mbhs=False, **kwargs
     )
@@ -220,6 +263,16 @@ def make_current_plot(current_info, save_file=None, add_mbhs=False, add_gbs=Fals
 
 
 class RunResultsProduction:
+    """Async-driven plot producer that listens to ``head_rank`` for new states.
+
+    Args:
+        comm: MPI communicator.
+        head_rank: Rank that owns the global state and serves snapshots.
+        add_mbhs: If ``True``, MBH templates are overlaid in plots.
+        add_gbs: If ``True``, GB templates are overlaid in plots.
+        **kwargs: Stored on the instance and forwarded to the plot functions.
+    """
+
     def __init__(self, comm, head_rank, add_mbhs=False, add_gbs=False, **kwargs):
         self.comm = comm
         self.head_rank = head_rank
@@ -228,6 +281,7 @@ class RunResultsProduction:
         self.kwargs = kwargs
 
     def run_results_production(**kwargs):
+        """Event loop that keeps producing plots until told to stop."""
 
         self.comm.send({"ready": True}, dest=self.head_rank, tag=7979)
 
@@ -246,6 +300,7 @@ class RunResultsProduction:
             self.comm.send({"ready": True}, dest=self.head_rank, tag=7979)
 
     def build_plots(self, current_info):
+        """Render the full set of diagnostic plots for ``current_info``."""
         base_save_file = current_info.general_info["file_information"]["plot_base"]
         if base_save_file[-4:] == ".png":
             base_save_file = base_save_file[:-4]

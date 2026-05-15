@@ -1,3 +1,5 @@
+"""High-level analysis containers combining data, sensitivity, and signal generation."""
+
 from __future__ import annotations
 
 import math
@@ -96,6 +98,7 @@ class AnalysisContainer:
 
     @property
     def start_freq_ind(self):
+        """Pass-through to :attr:`DataResidualArray.start_freq_ind`."""
         return self.data_res_arr.start_freq_ind
 
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
@@ -595,17 +598,31 @@ class AnalysisContainer:
 
 
 class AnalysisContainerArray:
-    @property
-    def xp(self) -> object:
-        return cp if self.gpus is not None else np
-    
-    """
-    Container for multiple analysis containers. This is useful for parallelization and batching.
+    """Container for multiple :class:`AnalysisContainer` objects.
+
+    Useful for parallelization and batching across many independent analyses
+    (for example one container per source). Provides a flat view (``acs``) and
+    preserves the original shape (``acs_shape``).
 
     Args:
-        analysis_containers: Can be a single :class:`AnalysisContainer`, a 1D list of :class:`AnalysisContainer`, or a numpy object array of :class:`AnalysisContainer`. If a 2D or higher list/array is input, it will be flattened to 1D and the original shape will be stored in ``acs_shape``.
-        gpus: If not ``None``, list of GPU ids to use for storing data and sensitivity information. The data and sensitivity information for each container will be split across the GPUs as evenly as possible. If ``None``, everything is stored on the CPU.
+        analysis_containers: Can be a single :class:`AnalysisContainer`, a 1D
+            list of :class:`AnalysisContainer`, or a NumPy object array of
+            :class:`AnalysisContainer`. If a 2D or higher list/array is input,
+            it will be flattened to 1D and the original shape will be stored
+            in ``acs_shape``.
+        gpus: If not ``None``, list of GPU ids to use for storing data and
+            sensitivity information. The data and sensitivity information for
+            each container will be split across the GPUs as evenly as possible.
+            If ``None``, everything is stored on the CPU.
+        complex_psd: If ``True``, allocate a complex-valued PSD buffer (not yet
+            implemented; raises ``NotImplementedError``).
+
     """
+
+    @property
+    def xp(self) -> object:
+        """Return the active array module (``cupy`` if GPUs are configured, else ``numpy``)."""
+        return cp if self.gpus is not None else np
 
     def __init__(
         self,
@@ -710,6 +727,7 @@ class AnalysisContainerArray:
         self.reset_linear_psd_arr()
 
     def zero_out_data_arr(self):
+        """Zero the linear (per-GPU) data buffers in place."""
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
 
@@ -720,6 +738,7 @@ class AnalysisContainerArray:
         self.xp.cuda.runtime.setDevice(main_gpu)
 
     def reset_linear_data_arr(self):
+        """Repack each container's data residual into the contiguous per-GPU data buffer."""
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
 
@@ -751,6 +770,7 @@ class AnalysisContainerArray:
             self.xp.cuda.runtime.setDevice(main_gpu)
 
     def reset_linear_psd_arr(self):
+        """Repack each container's inverse-PSD into the contiguous per-GPU PSD buffer."""
         if self.gpus is not None:
             main_gpu = self.xp.cuda.runtime.getDevice()
 
@@ -785,16 +805,19 @@ class AnalysisContainerArray:
 
     @property
     def f_arr(self):
+        """Frequency array of the first analysis container."""
         return self.acs[0].data_res_arr.f_arr
 
     @property
     def df(self):
+        """Frequency spacing inferred from :attr:`f_arr`."""
         return self.f_arr[1] - self.f_arr[0]
 
     def __len__(self) -> int:
         return len(self.acs)
 
     def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
+        """Apply ``operation`` to every container and stack the per-container results."""
         for i, ac in enumerate(self.acs.flatten()):
             _tmp = getattr(ac, operation)
             if callable(_tmp):
@@ -813,15 +836,19 @@ class AnalysisContainerArray:
 
     @property
     def start_freq_ind(self):
+        """Per-container ``start_freq_ind`` reshaped to :attr:`acs_shape`."""
         return self._loop_operation("start_freq_ind")
 
     def inner_product(self, **kwargs):
+        """Per-container :meth:`AnalysisContainer.inner_product` reshaped to :attr:`acs_shape`."""
         return self._loop_operation("inner_product", **kwargs)
 
     def likelihood(self, **kwargs):
+        """Per-container :meth:`AnalysisContainer.likelihood` reshaped to :attr:`acs_shape`."""
         return self._loop_operation("likelihood", **kwargs)
 
     def snr(self, **kwargs):
+        """Per-container :meth:`AnalysisContainer.snr` reshaped to :attr:`acs_shape`."""
         return self._loop_operation("snr", **kwargs)
 
     def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:
@@ -1175,6 +1202,7 @@ class AnalysisContainerArray:
 
     @property
     def data_shaped(self):
+        """Per-GPU data buffers reshaped to ``(n_acs_on_gpu, nchannels, *end_shape)``."""
         out = []
         for i, tmp in enumerate(self.linear_data_arr):
             if self.gpus is not None:
@@ -1184,6 +1212,7 @@ class AnalysisContainerArray:
 
     @property
     def psd_shaped(self):
+        """Per-GPU PSD buffers reshaped to ``(n_acs_on_gpu, *shape_sens, *end_shape)``."""
         out = []
         for i, tmp in enumerate(self.linear_psd_arr):
             if self.gpus is not None:

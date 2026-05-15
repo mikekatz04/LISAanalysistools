@@ -1,3 +1,5 @@
+"""Inner products, likelihood terms, and Fisher / covariance diagnostics."""
+
 from __future__ import annotations
 
 import warnings
@@ -54,9 +56,9 @@ def inner_product(
             Can be time-domain or frequency-domain.
             Must be 1D ``np.ndarray``, list of 1D ``np.ndarray``s, or 2D ``np.ndarray``
             across channels with shape ``(nchannels, data length)``.
-        dt: Time step in seconds. If provided, assumes time-domain signals.
-        df: Constant frequency spacing. This will assume a frequency domain signal with constant frequency spacing.
-        f_arr: Array of specific frequencies at which the signal is given.
+        basis_settings: :class:`~lisatools.domains.DomainSettingsBase` describing the
+            domain of ``sig1`` / ``sig2`` (only consulted when raw arrays are passed
+            instead of :class:`~lisatools.datacontainer.DataResidualArray` objects).
         psd: Indicator of what psd to use. If a ``str``, this will be passed as the ``sens_fn`` kwarg to :func:`get_sensitivity`.
             If ``None``, it will be an array of ones. Or, you can pass a 1D ``np.ndarray`` of psd values that must be the same length
             as the frequency domain signals.
@@ -462,7 +464,7 @@ def h_var_p_eps(
     waveform_args: Optional[tuple] = (),
     waveform_kwargs: Optional[dict] = {},
 ) -> np.ndarray:  # TODO: check this
-    """Calculate the waveform with a perturbation step of the variable V[i]
+    """Calculate the waveform with a perturbation step of the variable V[i].
 
     Args:
         waveform_model: Callable function to the waveform generator with signature ``(*params, **waveform_kwargs)``.
@@ -507,7 +509,7 @@ def dh_dlambda(
     more_accurate: Optional[bool] = True,
     **kwargs: dict,
 ) -> np.ndarray:
-    """Derivative of the waveform
+    """Derivative of the waveform.
 
     Calculate the derivative of the waveform with precision of order (step^4)
     with respect to the variable V in the i direction.

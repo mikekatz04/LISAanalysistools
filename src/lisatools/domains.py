@@ -1,3 +1,12 @@
+"""Time, frequency, and time-frequency domain settings and array wrappers.
+
+Defines :class:`DomainSettingsBase` (with its concrete subclasses :class:`TDSettings`,
+:class:`FDSettings`, :class:`STFTSettings`, :class:`WDMSettings`) and the matching
+:class:`DomainBase` array wrappers used throughout the package to keep arrays
+tagged with their basis information so that transforms (FFT/iFFT, STFT, WDM)
+can be performed automatically.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -39,6 +48,9 @@ from .utils.parallelbase import LISAToolsParallelModule
 import dataclasses
 
 
+# TODO/DOCS: this stub appears to be a forward declaration that the
+# ``@dataclass``-decorated definition below shadows; verify whether it's still
+# needed.
 class DomainSettingsBase(LISAToolsParallelModule):
     force_backend: str = None
     def __init__(self, force_backend: str = None):
@@ -47,6 +59,19 @@ class DomainSettingsBase(LISAToolsParallelModule):
 
 @dataclasses.dataclass
 class DomainSettingsBase(LISAToolsParallelModule):
+    """Base class for domain settings (TD, FD, STFT, WDM, ...).
+
+    Carries the ``force_backend`` selector that decides whether NumPy or CuPy
+    is used for arrays in this domain. Subclasses must implement
+    :meth:`get_slice` and define an ``associated_class`` mapping the settings
+    to a concrete :class:`DomainBase` subclass.
+
+    Args:
+        force_backend: Backend name passed to
+            :class:`~lisatools.utils.parallelbase.LISAToolsParallelModule`
+            (e.g. ``"cpu"``, ``"cuda12x"``).
+    """
+
     force_backend: str = None
 
     def __init__(self, force_backend: str = None):
@@ -54,19 +79,31 @@ class DomainSettingsBase(LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls):
+        """Return the list of backend names this settings class supports."""
         return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_slice(self, index: tuple) -> DomainSettingsBase:
+        """Return a new settings object describing a sliced view of this domain."""
         raise NotImplementedError("get_slice needs to be implemented for this signal type.")
 
 
 class DomainBase:
+    """Base wrapper for an array tagged with its domain settings.
+
+    The array's last ``len(basis_shape_active)`` dimensions correspond to the
+    domain's basis (e.g. frequency bins, time bins, time-frequency cells); any
+    leading dimensions are interpreted as ``(nbatch?, nchannels)``.
+
+    Args:
+        arr: The underlying NumPy or CuPy array.
+    """
 
     def __init__(self, arr):
         self.arr = arr
 
     @staticmethod
     def get(x: np.ndarray) -> np.ndarray:
+        """Return ``x`` as a NumPy array (calls ``.get()`` for CuPy arrays)."""
         try:
             return x.get()
         except AttributeError:
@@ -74,11 +111,12 @@ class DomainBase:
 
     @property
     def arr(self) -> np.ndarray | cp.ndarray:
+        """Underlying NumPy or CuPy array."""
         return self._arr
 
     @arr.setter
     def arr(self, arr: np.ndarray | cp.ndarray):
-        
+        """Set the underlying array and infer batch / channel dimensions."""
         if self.backend.uses_cupy:
             self._stft = cupyx_signal.stft
         else:
@@ -121,13 +159,16 @@ class DomainBase:
         return self._nbatch
 
     def flatten(self) -> np.ndarray | cp.ndarray:
+        """Return :attr:`arr` flattened to 1D."""
         return self.arr.flatten()
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
+        """Transform this signal into ``new_domain`` (subclasses must implement)."""
         raise NotImplementedError("Transform needs to be implemented for this signal type.")
 
     @property
     def shape(self) -> tuple:
+        """Shape of :attr:`arr`."""
         return self.arr.shape
     
     def __add__(self, other: DomainBase):
@@ -155,12 +196,22 @@ class DomainBase:
         return self.__class__(self.arr / other, settings=self.settings)
 
     def get_array_slice(self, index: tuple) -> DomainBase:
+        """Return a sliced copy with both the array and its settings restricted to ``index``."""
         new_arr = self.arr[(Ellipsis,) + index]
         new_settings = self.settings.get_slice(index)
         return self.settings.associated_class(new_arr, new_settings)
 
 
 class TDSettings(DomainSettingsBase):
+    """Time-domain basis settings.
+
+    Args:
+        N: Number of time samples.
+        dt: Sample spacing in seconds.
+        t0: Start time in seconds. Defaults to ``0.0``.
+        **kwargs: Forwarded to :class:`DomainSettingsBase` (e.g. ``force_backend``).
+    """
+
     N: int
     dt: float
     t0: float = 0.0
@@ -174,30 +225,37 @@ class TDSettings(DomainSettingsBase):
 
     @staticmethod
     def get_associated_class():
+        """Return the :class:`DomainBase` subclass that pairs with these settings."""
         return TDSignal
 
     @property
     def associated_class(self):
+        """The :class:`DomainBase` subclass that pairs with these settings."""
         return self.get_associated_class()
 
     @property
     def kwargs(self) -> dict:
+        """Keyword arguments needed to reconstruct this settings object."""
         return dict(t0=self.t0, force_backend=self.backend)
-    
+
     @property
     def args(self) -> tuple:
+        """Positional arguments needed to reconstruct this settings object."""
         return (self.N, self.dt)
 
     @property
     def t_arr(self) -> np.ndarray:
+        """Array of sample times: ``t0 + arange(N) * dt``."""
         return self.t0 + self.xp.arange(self.N) * self.dt
 
     @property
     def basis_shape(self) -> tuple:
+        """Total basis shape ``(N,)``."""
         return (self.N,)
-    
+
     @property
     def basis_shape_active(self) -> tuple:
+        """Active basis shape (same as :attr:`basis_shape` for TD)."""
         # TODO: adjust this
         return (self.N,)
 
@@ -217,13 +275,16 @@ class TDSettings(DomainSettingsBase):
 
     @property
     def differential_component(self) -> float:
+        """Differential element used in inner-product summations (``dt`` in TD)."""
         return self.dt
 
     @property
     def total_terms(self) -> int:
+        """Total number of basis elements (``N``)."""
         return self.N
 
     def compute_slice_indices(self, tmin: float, tmax: float) -> slice:
+        """Return a ``slice`` along the time axis covering ``[tmin, tmax]``."""
         if tmin < self.t0:
             raise ValueError("tmin must be greater than or equal to t0.")
         if tmax > self.t0 + self.N * self.dt:
@@ -265,12 +326,20 @@ class TDSettings(DomainSettingsBase):
 
 
 class TDSignal(DomainBase, TDSettings):
+    """Time-domain array wrapper paired with :class:`TDSettings`.
+
+    Args:
+        arr: NumPy or CuPy array with shape ``(..., N)``.
+        settings: :class:`TDSettings` describing the time grid.
+    """
+
     def __init__(self, arr, settings: TDSettings):
         TDSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
 
     @property
     def settings(self) -> TDSettings:
+        """A fresh :class:`TDSettings` matching this signal's time grid."""
         return TDSettings(*self.args, **self.kwargs)
 
     def __repr__(self) -> str:
@@ -280,6 +349,16 @@ class TDSignal(DomainBase, TDSettings):
         )
     
     def fft(self, settings=None, window=None):
+        """Forward FFT of the (optionally windowed) time-domain signal.
+
+        Args:
+            settings: Optional target :class:`FDSettings`; if ``None``, one is built
+                from the inferred ``df`` and FFT length.
+            window: Optional window applied before the transform.
+
+        Returns:
+            :class:`FDSignal` containing the (possibly trimmed) frequency-domain array.
+        """
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
@@ -299,7 +378,16 @@ class TDSignal(DomainBase, TDSettings):
         return FDSignal(fd_arr_in, fd_settings)
 
     def stft(self, settings=None, window=None):
+        """Short-time Fourier transform of the time-domain signal.
 
+        Args:
+            settings: :class:`STFTSettings` describing the segment grid (required).
+            window: Optional per-segment window (length ``nperseg``).
+
+        Returns:
+            :class:`STFTSignal` containing the time-frequency array sliced to
+            ``settings.active_slice``.
+        """
         if settings is None:
             raise ValueError("Must provide STFTSettings for stft transform.")
         assert isinstance(settings, STFTSettings)
@@ -343,6 +431,7 @@ class TDSignal(DomainBase, TDSettings):
         return STFTSignal(stft_arr[..., settings.active_slice], settings)  # (nchannels, NT, NF)
 
     def wdmtransform(self, settings=None, window=None):
+        """Transform to the WDM wavelet basis via FFT then :meth:`FDSignal.wdmtransform`."""
         if window is None:
             window =self.xp.ones(self.arr.shape, dtype=float)
 
@@ -354,6 +443,7 @@ class TDSignal(DomainBase, TDSettings):
         return self.fft(settings=None, window=window).transform(settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray = None):
+        """Dispatch to :meth:`fft`, :meth:`stft`, or :meth:`wdmtransform` based on ``new_domain``."""
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
@@ -376,6 +466,17 @@ class TDSignal(DomainBase, TDSettings):
 
 
 class FDSettings(DomainSettingsBase):
+    """Frequency-domain basis settings on a uniform grid.
+
+    Args:
+        N: Total number of frequency bins on the underlying ``arange(0, N) * df`` grid.
+        df: Frequency spacing in Hz.
+        min_freq: Lower edge of the active band; bins below are masked out via
+            :attr:`active_slice`. Defaults to ``0.0``.
+        max_freq: Upper edge of the active band; if ``None``, the full range is used.
+        **kwargs: Forwarded to :class:`DomainSettingsBase` (e.g. ``force_backend``).
+    """
+
     N: int
     df: float
     min_freq: Optional[float] = 0.0
@@ -397,6 +498,7 @@ class FDSettings(DomainSettingsBase):
 
     @property
     def differential_component(self) -> float:
+        """Differential element used in inner-product summations (``df`` in FD)."""
         return self.df
    
     @property
@@ -457,14 +559,17 @@ class FDSettings(DomainSettingsBase):
 
     @staticmethod
     def get_associated_class():
+        """Return the :class:`DomainBase` subclass that pairs with these settings."""
         return FDSignal
 
     @property
     def associated_class(self):
+        """The :class:`DomainBase` subclass that pairs with these settings."""
         return self.get_associated_class()
 
     @property
     def kwargs(self) -> dict:
+        """Keyword arguments needed to reconstruct this settings object."""
         return dict(
             min_freq=self.min_freq,
             max_freq=self.max_freq,
@@ -473,18 +578,22 @@ class FDSettings(DomainSettingsBase):
 
     @property
     def args(self) -> tuple:
+        """Positional arguments needed to reconstruct this settings object."""
         return (self.N, self.df)
 
     @property
     def basis_shape(self) -> tuple:
+        """Total basis shape ``(N,)``."""
         return (self.N,)
-    
+
     @property
     def basis_shape_active(self) -> tuple:
+        """Active basis shape (after applying ``min_freq``/``max_freq`` masking)."""
         return (self.N_active,)
 
     @property
     def f_arr(self) -> np.ndarray:
+        """Active-band frequency array (Hz)."""
         _all_freqs = self.xp.arange(0, self.N) * self.df
 
         return _all_freqs[self.active_slice]
@@ -508,16 +617,19 @@ class FDSettings(DomainSettingsBase):
 
     @property
     def total_terms(self) -> int:
+        """Total number of basis elements in the active band."""
         return self.N_active
 
     @property
     def active_slice(
         self,
     ) -> slice:
+        """Slice along the frequency axis that selects ``[min_freq, max_freq]``."""
         return slice(self.ind_min, self.ind_max + 1)
 
     @property
     def N_active(self) -> int:
+        """Number of frequency bins in the active band."""
         sl = self.active_slice
         return sl.stop - sl.start
 
@@ -534,6 +646,14 @@ class FDSettings(DomainSettingsBase):
 
 
 class FDSignal(FDSettings, DomainBase):
+    """Frequency-domain array wrapper paired with :class:`FDSettings`.
+
+    Args:
+        arr: NumPy or CuPy array. The trailing axis must have length ``N_active``
+            (or ``N`` if no min/max masking is applied).
+        settings: :class:`FDSettings` describing the frequency grid and band.
+    """
+
     def __init__(self, arr, settings: FDSettings):
         try:
             FDSettings.__init__(self, *settings.args, **settings.kwargs)
@@ -549,14 +669,17 @@ class FDSignal(FDSettings, DomainBase):
 
     @property
     def settings(self) -> FDSettings:
+        """A fresh :class:`FDSettings` matching this signal's frequency grid."""
         return FDSettings(*self.args, **self.kwargs)
 
     def pad_array(self, arr: np.ndarray) -> np.ndarray:
+        """Zero-pad ``arr`` (2D) back to the full ``N``-bin grid before an inverse transform."""
         assert arr.ndim == 2
         _arr = np.pad(arr, ((0, 0), (self.ind_min - 1, self.N - 1 - self.ind_max)), mode="constant", constant_values=0.0)
         return _arr
 
     def ifft(self, settings=None, window=None):
+        """Inverse FFT back to the time domain (zero-padding the active band if trimmed)."""
 
         arr_in = self.arr.copy()
         
@@ -589,7 +712,11 @@ class FDSignal(FDSettings, DomainBase):
         return TDSignal(td_arr, td_settings)
 
     def get_fd_window_for_wdm(self, settings):
-
+        """Build the WDM analysis window in frequency space (currently unimplemented)."""
+        # TODO/DOCS: this method computes only the first half of the WDM window
+        # and then raises NotImplementedError before normalising; the active
+        # WDM path uses ``settings.window`` instead. Verify whether this helper
+        # is still needed.
         N = self.settings.N
 
         # solve for window
@@ -619,6 +746,22 @@ class FDSignal(FDSettings, DomainBase):
     def wdmtransform(
         self, settings=None, window=None, return_transpose_time_axis_first: bool = False, is_psd: bool = False
     ):
+        """Transform the FD signal into the WDM wavelet basis.
+
+        Args:
+            settings: :class:`WDMSettings` describing the wavelet grid (required).
+            window: Unused in the current implementation; the WDM analysis window
+                is taken from ``settings.window``.
+            return_transpose_time_axis_first: Currently has no effect (the
+                transposed branch is commented out below).
+            is_psd: If ``True``, treat the input as a PSD and follow the
+                stationary-PSD shortcut (returns a raw NumPy/CuPy array instead
+                of a :class:`WDMSignal`).
+
+        Returns:
+            :class:`WDMSignal` for ordinary signals, or a NumPy/CuPy array when
+            ``is_psd is True``.
+        """
         if settings is None:
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
@@ -697,6 +840,7 @@ class FDSignal(FDSettings, DomainBase):
         return WDMSignal(output, settings=settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
+        """Dispatch to :meth:`ifft`, :meth:`wdmtransform`, etc. based on ``new_domain``."""
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
@@ -705,7 +849,7 @@ class FDSignal(FDSettings, DomainBase):
 
         elif isinstance(new_domain, TDSettings):
             return self.ifft(settings=new_domain, window=window)
-        
+
         elif isinstance(new_domain, STFTSettings):
             raise NotImplementedError
             return self.stft()
@@ -749,6 +893,20 @@ class FDSignal(FDSettings, DomainBase):
         return ax
         
 class STFTSettings(DomainSettingsBase):
+    """Short-time Fourier transform basis settings.
+
+    Args:
+        t0: Time of the first segment (seconds).
+        dt: Segment cadence in seconds (spacing between successive STFT slices).
+        df: Frequency bin spacing in Hz.
+        NT: Number of time segments.
+        NF: Number of frequency bins per segment.
+        min_freq: Lower edge of the active band (Hz). Defaults to ``0.0``.
+        max_freq: Upper edge of the active band (Hz). If ``None``, the full range
+            is used.
+        **kwargs: Forwarded to :class:`DomainSettingsBase` (e.g. ``force_backend``).
+    """
+
     t0: float
     dt: float
     df: float
@@ -915,7 +1073,7 @@ class STFTSettings(DomainSettingsBase):
         return sl.stop - sl.start
 
     def get_nperseg(self, small_dt: float):
-
+        """Number of samples per segment given the underlying sample step ``small_dt``."""
         nperseg = round(self.dt / small_dt)
 
         assert (
@@ -1035,6 +1193,13 @@ def get_stft_settings(
 
 
 class STFTSignal(STFTSettings, DomainBase):
+    """STFT array wrapper paired with :class:`STFTSettings`.
+
+    Args:
+        arr: NumPy or CuPy array with trailing axes ``(NT, NF_active)``.
+        settings: :class:`STFTSettings` describing the time-frequency grid.
+    """
+
     def __init__(self, arr, settings: STFTSettings):
         STFTSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
@@ -1048,6 +1213,7 @@ class STFTSignal(STFTSettings, DomainBase):
 
     @property
     def settings(self) -> STFTSettings:
+        """A fresh :class:`STFTSettings` matching this signal's grid."""
         return STFTSettings(*self.args, **self.kwargs)
 
     def __repr__(self) -> str:
@@ -1167,15 +1333,36 @@ WAVELET_FILTER_CONSTANT = 4
 
 
 class WDMSettings(DomainSettingsBase):
+    """Wavelet (WDM) basis settings for time-frequency analysis.
+
+    Args:
+        Nf: Number of frequency layers (must be even).
+        Nt: Number of time pixels per layer (must be even).
+        dt: Underlying time-domain sample step in seconds.
+        t0: Start time in seconds. Defaults to ``0.0``.
+        oversample: Frequency oversampling factor used when building the WDM
+            window via :meth:`setup_window`. Defaults to ``16``.
+        window: Pre-computed WDM analysis window of length ``Nt``. If provided,
+            ``omega`` must also be supplied; otherwise the window is built by
+            :meth:`setup_window`.
+        omega: Pre-computed angular-frequency grid that pairs with ``window``.
+        min_freq: Lower edge of the active frequency band (Hz). ``None`` selects
+            the full range.
+        max_freq: Upper edge of the active frequency band (Hz).
+        min_time: Lower edge of the active time band (seconds).
+        max_time: Upper edge of the active time band (seconds).
+        **kwargs: Forwarded to :class:`DomainSettingsBase` (e.g. ``force_backend``).
+    """
+
     def __init__(
         self,
-        Nf: float, 
+        Nf: float,
         Nt: float,
         dt: float,
         t0: float = 0.0,
         oversample: int = 16,
         window: Optional[np.ndarray] = None,
-        # norm: Optional[float] = None, 
+        # norm: Optional[float] = None,
         omega: Optional[np.ndarray] = None,
         min_freq: Optional[float] = None,
         max_freq: Optional[float] = None,
@@ -1219,6 +1406,22 @@ class WDMSettings(DomainSettingsBase):
     
     @staticmethod
     def adjust_to_even_bins(t_min: float, t_max: float, dt: float, Tobs: float, num_linspace: Optional[int]=1000, verbose: Optional[bool] = False) -> Tuple[int, int, float]:
+        """Pick a wavelet pixel duration in ``[t_min, t_max]`` that makes both ``Nf`` and ``Nt`` even.
+
+        Args:
+            t_min: Lower bound on the wavelet pixel duration in seconds.
+            t_max: Upper bound on the wavelet pixel duration in seconds.
+            dt: Underlying time-sample step (the duration is rounded to a multiple).
+            Tobs: Total observation time (seconds).
+            num_linspace: Number of candidate durations to scan between ``t_min`` and ``t_max``.
+            verbose: If ``True``, print each attempted duration.
+
+        Returns:
+            ``(Nf, Nt, wavelet_duration)``.
+
+        Raises:
+            ValueError: If no candidate produces both ``Nf`` and ``Nt`` even.
+        """
         Nf = -1
         Nt = -1
 
@@ -1318,6 +1521,10 @@ class WDMSettings(DomainSettingsBase):
         return (self.xp.arange(self.Nt_active + 1) + self.ind_min_t) * self.layer_dt
 
     def phitilde(self, omega, dOmega):
+        """Smooth WDM frequency-domain analysis function :math:`\\tilde{\\phi}(\\omega)`."""
+        # TODO/DOCS: parameters ``A``, ``B`` and ``WAVELET_FILTER_CONSTANT``
+        # control the window roll-off; the exact convention follows the WDM
+        # transform of Cornish & Romano. Verify against the cited reference.
         insDOM = 1. / np.sqrt(dOmega)
         A = self.A
         B = dOmega - 2 * A
@@ -1332,8 +1539,9 @@ class WDMSettings(DomainSettingsBase):
         return z
     
     def get_Cmn(self, m: np.array[int], n: np.array[int]) -> np.array[int]:
-        m_in = self.xp.atleast_1d(m)    
-        n_in = self.xp.atleast_1d(n)    
+        """Return ``1`` for even ``(m + n)`` and ``1j`` for odd ``(m + n)``."""
+        m_in = self.xp.atleast_1d(m)
+        n_in = self.xp.atleast_1d(n)
         output = np.zeros(m_in.shape, dtype=complex)
         is_even = ((m_in + n_in) % 2) == 0
         output[is_even] = 1.0
@@ -1365,6 +1573,7 @@ class WDMSettings(DomainSettingsBase):
             return wavelets_time
 
     def get_shift_map(self, m: np.ndarray[int]) -> np.ndarray:
+        """Return a 2D shift map ``m * Nt/2 + arange(-Nt/2, Nt/2)`` used by the WDM transform."""
         if m.ndim == 1:
             m_in = m[:, None]
         elif m.ndim == 2:
@@ -1379,7 +1588,7 @@ class WDMSettings(DomainSettingsBase):
     #     (2 * np.pi) / self.N 
 
     def setup_window(self):  # , forward: bool= True):
-
+        """Build the default WDM analysis window and store it in :attr:`window` / :attr:`omega`."""
         # *DX = (double*)malloc(sizeof(double)*(2*wdm->N))
         # zero frequency
         # REAL(DX,0) =  wdm->inv_root_dOmega
@@ -1577,6 +1786,7 @@ class WDMSettings(DomainSettingsBase):
         return self.Nt * self.Nf
     
     def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
+        """Apply :attr:`frequency_layer_mask` to ``arr`` along the WDM frequency axis (penultimate dim)."""
         if self.frequency_layer_mask is None or arr.shape[-2] == self.Nf_active:
             return arr
         elif arr.ndim == 1:
@@ -1595,6 +1805,12 @@ class WDMSettings(DomainSettingsBase):
 
 
 class WDMSignal(WDMSettings, DomainBase):
+    """WDM wavelet array wrapper paired with :class:`WDMSettings`.
+
+    Args:
+        arr: NumPy or CuPy array with trailing axes ``(Nf_active, Nt_active)``.
+        settings: :class:`WDMSettings` describing the wavelet grid.
+    """
 
     # TEST back and forth
     # tmp_dat = np.zeros(wdm_set.N)
@@ -1643,10 +1859,21 @@ class WDMSignal(WDMSettings, DomainBase):
         )
     
     def wdm_to_td(self, settings=None, window=None):
+        """Inverse-transform from WDM to time domain (via FD)."""
         return self.wdm_to_fd(settings=None).ifft(settings=settings, window=window)
-    
+
     def wdm_to_fd(self, settings=None, window=None):
-        
+        """Inverse-transform from WDM to frequency domain.
+
+        Args:
+            settings: Optional target :class:`FDSettings`; if ``None``, one is
+                derived from the underlying ``data_dt`` and ``N``.
+            window: Currently unused (the WDM analysis window stored on the
+                signal is used internally).
+
+        Returns:
+            :class:`FDSignal`.
+        """
         if settings is None:
             _tmp_fd = np.fft.rfftfreq(self.N, self.data_dt)
             Nfd = len(_tmp_fd)
@@ -1732,18 +1959,19 @@ class WDMSignal(WDMSettings, DomainBase):
         return FDSignal(new_arr, settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
+        """Dispatch to the correct WDM-to-X conversion based on ``new_domain``."""
         if window is None:
             window = self.xp.ones(self.arr.shape, dtype=float)
 
         if isinstance(new_domain, TDSettings):
             return self.wdm_to_fd(settings=None, window=None).ifft(settings=new_domain, window=window)
-        
+
         elif isinstance(new_domain, FDSettings):
             return self.wdm_to_fd(settings=new_domain, window=window)
 
         elif isinstance(new_domain, STFTSettings):
             return self.wdm_to_fd(settings=None, window=None).ifft(settings=None, window=None).stft(settings=new_domain, window=window)
-        
+
         elif isinstance(new_domain, WDMSettings):
             if new_domain == self.settings:
                 return self
@@ -1755,6 +1983,22 @@ class WDMSignal(WDMSettings, DomainBase):
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
     def heatmap(self, index: int = None, mag: bool = False, fig=None, ax=None, cax=None, add_cax=False, log: bool = False, **kwargs):
+        """Produce a time-frequency heatmap of the WDM coefficients.
+
+        Args:
+            index: If given, plot only channel ``index`` on the supplied ``ax``.
+                If ``None``, every channel is plotted on its own row.
+            mag: If ``True``, plot ``|coeff|``; otherwise plot the signed value.
+            fig: Existing :class:`matplotlib.figure.Figure` (optional).
+            ax: Existing axes; required when ``index`` is provided.
+            cax: Optional axes for the colourbar.
+            add_cax: If ``True``, create a new colourbar axes.
+            log: If ``True``, plot ``log10(|coeff|)``.
+            **kwargs: Forwarded to :func:`matplotlib.pyplot.pcolormesh`.
+
+        Returns:
+            ``(fig, ax)``.
+        """
         # if fig is not None or ax is not None:
         #     if fig is None or ax is None:
         #         raise ValueError("If providing fig or ax, must provide both.")
@@ -1816,8 +2060,31 @@ class WDMSignal(WDMSettings, DomainBase):
 import h5py
 
 class WDMLookupTable(WDMSettings):
-   
+    """Pre-computed sine/cosine WDM-pixel coefficient lookup table.
+
+    Builds (or loads from disk) tables indexed by frequency offset, frequency
+    derivative, time pixel, and frequency-layer offset that allow fast
+    evaluation of monochromatic / chirping signal templates in the WDM basis.
+
+    Args:
+        settings: Underlying :class:`WDMSettings` defining the wavelet grid.
+        nchannels: Number of channels stored in the table.
+        m_ref: Reference frequency-layer index used as the centre of the
+            table. Defaults to a sensible value chosen by the helper.
+        norm_freq_single_layer: Sub-bin frequency offsets sampled within one
+            wavelet layer.
+        m_diffs: Integer offsets (in frequency layers) covered by the table.
+        fdot_vals: Frequency-derivative grid (Hz/s) sampled in the table.
+        store_path: HDF5 file path. If it exists, the table is loaded; otherwise
+            it is built and saved here.
+        batch_size_gen: Batch size used when generating the table on-the-fly
+            (``-1`` means a single batch).
+        td_window: Optional time-domain window applied while building the
+            table.
+    """
+
     def to_file(self, fp: str):
+        """Persist the lookup table to an HDF5 file at ``fp``."""
         if os.path.exists(fp):
             raise ValueError("Trying to write to file that exists.")
         
@@ -1849,6 +2116,7 @@ class WDMLookupTable(WDMSettings):
 
     @staticmethod
     def from_file(fp: str, force_backend: Optional[str] = None):
+        """Construct a :class:`WDMLookupTable` from a previously-saved HDF5 file."""
         with h5py.File(fp, "r") as f:
             g = f["wdm"]
 
@@ -1912,6 +2180,7 @@ class WDMLookupTable(WDMSettings):
             return WDMLookupTable(settings, nchannels, store_path=fp)
 
     def from_file_internal(self, fp: str):
+        """Repopulate this instance's tables and metadata from ``fp``."""
         with h5py.File(fp, "r") as fp:
             g = fp["wdm"]
             self.sub_settings = WDMSettings(g.attrs["Nf"], g.attrs["Nt_generate"], g.attrs["data_dt"])
@@ -1928,14 +2197,16 @@ class WDMLookupTable(WDMSettings):
             
     @staticmethod
     def apply_eps_fdot(eps: float, settings: WDMSettings, fdot_max_factor: float= 8.0) -> np.ndarray:
+        """Build a symmetric :math:`\\dot{f}` grid spaced by ``eps * df_layer / dt_layer``."""
         delta_fdot = eps * settings.layer_df / settings.layer_dt
         fdot_max_val = fdot_max_factor * settings.layer_df / settings.layer_dt
         _fdot = np.arange(0.0, fdot_max_val, delta_fdot)
         fdot_vals = np.concatenate([-_fdot[::-1][:-1], _fdot])
         return fdot_vals
-            
-    @staticmethod 
+
+    @staticmethod
     def apply_eps_frequency(eps: float, settings: WDMSettings, m_ref: Optional[int] = None, num_layers_diff: Optional[int] = 2) -> tuple:
+        """Build sub-layer frequency offsets, layer-index offsets, and the reference layer."""
         delta_f = eps * settings.layer_df
 
         if m_ref is None:
@@ -1959,7 +2230,7 @@ class WDMLookupTable(WDMSettings):
             self.build_lookup_table(m_ref, m_diffs, norm_freq_single_layer, fdot_vals, store_path, batch_size_gen, td_window)
 
     def build_lookup_table(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None) -> None:
-        
+        """Generate the sin/cos coefficient tables and (optionally) save them to ``store_path``."""
         self.sub_settings = WDMSettings(self.Nf, self.Nt, self.data_dt, force_backend=self.force_backend)
         self.m_ref = m_ref  # int(3e-3 / self.sub_settings.layer_df)  # int(self.sub_settings.Nf / 2)
         self.n_ref = int(self.sub_settings.Nt / 2)
@@ -2129,6 +2400,7 @@ class WDMLookupTable(WDMSettings):
         return WDMSettings(*self.args, **self.kwargs)
 
     def build_interpolator(self, table: np.ndarray):
+        """Construct a scipy/cupyx interpolator over ``table`` for fast template generation."""
         if self.backend.uses_cupy:
             interpolate = interpolate_gpu
         else:
@@ -2150,9 +2422,11 @@ class WDMLookupTable(WDMSettings):
             return interpolate.interp1d(x_points_in, y_points_in)
         
     def get_x_points_no_fdot(self, f_norm: np.ndarray, n_arr: np.ndarray) -> np.ndarray:
+        """1D evaluation coordinate that encodes both ``f_norm`` and the time-pixel index."""
         return (f_norm + self.factor_spacing * n_arr)
-    
+
     def get_table_coeffs(self, f_norm: np.ndarray, fdot_arr: np.ndarray, n_arr: np.ndarray) -> np.ndarray:
+        """Look up sin/cos coefficients at the requested ``(f_norm, fdot, n)`` points."""
         # ms = (f_arr // self.layer_df).astype(int)
         # TODO: vectorize?
         if self.run_fdot:
@@ -2170,6 +2444,17 @@ class WDMLookupTable(WDMSettings):
         return (sin_coeffs, cos_coeffs)
 
     def get_wdm_coeffs(self, amp_arr: np.ndarray, phi_arr: np.ndarray, f_arr: np.ndarray, fdot_arr: np.ndarray, n_arr: np.ndarray, num_m_layers: int = 1):
+        """Compute amplitude / phase WDM coefficients for a batch of ``(f, fdot, n)`` queries.
+
+        Returns:
+            ``(wdm_coeffs_out, m_map)`` where ``wdm_coeffs_out`` has shape
+            ``(len(amp_arr), 2 * num_m_layers + 1)`` and ``m_map`` records the
+            integer frequency-layer index used for each output column (``-1``
+            for entries that fall outside the table).
+        """
+        # TODO/DOCS: the parity logic that switches between sin/cos lookup
+        # tables follows the WDM convention used elsewhere in this file;
+        # verify the sign/swap rules against the WDM transform definition.
         ms = (f_arr / self.layer_df).astype(int)
         wdm_coeffs_out = self.xp.zeros((amp_arr.shape[0], num_m_layers * 2 + 1))
         m_map = -self.xp.ones((amp_arr.shape[0], num_m_layers * 2 + 1), dtype=int)
@@ -2319,6 +2604,7 @@ class DomainBaseArray:
 __available_domains__ = [TDSettings, FDSettings, STFTSettings, WDMSettings]
 
 def get_available_domains() -> List[DomainSettingsBase]:
+    """Return the list of :class:`DomainSettingsBase` subclasses supported by the package."""
     return __available_domains__
 
 

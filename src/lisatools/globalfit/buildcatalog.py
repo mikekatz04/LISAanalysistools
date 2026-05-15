@@ -1,3 +1,5 @@
+"""Build per-source catalogs (GB / MBH) from a finished global-fit run."""
+
 import os
 import time
 from datetime import datetime
@@ -14,7 +16,22 @@ from .gathergalaxy import gather_gb_samples_cat
 
 
 def build_gb_catalog(current_info, gpu, **kwargs):
+    """Assemble the EREBOR-style GB catalog from a finished GB chain.
 
+    Loads the GB reader from ``current_info``, gathers per-source samples
+    using :func:`gather_gb_samples_cat`, drops sources with confidence
+    below 0.25, picks the median-frequency sample of each surviving group as
+    its representative entry, and writes a main HDF5 detection table plus
+    one chain dataset per source.
+
+    Args:
+        current_info: The :class:`GlobalFitInfo`-like configuration that
+            exposes ``gb_info`` and ``general_info``.
+        gpu: GPU device index. Required.
+
+    Raises:
+        ValueError: If ``gpu`` is ``None``.
+    """
     if gpu is None:
         raise ValueError(
             "When building a gb catalog, must add a GPU index. `gpu` is currently None."
@@ -138,7 +155,20 @@ def build_gb_catalog(current_info, gpu, **kwargs):
 
 
 def build_mbh_catalog(current_info, gpu, **kwargs):
+    """Assemble the EREBOR-style MBH catalog from a finished MBH chain.
 
+    For every MBH leaf, reshapes the chain, derives masses from
+    ``ln total mass`` and the mass ratio, transforms the L-frame sky angles
+    back to the SSB frame, writes the per-source samples to HDF, and selects
+    the median-merger-time row as the representative entry in the main
+    detection table.
+
+    Args:
+        current_info: Configuration object exposing ``mbh_info`` and
+            ``general_info``.
+        gpu: GPU device index (unused by this function but kept for API
+            symmetry with :func:`build_gb_catalog`).
+    """
     mbh_reader = current_info.mbh_info["reader"]
 
     ntemps, nwalkers, mbh_leaves, mbh_ndim = mbh_reader.shape["mbh"]
@@ -269,7 +299,17 @@ catalog_generate_funcs = {"gb": build_gb_catalog, "mbh": build_mbh_catalog}
 
 
 def build_catalog(current_info, gpu=None, catalogs=["gb", "mbh"], cat_kwargs={}, **kwargs):
+    """Dispatch to per-source catalog builders.
 
+    Args:
+        current_info: Global-fit configuration object.
+        gpu: GPU device index forwarded to each builder.
+        catalogs: Either a single source name (``"gb"`` / ``"mbh"``) or a
+            list of names. Each must have an entry in
+            :data:`catalog_generate_funcs`.
+        cat_kwargs: Mapping of source-name to extra kwargs forwarded to the
+            corresponding builder.
+    """
     if isinstance(catalogs, str):
         catalogs = [catalogs]
 

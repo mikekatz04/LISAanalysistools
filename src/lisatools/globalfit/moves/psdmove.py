@@ -1,3 +1,5 @@
+"""MCMC move that updates the LISA noise PSD (and optional galactic foreground)."""
+
 import time
 import warnings
 from copy import deepcopy
@@ -194,7 +196,23 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.permute_every = permute_every
 
     def psd_log_like(self, x, data, supps=None, **sens_kwargs):
-        """ """
+        """Compute the PSD log likelihood for a batch of walker proposals.
+
+        Args:
+            x: Tuple/list of parameter arrays. ``x[0]`` is PSD parameters; an
+                optional ``x[1]`` adds galactic-foreground parameters.
+            data: Linear data array (channel-flattened) for the current walker
+                set, as exposed by :class:`AnalysisContainerArray`.
+            supps: Eryn supplemental dict; must contain ``walker_inds`` so the
+                kernel can index per-walker data.
+            **sens_kwargs: Reserved for future sensitivity kwargs.
+
+        Returns:
+            Per-walker log-likelihood values.
+
+        Raises:
+            ValueError: If ``supps`` is ``None``.
+        """
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
 
@@ -287,6 +305,19 @@ class PSDMove(GlobalFitMove, StretchMove):
         return ll.get() if hasattr(ll, "get") else ll
 
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
+        """Compute the log likelihood for a state's PSD/galfor branches.
+
+        Args:
+            coords: Branch-keyed dict of coordinates from the current state.
+            inds: Branch-keyed dict of leaf occupancy flags (unused here).
+            logp: Optional pre-computed log prior; computed if ``None``.
+            supps: Eryn supplemental information passed through to
+                :meth:`psd_log_like`.
+            branch_supps: Branch-supplemental dict (unused here).
+
+        Returns:
+            Tuple ``(logl, blobs)`` matching the eryn signature.
+        """
         if logp is None:
             logp = self.compute_log_prior(coords, inds=inds, supps=supps, branch_supps=branch_supps)
 
@@ -343,6 +374,14 @@ class PSDMove(GlobalFitMove, StretchMove):
     #     return logp
 
     def compute_log_prior(self, branches_coords, *args, **kwargs):
+        """Sum the per-branch log priors over PSD and (optional) galfor coordinates.
+
+        Args:
+            branches_coords: Branch-keyed dict of coordinates.
+
+        Returns:
+            ``(ntemps, nwalkers)`` array of prior log probabilities.
+        """
         # wait to get ntemps, nwalkers
         logp = None
         for key in ["psd", "galfor"]:
@@ -360,6 +399,17 @@ class PSDMove(GlobalFitMove, StretchMove):
         return logp
 
     def run_move(self, move_i, model, state):
+        """Run one stretch-move iteration and (optionally) a tempering swap.
+
+        Args:
+            move_i: Iteration index used to schedule the periodic
+                :attr:`permute_every` temperature swap.
+            model: Eryn ``Model`` object.
+            state: Current sampler state.
+
+        Returns:
+            Tuple ``(new_state, accepted)``.
+        """
         new_state, accepted = super(PSDMove, self).propose(model, state)
 
         if move_i % self.permute_every == 0:
@@ -396,12 +446,18 @@ class PSDMove(GlobalFitMove, StretchMove):
         return new_state, accepted
 
     def run_move_for_loop(self, model, state, num_repeats):
+        """Run :meth:`run_move` ``num_repeats`` times sequentially."""
         for i in tqdm(range(num_repeats), desc="psd update"):
             state, accepted = self.run_move(i, model, state)
         return state, accepted
 
     def run_move_max_likelihood(self, model, state):
+        """Repeat :meth:`run_move_for_loop` until the max log-like plateaus.
 
+        Used in search-style runs (``max_logl_mode=True``). The loop counts
+        consecutive iterations during which the cold-chain max log-likelihood
+        no longer increases and exits after ``num_checks`` such iterations.
+        """
         num_checks = 5
         num_so_far = 0
         max_logl = -np.inf
@@ -425,6 +481,16 @@ class PSDMove(GlobalFitMove, StretchMove):
         return state, accepted
 
     def propose(self, model, state):
+        """Propose a PSD update and refresh per-walker sensitivity matrices.
+
+        Builds a temporary :class:`GFState` containing only the PSD/galfor
+        branches, runs the inner stretch-move loop, then writes the accepted
+        coordinates back into a copy of ``state`` and refreshes each walker's
+        sensitivity matrix in :attr:`acs`.
+
+        Returns:
+            Tuple ``(new_state, accepted)``.
+        """
         # setup model framework for passing necessary
         # self.priors["all_models_together"].full_state = state
         tmp_branches_coords = {

@@ -1,3 +1,5 @@
+"""MBH-specific MCMC move including an optional time-windowed search step."""
+
 import os
 from copy import deepcopy
 
@@ -29,6 +31,7 @@ from .globalfitmove import GlobalFitMove
 
 
 def update_fn(i, last_sample, sampler):
+    """Search-mode update hook that copies the cold chain into the hottest chain."""
     print("max logl:", last_sample.log_like.max())
     last_sample.branches_coords["mbh"][-1] = last_sample.branches_coords["mbh"][0]
     last_sample.log_like[-1] = last_sample.log_like[0]
@@ -46,6 +49,28 @@ def search_likelihood_wrap(
     like_args,
     mbh_kwargs,
 ):
+    """Vectorized log-likelihood for the windowed MBH search step.
+
+    For each candidate MBH parameter row in ``x`` the merger time is bucketed
+    against ``t_ref_lims`` to choose which time-windowed analysis segment
+    (and corresponding cached :math:`\\langle d|d\\rangle`) is used.
+
+    Args:
+        x: Untransformed parameter samples, shape ``(N, ndim)``.
+        wave_gen: ``bbhx`` waveform generator with GPU buffers.
+        initial_t_vals: Per-segment start times.
+        end_t_vals: Per-segment end times.
+        d_d_vals: Per-segment cached inner products of data with itself.
+        t_ref_lims: Bin edges (in seconds) used to select segment indices.
+        transform_fn: :class:`TransformContainer` mapping samples to physical
+            parameters expected by ``wave_gen``.
+        like_args: Tuple ``(fd, all_data, psd, df)`` passed straight through to
+            ``wave_gen.get_direct_ll``.
+        mbh_kwargs: Extra keyword arguments forwarded to ``get_direct_ll``.
+
+    Returns:
+        Real-valued log-likelihood array of length ``len(x)``.
+    """
     x_in = transform_fn.both_transforms(x)
 
     data_index = noise_index = (np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1).astype(
@@ -78,6 +103,23 @@ def search_likelihood_wrap(
 class MBHSpecialMove(
     LISAToolsParallelModule, ResidualAddOneRemoveOneMove, GlobalFitMove, RedBlueMove
 ):
+    """Massive black-hole binary move with optional initial windowed search.
+
+    Combines :class:`ResidualAddOneRemoveOneMove` (per-leaf add/remove logic)
+    with a one-time search phase that scans short time windows of the input
+    data for MBH-like signals before falling into routine PE.
+
+    Args:
+        file_backend: HDF backend used to persist newly discovered MBHs during
+            the search phase.
+        search_fp: Path to a temporary HDF5 file used for the search-step
+            sampler's backend.
+        force_backend: Override for the GPU backend selection
+            (forwarded to :class:`LISAToolsParallelModule`).
+        run_search: If ``True`` the move runs the windowed search step on
+            first call to :meth:`setup`.
+    """
+
     def __init__(
         self,
         *args,
@@ -104,10 +146,19 @@ class MBHSpecialMove(
 
     @classmethod
     def supported_backends(cls):
+        """List the GPU backend names this move supports."""
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def setup(self, model, state):
+        """Run the search phase (if enabled) and seed new MBH leaves.
 
+        # TODO/DOCS: search-phase implementation is large and hand-tuned;
+        the body is the canonical reference for behavior. The high-level intent
+        is: take the current best-likelihood walker, ifft to time domain, slide
+        short overlapping windows, search each window with a temperaed sampler,
+        then either install the discovered MBH into the next free leaf or
+        terminate the search (``self.finished_search = True``).
+        """
         ntemps, nwalkers, _, _ = state.branches["mbh"].shape
         _accepted = np.zeros((ntemps, nwalkers), dtype=bool)
 
@@ -519,6 +570,11 @@ class MBHSpecialMove(
                 return
 
     def propose(self, model, state):
+        """Propose MBH updates by delegating to :meth:`ResidualAddOneRemoveOneMove.propose`.
+
+        Skips work entirely if no MBH leaves are populated and the search has
+        already concluded.
+        """
         __doc__ = ResidualAddOneRemoveOneMove.propose.__doc__
         assert np.all(state.branches["mbh"].nleaves[0, 0] == state.branches["mbh"].nleaves)
         if self.finished_search and state.branches["mbh"].nleaves[0, 0] == 0:
@@ -533,6 +589,12 @@ class MBHSpecialMove(
         return output
 
     def setup_likelihood_here(self, coords):
+        """Build a heterodyned-likelihood object centred on the best walker.
+
+        # TODO/DOCS: not certain whether picking by full residual likelihood
+        (rather than per-MBH likelihood) is intentional; comment in body
+        flags this as an open question.
+        """
         # TODO: should we try to pick specifically based on max ll for MBHs rather than data as a whole
         start_likelihood = self.acs.likelihood()
         keep_het = start_likelihood.argmax()
@@ -568,6 +630,7 @@ class MBHSpecialMove(
         cp.get_default_memory_pool().free_all_blocks()
 
     def compute_like(self, new_points_in, data_index):
+        """Evaluate the heterodyned likelihood for proposed parameter rows."""
         assert data_index is not None
         logl = self.like_fn.get_ll(
             new_points_in,
@@ -577,6 +640,12 @@ class MBHSpecialMove(
         return logl
 
     def get_waveform_here(self, coords):
+        """Build MBH waveforms on the GPU for each row of ``coords``.
+
+        Returns:
+            ``(N, nchannels, data_length)`` ``cupy.ndarray`` of frequency-domain
+            templates aligned with :attr:`acs`'s data array.
+        """
         cp.get_default_memory_pool().free_all_blocks()
         waveforms = cp.zeros(
             (coords.shape[0], self.acs.nchannels, self.acs.data_length), dtype=complex
@@ -593,6 +662,12 @@ class MBHSpecialMove(
         return waveforms
 
     def replace_residuals(self, old_state, new_state):
+        """Replace the cold-chain MBH contribution between two states.
+
+        For each leaf, generates the templates for both ``old_state`` and
+        ``new_state``, accumulates per-channel sums, and swaps them through
+        :meth:`AnalysisContainerArray.swap_out_in_base_data`.
+        """
         fd = cp.asarray(self.acs.fd)
         old_contrib = [None, None]
         new_contrib = [None, None]

@@ -1,3 +1,5 @@
+"""Physical and LISA-specific numeric constants used throughout the package."""
+
 MSUN_SI = 1.98848e30
 YRSID_SI = 31558149.763545603
 AU_SI = 149597870700.0

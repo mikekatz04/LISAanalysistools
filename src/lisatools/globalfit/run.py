@@ -1,3 +1,9 @@
+"""Top-level runner classes (``GlobalFit``, ``GlobalFitSegment``, ``MPIControlGlobalFit``).
+
+This module wires together the per-source samplers, the recipe driver, the
+HDF backend, and MPI rank coordination into a runnable end-to-end global fit.
+"""
+
 import logging
 import os
 import time

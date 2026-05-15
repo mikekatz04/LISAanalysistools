@@ -754,6 +754,23 @@ def _estimate_log_gaussian_prob(X, means, precisions_chol, covariance_type, xp=N
 
 
 def draw_multinomial_vec(n_samples, weights, random_state, xp=None):
+    """Vectorized multinomial draw across mixture groups.
+
+    For each row of ``weights`` (one mixture / group), draw ``n_samples`` from
+    the corresponding categorical distribution and return the per-component
+    counts.
+
+    Args:
+        n_samples: Number of categorical draws per group.
+        weights: Array of shape ``(n_groups, n_components)`` of per-group
+            mixture weights (rows must sum to one).
+        random_state: Object exposing a ``rand`` method (numpy / cupy
+            ``random``) used to draw uniforms.
+        xp: Array module (numpy or cupy). Defaults to numpy.
+
+    Returns:
+        Integer counts array of shape ``(n_groups, n_components)``.
+    """
     if xp is None:
         xp = np
 
@@ -990,6 +1007,7 @@ class GaussianMixtureModel:
 
     @property
     def xp(self):
+        """Array module (``numpy`` or ``cupy``) used for the computations."""
         if self.use_gpu:
             return cp
         else:
@@ -1043,6 +1061,7 @@ class GaussianMixtureModel:
 
     @property
     def xp(self):
+        """Array module (``numpy`` or ``cupy``) used for the computations."""
         if self.use_gpu:
             return cp
         else:
@@ -1050,6 +1069,7 @@ class GaussianMixtureModel:
 
     @property
     def logsumexp(self):
+        """``logsumexp`` implementation matching the active array module."""
         if self.use_gpu:
             return logsumexp_gpu
         else:
@@ -1104,6 +1124,7 @@ class GaussianMixtureModel:
                 self._iter_prev_time = cur_time
 
     def _initialize_parameters(self, X, random_state):
+        """Run initialization, skipping it if all init arrays were user-provided."""
         # If all the initial parameters are all provided, then there is no need to run
         # the initialization.
         compute_resp = (
@@ -1232,6 +1253,7 @@ class GaussianMixtureModel:
         return self.score_samples(X).mean(axis=-1)
 
     def logpdf(self, X):
+        """Alias for :meth:`score_samples`."""
         return self.score_samples(X)
 
     def predict_proba(self, X):
@@ -1628,6 +1650,7 @@ class GaussianMixtureModel:
         )
 
     def _estimate_log_prob(self, X, converged=None):
+        """Per-component log-probabilities for non-converged groups only."""
         if converged is None:
             converged = self.xp.full(X.shape[0], False)
 
@@ -1640,15 +1663,18 @@ class GaussianMixtureModel:
         )
 
     def _estimate_log_weights(self, converged=None):
+        """Log of mixture weights for non-converged groups only."""
         if converged is None:
             converged = self.xp.full(self.weights_.shape[0], False)
 
         return self.xp.log(self.weights_[~converged])
 
     def _compute_lower_bound(self, _, log_prob_norm):
+        """Return the EM lower bound (here just the per-sample log-norm)."""
         return log_prob_norm
 
     def _estimate_weighted_log_prob_for_flat(self, X):
+        """Weighted per-component log-probability for the flattened mixture."""
         # must be converged already
         logpdf_gaussian = _estimate_log_gaussian_prob(
             X, self.means_, self.precisions_cholesky_, self.covariance_type, xp=self.xp
@@ -1661,6 +1687,7 @@ class GaussianMixtureModel:
         return logpdf
 
     def _get_parameters(self):
+        """Snapshot of ``(weights_, means_, covariances_, precisions_cholesky_)``."""
         return (
             self.weights_,
             self.means_,
@@ -1669,6 +1696,7 @@ class GaussianMixtureModel:
         )
 
     def _set_parameters(self, params, store_all=False):
+        """Restore mixture parameters and recompute precisions / cached covariance inverses."""
         (
             self.weights_,
             self.means_,
@@ -1735,6 +1763,20 @@ class GaussianMixtureModel:
         return -2 * self.score(X) * X.shape[1] + self._n_parameters() * np.log(X.shape[1])
 
     def general_way_logpdf(self, X, flat=True):
+        """Reference log-PDF computed directly from :math:`(x-\\mu)^T \\Sigma^{-1} (x-\\mu)`.
+
+        Provided as a cross-check of :meth:`score_samples`; uses the cached
+        ``inv_covs_`` and ``det_covs_`` attributes set when ``store_all`` is
+        used in :meth:`_set_parameters`.
+
+        Args:
+            X: Array of shape ``(n_groups, n_samples, n_features)``.
+            flat: If ``True``, normalize the weights across the full
+                concatenated mixture rather than per group.
+
+        Returns:
+            Array of log-PDF values of shape ``(n_groups, n_samples)``.
+        """
 
         n_groups, n_components, n_features, _ = self.inv_covs_.shape
 
@@ -1777,9 +1819,23 @@ class GaussianMixtureModel:
 
 
 class GMMFit:
+    """Fit a vectorized GMM to per-group samples mapped onto the unit cube.
+
+    For each group the per-feature ``min`` / ``max`` of the input samples is
+    used to map the data linearly into :math:`[-1, 1]^d` before fitting a
+    :class:`GaussianMixtureModel`. The Jacobian of this mapping is precomputed
+    so that :meth:`logpdf` returns log-densities in the original coordinates.
+
+    Args:
+        samples_in: Array of shape ``(n_groups, n_samples, n_features)`` to
+            be fit.
+        n_components: Number of mixture components.
+        gpu: GPU device index to use; ``None`` selects CPU.
+    """
 
     @property
     def xp(self):
+        """Array module (``numpy`` or ``cupy``) used for the computations."""
         if self.use_gpu:
             return cp
         else:
@@ -1834,6 +1890,7 @@ class GMMFit:
         self.fitted = True
 
     def transform_to_gmm_basis(self, samples):
+        """Map physical samples into the :math:`[-1, 1]` unit-cube basis."""
         squeeze = samples.ndim == 2
         if squeeze:
             samples = samples[None, :]
@@ -1848,6 +1905,14 @@ class GMMFit:
             return tmp
 
     def transform_from_gmm_basis(self, samples, inds_component=None):
+        """Map :math:`[-1, 1]` unit-cube samples back into physical units.
+
+        Args:
+            samples: Samples in the unit-cube basis.
+            inds_component: Optional 1D array selecting which group's
+                ``(mins, maxs)`` to use per sample (used by the flat
+                mixture path).
+        """
         squeeze = samples.ndim == 2
         if squeeze:
             samples = samples[None, :]
@@ -1870,6 +1935,16 @@ class GMMFit:
             return tmp
 
     def rvs(self, size=(1,), flat=False):
+        """Draw samples from the fitted mixture in physical coordinates.
+
+        Args:
+            size: Output shape (per group, unless ``flat`` is set).
+            flat: If ``True``, sample from the concatenated, equally-weighted
+                mixture across all groups rather than per group.
+
+        Returns:
+            Array of samples in physical coordinates.
+        """
         assert self.fitted
         if isinstance(size, int):
             size = (size,)
@@ -1890,6 +1965,17 @@ class GMMFit:
         return samples
 
     def logpdf(self, x, flat=False):
+        """Evaluate the log-PDF of the fitted mixture in physical coordinates.
+
+        Args:
+            x: Sample locations.
+            flat: If ``True``, treat the union of group-mixtures as a single
+                distribution and return one log-density per row of ``x``.
+
+        Returns:
+            Log-PDF values, including the log-Jacobian of the unit-cube
+            mapping.
+        """
 
         if not flat:
             x_in = self.transform_to_gmm_basis(x)
@@ -1920,6 +2006,16 @@ class GMMFit:
         return logpdf
 
     def bic(self, x, flat=False):
+        """Bayesian Information Criterion of the fitted mixture at ``x``.
+
+        Args:
+            x: Sample locations.
+            flat: If ``True``, evaluate using the flattened, equally-weighted
+                global mixture.
+
+        Returns:
+            BIC values per group.
+        """
 
         if not flat:
             x_in = self.transform_to_gmm_basis(x)
@@ -1961,6 +2057,30 @@ def vec_fit_gmm_min_bic(
     verbose=False,
     return_components=False,
 ):
+    """Fit per-group GMMs by sweeping component count and selecting min BIC.
+
+    For each group, fits :class:`GMMFit` with increasing ``n_components`` and
+    keeps the parameters at which the BIC reaches its minimum. A group is
+    declared converged once the BIC has increased at least twice past its
+    running minimum, after which it is excluded from further fits.
+
+    Args:
+        samples: Array of shape ``(n_groups, n_samples, n_features)``.
+        min_comp: Smallest number of components to try.
+        max_comp: Largest number of components to try.
+        n_samp_bic_test: Number of synthetic samples drawn from each fit to
+            evaluate the BIC.
+        gpu: GPU device index to use; ``None`` selects CPU.
+        verbose: If ``True``, print convergence progress.
+        return_components: If ``True``, return the raw lists
+            ``[weights, means, covs, invcovs, dets, mins, maxs]`` instead of
+            a :class:`FullGaussianMixtureModel`.
+
+    Returns:
+        Either the raw component lists (when ``return_components`` is
+        ``True``) or a :class:`FullGaussianMixtureModel` constructed from
+        them.
+    """
 
     if gpu is not None:
         use_gpu = True

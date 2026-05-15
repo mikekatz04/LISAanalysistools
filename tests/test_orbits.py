@@ -1,3 +1,5 @@
+"""Tests for :class:`lisatools.detector.EqualArmlengthOrbits` interpolation."""
+
 import numpy as np
 import time
 
@@ -25,7 +27,10 @@ force_backend = "gpu" if gpu_available else "cpu"
 
 
 class OrbitsTest(unittest.TestCase):
+    """Sanity checks for :class:`EqualArmlengthOrbits` spacecraft position queries."""
+
     def test_orbits(self):
+        """Verify interpolated spacecraft positions are finite across the orbit time base."""
         xp = cp if gpu_available else np
         
         orbits = EqualArmlengthOrbits(force_backend=force_backend)

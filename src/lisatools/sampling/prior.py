@@ -1,3 +1,5 @@
+"""Prior distributions and density helpers for LISA sampling."""
+
 import numpy as np
 from eryn.moves.multipletry import logsumexp
 from scipy import stats
@@ -26,6 +28,25 @@ except (ModuleNotFoundError, ImportError) as e:
 
 
 class AmplitudeFrequencySNRPrior:
+    """Joint prior on GB amplitude and frequency expressed via SNR.
+
+    Internally the amplitude prior is the SNR prior of :class:`SNRPrior`
+    transformed to amplitude using :class:`AmplitudeFromSNR` (which depends
+    on the frequency through the LISA noise PSD). The frequency prior is
+    user-supplied.
+
+    Args:
+        rho_star: Characteristic SNR scale used by :class:`SNRPrior`.
+        frequency_prior: Prior on the frequency parameter (in mHz). Must
+            expose ``logpdf`` and ``rvs`` and accept a ``use_cupy`` flag.
+        L: LISA arm length in meters; passed to :class:`AmplitudeFromSNR`.
+        Tobs: Observation time in seconds; passed to
+            :class:`AmplitudeFromSNR`.
+        use_cupy: If ``True``, use ``cupy`` arrays internally.
+        **noise_kwargs: Default keyword arguments for
+            :func:`get_sensitivity` when evaluating the LISA noise PSD.
+    """
+
     def __init__(self, rho_star, frequency_prior, L, Tobs, use_cupy=False, **noise_kwargs):
         self.rho_star = rho_star
         self.frequency_prior = frequency_prior
@@ -48,9 +69,20 @@ class AmplitudeFrequencySNRPrior:
         self.frequency_prior.use_cupy = use_cupy
 
     def pdf(self, *args, **noise_kwargs):
+        """Return the joint amplitude-frequency PDF, ``exp(logpdf(...))``."""
         return np.exp(self.logpdf(*args, **noise_kwargs))
 
     def logpdf(self, amp, f0_ms, **noise_kwargs):
+        """Evaluate the joint log-PDF on amplitude and frequency.
+
+        Args:
+            amp: GB amplitude(s).
+            f0_ms: GB frequency(ies) in mHz.
+            **noise_kwargs: Forwarded to the SNR / PSD calculation.
+
+        Returns:
+            Log-probability density evaluated at the input points.
+        """
 
         xp = np if not self.use_cupy else cp
 
@@ -68,6 +100,17 @@ class AmplitudeFrequencySNRPrior:
         return logpdf_amp + logpdf_f
 
     def rvs(self, size=1, f0_input=None, **noise_kwargs):
+        """Draw samples ``(amp, f0_ms)`` from the joint prior.
+
+        Args:
+            size: Sample shape; an integer is interpreted as a 1-tuple.
+            f0_input: Optional pre-drawn frequency samples (in mHz) used
+                in place of drawing from ``self.frequency_prior``.
+            **noise_kwargs: Forwarded to the SNR-to-amplitude transform.
+
+        Returns:
+            Tuple ``(amp, f0_ms)`` with shape ``size`` each.
+        """
         if isinstance(size, int):
             size = (size,)
 
@@ -89,6 +132,21 @@ class AmplitudeFrequencySNRPrior:
 
 
 class SNRPrior:
+    """Prior on signal-to-noise ratio with characteristic scale :math:`\\rho_*`.
+
+    Implements the analytic SNR prior
+
+    .. math::
+
+        p(\\rho) = \\frac{3 \\rho}{4 \\rho_*^2 (1 + \\rho / (4 \\rho_*))^5} \\quad \\rho > 0,
+
+    along with its CDF and an inverse-CDF sampler.
+
+    Args:
+        rho_star: Characteristic SNR scale :math:`\\rho_*`.
+        use_cupy: If ``True``, evaluate using ``cupy`` arrays.
+    """
+
     def __init__(self, rho_star, use_cupy=False):
         self.rho_star = rho_star
         self.use_cupy = use_cupy
@@ -102,6 +160,7 @@ class SNRPrior:
         self._use_cupy = use_cupy
 
     def pdf(self, rho):
+        """Evaluate the SNR PDF, returning zero for non-positive SNR."""
 
         xp = np if not self.use_cupy else cp
 
@@ -113,10 +172,12 @@ class SNRPrior:
         return p
 
     def logpdf(self, rho):
+        """Return ``log(pdf(rho))``."""
         xp = np if not self.use_cupy else cp
         return xp.log(self.pdf(rho))
 
     def cdf(self, rho):
+        """Evaluate the analytic CDF of the SNR prior."""
         xp = np if not self.use_cupy else cp
         c = xp.zeros_like(rho)
         good = rho > 0.0
@@ -131,6 +192,14 @@ class SNRPrior:
         return c
 
     def rvs(self, size=1):
+        """Draw SNR samples via inverse-CDF sampling.
+
+        Args:
+            size: Output shape; an integer is interpreted as a 1-tuple.
+
+        Returns:
+            Array of SNR samples with shape ``size``.
+        """
         if isinstance(size, int):
             size = (size,)
 
@@ -248,6 +317,29 @@ class SNRPrior:
 
 
 class AmplitudeFromSNR:
+    """Convert between GB amplitude and optimal SNR for a given LISA noise model.
+
+    The amplitude / SNR relation used here is
+
+    .. math::
+
+        \\rho = \\frac{1}{2} \\, A \\, \\sqrt{\\frac{T_\\text{obs} \\, \\sin^2(f / f_*)}{S_n(f)}},
+
+    where :math:`f_* = c / (2\\pi L)` is the LISA transfer frequency. Either
+    direction (amplitude → SNR or SNR → amplitude) can be evaluated, and the
+    PSD :math:`S_n(f)` can be supplied directly, interpolated from a sampled
+    PSD, or computed from :func:`get_sensitivity`.
+
+    Args:
+        L: LISA arm length in meters.
+        Tobs: Observation time in seconds.
+        fd: Optional frequency grid (Hz) used to interpolate sampled PSDs in
+            :meth:`interp_psd`.
+        use_cupy: If ``True``, store ``fd`` and operate on ``cupy`` arrays.
+        **noise_kwargs: Default kwargs passed to :func:`get_sensitivity` when
+            no PSD is supplied at call time.
+    """
+
     def __init__(self, L, Tobs, fd=None, use_cupy=False, **noise_kwargs):
         self.f_star = 1 / (2.0 * np.pi * L) * C_SI
         self.Tobs = Tobs
@@ -275,6 +367,18 @@ class AmplitudeFromSNR:
             self.fd = self.fd.get()
 
     def interp_psd(self, f0, psds, walker_inds=None):
+        """Linearly interpolate sampled PSDs at frequencies ``f0``.
+
+        Args:
+            f0: Target frequencies (Hz) at which to evaluate the PSD.
+            psds: Array of shape ``(nwalkers, len(self.fd))`` (or
+                broadcastable to that) holding the sampled PSDs.
+            walker_inds: Per-frequency walker indices selecting which row of
+                ``psds`` to use. If ``None``, walker index 0 is used for all.
+
+        Returns:
+            Array of interpolated PSD values at ``f0``.
+        """
         assert self.fd is not None
         xp = np if not self.use_cupy else cp
         psds = xp.atleast_2d(psds)
@@ -294,6 +398,16 @@ class AmplitudeFromSNR:
         return new_psds
 
     def __call__(self, rho, f0, **noise_kwargs):
+        """Convert SNR to amplitude at the given frequency.
+
+        Args:
+            rho: SNR value(s).
+            f0: Frequency value(s) in Hz.
+            **noise_kwargs: Forwarded to :meth:`get_Sn_f`.
+
+        Returns:
+            Tuple ``(amp, f0)``.
+        """
 
         xp = np if not self.use_cupy else cp
 
@@ -307,6 +421,24 @@ class AmplitudeFromSNR:
         return (amp, f0)
 
     def get_Sn_f(self, f0, psds=None, walker_inds=None, Sn_f=None, **noise_kwargs):
+        """Resolve the noise PSD at frequencies ``f0``.
+
+        The PSD is, in priority order: a user-supplied ``Sn_f`` (matched to
+        ``f0`` and converted between numpy/cupy as needed), an interpolation
+        of a sampled ``psds`` array, or a fresh evaluation of
+        :func:`get_sensitivity` with ``noise_kwargs``.
+
+        Args:
+            f0: Frequencies (Hz) at which to obtain the PSD.
+            psds: Optional sampled PSD array; see :meth:`interp_psd`.
+            walker_inds: Walker indices used by :meth:`interp_psd`.
+            Sn_f: Optional precomputed PSD values, same length as ``f0``.
+            **noise_kwargs: Forwarded to :func:`get_sensitivity` when
+                neither ``Sn_f`` nor ``psds`` is given.
+
+        Returns:
+            PSD values at ``f0``.
+        """
         if Sn_f is not None:
             assert len(f0) == len(Sn_f)
             if not isinstance(f0, type(Sn_f)):
@@ -325,6 +457,16 @@ class AmplitudeFromSNR:
         return Sn_f
 
     def forward(self, amp, f0, **noise_kwargs):
+        """Convert amplitude to SNR at the given frequency.
+
+        Args:
+            amp: GB amplitude(s).
+            f0: Frequency value(s) in Hz.
+            **noise_kwargs: Forwarded to :meth:`get_Sn_f`.
+
+        Returns:
+            Tuple ``(rho, f0)``.
+        """
 
         if noise_kwargs == {}:
             noise_kwargs = self.noise_kwargs
@@ -337,6 +479,26 @@ class AmplitudeFromSNR:
 
 
 class GBPriorWrap:
+    """Wrap a GB parameter prior so amplitude is sampled jointly with frequency.
+
+    Re-routes the amplitude / frequency components through an
+    :class:`AmplitudeFrequencySNRPrior` (stored under key ``(0, 1)`` of the
+    underlying ``priors_in`` mapping) while delegating the remaining
+    parameters to ``full_prior_container``.
+
+    Args:
+        ndim: Total parameter dimensionality of the GB model.
+        full_prior_container: ``eryn``-style prior container exposing
+            ``priors_in``, ``logpdf``, and ``rvs``, with the joint
+            amplitude-frequency prior stored at key ``(0, 1)``.
+        gen_frequency_alone: If ``True``, draw frequency from
+            ``full_prior_container`` and reuse it when sampling amplitude;
+            otherwise the joint amplitude-frequency prior generates both.
+    """
+
+    # TODO/DOCS: ``keys_sep`` is the list of indices not handled by the joint
+    # amplitude-frequency prior; precise eryn semantics of these keys are not
+    # documented here.
     def __init__(self, ndim, full_prior_container, gen_frequency_alone=False):
         self.base_prior = full_prior_container
         self.use_cupy = full_prior_container.use_cupy
@@ -353,6 +515,15 @@ class GBPriorWrap:
         return self.base_prior.priors_in
 
     def logpdf(self, x, **noise_kwargs):
+        """Evaluate the log-prior, summing the joint A-f piece and the rest.
+
+        Args:
+            x: Parameter array of shape ``(n, ndim)``.
+            **noise_kwargs: Forwarded to the joint amplitude-frequency prior.
+
+        Returns:
+            Log-prior values of shape ``(n,)``.
+        """
         xp = np if not self.use_cupy else cp
         assert x.shape[1] == self.ndim and x.ndim == 2
 
@@ -365,6 +536,18 @@ class GBPriorWrap:
         return logpdf_A_f + logpdf_everything_else
 
     def rvs(self, size=1, ignore_amp=False, **kwargs):
+        """Draw samples from the wrapped prior.
+
+        Args:
+            size: Sample shape; an integer is interpreted as a 1-tuple.
+            ignore_amp: If ``True``, leave the amplitude (and frequency, if
+                ``gen_frequency_alone``) entries at zero rather than drawing
+                from the joint amplitude-frequency prior.
+            **kwargs: Forwarded to the joint amplitude-frequency ``rvs``.
+
+        Returns:
+            Array of shape ``size + (self.ndim,)``.
+        """
         xp = np if not self.use_cupy else cp
         if isinstance(size, int):
             size = (size,)
@@ -392,6 +575,29 @@ from ..utils.parallelbase import LISAToolsParallelModule
 
 
 class FullGaussianMixtureModel(LISAToolsParallelModule):
+    """Concatenated Gaussian mixture distribution over many sub-domains.
+
+    Each input list provides the parameters of an independently-fit GMM in
+    its own ``(mins, maxs)``-bounded box (typically one per GB frequency
+    band). The component lists are concatenated into a single flat mixture
+    with weights re-normalized so the global PDF integrates to one. ``logpdf``
+    is evaluated via a backend C/CUDA kernel that only sums components whose
+    bounding box covers the query point.
+
+    Args:
+        weights: List of per-mixture weight arrays (one entry per
+            sub-domain).
+        means: List of per-mixture mean arrays.
+        covs: List of per-mixture covariance arrays.
+        invcovs: List of per-mixture inverse-covariance arrays.
+        dets: List of per-mixture covariance-determinant arrays.
+        mins: List of per-sub-domain coordinate lower bounds.
+        maxs: List of per-sub-domain coordinate upper bounds.
+        limit: Mapped-coordinate distance (in the unit-cube basis) beyond
+            which a component contribution is dropped from ``logpdf``.
+        use_cupy: If ``True``, store data on GPU and use the GPU backend.
+    """
+
     def __init__(
         self,
         weights,
@@ -459,9 +665,19 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
 
     @property
     def compute_logpdf(self) -> callable:
+        """Backend C/CUDA kernel that fills the per-point log-PDF buffer."""
         return self.backend.compute_logpdf
 
     def logpdf(self, x):
+        """Evaluate the log-PDF at the input points.
+
+        Args:
+            x: Array of shape ``(n, ndim)``.
+
+        Returns:
+            Log-density values of shape ``(n,)``. Points falling outside
+            every sub-domain box are returned as ``-inf``.
+        """
 
         if self.use_cupy:
             xp = cp
@@ -548,12 +764,23 @@ class FullGaussianMixtureModel(LISAToolsParallelModule):
         return logpdf_full_dist"""
 
     def map_input(self, x, mins, maxs):
+        """Map physical coordinates into the :math:`[-1, 1]^d` box."""
         return ((x - mins) / (maxs - mins)) * 2.0 - 1.0
 
     def map_back_frequency(self, x, mins, maxs):
+        """Map :math:`[-1, 1]^d` coordinates back into physical units."""
         return (x + 1.0) * 1.0 / 2.0 * (maxs - mins) + mins
 
     def rvs(self, size=(1,)):
+        """Draw samples from the mixture distribution.
+
+        Args:
+            size: Sample shape; an integer is interpreted as a 1-tuple.
+
+        Returns:
+            Array of shape ``size + (ndim,)`` of samples in physical
+            coordinates.
+        """
 
         if isinstance(size, int):
             size = (size,)

@@ -1,3 +1,5 @@
+"""Engine and configuration dataclasses for the LISA global-fit sampler."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -38,11 +40,25 @@ from .preprocessing import BaseProcessingStep
 
 @dataclasses.dataclass
 class RankInfo:
+    """MPI rank assignments for the global fit.
+
+    Args:
+        head_rank: Rank that orchestrates the run.
+        main_rank: Rank that drives the main sampler loop.
+    """
+
     head_rank: int = -1
     main_rank: int = -1
 
 
 class Setup:
+    """Adapter wrapping a :class:`Settings` dataclass for use as a setup object.
+
+    Args:
+        settings_holder: A :class:`Settings` instance whose fields populate
+            this :class:`Setup`. The dataclass field metadata is introspected
+            so the same constructor can be re-applied.
+    """
 
     def __init__(self, settings_holder: Settings):
         self._settings_class = type(settings_holder)
@@ -72,6 +88,7 @@ class Setup:
 
     @property
     def settings(self) -> Settings:
+        """The wrapped :class:`Settings` object."""
         return self._settings
 
     @settings.setter
@@ -80,12 +97,19 @@ class Setup:
         self._settings = settings
 
     def init_df(self):
+        """Round ``Tobs`` to a multiple of ``dt`` and recompute ``df = 1/Tobs``."""
         self.Tobs = int(self.Tobs / self.dt) * self.dt
         self.df = 1.0 / self.Tobs
 
 
 @dataclasses.dataclass
 class Settings:
+    """Common configuration fields shared by branch-specific setup objects.
+
+    Most fields default to ``None`` so subclasses can extend or override
+    them; users assemble settings either by subclassing or by setting fields
+    directly.
+    """
     Tobs: float | None = None
     dt: float | None = None
     initialize_kwargs: dict | None = None
@@ -104,6 +128,13 @@ class Settings:
 
 @dataclasses.dataclass
 class GeneralSettings(Settings):
+    """Top-level (non-source-specific) configuration for a global-fit run.
+
+    Holds output paths, observation/window options, the basis-domain choice
+    (``stft`` or ``fd``), and the ``data_processor`` that loads/conditions
+    the input data. Field defaults of ``None`` mark options that the user
+    must supply (see :meth:`GeneralSetup.init_setup` for assertions).
+    """
     Tobs: float | None = None
     dt: float | None = None
     file_store_dir: str | None = None
@@ -144,6 +175,22 @@ from .loginfo import init_logger
 
 
 class GeneralSetup(Setup, GeneralSettings):
+    """Setup object that ingests data, prepares orbits, and builds the sensitivity backend.
+
+    On construction it:
+
+    1. Ensures the artifacts directory exists and attaches a logger.
+    2. Runs the configured :attr:`data_processor` to load and condition the
+       time-domain data.
+    3. Builds the basis-domain settings (STFT or FD), the analysis window,
+       and the input :class:`DataResidualArray`.
+    4. Configures :class:`XYZSensitivityBackend` for use in PSD/likelihood
+       calls.
+
+    Args:
+        general_settings: The :class:`GeneralSettings` to use.
+    """
+
     def __init__(self, general_settings: GeneralSettings):
 
         # had a better way to do this but it stopped allowing for pickle
@@ -160,6 +207,7 @@ class GeneralSetup(Setup, GeneralSettings):
 
     @property
     def main_file_path(self) -> str:
+        """Filesystem path of the primary HDF5 backend file."""
         return self.file_store_dir + self.base_file_name + "_" + self.main_file_key + ".h5"
 
     # def __getattr__(self, attr: str) -> typing.Any:
@@ -167,9 +215,11 @@ class GeneralSetup(Setup, GeneralSettings):
     #         return getattr(self.gb_settings, attr)
     @property
     def artifacts_file_dir(self) -> str:
+        """Directory where logs and diagnostic plots are stored for this run."""
         return self.file_store_dir + self.base_file_name + "_artifacts/"
 
     def init_setup(self):
+        """Validate required settings and trigger data preparation."""
         if self.file_store_dir is None:
             raise ValueError("Must provide file_store_dir settings for GeneralSetup.")
         if self.base_file_name is None:
@@ -187,6 +237,7 @@ class GeneralSetup(Setup, GeneralSettings):
         self.init_data_information()
 
     def init_orbit_information(self):
+        """Construct orbit objects, defaulting to :class:`EqualArmlengthOrbits`."""
         if self.orbits is None:
             self.orbits = EqualArmlengthOrbits()
             self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.gpu_backend)
@@ -196,7 +247,7 @@ class GeneralSetup(Setup, GeneralSettings):
                 raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
     def init_data_information(self):
-
+        """Run preprocessing, build the basis domain, and configure the sensitivity backend."""
         # load data #todo add here not in file
         if self.data_processor is None:
             raise ValueError("Must provide data_processor for GeneralSetup.")
@@ -353,6 +404,16 @@ class GeneralSetup(Setup, GeneralSettings):
 
 @dataclasses.dataclass
 class GlobalFitSettings:
+    """Top-level settings bundle describing one global-fit run.
+
+    Args:
+        source_info: Mapping of source-class name to its :class:`Setup`.
+        general_info: General (non-source) settings.
+        rank_info: MPI rank assignments.
+        setup_function: User-supplied callback invoked once at run start to
+            wire the global fit's components together.
+    """
+
     source_info: typing.Dict[str, Setup]
     general_info: GeneralSetup
     rank_info: RankInfo
@@ -362,6 +423,8 @@ class GlobalFitSettings:
 
 @dataclasses.dataclass
 class EngineInfo:
+    """Branch-keyed metadata that the engine needs in order to launch a sampler."""
+
     branch_names: typing.List[str]
     ndims: typing.Dict[str, int]
     nleaves_max: typing.Dict[str, int]
@@ -381,6 +444,18 @@ GlobalFitInfo = namedtuple(
 
 
 class GlobalFitEngine(EnsembleSampler):
+    """``eryn`` :class:`EnsembleSampler` extended with a shared analysis-container array.
+
+    The engine owns the :class:`AnalysisContainerArray` shared by all moves so
+    likelihoods, residuals, and PSDs stay synchronized across walker indices
+    during the run.
+
+    Args:
+        analysis_container_arr: Shared :class:`AnalysisContainerArray` for
+            this run.
+        *args: Forwarded to :class:`eryn.ensemble.EnsembleSampler`.
+        **kwargs: Forwarded to :class:`eryn.ensemble.EnsembleSampler`.
+    """
 
     def __init__(self, analysis_container_arr: AnalysisContainerArray, *args, **kwargs):
         super().__init__(*args, **kwargs)

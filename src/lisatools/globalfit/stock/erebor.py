@@ -1,3 +1,5 @@
+"""Stock Erebor recipe: per-source :class:`Setup` / :class:`Settings` definitions."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -32,6 +34,12 @@ from ..loginfo import init_logger
 
 @dataclasses.dataclass
 class GBSettings(Settings):
+    """Settings dataclass describing the GB branch in an Erebor-style recipe.
+
+    Mostly holds parameter limits, frequency-band oversampling, and the
+    starting frequency / TDI configuration consumed by :class:`GBSetup`.
+    """
+
     A_lims: typing.List[float] = dataclasses.field(default_factory=list)
     f0_lims: typing.List[float] = dataclasses.field(default_factory=list)
     m_chirp_lims: typing.List[float] = dataclasses.field(default_factory=list)
@@ -55,6 +63,7 @@ class GBSettings(Settings):
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
+    """Convert frequencies from mHz to Hz (named for pickling support)."""
     return x * 1e-3
 
 
@@ -63,6 +72,13 @@ from ..state import GBState
 
 
 class GBSetup(Setup, GBSettings):
+    """:class:`Setup` for galactic binaries in the Erebor recipe.
+
+    Args:
+        gb_settings: Settings dataclass holding GB parameter ranges and
+            domain configuration.
+    """
+
     def __init__(self, gb_settings: GBSettings):
 
         # had a better way to do this but it stopped allowing for pickle
@@ -75,7 +91,7 @@ class GBSetup(Setup, GBSettings):
         self.init_setup()
 
     def init_sampling_info(self):
-
+        """Build the GB :class:`TransformContainer`, prior, periodicity, and waveform kwargs."""
         input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
 
         if self.transform is None:
@@ -183,11 +199,13 @@ class GBSetup(Setup, GBSettings):
     #         return getattr(self.gb_settings, attr)
 
     def init_setup(self):
+        """Run the band-structure, sampling-info, and state-backend init helpers."""
         self.init_band_structure()
         self.init_sampling_info()
         self.init_state_backend_info()
 
     def init_state_backend_info(self):
+        """Default :attr:`branch_state` to :class:`GBState` and :attr:`branch_backend` to :class:`GBHDFBackend`."""
         if self.branch_state is None:
             self.branch_state = GBState
 
@@ -195,6 +213,7 @@ class GBSetup(Setup, GBSettings):
             self.branch_backend = GBHDFBackend
 
     def init_band_structure(self):
+        """Compute :attr:`band_edges` and :attr:`band_N_vals` from the GB frequency range."""
         # band separation setup
 
         if self.oversample is None and self.Tobs < YRSID_SI / 2.0:
@@ -236,6 +255,7 @@ class GBSetup(Setup, GBSettings):
 
 
 def mbh_dist_trans(x):
+    """Transform an MBH ``ln total mass`` parameter (named for pickling support)."""
     return x * PC_SI * 1e9  # Gpc
 
 
@@ -255,6 +275,8 @@ from ..state import MBHState
 
 @dataclasses.dataclass
 class MBHSettings(Settings):
+    """Settings dataclass describing the MBH branch in an Erebor-style recipe."""
+
     waveform_kwargs: Optional[dict] = None
     betas: Optional[np.ndarray] = None
     inner_moves: Optional[typing.List[Move]] = None
@@ -264,6 +286,12 @@ class MBHSettings(Settings):
 
 
 class MBHSetup(Setup):
+    """:class:`Setup` for massive black-hole binaries in the Erebor recipe.
+
+    Args:
+        mbh_settings: Settings dataclass with MBH waveform / prior config.
+    """
+
     def __init__(self, mbh_settings: MBHSettings):
 
         # had a better way to do this but it stopped allowing for pickle
@@ -276,7 +304,7 @@ class MBHSetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-
+        """Build the MBH :class:`TransformContainer`, prior, periodicity, and waveform kwargs."""
         # input_basis = [
         #     "logM",
         #     "q",
@@ -427,10 +455,12 @@ class MBHSetup(Setup):
             ]
 
     def init_setup(self):
+        """Run sampling-info and state-backend initialization."""
         self.init_sampling_info()
         self.init_state_backend_info()
 
     def init_state_backend_info(self):
+        """Default the MBH state and backend to :class:`MBHState` / :class:`MBHHDFBackend`."""
         if self.branch_state is None:
             self.branch_state = MBHState
 
@@ -444,6 +474,16 @@ from ..state import EMRIState
 
 @dataclasses.dataclass
 class EMRISettings(Settings):
+    """Settings dataclass describing the EMRI branch in an Erebor-style recipe.
+
+    Holds parameter ranges for the intrinsic EMRI parameters (primary mass,
+    secondary mass, spin, semi-latus rectum, eccentricity), the waveform
+    configuration, and search/sampling helpers consumed by :class:`EMRISetup`.
+
+    # TODO/DOCS: confirm the role of ``info_matrix_gen`` and ``fill_values``
+    # in coordinating EMRI starts with the Fisher / search pipeline.
+    """
+
     logm1_lims: typing.List[float] = dataclasses.field(default_factory=list)
     m2_lims: typing.List[float] = dataclasses.field(default_factory=list)
     a_lims: typing.List[float] = dataclasses.field(default_factory=list)
@@ -460,6 +500,13 @@ class EMRISettings(Settings):
 
 
 class EMRISetup(Setup):
+    """:class:`Setup` for extreme mass-ratio inspirals in the Erebor recipe.
+
+    Args:
+        emri_settings: Settings dataclass with EMRI parameter ranges,
+            waveform configuration, and search helpers.
+    """
+
     def __init__(self, emri_settings: EMRISettings):
 
         # had a better way to do this but it stopped allowing for pickle
@@ -472,7 +519,7 @@ class EMRISetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-
+        """Build the EMRI :class:`TransformContainer`, prior, periodicity, and tempering ladder."""
         input_basis = [
             "logm1",
             "m2",
@@ -586,14 +633,16 @@ class EMRISetup(Setup):
             self.inner_moves = [(StretchMove(), 1.0)]
 
     def setup_priors(self, input_basis):
-        """
-        Get the prior distributions for the EMRI parameters.
-        override the default priors with custom boundaries for the intrinsic parameters.
+        """Build the EMRI prior dictionary, overriding intrinsic ranges from settings.
+
+        Starts from a default uniform prior on each input-basis parameter and
+        overrides the intrinsic parameter ranges (``logm1``, ``m2``, ``a``,
+        ``p0``, ``e0``) with the corresponding ``*_lims`` attributes when
+        those have been set.
 
         Args:
-
-        Returns:
-            ProbDistContainer: Container with prior distributions for each parameter.
+            input_basis: Ordered list of EMRI parameter names matching the
+                sampler's input basis.
         """
 
         priors_emri = {
@@ -622,10 +671,12 @@ class EMRISetup(Setup):
         self.priors = {"emri": ProbDistContainer(priors_emri)}
 
     def init_setup(self):
+        """Run sampling-info and state-backend initialization."""
         self.init_sampling_info()
         self.init_state_backend_info()
 
     def init_state_backend_info(self):
+        """Default the EMRI state and backend to :class:`EMRIState` / :class:`EMRIHDFBackend`."""
         if self.branch_state is None:
             self.branch_state = EMRIState
 
@@ -638,6 +689,16 @@ from lisatools.detector import EqualArmlengthOrbits
 
 @dataclasses.dataclass
 class PSDSettings(Settings):
+    """Settings dataclass describing the PSD branch in an Erebor-style recipe.
+
+    Configures the PSD model parameters that are sampled jointly with the
+    other source branches (e.g. instrumental noise levels) and feeds into
+    :class:`PSDSetup`.
+
+    # TODO/DOCS: confirm coordination between ``nknots`` and ``ndim`` for
+    # spline-style PSD parameterizations vs. the default 4-parameter setup.
+    """
+
     psd_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     nleaves_max: int = 1
     nleaves_min: int = 1
@@ -648,6 +709,13 @@ class PSDSettings(Settings):
 
 
 class PSDSetup(Setup):
+    """:class:`Setup` for the instrumental PSD branch in the Erebor recipe.
+
+    Args:
+        psd_settings: Settings dataclass with PSD kwargs, prior, and
+            tempering configuration.
+    """
+
     def __init__(self, psd_settings: PSDSettings):
 
         # had a better way to do this but it stopped allowing for pickle
@@ -660,7 +728,7 @@ class PSDSetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-
+        """Build the PSD prior, tempering ladder, and default ``psd_kwargs``."""
         if self.psd_kwargs is None:
             self.psd_kwargs = dict(sens_fn="A1TDISens")
 
@@ -699,11 +767,19 @@ class PSDSetup(Setup):
         assert not self.other_tempering_kwargs["permute"]
 
     def init_setup(self):
+        """Run sampling-info initialization for the PSD branch."""
         self.init_sampling_info()
 
 
 @dataclasses.dataclass
 class GalForSettings(Settings):
+    """Settings dataclass describing the galactic-foreground branch in an Erebor-style recipe.
+
+    Holds the foreground-model kwargs and the leaf / dimension counts used
+    by :class:`GalForSetup` to build the prior on the stochastic galactic
+    foreground (amplitude, knee, slopes, etc.).
+    """
+
     galfor_kwargs: typing.Dict = dataclasses.field(default_factory=dict)
     nleaves_max: int = 1
     nleaves_min: int = 1
@@ -711,6 +787,13 @@ class GalForSettings(Settings):
 
 
 class GalForSetup(Setup):
+    """:class:`Setup` for the galactic-foreground branch in the Erebor recipe.
+
+    Args:
+        galfor_settings: Settings dataclass with foreground kwargs, prior,
+            and tempering configuration.
+    """
+
     def __init__(self, galfor_settings: GalForSettings):
 
         # had a better way to do this but it stopped allowing for pickle
@@ -723,7 +806,7 @@ class GalForSetup(Setup):
         self.init_setup()
 
     def init_sampling_info(self):
-
+        """Build the galactic-foreground prior, tempering kwargs, and default ``galfor_kwargs``."""
         if self.galfor_kwargs is None:
             self.galfor_kwargs = dict(sens_fn="A1TDISens")
 
@@ -760,11 +843,28 @@ class GalForSetup(Setup):
         assert not self.other_tempering_kwargs["permute"]
 
     def init_setup(self):
+        """Run sampling-info initialization for the galactic-foreground branch."""
         self.init_sampling_info()
 
 
 def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
+    """Construct the default :class:`GalForSetup` for an Erebor run.
 
+    Builds a :class:`GalForSettings` from the run-wide ``Tobs`` / ``dt``
+    carried on ``general_set`` and wraps it in a :class:`GalForSetup`.
+
+    # TODO/DOCS: the local ``Tobs = YRSID_SI`` and ``dt = 10.0`` are dead
+    # code (overridden by ``general_set``); confirm whether they should be
+    # used as fallbacks.
+
+    Args:
+        general_set: Run-wide :class:`GeneralSetup` providing ``Tobs`` and
+            ``dt``.
+
+    Returns:
+        Configured :class:`GalForSetup` ready for use in the Erebor
+        pipeline.
+    """
     from lisatools.detector import EqualArmlengthOrbits
     from lisatools.utils.constants import YRSID_SI
 

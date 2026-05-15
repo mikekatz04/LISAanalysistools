@@ -1,3 +1,5 @@
+"""Standalone PSD parameter-estimation runner with optional galactic foreground."""
+
 import pickle
 import shutil
 import time
@@ -32,16 +34,35 @@ from lisatools.sampling.stopping import SearchConvergeStopping
 
 
 class PlaceHolder(Move):
+    """No-op move used to satisfy the eryn move-list contract during PSD-only runs."""
+
     def __init__(self, *args, **kwargs):
         super(PlaceHolder, self).__init__(*args, **kwargs)
 
     def propose(self, model, state):
+        """Accept nothing and reset the temperature swap counters."""
         accepted = np.zeros(state.log_like.shape)
         self.temperature_control.swaps_accepted = np.zeros(self.temperature_control.ntemps - 1)
         return state, accepted
 
 
 def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
+    """Vectorized PSD + galactic-foreground log-likelihood backed by GBGPU.
+
+    Args:
+        x: Tuple ``(psd_params, galfor_params)`` where each is a 2D array
+            indexed by walker.
+        freqs: Frequency array.
+        data: Channel-flattened complex frequency-domain data.
+        gb: A :class:`gbgpu.GBGPU` instance whose ``psd_likelihood`` is called.
+        df: Frequency spacing.
+        data_length: Number of frequency bins per walker.
+        supps: Eryn supplemental dict; must contain ``walker_inds``.
+        **sens_kwargs: Currently unused.
+
+    Returns:
+        Per-walker log-likelihood values.
+    """
     if supps is None:
         raise ValueError("Must provide supps to identify the data streams.")
 
@@ -103,6 +124,18 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
 
 
 class PSDwithGBPriorWrap:
+    """Composite prior that combines PSD/galfor priors with the per-binary GB prior.
+
+    The GB prior conditions on the current PSD via :meth:`gbgpu.GBGPU.get_lisasens_val`,
+    so the prior wraps the GBGPU instance and the current GB/MBH state.
+
+    Args:
+        nwalkers: Total number of walkers in the run.
+        gb: :class:`gbgpu.GBGPU` instance providing ``get_lisasens_val``.
+        priors: Mapping ``{branch_name: ProbDistContainer}``. Must include
+            ``psd``, ``galfor``, ``mbh``, and ``gb`` entries.
+    """
+
     def __init__(self, nwalkers, gb, priors):
         self.gb = gb
         self.priors = priors
@@ -110,6 +143,7 @@ class PSDwithGBPriorWrap:
 
     @property
     def full_state(self):
+        """The complete :class:`State` (used when proposed coords are a subset)."""
         if not hasattr(self, "_full_state") or self._full_state is None:
             raise ValueError(
                 "Need to provide a full state when working with calculations of nwalkers < self.nwalkers."
@@ -122,7 +156,20 @@ class PSDwithGBPriorWrap:
         self._full_state = full_state
 
     def logpdf(self, coords, inds, supps=None, branch_supps=None):
+        """Combined log-prior across PSD, galactic foreground, GB, and MBH branches.
 
+        Args:
+            coords: Branch-keyed dict of coordinates.
+            inds: Branch-keyed dict of leaf occupancy flags.
+            supps: Eryn supplemental info; must contain ``walker_inds``.
+            branch_supps: Branch-supplemental dict (unused).
+
+        Returns:
+            ``(ntemps, nwalkers)`` log-probability array.
+
+        Raises:
+            ValueError: If every entry in the result is ``NaN``.
+        """
         psd_pars = coords["psd"].reshape(-1, coords["psd"].shape[-1])
         galfor_pars = coords["galfor"].reshape(-1, coords["galfor"].shape[-1])
 
@@ -248,6 +295,20 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResidualsPSD(Update):
+    """Synchronizes PSD residuals with the head rank between iterations.
+
+    Sends the current cold-chain PSD/galfor coordinates to the head rank,
+    receives refreshed residuals, and accepts the swap with a forced
+    ``True`` decision (the original Metropolis ratio was found to be wrong).
+
+    Args:
+        comm: MPI communicator.
+        head_rank: Rank that owns the global state.
+        last_mbh_prior_val: Cached MBH prior contribution per walker;
+            updated in place when accepts occur.
+        verbose: If ``True``, log each communication step.
+    """
+
     def __init__(self, comm, head_rank, last_mbh_prior_val, verbose=False):
         self.comm = comm
         self.head_rank = head_rank
@@ -255,6 +316,10 @@ class UpdateNewResidualsPSD(Update):
         self.last_mbh_prior_val = last_mbh_prior_val
 
     def __call__(self, iter, last_sample, sampler):
+        """Pull fresh data residuals from the head rank into ``sampler``.
+
+        # TODO/DOCS: see code comment — accept mask is forced to ``True``.
+        """
 
         if self.verbose:
             print("Sending psd update to head process.")
@@ -376,6 +441,18 @@ class UpdateNewResidualsPSD(Update):
 
 
 def run_psd_pe(gpu, comm, head_rank):
+    """Run the PSD parameter-estimation sampler on ``gpu``.
+
+    Receives the global-fit configuration from ``head_rank``, builds the
+    PSD likelihood + GB-conditional prior, attaches an
+    :class:`UpdateNewResidualsPSD` callback, and runs the inner
+    :class:`EnsembleSampler` to convergence.
+
+    Args:
+        gpu: GPU device index.
+        comm: MPI communicator.
+        head_rank: Rank that hosts the shared :class:`CurrentInfoGlobalFit`.
+    """
 
     gpus = [gpu]
 

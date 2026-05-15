@@ -1,3 +1,5 @@
+"""Diagnostic plotting utilities (corner plots, log-likelihood traces, styling)."""
+
 import os
 
 import chainconsumer
@@ -147,6 +149,13 @@ def with_default_plotting_style(func):
 
 @with_custom_plotting_style
 def plot_loglikelihood(reader, discard=0, save_dir="./"):
+    """Plot per-walker log-likelihood traces and a per-walker facet grid.
+
+    Args:
+        reader: HDF backend or any reader with ``get_log_like(discard=)``.
+        discard: Burn-in steps to discard.
+        save_dir: Directory to write the resulting PNGs into.
+    """
     logl = reader.get_log_like(discard=discard)[:, 0]
 
     nsteps, nwalkers = logl.shape
@@ -190,7 +199,17 @@ def plot_loglikelihood(reader, discard=0, save_dir="./"):
 def base_branch_plots(
     chain, key, labels, save_dir="./", plot_trace=True, plot_corner=True, truths=None
 ):
+    """Generic per-branch trace + corner plotting helper.
 
+    Args:
+        chain: Branch chain of shape ``(nsteps, nwalkers, nleaves, ndim)``.
+        key: Branch name used to build output filenames.
+        labels: Per-dimension axis labels.
+        save_dir: Directory to write PNGs into.
+        plot_trace: If ``True``, render a per-dimension trace plot.
+        plot_corner: If ``True``, render a corner plot.
+        truths: Optional injection truths overlaid on the plots.
+    """
     nsteps, nwalkers, nleaves, ndim = chain.shape
 
     # chain = chain.reshape((nsteps, nwalkers, ndim))
@@ -231,6 +250,7 @@ def base_branch_plots(
 
 
 def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
+    """Plot the MBH chain (trace + corner) with default parameter labels."""
     labels = [
         r"$\log (m_1 / M_\odot)$",
         r"$q$",
@@ -252,10 +272,12 @@ def produce_mbh_plots(chain=None, reader=None, discard=0, save_dir="./", truths=
 
 
 def produce_gb_plots(chain=None, reader=None, discard=0, save_dir="./"):
+    """Placeholder for GB diagnostic plots (no-op for now)."""
     pass
 
 
 def produce_emri_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
+    """Plot the EMRI chain (trace + corner) with default parameter labels."""
     labels = [
         r"$\log (m_1 / M_\odot)$",
         r"$m_2 / M_\odot$",
@@ -278,6 +300,7 @@ def produce_emri_plots(chain=None, reader=None, discard=0, save_dir="./", truths
 
 
 def produce_psd_plots(chain=None, reader=None, discard=0, save_dir="./", truths=None):
+    """Plot the PSD chain (trace + corner) with default parameter labels."""
     labels = [
         r"$S_{\mathrm{oms}_A}$",
         r"$S_{\mathrm{acc}_A}$",
@@ -298,6 +321,7 @@ def produce_psd_plots(chain=None, reader=None, discard=0, save_dir="./", truths=
 
 
 def produce_galfor_plots(chain=None, reader=None, discard=0, save_dir="./"):
+    """Placeholder for galactic-foreground diagnostic plots (no-op for now)."""
     pass
 
 
@@ -317,6 +341,14 @@ all_branches_functions = dict(
 
 
 class DiagnosticPlotter:
+    """Sampler callback that periodically writes per-branch diagnostic plots.
+
+    Args:
+        curr: Global-fit info object exposing ``source_info`` and
+            ``general_info``.
+        plot_every: Iteration cadence at which plots are regenerated.
+    """
+
     def __init__(self, curr, plot_every=10):
         self.curr = curr  # information holder
         self.plot_every = plot_every
@@ -338,6 +370,7 @@ class DiagnosticPlotter:
         print("Saving diagnostic plots to ", self.savedir)
 
     def __call__(self, iteration, last_sample, sampler):
+        """Print per-move acceptance and write diagnostic plots every ``plot_every`` iterations."""
         if iteration > 0 and iteration % self.plot_every == 0:
 
             for move in sampler.moves:

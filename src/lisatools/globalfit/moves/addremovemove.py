@@ -1,3 +1,5 @@
+"""Move that swaps individual sources in/out of the residual data array."""
+
 import logging
 import time
 from copy import deepcopy
@@ -107,8 +109,9 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
     @property
     def periodic(self):
+        """Periodicity dictionary propagated to all inner moves."""
         return self._periodic
-    
+
     @periodic.setter
     def periodic(self, periodic):
         self._periodic = periodic
@@ -118,6 +121,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                     tmp_move.periodic = periodic
 
     def check_add_skip_swap_info(self, state):
+        """Populate ``skip_swap_branches`` on each per-leaf temperature control.
+
+        Branches other than :attr:`branch_name` are skipped during temperature
+        swapping so this move does not corrupt unrelated branches.
+        """
 
         if self.temperature_controls[0].skip_swap_branches is not None:
             return
@@ -204,6 +212,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return DomainBaseArray(waveforms)
 
     def setup_likelihood_here(self, coords):
+        """Hook for subclasses to set up state before computing the likelihood."""
         pass
 
     def compute_like(self, coords_in, data_index):
@@ -233,6 +242,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return ll
 
     def setup(self, model, state):
+        """Per-iteration setup hook (no-op by default)."""
         return
 
     def log_like_for_fancy_swaping(self, x, supps=None, branch_supps=None, **kwargs):
@@ -271,7 +281,19 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return output, None  # AS: match psd? I'm not sure
 
     def propose(self, model, state):
+        """Generate proposals by removing, updating, and re-adding each leaf.
 
+        # TODO/DOCS: detailed acceptance/swap accounting; see code for the per-leaf
+        loop and the ``compute_like`` calls used to score proposals.
+
+        Args:
+            model: ``eryn`` model object containing ``analysis_container_arr``,
+                ``random``, etc.
+            state: Current sampler state.
+
+        Returns:
+            Tuple ``(new_state, accepted)``.
+        """
         self.setup(model, state)
         tic = time.time()
 
@@ -574,6 +596,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         return new_state, accepted
 
     def replace_residuals(self, old_state, new_state):
+        """Swap the cold-chain contribution from ``old_state`` to ``new_state``.
+
+        # TODO/DOCS: not currently functional — body raises ``NotImplementedError``.
+        """
         raise NotImplementedError
         fd = xp.asarray(self.acs.fd)
         old_contrib = [None, None]

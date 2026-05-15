@@ -1,3 +1,5 @@
+"""Galactic-binary specialized stretch / RJ moves and supporting infrastructure."""
+
 from __future__ import annotations
 
 import os
@@ -52,6 +54,20 @@ __all__ = ["GBSpecialStretchMove"]
 
 
 def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
+    """Worker entry point for ranks dedicated to the GB bulk search.
+
+    # TODO/DOCS: full handshake protocol with ``main_rank``; the body is the
+    canonical reference. Worker ranks pin themselves to a GPU, receive
+    band-split assignments, run :func:`run_gb_bulk_search`, and report
+    back.
+
+    Args:
+        comm: MPI communicator.
+        curr: Global-fit info object.
+        main_rank: Rank that orchestrates the search.
+        class_extra_gpus: GPU indices owned by this move class.
+        class_ranks_list: Ranks owned by this move class.
+    """
     assert comm is not None
 
     # get current rank and get index into class_ranks_list
@@ -91,6 +107,12 @@ def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
 
 
 def fit_gmm(samples, comm, comm_info):
+    """Fit a Gaussian mixture model to per-leaf GB chain samples.
+
+    # TODO/DOCS: cross-rank protocol; mirrors the helper in
+    :mod:`lisatools.globalfit.galaxyglobal` but is invoked by worker ranks
+    of the GB special move set.
+    """
 
     if len(samples) == 0:
         return None
@@ -230,6 +252,7 @@ def fit_gmm(samples, comm, comm_info):
 
 
 def fit_each_leaf(rank, curr, gather_rank, comm):
+    """Worker-side helper that fits one GMM per assigned GB leaf."""
 
     run_process = True
 
@@ -289,6 +312,11 @@ def fit_each_leaf(rank, curr, gather_rank, comm):
 
 
 def gb_refit_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
+    """Worker entry point for ranks dedicated to GMM-based GB refits.
+
+    # TODO/DOCS: full protocol; coordinates the per-leaf GMM refits used to
+    refresh ``rj_proposal_distribution`` on the GB RJ moves.
+    """
     assert comm is not None
 
     # get current rank and get index into class_ranks_list
@@ -318,16 +346,33 @@ from eryn.utils import TransformContainer
 
 
 class Buffer(LISAToolsParallelModule):
+    """GPU-resident scratch buffers used by the GB special moves.
+
+    Allocates and reuses the per-band working memory (sources currently
+    in band, indices into the data array, etc.) so the inner MCMC loop
+    avoids reallocating large arrays each iteration.
+
+    # TODO/DOCS: detailed semantics of every buffer field — the body is
+    the canonical reference. The most-used members are:
+
+    - ``special_indices_unique`` / ``special_indices_unique_sort``: lookup
+      tables that map a per-source ``special_index`` back into the buffer
+      ordering.
+    - ``params_interest``: parameters of GBs that participate in the move.
+    """
 
     @property
     def xp(self) -> Union[ModuleType, numpy , cupy]:
+        """Active array module (NumPy or CuPy) for this buffer."""
         return self.backend.xp
 
     @classmethod
     def supported_backends(cls):
+        """List the GPU backend names this buffer supports."""
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_index(self, special_inds_test):
+        """Map a special-index test value to its position inside the buffer."""
         now_index = (
             self.special_indices_unique_sort[
                 cp.searchsorted(
@@ -846,10 +891,18 @@ class Buffer(LISAToolsParallelModule):
 
 
 def return_x(x):
+    """Identity helper used as a no-op replacement for :func:`copy.deepcopy`."""
     return x
 
 
 class BandSorter(LISAToolsParallelModule):
+    """GPU helper that sorts/ungroups GB samples by frequency band.
+
+    # TODO/DOCS: detailed semantics. Used by :class:`GBSpecialBase` to keep
+    track of which sources fall into which band and to map data-array
+    indices accordingly so band-temperature swaps and per-band proposals
+    operate on the correct subset.
+    """
 
     @property
     def xp(self) -> Union[ModuleType, numpy , cupy]:
@@ -1251,18 +1304,50 @@ class BandSorter(LISAToolsParallelModule):
 
 # MHMove needs to be to the left here to overwrite GBBruteRejectionRJ RJ proposal method
 class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModule):
-    """Generate Revesible-Jump proposals for GBs with try-force rejection
+    """Base class for GB-specific stretch / reversible-jump moves.
 
-    Will use gpu if template generator uses GPU.
+    Combines :class:`GlobalFitMove`, :class:`eryn.moves.GroupStretchMove`,
+    :class:`Move`, and :class:`LISAToolsParallelModule` so each GB move can
+    use try-force rejection, optional phase maximization, and GPU-resident
+    band-aware buffers (:class:`Buffer`, :class:`BandSorter`).
+
+    # TODO/DOCS: full argument list — many constructor kwargs are passed
+    through unmodified to ``GroupStretchMove``. Intended use is via the
+    concrete subclasses :class:`GBSpecialStretchMove`,
+    :class:`GBSpecialRJPriorMove`, :class:`GBSpecialRJSearchMove`,
+    :class:`GBSpecialRJSerialSearchMCMC`, and
+    :class:`GBSpecialRJRefitMove`.
 
     Args:
-        priors (object): :class:`ProbDistContainer` object that has ``logpdf``
-            and ``rvs`` methods.
-
+        gb: :class:`gbgpu.GBGPU` instance.
+        priors: :class:`ProbDistContainer` for in-model GB parameters.
+        start_freq_ind: Inclusive starting index into the global ``f_arr``.
+        data_length: Length of the data array per channel.
+        mgh: Multi-GPU data holder / analysis container.
+        fd: Frequency array.
+        band_edges: Frequency-band edges.
+        band_N_vals: Per-band waveform sample counts.
+        gpu_priors: Branch-keyed GPU-resident priors.
+        waveform_kwargs: Forwarded to ``gb`` waveform calls.
+        parameter_transforms: :class:`TransformContainer` for GBs.
+        snr_lim: Optional SNR cut.
+        rj_proposal_distribution: Distribution used to draw RJ proposals.
+        is_rj_prop: Marks this move as a reversible-jump proposal.
+        num_repeat_proposals: Inner repeat count per call.
+        name: Move name (used for logging and bookkeeping).
+        use_prior_removal: If ``True``, draw RJ proposals from the prior.
+        phase_maximize: If ``True``, marginalize over phase in the
+            likelihood.
+        ranks_needed / gpus: MPI / GPU resource requests.
+        num_band_preload: Number of bands preloaded per call.
+        run_swaps: Whether to run band-temperature swaps.
+        max_data_store_size: Cap on the per-iteration data store size.
+        force_backend: Optional backend override.
     """
 
     @property
     def xp(self) -> Union[ModuleType, numpy , cupy]:
+        """Active array module (NumPy or CuPy) for this move."""
         return self.backend.xp
 
     def __init__(
@@ -3114,6 +3199,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
 
 class GBSpecialStretchMove(GBSpecialBase):
+    """In-model GB stretch move with band-aware group proposals.
+
+    On each call updates the per-leaf group structure (when due) and runs
+    a stretch proposal restricted to GBs that share the same frequency
+    band, so band-temperature swaps can interact correctly.
+    """
 
     def setup(self, model, branches):
         for i, (name, branch) in enumerate(branches.items()):
@@ -3161,6 +3252,7 @@ class GBSpecialStretchMove(GBSpecialBase):
 
 
 class GBSpecialRJPriorMove(GBSpecialBase):
+    """Reversible-jump GB move that draws proposals from the prior distribution."""
     pass
 
 
@@ -3175,6 +3267,26 @@ def para_log_like(
     fstat=True,
     return_snr=False,
 ):
+    """Vectorized GB log-likelihood used by serial-search and refit moves.
+
+    Args:
+        x: GB parameter rows (untransformed).
+        gb: :class:`gbgpu.GBGPU` instance.
+        acs: :class:`AnalysisContainerArray`.
+        walker_max: Index of the walker whose data the proposals are scored
+            against.
+        transform_fn: :class:`TransformContainer` for GB parameters.
+        phase_maximize: If ``True``, marginalize over phase.
+        waveform_kwargs: Forwarded to ``gb.get_fstat_ll`` / ``gb.get_ll``.
+        fstat: If ``True``, use the F-statistic likelihood (``get_fstat_ll``)
+            and overwrite the amplitude / phase / iota / polarization
+            entries of ``x`` with their maximized values.
+        return_snr: If ``True`` and ``fstat`` is ``False``, also return the
+            optimal SNR per row.
+
+    Returns:
+        Per-row log-likelihood (or ``(ll, snr)`` tuple).
+    """
     xp = gb.backend.xp
 
     x_tmp = transform_fn.both_transforms(x, xp=xp)
@@ -3254,6 +3366,18 @@ def para_log_like(
 
 
 class PriorTransformFn:
+    """Transform between unit-cube prior coordinates and GB :math:`(f, \\dot f)`.
+
+    Used by the serial-search move to draw uniform-in-band proposals while
+    keeping the rest of the GB prior unchanged.
+
+    Args:
+        f_min: Minimum frequency (Hz).
+        f_max: Maximum frequency (Hz).
+        fdot_min: Minimum frequency derivative.
+        fdot_max: Maximum frequency derivative.
+    """
+
     def __init__(self, f_min: float, f_max: float, fdot_min: float, fdot_max: float):
         self.f_min, self.f_max, self.fdot_min, self.fdot_max = (
             f_min,
@@ -3263,7 +3387,7 @@ class PriorTransformFn:
         )
 
     def adjust_logp(self, logp, groups_running):
-
+        """Add the (uniform) ``f`` and ``fdot`` log-density to ``logp``."""
         xp = get_array_module(self.f_min)
 
         if groups_running is None:
@@ -3283,6 +3407,7 @@ class PriorTransformFn:
         return logp
 
     def transform_to_prior_basis(self, coords, groups_running):
+        """Map ``f`` / ``fdot`` columns of ``coords`` to the unit-cube basis."""
         xp = get_array_module(self.f_min)
 
         if groups_running is None:
@@ -3306,6 +3431,7 @@ class PriorTransformFn:
         return
 
     def transform_from_prior_basis(self, coords, groups_running):
+        """Map ``f`` / ``fdot`` columns of ``coords`` from unit cube back to physical."""
         if groups_running is None:
             groups_running = xp.arange(len(self.f_min))
 
@@ -3326,6 +3452,14 @@ class PriorTransformFn:
 
 
 class BayesGMMFit:
+    """Variational Bayesian GMM fit to per-leaf GB samples (sklearn ``BayesianGaussianMixture``).
+
+    Stores the per-feature min/max so samples can be transformed in/out of
+    a ``[-1, 1]`` GMM basis.
+
+    Args:
+        samples_in: 2D NumPy array of GB samples to fit.
+    """
 
     def __init__(self, samples_in):
 
@@ -3352,12 +3486,14 @@ class BayesGMMFit:
         self.keep_mix = mixture
 
     def transform_to_gmm_basis(self, samples):
+        """Map samples from physical to ``[-1, 1]`` GMM basis."""
         return (
             (samples - self.sample_mins[None, :])
             / (self.sample_maxs[None, :] - self.sample_mins[None, :])
         ) * 2 - 1
 
     def transform_from_gmm_basis(self, samples):
+        """Map samples from ``[-1, 1]`` GMM basis back to physical."""
         return (samples + 1.0) / 2.0 * (
             self.sample_maxs[None, :] - self.sample_mins[None, :]
         ) + self.sample_mins[None, :]
@@ -3367,6 +3503,11 @@ from sklearn.mixture import GaussianMixture
 
 
 class GMMFit:
+    """Plain GMM fit to per-leaf GB samples (sklearn ``GaussianMixture``).
+
+    Args:
+        samples_in: 2D NumPy array of GB samples to fit.
+    """
 
     def __init__(self, samples_in):
 
@@ -3428,18 +3569,21 @@ class GMMFit:
         self.keep_mix = mixture
 
     def transform_to_gmm_basis(self, samples):
+        """Map samples from physical to ``[-1, 1]`` GMM basis."""
         return (
             (samples - self.sample_mins[None, :])
             / (self.sample_maxs[None, :] - self.sample_mins[None, :])
         ) * 2 - 1
 
     def transform_from_gmm_basis(self, samples):
+        """Map samples from ``[-1, 1]`` GMM basis back to physical."""
         return (samples + 1.0) / 2.0 * (
             self.sample_maxs[None, :] - self.sample_mins[None, :]
         ) + self.sample_mins[None, :]
 
 
 def gather_gmms(gmms):
+    """Pack a list of GMM fits into the dict format expected by :func:`make_gmm`."""
     weights = []
     means = []
     covs = []
@@ -3477,6 +3621,12 @@ def gather_gmms(gmms):
 from lisatools.sampling.gmm import vec_fit_gmm_min_bic
 
 class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
+    """Reversible-jump GB move that runs a serial F-statistic MCMC search per band.
+
+    Each band proposes one new GB at a time using a parallel ensemble
+    sampler driven by :func:`para_log_like`, with proposals drawn from a
+    band-restricted prior via :class:`PriorTransformFn`.
+    """
     comm_info = None
 
     def get_rank_function(self):
@@ -3776,6 +3926,12 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
     
 
 class GBSpecialRJSearchMove(GBSpecialBase): #? only needed for mutli GPU usage
+    """Reversible-jump GB search move that delegates work to extra GPU/MPI ranks.
+
+    # TODO/DOCS: full multi-GPU coordination protocol with the worker
+    function :func:`gb_search_func` — used when sufficient ranks are
+    available so the bulk search runs concurrently with PE.
+    """
     def get_rank_function(self):
         return gb_search_func
 
@@ -3827,6 +3983,12 @@ from lisatools.globalfit.state import GBState
 
 
 class GBSpecialRJRefitMove(GBSpecialBase):
+    """Reversible-jump GB move that uses GMM-refitted proposals.
+
+    Loads per-leaf GMM proposals (refit by :func:`gb_refit_func`) and uses
+    them as the RJ proposal distribution. This is typically alternated
+    with :class:`GBSpecialRJPriorMove` to sharpen accepted GB candidates.
+    """
     def __init__(self, *args, fp=None, **kwargs):
         assert fp is not None and isinstance(fp, str)
         assert os.path.exists(fp)
@@ -3972,6 +4134,7 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
 
 def get_param_limits(array): # can be used for debugging of coordinate values
+    """Return per-column min/max of ``array`` (debug helper for GB coordinates)."""
     num_params = array.shape[-1]
     
     if num_params == 8:

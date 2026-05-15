@@ -1,3 +1,5 @@
+"""Galactic-binary parameter-estimation, search, and refit drivers."""
+
 import pickle
 import shutil
 import time
@@ -75,20 +77,26 @@ from lisatools.utils.utility import get_groups_from_band_structure, searchsorted
 
 
 class PlaceHolder(Move):
+    """No-op move that satisfies the ``eryn`` move-list contract for the GB sampler."""
+
     def __init__(self, *args, **kwargs):
         super(PlaceHolder, self).__init__(*args, **kwargs)
 
     def propose(self, model, state):
+        """Return the input state with empty acceptance and reset swap counters."""
         accepted = np.zeros(state.log_like.shape)
         self.temperature_control.swaps_accepted = np.zeros(self.temperature_control.ntemps - 1)
         return state, accepted
 
 
 class BasicResidualMGHLikelihood:
+    """Likelihood wrapper that pulls ``log_like`` values from a multi-GPU data holder."""
+
     def __init__(self, mgh):
         self.mgh = mgh
 
     def __call__(self, *args, supps=None, **kwargs):
+        """Return ``mgh.get_ll()`` indexed by ``supps["overal_inds"]``."""
         ll_temp = self.mgh.get_ll()
         overall_inds = supps["overal_inds"]
 
@@ -96,6 +104,7 @@ class BasicResidualMGHLikelihood:
 
 
 def shuffle_along_axis(a, axis):
+    """Shuffle ``a`` independently along ``axis``."""
     idx = np.random.rand(*a.shape).argsort(axis=axis)
     return np.take_along_axis(a, idx, axis=axis)
 
@@ -104,6 +113,22 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResiduals(Update):
+    """``eryn`` :class:`Update` that synchronizes GB residuals with the head rank.
+
+    Sends per-walker GB summaries (cold-chain coords, occupancy, log-likes,
+    log-priors) up to ``head_rank`` and accepts a refreshed set of data
+    residuals + PSDs into the multi-GPU data holder.
+
+    Args:
+        mgh: :class:`MultiGPUDataHolder` whose buffers are updated in place.
+        gb: :class:`gbgpu.GBGPU` instance used by the conditional GB prior.
+        comm: MPI communicator.
+        head_rank: Rank that owns the global state.
+        gpu_priors: Branch-keyed dict of GPU-resident priors.
+        last_prior_vals: Cached non-GB prior contributions; updated in place.
+        verbose: If ``True``, log each communication step.
+    """
+
     def __init__(self, mgh, gb, comm, head_rank, gpu_priors, last_prior_vals, verbose=False):
         self.mgh = mgh
         self.comm = comm
@@ -114,7 +139,13 @@ class UpdateNewResiduals(Update):
         self.last_prior_vals = last_prior_vals
 
     def __call__(self, iter, last_sample, sampler):
+        """Sync GB residuals between this rank and ``head_rank``.
 
+        # TODO/DOCS: detailed acceptance logic — the body computes a
+        Metropolis-style accept/reject between old and new residuals but, as
+        elsewhere in the global fit, the final accept mask is forced to
+        ``True``.
+        """
         if self.verbose:
             print("Sending gb update to head process.")
 
@@ -299,6 +330,12 @@ class UpdateNewResiduals(Update):
 
 
 def make_gmm(gb, gmm_info_in):
+    """Build a :class:`FullGaussianMixtureModel` proposal from saved GMM info.
+
+    Args:
+        gb: :class:`gbgpu.GBGPU` instance used internally by the proposal.
+        gmm_info_in: GMM information loaded from a refit/search artefact.
+    """
     gmm_info = FullGaussianMixtureModel(gb, *gmm_info_in, use_cupy=True)
 
     probs_in = {
@@ -311,6 +348,24 @@ def make_gmm(gb, gmm_info_in):
 
 
 def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
+    """Run the GB parameter-estimation sampler on ``gpu``.
+
+    Pulls the global-fit configuration from ``head_rank``, builds the GB
+    moves (GMM-based reversible-jump and stretch moves), attaches an
+    :class:`UpdateNewResiduals` callback so residuals stay synchronized
+    with PSD/MBH updates, and runs an :class:`EnsembleSampler` until the
+    configured stopping function fires.
+
+    # TODO/DOCS: this function is large; the body is the canonical reference
+    for the in-model + RJ move set, GMM proposal wiring, and the multi-GPU
+    data-holder configuration.
+
+    Args:
+        gpu: GPU device index.
+        comm: MPI communicator.
+        head_rank: Rank that hosts the shared :class:`CurrentInfoGlobalFit`.
+        save_plot_rank: Rank handling asynchronous plot saving.
+    """
 
     gpus_pe = [gpu]
     gpus = gpus_pe
@@ -790,6 +845,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
 
 
 def shuffle_along_axis(a, axis, xp=None):
+    """Shuffle ``a`` independently along ``axis`` using ``xp`` (NumPy or CuPy)."""
     if xp is None:
         xp = np
     idx = xp.random.rand(*a.shape).argsort(axis=axis)
@@ -797,6 +853,16 @@ def shuffle_along_axis(a, axis, xp=None):
 
 
 def fit_gmm(samples, comm, comm_info):
+    """Fit a Gaussian-mixture model to per-source GB samples.
+
+    # TODO/DOCS: cross-rank communication details. Used to distribute the
+    GMM fits across MPI ranks so the per-leaf fits run in parallel.
+
+    Args:
+        samples: Per-leaf chain samples to fit.
+        comm: MPI communicator.
+        comm_info: Communication metadata (rank assignments etc.).
+    """
 
     if len(samples) == 0:
         return None
@@ -936,6 +1002,11 @@ def fit_gmm(samples, comm, comm_info):
 
 
 def fit_each_leaf(rank, curr, gather_rank, comm):
+    """Fit GMM per GB leaf in parallel across MPI ranks.
+
+    # TODO/DOCS: rank-coordination protocol. Worker ranks receive a leaf
+    index from ``gather_rank`` and report back a fitted GMM.
+    """
 
     run_process = True
 
@@ -1053,7 +1124,30 @@ def run_iterative_subtraction_mcmc(
     comm,
     comm_info,
 ):
+    """Iterative single-binary subtraction sampler used by the GB bulk search.
 
+    For every active frequency band index, draws fresh proposals from the
+    prior, runs a short MCMC, accepts or rejects new sources by comparing
+    against the current residuals, and accumulates accepted parameters
+    until the band converges.
+
+    # TODO/DOCS: detailed convergence and per-band book-keeping; the body
+    is large and the canonical reference for behavior.
+
+    Args:
+        current_info: Global-fit configuration object.
+        gpu: GPU device index used for CuPy / GBGPU calls.
+        ndim: Number of GB parameters.
+        nwalkers: Number of walkers in each per-band sub-sampler.
+        ntemps: Number of temperatures.
+        band_inds_running: Boolean array selecting which bands to sample.
+        priors_good: GB prior usable on GPU.
+        f0_maxs / f0_mins / fdot_maxs / fdot_mins: Per-band prior bounds.
+        data_in / psd_in / lisasens_in: GPU-resident data, PSD, and
+            sensitivity arrays.
+        comm: MPI communicator.
+        comm_info: Inter-rank metadata used by GMM helpers.
+    """
     xp.cuda.runtime.setDevice(gpu)
     gb = GBGPU(use_gpu=True)
     temperature_control = TemperatureControl(ndim, nwalkers, ntemps=ntemps)
@@ -1750,6 +1844,11 @@ def run_iterative_subtraction_mcmc(
 
 
 def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_samples_keep):
+    """Refit per-leaf GMM proposals from the latest GB chain samples.
+
+    # TODO/DOCS: returned artefact format; used downstream by the
+    GMM-driven RJ moves to refresh ``rj_proposal_distribution``.
+    """
     print("GATHER")
     samples_gathered = gather_gb_samples(
         current_info, gb_reader, psd, gpu, samples_keep=number_samples_keep, thin_by=20
@@ -1759,6 +1858,21 @@ def refit_gmm(current_info, gpu, comm, comm_info, gb_reader, data, psd, number_s
 
 
 def run_gb_bulk_search(gpu, curr, comm, comm_info, head_rank, num_search, split_remainder):
+    """Run an iterative GB bulk-search worker on ``gpu``.
+
+    Loads the current data + PSD from the head rank, dispatches
+    :func:`run_iterative_subtraction_mcmc` for the assigned band split, and
+    persists candidate sources back to the global state via ``head_rank``.
+
+    Args:
+        gpu: GPU device index.
+        curr: :class:`CurrentInfoGlobalFit` (or compatible) state object.
+        comm: MPI communicator.
+        comm_info: Inter-rank metadata.
+        head_rank: Rank that owns the global state.
+        num_search: Total number of search workers.
+        split_remainder: Index identifying which band-split this worker owns.
+    """
     gpus = [gpu]
     xp.cuda.runtime.setDevice(gpus[0])
 

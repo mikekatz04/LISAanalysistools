@@ -1,3 +1,5 @@
+"""Standalone MBH search runner used as the seed step before global-fit PE."""
+
 # from global_fit_input.global_fit_settings import get_global_fit_settings
 import os
 import pickle
@@ -62,6 +64,28 @@ def search_likelihood_wrap(
     like_args,
     mbh_kwargs,
 ):
+    """Vectorized log-likelihood used by the standalone MBH search.
+
+    Mirrors the equivalent helper in
+    :mod:`lisatools.globalfit.moves.mbhspecialmove`: per-row merger time is
+    bucketed into a time window, and the corresponding cached
+    :math:`\\langle d|d\\rangle` is loaded into ``wave_gen`` before
+    :meth:`bbhx.BBHWaveformFD.get_direct_ll` is called.
+
+    Args:
+        x: Untransformed parameter samples.
+        wave_gen: ``bbhx`` waveform generator with GPU buffers.
+        initial_t_vals: Per-segment start times.
+        end_t_vals: Per-segment end times.
+        d_d_vals: Per-segment cached :math:`\\langle d|d\\rangle`.
+        t_ref_lims: Bin edges in seconds for segment selection.
+        transform_fn: :class:`TransformContainer`.
+        like_args: ``(fd, all_data, psd, df)`` forwarded to ``get_direct_ll``.
+        mbh_kwargs: Extra keyword args for ``get_direct_ll``.
+
+    Returns:
+        Per-sample real log-likelihood values.
+    """
     x_in = transform_fn.both_transforms(x)
 
     data_index = noise_index = (np.searchsorted(t_ref_lims, x[:, -1], side="right") - 1).astype(
@@ -92,7 +116,24 @@ def search_likelihood_wrap(
 
 # function call
 def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_points, num_run):
+    """Run one MBH search worker on ``gpu`` for a given time-split.
 
+    Each MPI worker handles a single ``time_split`` of the data and reports
+    the highest-likelihood point back to :class:`ParallelMBHSearchControl`.
+
+    # TODO/DOCS: detailed argument semantics; this function is large and
+    hand-tuned. The ``best_points`` argument carries the running best
+    candidates between calls.
+
+    Args:
+        gpu: GPU device index for this worker.
+        settings: Full settings dict.
+        rank: MPI rank of this worker.
+        time_split: Index of the time window assigned to this worker.
+        total_time_splits: Total number of time windows being searched.
+        best_points: Mutable container of best-so-far MBH candidates.
+        num_run: Iteration counter for the search loop.
+    """
     cp.cuda.runtime.setDevice(gpu)
 
     mbh_info = settings["mbh"]
@@ -492,6 +533,22 @@ def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_poin
 
 
 class ParallelMBHSearchControl:
+    """MPI-driven controller that distributes MBH search across GPUs.
+
+    The controller assigns each available worker rank to a (GPU, time-split)
+    pair, persists best-so-far candidates to a pickle file so progress
+    survives restarts, and re-issues splits until each one converges below
+    the configured SNR threshold.
+
+    Args:
+        settings: Settings dictionary; ``mbh.search_info`` is consulted.
+        comm: MPI communicator.
+        gpus: List of GPU device indices to use.
+        head_rank: Rank that orchestrates the search.
+        max_num_per_gpu: Maximum number of worker processes per GPU.
+        verbose: If ``True``, print scheduling debug information.
+    """
+
     def __init__(self, settings, comm, gpus, head_rank=0, max_num_per_gpu=2, verbose=False):
         self.comm = comm
         self.rank = comm.Get_rank()
@@ -530,10 +587,12 @@ class ParallelMBHSearchControl:
         # assert  self.num_procs >= self.total_procs_max + 1
 
     def send_initial_gpu_information(self):
+        """Send each worker rank its assigned GPU device index."""
         for proc_i, gpu_i in zip(self.proc_inds, self.gpu_procs):
             self.comm.send({"gpu": gpu_i}, dest=proc_i)
 
     def check_for_receiving_info(self, i, current_status, current_time_segment_status):
+        """Poll worker ``i``; if it has a result, persist it and free its slot."""
         check_remove = self.comm.irecv(source=self.proc_inds[i])
 
         if check_remove.get_status():
@@ -564,6 +623,7 @@ class ParallelMBHSearchControl:
             check_remove.cancel()
 
     def launch_search_process(self, i, current_status, current_time_segment_status):
+        """Find an idle time-split and dispatch worker ``i`` to it."""
         time_split_ind = 0
         try:
             while (
@@ -597,10 +657,12 @@ class ParallelMBHSearchControl:
         current_time_segment_status[time_split_ind] = True
 
     def end_run(self):
+        """Tell all worker ranks that the search is finished."""
         for proc_i in self.proc_inds:
             self.comm.send({"complete": True}, dest=proc_i)
 
     def run_single_search(self, gpu, best_points, time_split, total_time_splits, num_run):
+        """Worker-side wrapper around :func:`run_mbh_search`."""
 
         print(f"Starting: split {time_split} for run number {num_run}")
         new_output_points, new_best_point, finished_this_split = run_mbh_search(
@@ -617,6 +679,7 @@ class ParallelMBHSearchControl:
         return (new_output_points, new_best_point, finished_this_split)
 
     def search_process_control(self):
+        """Worker-side event loop: receive splits and report results until told to stop."""
         gpu_check = self.comm.recv(source=self.head_rank)
         cp.cuda.runtime.setDevice(gpu_check["gpu"])
         run = True
@@ -658,7 +721,13 @@ class ParallelMBHSearchControl:
             print(f"after update: split {time_split} for run number {num_run}")
 
     def run_parallel_mbh_search(self, testing_time_split=None):
+        """Drive the parallel search loop until all time-splits converge.
 
+        Args:
+            testing_time_split: If provided, only run the single time-split
+                index given (intended for unit testing). Otherwise the full
+                parallel search is executed across all configured splits.
+        """
         # testing
         if testing_time_split is not None:
             assert isinstance(testing_time_split, int) and testing_time_split < self.time_splits
@@ -707,6 +776,14 @@ class ParallelMBHSearchControl:
         print(self.comm.Get_rank(), "done")
 
     def prune_via_matching(self):
+        """Drop duplicate MBH search candidates by waveform-overlap matching.
+
+        Loads the persisted ``output_points_info`` pickle, generates AET
+        waveforms for every best-point candidate, and computes inner-product
+        matches between pairs. Candidates that match an already-kept entry
+        are pruned and the file is rewritten with an ``output_points_pruned``
+        list.
+        """
         if os.path.exists(self.output_points_file):
             with open(self.output_points_file, "rb") as fp:
                 self.output_points_info = pickle.load(fp)

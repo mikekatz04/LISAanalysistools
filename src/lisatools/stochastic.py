@@ -1,3 +1,5 @@
+"""Stochastic foreground contributions to the LISA noise budget."""
+
 from __future__ import annotations
 
 import math
@@ -179,7 +181,21 @@ class HyperbolicTangentGalacticForeground(StochasticContribution):
 
 
 class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForeground):
+    """Time-dependent fit of the Galactic confusion-foreground PSD.
+
+    Specializes :class:`HyperbolicTangentGalacticForeground` by interpolating
+    pre-fit values of the knee frequency and slope parameters as a function of
+    observation time ``Tobs``. The amplitude and power-law index are held fixed
+    at the values stored in the class attributes ``amp`` and ``alpha``.
+
+    The fit is only valid up to ``Tmax`` (10 years). The single free parameter
+    accepted by :meth:`specific_Sh_function` is the observation time in seconds.
+    """
+
     # TODO: need to verify this is still working
+    # TODO/DOCS: the time-dependent Galactic-foreground fit has not been re-validated
+    # against current data; the original TODO above flags this. Treat the numerical
+    # fit coefficients (knee, Slope1, Slope2, amp, alpha) as legacy values pending review.
     ndim = 1
     amp = 3.26651613e-44
     alpha = 1.18300266e00

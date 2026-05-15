@@ -1,3 +1,5 @@
+"""Built-in recipe steps and helpers for assembling Erebor-style global-fit runs."""
+
 import time
 import logging
 import typing
@@ -27,12 +29,14 @@ logger = logging.getLogger(__name__)
 
 
 class SearchRecipeStep(BaseRecipeStep):
-    """
-    Recipe step that completes immediately (one-shot search/initialisation). 
-    Used when the stopping criterion is embedded in the move.
+    """Recipe step that completes immediately (one-shot search/initialization).
+
+    Used when the stopping criterion is embedded inside the move itself
+    rather than at the recipe level.
     """
 
     def stopping_function(self, *args, **kwargs):
+        """Always stop after one call."""
         return True
 
 
@@ -40,16 +44,24 @@ class PERecipeStep(BaseRecipeStep):
     """Recipe step that runs indefinitely (ongoing parameter estimation)."""
 
     def stopping_function(self, *args, **kwargs):
+        """Never stop on its own — relies on outer stopping logic."""
         return False
 
 
 class RJRecipeStep(BaseRecipeStep):
+    """Reversible-jump recipe step that stops once GB leaf count plateaus.
+
+    Args:
+        convergence_iter: Window length used to compare older vs newer
+            cold-chain max leaf counts.
+        thin_by: Forwarded thinning factor applied to the sampler.
+    """
 
     def __init__(
-        self, 
-        *args, 
-        convergence_iter: int = 5, 
-        thin_by: int = 1, 
+        self,
+        *args,
+        convergence_iter: int = 5,
+        thin_by: int = 1,
         **kwargs
     ):
         RecipeStep.__init__(self, *args, **kwargs)
@@ -57,11 +69,12 @@ class RJRecipeStep(BaseRecipeStep):
         self.thin_by = thin_by
 
     def stopping_function(
-        self, 
-        i, 
-        sample, 
+        self,
+        i,
+        sample,
         sampler: GlobalFitEngine
     ) -> bool:
+        """Stop when the cold chain stops growing in number of GB leaves."""
 
         if not hasattr(self, "st"):
             self.st = time.perf_counter()
@@ -92,11 +105,12 @@ class RJRecipeStep(BaseRecipeStep):
         return stop
         
     def setup_run(
-        self, 
-        iteration, 
-        last_sample, 
+        self,
+        iteration,
+        last_sample,
         sampler: GlobalFitEngine
     ):
+        """Configure the sampler for this RJ recipe step (moves, weights, thinning)."""
         # TODO: maybe make this the defaul setup
         sampler.moves = self.moves
         sampler.weights = self.weights
@@ -272,7 +286,22 @@ def subtract_initial_signal(
     source_name: str,
     source_info: Setup,
 ):
-    
+    """Subtract pre-injected source templates from the residual buffers in ``acs``.
+
+    Used at run start when a recipe seeds branches with known signal
+    parameters (e.g. catalog injections); the corresponding template is
+    removed from the residual so the sampler sees only the noise + other
+    sources.
+
+    Args:
+        acs: Shared :class:`AnalysisContainerArray` whose residuals are
+            modified in place.
+        state: Current sampler state.
+        wave_gen: Waveform generator for ``source_name``.
+        source_name: Branch name (e.g. ``"mbh"``, ``"emri"``).
+        source_info: Per-source :class:`Setup` providing transforms /
+            waveform kwargs.
+    """
     if np.any(inds := state.branches_inds[source_name][0]):
         logger.info(f"Subtracting initial signals for {source_name}")
         counter = 0

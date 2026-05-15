@@ -1,3 +1,5 @@
+"""Specialized ``eryn`` HDF5 backends for the global fit (GB / MBH / EMRI / GF)."""
+
 import shutil
 import time
 
@@ -11,7 +13,22 @@ from .state import EMRIState, GBState, GFState, MBHState
 def save_to_backend_asynchronously_and_plot(
     gb_reader, comm, main_rank, head_rank, plot_iter, backup_iter
 ):
+    """Async writer loop: receive states from ``main_rank`` and persist to HDF5.
 
+    Runs on the dedicated results rank. Receives a ``{save_args, save_kwargs}``
+    payload, calls :meth:`GFHDFBackend.save_step_main`, periodically copies
+    the file to a running backup, and exits when sent ``{"finish_run": True}``.
+
+    Args:
+        gb_reader: The :class:`GFHDFBackend` to write into.
+        comm: MPI communicator.
+        main_rank: Rank that produces the save payloads.
+        head_rank: Rank that owns the global state.
+        plot_iter: Iteration cadence for plot regeneration (currently
+            commented out in body).
+        backup_iter: Iteration cadence at which the HDF file is copied to a
+            ``*_running_backup_copy.h5``.
+    """
     print("starting run SAVE")
     run_results_production = (
         None  ## RunResultsProduction(None, None, add_gbs=False, add_mbhs=False)
@@ -58,6 +75,29 @@ def save_to_backend_asynchronously_and_plot(
 
 
 class GFHDFBackend(eryn_HDFBackend):
+    """``eryn`` HDF backend extended with per-branch sub-backends and recipe tracking.
+
+    Each branch (``gb``, ``mbh``, ...) may register its own backend class via
+    ``sub_backend``; on every save step the global :class:`GFHDFBackend` calls
+    each sub-backend's :meth:`save_step` so per-branch counters / band info /
+    temperature ladders persist alongside the eryn state.
+
+    Args:
+        *args: Forwarded to :class:`eryn.backends.HDFBackend`.
+        comm: Optional MPI communicator (required together with
+            ``save_plot_rank`` for asynchronous saves).
+        sub_backend: Mapping ``{branch_name: backend_class}`` for branch-
+            specific datasets.
+        sub_state_bases: Mapping ``{branch_name: state_class}`` to wrap
+            states pulled from the file with the right :class:`GFState`
+            subclass.
+        save_plot_rank: Rank to forward save jobs to.
+        **kwargs: Forwarded to :class:`eryn.backends.HDFBackend`.
+
+    Raises:
+        ValueError: If only one of ``comm`` / ``save_plot_rank`` is provided.
+    """
+
     def __init__(
         self,
         *args,
@@ -112,6 +152,13 @@ class GFHDFBackend(eryn_HDFBackend):
         return base_kwargs
 
     def reset(self, *args, **kwargs):
+        """Wipe the file and re-initialize all sub-backends.
+
+        Sub-backend kwargs are saved before ``super().reset()`` is called,
+        because the parent ``reset`` deletes the entire HDF5 group; the
+        saved kwargs (merged with any new caller kwargs) are then used to
+        reset each sub-backend.
+        """
         # Store sub-backend kwargs before super().reset() deletes the HDF5 group.
         # super().reset() calls `del f[self.name]` which wipes everything,
         # including the sub_backend group. We need to preserve the kwargs
@@ -161,6 +208,7 @@ class GFHDFBackend(eryn_HDFBackend):
             f[self.name].attrs["has_recipe"] = False
 
     def grow(self, ngrow, *args):
+        """Grow the main backend and every sub-backend by ``ngrow`` rows."""
         super().grow(ngrow, *args)
 
         # open the file in append mode
@@ -176,7 +224,7 @@ class GFHDFBackend(eryn_HDFBackend):
                     sub_backend_tmp.grow(ngrow, *args)
 
     def save_step_main(self, state, *args, **kwargs):
-
+        """Persist a single sample to the main backend and every sub-backend."""
         super().save_step(state, *args, **kwargs)
 
         # open for appending in with statement
@@ -268,11 +316,13 @@ class GFHDFBackend(eryn_HDFBackend):
 
     @property
     def has_recipe(self):
+        """Whether a :class:`Recipe` has been recorded in this file."""
         with self.open() as f:
             return f[self.name].attrs["has_recipe"]
 
     @property
     def recipe(self):
+        """Reconstructed dict of the on-disk recipe steps in their original order."""
         assert self.has_recipe
         with self.open() as f:
             _recipe = {}
@@ -291,6 +341,7 @@ class GFHDFBackend(eryn_HDFBackend):
         return recipe
 
     def add_recipe(self, recipe):
+        """Persist a :class:`Recipe` into this backend's HDF5 metadata."""
         if self.has_recipe:
             with self.open() as f:
                 recipe_group = f[self.name]["recipe"]
@@ -314,6 +365,7 @@ class GFHDFBackend(eryn_HDFBackend):
                 f[self.name].attrs["has_recipe"] = True
 
     def completed_recipe_step(self, step_name):
+        """Mark ``step_name`` as completed in the on-disk recipe metadata."""
         with self.open("a") as f:
             recipe_group = f[self.name]["recipe"]
             recipe_step_group = recipe_group[step_name]
@@ -321,8 +373,10 @@ class GFHDFBackend(eryn_HDFBackend):
 
 
 class GBHDFBackend(eryn_HDFBackend):
+    """Sub-backend that persists per-band GB sampler counters."""
 
     def reset(self, nwalkers, *args, ntemps=1, num_bands=None, band_edges=None, **kwargs):
+        """Create the per-band datasets used to back :class:`GBState`."""
         if num_bands is None or band_edges is None:
             raise ValueError("Must provide num_bands and band_edges kwargs.")
 
@@ -432,7 +486,7 @@ class GBHDFBackend(eryn_HDFBackend):
         return dict(num_bands=self.num_bands, band_edges=self.band_edges)
 
     def grow(self, ngrow, *args):
-
+        """Grow every per-band dataset by ``ngrow`` rows."""
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
@@ -535,7 +589,7 @@ class GBHDFBackend(eryn_HDFBackend):
         return tmp
 
     def save_step(self, state, *args, **kwargs):
-
+        """Persist the current ``GBState.band_info`` arrays for one iteration."""
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]
@@ -585,8 +639,10 @@ class GBHDFBackend(eryn_HDFBackend):
 
 
 class MBHHDFBackend(eryn_HDFBackend):
+    """Sub-backend that persists the per-leaf MBH temperature ladder."""
 
     def reset(self, nwalkers, *args, ntemps=1, num_mbhs: int = None, **kwargs):
+        """Create a ``betas_all`` dataset of shape ``(*, num_mbhs, ntemps)``."""
         if num_mbhs is None:
             raise ValueError("Must provide num_mbhs kwarg.")
 
@@ -620,7 +676,7 @@ class MBHHDFBackend(eryn_HDFBackend):
         return dict(num_mbhs=self.num_mbhs)
 
     def grow(self, ngrow, *args):
-
+        """Grow ``betas_all`` by ``ngrow`` rows."""
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
@@ -702,7 +758,7 @@ class MBHHDFBackend(eryn_HDFBackend):
         return self.get_value("betas_all", **kwargs)
 
     def save_step(self, state, *args, **kwargs):
-
+        """Persist this iteration's ``betas_all`` from the current MBH sub-state."""
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]
@@ -739,8 +795,10 @@ class MBHHDFBackend(eryn_HDFBackend):
 
 
 class EMRIHDFBackend(eryn_HDFBackend):
+    """Sub-backend that persists the per-leaf EMRI temperature ladder."""
 
     def reset(self, nwalkers, *args, ntemps=1, num_emris: int = None, **kwargs):
+        """Create a ``betas_all`` dataset of shape ``(*, num_emris, ntemps)``."""
         if num_emris is None:
             raise ValueError("Must provide num_emris kwarg.")
 
@@ -773,7 +831,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
         return dict(num_emris=self.num_emris)
 
     def grow(self, ngrow, *args):
-
+        """Grow ``betas_all`` by ``ngrow`` rows."""
         # open the file in append mode
         with self.open("a") as f:
             g = f[self.name]
@@ -855,7 +913,7 @@ class EMRIHDFBackend(eryn_HDFBackend):
         return self.get_value("betas_all", **kwargs)
 
     def save_step(self, state, *args, **kwargs):
-
+        """Persist this iteration's ``betas_all`` from the current EMRI sub-state."""
         # open for appending in with statement
         with self.open("a") as f:
             g = f[self.name]

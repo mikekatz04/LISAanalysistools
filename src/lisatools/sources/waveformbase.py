@@ -1,3 +1,5 @@
+"""Base classes for LISA waveform generators across source classes and output domains."""
+
 from abc import ABC
 from typing import List, Tuple
 
@@ -62,20 +64,44 @@ class SNRWaveform(ABC):
 
 
 class TDWaveformBase(LISAToolsParallelModule):
-    """
-    Base class for a waveform built in the time domain.
+    """Base class for a waveform built in the time domain.
+
+    Subclasses implement :meth:`wave_gen` (and optionally :meth:`wave_gen_batch`)
+    to produce :math:`h_+` / :math:`h_\\times` polarisations on a time grid; the
+    base class handles applying the TDI response, optional windowing, and
+    transformation to the requested output domain (TD / STFT / FD).
 
     Args:
-    waveform_t0: Initial time in seconds.
-    dt: Time step in seconds.
-    Tobs: Observation time in years.
-    data_t0: Optional initial time for the data. If None, defaults to waveform_t0. If provided, the output time arrays will be shifted so that the first sample corresponds to a integer multiple of dt after data_t0. This allows for proper alignment of the waveform with an external time grid (e.g. from a loader) when data_t0 is set to the same reference time as the loader.
-    response_kwargs: Keyword arguments for the TDI response.
-    buffer_time: Time in seconds to add as buffer to the TDI response to ensure proper calculation at the beginning and end of the signal.
-    tukey_alpha: Alpha parameter for the Tukey window applied to the output signal. Only applied if settings_class is not None.
-    force_uniform_stft: If True, batched calls in STFT mode will force all signals onto a common STFT grid
-        spanning the union of all source time ranges. If False (default), each source retains its natural
-        STFT grid derived from its own time range. Only relevant for batched calls with output_domain='STFT'.
+        waveform_t0: Initial time in seconds.
+        dt: Time step in seconds.
+        Tobs: Observation time in years.
+        data_t0: Optional initial time for the data. If ``None``, defaults to
+            ``waveform_t0``. If provided, the output time arrays will be shifted
+            so that the first sample corresponds to an integer multiple of
+            ``dt`` after ``data_t0``. This allows proper alignment of the
+            waveform with an external time grid (e.g. from a loader) when
+            ``data_t0`` is set to the same reference time as the loader.
+        response_kwargs: Keyword arguments for the TDI response
+            (``fastlisaresponse.pyResponseTDI``).
+        buffer_time: Time in seconds to add as buffer to the TDI response to
+            ensure proper calculation at the beginning and end of the signal.
+        tukey_alpha: Alpha parameter for the Tukey window applied to the output
+            signal. Only applied when transforming to a non-TD output domain.
+        force_backend: Backend name to force (e.g. ``"cpu"`` or ``"cuda12x"``).
+        force_uniform_stft: If ``True``, batched calls in STFT mode will force
+            all signals onto a common STFT grid spanning the union of all
+            source time ranges. If ``False`` (default), each source retains its
+            natural STFT grid derived from its own time range. Only relevant
+            for batched calls with ``output_domain='STFT'``.
+        ra_index: Index in the positional argument tuple at which the right
+            ascension is found when sky parameters are passed positionally.
+        dec_index: Index in the positional argument tuple at which the
+            declination is found when sky parameters are passed positionally.
+        merger_time_index: Index in the positional argument tuple at which the
+            merger time is found when sky parameters are passed positionally.
+        num_remove: Number of trailing positional arguments to peel off as
+            sky/response parameters when ``ra``/``dec``/``merger_time`` are not
+            given as keyword arguments.
 
     """
 
@@ -359,12 +385,11 @@ class TDWaveformBase(LISAToolsParallelModule):
         td_signals: List[TDSignal],
         domain_kwargs: dict,
     ) -> DomainBaseArray:
-        """
-        Project all TDSignals onto a common STFT grid spanning the union of their time ranges.
+        """Project all TDSignals onto a common STFT grid spanning the union of their time ranges.
 
         Sources whose time range is shorter than the global span are zero-padded at
         the appropriate boundary so that all signals share exactly the same
-        STFTSettings, yielding a uniform DomainBaseArray.
+        :class:`STFTSettings`, yielding a uniform :class:`DomainBaseArray`.
         """
         # Determine the global time span.
         waveform_t0_global = min(s.settings.waveform_t0 for s in td_signals)
@@ -444,8 +469,7 @@ class TDWaveformBase(LISAToolsParallelModule):
         domain_kwargs: dict = None,
         **kwargs,
     ) -> DomainBase | DomainBaseArray:
-        """
-        Generate the waveform and return the signal in the specified output domain.
+        """Generate the waveform and return the signal in the specified output domain.
 
         When ``ra`` is a 1-D array the call is treated as batched: ``wave_gen_batch``
         is invoked and a :class:`DomainBaseArray` is returned.  For scalar ``ra`` the

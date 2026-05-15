@@ -1,3 +1,5 @@
+"""Chebyshev-based EMRI single-harmonic waveform model and its TDI projection."""
+
 from __future__ import annotations
 
 import os
@@ -20,6 +22,26 @@ from scipy.interpolate import CubicSpline, interp1d, make_interp_spline
 
 
 def alpha_to_tf(alpha, npts, fmin, fmax):
+    """Compute :math:`t(f)` from a Chebyshev expansion of the inspiral.
+
+    Takes the Chebyshev coefficients :math:`\\vec\\alpha = (\\alpha_0, \\dots, \\alpha_4)`
+    and returns ``t(f)`` evaluated on a 1-D grid of ``npts`` frequencies that are
+    evenly spaced in :math:`\\ln f` between ``fmin`` and ``fmax``. The "zero of
+    time" convention is :math:`t = 0` at ``fmid``, the geometric mean of ``fmin``
+    and ``fmax``.
+
+    As an intermediate step, ``t(y)`` is computed where :math:`y` is a shifted /
+    rescaled :math:`\\ln f` running from ``-1`` to ``1``.
+
+    Args:
+        alpha: Chebyshev coefficients (1-D array-like of length 5).
+        npts: Number of points in the output frequency grid.
+        fmin: Minimum frequency in Hz.
+        fmax: Maximum frequency in Hz.
+
+    Returns:
+        Tuple ``(f, t)`` of frequency and time grids, both of length ``npts``.
+    """
     # This function takes in the Chebyshev coeffs \vec \alpha (alpha_0
     # thru \alpha4) and calculates t(f) on a 1-d grid where the f values are
     # evenly spaced in lnf.  npts is the number of pts in the grid.
@@ -162,6 +184,7 @@ def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
 
 
 def tupleset(t, i, value):
+    """Return a copy of tuple ``t`` with element ``i`` replaced by ``value``."""
     l = list(t)
     l[i] = value
     return tuple(l)
@@ -416,6 +439,7 @@ def _cumulative_simpson_unequal_intervals(y: np.ndarray, dx: np.ndarray) -> np.n
 
 
 def _ensure_float_array(arr: npt.ArrayLike) -> np.ndarray:
+    """Coerce ``arr`` to a NumPy array, promoting integer dtypes to float."""
     arr = np.asarray(arr)
     if np.issubdtype(arr.dtype, np.integer):
         arr = arr.astype(float, copy=False)
@@ -423,6 +447,20 @@ def _ensure_float_array(arr: npt.ArrayLike) -> np.ndarray:
 
 
 class ChebyshevWave:
+    """Vectorised Chebyshev expansion of the inspiral :math:`t(f)` relation.
+
+    Given the Chebyshev coefficients :math:`\\vec\\alpha`, evaluates ``t(f)`` (and
+    optionally the cumulative phase) on a frequency grid evenly spaced in
+    :math:`\\ln f` between ``fmin`` and ``fmax``. Most expensive intermediates
+    (basis functions, the ``y`` grid, ``exp(kappa*y)``) are precomputed in
+    :meth:`__init__` so that batched evaluations over many sources reuse them.
+
+    Args:
+        npts: Number of points in the output frequency grid.
+        fmin: Minimum frequency in Hz.
+        fmax: Maximum frequency in Hz.
+
+    """
 
     def __init__(self, npts: int, fmin: float, fmax: float):
 
@@ -437,7 +475,19 @@ class ChebyshevWave:
         self.midpt = (self.npts - 1) // 2
 
     def __call__(self, *alpha_in: np.ndarray | list, return_phase: bool = False) -> typing.Tuple[np.ndarray, np.ndarray]:
-        
+        """Evaluate ``t(f)`` (and optionally the orbital phase) for the supplied coefficients.
+
+        Args:
+            *alpha_in: Chebyshev coefficients. Each positional argument is one
+                coefficient (scalar or 1-D array over the source batch).
+            return_phase: If ``True``, return ``(phase, f)`` instead of
+                ``(t, f)``, where ``phase = 2 * pi * f * t``.
+
+        Returns:
+            Tuple ``(t, f)`` (or ``(phase, f)`` when ``return_phase`` is ``True``).
+            For a single set of coefficients the arrays are 1-D of length
+            ``npts``; for batched inputs they have shape ``(nsources, npts)``.
+        """
         alpha = np.asarray(alpha_in).T
         squeeze = alpha.ndim == 1
         alpha = np.atleast_2d(alpha)
@@ -492,7 +542,25 @@ from gpubackendtools.interpolate import CubicSplineInterpolant
 
 
 class ChebyshevXYZ(ChebyshevWave):
+    """Project a :class:`ChebyshevWave` onto the LISA XYZ TDI channels on the fly.
 
+    Combines the Chebyshev :math:`t(f)` model with
+    :class:`fastlisaresponse.tdionfly.FDTDIonTheFly` and
+    :class:`gpubackendtools.interpolate.CubicSplineInterpolant` to produce TDI
+    output for a batch of sources directly in the frequency domain.
+
+    Args:
+        fs: Sampling frequency / TDI evaluation frequencies forwarded to
+            :class:`FDTDIonTheFly`.
+        *args: Positional arguments forwarded to :class:`ChebyshevWave`
+            (``npts``, ``fmin``, ``fmax``).
+        **kwargs: Keyword arguments forwarded to :class:`ChebyshevWave`.
+
+    """
+
+    # TODO/DOCS: ``fs`` is passed straight through to FDTDIonTheFly's ``fs`` slot;
+    # confirm whether it is a sampling rate (Hz) or a frequency-array (Hz array)
+    # for the on-the-fly TDI generator.
     def __init__(self, fs, *args, **kwargs):
         ChebyshevWave.__init__(self, *args, **kwargs)
         # Need to initialize FDTDIonTheFly each time through
@@ -512,6 +580,29 @@ class ChebyshevXYZ(ChebyshevWave):
         return_spline: bool = False,
         **cheb_kwargs,
     ):
+        """Generate XYZ TDI waveforms for one or more EMRI sources.
+
+        Args:
+            amp0: Overall amplitude scale applied to the TDI amplitude
+                (broadcast over sources).
+            phi0: Constant phase offset added to the reference phase
+                (broadcast over sources).
+            inc: Inclination angle in radians.
+            psi: Polarisation angle in radians.
+            lam: Ecliptic longitude in radians.
+            beta: Ecliptic latitude in radians.
+            t_start: Start time in seconds for each source (1-D array).
+            *alpha: Chebyshev coefficients forwarded to
+                :meth:`ChebyshevWave.__call__`.
+            return_spline: If ``True``, the underlying TDI generator returns the
+                spline objects in addition to the waveform.
+            **cheb_kwargs: Extra keyword arguments forwarded to
+                :meth:`ChebyshevWave.__call__`.
+
+        Returns:
+            The output of the wrapped :class:`FDTDIonTheFly` call, with the
+            amplitude and reference-phase shifts from ``amp0``/``phi0`` applied.
+        """
 
         t_intrinsic, _f = ChebyshevWave.__call__(self, *alpha, **cheb_kwargs)
 

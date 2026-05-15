@@ -1,3 +1,9 @@
+"""LISA PSD / sensitivity matrices, TDI noise channels, and PSD utilities.
+
+The sensitivity code is heavily based on an original code by
+Stas Babak and Antoine Petiteau for the LDC team.
+"""
+
 from __future__ import annotations
 
 import math
@@ -42,11 +48,6 @@ from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
 from eryn.utils import TransformContainer
-
-"""
-The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
-"""
-
 
 class Sensitivity(ABC):
     """Base Class for PSD information.
@@ -224,11 +225,13 @@ class Sensitivity(ABC):
 
 
 class X1TDISens(Sensitivity):
+    """Sensitivity for the TDI 1.5 X channel."""
+
     channel: str = "X"
 
     @staticmethod
     def Cxx(f: float | np.ndarray) -> float | np.ndarray:
-        """Common TDI transform factor.
+        """Common TDI 1.5 X auto-spectrum transfer factor.
 
         Args:
             f: Frequencyies to evaluate.
@@ -306,6 +309,8 @@ class Z1TDISens(X1TDISens):
 
 
 class XY1TDISens(Sensitivity):
+    """Sensitivity for the TDI 1.5 XY cross-spectrum channel."""
+
     channel: str = "XY"
 
     @staticmethod
@@ -388,6 +393,8 @@ class YZ1TDISens(XY1TDISens):
 
 
 class X2TDISens(Sensitivity):
+    """Sensitivity for the TDI 2.0 X channel."""
+
     channel: str = "X"
 
     @staticmethod
@@ -610,6 +617,8 @@ class ZX2TDISens(XY2TDISens):
 
 
 class A1TDISens(X1TDISens, Sensitivity):
+    """Sensitivity for the TDI 1.5 A channel (orthogonal A/E/T basis)."""
+
     channel: str = "A"
 
     @staticmethod
@@ -693,6 +702,8 @@ class E1TDISens(A1TDISens):
 
 
 class T1TDISens(Sensitivity):
+    """Sensitivity for the TDI 1.5 T channel (null channel of A/E/T basis)."""
+
     channel: str = "T"
 
     @staticmethod
@@ -768,6 +779,8 @@ class T1TDISens(Sensitivity):
         return 0.0 * (Sh * t)
 
 class A2TDISens(X2TDISens, Sensitivity):
+    """Sensitivity for the TDI 2.0 A channel."""
+
     channel: str = "A"
 
     @staticmethod
@@ -832,6 +845,8 @@ class E2TDISens(A2TDISens):
 
 
 class T2TDISens(X2TDISens, Sensitivity):
+    """Sensitivity for the TDI 2.0 T (null) channel."""
+
     channel: str = "T"
 
     @staticmethod
@@ -889,6 +904,8 @@ class T2TDISens(X2TDISens, Sensitivity):
 
 
 class LISASens(Sensitivity):
+    """Base sensitivity curve for LISA (sky-/polarisation-averaged strain)."""
+
     @classmethod
     def get_Sn(
         cls,
@@ -955,8 +972,17 @@ class CornishLISASens(LISASens):
 
     @staticmethod
     def get_Sn(f: float | np.ndarray, average: bool = True, **kwargs: dict) -> float | np.ndarray:
-        # TODO: documentation here
+        """Cornish (2018) LISA PSD evaluated at ``f`` (Hz).
 
+        Args:
+            f: Frequency array in Hz.
+            average: If ``True``, include the sky-averaging factor ``20/3``.
+            **kwargs: Ignored; kept for interface compatibility.
+
+        Returns:
+            PSD values.
+        """
+        # TODO: documentation here
         sky_averaging_constant = 20.0 / 3.0 if average else 1.0
 
         L = 2.5 * 10**9  # Length of LISA arm
@@ -999,6 +1025,17 @@ class FlatPSDFunction(LISASens):
 
     @classmethod
     def get_Sn(cls, f: float | np.ndarray, val: float, **kwargs: dict) -> float | np.ndarray:
+        """Return ``val`` broadcast to the shape of ``f`` (a flat / white PSD).
+
+        Args:
+            f: Frequency array (or scalar).
+            val: The constant PSD value.
+            **kwargs: Ignored; kept for interface compatibility.
+
+        Returns:
+            Either an array of shape ``f.shape`` filled with ``val``, or a
+            Python ``float`` if ``f`` was a scalar.
+        """
         # TODO: documentation here
         xp = cls.get_xp(f)
         out = xp.full_like(f, val)
@@ -1027,14 +1064,17 @@ class SensitivityMatrixBase:
 
     @property
     def basis_settings(self) -> np.ndarray:
+        """Domain settings (frequency / time / TF) the matrix is evaluated on."""
         return self._basis_settings
 
     @basis_settings.setter
     def basis_settings(self, basis_settings: np.ndarray) -> None:
+        """Set the domain settings (must be a :class:`~lisatools.domains.DomainSettingsBase`)."""
         assert isinstance(basis_settings, domains.DomainSettingsBase)
         self._basis_settings = basis_settings
 
     def check_update(self):
+        """Raise if the original input was raw arrays (rather than callables) and cannot be re-evaluated."""
         if not self.can_redo:
             raise ValueError(
                 "Cannot update sensitivities because original input was arrays rather than functions."
@@ -1230,6 +1270,7 @@ class SensitivityMatrixBase:
 
     @property
     def differential_component(self) -> float:
+        """Pass-through to :attr:`basis_settings.differential_component` (df / dt / etc.)."""
         return self.basis_settings.differential_component
 
     # use the getitem to get a slice of the sensitivity matrix, then use that to get the corresponding slice of the determinant and inverse
@@ -1626,6 +1667,7 @@ class LISASensSensitivityMatrix(SensitivityMatrix):
         super().__init__(settings, sens_mat, **sens_kwargs)
 
 def randc(shape):
+    """Return complex Gaussian noise with the given ``shape`` (real + imaginary unit-variance)."""
     return np.random.randn(*shape) + 1j*np.random.randn(*shape)
 
 def get_sensitivity(
@@ -1829,12 +1871,38 @@ def check_sensitivity(sensitivity: Any) -> Sensitivity:
     return sensitivity
 
 
+# TODO/DOCS: this stub appears to be a forward declaration mirroring the
+# ``DataResidualArray`` pattern in datacontainer.py; verify whether it's
+# still needed.
 class XYZSensitivityBackend:
     pass
 
 
 class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
-    """Helper class for sensitivity matrix with c++ backend."""
+    """3x3 XYZ TDI sensitivity matrix backed by the C++/CUDA detector kernels.
+
+    Wraps :class:`LISAToolsParallelModule` (for backend dispatch) and
+    :class:`SensitivityMatrixBase` (for the matrix interface). The matrix is
+    computed at the basis frequencies via the pybind11 ``SensitivityMatrixWrap``
+    using averaged light-travel-times derived from the supplied orbits.
+
+    Args:
+        orbits: Configured :class:`~lisatools.detector.L1Orbits` instance providing
+            light travel times and spacecraft positions.
+        settings: Domain settings (frequency or time-frequency) the matrix is
+            evaluated on.
+        tdi_generation: 1 for TDI 1.5 or 2 for TDI 2.0.
+        use_splines: If ``True``, use Akima spline interpolation for the noise
+            knots passed in :meth:`set_sensitivity_matrix`.
+        spline_order: Order of the Akima interpolant (passed through to
+            :class:`cudakima.AkimaInterpolant1D`).
+        force_backend: Backend selector (``"cpu"`` or a CUDA name); see
+            :class:`LISAToolsParallelModule`.
+        mask_percentage: Fractional bandwidth around transfer-function dips that
+            is masked out (defaults to ``0.05``).
+        window_values: Optional window applied to the data; used for
+            normalising the resulting PSD.
+    """
 
     def __init__(
         self,
@@ -1894,10 +1962,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     @property
     def time_indices(self):
+        """Integer indices into the time axis used by the C++ backend."""
         return self._time_indices
 
     @time_indices.setter
     def time_indices(self, x):
+        """Set the time-index array used by the C++ backend."""
         self._time_indices = x
 
     def __deepcopy__(self, memo):
@@ -1929,6 +1999,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return new_obj
 
     def get_averaged_ltts(self):
+        """Return ``(avg_ltts, delta_ltts)`` averaged over conjugate link pairs.
+
+        Pairs (12, 21), (23, 32), (31, 13) are averaged to give the symmetric
+        light-travel times and their (small) differences used by the
+        sensitivity-matrix kernel.
+        """
         # first, compute the average ltts and their differences.
         # check if we need multiple time points
         if hasattr(self.basis_settings, "t_arr"):
@@ -2013,7 +2089,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.dips_mask = dips_mask.flatten()
 
     def _find_dips_with_percentage(self, tf, mask_percentage=0.05):
-
+        """Return indices of bins within ``mask_percentage`` of every transfer-function dip."""
         if hasattr(self.f_arr, "get"):
             f_arr = self.f_arr.get()
             tf = tf.get()
@@ -2038,7 +2114,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     def _get_dips_indices(
         self,
     ):
-
+        """Compute per-time-slice indices of frequency bins around transfer-function dips."""
         transfer_functions = self.compute_transfer_functions(self.f_arr)
 
         tf = transfer_functions[0]

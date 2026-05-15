@@ -1,3 +1,12 @@
+"""Multi-GPU container for two-channel frequency-domain data, PSDs, and templates.
+
+Provides :class:`MultiGPUDataHolder`, used by the global-fit sampler to keep
+per-walker copies of the data, base data, PSDs, and LISA sensitivity arrays
+distributed across one or more GPUs, plus helpers to update templates,
+recompute PSDs, and evaluate the standard inner-product / log-likelihood
+contributions.
+"""
+
 import time
 from copy import deepcopy
 
@@ -9,6 +18,45 @@ from lisatools.sensitivity import get_sensitivity
 
 
 class MultiGPUDataHolder:
+    """Hold per-walker channel data, PSDs, and LISA sensitivity arrays across multiple GPUs.
+
+    The container stores two channels (typically ``A`` and ``E``) of
+    frequency-domain residual data and matching PSD / sensitivity arrays for
+    every walker of an ``eryn`` ensemble, splitting the walkers across the
+    supplied GPU list. Internally the residual buffer for each channel is sized
+    ``2 * nwalkers * data_length`` to host both an "even" and an "odd"
+    contribution that are summed (and the base data subtracted) when residuals
+    are read back.
+
+    Args:
+        gpus: GPU device index, or list of indices, on which to allocate
+            buffers.
+        channel1_data: Initial channel-1 residual data, shape
+            ``(2, nwalkers, data_length)`` (the leading dimension carries the
+            two contributions kept per walker).
+        channel2_data: Initial channel-2 residual data, same shape as
+            ``channel1_data``.
+        channel1_base_data: Channel-1 "base" data (e.g. the injection plus
+            all current templates other than the one being sampled), shape
+            ``(1, nwalkers, data_length)``.
+        channel2_base_data: Channel-2 base data, same shape as
+            ``channel1_base_data``.
+        channel1_psd: Channel-1 PSD values, shape
+            ``(1, nwalkers, data_length)``.
+        channel2_psd: Channel-2 PSD values, shape
+            ``(1, nwalkers, data_length)``.
+        channel1_lisasens: Channel-1 LISA sensitivity values used for SNR
+            calculations, shape ``(1, nwalkers, data_length)``.
+        channel2_lisasens: Channel-2 LISA sensitivity values, shape
+            ``(1, nwalkers, data_length)``.
+        df: Frequency-bin spacing.
+        base_injections: Optional 2-element sequence of base injection arrays
+            (one per channel), used by :meth:`restore_base_injections` and
+            :meth:`get_injection_inner_product`.
+        base_psd: Optional 2-element sequence of base PSD arrays matching
+            ``base_injections``.
+    """
+
     def __init__(
         self,
         gpus,
@@ -184,32 +232,40 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
 
     def reshape_list(self, input_value):
+        """Reshape every entry of ``input_value`` to ``(-1, data_length)``."""
         return [self.reshape(tmp) for tmp in input_value]
 
     def reshape(self, input_value):
+        """Reshape a flat per-GPU buffer to ``(-1, data_length)``."""
         return input_value.reshape(-1, self.data_length)
 
     def __deepcopy__(self, *args, **kwargs):
+        """Disable deep copying — the GPU buffers are non-trivial to duplicate."""
         return self
 
     @property
     def data_list(self):
+        """Per-channel list of the underlying flat residual buffers, one per GPU."""
         return [self.channel1_data, self.channel2_data]
 
     @property
     def base_data_list(self):
+        """Per-channel list of the base-data buffers, one per GPU."""
         return [self.channel1_base_data, self.channel2_base_data]
 
     @property
     def psd_list(self):
+        """Per-channel list of PSD buffers, one per GPU."""
         return [self.channel1_psd, self.channel2_psd]
 
     @property
     def lisasens_list(self):
+        """Per-channel list of LISA sensitivity buffers, one per GPU."""
         return [self.channel1_lisasens, self.channel2_lisasens]
 
     @property
     def data_shaped(self):
+        """Per-channel residual arrays (even + odd minus base) reshaped per-walker."""
         tmp1 = [
             self.channel1_data[i][: self.nwalkers * self.data_length]
             + self.channel1_data[i][self.nwalkers * self.data_length :]
@@ -230,6 +286,7 @@ class MultiGPUDataHolder:
 
     @property
     def data_shaped_2_parts(self):
+        """Per-channel residual arrays, with even and odd halves kept separate."""
         return [
             self.reshape_list(self.channel1_data),
             self.reshape_list(self.channel2_data),
@@ -237,6 +294,7 @@ class MultiGPUDataHolder:
 
     @property
     def data_shaped_base(self):
+        """Per-channel base-data arrays reshaped per-walker."""
         return [
             self.reshape_list(self.channel1_base_data),
             self.reshape_list(self.channel2_base_data),
@@ -244,6 +302,7 @@ class MultiGPUDataHolder:
 
     @property
     def psd_shaped(self):
+        """Per-channel PSD arrays reshaped per-walker."""
         return [
             self.reshape_list(self.channel1_psd),
             self.reshape_list(self.channel2_psd),
@@ -251,6 +310,7 @@ class MultiGPUDataHolder:
 
     @property
     def lisasens_shaped(self):
+        """Per-channel LISA sensitivity arrays reshaped per-walker."""
         return [
             self.reshape_list(self.channel1_lisasens),
             self.reshape_list(self.channel2_lisasens),
@@ -258,6 +318,7 @@ class MultiGPUDataHolder:
 
     @property
     def map(self):
+        """Permutation mapping logical walker slots to physical buffer slots."""
         return self._map
 
     @map.setter
@@ -274,9 +335,22 @@ class MultiGPUDataHolder:
 
     @property
     def full_length(self):
+        """Total number of complex samples: ``ntemps * nwalkers * data_length``."""
         return self.ntemps * self.nwalkers * self.data_length
 
     def get_mapped_indices(self, inds_in):
+        """Apply :attr:`map` to convert logical to physical buffer indices.
+
+        Args:
+            inds_in: ``int64`` ``numpy.ndarray`` or ``int32`` ``cupy.ndarray``
+                of logical indices.
+
+        Returns:
+            Array of mapped indices, on the same device as ``inds_in``.
+
+        Raises:
+            ValueError: If ``inds_in`` is not an array of the expected dtype.
+        """
         if (not isinstance(inds_in, np.ndarray) and not isinstance(inds_in, xp.ndarray)) or (
             (inds_in.dtype != np.int64 and inds_in.dtype != xp.int32)
         ):
@@ -289,6 +363,16 @@ class MultiGPUDataHolder:
         return xp_here.asarray(self.map)[inds_in]
 
     def set_psd_from_arrays(self, A_vals_in, E_vals_in, overall_inds=None):
+        """Copy precomputed channel-1/2 PSD arrays into the per-walker GPU buffers.
+
+        Args:
+            A_vals_in: Sequence of channel-1 (``A``) PSD arrays, one per
+                index in ``overall_inds``.
+            E_vals_in: Sequence of channel-2 (``E``) PSD arrays, one per
+                index in ``overall_inds``.
+            overall_inds: Logical walker indices to update. Defaults to all
+                walkers across all temperatures.
+        """
 
         if overall_inds is None:
             overall_inds = np.arange(self.ntemps * self.nwalkers)
@@ -343,6 +427,16 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
 
     def set_lisasens_from_arrays(self, A_vals_in, E_vals_in, overall_inds=None):
+        """Copy precomputed LISA sensitivity arrays into the per-walker GPU buffers.
+
+        Args:
+            A_vals_in: Sequence of channel-1 LISA sensitivity arrays, one per
+                index in ``overall_inds``.
+            E_vals_in: Sequence of channel-2 LISA sensitivity arrays, one per
+                index in ``overall_inds``.
+            overall_inds: Logical walker indices to update. Defaults to all
+                walkers across all temperatures.
+        """
 
         if overall_inds is None:
             overall_inds = np.arange(self.ntemps * self.nwalkers)
@@ -397,6 +491,20 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
 
     def add_templates_from_arrays_to_residuals(self, A_vals_in, E_vals_in, overall_inds=None):
+        """Subtract template arrays from the per-walker residual buffers in place.
+
+        Despite the method name, this performs a subtraction (``data -=
+        template``) so that adding more templates to the running residual
+        cancels their contribution out of the data.
+
+        Args:
+            A_vals_in: Sequence of channel-1 template arrays, one per index in
+                ``overall_inds``.
+            E_vals_in: Sequence of channel-2 template arrays, one per index in
+                ``overall_inds``.
+            overall_inds: Logical walker indices to update. Defaults to all
+                walkers across all temperatures.
+        """
 
         if overall_inds is None:
             overall_inds = np.arange(self.ntemps * self.nwalkers)
@@ -450,6 +558,26 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
 
     def set_psd_vals(self, psd_params, overall_inds=None, foreground_params=None):
+        """Recompute PSDs and LISA sensitivity per walker from PSD parameters.
+
+        Each row of ``psd_params`` provides ``(Soms_d_A, Sa_a_A, Soms_d_E,
+        Sa_a_E)`` — the OMS displacement and acceleration noise amplitudes for
+        each of channels A and E. The ``sangria`` reference noise model is
+        copied and these values squared in to produce per-walker PSD and LISA
+        sensitivity arrays via :func:`lisatools.sensitivity.get_sensitivity`.
+
+        Args:
+            psd_params: 2D array-like of shape ``(len(overall_inds), 4)`` of
+                noise amplitudes ``(Soms_d_A, Sa_a_A, Soms_d_E, Sa_a_E)``.
+            overall_inds: Logical walker indices to update. ``None`` is not
+                yet implemented.
+            foreground_params: Optional per-walker stochastic foreground
+                parameters passed to ``get_sensitivity`` via
+                ``stochastic_params``.
+
+        Raises:
+            NotImplementedError: If ``overall_inds`` is ``None``.
+        """
 
         if overall_inds is None:
             raise NotImplementedError
@@ -562,6 +690,20 @@ class MultiGPUDataHolder:
         # print("fill", et - st)
 
     def set_lisasens_vals(self, lisasens_params, overall_inds=None, foreground_params=None):
+        """Recompute the LISA sensitivity arrays per walker from sensitivity parameters.
+
+        Args:
+            lisasens_params: 2D array-like of shape ``(len(overall_inds), 4)``
+                whose first two columns parameterize the channel-1 sensitivity
+                model and last two columns the channel-2 model.
+            overall_inds: Logical walker indices to update. Defaults to all
+                walkers across all temperatures.
+            foreground_params: Optional per-walker stochastic foreground
+                parameters forwarded to :func:`lisatools.sensitivity.get_sensitivity`.
+        """
+        # TODO/DOCS: confirm exact meaning of the four entries of each
+        # ``lisasens_params`` row — they are forwarded as ``model=...`` to
+        # ``get_sensitivity`` with ``sens_fn="lisasens"`` which is unusual.
 
         if overall_inds is None:
             overall_inds = np.arange(self.ntemps * self.nwalkers)
@@ -638,6 +780,16 @@ class MultiGPUDataHolder:
         # print("fill", et - st)
 
     def get_psd_term(self, overall_inds=None):
+        """Compute the per-walker PSD log-determinant term ``sum log(PSD_A) + log(PSD_E)``.
+
+        Args:
+            overall_inds: Logical walker indices to evaluate. Defaults to all
+                walkers in the cold chain.
+
+        Returns:
+            ``numpy.ndarray`` of the summed log-PSD across both channels for
+            each requested walker.
+        """
 
         reshape = False
         if overall_inds is None:
@@ -694,7 +846,16 @@ class MultiGPUDataHolder:
         return psd_term
 
     def sub_in_psd(self, psd, lisasens):
-        """Must be the same size at current data"""
+        """Replace the in-memory PSD and LISA sensitivity buffers with new arrays.
+
+        Only supported for a single-GPU configuration.
+
+        Args:
+            psd: 2-element sequence of channel-1 / channel-2 PSD arrays whose
+                flattened length matches the per-channel PSD buffer.
+            lisasens: 2-element sequence of channel-1 / channel-2 LISA
+                sensitivity arrays of matching size.
+        """
         assert len(self.gpus) == 1
         gpu_i = 0
 
@@ -709,10 +870,17 @@ class MultiGPUDataHolder:
         return
 
     def sub_in_data(self, data):
-        """Must be the same size at current data
+        """Swap in a new "base" dataset, keeping the running residual consistent.
 
-        Need to be more particular that this cannot have GBs in it.
+        The current base data is subtracted out of the residual buffers, the
+        base data is replaced with ``data``, and the new base is re-added so
+        the residual = ``data + templates`` invariant is preserved. Only
+        supported for a single-GPU configuration.
 
+        Args:
+            data: 2-element sequence of channel-1 / channel-2 data arrays
+                whose flattened length matches the per-channel base-data
+                buffer. Must not include galactic-binary contributions.
         """
         assert len(self.gpus) == 1
         gpu_i = 0
@@ -754,6 +922,28 @@ class MultiGPUDataHolder:
         return
 
     def get_inner_product(self, *args, overall_inds=None, band_edge_inds=None, **kwargs):
+        """Compute the per-walker noise-weighted inner product across both channels.
+
+        For each walker, evaluates :math:`4\\Delta f \\sum_f (|d_A|^2/S_A +
+        |d_E|^2/S_E)` with ``d`` taken as the running residual (even + odd
+        minus base). When ``band_edge_inds`` is supplied, the inner product is
+        accumulated bin-by-bin and differenced at the band edges to return one
+        value per band rather than a single total.
+
+        Args:
+            *args: Unused; accepted for interface compatibility.
+            overall_inds: Logical walker indices to evaluate. Defaults to all
+                cold-chain walkers.
+            band_edge_inds: Optional sorted indices into the frequency array
+                that define band boundaries. When provided, the return value
+                is the per-band contribution between consecutive edges.
+            **kwargs: Unused; accepted for interface compatibility.
+
+        Returns:
+            ``numpy.ndarray`` of inner-product values, shape
+            ``(len(overall_inds),)`` or ``(len(overall_inds),
+            len(band_edge_inds) - 1)`` if banded.
+        """
         reshape = False
         if overall_inds is None:
             reshape = True
@@ -867,6 +1057,20 @@ class MultiGPUDataHolder:
         return inner_term
 
     def get_ll(self, *args, include_psd_info=False, overall_inds=None, **kwargs):
+        """Compute the per-walker Gaussian log-likelihood ``-1/2 (d|d)``.
+
+        Args:
+            *args: Forwarded to :meth:`get_inner_product`.
+            include_psd_info: If ``True``, also subtract the
+                :meth:`get_psd_term` contribution
+                (i.e. include the PSD log-determinant term in the likelihood).
+            overall_inds: Logical walker indices to evaluate. Defaults to all
+                cold-chain walkers.
+            **kwargs: Forwarded to :meth:`get_inner_product`.
+
+        Returns:
+            ``numpy.ndarray`` of log-likelihood values per requested walker.
+        """
         inner_product = self.get_inner_product(*args, overall_inds=overall_inds, **kwargs)
         ll_out = -1 / 2 * inner_product
 
@@ -875,6 +1079,14 @@ class MultiGPUDataHolder:
         return ll_out
 
     def multiply_data(self, val):
+        """Multiply every per-GPU channel data buffer by a scalar in place.
+
+        Args:
+            val: Scalar multiplier (``int`` or ``float``).
+
+        Raises:
+            NotImplementedError: If ``val`` is not an ``int`` or ``float``.
+        """
         return_to_main = xp.cuda.runtime.getDevice()
         if not isinstance(val, int) and not isinstance(val, float):
             raise NotImplementedError("val must be an int or float.")
@@ -892,6 +1104,15 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
 
     def restore_base_injections(self):
+        """Reset per-walker data and PSD buffers to the constructor's base values.
+
+        Requires ``base_injections`` and ``base_psd`` to have been provided to
+        :meth:`__init__`.
+
+        Raises:
+            ValueError: If either ``base_injections`` or ``base_psd`` is
+                ``None``.
+        """
         return_to_main = xp.cuda.runtime.getDevice()
         if self.base_injections is None or self.base_psd is None:
             raise ValueError("Must give base_injections and base_psd kwarg to __init__ to restore.")
@@ -915,6 +1136,15 @@ class MultiGPUDataHolder:
         xp.cuda.runtime.deviceSynchronize()
 
     def get_injection_inner_product(self, *args, **kwargs):
+        """Inner product of the stored base injection against itself.
+
+        Uses ``base_injections`` and ``base_psd`` from construction. Useful as
+        a reference SNR-squared value for the injected signal.
+
+        Returns:
+            Scalar (complex-valued in CuPy/NumPy convention; real part is the
+            physical SNR-squared) inner product.
+        """
 
         inner_out = (
             self.df
@@ -927,7 +1157,13 @@ class MultiGPUDataHolder:
         return inner_out
 
     def get(self):
-        """Must be the same size at current data"""
+        """Copy all GPU buffers to host as ``(nwalkers_per_gpu, data_length)`` arrays.
+
+        Returns:
+            Dict keyed by ``"channel{1,2}_{psd,lisasens,base_data,data}"``.
+            Each value is a list (one entry per GPU) of host ``numpy`` arrays
+            obtained via ``cupy.ndarray.get()``.
+        """
         out = {}
         for chan in range(2):
             for key in [
@@ -946,9 +1182,25 @@ class MultiGPUDataHolder:
         return out
 
     def swap_out_in_base_data(self, old_contrib, new_contrib):
+        """Replace one component of the base data with another, single-GPU only.
+
+        Adds ``old_contrib`` back into the base data and subtracts
+        ``new_contrib``, then re-applies the base data via :meth:`sub_in_data`
+        so the residual buffers stay consistent.
+
+        Args:
+            old_contrib: 2-element sequence of channel-1 / channel-2 arrays
+                shaped ``(nwalkers, data_length)`` representing the component
+                currently embedded in the base data.
+            new_contrib: 2-element sequence of replacement arrays of the same
+                shape.
+
+        Raises:
+            NotImplementedError: If more than one GPU is in use.
         """
-        Need to wrap to properly handle special GB data setup
-        """
+        # TODO/DOCS: confirm intended sign convention — the implementation
+        # adds ``old_contrib`` and subtracts ``new_contrib`` before swapping
+        # the result in as the new base data.
         if len(self.gpus) > 1:
             raise NotImplementedError
 

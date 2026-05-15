@@ -1,3 +1,5 @@
+"""LISA orbit/detector geometry and constellation noise models."""
+
 from __future__ import annotations
 
 import os
@@ -366,6 +368,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @dt.setter
     def dt(self, dt: float) -> None:
+        """Set the configured time step."""
         self._dt = dt
 
     @property
@@ -395,6 +398,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @pycppdetector_args.setter
     def pycppdetector_args(self, pycppdetector_args: tuple) -> None:
+        """Store args used to build the C++ ``OrbitsWrap`` instance."""
         self._pycppdetector_args = pycppdetector_args
 
     @property
@@ -404,6 +408,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         return len(self.t)
 
     def _check_configured(self) -> None:
+        """Raise if :meth:`configure` has not been called yet."""
         if not self.configured:
             raise ValueError("Cannot request property. Need to use configure() method first.")
 
@@ -563,6 +568,7 @@ class Orbits(LISAToolsParallelModule, ABC):
 
     @classmethod
     def supported_backends(cls):
+        """Return the list of backend names this orbit class supports."""
         return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
 
@@ -838,7 +844,10 @@ class L1Orbits(Orbits):
 
     @property
     def pycppdetector(self) -> object:
-        """C++ class"""
+        """C++ ``OrbitsWrap`` instance backing this orbit class."""
+        # TODO/DOCS: ``self._pycppdetect_args`` looks like a typo for
+        # ``self._pycppdetector_args`` (used by :class:`Orbits`); confirm the
+        # intended attribute and fix.
         if self._pycppdetector_args is None:
             raise ValueError(
                 "Asking for c++ class. Need to set linear_interp_setup = True when configuring."

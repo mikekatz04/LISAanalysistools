@@ -1,3 +1,5 @@
+"""Misc utilities used by the global-fit setup code."""
+
 import typing as tp
 from copy import deepcopy
 
@@ -9,6 +11,14 @@ from ..sensitivity import SensitivityMatrix, get_sensitivity
 
 
 class BasicResidualacsLikelihood:
+    """Minimal residual-driven likelihood that delegates to an
+    :class:`AnalysisContainerArray`.
+
+    Args:
+        acs: The analysis-container array whose ``likelihood()`` method is
+            invoked on each call.
+    """
+
     def __init__(self, acs):
         self.acs = acs
 
@@ -20,6 +30,18 @@ class BasicResidualacsLikelihood:
 
 
 class NewSensitivityMatrix:
+    """Builder that returns a :class:`SensitivityMatrix` for given PSD parameters.
+
+    Args:
+        orbits: Detector orbits.
+        noise_model: Base :class:`LISAModel`; this is deep-copied per call so
+            ``Soms_d`` / ``Sa_a`` can be overridden without mutating the
+            original.
+        sens_fns: Either a single sensitivity-function callable (returns a
+            full matrix in one call) or a list of names that name individual
+            channel sensitivities to be assembled.
+    """
+
     def __init__(
         self,
         orbits: Orbits,
@@ -32,6 +54,21 @@ class NewSensitivityMatrix:
         self.sens_fns = sens_fns
 
     def __call__(self, name, psd_params, f_arr, galfor_params=None):
+        """Return a sensitivity matrix on ``f_arr`` for the supplied parameters.
+
+        Args:
+            name: Identifier (currently unused; reserved for future logging).
+            psd_params: Flat PSD parameter array. With a list-style
+                ``sens_fns`` the array is split into pairs
+                ``(Soms_d, Sa_a)`` per channel.
+            f_arr: Frequency array on which the sensitivity is evaluated.
+            galfor_params: Optional galactic-foreground parameters; if
+                ``None``, no stochastic foreground is added.
+
+        Returns:
+            Either the result of the user-provided sensitivity function or a
+            :class:`SensitivityMatrix` built from the per-channel pieces.
+        """
 
         if galfor_params is None:
             galfor_params = ()
@@ -79,6 +116,17 @@ class NewSensitivityMatrix:
 
 
 def new_sens_mat(name, psd_params, f_arr, galfor_params=None):
+    """Build a 2-channel ``A1``/``E1`` :class:`SensitivityMatrix` for given PSD/galfor params.
+
+    Args:
+        name: Unused identifier.
+        psd_params: 4-element array ``[A_Soms_d, A_Sa_a, E_Soms_d, E_Sa_a]``.
+        f_arr: Frequencies at which to evaluate the sensitivity.
+        galfor_params: Optional galactic-foreground parameters.
+
+    Returns:
+        :class:`SensitivityMatrix` of shape ``(2, len(f_arr))``.
+    """
     orbits = EqualArmlengthOrbits()
     A_params = psd_params[:2]
     E_params = psd_params[2:]
@@ -138,6 +186,14 @@ from dataclasses import dataclass
 
 
 class AllSetupInfoTransfer:
+    """Aggregate of two :class:`SetupInfoTransfer` instances.
+
+    Combining two setups via ``+`` (or by direct construction) yields an
+    :class:`AllSetupInfoTransfer` whose ``in_model_moves`` and ``rj_moves``
+    are the concatenations of the inputs and whose ``setup_names`` lists all
+    contributing setup names.
+    """
+
     def __init__(self, setup_1, setup_2):
         # TODO: cleanup
         for key in ["name", "in_model_moves", "rj_moves"]:
@@ -215,6 +271,7 @@ class AllSetupInfoTransfer:
         self._in_model_moves = in_model_moves
 
     def unwrap_moves(self, moves):
+        """Normalize a moves list so each entry is a ``(move, weight)`` tuple."""
         for i in range(len(moves)):
             if isinstance(moves[i], tuple):
                 assert isinstance(moves[i][1], float)
@@ -224,6 +281,7 @@ class AllSetupInfoTransfer:
 
     @property
     def rj_moves_input(self) -> list:
+        """Reversible-jump moves as a list of ``(move, weight)`` tuples (or ``None``)."""
         if self.rj_moves == []:
             return None
 
@@ -231,6 +289,7 @@ class AllSetupInfoTransfer:
 
     @property
     def in_model_moves_input(self) -> list:
+        """In-model moves as a list of ``(move, weight)`` tuples (or ``None``)."""
         if self.in_model_moves == []:
             return None
 
@@ -240,6 +299,14 @@ class AllSetupInfoTransfer:
 # TODO: this was not working?
 # @dataclass
 class SetupInfoTransfer:
+    """Container for a single source's MCMC moves and identifying name.
+
+    Args:
+        name: Identifier for this setup (e.g. ``"gb"``).
+        in_model_moves: List of in-model moves (each either a move object or
+            a ``(move, weight)`` tuple).
+        rj_moves: List of reversible-jump moves in the same form.
+    """
     # name = None
     # in_model_moves = []
     # rj_moves = []

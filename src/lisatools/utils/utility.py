@@ -1,3 +1,5 @@
+"""General-purpose array, window, noise, and indexing helpers shared across the package."""
+
 from __future__ import annotations
 
 import typing
@@ -16,27 +18,35 @@ except (ModuleNotFoundError, ImportError):
 
 # Generic window function
 def windowfun(winType, N, alpha=0.01, xp=None):
-    """ window (WINTYPE, N, alpha=0.01)
+    """Generate a window function of length ``N``.
 
-    A function to generate a desired type of window, given the data length N.
-    The 'alpha' parameter denotes the additional smoothness parameter neccesssary
-    for some particular types of windows, i.e. Tukey, Planck, or Kaizer.
+    The ``alpha`` parameter denotes the additional smoothness parameter
+    necessary for some window types (e.g. Tukey, Planck, Kaiser).
 
-    Available window types:
+    Available window types: ``nuttall``, ``nuttall3``, ``nuttall3a``,
+    ``nuttall3b``, ``nuttall4``, ``nuttall4a``, ``nuttall4b``, ``nuttall4c``,
+    ``blackman-harris``, ``tukey``, ``planck``, ``welch``, ``rectangular``,
+    ``hamming``, ``hanning``, ``kaiser``.
 
-        nuttall, nuttall3, nuttall3a, nuttall3b, nuttall4, nuttall4a, nuttall4b,
-        nuttall4c, blackman-harris, tukey, planck, welch, rectangular, hamming,
-        hanning, kaiser
+    For more details about the window types see
+    http://hdl.handle.net/11858/00-001M-0000-0013-557A-5.
 
-    For more details about the window types check http://hdl.handle.net/11858/00-001M-0000-0013-557A-5
+    Args:
+        winType: Name of the desired window (case-insensitive).
+        N: Length of the window in samples.
+        alpha: Smoothness parameter used by Tukey, Planck, and Kaiser windows.
+        xp: Array module to allocate the window with (``numpy`` or ``cupy``).
+            Defaults to ``numpy`` when ``None``.
 
-    INPUTS: a) WINTYPE: String of the desired window.
-            b) N:       The length of the window.
-            c) alpha:   Smoothness parameter.
+    Returns:
+        Tuple ``(winvals, winvals_norm)`` where ``winvals`` are the raw window
+        values and ``winvals_norm`` is ``winvals`` divided by
+        :math:`\\sqrt{\\sum w^2}` so that the squared sum of the normalized
+        window is unity.
 
-    RETURN:
-            a) WINVALS:     The window values.
-            b) WINVALSNROM: The window values normalized to the area of the window.
+    Raises:
+        NotImplementedError: If ``winType`` is not one of the supported window
+            names.
     """
     if xp is None:
         xp = np
@@ -166,7 +176,19 @@ def windowfun(winType, N, alpha=0.01, xp=None):
     return winvals, winvals_norm
 
 def tukey(N, alpha, xp=None):
+    """Build a Tukey (cosine-tapered) window of length ``N``.
 
+    Args:
+        N: Length of the window in samples.
+        alpha: Fraction of the window taper, in ``(0, 1)``. ``alpha`` near 0
+            approaches a rectangular window; ``alpha = 1`` approaches a Hann
+            window.
+        xp: Array module to allocate the window with (``numpy`` or ``cupy``).
+            Defaults to ``numpy`` when ``None``.
+
+    Returns:
+        Window values as a 1D array of length ``N``.
+    """
     if xp is None:
         xp = np
 
@@ -186,6 +208,18 @@ def tukey(N, alpha, xp=None):
 
 
 def detrend(t, y):
+    """Remove a linear trend and the residual mean from a time series.
+
+    Fits ``y`` against ``t`` with a degree-1 polynomial, subtracts the fitted
+    line, then subtracts the residual mean.
+
+    Args:
+        t: 1D array of sample times.
+        y: 1D array of values matching ``t``.
+
+    Returns:
+        Detrended, mean-removed copy of ``y``.
+    """
     # @Nikos data setup
     m, b = np.polyfit(t, y, 1)
     ytmp = y - (m * t + b)
@@ -286,6 +320,25 @@ def AET(
 
 
 def searchsorted2d_vec(a, b, xp=None, gpu=None, **kwargs):
+    """Row-wise vectorized :func:`numpy.searchsorted` over a 2D sorted array.
+
+    For each row ``i``, returns the insertion indices of ``b[i]`` into ``a[i]``.
+    The implementation offsets each row by a large multiple of the value range
+    so a single 1D ``searchsorted`` over the flattened arrays produces the
+    correct per-row result, avoiding a Python-level loop.
+
+    Args:
+        a: 2D array of shape ``(m, n)``, sorted along axis 1.
+        b: 2D array of shape ``(m, k)`` containing the values to insert.
+        xp: Array module (``numpy`` or ``cupy``). Defaults to ``numpy``.
+        gpu: Optional CUDA device index to switch to before running on GPU.
+            Ignored for the NumPy backend.
+        **kwargs: Forwarded to ``xp.searchsorted`` (e.g. ``side``).
+
+    Returns:
+        2D ``int`` array of shape ``(m, k)`` of insertion indices, one row per
+        row of ``a``.
+    """
     if xp is None:
         xp = np
     else:
@@ -311,6 +364,40 @@ def searchsorted2d_vec(a, b, xp=None, gpu=None, **kwargs):
 def get_groups_from_band_structure(
     f0, band_edges, f0_2=None, xp=None, num_groups_base=3, fix_f_test=None, inds=None
 ):
+    """Assign per-source group labels based on a frequency band structure.
+
+    Each source frequency in ``f0`` is bucketed into a band defined by
+    ``band_edges``. Sources sharing a temperature, walker, and band index are
+    coalesced into mutually-exclusive groups, alternated modulo
+    ``num_groups_base`` so that proposals operating on different groups do not
+    collide on the same band. Sources with ``f0`` outside ``[band_edges.min(),
+    band_edges.max()]`` are marked with group ``-1``; sources removed by the
+    optional ``f0_2`` consistency check are marked with group ``-2``.
+
+    Args:
+        f0: Source frequencies, shape ``(ntemps, nwalkers, nleaves)``.
+        band_edges: 1D sorted array of band-edge frequencies.
+        f0_2: Optional secondary frequencies (e.g. proposed values) with the
+            same shape as ``f0``. When provided, sources whose ``f0_2`` lands
+            more than one band away from ``f0`` are excluded.
+        xp: Array module (``numpy`` or ``cupy``). Defaults to ``numpy``.
+        num_groups_base: Number of alternating group families (2, 3, or 4).
+            Three is typical and ensures non-overlapping proposals across
+            adjacent bands.
+        fix_f_test: Optional boolean array, same shape as ``f0``. Entries set to
+            ``True`` are forcibly removed from the kept set (treated like the
+            ``f0_2`` rejection above).
+        inds: Currently unused; retained for backwards compatibility.
+
+    Returns:
+        Integer array with the same shape as ``f0`` containing group labels
+        per source. Special values are ``-1`` (out-of-range) and ``-2`` (not
+        assigned to any kept group).
+
+    Raises:
+        ValueError: If ``num_groups_base`` is not in ``{2, 3, 4}``.
+        TypeError: If ``f0`` or ``band_edges`` is not an ``xp.ndarray``.
+    """
     if num_groups_base not in [2, 3, 4]:
         raise ValueError("num_groups_base must be 2 or 3 or 4.")
     if xp is None:

@@ -1,3 +1,5 @@
+"""Backend definitions and method tables for the LISA Analysis Tools native modules."""
+
 from __future__ import annotations
 
 import abc
@@ -21,6 +23,21 @@ from ..utils.exceptions import *
 
 @dataclasses.dataclass
 class LISAToolsBackendMethods(BackendMethods):
+    """Container of native (C++/CUDA) symbols exposed by a LISA Analysis Tools backend.
+
+    Extends :class:`gpubackendtools.gpubackendtools.BackendMethods` with the
+    LISA-specific entries that each backend module must provide. When adding a
+    new C++/CUDA function to the package, add a field here and populate it from
+    every backend's ``*_module_loader``.
+
+    Attributes:
+        OrbitsWrap: Native ``OrbitsWrap`` class (CPU or GPU variant) used as the
+            low-level wrapper around an ``Orbits`` instance.
+        Orbits: Native ``Orbits`` class providing detector geometry on the
+            backend device.
+        check_orbits: Native function used to validate orbit data.
+    """
+
     OrbitsWrap: object
     Orbits: object
     # SensitivityMatrixWrap: object
@@ -30,6 +47,19 @@ class LISAToolsBackendMethods(BackendMethods):
 
 
 class LISAToolsBackend:
+    """Mixin attaching LISA-specific native symbols to a backend class.
+
+    Concrete CPU/CUDA backends combine this mixin with the matching
+    :class:`gpubackendtools` backend base (e.g. ``CpuBackend``,
+    ``Cuda12xBackend``) to expose both the generic ``xp`` array module and the
+    LISA-specific native classes (``OrbitsWrap``, ``Orbits``, ``check_orbits``).
+
+    Args:
+        lisatools_backend_methods: The :class:`LISAToolsBackendMethods` instance
+            produced by the backend's module loader. Its fields are copied onto
+            ``self`` so they are available as plain attributes.
+    """
+
     # TODO: not ClassVar?
     OrbitsWrap: object
     Orbits: object
@@ -52,7 +82,7 @@ class LISAToolsBackend:
 
 
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
-    """Implementation of the CPU backend"""
+    """CPU backend, backed by the ``lisatools_backend_cpu`` native module."""
 
     _backend_name = "lisatools_backend_cpu"
     _name = "lisatools_cpu"
@@ -63,6 +93,12 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
 
     @staticmethod
     def cpu_methods_loader() -> LISAToolsBackendMethods:
+        """Load CPU native symbols and return a populated :class:`LISAToolsBackendMethods`.
+
+        Raises:
+            BackendUnavailableException: If ``lisatools_backend_cpu`` cannot be
+                imported (e.g. the CPU extension was not built).
+        """
         try:
             import lisatools_backend_cpu.pycppdetector
 
@@ -83,7 +119,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
 
 
 class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
-    """Implementation of CUDA 11.x backend"""
+    """CUDA 11.x backend, backed by ``lisatools_backend_cuda11x``."""
 
     _backend_name: str = "lisatools_backend_cuda11x"
     _name = "lisatools_cuda11x"
@@ -94,6 +130,14 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
 
     @staticmethod
     def cuda11x_module_loader():
+        """Load CUDA 11.x native symbols and return a :class:`LISAToolsBackendMethods`.
+
+        Raises:
+            BackendUnavailableException: If ``lisatools_backend_cuda11x`` is not
+                available.
+            MissingDependencies: If ``cupy`` (specifically ``cupy-cuda11x``) is
+                not installed.
+        """
         try:
             import lisatools_backend_cuda11x.pycppdetector
             # import lisatools_backend_cuda11x.psd
@@ -120,7 +164,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
 
 
 class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
-    """Implementation of CUDA 12.x backend"""
+    """CUDA 12.x backend, backed by ``lisatools_backend_cuda12x``."""
 
     _backend_name: str = "lisatools_backend_cuda12x"
     _name = "lisatools_cuda12x"
@@ -131,6 +175,14 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
 
     @staticmethod
     def cuda12x_module_loader():
+        """Load CUDA 12.x native symbols and return a :class:`LISAToolsBackendMethods`.
+
+        Raises:
+            BackendUnavailableException: If ``lisatools_backend_cuda12x`` is not
+                available.
+            MissingDependencies: If ``cupy`` (specifically ``cupy-cuda12x``) is
+                not installed.
+        """
         try:
             import lisatools_backend_cuda12x.pycppdetector
 
@@ -155,7 +207,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
         )
 
 class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
-    """Implementation of CUDA 13.x backend"""
+    """CUDA 13.x backend, backed by ``lisatools_backend_cuda13x``."""
 
     _backend_name: str = "lisatools_backend_cuda13x"
     _name = "lisatools_cuda13x"
@@ -166,6 +218,14 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
 
     @staticmethod
     def cuda13x_module_loader():
+        """Load CUDA 13.x native symbols and return a :class:`LISAToolsBackendMethods`.
+
+        Raises:
+            BackendUnavailableException: If ``lisatools_backend_cuda13x`` is not
+                available.
+            MissingDependencies: If ``cupy`` (specifically ``cupy-cuda13x``) is
+                not installed.
+        """
         try:
             import lisatools_backend_cuda13x.pycppdetector
 

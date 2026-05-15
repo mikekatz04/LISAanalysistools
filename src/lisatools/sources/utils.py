@@ -1,3 +1,5 @@
+"""Calculation-controller helpers for SNR and information-matrix computations across source classes."""
+
 from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
@@ -17,12 +19,16 @@ from .waveformbase import AETTDIWaveform, SNRWaveform
 
 
 class CalculationController:
-    """Wrapper class to controll investigative computations.
+    """Wrapper class to control investigative computations.
+
+    Provides a common interface for computing SNRs (and, in subclasses, information /
+    covariance matrices) for a particular source class given a template waveform
+    generator and a LISA noise model.
 
     Args:
-        aet_template_gen: Template waveform generator.
-        model: Model for LISA.
-        psd_kwargs: psd_kwargs for :func:`lisatools.sensitivity.get_sensitivity`.
+        aet_template_gen: Template waveform generator that returns AET TDI channels.
+        model: LISA noise model passed to the sensitivity function.
+        psd_kwargs: Keyword arguments forwarded to :func:`lisatools.sensitivity.get_sensitivity`.
         Tobs: Observation time in **years**.
         dt: Timestep in seconds.
         psd: Sensitivity curve type to use. Default is :class:`A1TDISens`
@@ -56,7 +62,7 @@ class CalculationController:
 
     @parameter_transforms.setter
     def parameter_transforms(self, parameter_transforms: TransformContainer) -> None:
-        """Set parameter transforms."""
+        """Set the parameter transform container."""
         assert isinstance(parameter_transforms, TransformContainer)
         self._parameter_transforms = parameter_transforms
 
@@ -93,17 +99,25 @@ class CalculationController:
 
 
 def mT_q_to_m1_m2(mT: float, q: float) -> Tuple[float, float]:
-    """
-    q <= 1.0
+    """Convert total mass and mass ratio to component masses.
+
+    Args:
+        mT: Total mass :math:`M = m_1 + m_2`.
+        q: Mass ratio :math:`q = m_2 / m_1 \\le 1`.
+
+    Returns:
+        ``(m1, m2)`` component masses in the same units as ``mT``.
     """
     return (mT / (1 + q), (q * mT) / (1 + q))
 
 
 def dist_convert(x: float) -> float:
+    """Convert a distance from Gpc to meters."""
     return x * 1e9 * PC_SI
 
 
 def time_convert(x: float) -> float:
+    """Convert a time from years (sidereal) to seconds."""
     return x * YRSID_SI
 
 
@@ -476,8 +490,17 @@ class EMRICalculationController(CalculationController):
 
 
 def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, float]:
+    """Convert ICRS sky coordinates and polarisation angle to ecliptic coordinates.
+
+    Args:
+        psi: Polarisation angle in radians, defined in the ICRS frame.
+        ra: Right ascension in radians.
+        dec: Declination in radians.
+
+    Returns:
+        Tuple ``(psi_ecliptic, lambda, beta)`` of polarisation angle, ecliptic
+        longitude, and ecliptic latitude (all in radians).
     """
-    Convert ICRS coordinates and angles, (psi, ra, dec) to ecliptic coordinates (psi_ecliptic, lambda, beta)."""
     eps = 0.40909263366002024 # obliquity of the ecliptic at J2000 in radians
 
     coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')

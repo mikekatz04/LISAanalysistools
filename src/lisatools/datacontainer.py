@@ -1,3 +1,5 @@
+"""Container for LISA data, residuals, or templates and their basis settings."""
+
 from __future__ import annotations
 
 import math
@@ -25,6 +27,7 @@ from .utils.constants import *
 from .utils.utility import AET, get_array_module
 
 
+# TODO/DOCS: this stub appears to be a forward declaration for the type hint on __init__'s data_res_in parameter; verify whether it's still needed.
 class DataResidualArray:
     pass
 
@@ -37,11 +40,17 @@ class DataResidualArray:
     special computations in the backend.
 
     Args:
-        data_res_in: Data, residual, or template input information. Can be a list, numpy array
-            or another :class:`DataResidualArray`.
-        dt: Timestep in seconds.
-        f_arr: Frequency array.
-        df: Delta f in frequency domain.
+        data_res_in: Data, residual, or template input information. Can be a list, NumPy/CuPy array
+            or another :class:`DataResidualArray`. May also be a domain-aware array
+            (subclass of :class:`~lisatools.domains.DomainBase`).
+        signal_domain: Target domain settings the underlying array should live in.
+            If ``None``, defaults to the ``input_signal_domain`` (or, for time-domain inputs,
+            the matching :class:`~lisatools.domains.FDSettings`).
+        input_signal_domain: Domain settings describing the raw ``data_res_in`` array.
+            Required when ``data_res_in`` is a plain NumPy/CuPy array so the container knows
+            how to interpret it.
+        window: Optional window applied during a domain transform from ``input_signal_domain``
+            to ``signal_domain``.
         **kwargs: For future compatibility.
 
     """
@@ -103,7 +112,7 @@ class DataResidualArray:
 
     @property
     def init_kwargs(self) -> dict:
-        """Initial dt, df, f_arr"""
+        """Initial keyword arguments passed at construction (``signal_domain``, ``input_signal_domain``, ...)."""
         return self._init_kwargs
 
     @init_kwargs.setter
@@ -134,6 +143,7 @@ class DataResidualArray:
     
     @property
     def start_freq_ind(self):
+        """Index of the first frequency bin relative to a uniform ``df`` grid (or ``None``)."""
         if self.df is not None:
             return int(self.f_arr[0] / self.df)
         else:
@@ -145,6 +155,7 @@ class DataResidualArray:
         f_arr: Optional[np.ndarray] = None,
         df: Optional[float] = None,
     ):
+        """Populate ``_dt``, ``_df``, ``_Tobs``, ``_fmax``, and ``_f_arr`` from one of ``dt``/``f_arr``/``df``."""
         if dt is not None:
             self._dt = dt
             self._Tobs = self.data_length * dt

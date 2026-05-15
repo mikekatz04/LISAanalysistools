@@ -1,3 +1,5 @@
+"""Galactic binary AET TDI waveform generator built on :class:`gbgpu.gbgpu.GBGPU`."""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -45,8 +47,8 @@ class GBAETWaveform(AETTDIWaveform):
 
         Args:
             *params: Parameters going into :meth:`GBGPU.run_wave`.
-            return_array: If ``True``, return ``array([A, E, T]).
-                If ``False``, return (A, E, T).
+            return_array: If ``True``, return ``array([A, E, T])``.
+                If ``False``, return ``(A, E, T)``.
             **kwargs: Keyword arguments going into :meth:`GBGPU.run_wave`.
 
         Returns:

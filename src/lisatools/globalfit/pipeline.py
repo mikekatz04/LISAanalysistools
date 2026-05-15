@@ -1,3 +1,5 @@
+"""Pre-built :class:`GlobalFitSegment` pipelines used to assemble end-to-end runs."""
+
 import os
 import pickle
 import time
@@ -26,6 +28,12 @@ from .state import State
 
 
 class MBHSearchSegment(GlobalFitSegment):
+    """Segment that runs the standalone parallel MBH search.
+
+    Args:
+        head_rank: MPI rank that drives the search controller.
+    """
+
     def __init__(self, *args, head_rank=0, **kwargs):
 
         super().__init__(*args, **kwargs)
@@ -43,13 +51,17 @@ class MBHSearchSegment(GlobalFitSegment):
         )
 
     def adjust_settings(self, settings):
+        """No segment-level overrides applied for the MBH search."""
         pass
 
     def run(self):
+        """Launch :meth:`ParallelMBHSearchControl.run_parallel_mbh_search`."""
         self.para_mbh_search.run_parallel_mbh_search()
 
 
 class InitialPSDSearch(GlobalFitSegment):
+    """Segment that searches for the initial PSD before any source PE."""
+
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
@@ -59,6 +71,7 @@ class InitialPSDSearch(GlobalFitSegment):
         )
 
     def adjust_settings(self, settings):
+        """Configure PSD-only stopping/convergence for the initial search."""
         settings["psd"]["pe_info"]["update_iterations"] = -1
         settings["psd"]["pe_info"]["stopping_iterations"] = 4
         settings["psd"]["pe_info"]["stopping_function"] = SearchConvergeStopping(
@@ -66,13 +79,15 @@ class InitialPSDSearch(GlobalFitSegment):
         )
 
     def run(self):
-
+        """Run the global fit with only the PSD branch active."""
         self.mpi_controller.run_global_fit(
             run_psd=True, run_mbhs=False, run_gbs_pe=False, run_gbs_search=False
         )
 
 
 class InitialMBHMixSegment(GlobalFitSegment):
+    """Segment that mixes PSD and MBH PE prior to galactic-binary search."""
+
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
@@ -82,10 +97,11 @@ class InitialMBHMixSegment(GlobalFitSegment):
         )
 
     def adjust_settings(self, settings):
+        """No segment-level setting overrides for the MBH-mix segment."""
         pass
 
     def run(self):
-
+        """Run PSD + MBH PE; PSD waits on the MBH stopper via MPI."""
         stopper_rank = self.mpi_controller.mbh_rank
         other_ranks = [self.mpi_controller.psd_rank]
 
@@ -105,6 +121,12 @@ class InitialMBHMixSegment(GlobalFitSegment):
 
 
 class InitialGBSearchSegment(GlobalFitSegment):
+    """Segment that runs the initial galactic-binary search alongside PSD/MBH PE.
+
+    Args:
+        snr_lim: SNR threshold passed into the GB search settings.
+    """
+
     def __init__(self, *args, snr_lim=10.0, **kwargs):
         self.snr_lim = snr_lim
         super().__init__(*args, **kwargs)
@@ -113,7 +135,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
         )
 
     def adjust_settings(self, settings):
-
+        """Override settings with GB-search-specific RJ fractions and rank/GPU layout."""
         settings["gb"]["pe_info"]["use_prior_removal"] = True
         settings["gb"]["pe_info"]["rj_refit_fraction"] = 0.1
         settings["gb"]["pe_info"]["rj_search_fraction"] = 0.7
@@ -142,7 +164,7 @@ class InitialGBSearchSegment(GlobalFitSegment):
         settings["rank_info"]["mbh_rank"] = 6
 
     def run(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
-
+        """Run the configured global fit; the GB PE rank is the MPI stopper."""
         stopper_rank = self.mpi_controller.gb_pe_rank
         other_ranks = [
             self.mpi_controller.psd_rank,
@@ -176,6 +198,8 @@ class InitialGBSearchSegment(GlobalFitSegment):
 
 
 class FullPESegment(GlobalFitSegment):
+    """Segment that runs the full multi-source PE without imposing extra stopping logic."""
+
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
@@ -185,9 +209,18 @@ class FullPESegment(GlobalFitSegment):
         )
 
     def adjust_settings(self, settings):
+        """No settings overrides applied for the full PE segment."""
         pass
 
     def run(self, run_psd=True, run_mbhs=True, run_gbs_pe=True, run_gbs_search=True):
+        """Run the full global fit with optional per-component toggles.
+
+        Args:
+            run_psd: Toggle PSD branch.
+            run_mbhs: Toggle MBH branch.
+            run_gbs_pe: Toggle GB parameter-estimation branch.
+            run_gbs_search: Toggle GB search branch.
+        """
 
         stopper_rank = self.mpi_controller.main_rank
 

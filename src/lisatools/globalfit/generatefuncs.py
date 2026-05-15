@@ -1,3 +1,5 @@
+"""Helpers that turn an MCMC state into source templates / data residuals / PSDs."""
+
 import os
 import pickle
 import warnings
@@ -19,12 +21,23 @@ except (ImportError, ModuleNotFoundError) as e:
 
 
 class GetMBHTemplates:
+    """Callable that builds MBH frequency-domain templates for a given state.
+
+    Args:
+        initialization_kwargs: Forwarded to :class:`bbhx.BBHWaveformFD`.
+        runtime_kwargs: Forwarded to ``BBHWaveformFD.__call__``.
+    """
 
     def __init__(self, initialization_kwargs, runtime_kwargs):
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
 
     def __call__(self, current_state, mbh_info, general_info):
+        """Generate MBH templates summed over leaves for each walker.
+
+        Returns:
+            Per-walker complex template array of shape ``(nwalkers, 2, nfreqs)``.
+        """
 
         if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
@@ -75,6 +88,14 @@ class GetMBHTemplates:
 
 
 class GetEMRITemplates:
+    """Callable that builds EMRI frequency-domain templates for a given state.
+
+    Args:
+        initialization_kwargs: Forwarded to :class:`EMRITDIWaveform`.
+        runtime_kwargs: Forwarded to the EMRI waveform call.
+        start_freq_ind: Inclusive start frequency index (in the global ``fd`` array).
+        end_freq_ind: Exclusive end frequency index.
+    """
 
     def __init__(self, initialization_kwargs, runtime_kwargs, start_freq_ind, end_freq_ind):
         self.initialization_kwargs = initialization_kwargs
@@ -82,6 +103,7 @@ class GetEMRITemplates:
         self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
 
     def __call__(self, current_state, emri_info, general_info):
+        """Generate EMRI templates summed over leaves for each walker."""
 
         if "use_gpu" in self.initialization_kwargs and self.initialization_kwargs["use_gpu"]:
             xp = cp
@@ -130,12 +152,19 @@ class GetEMRITemplates:
 
 
 class GetGBTemplates:
+    """Callable that builds galactic-binary frequency-domain templates.
+
+    Args:
+        initialization_kwargs: Forwarded to :class:`gbgpu.GBGPU`.
+        runtime_kwargs: Forwarded to ``GBGPU.generate_global_template``.
+    """
 
     def __init__(self, initialization_kwargs, runtime_kwargs):
         self.initialization_kwargs = initialization_kwargs
         self.runtime_kwargs = runtime_kwargs
 
     def __call__(self, current_state, gb_info, general_info):
+        """Generate per-walker GB templates summed over all active leaves."""
 
         gb_gen = GBGPU(**self.initialization_kwargs)
 
@@ -185,6 +214,7 @@ class GetGBTemplates:
 
 
 def get_ll_source(data, psd, df):
+    """Compute the source-only inner-product log-likelihood :math:`-\\frac12 \\langle d|d\\rangle`."""
     inner_here = (
         -1.0
         / 2.0
@@ -201,11 +231,25 @@ def get_ll_source(data, psd, df):
 
 
 def get_psd_val(psd):
+    """Sum :math:`\\log S_n(f)` across channels and frequencies."""
     psd_term_here = np.sum(np.log(np.asarray(psd).transpose(1, 0, 2)), axis=(1, 2))
     return psd_term_here
 
 
 def get_ll(data, psd, df, return_source_only_ll=False):
+    """Compute the full noise-weighted log-likelihood ``ll_source - log_det_psd``.
+
+    Args:
+        data: Per-channel complex frequency-domain residual.
+        psd: Per-channel PSD array.
+        df: Frequency spacing.
+        return_source_only_ll: If ``True``, also return the source-only
+            contribution.
+
+    Returns:
+        Either the total log-likelihood, or a tuple
+        ``(ll_total, ll_source)``.
+    """
     ll_source = get_ll_source(data, psd, df)
     psd_val = get_psd_val(psd)
     ll_total = ll_source - psd_val
@@ -216,6 +260,18 @@ def get_ll(data, psd, df, return_source_only_ll=False):
 
 
 class GenerateCurrentState:
+    """Callable that builds the per-walker data + PSD residuals for a given state.
+
+    The original A/E injections are stored at construction; each call layers
+    the requested source contributions (MBH, GB, PSD, LISA sensitivity) on
+    top of (or removed from) those injections to produce the residuals
+    consumed by downstream samplers.
+
+    Args:
+        A_inj: A-channel injection array.
+        E_inj: E-channel injection array.
+    """
+
     def __init__(self, A_inj, E_inj):
         self.A_inj, self.E_inj = A_inj, E_inj
 
@@ -234,6 +290,32 @@ class GenerateCurrentState:
         return_prior_val=False,
         fix_val_in_gen=None,
     ):
+        """Generate data, PSD, optional LISA sensitivity, and (optionally) likelihoods.
+
+        # TODO/DOCS: full description of all flags. The body is the canonical
+        reference for the order in which sources are added/subtracted from
+        the injections, and for the fix/reuse behaviour governed by
+        ``fix_val_in_gen``.
+
+        Args:
+            current_state: Active sampler state.
+            general_info: Settings dict with ``source_info`` and ``general``.
+            include_mbhs / include_gbs / include_psd / include_lisasens:
+                Toggle each source contribution.
+            only_max_ll: If ``True``, only generate for the highest-likelihood
+                walker.
+            n_gen_in: Optional override for the per-source walker count.
+            include_ll: If ``True``, return computed log-likelihoods.
+            include_source_only_ll: If ``True``, additionally return the
+                source-only log-likelihood.
+            return_prior_val: If ``True``, propagate per-source prior values.
+            fix_val_in_gen: Optional list of source names to keep fixed
+                (i.e., reuse rather than regenerate).
+
+        Returns:
+            Dict with at minimum ``data`` and ``psd``; other keys are added
+            depending on the flags.
+        """
 
         info_dict = {}
         n_gen_check_it = []

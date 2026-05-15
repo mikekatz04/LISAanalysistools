@@ -673,6 +673,13 @@ class SignalProcessor:
 
 
 class BaseProcessingStep(SignalProcessor):
+    """:class:`SignalProcessor` extended with :meth:`process` and :meth:`pour` helpers.
+
+    Subclasses inherit a high-level :meth:`process` that runs the configured
+    sequence of filters / downsamples / trims and a :meth:`pour` that turns
+    the conditioned time-domain data into a :class:`DataResidualArray`.
+    """
+
     def __init__(self, *args, **kwargs):
         SignalProcessor.__init__(self, *args, **kwargs)
 

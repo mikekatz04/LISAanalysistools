@@ -1,4 +1,13 @@
-"""Mojito-specific Orbits implementation with JAX."""
+"""Mojito-specific Orbits implementation with JAX.
+
+# TODO/DOCS: as of this revision the entire module body below the imports is
+# commented out (legacy/dead code for ``L1Orbits``, ``JAXL1Orbits``, and
+# ``XYZSensitivityBackend`` plus their wrapping/interpolation helpers). The
+# active replacements live in :mod:`lisatools.detector` (``L1Orbits``,
+# ``JAXL1Orbits``). Verify whether this file is still needed or should be
+# removed; the wrapping/dips-masking logic specific to Mojito L1 frequency
+# transfer functions is too intricate to document accurately here.
+"""
 
 from copy import deepcopy
 from typing import Optional

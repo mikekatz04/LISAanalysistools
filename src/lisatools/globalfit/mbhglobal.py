@@ -1,3 +1,5 @@
+"""Standalone MBH parameter-estimation runner driven by an MPI head rank."""
+
 import pickle
 import shutil
 import time
@@ -38,6 +40,20 @@ from eryn.utils.updates import Update
 
 
 class UpdateNewResidualsMBH(Update):
+    """``eryn`` :class:`Update` that swaps in fresh residuals between iterations.
+
+    Sends the cold-chain MBH samples to the head rank, receives a refreshed
+    set of data + PSD residuals (with the latest GB / PSD subtractions), and
+    installs them into the per-move buffers if the Metropolis-style accept
+    test (currently always ``True``) passes.
+
+    Args:
+        comm: MPI communicator.
+        head_rank: Rank that owns the global state and serves the new data.
+        last_prior_vals: Cached non-MBH prior values, updated in place.
+        verbose: Print step-by-step communication if ``True``.
+    """
+
     def __init__(self, comm, head_rank, last_prior_vals, verbose=False):
         self.comm = comm
         self.head_rank = head_rank
@@ -45,6 +61,11 @@ class UpdateNewResidualsMBH(Update):
         self.last_prior_vals = last_prior_vals
 
     def __call__(self, iter, last_sample, sampler):
+        """Synchronize residuals from the head rank into ``sampler.moves``.
+
+        # TODO/DOCS: the accept test is forced to ``True`` (see code) — the
+        original Metropolis correction was found to be incorrect.
+        """
 
         if self.verbose:
             print("Sending mbh update to head process.")
@@ -141,10 +162,17 @@ class UpdateNewResidualsMBH(Update):
 
 
 class BasicResidualMGHLikelihood:
+    """Likelihood wrapper that pulls per-walker log-likelihoods from a MGH holder.
+
+    Args:
+        mgh: :class:`MultiGPUDataHolder` exposing ``get_ll``.
+    """
+
     def __init__(self, mgh):
         self.mgh = mgh
 
     def __call__(self, *args, supps=None, **kwargs):
+        """Return ``log_like`` indexed by ``supps["overal_inds"]``."""
         ll_temp = self.mgh.get_ll()
         overall_inds = supps["overal_inds"]
 
@@ -152,7 +180,19 @@ class BasicResidualMGHLikelihood:
 
 
 def run_mbh_pe(gpu, comm, head_rank):
+    """Run the MBH parameter-estimation sampler on ``gpu``.
 
+    Pulls the global-fit configuration from ``head_rank``, builds the
+    :class:`MBHSpecialMove`, attaches an :class:`UpdateNewResidualsMBH`
+    callback so residuals stay in sync with the GB/PSD updates, and runs
+    the inner :class:`EnsembleSampler` until the configured stopping
+    function fires.
+
+    Args:
+        gpu: GPU device index to bind this rank to.
+        comm: MPI communicator.
+        head_rank: Rank that hosts the shared :class:`CurrentInfoGlobalFit`.
+    """
     gpus = [gpu]
 
     gf_information = comm.recv(source=head_rank, tag=76)

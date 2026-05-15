@@ -1,3 +1,5 @@
+"""Binary black hole waveform classes (frequency-domain SNR waveforms and PhenomTHM TDI waveforms)."""
+
 from copy import deepcopy
 from typing import Any, Optional, Tuple
 
@@ -74,12 +76,12 @@ class BBHSNRWaveform(SNRWaveform):
         Args:
             *params: Parameters for the ``__call__`` function
                 for :class:`BBHWaveformFD`.
-            return_array: If ``True``, return ``array([A, E, T]).
-                If ``False``, return (A, E, T).
+            return_array: If ``True``, return ``array([A, E, T])``.
+                If ``False``, return ``(A, E, T)``.
             mf_min: Minimum dimensionless frequency to evaluate.
             mf_max: Maximum dimensionless frequency to evaluate.
             freqs: If ``None``, then default will be ``np.logspace(mf_min / M, mf_max / M, 1024)``.
-                Otherwise, it will calulate frequencies based on this exact array.
+                Otherwise, it will calculate frequencies based on this exact array.
             **kwargs: ``kwargs`` for the ``__call__`` function
                 for :class:`BBHWaveformFD`.
 
@@ -118,16 +120,21 @@ class BBHSNRWaveform(SNRWaveform):
 
 
 class PhenomTHMTDIWaveform(TDWaveformBase):
-    """
-    Generate PhenomTHM waveforms with the TDI LISA Response.
+    """Generate PhenomTHM waveforms with the TDI LISA Response.
 
     Args:
-        waveform_kwargs: Keyword arguments forwarded to :class:`phentax.waveform.IMRPhenomTHM`.
+        waveform_kwargs: Keyword arguments forwarded to ``phentax.waveform.IMRPhenomTHM``.
         Tobs: Observation time in years.
-        start_freq: Starting frequency in Hz for the waveform generation. If `None`, it has to be explicitly provided in the waveform generation calls.
-        ref_freq: Reference frequency in Hz for the waveform generation. If `None` and `start_freq` is provided, it will default to `start_freq`. Otherwise, it has to be explicitly provided in the waveform generation calls.
+        start_freq: Starting frequency in Hz for the waveform generation. If
+            ``None``, it has to be explicitly provided in the waveform generation
+            calls.
+        ref_freq: Reference frequency in Hz for the waveform generation. If
+            ``None`` and ``start_freq`` is provided, it will default to
+            ``start_freq``. Otherwise, it has to be explicitly provided in the
+            waveform generation calls.
         *args: Additional positional arguments forwarded to :class:`TDWaveformBase`.
         **kwargs: Additional keyword arguments forwarded to :class:`TDWaveformBase`.
+
     """
 
     def __init__(
@@ -169,11 +176,23 @@ class PhenomTHMTDIWaveform(TDWaveformBase):
         ref_freq: float = None,
         start_freq: float = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Generate the waveform's polarizations for a single source.
+        """Generate the waveform's polarisations for a single source.
+
+        Args:
+            m1: Mass of source 1 in solar masses.
+            m2: Mass of source 2 in solar masses.
+            s1z: Dimensionless aligned spin of source 1.
+            s2z: Dimensionless aligned spin of source 2.
+            distance: Luminosity distance in Mpc.
+            phi_ref: Reference phase in radians.
+            inclination: Inclination angle in radians.
+            psi: Polarisation angle in radians.
+            ref_freq: Reference frequency in Hz. Falls back to ``self.ref_freq``.
+            start_freq: Starting frequency in Hz. Falls back to ``self.start_freq``.
 
         Returns:
-            t_arr, h_plus, h_cross
+            Tuple ``(t_arr, h_plus, h_cross)`` with the time samples and the two
+            polarisations on the backend's array module.
 
         """
 

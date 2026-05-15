@@ -1,3 +1,5 @@
+"""Per-branch sampler-state subclasses used by the global fit."""
+
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -7,14 +9,29 @@ from eryn.state import State as eryn_State
 
 
 def return_x(x):
+    """Identity helper used as a no-op replacement for :func:`copy.deepcopy`."""
     return x
 
 
 class GBState(eryn_State):
+    """Galactic-binary (GB) sampler state with per-band bookkeeping.
+
+    Tracks per-band temperature ladders, swap counters, and binary-count
+    arrays that the GB special moves use to drive the band-temperature
+    sampler.
+
+    Args:
+        possible_state: Existing :class:`GBState` or a state-like object to
+            initialize from. When it is already a :class:`GBState`, band info
+            is copied over.
+        band_info: Optional pre-built band-information dict.
+        copy: If ``True``, deep-copy the band info from ``possible_state``.
+    """
 
     # copy this still for each. At general hdf5 function to deal with these setups rather than specific
     @property
     def band_initialized(self):
+        """Whether band tracking has been initialized for this state."""
         if hasattr(self, "band_info") and "initialized" in self.band_info:
             return self.band_info["initialized"]
         else:
@@ -31,6 +48,7 @@ class GBState(eryn_State):
 
     @property
     def band_info_keys(self):
+        """List of required keys for the :attr:`band_info` dict."""
         return [
             "initialized",
             "band_edges",
@@ -46,6 +64,7 @@ class GBState(eryn_State):
 
     @property
     def band_info(self):
+        """Dict holding per-band counters, temperatures, and edges."""
         return self._band_info
 
     @band_info.setter
@@ -58,6 +77,14 @@ class GBState(eryn_State):
         self._band_info["initialized"] = True
 
     def initialize_band_information(self, nwalkers, ntemps, band_edges, band_temps):
+        """Allocate the band-info dict with zeroed counters.
+
+        Args:
+            nwalkers: Number of MCMC walkers.
+            ntemps: Number of temperatures in the ladder.
+            band_edges: 1D array of frequency-band edges.
+            band_temps: ``(num_bands, ntemps)`` array of inverse temperatures.
+        """
 
         if not hasattr(self, "intialized"):
             band_info = {}
@@ -115,6 +142,18 @@ class GBState(eryn_State):
         band_num_binaries,
         is_rj,
     ):
+        """Accumulate one iteration's worth of band counters.
+
+        Args:
+            band_temps: New ``(num_bands, ntemps)`` temperature ladder.
+            band_num_proposed: ``(num_bands, ntemps)`` proposal counts.
+            band_num_accepted: ``(num_bands, ntemps)`` acceptance counts.
+            band_swaps_proposed: ``(num_bands, ntemps - 1)`` swap proposals.
+            band_swaps_accepted: ``(num_bands, ntemps - 1)`` swap acceptances.
+            band_num_binaries: ``(ntemps, nwalkers, num_bands)`` binary count.
+            is_rj: ``True`` to credit reversible-jump counters, otherwise
+                in-model counters.
+        """
         self.band_info["band_temps"][:] = band_temps
         self.band_info["band_num_binaries"][:] = band_num_binaries
 
@@ -129,6 +168,7 @@ class GBState(eryn_State):
         self.band_info["band_swaps_accepted"] += band_swaps_accepted
 
     def reset_band_counters(self):
+        """Zero all per-band proposal/acceptance/swap counters."""
         self.band_info["band_num_proposed"][:] = 0
         self.band_info["band_num_accepted"][:] = 0
         self.band_info["band_num_proposed_rj"][:] = 0
@@ -137,7 +177,7 @@ class GBState(eryn_State):
         self.band_info["band_swaps_accepted"][:] = 0
 
     def reset_backend(self, h5_group, h5_kwargs, nwalkers, *args, ntemps=1, **kwargs):
-
+        """Initialize the per-band HDF5 datasets used to store the chain."""
         assert self.band_initialized
 
         band_group = h5_group.create_group("gb_sub_state")
@@ -203,6 +243,7 @@ class GBState(eryn_State):
         )
 
     def grow_backend(self, h5_group, ngrow, *args):
+        """Grow per-band datasets to ``ngrow`` rows."""
         band_group = h5_group["gb_sub_state"]
         for key in band_group:
             if key == "band_edges":
@@ -210,6 +251,13 @@ class GBState(eryn_State):
             band_group[key].resize(ngrow, axis=0)
 
     def save_step(self, iteration, h5_group, state, *args, **kwargs):
+        """Persist this iteration's per-band info into ``h5_group``.
+
+        Args:
+            iteration: Index along the leading dataset axis to write to.
+            h5_group: HDF5 group containing the ``gb_sub_state`` subgroup.
+            state: Active sampler state (its ``sub_states["gb"]`` is read).
+        """
         # make sure the backend has all the information needed to store everything
         gb_group = h5_group["gb_sub_state"]
         for key in [
@@ -229,6 +277,7 @@ class GBState(eryn_State):
 
     @property
     def reset_kwargs(self):
+        """Kwargs passed back to the backend when re-initializing the state."""
         # TODO: this okay for future?
         return dict(
             num_bands=len(self.band_info["band_edges"]) - 1,
@@ -237,6 +286,15 @@ class GBState(eryn_State):
 
 
 class MBHState(eryn_State):
+    """Massive black-hole binary sampler state with per-leaf temperature ladder.
+
+    Args:
+        possible_state: Existing :class:`MBHState` or coords-like dict.
+        betas_all: Optional ``(num_mbhs, ntemps)`` array of inverse
+            temperatures, one row per MBH leaf.
+        copy: If ``True``, deep-copy data from ``possible_state``.
+    """
+
     remove_kwargs = ["betas_all"]
 
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
@@ -250,6 +308,7 @@ class MBHState(eryn_State):
 
     @property
     def reset_kwargs(self):
+        """Kwargs passed back to the backend when re-initializing the state."""
         # TODO: this okay for future?
         return dict(
             num_mbhs=self.num_mbhs,
@@ -257,6 +316,8 @@ class MBHState(eryn_State):
 
 
 class EMRIState(eryn_State):
+    """Extreme mass-ratio inspiral sampler state with per-leaf temperature ladder."""
+
     remove_kwargs = ["betas_all"]
 
     def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
@@ -270,11 +331,27 @@ class EMRIState(eryn_State):
 
     @property
     def reset_kwargs(self):
+        """Kwargs passed back to the backend when re-initializing the state."""
         # TODO: this okay for future?
         return dict(num_emris=self.num_emris)  # self.betas_all.shape[0]
 
 
 class GFState(eryn_State):
+    """Composite global-fit state holding per-source-class sub-states.
+
+    Wraps an :class:`eryn.state.State` with a dict mapping each branch name
+    (``gb``, ``mbh``, ``emri``, ...) to an associated state subclass
+    (e.g. :class:`GBState`, :class:`MBHState`).
+
+    Args:
+        possible_state: Either an existing :class:`GFState` to copy from or a
+            coords-like input.
+        is_eryn_state_input: When ``True``, treat ``possible_state`` as a
+            plain :class:`eryn.state.State` rather than a :class:`GFState`.
+        sub_state_bases: Mapping ``{branch_name: state_class}`` giving the
+            sub-state class to instantiate for each branch.
+    """
+
     # TODO: bandaid fix this
     def __init__(
         self,
@@ -329,6 +406,15 @@ class GFState(eryn_State):
 
 
 class AllGFBranchInfo:
+    """Aggregate of two or more :class:`GFBranchInfo` instances.
+
+    Combines per-branch metadata dicts (``ndims``, ``nleaves_max``,
+    ``nleaves_min``, ``branch_state``, ``branch_backend``) so that a global
+    fit can query branch info uniformly regardless of how many sources are
+    in the model. Use the ``+`` operator on :class:`GFBranchInfo` /
+    :class:`AllGFBranchInfo` to chain them together.
+    """
+
     def __init__(self, branch_1, branch_2):
 
         for key in [
@@ -433,6 +519,17 @@ from eryn.backends import backend as eryn_Backend
 
 @dataclass
 class GFBranchInfo:
+    """Metadata describing a single branch in the global fit.
+
+    Args:
+        name: Branch name (e.g. ``"gb"``, ``"mbh"``).
+        ndims: Number of parameters per leaf.
+        nleaves_max: Maximum allowed leaves on this branch.
+        nleaves_min: Minimum allowed leaves on this branch.
+        branch_state: Optional state class associated with this branch.
+        branch_backend: Optional backend object associated with this branch.
+    """
+
     name: str
     ndims: int
     nleaves_max: int

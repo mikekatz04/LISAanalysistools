@@ -1,3 +1,5 @@
+"""Post-processing helpers that group GB chain samples into individual sources."""
+
 import multiprocessing as mp
 import os
 import time
@@ -16,10 +18,33 @@ from lisatools.utils.constants import *
 
 
 class GBGrouping:
+    """Forward declaration placeholder for the real :class:`GBGrouping` below."""
+
     pass
 
 
 class GBGrouping:
+    """Group MCMC samples that correspond to the same physical galactic binary.
+
+    Walks the GB chain, computes waveform overlaps between candidate samples
+    and a reference, and assigns matching samples to the same group via the
+    :attr:`best_match_limit` threshold.
+
+    Args:
+        gb: :class:`gbgpu.GBGPU` instance.
+        current_info: Global-fit info object exposing ``gb_info``.
+        params: ``(N, 8)`` array of GB parameters.
+        sample: Per-sample auxiliary information (e.g. likelihood values).
+        fake_data: Buffers used to hold subtracted templates per sample.
+        psd: Per-sample PSD arrays.
+        waveform_kwargs: Kwargs forwarded to ``gb.run_wave``.
+        groups: Optional pre-existing group-assignment array.
+        copy: If ``True``, deep-copy ``params`` / ``sample`` / ``groups``.
+        group_indicator: Integer label for the next group to be created.
+        original_sample_count: Sample count before any pruning.
+        samples_so_far: Cumulative sample count for restart bookkeeping.
+    """
+
     best_match_limit = 0.9
     parameters = []
     stop = False
@@ -1006,6 +1031,7 @@ class GBGrouping:
 
 
 def para_func(i, assigned_groups, bg, cg):
+    """Worker helper: copy ``cg`` group assignments into ``bg`` for index ``i``."""
     inds_tmp = np.where(assigned_groups == cg)[0]
     base_out = np.full_like(inds_tmp, bg)
     if i % 10000 == 0:
@@ -1014,6 +1040,24 @@ def para_func(i, assigned_groups, bg, cg):
 
 
 def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, thin_by=1):
+    """Gather GB chain samples and group them into per-source detections.
+
+    Walks the GB reader, computes inter-sample waveform overlaps, and
+    returns a :class:`GBGrouping` whose ``groups`` array assigns each
+    sample to a physical source (or to ``-1`` for sources that fail the
+    confidence cut).
+
+    Args:
+        current_info: Global-fit configuration object.
+        gb_reader: HDF backend reader for the GB chain.
+        psd_in: PSD array used in the overlap computation.
+        gpu: GPU device index.
+        samples_keep: Number of samples per chain step to retain.
+        thin_by: Chain thinning factor.
+
+    Returns:
+        :class:`GBGrouping` with grouped samples ready for catalog output.
+    """
 
     gb = GBGPU(use_gpu=True)
     xp.cuda.runtime.setDevice(gpu)
@@ -1404,7 +1448,29 @@ def gather_gb_samples(
     overlap_lim=0.5,
     snr_diff_lim=20.0,
 ):
+    """Gather GB chain samples (band-aware) into per-source groups.
 
+    # TODO/DOCS: precise definitions of the SNR / overlap thresholds and
+    their interaction; the implementation is the canonical reference.
+
+    Args:
+        fd: Frequency array.
+        transform_fn: :class:`TransformContainer` for GB parameters.
+        gb: :class:`gbgpu.GBGPU` instance.
+        waveform_kwargs: Kwargs forwarded to ``gb.run_wave``.
+        band_edges: Band edge frequencies.
+        band_N_vals: Per-band waveform sample counts.
+        reader: HDF backend reader for the GB chain.
+        sens_mat: Sensitivity matrix used to weight inner products.
+        gpu: GPU device index.
+        num_compare_samples: Number of reference samples used for matching.
+        samples_keep: Number of latest samples to retain per walker.
+        thin_by: Chain thinning factor.
+        snr_lim_first_cut: Initial SNR cut applied to candidates.
+        snr_lim_second_cut: Secondary SNR cut after grouping.
+        overlap_lim: Overlap threshold above which samples are grouped.
+        snr_diff_lim: Maximum SNR difference within a group.
+    """
     gb.backend.set_cuda_device(gpu)
     gb.gpus = [gpu]
     fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]

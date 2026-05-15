@@ -1,8 +1,24 @@
+"""Base mix-in tying ``eryn`` moves to global-fit MPI/GPU bookkeeping."""
+
 import numpy as np
 from eryn.moves import CombineMove
 
 
 class GlobalFitMove:
+    """Mix-in providing MPI rank / GPU bookkeeping for global-fit moves.
+
+    Subclasses combine this mix-in with an ``eryn`` move to expose the extra
+    state the global-fit driver needs (assigned MPI ranks, GPU device list,
+    likelihood-comparison cadence, and buffer-reset cadence).
+
+    Args:
+        name: Required identifier used in logging and bookkeeping.
+        iters_compare_likelihood: Iteration cadence at which the move should
+            cross-check likelihoods between worker ranks. ``-1`` disables.
+        iters_reset_buffers: Iteration cadence at which auxiliary buffers
+            should be reset. ``-1`` disables.
+    """
+
     ranks_initialized = False
 
     def __init__(
@@ -23,6 +39,7 @@ class GlobalFitMove:
 
     @property
     def iters_reset_buffers(self) -> int:
+        """Iteration cadence at which auxiliary buffers are reset."""
         return self._iters_reset_buffers
 
     @iters_reset_buffers.setter
@@ -32,6 +49,7 @@ class GlobalFitMove:
 
     @property
     def iters_compare_likelihood(self) -> int:
+        """Iteration cadence at which inter-rank likelihoods are cross-checked."""
         return self._iters_compare_likelihood
 
     @iters_compare_likelihood.setter
@@ -41,6 +59,7 @@ class GlobalFitMove:
 
     @property
     def comm(self):
+        """The MPI communicator object owned by this move."""
         return self._comm
 
     @comm.setter
@@ -58,6 +77,7 @@ class GlobalFitMove:
 
     @property
     def ranks_needed(self):
+        """Number of MPI ranks this move requires (default 0)."""
         if not hasattr(self, "_ranks_needed"):
             return 0
         return self._ranks_needed
@@ -68,6 +88,7 @@ class GlobalFitMove:
 
     @property
     def gpus(self):
+        """List of GPU device indices assigned to this move (default empty)."""
         if not hasattr(self, "_gpus"):
             return []
         return self._gpus
@@ -82,15 +103,22 @@ class GlobalFitMove:
 
     @property
     def ranks(self):
+        """List of MPI ranks assigned to this move via :meth:`assign_ranks`."""
         return self._ranks
 
     def assign_ranks(self, ranks):
+        """Record the MPI ranks dedicated to this move.
+
+        Args:
+            ranks: List of MPI rank indices.
+        """
         assert isinstance(ranks, list)
         self.ranks_initialized = True
         self._ranks = ranks
 
     @property
     def ranks_needed(self):
+        """Number of MPI ranks this move requires (default 0)."""
         if not hasattr(self, "_ranks_needed"):
             return 0
         return self._ranks_needed
@@ -102,4 +130,11 @@ class GlobalFitMove:
 
 
 class GFCombineMove(CombineMove, GlobalFitMove):
+    """An ``eryn`` :class:`CombineMove` that participates in global-fit bookkeeping.
+
+    Inheriting both :class:`~eryn.moves.CombineMove` and :class:`GlobalFitMove`
+    lets a sequence of moves share rank/GPU state and likelihood-comparison
+    cadence with the rest of the global fit.
+    """
+
     update_comm_special = True

@@ -1,3 +1,5 @@
+"""EMRI waveform classes wrapping ``few``'s :class:`GenerateEMRIWaveform` with the LISA TDI response."""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -79,10 +81,19 @@ class EMRITDIWaveform(AETTDIWaveform):
 
     @property
     def dt(self) -> float:
-        """timestep"""
+        """Timestep in seconds."""
         return self.response.dt
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Generate the EMRI TDI waveform by delegating to the wrapped response.
+
+        Args:
+            *args: Positional arguments forwarded to :meth:`ResponseWrapper.__call__`.
+            **kwargs: Keyword arguments forwarded to :meth:`ResponseWrapper.__call__`.
+
+        Returns:
+            The output of the underlying :class:`ResponseWrapper` call (TDI channels).
+        """
         __doc__ = ResponseWrapper.__call__.__doc__
         try:
             return self.response(*args, **kwargs)

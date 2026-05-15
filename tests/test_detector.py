@@ -1,3 +1,5 @@
+"""Tests for :mod:`lisatools.detector` orbit and geometry queries."""
+
 import numpy as np
 import time
 
@@ -18,7 +20,10 @@ from lisatools import detector as lisa
 import sys
 
 class DetectorTest(unittest.TestCase):
+    """Sanity checks for :class:`lisatools.detector.DefaultOrbits`."""
+
     def test_orbits(self):
+        """Verify normal vectors, light travel times, and positions are finite over a year."""
         xp = cp if gpu_available else np
         force_backend = "cpu" if not gpu_available else "cuda12x"
         orbits = lisa.DefaultOrbits(force_backend=force_backend)
