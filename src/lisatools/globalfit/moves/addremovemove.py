@@ -848,7 +848,8 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         # Release waveform GPU arrays (signal_out) held by likelihood_args_per_split.
         # synchronize() inside compute_signal_likelihood cannot free them because this
         # local variable is still alive at that point.
-        # del likelihood_args_per_split
+        del likelihood_args_per_split
+        self.free_gpu_memory()
 
         likelihoods = np.where(np.isfinite(likelihoods), likelihoods, -1e300)
         return likelihoods
