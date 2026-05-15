@@ -570,7 +570,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.acs.likelihood()
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
-        self.free_gpu_memory()
         
         # TODO: add check with last used logl
 
@@ -601,8 +600,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplimental)
         # breakpoint()
         new_state.log_like[:] = (
-            self.acs.likelihood()
+            current_ll #self.acs.likelihood()
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+
+        self.free_gpu_memory()
 
         # assert np.abs(new_state.log_like[0] - self.acs.get_ll(include_psd_info=True)).max() < 1e-4
         # breakpoint()
@@ -845,10 +846,12 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
             run_threaded=self.run_threaded,
         )
 
-        # Release waveform GPU arrays (signal_out) held by likelihood_args_per_split.
-        # synchronize() inside compute_signal_likelihood cannot free them because this
-        # local variable is still alive at that point.
-        del likelihood_args_per_split
+        # Release GPU arrays before freeing the pool.
+        # waveform_args_per_split / data_intra_index_per_split are small coord arrays
+        # from place_on_device/make_args_tuple; likelihood_args_per_split holds the
+        # large template arrays.  All must be dereferenced before free_all_blocks() so
+        # those blocks are actually returned to CUDA rather than staying "owned" in the pool.
+        del likelihood_args_per_split, waveform_args_per_split, data_intra_index_per_split
         self.free_gpu_memory()
 
         likelihoods = np.where(np.isfinite(likelihoods), likelihoods, -1e300)
