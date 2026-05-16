@@ -21,7 +21,10 @@ from scipy import stats
 from ... import sensitivity
 from ...detector import sangria
 from ...utils.constants import *
-from ...analysiscontainer import AnalysisContainerArray
+from ...analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ...datacontainer import DataResidualArray
+from ...domains import DomainSettingsBase, FDSettings, WDMSettings
+from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
 from ..galaxyglobal import fit_each_leaf, make_gmm, run_gb_bulk_search
 from .globalfitmove import GFCombineMove, GlobalFitMove
@@ -407,6 +410,7 @@ class Buffer(LISAToolsParallelModule):
         opt_snr_rej_samp_limit=5.0,
         force_backend="gpu",
         use_template_arr=False,
+        basis_settings: Optional[DomainSettingsBase] = None,
         *args,
         **kwargs,
     ):
@@ -444,39 +448,236 @@ class Buffer(LISAToolsParallelModule):
         self.tdi_channel_setup = self.waveform_kwargs.get("tdi_channel_setup")
         if self.tdi_channel_setup == "XYZ":
             assert self.nchannels == 3
-            self.psd_shape = (self.num_bands_now, self.nchannels, self.nchannels, self.data_length)
-            psd_size = self.num_bands_now * self.nchannels * self.nchannels * self.data_length
         else:
             assert "A" in self.tdi_channel_setup and "E" in self.tdi_channel_setup
             print("WARNING: using AE(T) channels where we assume ortogonality. This may not be sufficient for realistic orbtis.")
-            self.psd_shape = (self.num_bands_now, self.nchannels, self.data_length)
-            psd_size = self.num_bands_now * self.nchannels * self.data_length
-        
-        self.band_buffer_tmp = cp.zeros(
-            (self.num_bands_now * self.nchannels * self.data_length), dtype=self.xp.complex128
-        )
 
-        self.psd_buffer_tmp = cp.zeros(psd_size, dtype=self.xp.complex128)
+        # Resolve the parent basis-domain settings. Defaults to an FD grid
+        # consistent with the legacy Buffer behavior (data_length bins on the
+        # parent's df). When invoked via BandSorter.get_buffer, the parent
+        # AnalysisContainerArray's settings are forwarded so this Buffer can
+        # branch on the actual domain (FD vs WDM).
+        if basis_settings is None:
+            basis_settings = FDSettings(
+                N=self.data_length,
+                df=float(self.df) if not hasattr(self.df, "item") else self.df.item(),
+            )
+        self._basis_settings = basis_settings
 
-        # careful here with accessing memory
-        self.band_buffer = self.band_buffer_tmp.reshape(
-            (self.num_bands_now, self.nchannels, self.data_length)
-        )
-        self.psd_buffer = self.psd_buffer_tmp.reshape(self.psd_shape)
-        
+        # Build the per-band AnalysisContainerArrays. The actual shape, dtype,
+        # and per-band domain depend on basis_settings; see _build_band_aca().
+        self._acs_buffer = self._build_band_aca()
         if self.use_template_arr:
-            self.template_buffer_tmp = cp.zeros(
-                (self.num_bands_now * self.nchannels * self.data_length), dtype=self.xp.complex128
-            )
+            # Templates mirror the band-buffer layout in a second ACA so they
+            # share the same managed memory region. The per-band sensitivity
+            # slot on the template ACA is unused but keeps construction
+            # symmetric across the two buffers.
+            self._acs_template_buffer = self._build_band_aca()
 
-            self.template_buffer = self.template_buffer_tmp.reshape(
-                (self.num_bands_now, self.nchannels, self.data_length)
-            )
+        # psd_shape is exposed for back-compat with downstream consumers that
+        # inspect it; it tracks the shape of the per-band PSD view.
+        self.psd_shape = (self.num_bands_now,) + self._per_band_sens_shape
 
         # TODO: fix this 4????
         self.special_band_inds = special_band_inds
         assert special_band_inds.shape[0] == self.params_interest.shape[0]
         self.now_index = self.get_index(special_band_inds)
+
+    # ------------------------------------------------------------------
+    # Views into the AnalysisContainerArray-backed scratch buffers
+    # ------------------------------------------------------------------
+
+    @property
+    def acs_buffer(self) -> AnalysisContainerArray:
+        """Internal :class:`AnalysisContainerArray` backing the per-band residual buffers."""
+        return self._acs_buffer
+
+    @property
+    def band_buffer_tmp(self):
+        """Flat per-GPU residual buffer (1D view into the internal ACA)."""
+        return self._acs_buffer.linear_data_arr[0]
+
+    @property
+    def band_buffer(self):
+        """Per-band residual buffer reshaped to ``(num_bands_now, nchannels, data_length)``."""
+        return self._acs_buffer.data_shaped[0]
+
+    @property
+    def psd_buffer_tmp(self):
+        """Flat per-GPU inverse-PSD buffer (1D view into the internal ACA)."""
+        return self._acs_buffer.linear_psd_arr[0]
+
+    @property
+    def psd_buffer(self):
+        """Per-band inverse-PSD buffer reshaped to :attr:`psd_shape`."""
+        return self._acs_buffer.psd_shaped[0]
+
+    @property
+    def template_buffer_tmp(self):
+        """Flat per-GPU template buffer (only valid when ``use_template_arr`` is True)."""
+        return self._acs_template_buffer.linear_data_arr[0]
+
+    @property
+    def template_buffer(self):
+        """Per-band template buffer reshaped to ``(num_bands_now, nchannels, data_length)``."""
+        return self._acs_template_buffer.data_shaped[0]
+
+    # ------------------------------------------------------------------
+    # Domain-aware allocation helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def basis_settings(self) -> DomainSettingsBase:
+        """Parent basis-domain settings driving per-band buffer geometry."""
+        return self._basis_settings
+
+    @property
+    def _per_band_data_shape(self) -> tuple:
+        """Shape of a single band's residual buffer (one AC's data_res_arr)."""
+        if isinstance(self._basis_settings, FDSettings):
+            return (self.nchannels, self.data_length)
+        elif isinstance(self._basis_settings, WDMSettings):
+            # Per-band WDM buffer: data_length frequency layers across the
+            # full Nt time axis. Final layout TBD when GB WDM waveform lands.
+            return (self.nchannels, self.data_length, self._basis_settings.Nt)
+        else:
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
+    @property
+    def _per_band_sens_shape(self) -> tuple:
+        """Shape of a single band's inverse-PSD buffer (one AC's sens_mat.invC)."""
+        if isinstance(self._basis_settings, FDSettings):
+            if self.tdi_channel_setup == "XYZ":
+                return (self.nchannels, self.nchannels, self.data_length)
+            return (self.nchannels, self.data_length)
+        elif isinstance(self._basis_settings, WDMSettings):
+            Nt = self._basis_settings.Nt
+            if self.tdi_channel_setup == "XYZ":
+                return (self.nchannels, self.nchannels, self.data_length, Nt)
+            return (self.nchannels, self.data_length, Nt)
+        else:
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
+    @property
+    def _per_band_data_dtype(self):
+        """Element dtype for the per-band residual buffer."""
+        if isinstance(self._basis_settings, FDSettings):
+            return self.xp.complex128
+        elif isinstance(self._basis_settings, WDMSettings):
+            return self.xp.float64
+        else:
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
+    @property
+    def _per_band_sens_dtype(self):
+        """Element dtype for the per-band inverse-PSD buffer."""
+        if isinstance(self._basis_settings, FDSettings):
+            return self.xp.complex128
+        elif isinstance(self._basis_settings, WDMSettings):
+            return self.xp.float64
+        else:
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
+    def _build_per_band_basis_settings(self) -> DomainSettingsBase:
+        """Construct the per-band domain settings used by each per-band AC.
+
+        Each per-band AC's :class:`DataResidualArray` needs a domain-settings
+        object whose ``basis_shape_active`` matches the per-band data shape.
+        For FD this is a fresh FDSettings sized to ``data_length``. For WDM
+        the per-band geometry depends on the GB WDM waveform spec and is not
+        yet implemented; see :meth:`_build_wdm_band_aca`.
+        """
+        if isinstance(self._basis_settings, FDSettings):
+            return FDSettings(
+                N=self.data_length,
+                df=float(self.df) if not hasattr(self.df, "item") else self.df.item(),
+            )
+        elif isinstance(self._basis_settings, WDMSettings):
+            # TODO: build a per-band WDMSettings (sliced view of the parent
+            # grid covering data_length frequency layers). Final shape and
+            # masking convention pending the GB WDM waveform implementation.
+            raise NotImplementedError(
+                "Per-band WDMSettings construction is scaffolded but not yet "
+                "implemented. Pending the GB WDM waveform spec."
+            )
+        else:
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
+    def _build_band_aca(self) -> AnalysisContainerArray:
+        """Allocate one :class:`AnalysisContainer` per band, wrapped in an ACA.
+
+        Branches on the parent basis domain. The FD path is the active code
+        path used by the GB special moves today. The WDM path is intentionally
+        left as a NotImplementedError so that the failure surfaces at
+        construction time once a WDM basis is supplied — the GB WDM template
+        generator must land first.
+        """
+        if isinstance(self._basis_settings, FDSettings):
+            return self._build_fd_band_aca()
+        elif isinstance(self._basis_settings, WDMSettings):
+            return self._build_wdm_band_aca()
+        else:
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
+    def _build_fd_band_aca(self) -> AnalysisContainerArray:
+        """FD path: one AC per band, each holding an FD residual buffer of
+        shape ``(nchannels, data_length)`` and a complex inverse-PSD."""
+        per_band_settings = self._build_per_band_basis_settings()
+        data_shape = self._per_band_data_shape
+        sens_shape = self._per_band_sens_shape
+        data_dtype = self._per_band_data_dtype
+        sens_dtype = self._per_band_sens_dtype
+
+        ac_list = []
+        for _ in range(self.num_bands_now):
+            res_data = cp.zeros(data_shape, dtype=data_dtype)
+            data_res_arr = DataResidualArray(
+                res_data,
+                signal_domain=per_band_settings,
+                input_signal_domain=per_band_settings,
+            )
+            sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
+            sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
+            sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
+            sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
+            ac_list.append(AnalysisContainer(data_res_arr, sm))
+
+        return AnalysisContainerArray(
+            ac_list,
+            gpus=[self.gb.gpus[0]],
+            complex_psd=True,
+        )
+
+    def _build_wdm_band_aca(self) -> AnalysisContainerArray:
+        """WDM path: scaffolded but not active.
+
+        When the GB WDM waveform generator lands, this method should mirror
+        :meth:`_build_fd_band_aca` but with WDM-shaped buffers (real-valued,
+        ``(nchannels, Nf_band, Nt)`` per band) and a per-band WDMSettings
+        sliced from the parent grid. The matching changes also need to be
+        made in :meth:`_get_fill_buffer_ind_map` (slice along the frequency
+        layer axis instead of frequency bins) and
+        :meth:`adjust_sources_in_band_buffer` (call the WDM template
+        generator).
+        """
+        raise NotImplementedError(
+            "WDM band-buffer allocation is scaffolded but not yet implemented. "
+            "Implement once the gbgpu WDM template generator is available; the "
+            "infrastructure (domain detection, per-band shape/dtype properties, "
+            "and branching in fill/waveform paths) is already in place."
+        )
 
     def update_special_indices(self, new_special_indices, inds_fill=None):
         if inds_fill is None:
@@ -795,41 +996,54 @@ class Buffer(LISAToolsParallelModule):
     def _get_fill_buffer_ind_map(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None, is_psd: bool = False
     ) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
-        
+
+        if isinstance(self._basis_settings, WDMSettings):
+            # TODO: implement WDM fill index map. Index along the frequency
+            # layer axis instead of the FD bin axis; the time axis (Nt) is
+            # taken in full from the parent ACA. Pending the GB WDM waveform.
+            raise NotImplementedError(
+                "WDM fill index map is scaffolded but not yet implemented. "
+                "Pending the gbgpu WDM template generator."
+            )
+        if not isinstance(self._basis_settings, FDSettings):
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
+
         if inds_fill is None:
             inds_fill = cp.arange(self.num_bands_now)
 
         assert np.all(acs.start_freq_ind[0] == acs.start_freq_ind)
         start_freq_ind = acs.start_freq_ind[0]
-        
+
         try:
             assert np.all((self.buffer_start_index[inds_fill] - start_freq_ind) >= 0)
         except AssertionError:
             breakpoint()
-            
+
         assert np.all(
             (self.buffer_start_index[inds_fill] - start_freq_ind + self.data_length)
             <= acs.data_length
         )
-        
+
         start_inds = self.buffer_start_index[inds_fill] - start_freq_ind
-        
+
         if is_psd and self.tdi_channel_setup == "XYZ":
             # Target output shape: (len(inds_fill), self.nchannels, self.nchannels, self.band_buffer.shape[-1])
             inds1 = (
-                self.unique_band_combos[inds_fill, 1][:, None, None, None] 
-                * self.nchannels 
+                self.unique_band_combos[inds_fill, 1][:, None, None, None]
+                * self.nchannels
                 + cp.arange(self.nchannels)[None, :, None, None]
             )
             inds2 = cp.arange(self.nchannels)[None, None, :, None]
             inds3 = start_inds[:, None, None, None] + cp.arange(self.band_buffer.shape[-1])[None, None, None, :]
-            
+
         else:
             # Target output shape: (len(inds_fill), self.nchannels, self.band_buffer.shape[-1])
             inds1 = self.unique_band_combos[inds_fill, 1][:, None, None]
             inds2 = cp.arange(self.nchannels)[None, :, None]
             inds3 = start_inds[:, None, None] + cp.arange(self.band_buffer.shape[-1])[None, None, :]
-            
+
         return inds1, inds2, inds3
 
     def remove_sources_from_template_buffer(self, *args, **kwargs) -> None:
@@ -843,6 +1057,20 @@ class Buffer(LISAToolsParallelModule):
     ) -> None:
 
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
+
+        if isinstance(self._basis_settings, WDMSettings):
+            # TODO: drop in the WDM GB template generator here. Should write
+            # into ``input_array`` (the per-GPU flat WDM band buffer) and
+            # respect the per-band frequency-layer offsets in
+            # ``self.start_freq_inds``. Pending the gbgpu WDM waveform.
+            raise NotImplementedError(
+                "WDM template generation is scaffolded but not yet implemented. "
+                "Pending the gbgpu WDM template generator."
+            )
+        if not isinstance(self._basis_settings, FDSettings):
+            raise NotImplementedError(
+                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
+            )
 
         # inject current sources into buffers
 
@@ -1251,6 +1479,7 @@ class BandSorter(LISAToolsParallelModule):
                 sources_now_map,
                 sources_inject_now_map,
                 self.main_band_sorter.special_band_inds[sources_now_map],
+                basis_settings=acs.settings,
                 **kwargs,
             )
 

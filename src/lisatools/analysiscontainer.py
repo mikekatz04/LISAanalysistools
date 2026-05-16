@@ -690,8 +690,6 @@ class AnalysisContainerArray:
             self.data_dtype = complex
 
         self.noise_dtype = float if not complex_psd else complex
-        if complex_psd:
-            raise NotImplementedError
             
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory

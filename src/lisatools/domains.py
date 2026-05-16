@@ -2247,7 +2247,8 @@ class WDMLookupTable(WDMSettings):
             _fdot_vals = self.xp.zeros_like(_f_vals)
 
         t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
-
+        t_vals_wdm = self.sub_settings.t_arr
+        t_diff_wdm = t_vals_wdm - self.t_ref
         t_diff = t_vals - self.t_ref
 
         if batch_size_gen == -1:
@@ -2268,26 +2269,37 @@ class WDMLookupTable(WDMSettings):
         for st_batch, end_batch in zip(batches[:-1], batches[1:]):
             inds = np.arange(st_batch, end_batch)
             
-            # if not self.xp.allclose(_f_vals[inds] - (self.f_ref + 0 * self.layer_df), 0.0) or not _fdot_vals[inds][0] == 0.0:  # -3.257427471431767e-11:
-            #     continue
-            wave_sin = self.xp.sin(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
-            wave_cos = self.xp.cos(2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2))
+            phase = 2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2)
+            wave_sin = self.xp.sin(phase)
+            wave_cos = self.xp.cos(phase)
             
             wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
             wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
         
+            # shape (Nt, len(inds)) to match _sin_coeff_1 / _cos_coeff_1 below
+            phase_n = 2 * np.pi * (_f_vals[None, inds] * t_diff_wdm[:, None] + 1. / 2. * _fdot_vals[None, inds] * t_diff_wdm[:, None] ** 2)
+            
             n_current = self.xp.arange(self.Nt)
             for m_i, m_diff in enumerate(m_diffs):
                 m_current = self.m_ref + m_diff
-                _sin_coeff = wave_sin_wdm[:, self.m_ref - m_diff, :].T
-                _cos_coeff = wave_cos_wdm[:, self.m_ref - m_diff, :].T
+                _sin_coeff_1 = wave_sin_wdm[:, self.m_ref - m_diff, :].T
+                _cos_coeff_1 = wave_cos_wdm[:, self.m_ref - m_diff, :].T
 
+                # Clean rotation of the complex value (c1 + i*s1) by exp(-i*phase_n):
+                # M_rot = (c1 + i s1) * exp(-i theta) where theta = phase_n.
+                # → Re(M_rot) = c1*cos(theta) + s1*sin(theta)
+                # → Im(M_rot) = -c1*sin(theta) + s1*cos(theta)
+                # Using θ→-phase_n: cos(-θ)=cos(θ), sin(-θ)=-sin(θ).
+                _cos_coeff = _cos_coeff_1 * np.cos(-phase_n)  - _sin_coeff_1 * np.sin(-phase_n)
+                _sin_coeff = _cos_coeff_1 * np.sin(-phase_n)  + _sin_coeff_1 * np.cos(-phase_n)
+                
                 _f_norm = _f_vals[inds] - (self.m_ref - m_diff) * self.layer_df
 
                 is_odd = ((m_current + n_current) % 2 == 1)[:, None]
                 # switch odd numbered pixels
                 sin_coeff = _sin_coeff * (~is_odd) + _cos_coeff * (is_odd)
                 cos_coeff = _sin_coeff * (is_odd) + _cos_coeff * (~is_odd)
+
                 try:
                     _table_sin[:, m_i, inds] = sin_coeff
                     _table_cos[:, m_i, inds] = cos_coeff
@@ -2480,19 +2492,21 @@ class WDMLookupTable(WDMSettings):
             sin_coeffs = self.xp.zeros_like(_sin_coeffs)
             cos_coeffs = self.xp.zeros_like(_cos_coeffs)
             
+            # Parity rules: the build pre-applied an (m+n)-parity swap to the table
+            # (sin/cos columns are swapped where (m+n) is odd), so cases 2 and 3 below
+            # naturally produce wdm = amp * (_cos_coeff*sin(phi) + _sin_coeff*cos(phi)).
+            # Cases 1 and 4 (where the original code had an extra negation) need to
+            # give the same form so all four branches yield a consistent formula.
             sin_coeffs[~is_m_plus_n_even & is_m_even] = _sin_coeffs[~is_m_plus_n_even & is_m_even]
-            cos_coeffs[~is_m_plus_n_even & is_m_even] = -_cos_coeffs[~is_m_plus_n_even & is_m_even]
+            cos_coeffs[~is_m_plus_n_even & is_m_even] = _cos_coeffs[~is_m_plus_n_even & is_m_even]
 
             sin_coeffs[~is_m_plus_n_even & ~is_m_even] = _sin_coeffs[~is_m_plus_n_even & ~is_m_even]
             cos_coeffs[~is_m_plus_n_even & ~is_m_even] = _cos_coeffs[~is_m_plus_n_even & ~is_m_even]
 
-            # if np.any(np.abs(_sin_coeffs) > 1e-3):
-            #     breakpoint()
-                
             sin_coeffs[is_m_plus_n_even & is_m_even] = _cos_coeffs[is_m_plus_n_even & is_m_even]
             cos_coeffs[is_m_plus_n_even & is_m_even] = _sin_coeffs[is_m_plus_n_even & is_m_even]
 
-            sin_coeffs[is_m_plus_n_even & ~is_m_even] = -_cos_coeffs[is_m_plus_n_even & ~is_m_even]
+            sin_coeffs[is_m_plus_n_even & ~is_m_even] = _cos_coeffs[is_m_plus_n_even & ~is_m_even]
             cos_coeffs[is_m_plus_n_even & ~is_m_even] = _sin_coeffs[is_m_plus_n_even & ~is_m_even]
 
             # keep1 = (~is_m_plus_n_even & ~is_m_odd)
