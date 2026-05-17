@@ -3,7 +3,10 @@
 import typing as tp
 from copy import deepcopy
 
-import cupy as cp
+try:
+    import cupy as cp
+except ModuleNotFoundError:
+    import numpy as cp
 import numpy as np
 
 from ..detector import EqualArmlengthOrbits, LISAModel, Orbits, sangria

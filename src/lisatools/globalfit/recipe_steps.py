@@ -6,7 +6,10 @@ import typing
 from copy import deepcopy
 
 import numpy as np
-import cupy as cp
+try:
+    import cupy as cp
+except ModuleNotFoundError:
+    import numpy as cp
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
@@ -615,6 +618,11 @@ def build_gb_moves(
         random_seed=general_info.random_seed,
         force_backend=general_info.gpu_backend,
         nfriends=nwalkers,
+        # gb_wdm_comp is None for the FD path (default) and a
+        # GBWDMComputations instance for the WDM path. The move's Buffer
+        # then dispatches on the AC's DomainSettings to pick the right
+        # likelihood engine -- no string-level mode flag.
+        gb_wdm_comp=gb_info.gb_wdm_comp,
         **gb_info.group_proposal_kwargs
     )
 

@@ -27,6 +27,13 @@ from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
 from ..galaxyglobal import fit_each_leaf, make_gmm, run_gb_bulk_search
+from ._gb_likelihood import (
+    BandLikelihoodEngine,
+    FDBandLikelihoodEngine,
+    SwapLLResult,
+    WDMBandLikelihoodEngine,
+    make_band_likelihood_engine,
+)
 from .globalfitmove import GFCombineMove, GlobalFitMove
 
 # -*- coding: utf-8 -*-
@@ -54,6 +61,20 @@ from ...utils.utility import get_array_module, get_groups_from_band_structure, s
 from ..state import GFState
 
 __all__ = ["GBSpecialStretchMove"]
+
+
+class _NoOpMempool:
+    """CPU stand-in for ``cupy.get_default_memory_pool()`` — calls become no-ops."""
+
+    def free_all_blocks(self):
+        return
+
+
+def _to_numpy(arr):
+    """Cupy/numpy-agnostic ``.get()``: returns a numpy view."""
+    if hasattr(arr, "get"):
+        return arr.get()
+    return np.asarray(arr)
 
 
 def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
@@ -411,6 +432,7 @@ class Buffer(LISAToolsParallelModule):
         force_backend="gpu",
         use_template_arr=False,
         basis_settings: Optional[DomainSettingsBase] = None,
+        gb_wdm_comp=None,
         *args,
         **kwargs,
     ):
@@ -418,6 +440,9 @@ class Buffer(LISAToolsParallelModule):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         assert self.backend.name.split("_")[-1] == gb.backend.name.split("_")[-1]
         self.gb = gb
+        # WDM-domain likelihood object (a fastlisaresponse.GBWDMComputations).
+        # Required when ``basis_settings`` is a WDMSettings, ignored otherwise.
+        self.gb_wdm_comp = gb_wdm_comp
         self.df = df
         self.nwalkers = nwalkers
         self.sources_now_map, self.sources_inject_now_map = (
@@ -478,6 +503,23 @@ class Buffer(LISAToolsParallelModule):
         # inspect it; it tracks the shape of the per-band PSD view.
         self.psd_shape = (self.num_bands_now,) + self._per_band_sens_shape
 
+        # Build the domain-aware likelihood engine. Dispatch is on
+        # ``isinstance(basis_settings, ...)`` -- no string-level mode flag.
+        # The engine takes an AnalysisContainerArray at call time, so the
+        # Buffer's get_swap_ll / get_ll / adjust_sources_in_band_buffer
+        # methods don't reach into self.gb (or self.gb_wdm_comp) directly.
+        self._likelihood_engine = make_band_likelihood_engine(
+            self._basis_settings,
+            gb=self.gb,
+            gb_wdm_comp=self.gb_wdm_comp,
+            nchannels=self.nchannels,
+            tdi_channel_setup=self.tdi_channel_setup,
+            df=float(self.df) if not hasattr(self.df, "item") else self.df.item(),
+            start_freq_inds=getattr(self, "start_freq_inds", None),
+            data_length=self.data_length,
+            opt_snr_rej_samp_limit=self.opt_snr_rej_samp_limit,
+        )
+
         # TODO: fix this 4????
         self.special_band_inds = special_band_inds
         assert special_band_inds.shape[0] == self.params_interest.shape[0]
@@ -537,9 +579,15 @@ class Buffer(LISAToolsParallelModule):
         if isinstance(self._basis_settings, FDSettings):
             return (self.nchannels, self.data_length)
         elif isinstance(self._basis_settings, WDMSettings):
-            # Per-band WDM buffer: data_length frequency layers across the
-            # full Nt time axis. Final layout TBD when GB WDM waveform lands.
-            return (self.nchannels, self.data_length, self._basis_settings.Nt)
+            # First-cut: each per-band buffer covers the FULL WDM active grid
+            # (Nf_active layers x Nt_active time pixels). The lisa-on-gpu WDM
+            # kernel currently uses a single global [ind_min_f, ind_max_f]
+            # rather than per-band offsets, so per-band slicing on the layer
+            # axis is a follow-on once the kernel takes per-band layer
+            # offsets. data_length is unused on the WDM path.
+            Nf_active = self._basis_settings.Nf_active
+            Nt_active = self._basis_settings.Nt_active
+            return (self.nchannels, Nf_active, Nt_active)
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -553,10 +601,11 @@ class Buffer(LISAToolsParallelModule):
                 return (self.nchannels, self.nchannels, self.data_length)
             return (self.nchannels, self.data_length)
         elif isinstance(self._basis_settings, WDMSettings):
-            Nt = self._basis_settings.Nt
+            Nf_active = self._basis_settings.Nf_active
+            Nt_active = self._basis_settings.Nt_active
             if self.tdi_channel_setup == "XYZ":
-                return (self.nchannels, self.nchannels, self.data_length, Nt)
-            return (self.nchannels, self.data_length, Nt)
+                return (self.nchannels, self.nchannels, Nf_active, Nt_active)
+            return (self.nchannels, Nf_active, Nt_active)
         else:
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -599,14 +648,26 @@ class Buffer(LISAToolsParallelModule):
             return FDSettings(
                 N=self.data_length,
                 df=float(self.df) if not hasattr(self.df, "item") else self.df.item(),
+                force_backend=self._basis_settings.backend_name.split("_", 1)[1],
             )
         elif isinstance(self._basis_settings, WDMSettings):
-            # TODO: build a per-band WDMSettings (sliced view of the parent
-            # grid covering data_length frequency layers). Final shape and
-            # masking convention pending the GB WDM waveform implementation.
-            raise NotImplementedError(
-                "Per-band WDMSettings construction is scaffolded but not yet "
-                "implemented. Pending the GB WDM waveform spec."
+            # First-cut: per-band WDMSettings matches the parent grid (full
+            # WDM active band). A true per-band sliced WDMSettings becomes
+            # possible once the lisa-on-gpu WDM kernel takes per-band
+            # [ind_min_f, ind_max_f] arrays; until then we share the parent.
+            parent = self._basis_settings
+            return WDMSettings(
+                Nf=parent.Nf,
+                Nt=parent.Nt,
+                dt=parent.data_dt,
+                t0=parent.t0,
+                oversample=parent.oversample,
+                window=parent.window,
+                omega=parent.omega,
+                min_freq=parent.ind_min_f * parent.layer_df,
+                max_freq=parent.ind_max_f * parent.layer_df,
+                min_time=parent.ind_min_t * parent.layer_dt,
+                max_time=parent.ind_max_t * parent.layer_dt,
             )
         else:
             raise NotImplementedError(
@@ -654,29 +715,52 @@ class Buffer(LISAToolsParallelModule):
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
             ac_list.append(AnalysisContainer(data_res_arr, sm))
 
+        gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
         return AnalysisContainerArray(
             ac_list,
-            gpus=[self.gb.gpus[0]],
+            gpus=[gpus_in[0]] if gpus_in else None,
             complex_psd=True,
         )
 
     def _build_wdm_band_aca(self) -> AnalysisContainerArray:
-        """WDM path: scaffolded but not active.
+        """WDM path: one AC per band, each holding a real-valued WDM buffer.
 
-        When the GB WDM waveform generator lands, this method should mirror
-        :meth:`_build_fd_band_aca` but with WDM-shaped buffers (real-valued,
-        ``(nchannels, Nf_band, Nt)`` per band) and a per-band WDMSettings
-        sliced from the parent grid. The matching changes also need to be
-        made in :meth:`_get_fill_buffer_ind_map` (slice along the frequency
-        layer axis instead of frequency bins) and
-        :meth:`adjust_sources_in_band_buffer` (call the WDM template
-        generator).
+        Mirrors :meth:`_build_fd_band_aca`. Per-band data shape is
+        ``(nchannels, Nf_active, Nt_active)``; per-band PSD shape is the same
+        (or ``(nchannels, nchannels, Nf_active, Nt_active)`` for XYZ, which
+        carries the full inverse covariance the WDM kernel's
+        ``get_pixel_noise_value_cross_channel`` consumes).
+
+        First-cut: each per-band buffer covers the full WDM active grid. The
+        lisa-on-gpu WDM kernel currently uses a single ``[ind_min_f, ind_max_f]``
+        from the WDM lookup table rather than per-band offsets, so a true
+        per-band layer slicing optimisation is a follow-on once that kernel
+        takes per-band offsets.
         """
-        raise NotImplementedError(
-            "WDM band-buffer allocation is scaffolded but not yet implemented. "
-            "Implement once the gbgpu WDM template generator is available; the "
-            "infrastructure (domain detection, per-band shape/dtype properties, "
-            "and branching in fill/waveform paths) is already in place."
+        per_band_settings = self._build_per_band_basis_settings()
+        data_shape = self._per_band_data_shape
+        sens_shape = self._per_band_sens_shape
+        data_dtype = self._per_band_data_dtype
+        sens_dtype = self._per_band_sens_dtype
+
+        ac_list = []
+        for _ in range(self.num_bands_now):
+            res_data = cp.zeros(data_shape, dtype=data_dtype)
+            data_res_arr = DataResidualArray(
+                res_data,
+                signal_domain=per_band_settings,
+                input_signal_domain=per_band_settings,
+            )
+            sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
+            sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
+            sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
+            sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
+            ac_list.append(AnalysisContainer(data_res_arr, sm))
+
+        return AnalysisContainerArray(
+            ac_list,
+            gpus=[self.gb.gpus[0]],
+            complex_psd=False,
         )
 
     def update_special_indices(self, new_special_indices, inds_fill=None):
@@ -785,171 +869,69 @@ class Buffer(LISAToolsParallelModule):
     
 
     def get_swap_ll(self, params_remove, params_add, data_index, N_vals, phase_maximize=False):
+        """Per-proposal swap log-likelihood difference.
 
-        params_remove_in = self.transform_fn.both_transforms(params_remove, xp=cp)
+        Domain-agnostic: dispatches to ``self._likelihood_engine.get_swap_ll``,
+        which is either :class:`FDBandLikelihoodEngine` or
+        :class:`WDMBandLikelihoodEngine` depending on the Buffer's
+        ``basis_settings``. Both engines take the per-band ACA
+        (:attr:`acs_buffer`) and the physical params, and return a
+        :class:`SwapLLResult`. The rejection-sampling clamp and the
+        phase-maximisation correction live here so the engine stays a thin
+        wrapper around the kernel.
+        """
+        params_remove_phys = self.transform_fn.both_transforms(params_remove, xp=cp)
+        params_add_phys = self.transform_fn.both_transforms(params_add, xp=cp)
 
-        params_add_in = self.transform_fn.both_transforms(params_add, xp=cp)
-
-        # print("NEED TO CHECK THIS")
-        # TODO: add inplace (would need to add information for accept/reject)
-        # with buffer need to not be in kwargs
-        wave_kwargs_tmp = self.waveform_kwargs.copy()
-        if "start_freq_ind" in wave_kwargs_tmp:
-            wave_kwargs_tmp.pop("start_freq_ind")
-
-        # check for out-of-bound error when frequency indexing
-        # if np.any((params_add_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] + (N_vals / 2) >  self.band_buffer.shape[-1]):
-        #     breakpoint()
-        # if np.any((params_remove_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] + (N_vals / 2) >  self.band_buffer.shape[-1]):
-        #     breakpoint()
-        # if np.any((params_add_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] - (N_vals / 2) < 0):
-        #     breakpoint()
-        # if np.any((params_remove_in[:, 1] / self.df).astype(int) - self.start_freq_inds[data_index] - (N_vals / 2) < 0):
-        #     breakpoint()
-
-        # q_remove = cp.rint(params_remove_in[:,1] / self.df).astype(int)
-        # q_add = cp.rint(params_add_in[:,1] / self.df).astype(int)
-            
-        # keep = ~(
-        #     (
-        #         q_remove - self.start_freq_inds[data_index] - (N_vals / 2) < 0
-        #     )
-        #     | (
-        #         q_add - self.start_freq_inds[data_index] - (N_vals / 2) < 0
-        #     )
-        #     | ( # TODO check if the change from > to >= is valid
-        #         q_remove - self.start_freq_inds[data_index] + (N_vals / 2) >= self.band_buffer.shape[-1]
-        #     )
-        #     | (
-        #         q_add - self.start_freq_inds[data_index] + (N_vals / 2) >= self.band_buffer.shape[-1]
-        #     )
-        # )
-        keep = ~(
-            (
-                (params_remove_in[:, 1] / self.df).astype(int)
-                - self.start_freq_inds[data_index]
-                - (N_vals / 2)
-                < 0
-            )
-            | (
-                (params_add_in[:, 1] / self.df).astype(int)
-                - self.start_freq_inds[data_index]
-                - (N_vals / 2)
-                < 0
-            )
-            | (
-                (params_remove_in[:, 1] / self.df).astype(int)
-                - self.start_freq_inds[data_index]
-                + (N_vals / 2)
-                > self.band_buffer.shape[-1]
-            )
-            | (
-                (params_add_in[:, 1] / self.df).astype(int)
-                - self.start_freq_inds[data_index]
-                + (N_vals / 2)
-                > self.band_buffer.shape[-1]
-            )
+        result = self._likelihood_engine.get_swap_ll(
+            self.acs_buffer,
+            params_remove_phys,
+            params_add_phys,
+            data_index=data_index,
+            noise_index=data_index,
+            N_vals=N_vals,
+            phase_marginalize=phase_maximize,
+            waveform_kwargs=self.waveform_kwargs,
         )
 
-        params_remove_in_keep = params_remove_in[keep]
-        params_add_in_keep = params_add_in[keep]
-        data_index_keep = data_index[keep]
-        N_vals_keep = N_vals[keep]
+        ll_diff = result.ll_diff
+        kept = result.kept
 
-        if np.any(~keep):
-            print(f"NOT KEEPING: {(~keep).sum()}")
+        if np.any(~kept):
+            print(f"NOT KEEPING: {(~kept).sum()}")
 
-        ll_diff = cp.full(keep.shape[0], -1e300)
-        ll_diff[keep] = cp.asarray(
-            self.gb.swap_likelihood_difference(
-                params_remove_in_keep,
-                params_add_in_keep,
-                self.band_buffer_tmp,
-                self.psd_buffer_tmp,
-                start_freq_ind=self.start_freq_inds,
-                data_index=data_index_keep,
-                noise_index=data_index_keep,
-                adjust_inplace=False,
-                N=N_vals_keep,
-                data_length=self.band_buffer.shape[-1],
-                data_splits=np.full(self.band_buffer.shape[0], self.gb.gpus[0]),
-                phase_marginalize=phase_maximize,
-                return_cupy=True,
-                **wave_kwargs_tmp,
-            )
+        if phase_maximize and result.phase_angle is not None:
+            # Engine returns the per-proposal phase rotation applied during
+            # phase-maximisation; subtract it from phi0 so the accepted
+            # parameters reflect the maximised draw.
+            params_add[kept, 3] = params_add[kept, 3] - result.phase_angle
+
+        # Rejection sampling on SNR: only applied to *add* proposals (the
+        # remove side's opt_snr is meaningless when amp_add is tiny).
+        reject = self.xp.zeros(kept.shape[0], dtype=bool)
+        reject[kept] = (result.opt_snr_add[kept] < self.opt_snr_rej_samp_limit) & (
+            params_add_phys[kept, 0] > 1e-30
         )
-
-        if phase_maximize:
-            params_add[keep, 3] = params_add[keep, 3] - self.gb.phase_angle
-
-        # rejection sampling on SNR
-        opt_snr = (self.gb.add_add.real ** (1 / 2)).copy()
-
-        # params_add_in = self.transform_fn.both_transforms(
-        #     params_add, xp=cp
-        # )
-        # ll_4 = cp.asarray(self.gb.get_ll(
-        #     params_add_in,
-        #     self.band_buffer_tmp,
-        #     self.psd_buffer_tmp,
-        #     start_freq_ind=self.start_freq_inds,
-        #     data_index=data_index,
-        #     noise_index=data_index,
-        #     N=N_vals,
-        #     data_length=self.band_buffer.shape[-1],
-        #     data_splits=np.full(self.band_buffer.shape[0], self.gb.gpus[0]),
-        #     phase_marginalize=False,  # phase_maximize,
-        #     return_cupy=True,
-        #     **wave_kwargs_tmp,
-        # ))
-        # # breakpoint()
-
-        # data_index_tmp = self.xp.zeros(params_remove_in.shape[0], dtype=np.int32)
-
-        # ll_diff_2 = cp.asarray(self.gb.swap_likelihood_difference(
-        #     params_remove_in,
-        #     params_add_in,
-        #     self.acs.linear_data_arr,
-        #     self.acs.linear_psd_arr,
-        #     start_freq_ind=self.xp.asarray(self.acs.start_freq_ind).astype(np.int32),
-        #     data_index=data_index_tmp,
-        #     noise_index=data_index_tmp,
-        #     adjust_inplace=False,
-        #     N=N_vals,
-        #     data_length=self.acs.data_length,
-        #     data_splits=self.acs.gpu_map,
-        #     phase_marginalize=phase_maximize,
-        #     return_cupy=True,
-        #     **wave_kwargs_tmp,
-        # ))
-
-        # breakpoint()
-        # ll_3 = cp.asarray(self.gb.get_ll(
-        #     params_add_in,
-        #     self.acs.linear_data_arr,
-        #     self.acs.linear_psd_arr,
-        #     start_freq_ind=self.xp.asarray(self.acs.start_freq_ind).astype(np.int32),
-        #     data_index=data_index_tmp,
-        #     noise_index=data_index_tmp,
-        #     N=N_vals,
-        #     data_length=self.acs.data_length,
-        #     data_splits=self.acs.gpu_map,
-        #     phase_marginalize=phase_maximize,
-        #     return_cupy=True,
-        #     **wave_kwargs_tmp,
-        # ))
-        # breakpoint()
-        # # rejection sampling on SNR
-        # opt_snr_2 = self.gb.add_add.real ** (1/2)
-
-        # TODO: change limit
-        # reject sample only for adding, not removing
-        # when removing this opt_snr will be very small due to amp_add being super small
-        reject = self.xp.zeros(keep.shape[0], dtype=bool)
-        reject[keep] = (opt_snr < self.opt_snr_rej_samp_limit) & (params_add_in[keep, 0] > 1e-30)
         ll_diff[reject] = -1e300
 
         return ll_diff
+
+    def get_ll(self, params, data_index, noise_index, N_vals):
+        """Per-source log-likelihood = -0.5 * (h_h - 2 d_h).
+
+        Domain-agnostic dispatch like :meth:`get_swap_ll`. Returns the
+        ``(d_h, h_h)`` inner products on the engine's xp module so callers
+        can compute their preferred likelihood form.
+        """
+        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        return self._likelihood_engine.get_ll(
+            self.acs_buffer,
+            params_phys,
+            data_index=data_index,
+            noise_index=noise_index,
+            N_vals=N_vals,
+            waveform_kwargs=self.waveform_kwargs,
+        )
 
     def reset_residual_buffers(self, inds_fill=None):
         if inds_fill is None:
@@ -998,13 +980,35 @@ class Buffer(LISAToolsParallelModule):
     ) -> Tuple[cp.ndarray, cp.ndarray, cp.ndarray]:
 
         if isinstance(self._basis_settings, WDMSettings):
-            # TODO: implement WDM fill index map. Index along the frequency
-            # layer axis instead of the FD bin axis; the time axis (Nt) is
-            # taken in full from the parent ACA. Pending the GB WDM waveform.
-            raise NotImplementedError(
-                "WDM fill index map is scaffolded but not yet implemented. "
-                "Pending the gbgpu WDM template generator."
-            )
+            # First-cut WDM fill index map. Per-band buffers cover the full
+            # WDM active grid, so the index map is the simplest possible: it
+            # picks each band's entire (channel, Nf_active, Nt_active) slab
+            # out of the parent ACA. The data axis position is taken from
+            # unique_band_combos[:, 1] (the parent data index for that band).
+            if inds_fill is None:
+                inds_fill = cp.arange(self.num_bands_now)
+
+            Nf_active = self._basis_settings.Nf_active
+            Nt_active = self._basis_settings.Nt_active
+
+            if is_psd and self.tdi_channel_setup == "XYZ":
+                # target shape: (len(inds_fill), nchannels, nchannels, Nf_active, Nt_active)
+                inds1 = (
+                    self.unique_band_combos[inds_fill, 1][:, None, None, None, None]
+                    * self.nchannels
+                    + cp.arange(self.nchannels)[None, :, None, None, None]
+                )
+                inds2 = cp.arange(self.nchannels)[None, None, :, None, None]
+                inds3 = cp.arange(Nf_active)[None, None, None, :, None]
+                inds4 = cp.arange(Nt_active)[None, None, None, None, :]
+                return inds1, inds2, inds3, inds4
+
+            # target shape: (len(inds_fill), nchannels, Nf_active, Nt_active)
+            inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
+            inds2 = cp.arange(self.nchannels)[None, :, None, None]
+            inds3 = cp.arange(Nf_active)[None, None, :, None]
+            inds4 = cp.arange(Nt_active)[None, None, None, :]
+            return inds1, inds2, inds3, inds4
         if not isinstance(self._basis_settings, FDSettings):
             raise NotImplementedError(
                 f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
@@ -1047,62 +1051,65 @@ class Buffer(LISAToolsParallelModule):
         return inds1, inds2, inds3
 
     def remove_sources_from_template_buffer(self, *args, **kwargs) -> None:
-        self.adjust_sources_in_band_buffer(-1, self.template_buffer_tmp, *args, **kwargs)
+        self._adjust_via_engine(-1, self._acs_template_buffer, *args, **kwargs)
 
     def add_sources_to_template_buffer(self, *args, **kwargs) -> None:
-        self.adjust_sources_in_band_buffer(+1, self.template_buffer_tmp, *args, **kwargs)
+        self._adjust_via_engine(+1, self._acs_template_buffer, *args, **kwargs)
 
-    def adjust_sources_in_band_buffer(
-        self, factor, input_array, params, params_index, N_vals, *args, **kwargs
+    def _adjust_via_engine(
+        self, factor, target_aca, params, params_index, N_vals, *args, **kwargs
     ) -> None:
+        """Domain-agnostic dispatch into ``self._likelihood_engine.fill_template``.
 
+        ``factor`` is +1 (write source into the template) or -1 (subtract it).
+        ``target_aca`` selects which AnalysisContainerArray to write into
+        (band-residual ACA or template ACA). Both share the same per-band
+        geometry, so the engine doesn't need to know which one it's filling.
+        """
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
-
-        if isinstance(self._basis_settings, WDMSettings):
-            # TODO: drop in the WDM GB template generator here. Should write
-            # into ``input_array`` (the per-GPU flat WDM band buffer) and
-            # respect the per-band frequency-layer offsets in
-            # ``self.start_freq_inds``. Pending the gbgpu WDM waveform.
-            raise NotImplementedError(
-                "WDM template generation is scaffolded but not yet implemented. "
-                "Pending the gbgpu WDM template generator."
-            )
-        if not isinstance(self._basis_settings, FDSettings):
-            raise NotImplementedError(
-                f"Buffer does not support basis domain {type(self._basis_settings).__name__}."
-            )
-
-        # inject current sources into buffers
-
-        # TODO: check this???
-        factors_change = factor * cp.ones_like(params_index, dtype=float)
-        params_in = self.transform_fn.both_transforms(params, xp=cp)
-        # assign N based on band
-        # TODO: need to be careful about N changes across band edges?
-        wave_kwargs_tmp = self.waveform_kwargs.copy()
-
-        if "start_freq_ind" in wave_kwargs_tmp:
-            wave_kwargs_tmp.pop("start_freq_ind")
+        params_phys = self.transform_fn.both_transforms(params, xp=cp)
         try:
-            self.gb.generate_global_template(
-                params_in,
+            self._likelihood_engine.fill_template(
+                target_aca,
+                params_phys,
                 params_index,
-                input_array,
-                data_length=self.band_buffer.shape[-1],
-                factors=factors_change,
-                data_splits=np.full(self.band_buffer.shape[0], self.gb.gpus[0]),
-                N=N_vals,
-                start_freq_ind=self.start_freq_inds,
-                **wave_kwargs_tmp,
+                N_vals,
+                factor=factor,
+                waveform_kwargs=self.waveform_kwargs,
             )
         except AssertionError:
             breakpoint()
 
+    def adjust_sources_in_band_buffer(
+        self, factor, input_array, params, params_index, N_vals, *args, **kwargs
+    ) -> None:
+        """Backwards-compatible shim around :meth:`_adjust_via_engine`.
+
+        Routes ``input_array`` (a flat buffer pointer the legacy code passed
+        through) back to whichever ACA owns it. New code should call
+        :meth:`_adjust_via_engine` directly.
+        """
+        if input_array is self.band_buffer_tmp:
+            target_aca = self._acs_buffer
+        elif self.use_template_arr and input_array is self.template_buffer_tmp:
+            target_aca = self._acs_template_buffer
+        else:
+            raise ValueError(
+                "adjust_sources_in_band_buffer received an input_array that "
+                "is neither the band-residual nor the template buffer."
+            )
+        self._adjust_via_engine(factor, target_aca, params, params_index, N_vals, *args, **kwargs)
+
     def remove_sources_from_band_buffer(self, *args, **kwargs) -> None:
-        self.adjust_sources_in_band_buffer(+1, self.band_buffer_tmp, *args, **kwargs)
+        # NOTE: sign is +1 because band_buffer holds the residual
+        # (= data - sum(templates)). Removing a source from the model means
+        # ADDING it back to the residual, hence factor=+1 here.
+        self._adjust_via_engine(+1, self._acs_buffer, *args, **kwargs)
 
     def add_sources_to_band_buffer(self, *args, **kwargs) -> None:
-        self.adjust_sources_in_band_buffer(-1, self.band_buffer_tmp, *args, **kwargs)
+        # See remove_sources_from_band_buffer note; sign is flipped for the
+        # residual-tracking band_buffer.
+        self._adjust_via_engine(-1, self._acs_buffer, *args, **kwargs)
 
     def get_special_band_index(
         self, temp_inds: np.ndarray, walker_inds: np.ndarray, band_inds: np.ndarray
@@ -1151,6 +1158,7 @@ class BandSorter(LISAToolsParallelModule):
         inds_subset: Optional[np.ndarray] = None,
         inds_main_band_sorter: Optional[np.ndarray] = None,
         gb=None,
+        gb_wdm_comp=None,
         waveform_kwargs={},
         main_band_sorter=None,
         max_data_store_size: int = 6000,
@@ -1171,6 +1179,7 @@ class BandSorter(LISAToolsParallelModule):
                         "main_band_sorter",
                         "inds_main_band_sorter",
                         "gb",
+                        "gb_wdm_comp",
                         "rj_prop",
                     ]:
                         continue
@@ -1198,6 +1207,9 @@ class BandSorter(LISAToolsParallelModule):
 
             self.rj_prop = _band_sorter.rj_prop
             self.gb = _band_sorter.gb
+            # Forward the WDM computation object explicitly (skipped in the
+            # copy loop so we don't deepcopy a GPU-resident object).
+            self.gb_wdm_comp = getattr(_band_sorter, "gb_wdm_comp", None)
             # need to make sure is not mixed up in loop
             self.set_main_band_sorter_info(main_band_sorter, inds_main_band_sorter)
             return
@@ -1205,6 +1217,11 @@ class BandSorter(LISAToolsParallelModule):
         assert band_edges is not None and band_N_vals is not None
         self.force_backend = force_backend
         self.gb = gb
+        # Optional WDM-domain likelihood object. Forwarded to Buffer in
+        # :meth:`get_buffer` so the engine selection lands on
+        # :class:`WDMBandLikelihoodEngine` when the parent ACA carries a
+        # WDMSettings basis. Ignored on the FD path.
+        self.gb_wdm_comp = gb_wdm_comp
         self.waveform_kwargs = waveform_kwargs
         self.gb_branch_orig = gb_branch
         self.num_bands = len(band_edges) - 1
@@ -1250,7 +1267,8 @@ class BandSorter(LISAToolsParallelModule):
                 proposal_logpdf[stind:eind] = self.xp.asarray(
                     rj_prop.logpdf(self.coords[stind:eind])
                 )
-            self.xp.get_default_memory_pool().free_all_blocks()
+            if self.backend.uses_cupy:
+                self.xp.get_default_memory_pool().free_all_blocks()
 
             if keep_all_inds:
                 self.factors = (cp.asarray(proposal_logpdf) * -1) * (~self.orig_inds).flatten() + (
@@ -1408,7 +1426,7 @@ class BandSorter(LISAToolsParallelModule):
                     inds_keep &= self.special_band_inds == special_band_inds
 
                 elif isinstance(special_band_inds, self.xp.ndarray):
-                    inds_keep &= self.xp.in1d(self.special_band_inds, special_band_inds)
+                    inds_keep &= self.xp.isin(self.special_band_inds, special_band_inds)
 
         else:
             assert full_bool.shape[0] == self.num_sources
@@ -1435,13 +1453,13 @@ class BandSorter(LISAToolsParallelModule):
 
         # TODO: check the end of this line, is this covered ??
         sources_now_map = cp.arange(self.main_band_sorter.special_band_inds.shape[0])[
-            cp.in1d(self.main_band_sorter.special_band_inds, special_indices_unique)
+            cp.isin(self.main_band_sorter.special_band_inds, special_indices_unique)
         ]
 
         # NOTE: self.main_band_sorter.inds needed to only inject real sources
         # inject sources must include sources that have been turned off in these bands
         sources_inject_now_map = cp.arange(self.main_band_sorter.special_band_inds.shape[0])[
-            cp.in1d(self.main_band_sorter.special_band_inds, special_indices_unique)
+            cp.isin(self.main_band_sorter.special_band_inds, special_indices_unique)
             & self.main_band_sorter.inds
         ]
 
@@ -1480,6 +1498,8 @@ class BandSorter(LISAToolsParallelModule):
                 sources_inject_now_map,
                 self.main_band_sorter.special_band_inds[sources_now_map],
                 basis_settings=acs.settings,
+                gb_wdm_comp=self.gb_wdm_comp,
+                force_backend=self.force_backend,
                 **kwargs,
             )
 
@@ -1524,8 +1544,8 @@ class BandSorter(LISAToolsParallelModule):
 
         num_bands = len(self.band_edges) - 1
         band_counts = np.zeros((self.ntemps, self.nwalkers, num_bands), dtype=int)
-        band_counts[uni_temp_inds.get(), uni_walker_inds.get(), uni_band_inds.get()] = (
-            uni_special_counts.get()
+        band_counts[_to_numpy(uni_temp_inds), _to_numpy(uni_walker_inds), _to_numpy(uni_band_inds)] = (
+            _to_numpy(uni_special_counts)
         )
 
         return {"band_counts": band_counts}
@@ -1607,6 +1627,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # TODO: make this adjustable?
         max_data_store_size=6000,
         force_backend=None,
+        gb_wdm_comp=None,
         **kwargs,
     ):
         # return_gpu is a kwarg for the stretch move
@@ -1632,6 +1653,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         self.priors = priors
         self.gb = gb
+        # Optional WDM-domain likelihood object. Constructed once by the
+        # user (typically a fastlisaresponse.GBWDMComputations) and threaded
+        # through to BandSorter -> Buffer -> WDMBandLikelihoodEngine when
+        # the analysis container's DomainSettingsBase is a WDMSettings.
+        # Stays None on the FD path; the FD engine path doesn't touch it.
+        self.gb_wdm_comp = gb_wdm_comp
         self.stop_here = True
         self.run_swaps = run_swaps
 
@@ -1647,6 +1674,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # self.force_backend = gb.force_backend
         if self.backend.uses_cupy:
             self.mempool = self.xp.get_default_memory_pool()
+        else:
+            self.mempool = _NoOpMempool()
 
         self.band_edges = band_edges
         self.num_bands = len(band_edges) - 1
@@ -2260,7 +2289,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             ]
                         except ValueError:
                             breakpoint()
-                        run_now_tmp = self.xp.in1d(
+                        run_now_tmp = self.xp.isin(
                             currently_running_special_inds,
                             band_sorter.special_band_inds[
                                 source_map_now[sources_picked_for_update]
@@ -2364,7 +2393,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         if num_chol_remove > 0:
                             has_chol[remove_chol] = False
                             remove_inds = self.xp.arange(inds_map_chol.shape[0])[
-                                self.xp.in1d(inds_map_chol, source_map_now[remove_chol])
+                                self.xp.isin(inds_map_chol, source_map_now[remove_chol])
                             ]
 
                             _chol_store = self.xp.delete(chol_store, remove_inds, axis=0).copy()
@@ -2791,8 +2820,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             # ll_change_sum = ll_change_log.sum(axis=-1)
             # check_in = state.log_like[0] + ll_change_sum[0].get()    
                 
-            self.xp.cuda.runtime.deviceSynchronize()
-    
+            if self.backend.uses_cupy:
+                self.xp.cuda.runtime.deviceSynchronize()
+
 
         return ll_change_log
 
@@ -2875,7 +2905,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 special_inds_now_flat = special_inds_now.flatten()
 
                 # need to include inds
-                # now_bool_full = cp.in1d(band_sorter.special_band_inds, special_inds_now_flat)  # & band_sorter.inds
+                # now_bool_full = cp.isin(band_sorter.special_band_inds, special_inds_now_flat)  # & band_sorter.inds
                 # if not cp.any(now_bool_full):
                 #     num_bands_run += num_bands_preload_temp
                 #     # print("num bands", num_bands_run)
@@ -2953,7 +2983,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # temp_indices[fix_2] = i1
 
                     ind_sort_1 = cp.argsort(special_ind_test_1.flatten())
-                    ind_keep_1 = cp.in1d(band_sorter.special_band_inds, special_ind_test_1)
+                    ind_keep_1 = cp.isin(band_sorter.special_band_inds, special_ind_test_1)
                     sorted_map_1 = cp.searchsorted(
                         special_ind_test_1[ind_sort_1],
                         band_sorter.special_band_inds[ind_keep_1],
@@ -2962,7 +2992,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     # inds_now_1 = band_sorter.inds[ind_keep_1][sorted_map_1]
 
                     ind_sort_2 = cp.argsort(special_ind_test_2.flatten())
-                    ind_keep_2 = cp.in1d(band_sorter.special_band_inds, special_ind_test_2)
+                    ind_keep_2 = cp.isin(band_sorter.special_band_inds, special_ind_test_2)
                     sorted_map_2 = cp.searchsorted(
                         special_ind_test_2[ind_sort_2],
                         band_sorter.special_band_inds[ind_keep_2],
@@ -3059,7 +3089,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         st_all = time.perf_counter()
 
-        self.xp.cuda.runtime.setDevice(model.analysis_container_arr.gpus[0])
+        if self.backend.uses_cupy:
+            self.xp.cuda.runtime.setDevice(model.analysis_container_arr.gpus[0])
         # nchannels = model.analysis_container_arr.nchannels
         # data_length = model.analysis_container_arr.data_length
         self.fd = model.analysis_container_arr.f_arr.copy()
@@ -3153,13 +3184,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             transform_fn=self.parameter_transforms,
             max_data_store_size=self.max_data_store_size,
             gb=self.gb,
+            gb_wdm_comp=self.gb_wdm_comp,
             waveform_kwargs=self.waveform_kwargs,
             rj_prop=rj_prop,
             keep_all_inds=keep_all_inds,
         )
 
         do_synchronize = False
-        device = self.xp.cuda.runtime.getDevice()
+        device = self.xp.cuda.runtime.getDevice() if self.backend.uses_cupy else -1
 
         # get non-gb contribution
         self.remove_cold_chain_sources_from_residual(model, band_sorter, apply_inds=True)
@@ -3196,7 +3228,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         
         print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum = ll_change_log.sum(axis=-1)
-        new_state.log_like[0] += ll_change_sum[0].get()
+        new_state.log_like[0] += _to_numpy(ll_change_sum[0])
 
         ll_after = model.analysis_container_arr.likelihood()
         check = ll_after - new_state.log_like[0] - start_diffs
@@ -3232,7 +3264,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 model, new_state, band_sorter, band_temps
             )
 
-            new_state.log_like[0] += ll_change_sum_temp[0].get()
+            new_state.log_like[0] += _to_numpy(ll_change_sum_temp[0])
 
             ll_after = model.analysis_container_arr.likelihood()
             check = ll_after - new_state.log_like[0] - start_diffs
@@ -3270,16 +3302,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         print("NEED TO PROPERLY MOVE SUPPLEMENTAL INFO BASED ON OLD LEAVES.")
         inds_new = (
-            band_sorter.temp_inds[band_sorter.inds].get(),
-            band_sorter.walker_inds[band_sorter.inds].get(),
-            leaf_inds_new.get(),
+            _to_numpy(band_sorter.temp_inds[band_sorter.inds]),
+            _to_numpy(band_sorter.walker_inds[band_sorter.inds]),
+            _to_numpy(leaf_inds_new),
         )
         inds_old = (
-            band_sorter.orig_temp_inds[band_sorter.inds].get(),
-            band_sorter.orig_walker_inds[band_sorter.inds].get(),
-            band_sorter.orig_leaf_inds[band_sorter.inds].get(),
+            _to_numpy(band_sorter.orig_temp_inds[band_sorter.inds]),
+            _to_numpy(band_sorter.orig_walker_inds[band_sorter.inds]),
+            _to_numpy(band_sorter.orig_leaf_inds[band_sorter.inds]),
         )
-        new_state.branches["gb"].coords[inds_new] = band_sorter.coords[band_sorter.inds].get()
+        new_state.branches["gb"].coords[inds_new] = _to_numpy(band_sorter.coords[band_sorter.inds])
         new_state.branches["gb"].inds[:] = False
         # turn on all the ones that are there
         new_state.branches["gb"].inds[inds_new] = True
@@ -3352,6 +3384,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             transform_fn=self.parameter_transforms,
             max_data_store_size=self.max_data_store_size,
             gb=self.gb,
+            gb_wdm_comp=self.gb_wdm_comp,
             waveform_kwargs=self.waveform_kwargs,
         )
 
@@ -3383,11 +3416,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         band_info = new_band_sorter.get_band_info()
 
         new_state.sub_states["gb"].update_band_information(
-            band_temps.get(),
-            per_walker_band_proposals.sum(axis=1).T.get(),
-            per_walker_band_accepted.sum(axis=1).T.get(),
-            band_swaps_proposed.get(),
-            band_swaps_accepted.get(),
+            _to_numpy(band_temps),
+            _to_numpy(per_walker_band_proposals.sum(axis=1).T),
+            _to_numpy(per_walker_band_accepted.sum(axis=1).T),
+            _to_numpy(band_swaps_proposed),
+            _to_numpy(band_swaps_accepted),
             band_info["band_counts"],
             self.is_rj_prop,
         )

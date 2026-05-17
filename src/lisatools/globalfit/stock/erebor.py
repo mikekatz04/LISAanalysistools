@@ -58,8 +58,15 @@ class GBSettings(Settings):
     group_proposal_kwargs: Optional[dict] = None
     start_freq_ind: Optional[int] = 0  # goes into GPU for start of data stream
     t0: Optional[float] = 0.0
-    tdi_setup: Optional[str] = "XYZ" # other options are AET and AE. 
+    tdi_setup: Optional[str] = "XYZ" # other options are AET and AE.
     use_tdi2: Optional[bool] = True
+    # Optional WDM-domain likelihood object (a
+    # ``fastlisaresponse.gbcomps.GBWDMComputations`` instance). Required when
+    # the parent :class:`AnalysisContainer` carries a
+    # :class:`lisatools.domains.WDMSettings` basis; ignored when running in
+    # the frequency domain. Domain selection itself comes from the user-
+    # supplied DomainSettings on the AC, not from a separate string flag.
+    gb_wdm_comp: typing.Any = None
 
 # basic transform functions for pickling
 def f_ms_to_s(x):

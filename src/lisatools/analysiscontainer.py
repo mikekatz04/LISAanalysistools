@@ -726,9 +726,12 @@ class AnalysisContainerArray:
 
     def zero_out_data_arr(self):
         """Zero the linear (per-GPU) data buffers in place."""
-        if self.gpus is not None:
-            main_gpu = self.xp.cuda.runtime.getDevice()
+        if self.gpus is None:
+            for buf in self.linear_data_arr:
+                buf[:] = 0.0
+            return
 
+        main_gpu = self.xp.cuda.runtime.getDevice()
         for gpu_i, gpu in enumerate(self.gpus):
             with self.xp.cuda.device.Device(gpu):
                 self.linear_data_arr[gpu_i][:] = 0.0

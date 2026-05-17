@@ -4,7 +4,10 @@ import os
 import time
 from datetime import datetime
 
-import cupy as xp
+try:
+    import cupy as xp
+except ModuleNotFoundError:
+    import numpy as xp
 import numpy as np
 import pandas as pd
 # from bbhx.utils.transform import LISA_to_SSB

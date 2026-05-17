@@ -3,7 +3,10 @@
 import os
 from copy import deepcopy
 
-import cupy as cp
+try:
+    import cupy as cp
+except ModuleNotFoundError:
+    import numpy as cp
 import numpy as np
 from eryn.ensemble import EnsembleSampler
 from eryn.moves import RedBlueMove, StretchMove

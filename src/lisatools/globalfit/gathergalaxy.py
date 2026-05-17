@@ -7,7 +7,10 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
-import cupy as xp
+try:
+    import cupy as xp
+except ModuleNotFoundError:
+    import numpy as xp
 import h5py
 import numpy as np
 import pandas as pd

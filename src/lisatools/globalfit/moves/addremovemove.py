@@ -5,7 +5,13 @@ import time
 from copy import deepcopy
 from typing import Callable
 
-import cupy as xp
+try:
+    import cupy as xp
+except (ImportError, ModuleNotFoundError):
+    # CPU-only fallback so the moves package imports cleanly when cupy is
+    # unavailable (e.g. on a Mac development host). The functions below that
+    # actually call xp.* will still need a GPU at runtime.
+    import numpy as xp
 import numpy as np
 from eryn.moves import Move, StretchMove, TemperatureControl
 from eryn.prior import ProbDistContainer

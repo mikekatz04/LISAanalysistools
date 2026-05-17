@@ -5,12 +5,15 @@ import shutil
 import time
 from multiprocessing.sharedctypes import Value
 
-import cupy as xp
+try:
+    import cupy as xp
+    mempool = xp.get_default_memory_pool()
+except ModuleNotFoundError:
+    import numpy as xp
+    mempool = None
 import numpy as np
 
 # from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
-
-mempool = xp.get_default_memory_pool()
 
 import subprocess
 import warnings

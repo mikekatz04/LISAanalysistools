@@ -9,7 +9,7 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from eryn.utils import TransformContainer
 
-from .diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
+from ..diagnostic import covariance, plot_covariance_contour, plot_covariance_corner
 
 from ..detector import LISAModel
 from ..diagnostic import snr as snr_func

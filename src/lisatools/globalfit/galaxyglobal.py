@@ -5,14 +5,17 @@ import shutil
 import time
 from copy import deepcopy
 
-import cupy as xp
+try:
+    import cupy as xp
+    mempool = xp.get_default_memory_pool()
+except ModuleNotFoundError:
+    import numpy as xp
+    mempool = None
 import numpy as np
 from gbgpu.gbgpu import GBGPU
 
 # from lisatools.globalfit.moves import GBSpecialStretchMove
 from gbgpu.utils.utility import get_fdot
-
-mempool = xp.get_default_memory_pool()
 
 import subprocess
 import warnings
@@ -50,7 +53,8 @@ from tqdm import tqdm
 from .hdfbackend import GFHDFBackend
 from .state import GFState as GBState
 
-mempool = xp.get_default_memory_pool()
+if mempool is None and hasattr(xp, "get_default_memory_pool"):
+    mempool = xp.get_default_memory_pool()
 
 from sklearn.mixture import GaussianMixture
 

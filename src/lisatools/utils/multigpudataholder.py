@@ -10,7 +10,10 @@ contributions.
 import time
 from copy import deepcopy
 
-import cupy as xp
+try:
+    import cupy as xp
+except ModuleNotFoundError:
+    import numpy as xp
 import numpy as np
 
 from lisatools.detector import sangria
