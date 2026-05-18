@@ -719,7 +719,7 @@ def build_gb_moves(
         temperature_control=temperature_control,
         use_gpu=True, 
         num_repeat_proposals=gb_info.num_repeat_proposals,
-        **gb_info.search_kwargs
+        search_kwargs=gb_info.search_kwargs
        
     )
 
@@ -774,7 +774,7 @@ def build_gb_moves(
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
         ranks_needed=0,
-        run_swaps=True, 
+        run_swaps=False, 
         gpus=[],
         **gb_move_kwargs
     )

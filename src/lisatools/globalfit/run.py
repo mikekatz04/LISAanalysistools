@@ -680,10 +680,11 @@ class GlobalFit:
             # permute False is there for the PSD sampling for now
 
             truths = self.curr.get_truths_dict()
-            _ = truths.pop("gb", None)
+            
+            # _ = truths.pop("gb", None)
 
             plot_container = PlotContainer(
-                plots=["base", "tempering"],
+                plots=["base"],
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.4,

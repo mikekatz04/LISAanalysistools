@@ -133,7 +133,7 @@ class GeneralSettings(Settings):
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
     normalize_window: bool = False
-    catalogue: typing.Optional[dict] = None
+    # catalogue: typing.Optional[dict] = None
     # ---- Galactic foreground geometry (fixed, not inferred) ----
     # If None, the galactic foreground is disabled in the likelihood.
     # Keys: R_d [kpc], z_d [kpc], alpha0 [rad], beta0 [rad],
@@ -188,6 +188,10 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def data_dt(self) -> float:
         return self.data_td_settings.dt
+    
+    @property
+    def catalogue(self):
+        return getattr(self.data_processor, "catalogue", {})
 
     def init_setup(self):
         if self.file_store_dir is None:
@@ -250,7 +254,6 @@ class GeneralSetup(Setup, GeneralSettings):
             *data_processor.td_signal.settings.args, force_backend=self.force_backend
         )
         self.Tobs = Nt * dt
-        self.catalogue = getattr(data_processor, "catalogue", {})
 
         if self.basis_domain == "stft":
             from ..domains import get_stft_settings
@@ -353,6 +356,9 @@ class GeneralSetup(Setup, GeneralSettings):
         # are inferred; the sky geometry (R_d, z_d, alpha0, beta0) is fixed here.
         if self.galactic_grid_kwargs is not None:
             self._init_galactic_grid(domain_settings)
+
+        # --- Store preprocessing --- #
+        self.data_processor = data_processor
 
     def _init_galactic_grid(self, domain_settings):
         """

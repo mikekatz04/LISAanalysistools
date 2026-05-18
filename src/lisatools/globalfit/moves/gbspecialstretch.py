@@ -970,6 +970,7 @@ class BandSorter(LISAToolsParallelModule):
             # else:
             proposal_logpdf = cp.zeros(self.coords.shape[0])
 
+            # breakpoint()
             batch_here = int(1e6)
             inds_splitting = np.arange(0, self.coords.shape[0], batch_here)
             if inds_splitting[-1] != self.coords.shape[0] - 1:
@@ -1304,12 +1305,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         run_swaps=True,
         max_data_store_size=6000,
         force_backend=None,
-        **search_kwargs,
+        search_kwargs=None,
+        **kwargs
     ):
         # return_gpu is a kwarg for the stretch move
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         GlobalFitMove.__init__(self, name=name)
-        Move.__init__(self, *args, return_gpu=True)
+        Move.__init__(self, *args, return_gpu=True, **kwargs)
         # kwargs_group = dict(
         #     n_iter_update=1,
         #     live_dangerously=True,
@@ -1933,7 +1935,10 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # that way the recalculation technically only changes newly found sources
                 have_not_run_in_model = True
                 previous_inds = band_sorter.inds.copy()
+                counter_infomat = 0
+                time_spent_infomat = 0.0
                 for move_i in range(self.num_repeat_proposals):
+
                     is_rj_now = bool(np.random.choice([0, 1], p=[0.97, 0.03]))
 
                     if band_sorter.inds[source_map_now].sum() == 0:
@@ -1982,6 +1987,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         if num_chol_new > 0:
                             has_chol[new_chol] = True
 
+                            time_infomat_start = time.perf_counter()
                             # due to fixed, it will not change during run through of the proposal
                             # unless rj causes leaf addition/removal
                             new_chol_params_fixed = fixed_coords_for_info_mat[
@@ -2013,7 +2019,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             _tmp_waveform_kwargs.pop("start_freq_ind")
                             
                             # print("Number of params to calculate FIM for is", info_mat_params.shape[0])
-                            
                             info_mat = self.gb.information_matrix(
                                 info_mat_params,
                                 psd = model.analysis_container_arr.linear_psd_arr,
@@ -2079,6 +2084,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             chol_store = _chol_store
                             chol_params_fixed = _chol_params_fixed
                             inds_map_chol = _inds_map_chol
+
+                            time_spent_infomat += time.perf_counter() - time_infomat_start
+                            counter_infomat += 1
 
                         remove_chol = has_chol & (~band_sorter.inds[source_map_now])
                         num_chol_remove = remove_chol.sum().item()
@@ -2241,6 +2249,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         prev_logp[inds] = logp_tmp[inds]
                         curr_logp[~inds] = logp_tmp[~inds]
 
+                    # check if any proposals have -inf logp before likelihood calculation to catch issues early
+                    if cp.any(~cp.isfinite(prev_logp)):  # [run_now_tmp]
+                        breakpoint()
                     # if cp.any(cp.isinf(prev_logp)):  # [run_now_tmp]
                     #     breakpoint()
                     # inputs into swap proposal
@@ -2482,6 +2493,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 # RJ COUNT IS PROPORTIONAL TO NUMBER OF SOURCES IN THE BAND,
                 # SO IT WILL ALSO ACCOUNT FOR NUM_REPEAT_PROPOSALS FOR IN-MODEL
                 run_count[inds_now] = current_rj_counter
+                logger.info(f"The information matrix was calculated {counter_infomat} times over {self.num_repeat_proposals} proposal repeats, for a total of {time_spent_infomat:.2f} seconds.")
 
                 # if not self.is_rj_prop:
                 #     # should be subset for in model
@@ -2928,11 +2940,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         per_walker_band_proposals = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         per_walker_band_accepted = cp.zeros((ntemps, nwalkers, self.num_bands), dtype=int)
         
+        num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1) # cold chain only
+        logger.info(f"Number of active leaves before proposal: {num_active_leaves}")
         # TODO: make sure band temps transfers out
         st_prop = time.perf_counter()
         ll_change_log = self.run_proposal(model, new_state, band_sorter, band_temps)
         et_prop = time.perf_counter()
         logger.info(f"Runtime of {self.name} proposal is {round(et_prop - st_prop,3)} seconds.")
+        # Diagnostic: per-temperature alive source counts after run_proposal
+        _alive_per_temp_post_prop = [
+            int(band_sorter.inds[band_sorter.temp_inds == _t].sum()) for _t in range(ntemps)
+        ]
+        logger.info(f"Alive sources per temp after run_proposal: {_alive_per_temp_post_prop}")
         
         # TODO ask michael about this print("NEED TO FIX ANALYSIS CONTAINER extra factor")
         ll_change_sum = ll_change_log.sum(axis=-1)
@@ -2985,8 +3004,18 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.mempool.free_all_blocks()
             et_temp = time.perf_counter()
             logger.info(f"Runtime of {self.name} tempering is {round(et_temp - st_temp,3)} seconds.")
-            
+            # Diagnostic: per-temperature alive source counts after run_tempering
+            _alive_per_temp_post_temp = [
+                int(band_sorter.inds[band_sorter.temp_inds == _t].sum()) for _t in range(ntemps)
+            ]
+            logger.info(f"Alive sources per temp after run_tempering: {_alive_per_temp_post_temp}")
+
         # TODO ask michael about this print("make sure this works for rj")
+        # Diagnostic: per-temperature alive source counts before write-back
+        _alive_per_temp_pre_wb = [
+            int(band_sorter.inds[band_sorter.temp_inds == _t].sum()) for _t in range(ntemps)
+        ]
+        logger.info(f"Alive sources per temp before write-back: {_alive_per_temp_pre_wb}")
         special_indices_finish = (
             band_sorter.temp_inds[band_sorter.inds] * nwalkers
             + band_sorter.walker_inds[band_sorter.inds]
@@ -3027,6 +3056,8 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # new_state.branches["gb"].branch_supplemental[inds_new] = state.branches["gb"].branch_supplemental[inds_old]
         et_all = time.perf_counter()
         logger.info(f"Full runtime of {self.name} is {round(et_all - st_all, 3)} seconds.")
+        num_active_leaves = new_state.branches["gb"].inds[0].sum(axis=-1)
+        logger.info(f"Number of active leaves after proposal: {num_active_leaves}")
 
         # TODO: need to redo the acceptance fraction
         # get accepted fraction
@@ -3777,7 +3808,8 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # )
 
         samples_2 = samples_2.transpose(1, 0, 2, 3)
-        np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples_check.npy", samples_2)
+        #np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples_check.npy", samples_2)
+        checkpoint =  "data/asantini/packages/LISAanalysistools/gf_dev/search2_samples_check.npy"
 
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[
