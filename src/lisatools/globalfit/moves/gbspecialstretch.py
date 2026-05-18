@@ -3144,6 +3144,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplemental)
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
         
+        num_active_sources = new_state.branches["gb"].inds.sum(axis=-1)[0]
+        logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
+        
         return new_state, accepted
 
     def check_ll_inject(self, model, band_sorter, verbose=False):
