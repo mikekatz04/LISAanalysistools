@@ -26,6 +26,8 @@ from .stock.erebor import GBSetup, GeneralSetup
 
 logger = logging.getLogger(__name__)
 
+MOJITO_REFERENCE_TIME = 97729089.327664
+
 class SearchRecipeStep(BaseRecipeStep):
     """
     Recipe step that completes immediately (one-shot search/initialisation). 
@@ -335,7 +337,7 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
             assert conversion_func and callable(conversion_func), f"catalogue_to_sampling_basis function for {branch_name} was not found."
             assert curr.general_info.preprocess_kwargs
 
-            trim_duration = curr.general_info.data_t0 - curr.general_info.data_processor.original_t0
+            trim_duration = curr.general_info.data_t0 - MOJITO_REFERENCE_TIME # curr.general_info.data_processor.original_t0
             sampling_params = conversion_func(entry, trim_duration=trim_duration)
 
             injection_params_list.append(sampling_params)
@@ -720,7 +722,6 @@ def build_gb_moves(
         use_gpu=True, 
         num_repeat_proposals=gb_info.num_repeat_proposals,
         search_kwargs=gb_info.search_kwargs
-       
     )
 
     #* ============================================= SEARCH MOVES =============================================

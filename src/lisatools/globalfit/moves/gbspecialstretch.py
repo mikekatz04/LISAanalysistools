@@ -3174,6 +3174,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # new_state.log_prior[:] = model.compute_log_prior_fn(new_state.branches_coords, inds=new_state.branches_inds, supps=new_state.supplemental)
         accepted = np.zeros((ntemps, nwalkers), dtype=bool)
         
+        num_active_sources = new_state.branches["gb"].inds.sum(axis=-1)[0]
+        logger.info(f"Current number of active sources in cold chain is {num_active_sources}")
+        
         return new_state, accepted
 
     def check_ll_inject(self, model, band_sorter, verbose=False):
@@ -3267,6 +3270,7 @@ def para_log_like(
     data_index = xp.full(x.shape[0], walker_max, dtype=xp.int32)
     if fstat:
         x_in = x_tmp[:, xp.array([1, 2, 3, 7, 8])]
+        # breakpoint()
         # TODO: fix for N>256?
         ll = gb.get_fstat_ll(
             x_in,
@@ -3278,7 +3282,7 @@ def para_log_like(
             data_splits=np.array([gb.gpus[0]]),
             phase_marginalize=phase_maximize,
             return_cupy=True,
-            N=512,  # 1024 is too much shared memory I think
+            N=512,  
             **waveform_kwargs,
         )
 
@@ -3568,6 +3572,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         return gb_search_func
 
     def setup(self, model, branches):
+        assert isinstance(self.search_kwargs, dict)
         nwalkers: int = self.search_kwargs["nwalkers"]
         ntemps: int = self.search_kwargs["ntemps"]
         shutoff_band_iteration: int = self.search_kwargs["shutoff_band_iteration"]
@@ -3596,7 +3601,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         
         # run paraensemble MCMC.
         max_logl_walker = np.argmax(model.analysis_container_arr.likelihood()).item()
-        self.gb.d_d = 0.0  # model.analysis_container_arr.inner_product()[max_logl_walker]
+        self.gb.d_d = model.analysis_container_arr.inner_product()[max_logl_walker] # 0.0
         ndim = branches["gb"].ndim
         priors_global = self.priors if not self.backend.uses_cuda else self.gpu_priors            
 
@@ -3644,8 +3649,6 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         priors = {
             "gb": ProbDistContainer(priors_in, return_gpu=True, use_cupy=self.backend.uses_cupy)
         }
-        # print(priors["gb"].key_order)
-        
         start_params = priors["gb"].rvs(size=(ngroups, ntemps, nwalkers))
         prior_transform_fn = PriorTransformFn(f0_min * 1e3, f0_max * 1e3, fdot_min, fdot_max)
         prior_transform_fn.transform_from_prior_basis(start_params, self.xp.arange(ngroups))
@@ -3665,7 +3668,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             model.analysis_container_arr,
             max_logl_walker,
             self.parameter_transforms,
-            False,  # self.phase_maximize,
+            self.phase_maximize, # False, #
             self.waveform_kwargs,
         )
 
@@ -3740,15 +3743,16 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
                 self.found_source_in_band = np.vstack([self.found_source_in_band, shutoff_temp])
         
         logger.info(f"Found a source in {groups_running_now.sum()} out of {groups_running_now.shape[0]} active bands")
-        breakpoint()
         if not np.any(groups_running_now):
             logger.info("Did not find any new sources.")
             return
 
         start_params_2 = np.tile(samples[-1][groups_running_now, None], (1, ntemps, 1, 1))
-
+        # Maybe not start from maximized values?
         gibbs_sampling_setup_2 = np.ones(8, dtype=bool)
-        gibbs_sampling_setup_2[np.array([3])] = False
+        if ll_args_2[4]: # phase_maximization
+            gibbs_sampling_setup_2[np.array([3])] = False
+            
         prior_transform_fn_2 = PriorTransformFn(
             f0_min[groups_running_now] * 1e3,
             f0_max[groups_running_now] * 1e3,
@@ -3765,7 +3769,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
             para_log_like,
             priors,
             tempering_kwargs=dict(ntemps=ntemps, Tmax=np.inf),
-            args=ll_args,
+            args=ll_args_2,
             kwargs=dict(fstat=False),
             gpu=self.gb.gpus[0],
             periodic=self.periodic,
@@ -3808,8 +3812,7 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         # )
 
         samples_2 = samples_2.transpose(1, 0, 2, 3)
-        #np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples_check.npy", samples_2)
-        checkpoint =  "data/asantini/packages/LISAanalysistools/gf_dev/search2_samples_check.npy"
+        # np.save("/workspace/rrondeel/erebor/testing/highf_gb/search2_samples_check.npy", samples_2)
 
         st = time.perf_counter()
         samples_2_tmp = samples_2.reshape(samples_2.shape[0], -1, samples_2.shape[-1])[

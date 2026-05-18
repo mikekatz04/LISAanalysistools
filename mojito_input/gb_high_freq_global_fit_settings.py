@@ -148,7 +148,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.preprocess_kwargs
-    start_freq_ind = int(start_freq * Tobs)
+    start_freq_ind = int(np.round(start_freq * Tobs))
 
     initialize_kwargs = dict(
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
@@ -160,14 +160,13 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     betas = 1 / 1.2 ** np.arange(general_set.ntemps)
     betas[-1] = 0.0001
 
-    data_start_freq_ind = int(start_freq / input_data_arr.settings.df)
 
     search_kwargs = dict(
         nwalkers = 32,
         ntemps = 24,
         shutoff_band_iteration = 2,
         shutoff_frequency_threshold = None, # 4e-3 
-        burn_1 = 1000,
+        burn_1 = 700,
         nsteps_1 = 300,
         snr_threshold = 8.0,
         burn_2 = 500,
@@ -179,7 +178,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         dt=general_set.dt,
         T=Tobs,
         use_c_implementation=True,
-        start_freq_ind=data_start_freq_ind,
+        start_freq_ind=start_freq_ind,
         tdi_channel_setup="XYZ",
         tdi2=True,
         oversample=oversample,
@@ -257,7 +256,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
-    start_freq, end_freq = [0.019337, 0.0200433]
+    start_freq, end_freq = [0.0193, 0.0200433]
 
     head_dir = "/workspace/rrondeel/erebor/"
     data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
