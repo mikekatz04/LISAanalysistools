@@ -719,8 +719,7 @@ def build_gb_moves(
         temperature_control=temperature_control,
         use_gpu=True, 
         num_repeat_proposals=gb_info.num_repeat_proposals,
-        **gb_info.search_kwargs
-       
+        search_kwargs=gb_info.search_kwargs
     )
 
     #* ============================================= SEARCH MOVES =============================================
