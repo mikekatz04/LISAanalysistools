@@ -2029,7 +2029,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 inds = self.xp.asarray(_test_inds),
                                 easy_central_difference=False,
                                 noise_index = walker_inds_chol,
-                                N = 1024,
+                                N = 512,
                                 data_length = model.analysis_container_arr.end_shape[0],
                                 batch_size = 10000,
                                 **_tmp_waveform_kwargs,                                
@@ -2252,9 +2252,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         curr_logp[~inds] = logp_tmp[~inds]
 
                     # check if any proposals have -inf logp before likelihood calculation to catch issues early
-                    if cp.any(~cp.isfinite(prev_logp)):  # [run_now_tmp]
+                    if cp.all(~cp.isfinite(prev_logp)):  # [run_now_tmp]
+                        logger.warning("Found -inf logp in previous logp.")
                         # check which parameters have -inf logp and why
-                        breakpoint()
+                        # bad_idx = cp.where(~cp.isfinite(prev_logp))[0]
+                        # for idx in bad_idx:
+                        #     logger.warning(f"Parameter with -inf logp at index {idx}: {params_to_update[idx]}. Prior limits are:")
+
+                        # for param_name, prior in self.gpu_priors["gb"].priors_in.items():
+                        #     logger.warning(f"  {param_name}: [{prior.min_val},{prior.max_val}]")
+                        #breakpoint()
                     # if cp.any(cp.isinf(prev_logp)):  # [run_now_tmp]
                     #     breakpoint()
                     # inputs into swap proposal

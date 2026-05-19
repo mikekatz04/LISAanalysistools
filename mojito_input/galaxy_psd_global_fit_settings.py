@@ -310,8 +310,10 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
 
     input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    start_freq = float(input_data_arr.settings.f_arr[0])
-    end_freq = float(input_data_arr.settings.f_arr[-1])
+
+    eps = 0.0001  
+    start_freq = float(input_data_arr.settings.f_arr[0]) * (1 + eps)
+    end_freq = float(input_data_arr.settings.f_arr[-1]) * (1 - eps)  # avoid edge effects by staying slightly within the band limits defined by the input data array
 
     Tobs = 1/getattr(input_data_arr.settings, "df")
     
@@ -334,7 +336,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
-    start_freq_ind = int(start_freq * general_set.Tobs)
+    start_freq_ind = input_data_arr.start_freq_ind
 
     initialize_kwargs = dict(
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
@@ -345,9 +347,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     # geometric spacing 
     betas = 1 / 1.2 ** np.arange(general_set.ntemps)
     betas[-1] = 0.0001
-    
-    data_start_freq_ind = int(input_data_arr.settings.f_arr[0] / input_data_arr.settings.df)
-    
+        
     search_kwargs = dict(
         nwalkers = 16,
         ntemps = 24,
@@ -365,7 +365,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         dt=general_set.dt,
         T=Tobs,
         use_c_implementation=True,
-        start_freq_ind=data_start_freq_ind,
+        start_freq_ind=start_freq_ind,
         tdi_channel_setup="XYZ",
         tdi2=True,
         oversample=oversample,
@@ -465,8 +465,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 25
-    ntemps = 10
+    nwalkers = 32
+    ntemps = 12
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
