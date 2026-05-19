@@ -190,16 +190,16 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
     def compute_d_d_term(self, out: bool = False, **kwargs):
         """
-        Compute (d|d) term for the containers in this split only.
+        Compute the :math:`\\langle d | d\\rangle` term for the containers in this split only.
 
         Args:
             out : bool, optional
-                If True, return the computed (d|d) term. Otherwise, store it in the instance variable `self.d_d`. Default is False.
+                If True, return the computed :math:`\\langle d | d\\rangle` term. Otherwise, store it in the instance variable `self.d_d`. Default is False.
             **kwargs
                 Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
 
         Returns:
-            If `out` is True, returns a double array of shape ``(num_data,)`` containing the (d|d) term for each container in the split. Otherwise, returns None and stores the result in `self.d_d`.
+            If `out` is True, returns a double array of shape ``(num_data,)`` containing the :math:`\\langle d | d\\rangle` term for each container in the split. Otherwise, returns None and stores the result in `self.d_d`.
 
         Notes
         -----
@@ -208,7 +208,7 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
         """
         if self.split_acs is None:
             raise ValueError(
-                "Split ACs are not set. Cannot compute (d|d) term. "
+                "Split ACs are not set. Cannot compute :math:`\\langle d | d\\rangle` term. "
                 "Provide an AnalysisContainerArray to extract_from_acs first."
             )
 
@@ -219,6 +219,38 @@ class BaseDomainComputationGroup(LISAToolsParallelModule):
 
         if out:
             return self.d_d.copy()
+
+    def compute_noise_term(self, out: bool = False, **kwargs):
+        """
+        Compute :math:`\\log{\\mathcal{L}}_n = -\\sum \\log{\\vec{S}_n}` term for the containers in this split only.
+
+        Args:
+            out : bool, optional
+                If True, return the computed noise likelihood term. Otherwise, store it in the instance variable `self.noise_term`. Default is False.
+            **kwargs
+                Additional keyword arguments to pass to the `inner_product` method of each AnalysisContainer.
+
+        Returns:
+            If `out` is True, returns a double array of shape ``(num_data,)`` containing the :math:`\\log{\\mathcal{L}}_n` term for each container in the split. Otherwise, returns None and stores the result in `self.noise_term`.
+
+        Notes
+        -----
+        The result ``self.noise_term`` has shape ``(num_data,)`` — one value per
+        container in the split, indexed by intra-split index.
+        """
+        if self.split_acs is None:
+            raise ValueError(
+                "Split ACs are not set. Cannot compute :math:`\\log{\\mathcal{L}}_n` term. "
+                "Provide an AnalysisContainerArray to extract_from_acs first."
+            )
+
+        noise_term = self.xp.zeros(self.num_data, dtype=self.xp.float64)
+        for i, ac in enumerate(self.split_acs):
+            noise_term[i] = ac.likelihood(source_only=False, noise_only=True, **kwargs)
+        self.noise_term = noise_term
+
+        if out:
+            return self.noise_term.copy()
 
     def compute_signal_likelihood_terms(
         self,
@@ -827,6 +859,17 @@ class DomainComputationGroupArray:
         """Compute (d|d) terms for all splits and store them in the respective computation groups."""
 
         operations = [group.compute_d_d_term for group in self.computation_groups]
+
+        list_out = self._loop_operation(
+            operation=operations, operation_kwargs={"out": out, **kwargs}
+        )
+        if out:
+            return list_out
+
+    def compute_noise_terms(self, out: bool = False, **kwargs):
+        """Compute noise likelihood terms for all splits and store them in the respective computation groups."""
+
+        operations = [group.compute_noise_term for group in self.computation_groups]
 
         list_out = self._loop_operation(
             operation=operations, operation_kwargs={"out": out, **kwargs}

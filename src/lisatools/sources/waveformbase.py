@@ -9,7 +9,6 @@ WaveformBase module
 
 This module defines the base wrappers for waveform generation, including the application of the LISA response.
 """
-
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -32,6 +31,7 @@ from ..domains import (
     get_stft_settings,
 )
 from ..utils.parallelbase import LISAToolsParallelModule
+from ..utils.typing import ArrayLike, ArrayModule
 from ..utils.utility import tukey
 
 if TYPE_CHECKING:
@@ -179,7 +179,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         return self.backend_name.split("_")[-1]
 
     @property
-    def xp(self):
+    def xp(self) -> ArrayModule:
         """Array module used for calculations."""
         return self.backend.xp
 
@@ -258,12 +258,12 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     @abstractmethod
     def compute_tdi_channels(
         self, *args, **kwargs
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """Time domain TDI channels computation. The output must be a tuple of (times, channels), where `times` can be a 1D array of shape (num_times,) or a 2D array of shape (num_bin, num_times) for batched generation, and `channels` is the corresponding TDI response with shape (num_channels, num_times) or (num_bin, num_channels, num_times) respectively."""
 
         raise NotImplementedError("compute_tdi_channels method must be implemented in subclass.")
 
-    def get_grid_time(self, times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+    def get_grid_time(self, times: ArrayLike) -> ArrayLike:
         """
         For a given array of times, compute the closest points on the grid defined by the data time step.
 
@@ -277,7 +277,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         t0 = self.data_t0
         return t0 + self.xp.round((times - t0) / dt) * dt
 
-    def get_output_settings(self, times: np.ndarray | cp.ndarray) -> DomainSettingsBase:
+    def get_output_settings(self, times: ArrayLike) -> DomainSettingsBase:
         """
         Get the settings for the output domain based on the evaluation times and the chosen analysis domain (STFT or FD).
 
@@ -308,8 +308,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         raise NotImplementedError(f"Unsupported analysis domain: {self.analysis_domain}")
 
     def find_bin_edges(
-        self, times: np.ndarray | cp.ndarray
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self, times: ArrayLike
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """
         For a given array of times, compute the edges of the bins defined by the data time step that contain the times. This is used to determine the time segments for the STFT or the frequency bins for the FD transformation.
 
@@ -340,8 +340,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         return left_edges, grid_length
 
     def build_common_grid(
-        self, times: np.ndarray | cp.ndarray, channels: np.ndarray | cp.ndarray
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self, times: ArrayLike, channels: ArrayLike
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """
         For a given array of times and corresponding channels, build a common grid for all sources based on the analysis domain (STFT or FD).
 
@@ -407,11 +407,11 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     def _pad_td_signal(
         self,
-        times: np.ndarray | cp.ndarray,
-        signals: np.ndarray | cp.ndarray,
+        times: ArrayLike,
+        signals: ArrayLike,
         align_samples: int,
         target_n: int = None,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """Pad time-domain arrays so the start is aligned with data_t0 and reaches a target length.
 
         Accepts either a single source or a batch:
@@ -491,8 +491,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     def _td_to_output_domain(
         self,
-        times_in: np.ndarray | cp.ndarray,
-        signal_in: np.ndarray | cp.ndarray,
+        times_in: ArrayLike,
+        signal_in: ArrayLike,
         output_domain: str = None,
         domain_kwargs: dict = None,
     ) -> DomainBase:
@@ -594,8 +594,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         return padded_td_signal.transform(out_settings, window=window)
 
     def fft(
-        self, start_times: np.ndarray | cp.ndarray, signal_in: np.ndarray | cp.ndarray
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self, start_times: ArrayLike, signal_in: ArrayLike
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """
         Transform pre-padded time domain data to the FD basis.
 
@@ -646,9 +646,9 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     def stft(
         self,
-        start_times: np.ndarray | cp.ndarray,
-        signal_in: np.ndarray | cp.ndarray,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        start_times: ArrayLike,
+        signal_in: ArrayLike,
+    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
         """
         Transform pre-padded time domain data to the STFT basis.
 
@@ -774,7 +774,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
     def wave_gen(
         self, *args, **kwargs
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
         """Generate the waveform for a single source.
 
         Returns:
@@ -800,113 +800,138 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             "Batched calls require implementing wave_gen_batch in the subclass."
         )
 
-    def _apply_response_single(
+    # def _apply_response_single(
+    #     self,
+    #     t_arr: ArrayLike,
+    #     h_plus: ArrayLike,
+    #     h_cross: ArrayLike,
+    #     ra: float,
+    #     dec: float,
+    #     merger_time: float,
+    # ) -> Tuple[ArrayLike, ArrayLike]:
+    #     """Apply the TDI response to a single source and return a TDSignal.
+
+    #     Args:
+    #         t_arr: Time array relative to zero (output of wave_gen).
+    #         h_plus: Plus polarization.
+    #         h_cross: Cross polarization.
+    #         ra: Right ascension in radians.
+    #         dec: Declination in radians.
+    #         merger_time: Time of merger in seconds (relative to waveform_t0).
+
+    #     Returns:
+    #         Tuple of (times, channels) where times is the time array after shifting and padding, and channels is the TDI response with shape (num_channels, num_times).
+    #     """
+    #     shifted_t_arr = t_arr + merger_time + self.waveform_t0
+    #     # add 500 seconds to the end to prevent problems with the response
+
+    #     # pad both sides with zeros by num_pad
+    #     num_pad = int(self.buffer_time / self.dt)
+
+    #     shifted_t_arr = self.xp.concatenate(
+    #         [
+    #             #shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
+    #             shifted_t_arr,
+    #             shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1),
+    #         ]
+    #     )
+
+    #     h_plus = self.xp.pad(h_plus, (0, num_pad), mode="edge")
+    #     h_cross = self.xp.pad(h_cross, (0, num_pad), mode="edge")
+
+    #     self.response.num_pts = shifted_t_arr.shape[-1]
+
+    #     strain = h_plus + 1j * h_cross
+
+    #     self.response.get_projections(
+    #         strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time, run_async=self.run_async
+    #     )
+    #     tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
+
+    #     # trim the invalid points
+    #     shifted_t_arr = shifted_t_arr[:-num_pad]
+    #     tdis[:, :num_pad] = 0.0  # zero out the corrupted points at the start
+    #     tdis = tdis[:, :-num_pad]
+
+    #     # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
+    #     t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
+    #     shifted_t_arr += t_arr_shift
+
+    #     # now remove everything before the start of the data
+    #     start_ind = int((self.data_t0 - shifted_t_arr[0]) / self.dt)
+    #     if start_ind > 0:
+    #         shifted_t_arr = shifted_t_arr[start_ind:]
+    #         tdis = tdis[:, start_ind:]
+
+    #     return shifted_t_arr, tdis
+
+
+    def _apply_response(
         self,
-        t_arr: np.ndarray | cp.ndarray,
-        h_plus: np.ndarray | cp.ndarray,
-        h_cross: np.ndarray | cp.ndarray,
-        ra: float,
-        dec: float,
-        merger_time: float,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
-        """Apply the TDI response to a single source and return a TDSignal.
-
-        Args:
-            t_arr: Time array relative to zero (output of wave_gen).
-            h_plus: Plus polarization.
-            h_cross: Cross polarization.
-            ra: Right ascension in radians.
-            dec: Declination in radians.
-            merger_time: Time of merger in seconds (relative to waveform_t0).
-
-        Returns:
-            Tuple of (times, channels) where times is the time array after shifting and padding, and channels is the TDI response with shape (num_channels, num_times).
-        """
-        shifted_t_arr = t_arr + merger_time + self.waveform_t0
-        # add 500 seconds to the end to prevent problems with the response
-
-        # pad both sides with zeros by num_pad
-        num_pad = int(self.buffer_time / self.dt)
-
-        shifted_t_arr = self.xp.concatenate(
-            [
-                #shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
-                shifted_t_arr,
-                shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1),
-            ]
-        )
-
-        h_plus = self.xp.pad(h_plus, (0, num_pad), mode="edge")
-        h_cross = self.xp.pad(h_cross, (0, num_pad), mode="edge")
-
-        self.response.num_pts = shifted_t_arr.shape[-1]
-
-        strain = h_plus + 1j * h_cross
-
-        self.response.get_projections(
-            strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time, run_async=self.run_async
-        )
-        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
-
-        # trim the invalid points
-        shifted_t_arr = shifted_t_arr[:-num_pad]
-        tdis[:, :num_pad] = 0.0  # zero out the corrupted points at the start
-        tdis = tdis[:, :-num_pad]
-
-        # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
-        t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
-        shifted_t_arr += t_arr_shift
-
-        # now remove everything before the start of the data
-        start_ind = int((self.data_t0 - shifted_t_arr[0]) / self.dt)
-        if start_ind > 0:
-            shifted_t_arr = shifted_t_arr[start_ind:]
-            tdis = tdis[:, start_ind:]
-
-        return shifted_t_arr, tdis
-
-
-    def _apply_response_batch(
-        self,
-        t_arr: np.ndarray | cp.ndarray,
-        h_plus: np.ndarray | cp.ndarray,
-        h_cross: np.ndarray | cp.ndarray,
-        ra: np.ndarray | cp.ndarray,
-        dec: np.ndarray | cp.ndarray,
-        merger_time: np.ndarray | cp.ndarray,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        t_arr: ArrayLike,
+        h_plus: ArrayLike,
+        h_cross: ArrayLike,
+        ra: float | ArrayLike,
+        dec: float | ArrayLike,
+        merger_time: float | ArrayLike,
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """Apply the TDI response to a batch of sources.
 
         Args:
-            t_arr: Time array relative to zero (output of wave_gen_batch), shape (Nbatch, Ntimes).
-            h_plus: Plus polarization, shape (Nbatch, Ntimes).
-            h_cross: Cross polarization, shape (Nbatch, Ntimes).
-            ra: Right ascension in radians, shape (Nbatch,).
-            dec: Declination in radians, shape (Nbatch,).
-            merger_time: Time of merger in seconds (relative to waveform_t0), shape (Nbatch,).
+            t_arr: Time array relative to zero, shape (Ntimes,) or (Nbatch, Ntimes).
+            h_plus: Plus polarization, shape (Ntimes,) or (Nbatch, Ntimes).
+            h_cross: Cross polarization, shape (Ntimes,) or (Nbatch, Ntimes).
+            ra: Right ascension in radians, float or shape (Nbatch,).
+            dec: Declination in radians, float or shape (Nbatch,).
+            merger_time: Time of merger in seconds (relative to waveform_t0), float or shape (Nbatch,).
 
         Returns:
             Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
         """
+        single_source = isinstance(ra, float)
+
+        ra = self.xp.atleast_1d(ra)
+        dec = self.xp.atleast_1d(dec)
+        merger_time = self.xp.atleast_1d(merger_time)
+
+        t_arr = self.xp.atleast_2d(t_arr)
+        h_plus = self.xp.atleast_2d(h_plus)
+        h_cross = self.xp.atleast_2d(h_cross)
+
         shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
         # add 500 seconds to the end to prevent problems with the response
 
-        # pad both sides with zeros by num_pad
+        # pad with zeros by num_pad
         num_pad = int(self.buffer_time / self.dt)
 
-        pad_idx = self.xp.arange(1, num_pad + 1)[None, :]
+        pad_idx_right = self.xp.arange(1, num_pad + 1)[None, :]
+        pad_idx_left = self.xp.arange(num_pad, 0, -1)[None, :]
+
         shifted_t_arr = self.xp.concatenate(
             [
+                #shifted_t_arr[:, 0:1] - self.dt * pad_idx_left,
                 shifted_t_arr,
-                shifted_t_arr[:, -1:] + self.dt * pad_idx,
+                shifted_t_arr[:, -1:] + self.dt * pad_idx_right,
             ],
             axis=-1,
         )
 
-        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_pad)), mode="edge")
-        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_pad)), mode="edge")
+        # condition the signal with a small taper at the start to mitigate edge effects in the response
+        num_orig_pts = h_plus.shape[-1]
+        taper_points = num_pad
+        alpha = taper_points / num_orig_pts
+        window_orig = tukey(num_orig_pts, alpha=alpha, xp=self.xp)
+        window_orig[num_orig_pts//2:] = 1.0  # Only taper the start!
 
-        self.response.num_pts = shifted_t_arr.shape[-1]
+        h_plus = h_plus * window_orig[None, :]
+        h_cross = h_cross * window_orig[None, :]
+
+        # Pad zeros to both the front (buffer) and the back
+        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_pad)), mode="constant", constant_values=0.0)
+        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_pad)), mode="constant", constant_values=0.0)
+
+        num_pts = shifted_t_arr.shape[-1]
+        self.response.num_pts = num_pts
 
         strain = h_plus + 1j * h_cross
 
@@ -914,10 +939,12 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
         )
 
-        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)).transpose(1, 0, 2)  # (Nbatch, num_channels, Ntimes)
+        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)) # (Nbatch, num_channels, Ntimes) if batched else (num_channels, Ntimes)
+        if len(tdis.shape) == 3:
+            tdis = tdis.transpose(1, 0, 2)
 
-        tdis = tdis[:, :, :-num_pad] # remove the padded points at the end, which contain garbage data
-        tdis[:, :, :num_pad] = 0.0  # zero out the corrupted points at the start
+        tdis = tdis[..., :-num_pad] # remove the padded points
+        tdis[..., :num_pad] = 0.0  # zero out the corrupted points at the start
         shifted_t_arr = shifted_t_arr[:, :-num_pad]
 
         t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
@@ -930,7 +957,11 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         if start_ind > 0:
             shifted_t_arr = shifted_t_arr[:, start_ind:]
-            tdis = tdis[:, :, start_ind:]
+            tdis = tdis[..., start_ind:]
+        
+        # now remove the extra time dimensions if we only had one source (to be consistent with the single-source path)
+        if single_source:
+            shifted_t_arr = shifted_t_arr[0]
 
         return shifted_t_arr, tdis
 
@@ -941,23 +972,23 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         dec: float,
         merger_time: float,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """Handle single-source waveform generation and return a Tuple of times and channels."""
 
         t_arr, h_plus, h_cross = self.wave_gen(*args, ra, dec, merger_time, **kwargs)
 
-        times, channels = self._apply_response_single(t_arr, h_plus, h_cross, ra, dec, merger_time)
+        times, channels = self._apply_response(t_arr, h_plus, h_cross, ra, dec, merger_time)
 
         return times, channels
 
     def _call_batched(
         self,
         *args,
-        ra: np.ndarray | cp.ndarray,
-        dec: np.ndarray | cp.ndarray,
-        merger_time: np.ndarray | cp.ndarray,
+        ra: ArrayLike,
+        dec: ArrayLike,
+        merger_time: ArrayLike,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """Handle batched waveform generation and return a Tuple of times and channels.
 
         Loops over the batch dimension for the TDI response (which does not support
@@ -966,37 +997,16 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         """
         times_batch, hplus_batch, hcross_batch = self.wave_gen_batch(*args, ra, dec, merger_time, **kwargs)
 
-        # Nbatch = times_batch.shape[0]
-
-        # all_times = []
-        # all_channels = []
-
-        # for i in range(Nbatch):
-
-        #     times_i, channels_i = self._apply_response_single(
-        #         times_batch[i],
-        #         hplus_batch[i],
-        #         hcross_batch[i],
-        #         float(ra[i]),
-        #         float(dec[i]),
-        #         float(merger_time[i]),
-        #     )
-
-        #     all_times.append(times_i)
-        #     all_channels.append(channels_i)
-
-        # return self.xp.stack(all_times), self.xp.stack(all_channels)
-
-        return self._apply_response_batch(times_batch, hplus_batch, hcross_batch, ra, dec, merger_time)
+        return self._apply_response(times_batch, hplus_batch, hcross_batch, ra, dec, merger_time)
 
     def compute_tdi_channels(
         self,
         *args,
-        ra: float | np.ndarray | cp.ndarray = None,
-        dec: float | np.ndarray | cp.ndarray = None,
-        merger_time: float | np.ndarray | cp.ndarray = None,
+        ra: float | ArrayLike = None,
+        dec: float | ArrayLike = None,
+        merger_time: float | ArrayLike = None,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """Time domain TDI channels computation. In the case of multiple sources, the TDI response is applied sequentially to each source and the results are stacked together.
 
         Args:
@@ -1093,7 +1103,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         self,
         *args,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
         """
         Generate amplitude and phase arrays for each mode of a batch of sources.
         Returns also the time array.
@@ -1105,8 +1115,8 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         raise NotImplementedError("amp_phase_gen method must be implemented in subclass.")
 
     def process_amp_phase(
-        self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        self, amp: ArrayLike, phase: ArrayLike
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """
         Process the amplitude and phase arrays to be fed to the TDI on-the-fly response generator.
 
@@ -1122,7 +1132,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         raise NotImplementedError("process_amp_phase method must be implemented in subclass.")
 
-    def stack_parameter(self, param: np.ndarray, num_modes: int) -> np.ndarray | cp.ndarray:
+    def stack_parameter(self, param: np.ndarray, num_modes: int) -> ArrayLike:
         """
         Stack a parameter array for use in the TDI on-the-fly response generator.
         Given a parameter array of shape (Nbatch,), stack it to shape (Nbatch * num_modes,) by repeating each entry num_modes times. This is needed to match the expected input shape for the TDI on-the-fly response generator when using multiple modes per source.
@@ -1150,10 +1160,10 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
     def pad(
         self,
-        input_times: np.ndarray | cp.ndarray,
-        input_amplitudes: np.ndarray | cp.ndarray,
-        input_phases: np.ndarray | cp.ndarray,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+        input_times: ArrayLike,
+        input_amplitudes: ArrayLike,
+        input_phases: ArrayLike,
+    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
         """
         Add a 500 s buffer at both sides to make sure that we can compute tdi on the times we are actually interested in.
 
@@ -1187,7 +1197,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         return padded_times, padded_amplitudes, padded_phases
 
-    def get_evaluation_times(self, input_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+    def get_evaluation_times(self, input_times: ArrayLike) -> ArrayLike:
         """
         Get the time array on which to evaluate the TDI on-the-fly response. By default, this uses the same as the input time array from the amplitude and phase generation, but subclasses can override this method to define a different evaluation grid if needed (e.g. a regular grid).
 
@@ -1207,7 +1217,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         return evaluation_times
 
-    def get_dense_times(self, eval_times: np.ndarray | cp.ndarray) -> np.ndarray | cp.ndarray:
+    def get_dense_times(self, eval_times: ArrayLike) -> ArrayLike:
         """
         Get a dense time array on which to evaluate the TDI on-the-fly response. This can be used to ensure that the output response is sampled on a regular grid, even if the input amplitude and phase arrays are sampled irregularly.
         """
@@ -1232,13 +1242,13 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
     def compute_tdi_channels(
         self,
         *args,
-        inclination: np.ndarray | cp.ndarray = None,
-        psi: np.ndarray | cp.ndarray = None,
-        ra: np.ndarray | cp.ndarray = None,
-        dec: np.ndarray | cp.ndarray = None,
-        merger_time: np.ndarray | cp.ndarray = None,
+        inclination: ArrayLike = None,
+        psi: ArrayLike = None,
+        ra: ArrayLike = None,
+        dec: ArrayLike = None,
+        merger_time: ArrayLike = None,
         **kwargs,
-    ) -> Tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
+    ) -> Tuple[ArrayLike, ArrayLike]:
         """
         Generate the on-the-fly response for a batch of sources, and return the computed TDI channels.
 
