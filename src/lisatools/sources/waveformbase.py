@@ -31,7 +31,7 @@ from ..domains import (
     get_stft_settings,
 )
 from ..utils.parallelbase import LISAToolsParallelModule
-from ..utils.typing import ArrayLike, ArrayModule
+from ..utils.typing import NDArrayLike, ArrayModule
 from ..utils.utility import tukey
 
 if TYPE_CHECKING:
@@ -258,12 +258,12 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     @abstractmethod
     def compute_tdi_channels(
         self, *args, **kwargs
-    ) -> Tuple[ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Time domain TDI channels computation. The output must be a tuple of (times, channels), where `times` can be a 1D array of shape (num_times,) or a 2D array of shape (num_bin, num_times) for batched generation, and `channels` is the corresponding TDI response with shape (num_channels, num_times) or (num_bin, num_channels, num_times) respectively."""
 
         raise NotImplementedError("compute_tdi_channels method must be implemented in subclass.")
 
-    def get_grid_time(self, times: ArrayLike) -> ArrayLike:
+    def get_grid_time(self, times: NDArrayLike) -> NDArrayLike:
         """
         For a given array of times, compute the closest points on the grid defined by the data time step.
 
@@ -277,7 +277,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         t0 = self.data_t0
         return t0 + self.xp.round((times - t0) / dt) * dt
 
-    def get_output_settings(self, times: ArrayLike) -> DomainSettingsBase:
+    def get_output_settings(self, times: NDArrayLike) -> DomainSettingsBase:
         """
         Get the settings for the output domain based on the evaluation times and the chosen analysis domain (STFT or FD).
 
@@ -308,8 +308,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         raise NotImplementedError(f"Unsupported analysis domain: {self.analysis_domain}")
 
     def find_bin_edges(
-        self, times: ArrayLike
-    ) -> Tuple[ArrayLike, ArrayLike]:
+        self, times: NDArrayLike
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """
         For a given array of times, compute the edges of the bins defined by the data time step that contain the times. This is used to determine the time segments for the STFT or the frequency bins for the FD transformation.
 
@@ -340,8 +340,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         return left_edges, grid_length
 
     def build_common_grid(
-        self, times: ArrayLike, channels: ArrayLike
-    ) -> Tuple[ArrayLike, ArrayLike]:
+        self, times: NDArrayLike, channels: NDArrayLike
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """
         For a given array of times and corresponding channels, build a common grid for all sources based on the analysis domain (STFT or FD).
 
@@ -407,11 +407,11 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     def _pad_td_signal(
         self,
-        times: ArrayLike,
-        signals: ArrayLike,
+        times: NDArrayLike,
+        signals: NDArrayLike,
         align_samples: int,
         target_n: int = None,
-    ) -> Tuple[ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Pad time-domain arrays so the start is aligned with data_t0 and reaches a target length.
 
         Accepts either a single source or a batch:
@@ -491,8 +491,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     def _td_to_output_domain(
         self,
-        times_in: ArrayLike,
-        signal_in: ArrayLike,
+        times_in: NDArrayLike,
+        signal_in: NDArrayLike,
         output_domain: str = None,
         domain_kwargs: dict = None,
     ) -> DomainBase:
@@ -594,8 +594,8 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         return padded_td_signal.transform(out_settings, window=window)
 
     def fft(
-        self, start_times: ArrayLike, signal_in: ArrayLike
-    ) -> Tuple[ArrayLike, ArrayLike]:
+        self, start_times: NDArrayLike, signal_in: NDArrayLike
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """
         Transform pre-padded time domain data to the FD basis.
 
@@ -646,9 +646,9 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     def stft(
         self,
-        start_times: ArrayLike,
-        signal_in: ArrayLike,
-    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
+        start_times: NDArrayLike,
+        signal_in: NDArrayLike,
+    ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
         """
         Transform pre-padded time domain data to the STFT basis.
 
@@ -774,7 +774,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
     def wave_gen(
         self, *args, **kwargs
-    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
         """Generate the waveform for a single source.
 
         Returns:
@@ -802,13 +802,13 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
     # def _apply_response_single(
     #     self,
-    #     t_arr: ArrayLike,
-    #     h_plus: ArrayLike,
-    #     h_cross: ArrayLike,
+    #     t_arr: NDArrayLike,
+    #     h_plus: NDArrayLike,
+    #     h_cross: NDArrayLike,
     #     ra: float,
     #     dec: float,
     #     merger_time: float,
-    # ) -> Tuple[ArrayLike, ArrayLike]:
+    # ) -> Tuple[NDArrayLike, NDArrayLike]:
     #     """Apply the TDI response to a single source and return a TDSignal.
 
     #     Args:
@@ -868,13 +868,13 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
     def _apply_response(
         self,
-        t_arr: ArrayLike,
-        h_plus: ArrayLike,
-        h_cross: ArrayLike,
-        ra: float | ArrayLike,
-        dec: float | ArrayLike,
-        merger_time: float | ArrayLike,
-    ) -> Tuple[ArrayLike, ArrayLike]:
+        t_arr: NDArrayLike,
+        h_plus: NDArrayLike,
+        h_cross: NDArrayLike,
+        ra: float | NDArrayLike,
+        dec: float | NDArrayLike,
+        merger_time: float | NDArrayLike,
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Apply the TDI response to a batch of sources.
 
         Args:
@@ -972,7 +972,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         dec: float,
         merger_time: float,
         **kwargs,
-    ) -> Tuple[ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Handle single-source waveform generation and return a Tuple of times and channels."""
 
         t_arr, h_plus, h_cross = self.wave_gen(*args, ra, dec, merger_time, **kwargs)
@@ -984,11 +984,11 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def _call_batched(
         self,
         *args,
-        ra: ArrayLike,
-        dec: ArrayLike,
-        merger_time: ArrayLike,
+        ra: NDArrayLike,
+        dec: NDArrayLike,
+        merger_time: NDArrayLike,
         **kwargs,
-    ) -> Tuple[ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Handle batched waveform generation and return a Tuple of times and channels.
 
         Loops over the batch dimension for the TDI response (which does not support
@@ -1002,11 +1002,11 @@ class TDPyResponseWaveformBase(TDWaveformBase):
     def compute_tdi_channels(
         self,
         *args,
-        ra: float | ArrayLike = None,
-        dec: float | ArrayLike = None,
-        merger_time: float | ArrayLike = None,
+        ra: float | NDArrayLike = None,
+        dec: float | NDArrayLike = None,
+        merger_time: float | NDArrayLike = None,
         **kwargs,
-    ) -> Tuple[ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Time domain TDI channels computation. In the case of multiple sources, the TDI response is applied sequentially to each source and the results are stacked together.
 
         Args:
@@ -1103,7 +1103,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         self,
         *args,
         **kwargs,
-    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
         """
         Generate amplitude and phase arrays for each mode of a batch of sources.
         Returns also the time array.
@@ -1115,8 +1115,8 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         raise NotImplementedError("amp_phase_gen method must be implemented in subclass.")
 
     def process_amp_phase(
-        self, amp: ArrayLike, phase: ArrayLike
-    ) -> Tuple[ArrayLike, ArrayLike]:
+        self, amp: NDArrayLike, phase: NDArrayLike
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """
         Process the amplitude and phase arrays to be fed to the TDI on-the-fly response generator.
 
@@ -1132,7 +1132,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         raise NotImplementedError("process_amp_phase method must be implemented in subclass.")
 
-    def stack_parameter(self, param: np.ndarray, num_modes: int) -> ArrayLike:
+    def stack_parameter(self, param: np.ndarray, num_modes: int) -> NDArrayLike:
         """
         Stack a parameter array for use in the TDI on-the-fly response generator.
         Given a parameter array of shape (Nbatch,), stack it to shape (Nbatch * num_modes,) by repeating each entry num_modes times. This is needed to match the expected input shape for the TDI on-the-fly response generator when using multiple modes per source.
@@ -1160,10 +1160,10 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
     def pad(
         self,
-        input_times: ArrayLike,
-        input_amplitudes: ArrayLike,
-        input_phases: ArrayLike,
-    ) -> Tuple[ArrayLike, ArrayLike, ArrayLike]:
+        input_times: NDArrayLike,
+        input_amplitudes: NDArrayLike,
+        input_phases: NDArrayLike,
+    ) -> Tuple[NDArrayLike, NDArrayLike, NDArrayLike]:
         """
         Add a 500 s buffer at both sides to make sure that we can compute tdi on the times we are actually interested in.
 
@@ -1197,7 +1197,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         return padded_times, padded_amplitudes, padded_phases
 
-    def get_evaluation_times(self, input_times: ArrayLike) -> ArrayLike:
+    def get_evaluation_times(self, input_times: NDArrayLike) -> NDArrayLike:
         """
         Get the time array on which to evaluate the TDI on-the-fly response. By default, this uses the same as the input time array from the amplitude and phase generation, but subclasses can override this method to define a different evaluation grid if needed (e.g. a regular grid).
 
@@ -1217,7 +1217,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
 
         return evaluation_times
 
-    def get_dense_times(self, eval_times: ArrayLike) -> ArrayLike:
+    def get_dense_times(self, eval_times: NDArrayLike) -> NDArrayLike:
         """
         Get a dense time array on which to evaluate the TDI on-the-fly response. This can be used to ensure that the output response is sampled on a regular grid, even if the input amplitude and phase arrays are sampled irregularly.
         """
@@ -1242,13 +1242,13 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
     def compute_tdi_channels(
         self,
         *args,
-        inclination: ArrayLike = None,
-        psi: ArrayLike = None,
-        ra: ArrayLike = None,
-        dec: ArrayLike = None,
-        merger_time: ArrayLike = None,
+        inclination: NDArrayLike = None,
+        psi: NDArrayLike = None,
+        ra: NDArrayLike = None,
+        dec: NDArrayLike = None,
+        merger_time: NDArrayLike = None,
         **kwargs,
-    ) -> Tuple[ArrayLike, ArrayLike]:
+    ) -> Tuple[NDArrayLike, NDArrayLike]:
         """
         Generate the on-the-fly response for a batch of sources, and return the computed TDI channels.
 
