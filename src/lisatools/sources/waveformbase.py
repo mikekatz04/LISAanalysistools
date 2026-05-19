@@ -638,11 +638,22 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         freqs = self.xp.fft.rfftfreq(n, d=self.dt)
 
         keep = (freqs >= self.freq_min) & (freqs <= self.freq_max)
-        signal_out = signal_fd[..., keep]
 
-        start_freqs = self.xp.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
+        # Find the integer indices corresponding to the frequency bounds
+        start_idx = self.xp.searchsorted(freqs, self.freq_min)
+        end_idx = self.xp.searchsorted(freqs, self.freq_max, side='right')
+
+        # Slicing creates a view, avoiding the copy
+        signal_out = signal_fd[..., start_idx:end_idx]
+
+        start_freqs = self.xp.full(shape=num_binaries, fill_value=freqs[start_idx])
 
         return signal_out, start_freqs
+        # signal_out = signal_fd[..., keep] #try to avoid this copy
+
+        # start_freqs = self.xp.full(shape=num_binaries, fill_value=self.xp.min(freqs[keep]))
+
+        # return signal_out, start_freqs
 
     def stft(
         self,
@@ -757,6 +768,14 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         self.buffer_time = buffer_time
         self.run_async = run_async
+
+        # Record which CUDA device the response/orbits were allocated on so that
+        # _apply_response can restore this context before calling get_projections,
+        # preventing illegal-memory-access when the caller leaves a different device current.
+        if hasattr(self, 'xp') and hasattr(self.xp, 'cuda'):
+            self._response_device_id = self.xp.cuda.runtime.getDevice()
+        else:
+            self._response_device_id = None
 
     @property
     def wrapper_kwargs(self) -> dict:
@@ -888,6 +907,20 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         Returns:
             Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
         """
+        # If we know which device the response/orbits live on, ensure that device is
+        # current for the entire computation.  This prevents an illegal-memory-access
+        # when a previous caller (e.g. template_likelihood on a GPU-2 walker) left a
+        # different device current and cudaMalloc inside get_response would then
+        # allocate orbits_gpu on the wrong GPU while n_arr/ltt_arr/x_arr still
+        # address GPU-0 memory.
+        _response_device_id = getattr(self, '_response_device_id', None)
+        if _response_device_id is not None:
+            _saved_device = self.xp.cuda.runtime.getDevice()
+            if _saved_device != _response_device_id:
+                self.xp.cuda.runtime.setDevice(_response_device_id)
+        else:
+            _saved_device = None
+
         single_source = isinstance(ra, float)
 
         ra = self.xp.atleast_1d(ra)
@@ -962,6 +995,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         # now remove the extra time dimensions if we only had one source (to be consistent with the single-source path)
         if single_source:
             shifted_t_arr = shifted_t_arr[0]
+
+        if _saved_device is not None and _saved_device != _response_device_id:
+            self.xp.cuda.runtime.setDevice(_saved_device)
 
         return shifted_t_arr, tdis
 

@@ -457,6 +457,7 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         likelihood_args_per_split = self.dcga._loop_operation(
             operation=self.prepare_likelihood_inputs,
             operation_args_per_split=coords_per_split,
+            positions_per_split=positions_per_split,
         )
 
         ll = self.dcga.compute_psd_likelihood(

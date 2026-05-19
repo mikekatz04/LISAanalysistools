@@ -369,7 +369,8 @@ def subtract_initial_signal(
     source_name: str,
     source_info: Setup,
 ):
-    
+    if acs.gpus is not None:
+        main_device = acs.gpus[0]
     if np.any(inds := state.branches_inds[source_name][0]):
         logger.info(f"Subtracting initial signals for {source_name}")
         counter = 0
@@ -378,12 +379,28 @@ def subtract_initial_signal(
                 assert np.all(inds[:, leaf])
                 inj_coords = state.branches_coords[source_name][0, :, leaf]
                 inj_coords_in = source_info.transform.both_transforms(inj_coords)
+                
+                logger.debug(f"CUDA device here: {cp.cuda.runtime.getDevice()}")  # Debugging line to check current CUDA device
+
                 signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
                 for w in range(len(signals_in)):
-                    ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
-                    logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}")
+                    if acs.gpus is not None:
+                        device = acs.gpu_map[w]
+                        with cp.cuda.Device(device):
+                            ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
+                    else:
+                        ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
+
+                    logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}. Device: {cp.cuda.runtime.getDevice() if acs.gpus is not None else 'CPU'}")
                 acs.add_signal_to_residual(signals_in)
                 counter += 1
+                
+                if acs.gpus is not None:
+                    acs.synchronize()  # Ensure GPU computations are complete before logging
+                    acs.xp.get_default_memory_pool().free_all_blocks()
+                    cp.cuda.runtime.setDevice(main_device)  # Switch back to main device after subtraction
+                    logger.debug(f"Switched back to main CUDA device {main_device} after subtraction.")
+                    
         logger.debug(f"Subtracted {counter} initial signals for {source_name}")
     else:
         logger.info(f"No initial signals for {source_name}")

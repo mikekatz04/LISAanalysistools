@@ -892,10 +892,11 @@ class DomainComputationGroupArray:
 
         operation_args_per_split = []
         for split_id in range(self.num_splits):
+            likelihood_args = likelihood_args_per_split[split_id]
             args_i = (
                 data_intra_per_split[split_id],
                 noise_intra_per_split[split_id],
-                *likelihood_args_per_split[split_id],
+                *(likelihood_args if likelihood_args is not None else ()),
             )
             operation_args_per_split.append(args_i)
 
