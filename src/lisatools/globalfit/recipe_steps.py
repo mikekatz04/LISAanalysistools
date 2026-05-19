@@ -54,7 +54,7 @@ class RJRecipeStep(BaseRecipeStep):
         thin_by: int = 1, 
         **kwargs
     ):
-        RecipeStep.__init__(self, *args, **kwargs)
+        BaseRecipeStep.__init__(self, *args, **kwargs)
         self.convergence_iter = convergence_iter
         self.thin_by = thin_by
 
@@ -308,7 +308,7 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot)
     
     f0_mHz = f_init * 1e3
-    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"])) % (np.pi)
+    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
 
     ra = np.array(catalogue_entry["RightAscension"]) # alpha
     dec = np.array(catalogue_entry["Declination"]) # delta
@@ -440,7 +440,7 @@ def build_psd_moves(
         num_repeats=num_repeats,
         permute_every=permute_every,
         live_dangerously=True,
-        psd_transform_fn=psd_info.transform_fn,
+        psd_transform_fn=psd_info.transform,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
         use_gpu=True,
@@ -628,6 +628,15 @@ def build_gb_moves(
         
         check = priors["gb"].logpdf(coords_out_gb)
         if np.any(np.isinf(check)):
+
+            # check which prior is inf
+            inf_indices = np.where(np.isinf(check))[0]
+            inf_coords = coords_out_gb[inf_indices]
+            logger.error(f"Found {len(inf_indices)} coordinates with inf logpdf under GB priors. Example inf coordinates: {inf_coords[:5]}") 
+
+            logger.info("Prior bounds for GB parameters:")
+            for param_name, prior in priors["gb"].priors_in.items():
+                logger.info(f"  {param_name}: [{prior.min_val},{prior.max_val}]")
             breakpoint()
             raise ValueError("Starting priors are inf. If injecting, try reducing spread.")
 
@@ -775,7 +784,7 @@ def build_gb_moves(
         use_prior_removal=False,  # gb_info["pe_info"]["use_prior_removal"],
         phase_maximize=False,  # should probably be false if pruning  # gb_info["pe_info"]["rj_phase_maximize"],
         ranks_needed=0,
-        run_swaps=False, 
+        run_swaps=True, 
         gpus=[],
         **gb_move_kwargs
     )
