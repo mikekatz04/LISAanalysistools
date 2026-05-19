@@ -772,10 +772,10 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         # Record which CUDA device the response/orbits were allocated on so that
         # _apply_response can restore this context before calling get_projections,
         # preventing illegal-memory-access when the caller leaves a different device current.
-        if hasattr(self, 'xp') and hasattr(self.xp, 'cuda'):
-            self._response_device_id = self.xp.cuda.runtime.getDevice()
-        else:
-            self._response_device_id = None
+        # if hasattr(self, 'xp') and hasattr(self.xp, 'cuda'):
+        #     self._response_device_id = self.xp.cuda.runtime.getDevice()
+        # else:
+        #     self._response_device_id = None
 
     @property
     def wrapper_kwargs(self) -> dict:
@@ -913,13 +913,13 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         # different device current and cudaMalloc inside get_response would then
         # allocate orbits_gpu on the wrong GPU while n_arr/ltt_arr/x_arr still
         # address GPU-0 memory.
-        _response_device_id = getattr(self, '_response_device_id', None)
-        if _response_device_id is not None:
-            _saved_device = self.xp.cuda.runtime.getDevice()
-            if _saved_device != _response_device_id:
-                self.xp.cuda.runtime.setDevice(_response_device_id)
-        else:
-            _saved_device = None
+        # _response_device_id = getattr(self, '_response_device_id', None)
+        # if _response_device_id is not None:
+        #     _saved_device = self.xp.cuda.runtime.getDevice()
+        #     if _saved_device != _response_device_id:
+        #         self.xp.cuda.runtime.setDevice(_response_device_id)
+        # else:
+        #     _saved_device = None
 
         single_source = isinstance(ra, float)
 
@@ -996,8 +996,8 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         if single_source:
             shifted_t_arr = shifted_t_arr[0]
 
-        if _saved_device is not None and _saved_device != _response_device_id:
-            self.xp.cuda.runtime.setDevice(_saved_device)
+        # if _saved_device is not None and _saved_device != _response_device_id:
+        #     self.xp.cuda.runtime.setDevice(_saved_device)
 
         return shifted_t_arr, tdis
 
