@@ -2219,19 +2219,19 @@ class WDMLookupTable(WDMSettings):
 
         return norm_freq_single_layer, m_diffs, m_ref
 
-    def __init__(self, settings: WDMSettings, nchannels: int, m_ref: int = None, norm_freq_single_layer: np.ndarray = None, m_diffs: np.ndarray = None, fdot_vals: np.ndarray = None, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, td_window: Optional[np.ndarray] = None):
+    def __init__(self, settings: WDMSettings, nchannels: int, m_ref: int = None, norm_freq_single_layer: np.ndarray = None, m_diffs: np.ndarray = None, fdot_vals: np.ndarray = None, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, td_window: Optional[np.ndarray] = None, verbose: bool = False):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
 
         self.nchannels = nchannels
-        
+
         self.store_path = store_path
         if os.path.exists(self.store_path):
             self.from_file_internal(self.store_path)
         else:
-            self.build_lookup_table(m_ref, m_diffs, norm_freq_single_layer, fdot_vals, store_path, batch_size_gen, td_window)
+            self.build_lookup_table(m_ref, m_diffs, norm_freq_single_layer, fdot_vals, store_path, batch_size_gen, td_window, verbose=verbose)
 
-    def build_lookup_table(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None) -> None:
+    def build_lookup_table(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None, verbose: bool = False) -> None:
         """Generate the sin/cos coefficient tables and (optionally) save them to ``store_path``."""
         self.sub_settings = WDMSettings(self.Nf, self.Nt, self.data_dt, force_backend=self.force_backend)
         self.m_ref = m_ref
@@ -2267,9 +2267,19 @@ class WDMLookupTable(WDMSettings):
         _table_cos = self.xp.zeros((self.Nt, len(m_diffs), total_f_fdot_vals,))
 
         self.td_window = td_window
-        for st_batch, end_batch in zip(batches[:-1], batches[1:]):
+        import time as _time
+        _n_batches = len(batches) - 1
+        _t_start = _time.perf_counter()
+        if verbose:
+            print(f"[build] starting: {_n_batches} batches × {len(m_diffs)} "
+                  f"m_diffs × Nt={self.Nt} time pixels", flush=True)
+        for _bi, (st_batch, end_batch) in enumerate(zip(batches[:-1], batches[1:])):
+            _t_batch = _time.perf_counter()
             inds = np.arange(st_batch, end_batch)
 
+            if not np.any(np.isclose(_f_vals[inds], (self.m_ref + 0.5) * self.layer_df) | np.isclose(_f_vals[inds], (self.m_ref + 0.5) * self.layer_df, 0.0)):
+                continue
+            # breakpoint()
             phase = 2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2)
             wave_sin = self.xp.sin(phase)
             wave_cos = self.xp.cos(phase)
@@ -2277,8 +2287,9 @@ class WDMLookupTable(WDMSettings):
             wave_sin_wdm = TDSignal(wave_sin, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
             wave_cos_wdm = TDSignal(wave_cos, TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend)).wdmtransform(settings=self.sub_settings, window=self.td_window)
 
+            # TODO this is transpose shape? should be fine
             phase_n = 2 * np.pi * (_f_vals[None, inds] * t_diff_wdm[:, None] + 1. / 2. * _fdot_vals[None, inds] * t_diff_wdm[:, None] ** 2)
-
+            
             n_current = self.xp.arange(self.Nt)
             for m_i, m_diff in enumerate(m_diffs):
                 m_current = self.m_ref + m_diff
@@ -2289,14 +2300,47 @@ class WDMLookupTable(WDMSettings):
                 _sin_coeff = _cos_coeff_1 * np.sin(-phase_n)  + _sin_coeff_1 * np.cos(-phase_n)
 
                 _f_norm = _f_vals[inds] - (self.m_ref - m_diff) * self.layer_df
+                
+                if np.any(np.isclose(_f_norm, 0.0) | np.isclose(_f_norm, 0.5 * self.layer_df)):
+                    breakpoint()
 
                 is_odd = ((m_current + n_current) % 2 == 1)[:, None]
+                # sin_coeff = _sin_coeff * (~is_odd) + _cos_coeff * (is_odd)
+                # cos_coeff = _sin_coeff * (is_odd) + _cos_coeff * (~is_odd)
+
                 sin_coeff = _sin_coeff * (~is_odd) + _cos_coeff * (is_odd)
                 cos_coeff = _sin_coeff * (is_odd) + _cos_coeff * (~is_odd)
+
+                # Bake (-1)^(m_diff parity) into the stored values so that
+                # adjacent m_diff blocks have matching signs at f_norm
+                # boundaries. Without this, linear interp across block
+                # boundaries blends opposite-sign samples and produces
+                # garbage in a narrow window of pixels around each Doppler
+                # crossing. The eval kernel undoes this with a matching
+                # (-1)^(m_diff) factor (which combines with the original
+                # FFT-mirror correction).
+                # TODO: when fdot != 0, the sine term still needs review —
+                # the current implementation only handles fdot_vals = [0.0],
+                # and the parity argument for the sine branch under nonzero
+                # fdot has not yet been worked out.
+                if int(m_diff) & 1:
+                    # with FDOT=0.0, sin_coeff is always ~0.0 here
+                    sin_coeff = -sin_coeff
+                    cos_coeff = -cos_coeff
 
                 _table_sin[:, m_i, inds] = sin_coeff
                 _table_cos[:, m_i, inds] = cos_coeff
 
+            if verbose:
+                _elapsed = _time.perf_counter() - _t_start
+                _per_batch = _elapsed / (_bi + 1)
+                _eta = _per_batch * (_n_batches - _bi - 1)
+                print(f"[build] batch {_bi + 1:4d}/{_n_batches}  "
+                      f"inds=[{int(st_batch):5d}, {int(end_batch):5d})  "
+                      f"this_batch={_time.perf_counter() - _t_batch:.2f}s  "
+                      f"elapsed={_elapsed/60.0:5.2f}m  ETA={_eta/60.0:5.2f}m",
+                      flush=True)
+        breakpoint()
         _table_sin = _table_sin.reshape(self.Nt, len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(0, 2, 1, 3).reshape(self.Nt, self.fdot_steps, self.f_steps).copy()
         _table_cos = _table_cos.reshape(self.Nt, len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(0, 2, 1, 3).reshape(self.Nt, self.fdot_steps, self.f_steps).copy()
 
@@ -2500,11 +2544,14 @@ class WDMLookupTable(WDMSettings):
 
             wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * self.xp.sin(phi_arr[keep_now]) + cos_coeffs * self.xp.cos(phi_arr[keep_now]))
 
-            # m-parity correction: build reads wave_*_wdm[:, m_ref - m_diff, :]
-            # so the stored coefficients carry an implicit (-1)^(m_source - m_ref)
-            # factor coming from FFT-mirror symmetry of the WDM transform.
-            ms_source = ms[keep_now]
-            sign = self.xp.where(((ms_source - self.m_ref) & 1) != 0, -1.0, 1.0)
+            # Build now bakes (-1)^(m_diff_build) into the stored values so
+            # that linear interp across f_norm block boundaries is smooth.
+            # The block selected at lookup is m_diff_build = -m_diff_eval, so
+            # the build flip imprints (-1)^(m_diff_eval) onto the looked-up
+            # value. Combined with the original FFT-mirror correction
+            # (-1)^(ms_source - m_ref), the net eval sign is
+            # (-1)^((ms_to_use - m_ref) parity).
+            sign = self.xp.where(((ms_to_use[keep_now] - self.m_ref) & 1) != 0, -1.0, 1.0)
             wdm_coeffs_out[keep_now, i] *= sign
 
             m_map[keep_now, i] = ms_to_use[keep_now]
