@@ -2386,7 +2386,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             if "fstat" in self.name or "refit" in self.name:
                                 pass
                             else:
-                                breakpoint()
+                                logger.info(f"delta_logP: {delta_logP[bad_accepts]}. Factors: {update_factors.squeeze()[bad_accepts]}. ll_diff: {ll_diff[bad_accepts]}. curr_logp: {curr_logp[bad_accepts]}. prev_logp: {prev_logp[bad_accepts]}. curr_beta: {curr_beta[bad_accepts]}")
                         accept[bad_accepts] = False
                             
                     if is_rj_now and self.use_prior_removal:
