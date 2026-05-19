@@ -101,7 +101,14 @@ def setup_recipe(
     spread_gb = np.array([1e-12, 1e-12, 1e-17, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
     iteratively_resolved_population_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "catalogues", "iteratively_resolved_gbs_075yrs_snr7.npy")
     iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
+
+    frequencies = iteratively_resolved_population["Frequency"]
+
+    in_band = (frequencies > curr.source_info["gb"].f0_lims[0]) & (frequencies < curr.source_info["gb"].f0_lims[1])
+    logger.info(f"Keeping {np.sum(in_band)} out of {len(iteratively_resolved_population)} iteratively resolved GB sources within the band limits {curr.source_info['gb'].f0_lims[0]} - {curr.source_info['gb'].f0_lims[1]}")
+    iteratively_resolved_population = iteratively_resolved_population[in_band]
     subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
+    logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
     # subset_inds = None
     setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds)
 
@@ -301,12 +308,18 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     waveform_model = "GBGPU"
     waveform_model_code_link = "https://github.com/Erebor-L2D/GBGPU/tree/cdl1-run0"
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
+
+    input_data_arr: DataResidualArray = general_set.input_data_residual_array
+    start_freq = float(input_data_arr.settings.f_arr[0])
+    end_freq = float(input_data_arr.settings.f_arr[-1])
+
+    Tobs = 1/getattr(input_data_arr.settings, "df")
     
     delta_safe = 1e-9
 
     A_lims = [10**(-23.2), 1e-20]
-    f0_lims = [1e-4, 0.023] # reset by band limits
-    
+    f0_lims = [start_freq, end_freq]#[general_set.start_freq, general_set.end_freq]  # reset by band limits
+
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
     
@@ -316,12 +329,6 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     psi_lims = [0.0, np.pi]
     alpha_lims = [0.0, 2 * np.pi]
     delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
-    
-    input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    start_freq = float(input_data_arr.settings.f_arr[0])
-    end_freq = float(input_data_arr.settings.f_arr[-1])
-
-    Tobs = 1/getattr(input_data_arr.settings, "df")
 
     oversample = 4
     extra_buffer = 5
@@ -390,7 +397,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=6000,
+        nleaves_max=4000,
         nleaves_min=0,
         ndim=8,
         betas=betas,
@@ -442,12 +449,12 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
-    start_freq = 1e-4
-    end_freq = 2.5e-2
+    start_freq = 1e-3
+    end_freq = 2e-3
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "full_scale_galaxy" #"test_mbh_18_with_covariance"
+    base_file_name = "full_scale_galaxy_v2" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
@@ -459,7 +466,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 25
-    ntemps = 16
+    ntemps = 10
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq

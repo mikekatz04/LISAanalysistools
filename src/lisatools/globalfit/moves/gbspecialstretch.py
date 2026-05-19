@@ -479,7 +479,9 @@ class Buffer(LISAToolsParallelModule):
             self.buffer_start_index[self.unique_band_combos[:, 2] == 0] = (
                 self.band_edges[0] / self.df
             ).astype(np.int32) - self.edge_buffer
-            # self.buffer_start_index[self.unique_band_combos[:, 2] == self.num_bands - 1] = (self.band_edges[-1] / self.df).astype(np.int32) - self.edge_buffer
+            # Clamp so buffer end never overflows the data range (band_edges[-1])
+            max_start = int(self.band_edges[-1] / self.df) - self.data_length
+            self.buffer_start_index = np.minimum(self.buffer_start_index, max_start)
 
         self.start_freq_inds = self.xp.asarray(self.buffer_start_index.copy().astype(np.int32))
 
@@ -770,7 +772,7 @@ class Buffer(LISAToolsParallelModule):
         assert np.all(
             (self.buffer_start_index[inds_fill] - start_freq_ind + self.data_length)
             <= acs.end_shape[0]
-        )
+        ), f"Buffer indexing exceeds available data length in AnalysisContainerArray. Start indices: {self.buffer_start_index[inds_fill]}, start_freq_ind: {start_freq_ind}, data_length: {self.data_length}, acs end shape: {acs.end_shape[0]}"
         
         start_inds = self.buffer_start_index[inds_fill] - start_freq_ind
         
@@ -2018,7 +2020,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             _tmp_waveform_kwargs = self.waveform_kwargs.copy()
                             _tmp_waveform_kwargs.pop("start_freq_ind")
                             
-                            # print("Number of params to calculate FIM for is", info_mat_params.shape[0])
+                            logger.info("Number of params to calculate FIM for is %d", info_mat_params.shape[0])
                             info_mat = self.gb.information_matrix(
                                 info_mat_params,
                                 psd = model.analysis_container_arr.linear_psd_arr,
@@ -2251,6 +2253,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
                     # check if any proposals have -inf logp before likelihood calculation to catch issues early
                     if cp.any(~cp.isfinite(prev_logp)):  # [run_now_tmp]
+                        # check which parameters have -inf logp and why
                         breakpoint()
                     # if cp.any(cp.isinf(prev_logp)):  # [run_now_tmp]
                     #     breakpoint()
@@ -2514,7 +2517,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 #     print(tmp)
                 self.mempool.free_all_blocks()
                 # update prop counter
-                # logger.info(f"For {self.name}, we still have to run {still_to_run.sum()} proposals.")
+                logger.info(f"For {self.name}, we still have to run {still_to_run.sum()} proposals.")
             # add back in all sources in the cold-chain
             # residual from this group
             # llaf1 = model.analysis_container_arr.likelihood()
