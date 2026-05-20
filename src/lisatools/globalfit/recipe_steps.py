@@ -126,6 +126,8 @@ def scatter_around_injection(
     spread: float | np.ndarray,
     reverse_transform: typing.Callable | None = None,
     betas: np.ndarray | None = None,
+    priors: ProbDistContainer | None = None,
+    max_resample_tries: int = 50,
 ):
     """
     Initialize branch coordinates by scattering walkers around injection parameters.
@@ -134,6 +136,13 @@ def scatter_around_injection(
     the (transformed) injection parameters.  Higher-temperature chains receive
     proportionally wider scatter when ``betas`` is provided.  Initialized
     leaves are marked as active (``inds = True``).
+
+    When ``priors`` is supplied, any draw that lies outside the prior support
+    (``logpdf == -inf``) is rejected and redrawn.  This is essential for
+    sampling bases that contain ``arcsin``/``arccos`` transforms (e.g. MBH
+    ``sin_beta``, ``cos_iota``) where an out-of-support initial coordinate
+    silently produces NaN once the transform pipeline runs, eventually
+    surfacing as a CUDA illegal-memory-access in downstream kernels.
 
     The function modifies ``state`` in-place, so it can be called from
     ``setup_recipe`` (before MCMC) or from a ``RecipeStep.setup_run``
@@ -167,6 +176,18 @@ def scatter_around_injection(
         Inverse-temperature ladder.  When provided the covariance for
         temperature index *t* is scaled by ``1 / betas[t]`` so that
         hotter chains start with a wider scatter.
+    priors : ProbDistContainer, optional
+        Prior container for ``branch_name``.  When given, walker draws
+        outside the prior support are rejected and redrawn (up to
+        ``max_resample_tries`` per walker).  Without it, this routine can
+        seed walkers that lie outside arcsin/arccos domains, producing
+        NaNs once the transform pipeline runs.
+    max_resample_tries : int, optional
+        Hard cap on resampling attempts per walker before raising.  Only
+        used when ``priors`` is supplied.  Default 50 — for any reasonable
+        scatter and prior, this is wildly more than needed; the cap exists
+        only to surface pathological configs (e.g. the entire scatter
+        landing outside the prior) instead of looping forever.
     """
     coords = state.branches_coords[branch_name]
     ntemps, nwalkers, nleaves_max, ndim = coords.shape
@@ -204,6 +225,9 @@ def scatter_around_injection(
 
     if betas is not None:
         logger.info(f"Scaling initial covariance by betas: {betas}")
+
+    leaf_prior = priors[branch_name] if priors is not None else None
+
     for leaf in range(nleaves_init):
         center = injection_sampling[leaf]
         leaf_cov = covs[leaf]
@@ -214,6 +238,28 @@ def scatter_around_injection(
                 scaled_cov = leaf_cov
 
             draws = np.random.multivariate_normal(center, scaled_cov, size=nwalkers)
+
+            if leaf_prior is not None:
+                bad = ~np.isfinite(leaf_prior.logpdf(draws))
+                tries = 0
+                while bad.any():
+                    if tries >= max_resample_tries:
+                        n_bad = int(bad.sum())
+                        raise RuntimeError(
+                            f"scatter_around_injection: leaf={leaf} temp={t}: "
+                            f"{n_bad}/{nwalkers} walkers still outside prior support "
+                            f"after {max_resample_tries} resample passes. "
+                            f"Injection sampling-basis params = {center.tolist()}. "
+                            f"Likely the injection sits on / outside a prior edge, or "
+                            f"the scatter is too wide for the prior range."
+                        )
+                    redraws = np.random.multivariate_normal(
+                        center, scaled_cov, size=int(bad.sum())
+                    )
+                    draws[bad] = redraws
+                    bad = ~np.isfinite(leaf_prior.logpdf(draws))
+                    tries += 1
+
             coords[t, :, leaf] = draws
 
         state.branches_inds[branch_name][:, :, leaf] = True
@@ -377,13 +423,14 @@ def subtract_initial_signal(
             if inds[0, leaf]:
                 assert np.all(inds[:, leaf])
                 inj_coords = state.branches_coords[source_name][0, :, leaf]
-                inj_coords_in = xp.asfortranarray(
-                    xp.asarray(source_info.transform.both_transforms(inj_coords))
-                    )
-                
+                inj_coords_in = xp.asarray(source_info.transform.both_transforms(inj_coords))
+
                 # logger.debug(f"CUDA device here: {cp.cuda.runtime.getDevice()}")  # Debugging line to check current CUDA device
 
-                signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
+                # C-order columns are non-contiguous (stride = ndim*8), so ascontiguousarray
+                # is forced to allocate a fresh, pool-aligned buffer for each parameter —
+                # avoiding the misalignment that arises with F-order when nwalkers is odd.
+                signals_in = wave_gen(*[xp.ascontiguousarray(col) for col in inj_coords_in.T], **source_info.waveform_kwargs)
                 for w in range(len(signals_in)):
                     ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
                 #     if acs.gpus is not None:
