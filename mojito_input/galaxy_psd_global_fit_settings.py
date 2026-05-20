@@ -95,14 +95,17 @@ def setup_recipe(
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
+    psd_info = curr.source_info["psd"]
 
     #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
-    spread_gb = np.array([1e-12, 1e-12, 1e-18, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
+    spread_gb = np.array([1e-12, 1e-12, 1e-20, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
     iteratively_resolved_population_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "catalogues", "iteratively_resolved_gbs_075yrs_snr7.npy")
     iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
 
     frequencies = iteratively_resolved_population["Frequency"]
+
+    # iteratively_resolved_population["Polarization"] = iteratively_resolved_population["Polarization"] % np.pi  # ensure polarization is within [0, pi]
 
     in_band = (frequencies > curr.source_info["gb"].f0_lims[0]) & (frequencies < curr.source_info["gb"].f0_lims[1])
     logger.info(f"Keeping {np.sum(in_band)} out of {len(iteratively_resolved_population)} iteratively resolved GB sources within the band limits {curr.source_info['gb'].f0_lims[0]} - {curr.source_info['gb'].f0_lims[1]}")
@@ -115,7 +118,7 @@ def setup_recipe(
     
     #* ================================= BUILD MOVES ==================================
     psd_search_move, psd_pe_move = build_psd_moves(
-        engine_info, curr, acs, priors
+        engine_info, curr, acs, priors, num_repeats=psd_info.num_prop_repeats
     )
     
     gb_search_moves, gb_pe_moves = build_gb_moves(
@@ -325,7 +328,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
     
-    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")] # also reset in band limits
+    fdot_lims = [get_fdot_mojito(f0_lims[-1] * 2, sign="-"), get_fdot_mojito(f0_lims[-1] * 2, sign="+")] # also reset in band limits
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
@@ -402,7 +405,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         ndim=8,
         betas=betas,
         log_dir=general_set.file_store_dir,
-        num_repeat_proposals=50, 
+        num_repeat_proposals=100, 
         search_kwargs=search_kwargs        
     )
 

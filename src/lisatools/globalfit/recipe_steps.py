@@ -252,6 +252,7 @@ def scatter_around_injection(
                             f"Injection sampling-basis params = {center.tolist()}. "
                             f"Likely the injection sits on / outside a prior edge, or "
                             f"the scatter is too wide for the prior range."
+                            f"Last resampled points (showing up to 10): {draws[bad][:10].tolist()}"
                         )
                     redraws = np.random.multivariate_normal(
                         center, scaled_cov, size=int(bad.sum())
@@ -358,7 +359,7 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
 
     ra = np.array(catalogue_entry["RightAscension"]) # alpha
     dec = np.array(catalogue_entry["Declination"]) # delta
-    psi_icrs = np.array(catalogue_entry["PolarisationAngle"])
+    psi_icrs = np.array(catalogue_entry["PolarisationAngle"]) % np.pi  # ensure polarization is within [0, pi]
     # lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
 
     alpha = ra % (2 * np.pi)
