@@ -1941,7 +1941,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                 time_spent_infomat = 0.0
                 for move_i in range(self.num_repeat_proposals):
 
-                    is_rj_now = bool(np.random.choice([0, 1], p=[0.97, 0.03]))
+                    is_rj_now = bool(np.random.choice([0, 1], p=[0.80, 0.20])) # todo make custom
 
                     if band_sorter.inds[source_map_now].sum() == 0:
                         is_rj_now = True

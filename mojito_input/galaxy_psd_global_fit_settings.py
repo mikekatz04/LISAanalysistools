@@ -450,11 +450,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-3
-    end_freq = 2e-3
+    end_freq = 1.5e-3
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "full_scale_galaxy_v2" #"test_mbh_18_with_covariance"
+    base_file_name = "small_band_galaxy" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
@@ -523,6 +523,20 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
 
+    # ---- Fixed galactic grid parameters (NOT inferred) ----
+    # alpha0, beta0: LISA orbit orientation angles [rad].
+    # These should match the orbit file used; 0.0 is the default for
+    # equal-armlength/Keplerian orbits.  For numerical orbits, read them
+    # from the orbit file or set to the appropriate value.
+    galactic_grid_kwargs = dict(
+        R_d=2.18,     # disk radial scale length [kpc]
+        z_d=0.48,     # disk vertical scale height [kpc]
+        alpha0=1.006863,  # Initial orbital phase α0 [rad]
+        beta0=2.384498,   # Initial constellation rotation β0 [rad]
+        N_lambda=90, # sky grid longitude points
+        N_beta=60,   # sky grid latitude points
+    )
+
     general_settings = GeneralSettings(
         num_iterations=num_iterations,
         Tobs=Tobs,
@@ -545,6 +559,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         preprocess_kwargs=preprocess_kwargs,
         normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
+        galactic_grid_kwargs=galactic_grid_kwargs,
         global_fit_codename=global_fit_codename,
         global_fit_version=global_fit_version,
         global_fit_contact=global_fit_contact,
