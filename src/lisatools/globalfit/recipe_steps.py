@@ -497,8 +497,9 @@ def build_psd_moves(
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     psd_info = curr.source_info["psd"]
+    galfor_info = curr.source_info.get("galfor", None)
 
-    effective_ndim = engine_info.ndims["psd"]
+    effective_ndim = engine_info.ndims["psd"] if galfor_info is None else engine_info.ndims["galfor"] + engine_info.ndims["psd"] 
     temperature_control = TemperatureControl(
         effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
     )
@@ -508,6 +509,7 @@ def build_psd_moves(
         permute_every=permute_every,
         live_dangerously=True,
         psd_transform_fn=psd_info.transform,
+        galfor_transform_fn=galfor_info.transform if galfor_info is not None else None,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
         use_gpu=True,

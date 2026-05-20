@@ -567,6 +567,7 @@ class GlobalFit:
             self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood(complex=False)
+            logger.info(f"initial log likelihood: {state.log_like[0]}")
 
             like_mix = BasicResidualacsLikelihood(acs)
 
@@ -684,7 +685,7 @@ class GlobalFit:
             _ = truths.pop("gb", None)
 
             plot_container = PlotContainer(
-                plots=["base"],
+                plots=["base", "tempering"],
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.3,
