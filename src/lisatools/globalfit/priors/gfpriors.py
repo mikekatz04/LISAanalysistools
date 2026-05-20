@@ -12,7 +12,7 @@ except (ModuleNotFoundError, ImportError):
 
 ArrayType = np.ndarray | cp.ndarray
 
-from eryn.prior import ProbDistContainer
+from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils import TransformContainer
 
 
@@ -35,6 +35,8 @@ class BaseSourcePrior:
         physical_params (Optional[List[str]]): Parameters in the physical basis.
             Defaults to `sampling_params` if not provided.
         fill_dict (Optional[Dict[str, float]]): Fixed parameters to inject during transforms.
+        key_map (Optional[Dict[str, str]]): Mapping from sampling to physical param names
+            for cases where they differ and no TransformContainer is provided.
         param_transforms (Optional[Union[Dict, TransformContainer]]): Callables or
             an already initialized TransformContainer mapping sampling to physical.
         periodic (Optional[Dict[str, float]]): Periodic boundaries for parameters.
@@ -50,6 +52,7 @@ class BaseSourcePrior:
         param_prior_inputs: Optional[Dict[str | Tuple[str, ...], List[Any]] | List[List[Any]]] = None,
         physical_params: Optional[List[str]] = None,
         fill_dict: Optional[Dict[str, float]] = None,
+        key_map: Optional[Dict[str, str]] = None,
         param_transforms: Optional[Dict[str | Tuple[str, ...], Callable] | TransformContainer] = None,
         use_cupy: bool = False,
         return_gpu: bool = False,
@@ -60,7 +63,7 @@ class BaseSourcePrior:
         self.physical_params = physical_params if physical_params is not None else sampling_params.copy()
 
         self.fill_dict = fill_dict or {}
-
+        self.key_map = key_map or {}
         self.use_cupy = use_cupy
         self.return_gpu = return_gpu
         self.verbose = verbose
@@ -71,7 +74,7 @@ class BaseSourcePrior:
         self._check_fill_dict()
 
         if self.verbose:
-            self._run_sanity_checks(param_transforms)
+            self._run_checks(param_transforms)
 
         # Build transform container
         if param_transforms is None:
@@ -82,6 +85,7 @@ class BaseSourcePrior:
                 output_basis=self.physical_params,
                 parameter_transforms=param_transforms,
                 fill_dict=self.fill_dict,
+                key_map=self.key_map,
             )
         else:
             assert isinstance(param_transforms, TransformContainer)
@@ -174,24 +178,24 @@ class BaseSourcePrior:
 
         return priors_out
 
-    def logpdf(self, x: ArrayType, keys: Optional[List[str]] = None) -> ArrayType:
+    def logpdf(self, x: ArrayType, *args, keys: Optional[List[str]] = None, **kwargs) -> ArrayType:
         """Log probability of the sample."""
-        return self.priors[self.source_name].logpdf(x, keys=keys)
+        return self.priors[self.source_name].logpdf(x, *args, keys=keys, **kwargs)
 
-    def pdf(self, x: ArrayType, keys: Optional[List[str]] = None) -> ArrayType:
+    def pdf(self, x: ArrayType, *args, keys: Optional[List[str]] = None, **kwargs) -> ArrayType:
         """Probability density of the sample."""
         if hasattr(self.priors[self.source_name], "pdf"):
-            return getattr(self.priors[self.source_name], "pdf")(x, keys=keys)
+            return getattr(self.priors[self.source_name], "pdf")(x, *args, keys=keys, **kwargs)
         else:
-            log_prob = self.logpdf(x, keys=keys)
+            log_prob = self.logpdf(x, *args, keys=keys, **kwargs)
             if self.return_gpu:
                 return cp.exp(cp.asarray(log_prob))
             log_prob_cpu = getattr(log_prob, "get")() if (_CUPY_AVAILABLE and isinstance(log_prob, cp.ndarray)) else log_prob
             return np.exp(log_prob_cpu)
 
-    def rvs(self, size: int | Tuple[int, ...] = 1, keys: Optional[List[str]] = None) -> ArrayType:
+    def rvs(self, *args, size: int | Tuple[int, ...] = 1, keys: Optional[List[str]] = None, **kwargs) -> ArrayType:
         """Sample from the prior."""
-        return self.priors[self.source_name].rvs(size=size, keys=keys)
+        return self.priors[self.source_name].rvs(*args, size=size, keys=keys, **kwargs)
 
     def _check_fill_dict(self) -> None:
         """Always-on fill_dict consistency check (not verbose-gated).
@@ -210,7 +214,7 @@ class BaseSourcePrior:
                     stacklevel=3,
                 )
 
-    def _run_sanity_checks(self, param_transforms: Any) -> None:
+    def _run_checks(self, param_transforms: Any) -> None:
         """Optional verbose checks for common design-intent mismatches."""
         if set(self.sampling_params) != set(self.physical_params) and param_transforms is None:
             warnings.warn(
@@ -218,6 +222,92 @@ class BaseSourcePrior:
                 "but `param_transforms` is None. Transformations were expected.",
                 stacklevel=3,
             )
+            
+        # if self.transform_container is not None:
+        #     missing_keys = set(self.sampling_params) - set(self.transform_container.input_basis)
+        #     if missing_keys:
+        #         warnings.warn(
+        #             f"[{self.source_name}] The following sampling parameters are missing "
+        #             f"in the transform container's input_basis: {missing_keys}",
+        #             stacklevel=3,
+        #         )
+        
+        # if self.key_map:
+        #     unmapped = set(self.sampling_params) - set(self.key_map.keys())
+        #     if unmapped:
+        #         warnings.warn(
+        #             f"[{self.source_name}] The following sampling parameters are missing "
+        #             f"in `key_map`: {unmapped}. This may cause issues if no "
+        #             "TransformContainer is provided.",
+        #             stacklevel=3,
+        #         )
+
+
+
+class UniformSourcePrior(BaseSourcePrior):
+    """Convenience class for sources parameterized entirely by uniform priors.
+    
+    This class wraps `BaseSourcePrior`. Instead of passing initialized prior 
+    distribution objects, the user provides a dictionary of bounds `(min, max)`.
+    The class automatically maps these to Eryn's `uniform_dist` callables.
+
+    Args:
+        source_name (str): Identifier for the source (e.g., 'gb', 'mbhb').
+        sampling_params (List[str]): List of parameter names exactly as they will be sampled by Eryn.
+        param_limits (Dict[str | Tuple[str, ...], Tuple[float, float]]): Dictionary mapping sampling 
+            parameter names to their (min, max) boundaries. These boundaries MUST correspond to the 
+            SAMPLING basis, not the physical basis.
+        physical_params (Optional[List[str]]): List of parameter names in the physical evaluation basis. 
+            If None, assumes the physical basis is identical to the sampling basis.
+        fill_dict (Optional[Dict[str, float]]): Dictionary mapping physical parameters to fixed constant 
+            values. Used to inject parameters that are not sampled.
+            Dictionary mapping physical parameters to fixed constant values. Used to inject parameters that 
+            are not sampled.
+        param_transforms (Optional[Dict[str | Tuple[str, ...], Callable] | TransformContainer], default=None):
+            Mapping of sampling parameters to callable functions (e.g., `np.exp`) that transform them into 
+            the physical basis. Alternatively, a fully initialized `TransformContainer`.
+        key_map (Optional[Dict[str, str]], default=None): Dictionary bridging naming mismatches between 
+            `sampling_params` and `physical_params` during transformations (e.g., `{"logA": "A"}`).
+        use_cupy (bool, default=False): Whether to instantiate distributions with CuPy acceleration.
+        return_gpu (bool, default=False): Whether Eryn should return outputs explicitly on the GPU memory space.
+        verbose (bool, default=False): If True, issues warnings for potentially misaligned bases or missing parameters.
+
+    Notes:
+        If a parameter requires a non-uniform prior (e.g., Gaussian or Normalizing Flow), 
+        do not use this class. Instead, initialize `BaseSourcePrior` directly and 
+        pass the instantiated distributions.
+    """
+    def __init__(
+        self,
+        source_name: str,
+        sampling_params: List[str],
+        param_limits: Dict[str | Tuple[str, ...], Tuple[float, float]],
+        physical_params: Optional[List[str]] = None,
+        fill_dict: Optional[Dict[str, float]] = None,
+        param_transforms: Optional[Dict[str | Tuple[str, ...], Callable] | TransformContainer] = None,
+        key_map: Optional[Dict[str, str]] = None,
+        use_cupy: bool = False,
+        return_gpu: bool = False,
+        verbose: bool = False,
+    ):
+        # Map boundaries to uniform_dist callables
+        param_priors = {k: uniform_dist for k in param_limits.keys()}
+        param_prior_inputs = {k: list(v) for k, v in param_limits.items()}
+
+        super().__init__(
+            source_name=source_name,
+            sampling_params=sampling_params,
+            param_priors=param_priors,
+            param_prior_inputs=param_prior_inputs,
+            physical_params=physical_params,
+            fill_dict=fill_dict,
+            param_transforms=param_transforms,
+            key_map=key_map,
+            use_cupy=use_cupy,
+            return_gpu=return_gpu,
+            verbose=verbose
+        )
+
 
 
 class _GPUPriorWrapper:
@@ -297,3 +387,6 @@ class _GPUPriorWrapper:
         if not hasattr(self._prior_obj, "rvs"):
             raise AttributeError(f"{type(self._prior_obj).__name__} has no rvs method.")
         return self._call_with_cpu_fallback("rvs", *args, size=size, **kwargs)
+    
+    
+    
