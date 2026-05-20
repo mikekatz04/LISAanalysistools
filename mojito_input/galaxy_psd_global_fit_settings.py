@@ -98,7 +98,7 @@ def setup_recipe(
 
     #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
-    spread_gb = np.array([1e-12, 1e-12, 1e-17, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
+    spread_gb = np.array([1e-12, 1e-12, 1e-18, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
     iteratively_resolved_population_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "catalogues", "iteratively_resolved_gbs_075yrs_snr7.npy")
     iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
 
@@ -110,7 +110,7 @@ def setup_recipe(
     subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
     logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
     # subset_inds = None
-    setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds)
+    setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds, priors=priors)
 
     
     #* ================================= BUILD MOVES ==================================
@@ -213,7 +213,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         ndim=2,
         injection=injection,
         log_dir=general_set.file_store_dir,
-        num_prop_repeats=50,
+        num_prop_repeats=100,
         transform=psd_transform,
     )
 

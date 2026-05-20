@@ -367,7 +367,7 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_icrs, alpha, sin_delta]).T
 
 
-def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None):
+def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
     """Initialize 'branch_name' walkers from catalogue injection parameters"""
 
     catalogue = getattr(curr.general_info, "catalogue", {})
@@ -403,8 +403,10 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
         except AttributeError:
             logger.warning(f"No injection data is saved for {branch_name}.")
 
+        priors_in = priors[branch_name] if priors is not None else None
+        
         scatter_around_injection(
-            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas")
+            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas"), priors=priors_in
         )
 
 
