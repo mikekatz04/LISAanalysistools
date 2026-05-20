@@ -402,11 +402,9 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
             setattr(curr.source_info[branch_name], "injection", injection_params)
         except AttributeError:
             logger.warning(f"No injection data is saved for {branch_name}.")
-
-        priors_in = priors[branch_name] if priors is not None else None
         
         scatter_around_injection(
-            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas"), priors=priors_in
+            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas"), priors=priors
         )
 
 
