@@ -56,9 +56,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-    Tmax: float = 1.0e1
+    Tmax: float = 1e6
     num_repeats: int = 100
-    permute_every: int = 101
+    permute_every: int = 50
 
     psd_info = curr.source_info["psd"]
     # mbh_info = curr.source_info["mbh"]
@@ -190,7 +190,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 24
-    ntemps = 1
+    ntemps = 10
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
