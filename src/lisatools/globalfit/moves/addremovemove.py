@@ -721,17 +721,17 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
                 raise ValueError("Waveform generator must have a 'kwargs' attribute that contains the keyword arguments to initialize the waveform generator.")    
             
             with self.dcga.device_context(device):
-                if i == 0:
-                    # Reuse the initial waveform generator for the first split to save memory
-                    self._waveform_generators.append(self.waveform_gen)
-                else:
-                    init_kwargs = self.waveform_gen.kwargs.copy()
-                    if "orbits" in init_kwargs:
-                        init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
+                # if i == 0:
+                #     # Reuse the initial waveform generator for the first split to save memory
+                #     self._waveform_generators.append(self.waveform_gen)
+                # else:
+                init_kwargs = self.waveform_gen.kwargs.copy()
+                if "orbits" in init_kwargs:
+                    init_kwargs["orbits"] = self.dcga.computation_groups[i].orbits
 
-                    self._waveform_generators.append(
-                        self.waveform_gen.__class__(**init_kwargs)
-                    )
+                self._waveform_generators.append(
+                    self.waveform_gen.__class__(**init_kwargs)
+                )
 
     def free_gpu_memory(self):
         self.dcga.free_gpu_memory()
