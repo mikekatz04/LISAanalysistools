@@ -21,9 +21,8 @@ from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import PSDSetup, PSDSettings, MBHSetup, MBHSettings
 
 
-from eryn.prior import uniform_dist, log_uniform
+from eryn.prior import uniform_dist, log_uniform, ProbDistContainer
 from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
 
 from eryn.moves import TemperatureControl
 from eryn.moves.tempering import make_ladder
@@ -57,9 +56,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-    Tmax: float = 1.0e6
-    num_repeats: int = 50
-    permute_every: int = 30
+    Tmax: float = 1.0e1
+    num_repeats: int = 100
+    permute_every: int = 101
 
     psd_info = curr.source_info["psd"]
     # mbh_info = curr.source_info["mbh"]
@@ -73,10 +72,10 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         num_repeats=num_repeats,
         permute_every=permute_every,
         live_dangerously=True,
-        psd_transform_fn=psd_info.transform_fn,
+        psd_transform_fn=psd_info.transform,
         temperature_control=temperature_control,
         use_gpu=True,
-        run_async=True,
+        run_async=False,
         run_threaded=False
     )
 
@@ -169,18 +168,18 @@ def get_general_erebor_settings() -> GeneralSetup:
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D" #todo populate repositories
 
-    submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+    submission_folder = None #"/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
     source_ids = [18]
 
-    Tobs = 4.0 * YRSID_SI / 12.0
+    Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
     end_freq = 2.9e-2
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = global_fit_version #"test_mbh_18_with_covariance"
+    base_file_name = "9_months_psd_noswaps_debug" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
@@ -190,7 +189,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 30
+    nwalkers = 24
     ntemps = 1
 
     window_type = "tukey"
