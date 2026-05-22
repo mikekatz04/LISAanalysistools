@@ -225,13 +225,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def setup_likelihood_here(self, coords):
         pass
 
-    def compute_acs_like(self, coords_in, data_index, **kwargs):
+    def compute_acs_like(self, coords_in, data_index, signal_gen, **kwargs):
         """
         Compute the likelihood for the given coordinates and data index using the analysis container array.
 
         Args:
             coords_in: coordinates of the sources for which we want to compute the likelihood. Shape is (n_sources, ndim).
             data_index: index of the data for which we want to compute the likelihood. Shape is (n_sources,).
+            signal_gen: waveform generator function to use for computing the likelihood. This is needed because in some cases we need to compute the likelihood with a different waveform generator than the one used for proposing new sources, for example when using heterodyned likelihoods.
             kwargs: additional keyword arguments for the likelihood computation function.
 
         Returns:
@@ -246,7 +247,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
                 waveform_kwargs=self.waveform_gen_kwargs,
-                signal_gen=self.waveform_gen,
+                signal_gen=signal_gen,
                 **kwargs,
             )
 
@@ -263,7 +264,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         Returns:
             ll: likelihood for the given coordinates and data index. Shape is (n_sources,).
         """
-        return self.compute_acs_like(coords_in, data_index, **self.waveform_like_kwargs)
+        return self.compute_acs_like(coords_in, data_index, signal_gen=self.waveform_gen, **self.waveform_like_kwargs)
 
 
     def setup(self, model, state):
@@ -380,10 +381,21 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
+            if hasattr(self, "waveform_gen_method"):
+                signal_gen = getattr(self.waveform_gen, self.waveform_gen_method)
+            else:
+                signal_gen = self.waveform_gen
+            
+            acs_like_here = self.compute_acs_like(old_coords_in, data_index=data_index_in, signal_gen=signal_gen, source_only=True, propagate_data_res_kwargs=False).reshape((self.ntemps, self.nwalkers)).real
+            diff = prev_logl - acs_like_here
+
+            if np.any(np.abs(diff) > 1e-1):
+                    logger.warning(f"acs likelihood: {acs_like_here.flatten()}. proposed likelihood: {prev_logl.flatten()}. This could be a sign of numerical issues.")
+                    raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
+
             if np.any(prev_logl < -1e10):
                 logger.warning(f"Very low log likelihood encountered in propose: {prev_logl.min()}. This could be a sign of numerical issues.")
-                acs_like_here = self.compute_acs_like(old_coords_in, data_index=data_index_in, source_only=True, propagate_data_res_kwargs=False)
-                diff = prev_logl - acs_like_here
+            
                 if np.any(np.abs(diff) > 1e-1):
                     raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
                 if DEBUG_MODE:
@@ -481,9 +493,11 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                                     new_points_in,
                                     data_index=data_index,
                                 )
+                    
+                    logger.debug(f"proposed logl: {logl[in_prior]}. elapsed: {time.time() - tic}")
     
                     if np.any(logl[in_prior] < -1e10):
-                        #logger.warning(f"Very low log likelihood encountered in propose: {logl[~np.isinf(logp)].min()}. This could be a sign of numerical issues.")
+                        logger.warning(f"Very low log likelihood encountered in propose: {logl[~np.isinf(logp)].min()}. This could be a sign of numerical issues.")
                         if DEBUG_MODE:
                             breakpoint()
                     # print(f"new logl: {logl}. elapsed: {time.time() - tic}")
