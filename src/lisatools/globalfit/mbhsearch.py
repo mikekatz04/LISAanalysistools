@@ -9,6 +9,9 @@ from copy import deepcopy
 
 import corner
 import numpy as np
+
+from ..utils.utility import asnumpy
+
 from bbhx.likelihood import HeterodynedLikelihood
 from bbhx.likelihood import Likelihood as MBHLikelihood
 from bbhx.response.fastfdresponse import LISATDIResponse
@@ -98,7 +101,7 @@ def search_likelihood_wrap(
     t_obs_end = end_t_vals[data_index] / YRSID_SI
     wave_gen.d_d = cp.asarray(d_d_vals[data_index])
     fd, all_data, psd, df = like_args
-    ll = wave_gen.get_direct_ll(
+    ll = asnumpy(wave_gen.get_direct_ll(
         fd,
         all_data,
         psd,
@@ -109,7 +112,7 @@ def search_likelihood_wrap(
         t_obs_start=t_obs_start,
         t_obs_end=t_obs_end,
         **mbh_kwargs,
-    ).real.get()
+    ).real)
 
     return ll
 
@@ -245,9 +248,9 @@ def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_poin
             # Ef += data_channels_AET[1].get()
             # Tf += data_channels_AET[2].get()
 
-            Af -= data_channels_AET[0].get()
-            Ef -= data_channels_AET[1].get()
-            Tf -= data_channels_AET[2].get()
+            Af -= asnumpy(data_channels_AET[0])
+            Ef -= asnumpy(data_channels_AET[1])
+            Tf -= asnumpy(data_channels_AET[2])
 
             # ll = -1/2 * 4 * settings["general"]["df"] * np.sum((Af.conj() * Af + Ef.conj() * Ef) / psd_tmp)
 
@@ -339,14 +342,14 @@ def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_poin
     ].squeeze()
 
     A_psd = get_sensitivity(
-        fd.get(),
+        asnumpy(fd),
         sens_fn="noisepsd_AE",
         model=psd_best[:2],
         foreground_params=galfor_best,
     )
 
     E_psd = get_sensitivity(
-        fd.get(),
+        asnumpy(fd),
         sens_fn="noisepsd_AE",
         model=psd_best[2:],
         foreground_params=galfor_best,
@@ -500,11 +503,11 @@ def run_mbh_search(gpu, settings, rank, time_split, total_time_splits, best_poin
 
     out_ll = search_likelihood_wrap(output_points.reshape(-1, ndim), *like_args)
 
-    phase_change = np.angle(wave_gen.non_marg_d_h.get())[: output_points.shape[0]]
+    phase_change = np.angle(asnumpy(wave_gen.non_marg_d_h))[: output_points.shape[0]]
     output_points[:, 5] = (output_points[:, 5] + 1 / 2 * phase_change) % (2 * np.pi)
 
     out_ll2 = search_likelihood_wrap(output_points.reshape(-1, ndim), *like_args)
-    assert np.all(np.abs(wave_gen.non_marg_d_h.imag.get()) < 1e-5)
+    assert np.all(np.abs(asnumpy(wave_gen.non_marg_d_h.imag)) < 1e-5)
 
     mbh_best = output_points[out_ll.argmax()]
 

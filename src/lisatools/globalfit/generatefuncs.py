@@ -12,6 +12,7 @@ from gbgpu.gbgpu import GBGPU
 
 from ..detector import sangria
 from ..sensitivity import get_sensitivity
+from ..utils.utility import asnumpy
 from ..sources.emri.waveform import EMRITDIWaveform
 
 try:
@@ -70,12 +71,7 @@ class GetMBHTemplates:
                 )
 
                 tmp1 = AET.reshape((3, -1))
-
-                if use_gpu:
-                    tmp2 = tmp1.get()
-                else:
-                    tmp2 = tmp1
-
+                tmp2 = asnumpy(tmp1) if use_gpu else tmp1
                 out[i] += tmp2
 
         del mbh_gen, freqs, AET, tmp2
@@ -132,12 +128,7 @@ class GetEMRITemplates:
                     AET_t = emri_gen(*emri_params_in_i, **self.runtime_kwargs)
                     tmp1 = xp.fft.rfft(AET_t, axis=-1)[:, self.start_freq_ind : self.end_freq_ind]
                     assert tmp1.shape[0] == freqs.shape[0]
-
-                    if use_gpu:
-                        tmp2 = tmp1.get()
-                    else:
-                        tmp2 = tmp1
-
+                    tmp2 = asnumpy(tmp1) if use_gpu else tmp1
                     out[i] += tmp2
 
         del emri_gen, freqs, AET, tmp2
@@ -197,11 +188,7 @@ class GetGBTemplates:
             gb_params_in, group_index, templates_in_tmp, **self.runtime_kwargs
         )
 
-        if use_gpu:
-            templates_in = templates_in_tmp.get()
-
-        else:
-            templates_in = templates_in_tmp
+        templates_in = asnumpy(templates_in_tmp) if use_gpu else templates_in_tmp
 
         del gb_gen, templates_in_tmp, group_index
 

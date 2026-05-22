@@ -24,7 +24,7 @@ from . import domains
 from .sensitivity import SensitivityMatrix
 from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticContribution
 from .utils.constants import *
-from .utils.utility import AET, get_array_module
+from .utils.utility import AET, asnumpy, get_array_module
 
 
 # TODO/DOCS: this stub appears to be a forward declaration for the type hint on __init__'s data_res_in parameter; verify whether it's still needed.
@@ -143,11 +143,45 @@ class DataResidualArray:
     
     @property
     def start_freq_ind(self):
-        """Index of the first frequency bin relative to a uniform ``df`` grid (or ``None``)."""
-        if self.df is not None:
-            return int(self.f_arr[0] / self.df)
-        else:
-            return None
+        """Index of the first frequency bin relative to a uniform ``df`` grid (or ``None``).
+
+        For WDM data this is the first active *frequency-layer* index
+        (``settings.ind_min_f``); for FD data it is the first bin index
+        ``f_arr[0] / df``. Returns ``None`` when no uniform grid exists.
+        """
+        if isinstance(self.settings, domains.WDMSettings):
+            return int(self.settings.ind_min_f)
+        if self._df is not None:
+            return int(self._f_arr[0] / self._df)
+        return None
+
+    @property
+    def start_freq_layer_ind(self):
+        """First active WDM frequency-layer index (``ind_min_f``); ``None`` if not WDM."""
+        if isinstance(self.settings, domains.WDMSettings):
+            return int(self.settings.ind_min_f)
+        return None
+
+    @property
+    def start_time_layer_ind(self):
+        """First active WDM time-layer index (``ind_min_t``); ``None`` if not WDM."""
+        if isinstance(self.settings, domains.WDMSettings):
+            return int(self.settings.ind_min_t)
+        return None
+
+    @property
+    def layer_df(self):
+        """WDM layer frequency spacing; ``None`` if not WDM."""
+        if isinstance(self.settings, domains.WDMSettings):
+            return float(self.settings.layer_df)
+        return None
+
+    @property
+    def layer_dt(self):
+        """WDM layer time spacing; ``None`` if not WDM."""
+        if isinstance(self.settings, domains.WDMSettings):
+            return float(self.settings.layer_dt)
+        return None
 
     def _store_time_and_frequency_information(
         self,
@@ -222,7 +256,14 @@ class DataResidualArray:
 
     @property
     def f_arr(self):
-        """Frequency array."""
+        """Frequency array.
+
+        For WDM data this is the active per-layer frequency grid
+        (``settings.f_arr``); for FD data it is the precomputed FD grid
+        stored at construction.
+        """
+        if isinstance(self.settings, domains.WDMSettings):
+            return self.settings.f_arr
         return self._f_arr
 
     @property
@@ -243,10 +284,16 @@ class DataResidualArray:
 
     @property
     def df(self):
-        """Delta f in the frequency domain."""
+        """Delta f.
+
+        For WDM data this is the layer frequency spacing
+        (``settings.layer_df``); for FD data it is the precomputed FD
+        bin spacing.
+        """
+        if isinstance(self.settings, domains.WDMSettings):
+            return float(self.settings.layer_df)
         if self._df is None:
             raise ValueError("df cannot be determined from this f_arr input.")
-
         return self._df
 
     @property
@@ -336,16 +383,8 @@ class DataResidualArray:
         elif fig is not None:
             raise NotImplementedError
 
-        _f_arr = (
-            self.settings.f_arr.get()
-            if isinstance(self.settings.f_arr, cp.ndarray)
-            else self.settings.f_arr
-        )
-        _data_res_arr = (
-            self.data_res_arr.arr.get()
-            if isinstance(self.data_res_arr.arr, cp.ndarray)
-            else self.data_res_arr.arr
-        )
+        _f_arr = asnumpy(self.settings.f_arr)
+        _data_res_arr = asnumpy(self.data_res_arr.arr)
 
         for i, ax_tmp in zip(inds_list, ax):
             plot_in = np.abs(_data_res_arr[i])

@@ -6,7 +6,7 @@ import dataclasses
 import logging
 from collections import namedtuple
 import os
-from typing import Optional
+from typing import Any, Callable, Optional, Union
 
 import h5py
 import numpy as np
@@ -26,6 +26,13 @@ from lisatools.detector import EqualArmlengthOrbits, Orbits
 
 from ..analysiscontainer import AnalysisContainerArray
 from ..detector import LISAModel, sangria
+from ..domains import (
+    DomainSettingsBase,
+    FDSettings,
+    STFTSettings,
+    WDMLookupTable,
+    WDMSettings,
+)
 from ..sensitivity import (
     AE1SensitivityMatrix,
     AE2SensitivityMatrix,
@@ -126,14 +133,25 @@ class Settings:
     log_dir: Optional[str] = None
 
 
+# Type alias: a user-supplied domain spec is either a fully constructed
+# DomainSettings instance (used as-is) or a factory of signature
+# ``(times: np.ndarray, dt: float, force_backend: str) -> DomainSettingsBase``
+# which the engine calls *after* loading the data so the grid can be sized
+# against ``times`` / ``dt`` if needed. The factory form is the only way to
+# pass an STFT grid (which depends on ``times``); WDM and FD typically pass
+# a pre-constructed instance.
+DomainSettingsSpec = Union[DomainSettingsBase, Callable[..., DomainSettingsBase]]
+
+
 @dataclasses.dataclass
 class GeneralSettings(Settings):
     """Top-level (non-source-specific) configuration for a global-fit run.
 
     Holds output paths, observation/window options, the basis-domain choice
-    (``stft`` or ``fd``), and the ``data_processor`` that loads/conditions
-    the input data. Field defaults of ``None`` mark options that the user
-    must supply (see :meth:`GeneralSetup.init_setup` for assertions).
+    (passed as a :class:`DomainSettingsBase` instance or a factory callable),
+    and the ``data_processor`` that loads/conditions the input data. Field
+    defaults of ``None`` mark options that the user must supply (see
+    :meth:`GeneralSetup.init_setup` for assertions).
     """
     Tobs: float | None = None
     dt: float | None = None
@@ -143,10 +161,19 @@ class GeneralSettings(Settings):
     past_file_for_start: Optional[str] = None
     orbits: Orbits | None = None
     gpu_orbits: Orbits | None = None
-    basis_domain: str = "stft"
-    start_freq: float | None = None
-    end_freq: float | None = None
-    stft_dt: float | None = None
+    # Pass either a constructed DomainSettings instance or a factory
+    # callable ``(times, dt, force_backend) -> DomainSettingsBase``. The
+    # callable form is used by the STFT path where the grid depends on the
+    # loaded ``times`` array; FD/WDM users typically construct the settings
+    # directly. No string-level domain flag.
+    domain_settings: Optional[DomainSettingsSpec] = None
+    # Optional WDM lookup table. When the basis settings resolve to a
+    # WDMSettings, the user supplies the pre-built lookup table here (or
+    # passes a factory ``(WDMSettings) -> WDMLookupTable``). Stored on the
+    # setup so downstream GB code can pick it up. Ignored otherwise.
+    wdm_lookup_table: Optional[
+        Union[WDMLookupTable, Callable[[WDMSettings], WDMLookupTable]]
+    ] = None
     random_seed: int | None = None
     backup_iter: int | None = None
     nwalkers: int | None = None
@@ -156,19 +183,12 @@ class GeneralSettings(Settings):
     gpu_backend: str = "cuda12x"
     gpus: typing.List[int] | None = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
-    # channels: typing.List[str] = dataclasses.field(default_factory=lambda: ["A", "E"])
-    # noise_model: Optional[LISAModel] = None
     data_processor: Optional[BaseProcessingStep] = None
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
     normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
-    # file_information["gb_main_chain_file"] = file_store_dir + base_file_name + "_gb_main_chain_file.h5"
-    # file_information["gb_all_chain_file"] = file_store_dir + base_file_name + "_gb_all_chain_file.h5"
-
-    # file_information["mbh_main_chain_file"] = file_store_dir + base_file_name + "_mbh_main_chain_file.h5"
-    # file_information["mbh_search_file"] = file_store_dir + base_file_name + "_mbh_search_tmp_file.h5"
 
 
 from .loginfo import init_logger
@@ -182,9 +202,12 @@ class GeneralSetup(Setup, GeneralSettings):
     1. Ensures the artifacts directory exists and attaches a logger.
     2. Runs the configured :attr:`data_processor` to load and condition the
        time-domain data.
-    3. Builds the basis-domain settings (STFT or FD), the analysis window,
-       and the input :class:`DataResidualArray`.
-    4. Configures :class:`XYZSensitivityBackend` for use in PSD/likelihood
+    3. Resolves ``domain_settings`` (instance or factory) into a concrete
+       :class:`~lisatools.domains.DomainSettingsBase`, builds the analysis
+       window, and constructs the input :class:`DataResidualArray`.
+    4. Resolves ``wdm_lookup_table`` (instance or factory) when running in
+       the WDM domain.
+    5. Configures :class:`XYZSensitivityBackend` for use in PSD/likelihood
        calls.
 
     Args:
@@ -210,9 +233,6 @@ class GeneralSetup(Setup, GeneralSettings):
         """Filesystem path of the primary HDF5 backend file."""
         return self.file_store_dir + self.base_file_name + "_" + self.main_file_key + ".h5"
 
-    # def __getattr__(self, attr: str) -> typing.Any:
-    #     if hasattr(self.gb_settings, attr):
-    #         return getattr(self.gb_settings, attr)
     @property
     def artifacts_file_dir(self) -> str:
         """Directory where logs and diagnostic plots are stored for this run."""
@@ -224,31 +244,74 @@ class GeneralSetup(Setup, GeneralSettings):
             raise ValueError("Must provide file_store_dir settings for GeneralSetup.")
         if self.base_file_name is None:
             raise ValueError("Must provide base_file_name settings for GeneralSetup.")
-        # if self.data_input_path is None:
-        #     raise ValueError("Must provide base_file_name settings for GeneralSetup.")
+        if self.domain_settings is None:
+            raise ValueError(
+                "Must provide domain_settings (a DomainSettings instance or a "
+                "factory ``(times, dt, force_backend) -> DomainSettingsBase``)."
+            )
 
-        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu" 
+        # CPU fallback: when gpus is None, force_backend resolves to "cpu" so
+        # downstream consumers stay numpy-only. GPU path keeps cupy.
+        self.force_backend = self.gpu_backend if self.gpus is not None else "cpu"
         self.logger.debug(f"Saving h5 backend to {self.main_file_path}")
         self.logger.debug(f"Saving artifacts to {self.artifacts_file_dir}")
         if not os.path.exists(self.artifacts_file_dir):
             os.makedirs(self.artifacts_file_dir)
             self.logger.debug(f"Created artifacts directory")
-                          
+
         self.init_data_information()
 
     def init_orbit_information(self):
         """Construct orbit objects, defaulting to :class:`EqualArmlengthOrbits`."""
         if self.orbits is None:
             self.orbits = EqualArmlengthOrbits()
-            self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.gpu_backend)
+            self.gpu_orbits = EqualArmlengthOrbits(force_backend=self.force_backend)
         else:
             if self.gpu_orbits is None and self.force_backend == self.gpu_backend:
                 # TODO: make better
                 raise ValueError("If adding orbits, make sure to duplicate into GPU orbits.")
 
+    def _resolve_domain_settings(
+        self, times: np.ndarray, dt: float
+    ) -> DomainSettingsBase:
+        """Turn the user-supplied ``domain_settings`` into a concrete instance.
+
+        Accepts either a :class:`DomainSettingsBase` (used directly) or a
+        factory called with ``(times, dt, force_backend)``.
+        """
+        spec = self.domain_settings
+        if isinstance(spec, DomainSettingsBase):
+            return spec
+        if callable(spec):
+            return spec(times=times, dt=dt, force_backend=self.force_backend)
+        raise TypeError(
+            f"domain_settings must be a DomainSettingsBase instance or a "
+            f"factory callable; got {type(spec).__name__}."
+        )
+
+    def _resolve_wdm_lookup_table(
+        self, domain_settings: WDMSettings
+    ) -> Optional[WDMLookupTable]:
+        """Resolve the (optional) WDM lookup table from the user-supplied spec.
+
+        ``wdm_lookup_table`` may be a fully constructed :class:`WDMLookupTable`
+        (used directly), a factory ``(WDMSettings) -> WDMLookupTable``
+        (called now that the grid is known), or ``None``.
+        """
+        spec = self.wdm_lookup_table
+        if spec is None:
+            return None
+        if isinstance(spec, WDMLookupTable):
+            return spec
+        if callable(spec):
+            return spec(domain_settings)
+        raise TypeError(
+            f"wdm_lookup_table must be a WDMLookupTable instance or a factory; "
+            f"got {type(spec).__name__}."
+        )
+
     def init_data_information(self):
         """Run preprocessing, build the basis domain, and configure the sensitivity backend."""
-        # load data #todo add here not in file
         if self.data_processor is None:
             raise ValueError("Must provide data_processor for GeneralSetup.")
 
@@ -274,7 +337,6 @@ class GeneralSetup(Setup, GeneralSettings):
         else:
             preprocess_kwargs = {**default_preprocess_kwargs, **self.preprocess_kwargs}
 
-        # output the preprocess kwargs to the logger for transparency
         for key, value in preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
 
@@ -284,68 +346,71 @@ class GeneralSetup(Setup, GeneralSettings):
         self.data_t0 = float(times[0])
         self.catalogue = getattr(data_processor, 'catalogue', {})
 
-        if self.basis_domain == "stft":
-            from ..domains import get_stft_settings
+        domain_settings = self._resolve_domain_settings(times=times, dt=dt)
+        self.basis_kwargs = dict(force_backend=self.force_backend)
 
-            if self.stft_dt is None:
-                raise ValueError("Must provide `stft_dt` for stft basis domain.")
-            self.basis_kwargs = dict(
-                big_dt=self.stft_dt, min_freq=self.start_freq, max_freq=self.end_freq
-            )
-
-            domain_settings = get_stft_settings(
-                times=times,
-                **self.basis_kwargs,
-                force_backend=self.force_backend,
-            )
+        # Domain-specific window length + diagnostic-plot kwargs. The window
+        # is always built on the underlying time grid (length Nt); the basis
+        # transform inside data_processor.pour() handles the projection.
+        if isinstance(domain_settings, STFTSettings):
             nperseg = domain_settings.get_nperseg(dt)
-            
             self.window_alpha = self.window_taper_duration / (nperseg * dt)
             window, _ = windowfun(self.window_type, nperseg, alpha=self.window_alpha)
-
             plot_kwargs_list = [
                 dict(channel=0, plot_type="stft", filename=self.artifacts_file_dir + "stft_data.png"),
                 dict(channel=0, plot_type="fd", time_bin=0, filename=self.artifacts_file_dir + "fd_data.png"),
                 dict(channel=0, plot_type="td", freq_bin=0, filename=self.artifacts_file_dir + "td_data.png"),
-                ]
-
-        elif self.basis_domain == "fd":
-            from ..domains import FDSettings
-
-            df = 1.0 / (Nt * dt)
-            Nf = Nt // 2 + 1
-
-            self.basis_kwargs = dict(N=Nf, df=df, min_freq=self.start_freq, max_freq=self.end_freq)
-
-            domain_settings = FDSettings(**self.basis_kwargs, force_backend=self.force_backend)
-
+            ]
+        elif isinstance(domain_settings, FDSettings):
             self.window_alpha = self.window_taper_duration / (Nt * dt)
             window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
-            plot_kwargs_list = [dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")]
-
+            plot_kwargs_list = [
+                dict(channel=0, filename=self.artifacts_file_dir + "fd_data.png")
+            ]
+        elif isinstance(domain_settings, WDMSettings):
+            self.window_alpha = self.window_taper_duration / (Nt * dt)
+            window, _ = windowfun(self.window_type, Nt, alpha=self.window_alpha)
+            # WDMSignal exposes a heatmap rather than a generic plot; the
+            # engine renders it directly after pouring the data in.
+            plot_kwargs_list = []
         else:
-            raise NotImplementedError(f"Basis domain {self.basis_domain} not implemented.")
+            raise NotImplementedError(
+                f"Basis domain {type(domain_settings).__name__} not implemented."
+            )
 
-        # window_factor = np.sqrt(np.sum(window**2) / len(window)) if normalize_window else 1.0
-        # self.logger.debug(f"Window factor for normalization: {window_factor}")
         self.domain_settings = domain_settings
-        
         self.input_data_residual_array, orbits = data_processor.pour(
             settings=domain_settings, window=window, return_orbits=True
         )
-        
-        if self.basis_domain == "fd": # TODO check if this is also necessary for STFT or TD
+
+        if isinstance(domain_settings, FDSettings):
+            # FD path: thread the active-band f_arr through DataResidualArray
+            # so downstream consumers (e.g. moves keyed off start_freq_ind)
+            # see the correct band.
             self.input_data_residual_array.data_length = len(domain_settings.f_arr)
             self.input_data_residual_array._store_time_and_frequency_information(
-                df = domain_settings.df,
-                f_arr = domain_settings.f_arr
+                df=domain_settings.df,
+                f_arr=domain_settings.f_arr,
             )
 
+        # Diagnostic plots — domain-dependent.
         for plot_kwargs_here in plot_kwargs_list:
             _ = self.input_data_residual_array.data_res_arr.plot(**plot_kwargs_here)
 
-        # use logger to output domain info
+        if isinstance(domain_settings, WDMSettings):
+            # WDMSignal.heatmap() takes no `filename` kwarg; render and save
+            # manually so we still get a diagnostic figure.
+            import matplotlib.pyplot as plt
 
+            try:
+                fig, _ = self.input_data_residual_array.data_res_arr.heatmap(mag=True)
+                fig.savefig(self.artifacts_file_dir + "wdm_data.png", bbox_inches="tight")
+                plt.close(fig)
+            except Exception as exc:
+                # Heatmap is purely diagnostic; never fail the run on plot errors.
+                self.logger.warning(f"WDM data heatmap failed: {exc}")
+
+        # log domain info
         for key, value in domain_settings.__dict__.items():
             self.logger.info(f"Domain setting: {key} = {value}")
 
@@ -357,11 +422,22 @@ class GeneralSetup(Setup, GeneralSettings):
                     armlength=orbits.armlength,
                     force_backend=self.gpu_backend,
                 )
-            # self.gpu_orbits.configure()
 
         self.init_orbit_information()
 
-        # todo make it flexible when adding also AET backend.
+        # Resolve the (optional) WDM lookup table once the WDM grid is final.
+        if isinstance(domain_settings, WDMSettings):
+            self.wdm_lookup_table = self._resolve_wdm_lookup_table(domain_settings)
+        else:
+            # Forbid a stray lookup table on FD/STFT runs — it would never be
+            # used and signals a setup mistake.
+            if self.wdm_lookup_table is not None:
+                raise ValueError(
+                    "wdm_lookup_table was provided but domain_settings is not "
+                    "a WDMSettings; remove it or switch the domain."
+                )
+
+        # TODO: AET sensitivity backend wiring.
         self.sensitivity_backend = XYZSensitivityBackend(
             orbits=self.gpu_orbits,
             settings=domain_settings,
@@ -369,37 +445,6 @@ class GeneralSetup(Setup, GeneralSettings):
             window_values=window if self.normalize_window else None,
             **self.sensitivity_init_kwargs,
         )
-
-        # if self.noise_model.name == 'sangria':
-        #     if "A" in self.channels:
-        #         sens_fns = [
-        #             'A1TDISens',
-        #             'E1TDISens',
-        #         ]
-        #         self.sensitivity_matrix = AE1SensitivityMatrix
-        #     elif "X" in self.channels:
-        #         sens_fns = XYZ1SensitivityMatrix
-        #         self.sensitivity_matrix = XYZ1SensitivityMatrix
-
-        # elif self.noise_model.name == 'mojito':
-
-        #     if "A" in self.channels:
-        #         sens_fns = [
-        #             'A2TDISens',
-        #             'E2TDISens',
-        #             'T2TDISens',
-        #         ][:len(self.channels)]
-        #         self.sensitivity_matrix = AET2SensitivityMatrix if len(self.channels) == 3 else AE2SensitivityMatrix
-        #     else:
-
-        #         sens_fns = XYZ2SensitivityMatrix
-        #         self.sensitivity_matrix = XYZ2SensitivityMatrix
-
-        # self.new_sens_mat = NewSensitivityMatrix(
-        #         orbits=self.orbits,
-        #         noise_model=self.noise_model,
-        #         sens_fns=sens_fns,
-        # )
 
 
 @dataclasses.dataclass

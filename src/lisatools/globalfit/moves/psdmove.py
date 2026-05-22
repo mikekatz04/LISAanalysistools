@@ -23,6 +23,7 @@ from lisatools.cutils.psd_likelihood_utils import psd_likelihood_numba
 from ... import get_backend
 from ...analysiscontainer import AnalysisContainerArray
 from ...sensitivity import XYZSensitivityBackend
+from ...utils.utility import asnumpy
 from ..moves import GlobalFitMove
 from ..state import GFState
 from .globalfitmove import GlobalFitMove
@@ -195,124 +196,38 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         self.permute_every = permute_every
 
-    def psd_log_like(self, x, data, supps=None, **sens_kwargs):
-        """Compute the PSD log likelihood for a batch of walker proposals.
+    def _build_sensitivity_for_walker(self, walker_index: int, psd_params, galfor_params):
+        """Build the per-walker sensitivity matrix for the given parameters.
 
-        Args:
-            x: Tuple/list of parameter arrays. ``x[0]`` is PSD parameters; an
-                optional ``x[1]`` adds galactic-foreground parameters.
-            data: Linear data array (channel-flattened) for the current walker
-                set, as exposed by :class:`AnalysisContainerArray`.
-            supps: Eryn supplemental dict; must contain ``walker_inds`` so the
-                kernel can index per-walker data.
-            **sens_kwargs: Reserved for future sensitivity kwargs.
-
-        Returns:
-            Per-walker log-likelihood values.
-
-        Raises:
-            ValueError: If ``supps`` is ``None``.
+        Routes through the configured :class:`XYZSensitivityBackend`. The
+        returned :class:`SensitivityMatrix` is what will be installed on the
+        AnalysisContainer for the matching walker when we accept proposals
+        (see :meth:`propose`).
         """
-        if supps is None:
-            raise ValueError("Must provide supps to identify the data streams.")
-
-        wi = supps["walker_inds"]
-
-        if self.psd_transform_fn is not None:
-            psd_pars = self.psd_transform_fn.both_transforms(x[0])
-        else:
-            psd_pars = x[0]
-
-        if len(x) == 1:
-            galfor_pars = np.tile(np.array([1e-200, 1e-3, 1.0, 1.0, 1.0]), (psd_pars.shape[0], 1))
-        else:
-            if self.galfor_transform_fn is not None:
-                galfor_pars = self.galfor_transform_fn.both_transforms(x[1])
-            else:
-                galfor_pars = x[1]
-
-        data_index_all = cp.asarray(wi).astype(np.int32)
-        
-        # HERE >
-        
-        # spline_params = cp.atleast_2d( spline_params )
-        # spline_knots_position = spline_params[:,3::2]
-        # spline_knots_amplitude = spline_params[:,2:-1:2]
-        # half = spline_knots_position.shape[1] // 2
-        # spline_knots_amplitude = cp.stack((spline_knots_amplitude[:, :half], spline_knots_amplitude[:, half:]))
-        # spline_knots_position = cp.stack((spline_knots_position[:, :half], spline_knots_position[:, half:]))
-        if self.sensitivity_backend.use_splines:
-            Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-            Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-            knots_positions = cp.asarray(psd_pars[:,3::2])
-            knots_amplitudes = cp.asarray(psd_pars[:,2:-1:2])
-            half = knots_positions.shape[1] // 2 # Get the mid of the array 
-            # put the 2 noise levels on the batch axis
-            spline_knots_amplitude = cp.stack((knots_amplitudes[:, :half], knots_amplitudes[:, half:]))
-            spline_knots_position = cp.stack((knots_positions[:, :half], knots_positions[:, half:]))
-
-            # # put the 2 noise levels on the batch axis
-            # n_knots = int(knots_positions.shape[1] / 2)
-
-            # oms_positions, oms_amplitudes = (
-            #     knots_positions[:, :n_knots],
-            #     knots_amplitudes[:, :n_knots],
-            # )
-            # testmass_positions, testmass_amplitudes = (
-            #     knots_positions[:, n_knots:],
-            #     knots_amplitudes[:, n_knots:],
-            # )
-
-            # knots_positions = cp.vstack([oms_positions, testmass_positions])
-            # knots_amplitudes = cp.vstack([oms_amplitudes, testmass_amplitudes])
-
-            # Sort
-            sort_indices = cp.argsort(spline_knots_position, axis=2)
-            # Apply the same indices to both arrays
-            spline_knots_position = cp.take_along_axis(spline_knots_position, sort_indices, axis=2)
-            spline_knots_amplitude = cp.take_along_axis(spline_knots_amplitude, sort_indices, axis=2)
-            # now check if any knot position is not too close together
-            invalid_knots = cp.any(cp.diff(10**spline_knots_position, axis=2) < self.tolerance, axis=(0, 2))
-        else:
-            spline_knots_position = None
-            spline_knots_amplitude = None
-            Soms_d_in_all = cp.asarray(psd_pars[:, 0])
-            Sa_a_in_all = cp.asarray(psd_pars[:, 1])
-            invalid_knots = cp.zeros(psd_pars.shape[0], dtype=bool)
-
-        Amp_all = cp.asarray(galfor_pars[:, 0])
-        kn_all = cp.asarray(galfor_pars[:, 1])
-        alpha_all = cp.asarray(galfor_pars[:, 2])
-        sl1_all = cp.asarray(galfor_pars[:, 3])
-        sl2_all = cp.asarray(galfor_pars[:, 4])
-
-        ll = self.sensitivity_backend.compute_log_like(
-            data,
-            data_index_all,
-            Soms_d_in_all,
-            Sa_a_in_all,
-            Amp_all,
-            alpha_all,
-            sl1_all,
-            kn_all,
-            sl2_all,
-            spline_knots_position,
-            spline_knots_amplitude,
+        return self.sensitivity_backend(
+            f"walker_{walker_index}",
+            psd_params,
+            galfor_params=galfor_params,
+            transform_fn=self.psd_transform_fn,
         )
 
-        ll[invalid_knots] = -1e300
-
-        return ll.get() if hasattr(ll, "get") else ll
-
     def compute_log_like(self, coords, inds=None, logp=None, supps=None, branch_supps=None):
-        """Compute the log likelihood for a state's PSD/galfor branches.
+        """Compute the PSD/galfor branch log-likelihood via the ACA.
+
+        For each walker we install the proposed PSD (and optional galactic
+        foreground) into the corresponding :class:`AnalysisContainer`'s
+        :attr:`sens_mat`, then read the per-walker likelihood from the
+        shared :class:`AnalysisContainerArray`. This is the same code path
+        that every other branch uses, which keeps the PSD move
+        domain-agnostic (FD / STFT / WDM) instead of routing through a
+        sensitivity-backend kernel that only spoke FD.
 
         Args:
             coords: Branch-keyed dict of coordinates from the current state.
             inds: Branch-keyed dict of leaf occupancy flags (unused here).
             logp: Optional pre-computed log prior; computed if ``None``.
-            supps: Eryn supplemental information passed through to
-                :meth:`psd_log_like`.
+            supps: Eryn supplemental information; ``walker_inds`` selects
+                which physical walker each row maps to.
             branch_supps: Branch-supplemental dict (unused here).
 
         Returns:
@@ -328,20 +243,43 @@ class PSDMove(GlobalFitMove, StretchMove):
         if not np.any(logp_keep):
             warnings.warn("All points entering likelihood have a log prior of minus inf.")
             return logl, None
+
+        if supps is None:
+            raise ValueError("Must provide supps to identify the data streams.")
+
+        # ``walker_inds`` is broadcast (ntemps, nwalkers) — flatten and mask
+        # to the rows that survived the prior cut. ``BranchSupplemental``'s
+        # ``__getitem__`` expects an integer/slice index, so reach into
+        # ``.holder`` to fetch the named entry.
+        walker_inds_all = np.asarray(supps.holder["walker_inds"]).reshape(logp.shape)
+        walker_inds_keep = walker_inds_all[logp_keep]
+
         psd_coords = coords["psd"][logp_keep][:, 0]
-        if "galfor" in coords:
-            galfor_coords = coords["galfor"][logp_keep][:, 0]
-            input_args = [psd_coords, galfor_coords]
-        else:
-            input_args = [psd_coords]
+        has_galfor = "galfor" in coords
+        galfor_coords = coords["galfor"][logp_keep][:, 0] if has_galfor else None
 
-        supps = supps[logp_keep]
-
-        tmp_logl = self.psd_log_like(
-            input_args, self.acs.linear_data_arr[0], supps=supps, **self.psd_kwargs
-        )
-
-        logl[logp_keep] = tmp_logl
+        # Cache and restore the per-walker sensitivity matrix so we don't
+        # corrupt the state seen by other moves. After all proposals are
+        # scored we put each AC's original sens_mat back; the caller (the
+        # ``propose`` loop) reinstalls the accepted PSD onto the ACs.
+        original_sens = {}
+        try:
+            for row, walker_idx in enumerate(walker_inds_keep):
+                w = int(walker_idx)
+                if w not in original_sens:
+                    original_sens[w] = self.acs[w].sens_mat
+                galfor_here = None if not has_galfor else galfor_coords[row]
+                self.acs[w].sens_mat = self._build_sensitivity_for_walker(
+                    w, psd_coords[row], galfor_here
+                )
+            self.acs.reset_linear_psd_arr()
+            walker_ll = self.acs.likelihood()
+            tmp_logl = asnumpy(np.asarray(walker_ll)[walker_inds_keep.astype(int)])
+            logl[logp_keep] = tmp_logl
+        finally:
+            for w, sens in original_sens.items():
+                self.acs[w].sens_mat = sens
+            self.acs.reset_linear_psd_arr()
 
         self.prev_logl = logl.copy()
 

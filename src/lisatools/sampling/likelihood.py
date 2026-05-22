@@ -5,6 +5,8 @@ import warnings
 import numpy as np
 from eryn.state import Branch, BranchSupplemental
 
+from ..utils.utility import asnumpy
+
 try:
     import cupy as cp
 
@@ -168,20 +170,14 @@ class Likelihood(object):
                 key = list(self.parameter_transforms.keys())[0]
                 params = self.parameter_transforms[key].both_transforms(params)
 
-            injection_channels = xp.asarray(self.template_model(*params, **waveform_kwargs))
-            try:
-                injection_channels = injection_channels.get()
-
-            except AttributeError:
-                pass
+            injection_channels = asnumpy(
+                xp.asarray(self.template_model(*params, **waveform_kwargs))
+            )
 
         elif data_stream is not None:
             if isinstance(data_stream, list) is False:
                 raise ValueError("If data_stream is provided, it must be as a list.")
-            try:
-                injection_channels = xp.asarray(data_stream).get()
-            except AttributeError:
-                injection_channels = np.asarray(data_stream)
+            injection_channels = asnumpy(xp.asarray(data_stream))
 
         else:
             raise ValueError("Must provide data_stream or params kwargs to inject signal.")
@@ -416,10 +412,7 @@ class Likelihood(object):
             if self.return_cupy:
                 return out
             else:
-                try:
-                    return out.get()
-                except AttributeError:
-                    return out
+                return asnumpy(out)
 
         else:
             return out
@@ -893,10 +886,7 @@ class GlobalLikelihood(Likelihood):
             if self.return_cupy:
                 return out
             else:
-                try:
-                    return out.get()
-                except AttributeError:
-                    return out
+                return asnumpy(out)
 
         else:
             return out

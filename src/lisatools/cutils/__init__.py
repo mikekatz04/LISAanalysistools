@@ -40,7 +40,7 @@ class LISAToolsBackendMethods(BackendMethods):
 
     OrbitsWrap: object
     Orbits: object
-    # SensitivityMatrixWrap: object
+    SensitivityMatrixWrap: object
     check_orbits: typing.Callable[(...), None]
     # psd_likelihood: typing.Callable[(...), None]
     # compute_logpdf: typing.Callable[(...), None]
@@ -64,7 +64,7 @@ class LISAToolsBackend:
     OrbitsWrap: object
     Orbits: object
     check_orbits: typing.Callable[(...), None]
-    # SensitivityMatrixWrap: object
+    SensitivityMatrixWrap: object
     # psd_likelihood: typing.Callable[(...), None]
     # compute_logpdf: typing.Callable[(...), None]
 
@@ -76,7 +76,7 @@ class LISAToolsBackend:
         self.OrbitsWrap = lisatools_backend_methods.OrbitsWrap
         self.Orbits = lisatools_backend_methods.Orbits
         self.check_orbits = lisatools_backend_methods.check_orbits
-        # self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap
+        self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap
         # self.psd_likelihood = lisatools_backend_methods.psd_likelihood
         # self.compute_logpdf = lisatools_backend_methods.compute_logpdf
 
@@ -111,7 +111,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             OrbitsWrap=lisatools_backend_cpu.pycppdetector.OrbitsWrapCPU,
             Orbits=lisatools_backend_cpu.pycppdetector.OrbitsCPU,
             check_orbits=lisatools_backend_cpu.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cpu.pycppdetector.XYZSensitivityMatrixWrapCPU,
+            SensitivityMatrixWrap=lisatools_backend_cpu.pycppdetector.XYZSensitivityMatrixWrapCPU,
             # psd_likelihood=lisatools_backend_cpu.pycppdetector.psd_likelihood,
             # compute_logpdf=lisatools_backend_cpu.pycppdetector.compute_logpdf,
             xp=numpy,
@@ -156,7 +156,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.OrbitsWrapGPU,
             Orbits=lisatools_backend_cuda11x.pycppdetector.OrbitsGPU,
             check_orbits=lisatools_backend_cuda11x.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cuda11x.pycppdetector.XYZSensitivityMatrixWrapGPU,
+            SensitivityMatrixWrap=lisatools_backend_cuda11x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             # psd_likelihood=lisatools_backend_cuda11x.pycppdetector.psd_likelihood,
             # compute_logpdf=lisatools_backend_cuda11x.pycppdetector.compute_logpdf,
             xp=cupy,
@@ -200,7 +200,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.OrbitsWrapGPU,
             Orbits=lisatools_backend_cuda12x.pycppdetector.OrbitsGPU,
             check_orbits=lisatools_backend_cuda12x.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cuda12x.pycppdetector.XYZSensitivityMatrixWrapGPU,
+            SensitivityMatrixWrap=lisatools_backend_cuda12x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             # psd_likelihood=lisatools_backend_cuda12x.pycppdetector.psd_likelihood,
             # compute_logpdf=lisatools_backend_cuda12x.pycppdetector.compute_logpdf,
             xp=cupy,
@@ -245,7 +245,7 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             OrbitsWrap=lisatools_backend_cuda13x.pycppdetector.OrbitsWrapGPU,
             Orbits=lisatools_backend_cuda13x.pycppdetector.OrbitsGPU,
             check_orbits=lisatools_backend_cuda13x.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cuda13x.pycppdetector.XYZSensitivityMatrixWrapGPU,
+            SensitivityMatrixWrap=lisatools_backend_cuda13x.pycppdetector.XYZSensitivityMatrixWrapGPU,
             # psd_likelihood=lisatools_backend_cuda13x.pycppdetector.psd_likelihood,
             # compute_logpdf=lisatools_backend_cuda13x.pycppdetector.compute_logpdf,
             xp=cupy,

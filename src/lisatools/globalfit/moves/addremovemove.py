@@ -7,12 +7,21 @@ from typing import Callable
 
 try:
     import cupy as xp
+    _xp_is_cupy = True
 except (ImportError, ModuleNotFoundError):
     # CPU-only fallback so the moves package imports cleanly when cupy is
-    # unavailable (e.g. on a Mac development host). The functions below that
-    # actually call xp.* will still need a GPU at runtime.
+    # unavailable (e.g. on a Mac development host).
     import numpy as xp
+    _xp_is_cupy = False
 import numpy as np
+
+
+def _free_pool() -> None:
+    """No-op stand-in for ``cupy.get_default_memory_pool().free_all_blocks()`` on CPU."""
+    if _xp_is_cupy:
+        xp.get_default_memory_pool().free_all_blocks()
+
+
 from eryn.moves import Move, StretchMove, TemperatureControl
 from eryn.prior import ProbDistContainer
 from eryn.utils.transform import TransformContainer
@@ -24,6 +33,7 @@ from tqdm import tqdm
 # from lisatools.sampling.moves.skymodehop import SkyMove
 from ...analysiscontainer import AnalysisContainerArray
 from ...domains import DomainBase, DomainBaseArray
+from ...utils.utility import asnumpy
 from .globalfitmove import GlobalFitMove
 
 logger = logging.getLogger(__name__)
@@ -146,47 +156,28 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         for i in range(self.nleaves_max):
             self.temperature_controls[i].skip_swap_branches = skip_swap_branches
 
+    def _apply_cold_chain_sources(self, coords, sign):
+        """One-at-a-time waveform generation + apply to keep peak RAM flat.
+
+        ``sign=-1`` subtracts (add_back), ``sign=+1`` adds (remove). Matches
+        the previous batched path semantically but never holds more than a
+        single source's waveform in memory.
+        """
+        import gc
+        for i in range(coords.shape[0]):
+            sig = self.waveform_gen(*coords[i], **self.waveform_gen_kwargs)
+            self.acs.signal_operation(sign, [sig], data_index=np.array([i]))
+            del sig
+            gc.collect()
+            _free_pool()
+
     def add_back_in_cold_chain_sources(self, coords):
-        """
-        Remove the contribution of the current sources in the cold chain from the residual.
-
-        Args:
-            coords: coordinates of the sources in the cold chain that we want to add back in to the residual.
-        """
-
-        # TODO: fix T channel
-        # d - h -> need to add removal waveforms
-        # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        removal_waveforms = self.get_waveform_here(coords)
-        ll_tmp2 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        self.acs.remove_signal_from_residual(removal_waveforms, data_index=None)
-        del removal_waveforms
-        xp.get_default_memory_pool().free_all_blocks()
-
-        ll_tmp3 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
+        """Subtract current cold-chain sources from the residual (one walker at a time)."""
+        self._apply_cold_chain_sources(coords, sign=-1)
 
     def remove_cold_chain_sources(self, coords):
-        """
-        Add the contribution of the current sources in the cold chain from the residual.
-
-        Args:
-            coords: coordinates of the sources in the cold chain that we want to remove from the residual.
-        """
-
-        # TODO: fix T channel
-        # d - h -> need to add removal waveforms
-        # ll_tmp1 = (-1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)) - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        removal_waveforms = self.get_waveform_here(coords)
-        ll_tmp2 = self.acs.likelihood(
-            source_only=True
-        )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
-        self.acs.add_signal_to_residual(removal_waveforms, data_index=None)
-        del removal_waveforms
-        xp.get_default_memory_pool().free_all_blocks()
+        """Add current cold-chain sources back into the residual (one walker at a time)."""
+        self._apply_cold_chain_sources(coords, sign=+1)
 
         ll_tmp3 = self.acs.likelihood(
             source_only=True
@@ -209,7 +200,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             :class:`~lisatools.domains.DomainBaseArray` of length ``n_sources``.
 
         """
-        xp.get_default_memory_pool().free_all_blocks()
+        _free_pool()
 
         waveforms = []
         for i in range(coords.shape[0]):
@@ -235,9 +226,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # TODO: we should probably move the prior in here even though
         # in general with current setup it should only be points in the prior
         # that make it here
-        ll = np.full_like(data_index.get(), -1e300, dtype=float)
-        
-        for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index.get())):
+        data_index_np = asnumpy(data_index)
+        ll = np.full_like(data_index_np, -1e300, dtype=float)
+
+        for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index_np)):
             ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
                 *coords_in_now,
                 waveform_kwargs=self.waveform_gen_kwargs,
@@ -384,7 +376,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             )
 
             # fix this need to compute prev_logl for all walkers
-            xp.get_default_memory_pool().free_all_blocks()
+            _free_pool()
             for repeat in tqdm(range(self.num_repeats), desc=f"{self.branch_name} update, leaf {leaf}"):
 
                 # pick move
@@ -542,7 +534,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             # ll_tmp1 = -1/2 * 4 * self.df * xp.sum(data_residuals[:2].conj() * data_residuals[:2] / psd[:2], axis=(0, 2)).get()
 
             # add back cold chain sources
-            xp.get_default_memory_pool().free_all_blocks()
+            _free_pool()
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
@@ -564,7 +556,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.acs.likelihood()
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
-        xp.get_default_memory_pool().free_all_blocks()
+        _free_pool()
         # TODO: add check with last used logl
 
         current_lp = (
@@ -576,7 +568,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
         new_state.log_like[0] = current_ll
         # new_state.log_prior[0] = current_lp
-        xp.get_default_memory_pool().free_all_blocks()
+        _free_pool()
         if not hasattr(self, "best_last_ll"):
             self.best_last_ll = current_ll.max()
             self.low_last_ll = current_ll.min()
@@ -604,35 +596,21 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
     def replace_residuals(self, old_state, new_state):
         """Swap the cold-chain contribution from ``old_state`` to ``new_state``.
 
-        # TODO/DOCS: not currently functional — body raises ``NotImplementedError``.
+        Domain-agnostic: the waveform generator returns a
+        :class:`~lisatools.domains.DomainBase` (FD, STFT, WDM, ...) and the
+        :class:`AnalysisContainerArray` dispatches the actual residual
+        update by basis. The old FD-only implementation hand-assembled
+        per-channel arrays from ``self.acs.fd``; that path is now
+        unnecessary because :meth:`add_signal_to_residual` /
+        :meth:`remove_signal_from_residual` work on any domain.
         """
-        raise NotImplementedError
-        fd = xp.asarray(self.acs.fd)
-        old_contrib = [None, None]
-        new_contrib = [None, None]
         for leaf in range(old_state.branches[self.branch_name].shape[-2]):
             removal_coords = old_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
-            removal_waveforms = self.waveform_gen(
-                *removal_coords_in.T, fill=True, freqs=fd, **self.waveform_gen_kwargs
-            ).transpose(1, 0, 2)
+            self._apply_cold_chain_sources(removal_coords_in, sign=+1)
 
             add_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             add_coords_in = self.transform_fn.both_transforms(add_coords)
-            add_waveforms = self.waveform_gen(
-                *add_coords_in.T, fill=True, freqs=fd, **self.waveform_gen_kwargs
-            ).transpose(1, 0, 2)
+            self._apply_cold_chain_sources(add_coords_in, sign=-1)
 
-            if leaf == 0:
-                old_contrib[0] = removal_waveforms[0]
-                old_contrib[1] = removal_waveforms[1]
-                new_contrib[0] = add_waveforms[0]
-                new_contrib[1] = add_waveforms[1]
-            else:
-                old_contrib[0] += removal_waveforms[0]
-                old_contrib[1] += removal_waveforms[1]
-                new_contrib[0] += add_waveforms[0]
-                new_contrib[1] += add_waveforms[1]
-
-        self.acs.swap_out_in_base_data(old_contrib, new_contrib)
-        xp.get_default_memory_pool().free_all_blocks()
+        _free_pool()

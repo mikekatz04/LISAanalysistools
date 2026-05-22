@@ -2,12 +2,163 @@
 
 import shutil
 import time
+from typing import Optional
 
+import h5py
 import numpy as np
 from eryn.backends import HDFBackend as eryn_HDFBackend
 
+from ..domains import (
+    DomainSettingsBase,
+    FDSettings,
+    STFTSettings,
+    WDMLookupTable,
+    WDMSettings,
+)
 from .plot import RunResultsProduction
 from .state import EMRIState, GBState, GFState, MBHState
+
+
+# ----------------------------------------------------------------------
+# Domain-settings (de)serialization helpers.
+#
+# Each concrete DomainSettings class exposes ``args`` / ``kwargs``
+# properties that round-trip its constructor. We persist those, plus a
+# class-name discriminator, so the backend can rebuild the exact
+# DomainSettings instance from disk later. No string-level "fd"/"wdm"
+# flag — the discriminator is the class name itself.
+# ----------------------------------------------------------------------
+
+
+_DOMAIN_SETTINGS_CLASSES = {
+    "FDSettings": FDSettings,
+    "STFTSettings": STFTSettings,
+    "WDMSettings": WDMSettings,
+}
+
+
+def _domain_attr_value(v):
+    """Coerce a kwarg value into something HDF5-friendly (or skip None)."""
+    if v is None:
+        return None
+    if isinstance(v, (str, bytes, bool, int, float, np.floating, np.integer)):
+        return v
+    if isinstance(v, np.ndarray):
+        return v
+    # Fall back to string repr for backends / orbits / etc. The user can
+    # reconstruct those separately; we just want the round-trip to not
+    # crash.
+    return str(v)
+
+
+def _write_domain_settings(group: h5py.Group, settings: DomainSettingsBase) -> None:
+    """Persist a :class:`DomainSettingsBase` into ``group`` under ``"domain_settings"``.
+
+    Stores the class name plus the ``args`` / ``kwargs`` from the
+    instance. For WDM the array-shaped kwargs (``window`` / ``omega``)
+    are written as datasets; everything else lives in attributes.
+    """
+    if "domain_settings" in group:
+        del group["domain_settings"]
+    ds_group = group.create_group("domain_settings")
+    ds_group.attrs["class_name"] = type(settings).__name__
+
+    args_group = ds_group.create_group("args")
+    for i, val in enumerate(settings.args):
+        coerced = _domain_attr_value(val)
+        if coerced is None:
+            continue
+        if isinstance(coerced, np.ndarray):
+            args_group.create_dataset(str(i), data=coerced)
+        else:
+            args_group.attrs[str(i)] = coerced
+
+    kwargs_group = ds_group.create_group("kwargs")
+    for key, val in settings.kwargs.items():
+        coerced = _domain_attr_value(val)
+        if coerced is None:
+            continue
+        if isinstance(coerced, np.ndarray):
+            kwargs_group.create_dataset(key, data=coerced)
+        else:
+            kwargs_group.attrs[key] = coerced
+
+
+def _read_domain_settings(
+    group: h5py.Group, force_backend: Optional[str] = None
+) -> Optional[DomainSettingsBase]:
+    """Reconstruct a :class:`DomainSettingsBase` from a ``"domain_settings"`` subgroup.
+
+    Returns ``None`` if the group does not contain a serialised settings
+    block (e.g. older files).
+    """
+    if "domain_settings" not in group:
+        return None
+    ds_group = group["domain_settings"]
+    class_name = ds_group.attrs.get("class_name")
+    if isinstance(class_name, bytes):
+        class_name = class_name.decode()
+    cls = _DOMAIN_SETTINGS_CLASSES.get(class_name)
+    if cls is None:
+        raise ValueError(f"Unknown domain settings class on disk: {class_name!r}")
+
+    args_group = ds_group["args"]
+    indices = sorted(
+        list(args_group.attrs.keys()) + list(args_group.keys()),
+        key=lambda s: int(s),
+    )
+    args = []
+    for idx in indices:
+        if idx in args_group.attrs:
+            args.append(args_group.attrs[idx])
+        else:
+            args.append(args_group[idx][...])
+
+    kwargs_group = ds_group["kwargs"]
+    kwargs = {}
+    for key in kwargs_group.attrs.keys():
+        val = kwargs_group.attrs[key]
+        if isinstance(val, bytes):
+            val = val.decode()
+        kwargs[key] = val
+    for key in kwargs_group.keys():
+        kwargs[key] = kwargs_group[key][...]
+    if force_backend is not None:
+        kwargs["force_backend"] = force_backend
+    return cls(*args, **kwargs)
+
+
+# ----------------------------------------------------------------------
+# WDM lookup table (de)serialization.
+#
+# Thin wrappers around :meth:`WDMLookupTable.to_h5_group` /
+# :meth:`WDMLookupTable.from_h5_group`. The actual layout (attrs + datasets)
+# lives on the lookup-table class so the standalone ``to_file`` / ``from_file``
+# and this embedded path share the same field set.
+# ----------------------------------------------------------------------
+
+
+_WDM_LOOKUP_GROUP_NAME = "wdm_lookup_table"
+
+
+def _write_wdm_lookup_table(
+    group: h5py.Group, lookup_table: WDMLookupTable
+) -> None:
+    """Persist a :class:`WDMLookupTable` into ``group`` under ``"wdm_lookup_table"``."""
+    if _WDM_LOOKUP_GROUP_NAME in group:
+        del group[_WDM_LOOKUP_GROUP_NAME]
+    lookup_table.to_h5_group(group.create_group(_WDM_LOOKUP_GROUP_NAME))
+
+
+def _read_wdm_lookup_table(
+    group: h5py.Group, force_backend: Optional[str] = None
+) -> Optional[WDMLookupTable]:
+    """Reconstruct a :class:`WDMLookupTable` previously stored via :func:`_write_wdm_lookup_table`."""
+    if _WDM_LOOKUP_GROUP_NAME not in group:
+        return None
+    return WDMLookupTable.from_h5_group(
+        group[_WDM_LOOKUP_GROUP_NAME], force_backend=force_backend
+    )
 
 
 def save_to_backend_asynchronously_and_plot(
@@ -127,6 +278,61 @@ class GFHDFBackend(eryn_HDFBackend):
 
         self.sub_state_bases = sub_state_bases
         self.recipe_added = False
+
+    # ------------------------------------------------------------------
+    # Domain-settings persistence
+    # ------------------------------------------------------------------
+
+    def write_domain_settings(self, settings: DomainSettingsBase) -> None:
+        """Record the run's :class:`DomainSettingsBase` into the file.
+
+        Idempotent: a second call replaces the previously stored block.
+        """
+        with self.open("a") as f:
+            _write_domain_settings(f[self.name], settings)
+
+    def read_domain_settings(
+        self, force_backend: Optional[str] = None
+    ) -> Optional[DomainSettingsBase]:
+        """Read back the run's :class:`DomainSettingsBase` (or ``None``)."""
+        with self.open() as f:
+            if self.name not in f:
+                return None
+            return _read_domain_settings(f[self.name], force_backend=force_backend)
+
+    # ------------------------------------------------------------------
+    # WDM lookup-table persistence (optional)
+    # ------------------------------------------------------------------
+
+    def write_wdm_lookup_table(self, lookup_table: WDMLookupTable) -> None:
+        """Embed a :class:`WDMLookupTable` inside the global-fit file.
+
+        Adjusts the lookup-table storage so the global-fit file is the
+        single source of truth — no separate side-car file is required.
+        Replaces any previously written table on a second call.
+        """
+        with self.open("a") as f:
+            _write_wdm_lookup_table(f[self.name], lookup_table)
+
+    def read_wdm_lookup_table(
+        self, force_backend: Optional[str] = None
+    ) -> Optional[WDMLookupTable]:
+        """Reconstruct the :class:`WDMLookupTable` previously stored via :meth:`write_wdm_lookup_table`."""
+        with self.open() as f:
+            if self.name not in f:
+                return None
+            return _read_wdm_lookup_table(
+                f[self.name], force_backend=force_backend
+            )
+
+    @property
+    def has_wdm_lookup_table(self) -> bool:
+        """Whether a WDM lookup table is embedded in this file."""
+        with self.open() as f:
+            return (
+                self.name in f
+                and "wdm_lookup_table" in f[self.name]
+            )
 
     @property
     def reset_kwargs(self):

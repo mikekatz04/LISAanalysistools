@@ -1,112 +1,308 @@
-import h5py
-import numpy as np
+"""Global-fit settings: EMRI-only smoke test (CPU + WDM + self-generated injection).
+
+Layout matches ``emri_test_script_td_wave.py``: the EMRI waveform is built
+from ``few.waveform.GenerateEMRIWaveform`` + ``fastlisaresponse.ResponseWrapper``
+directly (no ``EMRITDIonFly``), wrapped in a small ``EMRIWaveWrap`` that
+forwards the call to :class:`TDSignal.transform` so the global-fit
+machinery sees a domain-aware signal.
+
+Smoke-test choices:
+
+* CPU-only (no cupy / no GPU paths).
+* WDM grid ``Nf=720, Nt=2160, dt=5`` so ``Tobs = Nf*Nt*dt = 90 d ≈ 3 mo``.
+* ``nwalkers=4`` and ``ntemps=2`` for fast turnaround.
+* EMRI injection generated in-process — no external h5 paths.
+* Single cached ``ResponseWrapper`` reused between the synthetic-injection
+  data loader and the template move so the slow ``GenerateEMRIWaveform``
+  setup runs once.
+"""
+
+import gc
+import logging
 import shutil
+from typing import Optional
 
-try:
-    import cupy as cp
-    gpu_available = True
-except (ModuleNotFoundError, ImportError) as e:
-    import numpy as cp
-    gpu_available = True
+import numpy as np
 
-from eryn.moves.tempering import TemperatureControl, make_ladder
+# CPU-only smoke test. Map ``cp`` to numpy so the existing call sites
+# (``cp.cuda.runtime.setDevice`` etc.) can still be guarded by
+# ``gpu_available``.
+import numpy as cp
+
+GPU_BACKEND = "cpu"
+gpu_available = False
+
+logger = logging.getLogger(__name__)
+
+from eryn.moves import StretchMove
+from eryn.moves.tempering import make_ladder
+
+from fastlisaresponse import ResponseWrapper
+from fastlisaresponse.tdiconfig import TDIConfig
+from few.waveform import GenerateEMRIWaveform
 
 from lisatools.detector import EqualArmlengthOrbits
-from eryn.moves import TemperatureControl
-from lisatools.utils.constants import *
-from gbgpu.utils.utility import get_fdot
-from eryn.state import BranchSupplemental
-from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
-from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
-from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
-# from global_fit_input.global_fit_settings import get_global_fit_settings
+from lisatools.domains import (
+    DomainBaseArray,
+    FDSettings,
+    TDSettings,
+    TDSignal,
+    WDMSettings,
+)
+from lisatools.globalfit.engine import (
+    GeneralSettings,
+    GeneralSetup,
+    GlobalFitSettings,
+    RankInfo,
+)
+from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
+from lisatools.globalfit.preprocessing import BaseProcessingStep
+from lisatools.globalfit.recipe import RecipeStep
+from lisatools.globalfit.run import CurrentInfoGlobalFit
+from lisatools.globalfit.stock.erebor import EMRISettings, EMRISetup
+from lisatools.utils.constants import YRSID_SI
 
-from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
-from lisatools.globalfit.state import MBHState, EMRIState, GBState
 
-from bbhx.utils.transform import *
+# ============================================================
+# *** WDM grid ***
+# ============================================================
+NF = 720
+NT = 2160
+DT = 5.0
+TOBS = NF * NT * DT  # 7,776,000 s ≈ 90 d ≈ 3 mo
+T_START = 0.0
 
-from lisatools.globalfit.generatefuncs import *
-from lisatools.utils.utility import AET
-from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFrequencySNRPrior, GBPriorWrap
 
-from lisatools.globalfit.stock.erebor import (
-    GalForSetup, GalForSettings, PSDSetup, PSDSettings,
-    MBHSetup, MBHSettings, GBSetup, GBSettings, EMRISetup, EMRISettings,
+DOMAIN_CHOICE = WDMSettings.make_factory(
+    Nf=NF,
+    Nt=NT,
+    min_freq=1e-4,
+    max_freq=2.5e-2,
+    min_time=20 * 3600.0,
+    max_time=(NT - 20) * 3600.0,
 )
 
-from eryn.prior import uniform_dist
-from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
 
-from eryn.moves import StretchMove, GaussianMove
-from lisatools.sampling.moves.skymodehop import SkyMove
+# ============================================================
+# *** Self-generated EMRI injection ***
+# ============================================================
+# ``few``'s ``FastKerrEccentricEquatorialFlux`` consumes 14 parameters in
+# this order: M, mu, a, p0, e0, xI0, dist, qS, phiS, qK, phiK, Phi_phi0,
+# Phi_theta0, Phi_r0. EMRISetup's transform fills xI0 (idx 5) and
+# Phi_theta0 (idx 12) from ``fill_values`` so the sampling basis has 12
+# parameters (with ``M -> logM``, ``qS -> cos qS``, ``qK -> cos qK``).
+INJECTION_PARAMS_FULL_BASIS = np.array(
+    [
+        1.0e6,      # M
+        1.0e1,      # mu
+        0.5,        # a
+        10.0,       # p0
+        0.3,        # e0
+        1.0,        # xI0 — fill_value[0] (prograde equatorial)
+        1.0,        # dist (Gpc)
+        np.pi / 3,  # qS
+        1.0,        # phiS
+        np.pi / 4,  # qK
+        2.0,        # phiK
+        0.0,        # Phi_phi0
+        0.0,        # Phi_theta0 — fill_value[1]
+        0.0,        # Phi_r0
+    ]
+)
+SAMPLE_FILL_INDICES = [5, 12]
 
-from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
-from lisatools.globalfit.galaxyglobal import make_gmm
-from lisatools.globalfit.moves import GlobalFitMove
-from lisatools.utils.utility import tukey
+
+def emri_full_to_sampling(params_full):
+    """Convert a 14-param waveform-basis vector to the 12-param sampling basis."""
+    p = np.asarray(params_full, dtype=float).copy()
+    p[0] = np.log(p[0])    # logM
+    p[7] = np.cos(p[7])    # cos qS
+    p[9] = np.cos(p[9])    # cos qK
+    return np.delete(p, SAMPLE_FILL_INDICES)
 
 
-# import few
-from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
+# ---- Cached EMRI generator + wrappers (shared across data path + moves) ----
+
+# Shared inspiral / sum / mode-selector kwargs (mirrors emri_test_script_td_wave.py).
+INSPIRAL_KWARGS = {
+    "DENSE_STEPPING": 0,
+    "max_init_len": int(1e4),
+    "force_backend": "cpu",
+}
+SUM_KWARGS = {"pad_output": True}
+# Single mode-selection threshold for both injection and template paths.
+# 1e-2 keeps the smoke test fast; revisit once GPU is available.
+MODE_SELECTOR_KWARGS = {"mode_selection_threshold": 1e-2}
+
+_WAVE_GEN_CACHE = {}
 
 
-from eryn.utils.updates import Update
+def get_emri_response_wrapper(
+    *,
+    Tobs: float,
+    dt: float,
+    t_start: float,
+    tdi_config: TDIConfig,
+    tdi_chan: str = "XYZ",
+    role: str = "template",
+    order: int = 40,
+    t_buffer: float = 3e4,
+    force_backend: str = "cpu",
+):
+    """Build (and cache) a :class:`ResponseWrapper` around ``GenerateEMRIWaveform``.
 
-from lisatools.globalfit.recipe import Recipe, RecipeStep
-import time
+    Note: this smoke test uses *one* generator for both the synthetic
+    injection and the template path. Building two ``GenerateEMRIWaveform``
+    instances (as the original test script does for tight vs loose mode
+    selection) crashes the CPU process here, so we just share the looser
+    template threshold and pay the small accuracy cost — the smoke test
+    only exercises pipeline plumbing, not source recovery.
+    """
+    # ``role`` is intentionally ignored in the cache key so injection and
+    # template both reuse the first generator built.
+    key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
+    if key in _WAVE_GEN_CACHE:
+        return _WAVE_GEN_CACHE[key]
+
+    few_generator = GenerateEMRIWaveform(
+        "FastKerrEccentricEquatorialFlux",
+        return_list=False,
+        inspiral_kwargs=INSPIRAL_KWARGS,
+        sum_kwargs=SUM_KWARGS,
+        frame="detector",
+        mode_selector_kwargs=MODE_SELECTOR_KWARGS,
+        force_backend=force_backend,
+    )
+
+    response_kwargs = {
+        "Tobs": Tobs / YRSID_SI,
+        "dt": dt,
+        "index_lambda": 8,
+        "index_beta": 7,
+        "flip_hx": True,
+        "force_backend": force_backend,
+        "tdi": tdi_config,
+        "tdi_chan": tdi_chan,
+        "order": order,
+        "remove_garbage": "zero",
+        "is_ecliptic_latitude": False,
+        "t_buffer": t_buffer,
+    }
+
+    orbits = EqualArmlengthOrbits(force_backend=force_backend)
+    wave_gen = ResponseWrapper(
+        few_generator,
+        orbits=orbits,
+        t0=t_start,
+        **response_kwargs,
+    )
+    _WAVE_GEN_CACHE[key] = wave_gen
+    return wave_gen
+
+
+class EMRIWaveWrap:
+    """Adapter that runs the cached ResponseWrapper and projects to the run's domain.
+
+    Mirrors ``EMRIWaveWrap`` in ``emri_test_script_td_wave.py``: the call
+    output is a :class:`DomainBase` subclass (FDSignal / WDMSignal / ...)
+    so the global-fit move and ACA dispatch land on the right kernels.
+    """
+
+    def __init__(
+        self,
+        wave_gen,
+        td_settings: TDSettings,
+        target_domain,
+        td_window=None,
+        runtime_kwargs: Optional[dict] = None,
+        nchannels: Optional[int] = None,
+    ):
+        self.wave_gen = wave_gen
+        self.td_settings = td_settings
+        self.target_domain = target_domain
+        self.td_window = td_window
+        self.runtime_kwargs = runtime_kwargs or {}
+        self.nchannels = nchannels
+
+    def __call__(self, *params, **kwargs):
+        call_kwargs = dict(self.runtime_kwargs)
+        call_kwargs.update(kwargs)
+        # ``convert_to_ra_dec=False`` keeps the sampler basis aligned with
+        # ``[qS, phiS, qK, phiK]`` rather than (ra, dec).
+        call_kwargs.setdefault("convert_to_ra_dec", False)
+        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
+        if self.nchannels is not None:
+            arr = arr[: self.nchannels]
+        return TDSignal(arr, self.td_settings).transform(
+            self.target_domain, window=self.td_window
+        )
+
+
+class SyntheticEMRIProcessingStep(BaseProcessingStep):
+    """Generate the EMRI injection in-process via the shared ResponseWrapper.
+
+    Hands ``(times, data, fs)`` to :class:`BaseProcessingStep` — same
+    interface as :class:`SangriaProcessingStep`. No external h5 path
+    needed.
+    """
+
+    def __init__(
+        self,
+        Tobs: float,
+        dt: float,
+        t_start: float,
+        injection_params_full_basis: np.ndarray,
+        tdi_chan: str = "XYZ",
+        nchannels: int = 3,
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        tdi_config = TDIConfig("2nd generation", force_backend="cpu")
+        wave_gen = get_emri_response_wrapper(
+            Tobs=Tobs,
+            dt=dt,
+            t_start=t_start,
+            tdi_config=tdi_config,
+            tdi_chan=tdi_chan,
+            role="injection",
+        )
+
+        td_signal = np.asarray(
+            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
+        )
+        td_signal = np.atleast_2d(td_signal)[:nchannels]
+
+        # ``ResponseWrapper`` can produce a couple fewer samples than
+        # ``Tobs/dt`` (Lagrange buffer / remove_garbage). Pad/clip to
+        # exactly ``Tobs/dt`` so downstream WDM ``N = Nf*Nt`` matches.
+        target_N = int(round(Tobs / dt))
+        if td_signal.shape[-1] < target_N:
+            pad = target_N - td_signal.shape[-1]
+            td_signal = np.pad(td_signal, ((0, 0), (0, pad)), mode="constant")
+        elif td_signal.shape[-1] > target_N:
+            td_signal = td_signal[:, :target_N]
+
+        N = td_signal.shape[-1]
+        times = np.arange(N) * dt + t_start
+        fs = 1.0 / dt
+
+        BaseProcessingStep.__init__(
+            self, times, td_signal, fs, verbose=verbose, do_plots=do_plots
+        )
+        self.orbits = None
+        self.injection_params_full_basis = injection_params_full_basis
+        self.tdi_chan = tdi_chan
 
 
 ################
-
-### DEFINE RECIPE
-
-#############
+#  RECIPE STEPS
+################
 
 
-class PSDSearchRecipeStep(RecipeStep):
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return True
-
-
-class PSDPERecipeStep(RecipeStep):
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        return False
-    
-class EMRISearchRecipeStep(RecipeStep):
-    """
-    Placeholder for an actual EMRI search step. Now I only want to propose from Fisher.
-    """
-    def setup_run(self, iteration, last_sample, sampler):
-        # making sure
-        sampler.moves = self.moves
-        sampler.weights = self.weights
-
-    def stopping_function(self, iteration, last_sample, sampler):
-        # this will already be converged to max logl
-        print('Starting points drawn from Information Matrix')
-        return True
-    
 class EMRIPERecipeStep(RecipeStep):
-    def __init__(self, *args, moves=None, weights=None, **kwargs):
-        super().__init__(moves=moves, weights=weights)
-    
+    """PE-only step (runs indefinitely; outer ``run_mcmc`` count caps it)."""
+
     def setup_run(self, iteration, last_sample, sampler):
-        # making sure
         sampler.moves = self.moves
         sampler.weights = self.weights
 
@@ -114,242 +310,168 @@ class EMRIPERecipeStep(RecipeStep):
         return False
 
 
-from lisatools.sampling.stopping import SearchConvergeStopping
-
-
 ################
-
-### DEFINE RECIPE
-
-#############
+#  RECIPE
+################
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-
-    from lisatools.sources.emri import EMRITDIWaveform  
-   
+    print("[setup_recipe] entered", flush=True)
     emri_info = curr.source_info["emri"]
-    # TODO: adjust this indide current info
     general_info = curr.general_info
-    nwalkers = curr.general_info.nwalkers
-    ntemps = curr.general_info.ntemps
+    nwalkers = general_info.nwalkers
+    ntemps = general_info.ntemps
+    gpus = general_info.gpus
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
 
-    gpus = curr.general_info.gpus
-    cp.cuda.runtime.setDevice(gpus[0])
-
-    wave_gen = WrapEMRI(EMRITDIWaveform(**emri_info.initialize_kwargs), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
-    if np.any(emri_inds := state.branches_inds["emri"][0]):
-        for leaf in range(emri_inds.shape[-1]):
-            if emri_inds[0, leaf]:
-                assert np.all(emri_inds[:, leaf])
-                inj_coords = state.branches_coords["emri"][0, :, leaf]
-                inj_coords_in = emri_info.transform.both_transforms(inj_coords)
-    
-                AET = cp.zeros((inj_coords.shape[0], acs.nchannels, acs.data_length), dtype=complex)
-                for i in range(inj_coords.shape[0]):
-                    AET[i] = wave_gen(*inj_coords_in[i],  **emri_info.waveform_kwargs)
-                acs.add_signal_to_residual(AET[:, :2])
-    
-    print('need to fix emri betas_all setup')
-    betas_all = np.tile(make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1))
-
-    # to make the states work 
-    betas = betas_all[0]
-    state.sub_states["emri"].betas_all = betas_all
-
-    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
-    
-    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
-
-    inner_moves = emri_info.inner_moves.copy()
-
-    info_matrix_move = (deepcopy(emri_info.inner_moves[-1][0]), 1)  # assuming last is info_matrix move
-
-    emri_search_move_args = (
-        "emri",
-        coords_shape,
-        wave_gen,
-        tempering_kwargs,
-        emri_info.waveform_kwargs.copy(),
-        emri_info.waveform_kwargs.copy(),
-        acs,
-        1,
-        emri_info.transform,
-        priors,
-        [info_matrix_move],  # skip stretch for search
-        acs.df
+    domain_settings = general_info.domain_settings
+    print(
+        f"[setup_recipe] nwalkers={nwalkers} ntemps={ntemps} "
+        f"domain={type(domain_settings).__name__} nchannels={acs.nchannels}",
+        flush=True,
     )
 
-    emri_search_move = ResidualAddOneRemoveOneMove(*emri_search_move_args)
+    # Pull the cached ResponseWrapper (built once at data-load time) and
+    # wrap it for the template path. ``EMRIWaveWrap`` returns a
+    # ``DomainBase`` so ACA add/remove_signal_to_residual and the EMRI
+    # move's get_waveform_here use the right kernels.
+    tdi_config = TDIConfig("2nd generation", force_backend="cpu")
+    template_wave_gen = get_emri_response_wrapper(
+        Tobs=general_info.Tobs,
+        dt=general_info.dt,
+        t_start=T_START,
+        tdi_config=tdi_config,
+        tdi_chan="XYZ",
+        role="template",
+    )
+    td_settings = TDSettings(
+        int(round(general_info.Tobs / general_info.dt)),
+        general_info.dt,
+        force_backend="cpu",
+    )
+    wave_gen = EMRIWaveWrap(
+        template_wave_gen,
+        td_settings,
+        domain_settings,
+        td_window=None,
+        nchannels=acs.nchannels,
+    )
 
-    emri_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    recipe.add_recipe_component(EMRISearchRecipeStep(moves=[emri_search_move]), name="emri FIM search")
+    # Pre-inject starting templates into each walker's residual.
+    if np.any(emri_inds := state.branches_inds["emri"][0]):
+        print(
+            f"[setup_recipe] pre-injecting EMRI starts; nleaves_max={emri_inds.shape[-1]}",
+            flush=True,
+        )
+        for leaf in range(emri_inds.shape[-1]):
+            if not emri_inds[0, leaf]:
+                continue
+            assert np.all(emri_inds[:, leaf])
+            inj_coords = state.branches_coords["emri"][0, :, leaf]
+            inj_coords_in = emri_info.transform.both_transforms(inj_coords)
+            n_starts = inj_coords.shape[0]
+            print(
+                f"[setup_recipe] generating + applying {n_starts} starting waveforms (leaf {leaf}) one at a time...",
+                flush=True,
+            )
+            # One EMRI waveform at a time: generate, add to that walker's
+            # residual, drop the reference, force a gc cycle. Keeps peak RAM
+            # at one waveform worth instead of ``n_starts`` simultaneously.
+            for i in range(n_starts):
+                print(
+                    f"[setup_recipe]   walker {i}/{n_starts}: generating...",
+                    flush=True,
+                )
+                sig = wave_gen(*inj_coords_in[i], **emri_info.waveform_kwargs)
+                acs.add_signal_to_residual([sig], data_index=np.array([i]))
+                del sig
+                gc.collect()
+    print("[setup_recipe] pre-injection done; building EMRI PE move", flush=True)
 
-    emri_move_args = (
+    betas_all = np.tile(
+        make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1)
+    )
+    state.sub_states["emri"].betas_all = betas_all
+
+    coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
+
+    emri_pe_move = ResidualAddOneRemoveOneMove(
         "emri",
         coords_shape,
         wave_gen,
-        tempering_kwargs,
         emri_info.waveform_kwargs.copy(),
         emri_info.waveform_kwargs.copy(),
         acs,
         emri_info.num_prop_repeats,
         emri_info.transform,
         priors,
-        inner_moves,
-        acs.df
+        emri_info.inner_moves,
+        Tmax=np.inf,
+        betas_all=betas_all,
     )
-    emri_pe_move = ResidualAddOneRemoveOneMove(*emri_move_args)
-
     emri_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    recipe.add_recipe_component(
+        EMRIPERecipeStep(moves=[emri_pe_move]), name="emri pe"
+    )
 
-    recipe.add_recipe_component(EMRIPERecipeStep(moves=[emri_pe_move]), name="emri pe")
 
-
-########################## 
-##### SETTINGS ###########
+##########################
+#  SETTINGS
 ##########################
 
-class WrapEMRI:
-    def __init__(self, waveform_gen_td, nchannels, tukey_alpha, start_freq_ind, end_freq_ind, dt):
-        self.waveform_gen_td = waveform_gen_td
-        self.tukey_alpha = tukey_alpha
-        self.nchannels = nchannels
-        self.start_freq_ind, self.end_freq_ind = start_freq_ind, end_freq_ind
-        self.dt = dt
-
-    def __call__(self, *args, **kwargs):
-        AET_t = cp.asarray(self.waveform_gen_td(*args, **kwargs))
-        fft_input = AET_t * tukey(AET_t.shape[-1], self.tukey_alpha, xp=cp)[None, :]
-        # TODO: adjust this if it needs 3rd axis?
-        AET_f = self.dt * cp.fft.rfft(fft_input, axis=-1)[:self.nchannels, self.start_freq_ind: self.end_freq_ind]
-        return AET_f
 
 def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
-
-    from stableemrifisher.fisher import StableEMRIFisher
-    from fastlisaresponse import ResponseWrapper
-    from few.waveform.waveform import GenerateEMRIWaveform
-
-    injection_parameters_file = '/data/asantini/packages/LISAanalysistools/injection_params.npz'
-    info_matrix_covariance_file = '/data/asantini/packages/LISAanalysistools/fim_covariance.npz'
-    delta_prior = 1e-2
-
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
-    # waveform kwargs
-    response_kwargs = dict(
-        t0=30000.0,
-        order=30,
-        tdi="1st generation",
-        tdi_chan="AE",
-        orbits=gpu_orbits,
-        force_backend="cuda12x",
-        remove_garbage="zero",  # removes the beginning of the signal that has bad information
-    )
-
-    # TODO: I prepared this for Kerr but have not used it with the Kerr waveform yet
-    # so spin results are currently meaningless and will lead to slower code
-    # waveform kwargs
-    waveform_class = "FastKerrEccentricEquatorialFlux"
+    """Build the EMRI :class:`EMRISetup` for the CPU smoke test."""
+    # ``initialize_kwargs`` is consumed by ``EMRISetup`` only to track
+    # metadata for the run; we don't construct another generator from it
+    # (the cached one in ``setup_recipe`` is the active path).
     initialize_kwargs_emri = dict(
-        T=general_set.Tobs / YRSID_SI, # TODO: check these conversions all align
+        T=general_set.Tobs / YRSID_SI,
         dt=general_set.dt,
-        emri_waveform_args=(waveform_class,),
-        emri_waveform_kwargs=dict(force_backend="cuda12x"),
-        response_kwargs=response_kwargs,
+        emri_waveform_args=("FastKerrEccentricEquatorialFlux",),
+        emri_waveform_kwargs=dict(force_backend="cpu"),
+        response_kwargs=dict(
+            t0=T_START,
+            order=40,
+            tdi="2nd generation",
+            tdi_chan="XYZ",
+            force_backend="cpu",
+            remove_garbage="zero",
+        ),
     )
 
-    waveform_kwargs_pe = dict(
-            mode_selection_threshold=0.1,
-            #specific_modes=specific_modes,
-        )
-    
-    info_matrix_folder = general_set.file_store_dir + general_set.base_file_name + "_emri_info_matrix/"
+    waveform_kwargs_pe = dict()
 
-    info_matrix_kwargs = {
-        'stats_for_nerds': False, # use logger.debug in the info_matrix
-        'CovEllipse': False,
-        'stability_plot': True,
-        'save_derivatives': True,
-        'der_order': 4,
-        'Ndelta': 8,
-        'plunge_check': False,
-        'waveform_kwargs': waveform_kwargs_pe,
-        'filename': info_matrix_folder,
-    }
+    delta_prior = 1e-2
+    injection_sampling = emri_full_to_sampling(INJECTION_PARAMS_FULL_BASIS)
 
-    # info_matrix_generator = StableEMRIFisher(
-    #         waveform_class=waveform_class,
-    #         waveform_class_kwargs={},
-    #         waveform_generator=GenerateEMRIWaveform,
-    #         waveform_generator_kwargs=dict(sum_kwargs=dict(pad_output=True), force_backend="cuda12x"),
-    #         ResponseWrapper=ResponseWrapper,
-    #         ResponseWrapper_kwargs=response_kwargs,
-    #         T=general_set.Tobs / YRSID_SI,
-    #         dt=general_set.dt,
-    #         use_gpu=True,
-    #         channels= ["A", "E"],
-    #         **info_matrix_kwargs
-    # )
+    logm1_lims = [
+        (1 - delta_prior) * injection_sampling[0],
+        (1 + delta_prior) * injection_sampling[0],
+    ]
+    m2_lims = [
+        (1 - delta_prior) * injection_sampling[1],
+        (1 + delta_prior) * injection_sampling[1],
+    ]
+    amax = min(0.999, (1 + delta_prior) * injection_sampling[2])
+    a_lims = [(1 - delta_prior) * injection_sampling[2], amax]
+    p0_lims = [
+        (1 - delta_prior) * injection_sampling[3],
+        (1 + delta_prior) * injection_sampling[3],
+    ]
+    e0_lims = [
+        (1 - delta_prior) * injection_sampling[4],
+        (1 + delta_prior) * injection_sampling[4],
+    ]
 
-    info_matrix_generator = None # todo : set up info_matrix properly later
-
-    from emritools.utils.utility import get_selection
-    from emritools.pe.eryn_utils import DefaultSEFMove
-
-    parameter_names_full = get_selection(selection='names')
-    parameter_names = get_selection(selection='names', indeces_remove=[5, 12])
-    injection_params = np.load(injection_parameters_file)['injection_params']
-    injection_dict = dict(zip(parameter_names_full, injection_params))
-
-    fim_covariance = np.load(info_matrix_covariance_file)['covariance']
-
-    info_matrix_move = DefaultSEFMove(
-        means=dict(emri=injection_dict),
-        covariances=dict(emri=fim_covariance),
-        multiplying_factor=1.0,
-        info_matrix_generator=None,
-        fisher_kwargs=dict(param_names=parameter_names),
-        all_param_names=parameter_names_full
+    inner_moves = [(StretchMove(), 1.0)]
+    fill_values = np.array(
+        [
+            INJECTION_PARAMS_FULL_BASIS[5],   # xI0
+            INJECTION_PARAMS_FULL_BASIS[12],  # Phi_theta0
+        ]
     )
-
-    # compute the covariance matrix in the sampling parameters
-    J_diagonal = np.ones((fim_covariance.shape[0],))
-    # mass 1
-    J_diagonal[0] = 1.0 / injection_params[0]
-    # cos qK
-    J_diagonal[6] = -np.sin(injection_params[7])
-    # cos qS
-    J_diagonal[8] = -np.sin(injection_params[9])
-    
-    jacobian = np.diag(J_diagonal)
-
-    fim_sampling_covariance = jacobian @ fim_covariance @ jacobian.T
-
-    info_matrix_gaussian_move = GaussianMove(cov_all={'emri': fim_sampling_covariance})
-
-    # svd check
-    u, s, vh = np.linalg.svd(fim_sampling_covariance)
-
-    inner_moves = [(StretchMove(), 0.4), (info_matrix_gaussian_move, 0.3), (info_matrix_move, 0.3)]
-    #inner_moves = [(StretchMove(), 1.0)]
-
-    fill_values = np.array([injection_params[5], injection_params[12]])
-
-    injection_sampling = deepcopy(injection_params)
-    injection_sampling[0] = np.log(injection_sampling[0])  # log mass
-    injection_sampling[7] = np.cos(injection_sampling[7])  # cos qK
-    injection_sampling[9] = np.cos(injection_sampling[9])  # cos qS
-
-    injection_sampling = np.delete(injection_sampling, [5, 12])
-
-    #breakpoint()
-    logm1_lims = [(1-delta_prior) * injection_sampling[0], (1+delta_prior) * injection_sampling[0]]
-    m2_lims = [(1-delta_prior) * injection_sampling[1], (1+delta_prior) * injection_sampling[1]]
-    amax = min(0.999, (1+delta_prior) * injection_sampling[2])
-    a_lims = [(1-delta_prior) * injection_sampling[2], amax]
-    p0_lims = [(1-delta_prior) * injection_sampling[3], (1+delta_prior) * injection_sampling[3]]
-    e0_lims = [(1-delta_prior) * injection_sampling[4], (1+delta_prior) * injection_sampling[4]]
 
     emri_settings = EMRISettings(
         Tobs=general_set.Tobs,
@@ -361,143 +483,106 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
         p0_lims=p0_lims,
         e0_lims=e0_lims,
         injection=injection_sampling,
-        num_prop_repeats=5,
+        num_prop_repeats=2,
         initialize_kwargs=initialize_kwargs_emri,
         waveform_kwargs=waveform_kwargs_pe,
-        info_matrix_gen=info_matrix_generator,
+        info_matrix_gen=None,
         inner_moves=inner_moves,
         nleaves_max=1,
         nleaves_min=1,
-        ndim=12
+        ndim=12,
     )
 
     return EMRISetup(emri_settings)
 
-# def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
-    
-#     from lisatools.detector import EqualArmlengthOrbits
-
-#     from lisatools.utils.constants import YRSID_SI
-#     Tobs = YRSID_SI
-#     dt = 10.0
-
-#     galfor_settings = GalForSettings(
-#         Tobs=general_set.Tobs,
-#         dt=general_set.dt,
-#         initialize_kwargs={},
-#     )
-
-#     return GalForSetup(galfor_settings)
-
-
 
 def get_general_erebor_settings() -> GeneralSetup:
-       # limits on parameters
-    delta_safe = 1e-5
-    # now with negative fdots
-    
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI * 3.1 / 12.0
-    dt = 5.0
+    Tobs = TOBS
+    dt = DT
 
-    emri_source_file = "/data/asantini/packages/LISAanalysistools/emri_sangria_injection.h5"
-    base_file_name = "emri_only_5th_try"
-    file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
+    base_file_name = "emri_only_smoke_test"
+    file_store_dir = "./gf_output/"
 
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
+    nwalkers = 4
+    ntemps = 2
 
-    gpus = [1]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
-    nwalkers = 24
-    ntemps = 1
+    domain_settings = DOMAIN_CHOICE
 
-    tukey_alpha = 0.05
+    processor_init_kwargs = dict(
+        Tobs=Tobs,
+        dt=dt,
+        t_start=T_START,
+        injection_params_full_basis=INJECTION_PARAMS_FULL_BASIS,
+        tdi_chan="XYZ",
+        nchannels=3,
+    )
 
-    orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    sensitivity_init_kwargs = dict(
+        tdi_generation=2, mask_percentage=0.02, use_splines=False
+    )
+
+    # Smoke test: no Tukey taper.
+    window_taper_duration = 0.0
+
+    # Skip the engine's default highpass + 200 h edge-trim + Tobs trim.
+    # The synthesised signal already covers exactly ``Tobs = Nf*Nt*dt``;
+    # the default ``Tobs`` trim uses ``T=(N-1)*dt`` which would lose one
+    # sample and break the WDM ``Nf*Nt`` shape.
+    preprocess_kwargs = dict(
+        highpass_kwargs=None,
+        trim_kwargs=None,
+        Tobs=None,
+    )
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        data_input_path=emri_source_file,
-        orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        start_freq_ind=0,
-        end_freq_ind=None,
+        main_file_key="testing",
+        domain_settings=domain_settings,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
-        gpus=gpus,
-        remove_from_data=["noise", "dgb", "igb", "vgb", "mbhb"],
-        fixed_psd_kwargs=dict(model=sangria)
+        window_type="tukey",
+        window_taper_duration=window_taper_duration,
+        gpu_backend=GPU_BACKEND,
+        gpus=None,
+        data_processor=SyntheticEMRIProcessingStep,
+        processor_init_kwargs=processor_init_kwargs,
+        preprocess_kwargs=preprocess_kwargs,
+        sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
-    general_setup = GeneralSetup(general_settings)
-    return general_setup
-
-
-from lisatools.globalfit.engine import RankInfo
+    return GeneralSetup(general_settings)
 
 
 def get_global_fit_settings(copy_settings_file=False):
-
     general_setup = get_general_erebor_settings()
-
-    # file_information["past_file_for_start"] = file_store_dir + "rework_6th_run_through" + "_parameter_estimation_main.h5"
     if copy_settings_file:
-        shutil.copy(__file__, general_setup.file_store_dir + general_setup.base_file_name + "_" + __file__.split("/")[-1])
+        shutil.copy(
+            __file__,
+            general_setup.file_store_dir
+            + general_setup.base_file_name
+            + "_"
+            + __file__.split("/")[-1],
+        )
 
-    ###############################
-    ###############################
-    ######    Rank/GPU setup  #####
-    ###############################
-    ###############################
-
-    head_rank = 1
-
-    main_rank = 0
-    
-    # run results rank will be next available rank if used
-    # gmm_ranks will be all other ranks
-
-    rank_info = RankInfo(
-        head_rank=head_rank,
-        main_rank=main_rank
-    )
-
-    ##################################
-    ##################################
-    ###  EMRI Settings  ##############
-    ##################################
-    ##################################
+    rank_info = RankInfo(head_rank=1, main_rank=0)
 
     emri_setup = get_emri_erebor_settings(general_setup)
 
-    ##############
-    ## READ OUT ##
-    ##############
-
-
     global_settings = GlobalFitSettings(
-        source_info={
-            "emri": emri_setup,
-        },
+        source_info={"emri": emri_setup},
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,
     )
 
-    curr_info = CurrentInfoGlobalFit(global_settings)
-
-    return curr_info
-
+    return CurrentInfoGlobalFit(global_settings)
 
 
 if __name__ == "__main__":
     settings = get_global_fit_settings()
-    breakpoint()
+    print("EMRI smoke-test settings constructed OK")

@@ -33,6 +33,7 @@ from lisatools.sampling.prior import (
     SNRPrior,
 )
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
+from lisatools.utils.utility import asnumpy
 
 warnings.filterwarnings("ignore")
 
@@ -221,14 +222,13 @@ class UpdateNewResiduals(Update):
             .transpose(1, 0, 2)[last_sample.branches["gb"].inds]
         )
 
-        per_source_lp_old[last_sample.branches["gb"].inds] = (
+        per_source_lp_old[last_sample.branches["gb"].inds] = asnumpy(
             self.gpu_priors["gb"]
             .logpdf(
                 last_sample.branches["gb"].coords[last_sample.branches["gb"].inds],
                 psds=self.mgh.lisasens_shaped[0][0],
                 walker_inds=walker_inds_old,
             )
-            .get()
         )
 
         lp_gbs_old = per_source_lp_old.sum(axis=-1)
@@ -272,14 +272,13 @@ class UpdateNewResiduals(Update):
             .transpose(1, 0, 2)[last_sample.branches["gb"].inds]
         )
 
-        per_source_lp[last_sample.branches["gb"].inds] = (
+        per_source_lp[last_sample.branches["gb"].inds] = asnumpy(
             self.gpu_priors["gb"]
             .logpdf(
                 last_sample.branches["gb"].coords[last_sample.branches["gb"].inds],
                 psds=lisasens[0],
                 walker_inds=walker_inds,
             )
-            .get()
         )
 
         new_lp_gbs = per_source_lp.sum(axis=-1)
@@ -584,7 +583,7 @@ def run_gb_pe(gpu, comm, head_rank, save_plot_rank):
         band_inds_in[state_mix.branches["gb"].inds] = (
             np.searchsorted(band_edges, f_in, side="right") - 1
         )
-        N_vals_in[state_mix.branches["gb"].inds] = band_N_vals.get()[
+        N_vals_in[state_mix.branches["gb"].inds] = asnumpy(band_N_vals)[
             band_inds_in[state_mix.branches["gb"].inds]
         ]
 
@@ -1546,7 +1545,7 @@ def run_iterative_subtraction_mcmc(
                     psds=lisasens_in[0][None, :],
                 )[0].reshape(coords_with_fs.shape[:-1])
 
-                samples_store[:, collect_sample_iter] = coords_with_fs.get()
+                samples_store[:, collect_sample_iter] = asnumpy(coords_with_fs)
                 collect_sample_iter += 1
                 print(collect_sample_iter, num_samples_store)
                 if collect_sample_iter == num_samples_store:

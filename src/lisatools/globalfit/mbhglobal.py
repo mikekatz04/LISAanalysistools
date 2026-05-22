@@ -13,6 +13,8 @@ except ModuleNotFoundError:
     mempool = None
 import numpy as np
 
+from lisatools.utils.utility import asnumpy
+
 # from lisatools.sampling.moves.gbspecialgroupstretch import GBSpecialGroupStretchMove
 
 import subprocess
@@ -112,16 +114,14 @@ class UpdateNewResidualsMBH(Update):
 
         for i in range(data_fin.shape[1]):
             start_ll_check[i] = (
-                (
+                asnumpy(
                     -1
                     / 2
                     * 4
                     * new_info.general_info["df"]
                     * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i])
                     - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))
-                )
-                .get()
-                .real
+                ).real
             )
 
         # accept or reject
@@ -241,14 +241,10 @@ def run_mbh_pe(gpu, comm, head_rank):
     start_ll_check = np.zeros((data_fin.shape[1]))
 
     for i in range(data_fin.shape[1]):
-        start_ll_check[i] = (
-            (
-                -1 / 2 * 4 * df * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i])
-                - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))
-            )
-            .get()
-            .real
-        )
+        start_ll_check[i] = asnumpy(
+            -1 / 2 * 4 * df * xp.sum(data_fin[:2, i].conj() * data_fin[:2, i] / psds_fin[:2, i])
+            - xp.sum(xp.log(xp.asarray(psds_fin[:2, i])))
+        ).real
 
     xp.get_default_memory_pool().free_all_blocks()
 

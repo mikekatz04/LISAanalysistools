@@ -1,13 +1,35 @@
+"""Global-fit settings: MBH-only run.
+
+Edit this file directly. The *backend* block below picks the array
+module + GPU backend; ``DOMAIN_CHOICE`` (further down) picks the basis
+grid as a :class:`DomainSettingsBase` / factory the engine consumes.
+``MBHSpecialMove`` is FD-only — switch the MBH branch to
+:class:`ResidualAddOneRemoveOneMove` (see ``emri_*`` settings) when
+running STFT / WDM.
+"""
+
 import h5py
 import numpy as np
 import shutil
+import logging
 
+
+# ============================================================
+# *** Backend selection ***
+# ============================================================
 try:
     import cupy as cp
+
+    GPU_BACKEND = "cuda12x"  # change to "cuda11x" / "cuda13x" if needed
     gpu_available = True
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     import numpy as cp
-    gpu_available = True
+
+    GPU_BACKEND = "cpu"
+    gpu_available = False
+# ============================================================
+
+logger = logging.getLogger(__name__)
 
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
@@ -47,10 +69,7 @@ from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
-
-
-# import few
-
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings
 
 
 # basic transform functions for pickling
@@ -63,6 +82,23 @@ from lisatools.globalfit.recipe import Recipe, RecipeStep
 import time
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
+from lisatools.globalfit.preprocessing import SangriaProcessingStep
+
+
+# ============================================================
+# *** Domain selection ***
+# ============================================================
+#
+# ``DOMAIN_CHOICE`` is consumed by the engine via
+# ``GeneralSettings.domain_settings`` — either a
+# :class:`DomainSettingsBase` instance or a factory
+# ``(times, dt, force_backend) -> DomainSettings``. Each Settings class
+# exposes a ``make_factory(...)`` classmethod that returns one. Edit directly:
+DOMAIN_CHOICE = FDSettings.make_factory(min_freq=0.0, max_freq=None)
+# Example WDM / STFT alternatives:
+# DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=0.0, max_freq=None)
+# DOMAIN_CHOICE = WDMSettings.make_factory(Nf=2048, Nt=8192, min_freq=0.0, max_freq=None)
+# ============================================================
 
 
 ################
@@ -123,8 +159,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     ntemps = curr.general_info.ntemps
 
     gpus = curr.general_info.gpus
-    cp.cuda.runtime.setDevice(gpus[0])
-    
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
+
     mbh_info = curr.source_info["mbh"]
     from bbhx.waveformbuild import BBHWaveformFD
 
@@ -224,40 +261,48 @@ def get_general_erebor_settings() -> GeneralSetup:
     dt = 10.0
 
     ldc_source_file = "/scratch/335-lisa/mlkatz/LDC2_sangria_training_v2.h5"
-    base_file_name = "mbh_separate_1st_try_parameter_estimation_main.h5"
+    base_file_name = "mbh_separate_1st_try"
     file_store_dir = "/scratch/335-lisa/mlkatz/gf_output/"
 
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
-
-    gpus = [0]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
+    gpus = [0] if gpu_available else None
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 24
 
-    tukey_alpha = 0.05
+    window_taper_duration = 0.05 * Tobs
 
     orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    gpu_orbits = EqualArmlengthOrbits(force_backend=GPU_BACKEND)
+
+    domain_settings = DOMAIN_CHOICE
+
+    processor_init_kwargs = dict(
+        data_input_path=ldc_source_file,
+        remove_from_data=["dgb", "igb"],
+    )
+
+    sensitivity_init_kwargs = dict(tdi_generation=2)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        data_input_path=ldc_source_file,
         orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        start_freq_ind=0,
-        end_freq_ind=None,
+        gpu_orbits=gpu_orbits,
+        domain_settings=domain_settings,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        window_type="tukey",
+        window_taper_duration=window_taper_duration,
+        gpu_backend=GPU_BACKEND,
         gpus=gpus,
-        remove_from_data=["dgb", "igb"],
-        fixed_psd_kwargs=dict(model=sangria)
+        data_processor=SangriaProcessingStep,
+        processor_init_kwargs=processor_init_kwargs,
+        sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
     general_setup = GeneralSetup(general_settings)

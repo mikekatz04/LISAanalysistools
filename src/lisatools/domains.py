@@ -42,7 +42,7 @@ except (ModuleNotFoundError, ImportError):
     import numpy as cp  # type: ignore
 
 from . import detector as lisa_models
-from .utils.utility import AET, get_array_module
+from .utils.utility import AET, asnumpy, get_array_module
 from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from . import cutils
@@ -104,11 +104,12 @@ class DomainBase:
 
     @staticmethod
     def get(x: np.ndarray) -> np.ndarray:
-        """Return ``x`` as a NumPy array (calls ``.get()`` for CuPy arrays)."""
-        try:
-            return x.get()
-        except AttributeError:
-            return x
+        """Return ``x`` as a NumPy array (calls ``.get()`` for CuPy arrays).
+
+        Thin wrapper around :func:`lisatools.utils.utility.asnumpy` kept
+        for API stability — older call sites use ``self.get(x)``.
+        """
+        return asnumpy(x)
 
     @property
     def arr(self) -> np.ndarray | cp.ndarray:
@@ -497,6 +498,23 @@ class FDSettings(DomainSettingsBase):
         self.max_freq = max_freq
         super().__init__(**kwargs)
 
+    @staticmethod
+    def make_factory(min_freq: Optional[float] = 0.0, max_freq: Optional[float] = None):
+        """Build a ``(times, dt, force_backend) -> FDSettings`` factory.
+
+        The factory derives ``N = len(times)//2 + 1`` and ``df = 1/(len(times)*dt)``
+        from its inputs so the active band lives on the natural rFFT grid.
+        """
+        def _factory(times, dt, force_backend):
+            Nt = len(times)
+            df = 1.0 / (Nt * dt)
+            Nf = Nt // 2 + 1
+            return FDSettings(
+                N=Nf, df=df, min_freq=min_freq, max_freq=max_freq,
+                force_backend=force_backend,
+            )
+        return _factory
+
     @property
     def differential_component(self) -> float:
         """Differential element used in inner-product summations (``df`` in FD)."""
@@ -880,8 +898,8 @@ class FDSignal(FDSettings, DomainBase):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
-        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
-        arr_here = self.arr[channel].get() if self.backend.uses_cupy else self.arr[channel]
+        f_arr = asnumpy(self.f_arr)
+        arr_here = asnumpy(self.arr[channel])
 
         ax.loglog(f_arr, np.abs(arr_here) ** 2, **kwargs)
 
@@ -941,6 +959,21 @@ class STFTSettings(DomainSettingsBase):
             f"STFTSettings(t0={self.t0}, dt={self.dt}, df={self.df}, NT={self.NT}, NF={self.NF}, "
             f"min_freq={self.min_freq}, max_freq={self.max_freq}, backend={self.backend_name.split('_')[-1]})"
         )
+
+    @staticmethod
+    def make_factory(big_dt: float, min_freq: Optional[float] = 0.0, max_freq: Optional[float] = None):
+        """Build a ``(times, dt, force_backend) -> STFTSettings`` factory.
+
+        Delegates to :func:`get_stft_settings`, which fits ``big_dt`` to an
+        integer multiple of ``dt`` and derives ``NT``/``NF`` from there.
+        """
+        def _factory(times, dt, force_backend):
+            return get_stft_settings(
+                times=times, big_dt=big_dt,
+                min_freq=min_freq, max_freq=max_freq,
+                force_backend=force_backend,
+            )
+        return _factory
 
     @staticmethod
     def get_associated_class():
@@ -1227,10 +1260,10 @@ class STFTSignal(STFTSettings, DomainBase):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
-        t_arr = self.t_arr if get_array_module(self.t_arr) == np else self.t_arr.get()
-        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
+        t_arr = asnumpy(self.t_arr)
+        f_arr = asnumpy(self.f_arr)
 
-        arr_here = self.arr[channel].get() if self.backend.uses_cupy else self.arr[channel]
+        arr_here = asnumpy(self.arr[channel])
         cb = ax.pcolormesh(
             t_arr, f_arr, (np.abs(arr_here) ** 2).T, shading="auto", cmap="cividis", **kwargs
         )
@@ -1246,8 +1279,8 @@ class STFTSignal(STFTSettings, DomainBase):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
-        f_arr = self.f_arr if get_array_module(self.f_arr) == np else self.f_arr.get()
-        arr_here = self.arr[channel].get() if self.backend.uses_cupy else self.arr[channel]
+        f_arr = asnumpy(self.f_arr)
+        arr_here = asnumpy(self.arr[channel])
 
         ax.loglog(f_arr, np.abs(arr_here[time_bin]) ** 2, **kwargs)
 
@@ -1261,8 +1294,8 @@ class STFTSignal(STFTSettings, DomainBase):
         if ax is None:
             fig, ax = plt.subplots(figsize=(10, 6))
 
-        t_arr = self.t_arr if get_array_module(self.t_arr) == np else self.t_arr.get()
-        arr_here = self.arr[channel].get() if self.backend.uses_cupy else self.arr[channel]
+        t_arr = asnumpy(self.t_arr)
+        arr_here = asnumpy(self.arr[channel])
 
         ax.plot(t_arr, arr_here[:, freq_bin].real, label="real part", **kwargs)
         ax.plot(t_arr, arr_here[:, freq_bin].imag, label="imag part", **kwargs)
@@ -1406,6 +1439,30 @@ class WDMSettings(DomainSettingsBase):
             self.omega = omega
     
     @staticmethod
+    def make_factory(
+        Nf: int,
+        Nt: int,
+        min_freq: Optional[float] = None,
+        max_freq: Optional[float] = None,
+        oversample: int = 16,
+        min_time: Optional[float] = None,
+        max_time: Optional[float] = None,
+    ):
+        """Build a ``(times, dt, force_backend) -> WDMSettings`` factory.
+
+        ``Nf``/``Nt`` come from the caller; ``dt`` is taken from the
+        sample step of the input ``times`` array at factory-call time.
+        """
+        def _factory(times, dt, force_backend):
+            return WDMSettings(
+                Nf=Nf, Nt=Nt, dt=dt, oversample=oversample,
+                min_freq=min_freq, max_freq=max_freq,
+                min_time=min_time, max_time=max_time,
+                force_backend=force_backend,
+            )
+        return _factory
+
+    @staticmethod
     def adjust_to_even_bins(t_min: float, t_max: float, dt: float, Tobs: float, num_linspace: Optional[int]=1000, verbose: Optional[bool] = False) -> Tuple[int, int, float]:
         """Pick a wavelet pixel duration in ``[t_min, t_max]`` that makes both ``Nf`` and ``Nt`` even.
 
@@ -1474,20 +1531,24 @@ class WDMSettings(DomainSettingsBase):
         return sl.stop - sl.start
 
     def __eq__(self, value):
+        if not isinstance(value, WDMSettings):
+            return False
         return (
-            (value.Nt == self.Nt) and (value.Nf == self.Nf) 
-            and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) 
+            (value.Nt == self.Nt) and (value.Nf == self.Nf)
+            and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df)
             and (value.data_dt == self.data_dt)
             and (value.ind_min_t == self.ind_min_t)
             and (value.ind_max_t == self.ind_max_t)
             and (value.ind_min_f == self.ind_min_f)
             and (value.ind_max_f == self.ind_max_f)
         )
-    
+
     def eq_without_inds(self, value):
+        if not isinstance(value, WDMSettings):
+            return False
         return (
-            (value.Nt == self.Nt) and (value.Nf == self.Nf) 
-            and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df) 
+            (value.Nt == self.Nt) and (value.Nf == self.Nf)
+            and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df)
             and (value.data_dt == self.data_dt)
         )
 
@@ -1531,8 +1592,11 @@ class WDMSettings(DomainSettingsBase):
         B = dOmega - 2 * A
 
         z = self.xp.zeros(omega.shape[0])
-        beta_inc_calc = (np.abs(omega) >= A) & (np.abs(omega) <= A+B)
-        x = (np.abs(omega[beta_inc_calc])-A)/B
+        beta_inc_calc = (np.abs(omega) >= A) & (np.abs(omega) < A+B)
+        # Clip to [0, 1] — at omega = ±(A+B) the mathematical value is 1.0 but
+        # float arithmetic can overshoot by 1 ULP, and scipy.special.betainc
+        # returns NaN for any x > 1.0.
+        x = np.clip((np.abs(omega[beta_inc_calc])-A)/B, 0.0, 1.0)
         y = special.betainc(self.WAVELET_FILTER_CONSTANT, self.WAVELET_FILTER_CONSTANT, x)
         z[beta_inc_calc] = insDOM*np.cos(y*np.pi/2.0)
         z[(np.abs(omega) < A)] = insDOM
@@ -1784,8 +1848,15 @@ class WDMSettings(DomainSettingsBase):
 
     @property
     def total_terms(self) -> int:
-        return self.Nt * self.Nf
-    
+        """Number of basis elements in the **active** band (``Nf_active * Nt_active``).
+
+        Matches the FD semantics where ``total_terms`` is the active-band
+        size, not the full grid. Sensitivity-matrix and related code use
+        this to size per-pixel C++ buffers; allocating ``Nf*Nt`` instead
+        produces a length mismatch against ``len(f_arr) * len(t_arr)``.
+        """
+        return self.Nf_active * self.Nt_active
+
     def apply_frequency_layer_mask(self, arr: np.ndarray) -> np.ndarray:
         """Apply :attr:`frequency_layer_mask` to ``arr`` along the WDM frequency axis (penultimate dim)."""
         if self.frequency_layer_mask is None or arr.shape[-2] == self.Nf_active:
@@ -2084,118 +2155,199 @@ class WDMLookupTable(WDMSettings):
             table.
     """
 
-    def to_file(self, fp: str):
-        """Persist the lookup table to an HDF5 file at ``fp``."""
-        if os.path.exists(fp):
-            raise ValueError("Trying to write to file that exists.")
-        
-        with h5py.File(fp, "w") as fp:
-            g = fp.create_group("wdm")
+    # Attribute / dataset keys owned by the lookup-table serialisation. Used by
+    # :meth:`to_h5_group` so embedding the table into an HDF5 group that already
+    # held an older copy stays clean instead of leaving stale keys.
+    _H5_ATTR_KEYS = (
+        "Nf",
+        "Nt",
+        "Nt_generate",
+        "data_dt",
+        "max_freq",
+        "min_freq",
+        "max_time",
+        "min_time",
+        "m_ref",
+        "n_ref",
+        "nchannels",
+        "table_kind",
+    )
+    _H5_DATASET_KEYS = (
+        "table_sin",
+        "table_cos",
+        "fdot_vals",
+        "norm_freq_single_layer",
+        "m_diffs",
+    )
 
-            g.attrs["Nf"] = self.Nf
-            g.attrs["Nt"] = self.Nt
-            g.attrs["Nt_generate"] = self.sub_settings.Nt
-            g.attrs["data_dt"] = self.data_dt
+    def to_h5_group(self, group: h5py.Group) -> None:
+        """Persist the lookup table into an open :class:`h5py.Group`.
 
-            if self.max_freq is not None:
-                g.attrs["max_freq"] = self.max_freq
-            if self.min_freq is not None:
-                g.attrs["min_freq"] = self.min_freq
-            if self.max_time is not None:
-                g.attrs["max_time"] = self.max_time
-            if self.min_time is not None:
-                g.attrs["min_time"] = self.min_time
+        Idempotent: any pre-existing lookup-table attrs / datasets inside the
+        group are removed before writing so the result is a clean replacement.
+        Use this when embedding the table inside a larger HDF5 file (e.g. the
+        global-fit backend). The standalone :meth:`to_file` is a thin wrapper
+        around this helper.
+        """
+        for key in self._H5_ATTR_KEYS:
+            if key in group.attrs:
+                del group.attrs[key]
+        for key in self._H5_DATASET_KEYS:
+            if key in group:
+                del group[key]
 
-            g.attrs["m_ref"] = self.m_ref
-            g.attrs["n_ref"] = self.n_ref
-            g.attrs["nchannels"] = self.nchannels
-            g.create_dataset("table_sin", data=self.get(self.table_sin))
-            g.create_dataset("table_cos", data=self.get(self.table_cos))
-            g.create_dataset("fdot_vals", data=self.get(self.fdot_vals))
-            g.create_dataset("norm_freq_single_layer", data=self.get(self.norm_freq_single_layer))
-            g.create_dataset("m_diffs", data=self.get(self.m_diffs))
+        group.attrs["Nf"] = self.Nf
+        group.attrs["Nt"] = self.Nt
+        group.attrs["Nt_generate"] = self.sub_settings.Nt
+        group.attrs["data_dt"] = self.data_dt
+        if self.max_freq is not None:
+            group.attrs["max_freq"] = self.max_freq
+        if self.min_freq is not None:
+            group.attrs["min_freq"] = self.min_freq
+        if self.max_time is not None:
+            group.attrs["max_time"] = self.max_time
+        if self.min_time is not None:
+            group.attrs["min_time"] = self.min_time
+        group.attrs["m_ref"] = self.m_ref
+        group.attrs["n_ref"] = self.n_ref
+        group.attrs["nchannels"] = self.nchannels
+        group.attrs["table_kind"] = self.build_kind
+        group.create_dataset("table_sin", data=self.get(self.table_sin))
+        group.create_dataset("table_cos", data=self.get(self.table_cos))
+        group.create_dataset("fdot_vals", data=self.get(self.fdot_vals))
+        group.create_dataset(
+            "norm_freq_single_layer", data=self.get(self.norm_freq_single_layer)
+        )
+        group.create_dataset("m_diffs", data=self.get(self.m_diffs))
 
     @staticmethod
-    def from_file(fp: str, force_backend: Optional[str] = None):
-        """Construct a :class:`WDMLookupTable` from a previously-saved HDF5 file."""
+    def _settings_from_h5_group(
+        group: h5py.Group, force_backend: Optional[str] = None
+    ) -> Tuple["WDMSettings", int]:
+        """Build the WDM grid + nchannels from a serialised lookup-table group.
+
+        Handles the older ``ind_min`` / ``ind_max`` layout (converted to
+        explicit ``min_freq`` / ``max_freq``) so files saved before that
+        rewrite still load. Returns ``(settings, nchannels)``.
+        """
+        input_args = (
+            int(group.attrs["Nf"]),
+            int(group.attrs["Nt"]),
+            float(group.attrs["data_dt"]),
+        )
+        nchannels = int(group.attrs["nchannels"])
+
+        if "ind_min" in group.attrs:
+            # Legacy layout: ``ind_min`` / ``ind_max`` index pixels rather than
+            # carrying explicit frequency edges. Convert to ``min_freq`` /
+            # ``max_freq`` using a throwaway WDMSettings to read ``layer_df``.
+            _settings = WDMSettings(*input_args, force_backend=force_backend)
+            min_freq = _settings.layer_df * int(group.attrs["ind_min"])
+            max_freq = _settings.layer_df * int(group.attrs["ind_max"])
+            input_kwargs = dict(
+                min_freq=min_freq,
+                max_freq=max_freq,
+                force_backend=force_backend,
+            )
+        else:
+            input_kwargs = dict(force_backend=force_backend)
+            if "min_freq" in group.attrs:
+                input_kwargs["min_freq"] = float(group.attrs["min_freq"])
+            if "max_freq" in group.attrs:
+                input_kwargs["max_freq"] = float(group.attrs["max_freq"])
+            if "min_time" in group.attrs:
+                input_kwargs["min_time"] = float(group.attrs["min_time"])
+            if "max_time" in group.attrs:
+                input_kwargs["max_time"] = float(group.attrs["max_time"])
+
+        settings = WDMSettings(*input_args, **input_kwargs)
+        return settings, nchannels
+
+    @staticmethod
+    def from_h5_group(
+        group: h5py.Group, force_backend: Optional[str] = None
+    ) -> "WDMLookupTable":
+        """Reconstruct a :class:`WDMLookupTable` from an open :class:`h5py.Group`.
+
+        Skips the constructor's build-or-load branch so no on-disk file is
+        required; this is the counterpart to :meth:`to_h5_group` and what the
+        global-fit backend uses when it embeds the table directly into the
+        run's HDF5 file.
+        """
+        settings, nchannels = WDMLookupTable._settings_from_h5_group(
+            group, force_backend=force_backend
+        )
+
+        # Bypass ``__init__`` so we don't trigger the build-or-read-from-path
+        # logic. ``WDMSettings.__init__`` still has to run to populate the
+        # basis grid; everything else is filled in directly from ``group``.
+        obj = WDMLookupTable.__new__(WDMLookupTable)
+        WDMSettings.__init__(obj, *settings.args, **settings.kwargs)
+        obj.nchannels = nchannels
+        obj.store_path = None
+
+        table_kind = group.attrs.get("table_kind", "per_n")
+        if isinstance(table_kind, bytes):
+            table_kind = table_kind.decode()
+        obj.build_kind = table_kind
+
+        obj.sub_settings = WDMSettings(
+            int(group.attrs["Nf"]),
+            int(group.attrs["Nt_generate"]),
+            float(group.attrs["data_dt"]),
+            force_backend=obj.settings.backend,
+        )
+        obj.fdot_vals = obj.xp.asarray(group["fdot_vals"][:])
+        obj.m_ref = int(group.attrs["m_ref"])
+        # n_ref is the BUILD's sub_n_ref (= sub_settings.Nt // 2). The build
+        # enforces sub_n_ref parity == eval n_ref parity so the eval
+        # (-1)^dn sign pattern matches the eval grid.
+        obj.n_ref = int(obj.sub_settings.Nt / 2)
+        obj.is_m_ref_n_ref_even = (obj.m_ref + obj.n_ref) % 2 == 0
+
+        obj.norm_freq_single_layer = obj.xp.asarray(group["norm_freq_single_layer"][:])
+        obj.m_diffs = obj.xp.asarray(group["m_diffs"][:])
+        obj.table_sin = obj.xp.asarray(group["table_sin"][:])
+        obj.table_cos = obj.xp.asarray(group["table_cos"][:])
+        return obj
+
+    def to_file(self, fp: str) -> None:
+        """Persist the lookup table to a standalone HDF5 file at ``fp``."""
+        if os.path.exists(fp):
+            raise ValueError("Trying to write to file that exists.")
+        with h5py.File(fp, "w") as f:
+            self.to_h5_group(f.create_group("wdm"))
+
+    @staticmethod
+    def from_file(fp: str, force_backend: Optional[str] = None) -> "WDMLookupTable":
+        """Construct a :class:`WDMLookupTable` from a standalone HDF5 file at ``fp``."""
         with h5py.File(fp, "r") as f:
-            g = f["wdm"]
+            return WDMLookupTable.from_h5_group(f["wdm"], force_backend=force_backend)
 
-            if "ind_min" in g.attrs.keys():
-                # backwards compatibility for now
-                input_kwargs = dict(
-                    ind_min = g.attrs["ind_min"],
-                    ind_max = g.attrs["ind_max"],
-                    force_backend=force_backend,
-                )
+    def from_file_internal(self, fp: str) -> None:
+        """Repopulate this instance's tables and metadata from ``fp`` in-place.
 
-                ind_min = input_kwargs.pop("ind_min")
-                ind_max = input_kwargs.pop("ind_max")
+        Used by ``__init__`` when ``store_path`` already exists on disk. Reads
+        through :meth:`from_h5_group` and copies the populated fields over.
+        """
+        with h5py.File(fp, "r") as f:
+            loaded = WDMLookupTable.from_h5_group(
+                f["wdm"], force_backend=self.settings.backend
+            )
 
-                input_args = (
-                    g.attrs["Nf"],
-                    g.attrs["Nt"],
-                    g.attrs["data_dt"] 
-                )
-                nchannels = g.attrs["nchannels"]
-                _settings = WDMSettings(*input_args, **input_kwargs)
-                
-                max_freq = _settings.layer_df * ind_max
-                min_freq = _settings.layer_df * ind_min
-
-                input_kwargs["min_freq"] = min_freq
-                input_kwargs["max_freq"] = max_freq
-            else:
-                
-                input_args = (
-                    g.attrs["Nf"],
-                    g.attrs["Nt"],
-                    g.attrs["data_dt"] 
-                )
-                nchannels = g.attrs["nchannels"]
-
-                min_freq = None
-                if "min_freq" in g.attrs:
-                    min_freq = g.attrs["min_freq"]
-
-                max_freq = None
-                if "max_freq" in g.attrs:
-                    max_freq = g.attrs["max_freq"]
-
-                min_time = None
-                if "min_time" in g.attrs:
-                    min_time = g.attrs["min_time"]
-
-                max_time = None
-                if "max_time" in g.attrs:
-                    max_time = g.attrs["max_time"]
-
-                input_kwargs = dict(
-                    min_freq = min_freq,
-                    max_freq = max_freq,
-                    min_time = min_time,
-                    max_time = max_time,
-                    force_backend=force_backend,
-                )
-            settings = WDMSettings(*input_args, **input_kwargs)
-            
-            return WDMLookupTable(settings, nchannels, store_path=fp)
-
-    def from_file_internal(self, fp: str):
-        """Repopulate this instance's tables and metadata from ``fp``."""
-        with h5py.File(fp, "r") as fp:
-            g = fp["wdm"]
-            self.sub_settings = WDMSettings(g.attrs["Nf"], g.attrs["Nt_generate"], g.attrs["data_dt"], force_backend=self.settings.backend)
-            self.fdot_vals = self.xp.asarray(g["fdot_vals"][:])
-
-            self.m_ref = g.attrs["m_ref"]
-            self.n_ref = int(self.sub_settings.Nt / 2)  # g.attrs["n_ref"]
-
-            self.nchannels = g.attrs["nchannels"]
-            self.norm_freq_single_layer = self.xp.asarray(g["norm_freq_single_layer"][:])
-            self.m_diffs = self.xp.asarray(g["m_diffs"][:])
-            self.table_sin = self.xp.asarray(g["table_sin"][:])
-            self.table_cos = self.xp.asarray(g["table_cos"][:])
+        # Mirror the legacy ``from_file_internal`` field set so existing
+        # callers see exactly the same instance attributes after this runs.
+        self.build_kind = loaded.build_kind
+        self.sub_settings = loaded.sub_settings
+        self.fdot_vals = loaded.fdot_vals
+        self.m_ref = loaded.m_ref
+        self.n_ref = loaded.n_ref
+        self.is_m_ref_n_ref_even = loaded.is_m_ref_n_ref_even
+        self.nchannels = loaded.nchannels
+        self.norm_freq_single_layer = loaded.norm_freq_single_layer
+        self.m_diffs = loaded.m_diffs
+        self.table_sin = loaded.table_sin
+        self.table_cos = loaded.table_cos
             
     @staticmethod
     def apply_eps_fdot(eps: float, settings: WDMSettings, fdot_max_factor: float= 8.0) -> np.ndarray:
@@ -2219,20 +2371,58 @@ class WDMLookupTable(WDMSettings):
 
         return norm_freq_single_layer, m_diffs, m_ref
 
-    def __init__(self, settings: WDMSettings, nchannels: int, m_ref: int = None, norm_freq_single_layer: np.ndarray = None, m_diffs: np.ndarray = None, fdot_vals: np.ndarray = None, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, td_window: Optional[np.ndarray] = None, verbose: bool = False):
+    # Plan A vs Plan B switch. "n_ref_only" (default, see WDM_FDOT_LOOKUP_PLAN.md)
+    # extracts a single (m_ref, n_ref) pixel and stores a 2-D
+    # (fdot_steps, f_steps) table — handles fdot cleanly. "per_n" keeps
+    # the older per-time-pixel / per-m_diff build that does not support
+    # fdot at lookup time. Override per-instance via the build_kind kwarg
+    # or globally via env var WDM_BUILD_KIND.
+    BUILD_KIND = os.environ.get("WDM_BUILD_KIND", "n_ref_only")
+
+    def __init__(self, settings: WDMSettings, nchannels: int, m_ref: int = None, norm_freq_single_layer: np.ndarray = None, m_diffs: np.ndarray = None, fdot_vals: np.ndarray = None, store_path: Optional[str] = None, batch_size_gen: Optional[int] = 20, td_window: Optional[np.ndarray] = None, verbose: bool = False, build_kind: Optional[str] = None, time_layers: Optional[int] = None):
         WDMSettings.__init__(self, *settings.args, **settings.kwargs)
         # TODO: CHECK FIRST AND LAST TIME LAYERS DUE TO TIME WINDOWING?
 
         self.nchannels = nchannels
 
+        # Provisional build_kind; from_file_internal may overwrite it from disk.
+        self.build_kind = build_kind if build_kind is not None else type(self).BUILD_KIND
+
         self.store_path = store_path
         if os.path.exists(self.store_path):
             self.from_file_internal(self.store_path)
         else:
-            self.build_lookup_table(m_ref, m_diffs, norm_freq_single_layer, fdot_vals, store_path, batch_size_gen, td_window, verbose=verbose)
+            self.build_lookup_table(m_ref, m_diffs, norm_freq_single_layer, fdot_vals, store_path, batch_size_gen, td_window, verbose=verbose, time_layers=time_layers)
 
-    def build_lookup_table(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None, verbose: bool = False) -> None:
-        """Generate the sin/cos coefficient tables and (optionally) save them to ``store_path``."""
+    def build_lookup_table(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None, verbose: bool = False, time_layers: Optional[int] = None) -> None:
+        """Generate the sin/cos coefficient tables and (optionally) save them to ``store_path``.
+
+        Dispatches to ``_build_lookup_table_n_ref`` (Plan A, default) or
+        ``_build_lookup_table_per_n`` (Plan B fallback) based on
+        ``self.build_kind``.
+
+        For ``build_kind='n_ref_only'`` only, ``time_layers`` controls the
+        Nt of the synthetic transform used in the build; smaller values
+        speed the build up linearly (the table only reads one pixel
+        anyway). Must be even and large enough that the wavelet basis at
+        ``time_layers // 2`` is clear of edge effects. ``None`` keeps the
+        full Nt (slow).
+        """
+        if self.build_kind == "n_ref_only":
+            return self._build_lookup_table_n_ref(
+                m_ref, m_diffs, norm_freq_single_layer, fdot_vals,
+                store_path, batch_size_gen, td_window=td_window,
+                time_layers=time_layers, verbose=verbose,
+            )
+        if self.build_kind == "per_n":
+            return self._build_lookup_table_per_n(
+                m_ref, m_diffs, norm_freq_single_layer, fdot_vals,
+                store_path, batch_size_gen, td_window=td_window, verbose=verbose,
+            )
+        raise ValueError(f"Unknown WDMLookupTable.build_kind={self.build_kind!r}; expected 'n_ref_only' or 'per_n'.")
+
+    def _build_lookup_table_per_n(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None, verbose: bool = False) -> None:
+        """Plan B (fallback) — per-(n, m_diff) build. fdot lookup not yet wired."""
         self.sub_settings = WDMSettings(self.Nf, self.Nt, self.data_dt, force_backend=self.force_backend)
         self.m_ref = m_ref
         self.n_ref = int(self.sub_settings.Nt / 2)
@@ -2277,9 +2467,6 @@ class WDMLookupTable(WDMSettings):
             _t_batch = _time.perf_counter()
             inds = np.arange(st_batch, end_batch)
 
-            if not np.any(np.isclose(_f_vals[inds], (self.m_ref + 0.5) * self.layer_df) | np.isclose(_f_vals[inds], (self.m_ref + 0.5) * self.layer_df, 0.0)):
-                continue
-            # breakpoint()
             phase = 2 * np.pi * (_f_vals[inds, None] * t_diff[None, :] + 1. / 2. * _fdot_vals[inds, None] * t_diff[None, :] ** 2)
             wave_sin = self.xp.sin(phase)
             wave_cos = self.xp.cos(phase)
@@ -2300,9 +2487,6 @@ class WDMLookupTable(WDMSettings):
                 _sin_coeff = _cos_coeff_1 * np.sin(-phase_n)  + _sin_coeff_1 * np.cos(-phase_n)
 
                 _f_norm = _f_vals[inds] - (self.m_ref - m_diff) * self.layer_df
-                
-                if np.any(np.isclose(_f_norm, 0.0) | np.isclose(_f_norm, 0.5 * self.layer_df)):
-                    breakpoint()
 
                 is_odd = ((m_current + n_current) % 2 == 1)[:, None]
                 # sin_coeff = _sin_coeff * (~is_odd) + _cos_coeff * (is_odd)
@@ -2340,7 +2524,6 @@ class WDMLookupTable(WDMSettings):
                       f"this_batch={_time.perf_counter() - _t_batch:.2f}s  "
                       f"elapsed={_elapsed/60.0:5.2f}m  ETA={_eta/60.0:5.2f}m",
                       flush=True)
-        breakpoint()
         _table_sin = _table_sin.reshape(self.Nt, len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(0, 2, 1, 3).reshape(self.Nt, self.fdot_steps, self.f_steps).copy()
         _table_cos = _table_cos.reshape(self.Nt, len(m_diffs), self.fdot_steps, self.norm_f_steps).transpose(0, 2, 1, 3).reshape(self.Nt, self.fdot_steps, self.f_steps).copy()
 
@@ -2350,8 +2533,223 @@ class WDMLookupTable(WDMSettings):
         self.table_sin = _table_sin
         self.table_cos = _table_cos
 
-        # freqs = _f_vals[None, :] - m_diffs[:, None] * self.layer_df
-        # freqs_norm = self.f_ref - freqs
+        if store_path is not None:
+            self.to_file(store_path)
+
+    def _build_lookup_table_n_ref(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None, time_layers: Optional[int] = None, verbose: bool = False) -> None:
+        """Plan A — extract single ``(m_ref, n_ref)`` pixel, store ``(fdot_steps, f_steps)`` table.
+
+        Each table entry is the WDM coefficient at pixel ``(m_ref, n_ref)``
+        of a synthetic carrier ``sin/cos(2π (f·t + ½·fdot·t²))`` where
+        ``f`` ranges over ``f_vals`` (one layer worth of ``norm_freq``
+        concatenated across every ``m_diff`` block) and ``fdot`` over
+        ``fdot_vals``. The ``(-1)^m_diff_block`` sign bake at build keeps
+        adjacent ``m_diff`` blocks sign-aligned so the f_norm interpolator
+        is smooth across layer boundaries — the eval kernel inverts that
+        bake via the matching ``(-1)^((ms_to_use - m_ref) parity)``
+        post-multiply in ``get_wdm_coeffs``.
+        """
+        # time_layers controls Nt of the synthetic transform used to read
+        # the (m_ref, sub_n_ref) pixel. The WDM basis at (m, n) has time
+        # support ~Nf samples (one layer_dt each side), so as long as
+        # sub_n_ref is ≥ 2 layers from each edge the read is identical
+        # to the full-Nt transform. The build cost scales linearly with
+        # Nt → small time_layers is cheap.
+        # Parity requirement: sub_n_ref must have the SAME parity as
+        # the EVAL's n_ref (= self.Nt // 2) so the per-block parity
+        # swap and m-rotation conventions match. We enforce
+        # time_layers % 4 == 0 when self.Nt // 2 is even, etc.
+        if time_layers is None:
+            time_layers = int(self.Nt)
+        time_layers = int(time_layers)
+        _eval_n_ref = int(self.Nt) // 2
+        _sub_n_ref = time_layers // 2
+        if (_sub_n_ref % 2) != (_eval_n_ref % 2):
+            raise ValueError(
+                f"time_layers={time_layers} gives sub_n_ref={_sub_n_ref} "
+                f"with parity {_sub_n_ref % 2}, but the EVAL's n_ref="
+                f"{_eval_n_ref} has parity {_eval_n_ref % 2}. The build/eval "
+                "parity conventions require these to match — adjust "
+                "time_layers (e.g., bump to a multiple of 4 when the "
+                "eval n_ref is EVEN)."
+            )
+        if _sub_n_ref < 4:
+            raise ValueError(
+                f"time_layers={time_layers} gives sub_n_ref={_sub_n_ref}; "
+                "need at least 8 to keep the wavelet basis clear of edges."
+            )
+
+        self.sub_settings = WDMSettings(self.Nf, time_layers, self.data_dt, force_backend=self.force_backend)
+        self.m_ref = m_ref
+        # self.n_ref is the BUILD'S sub_n_ref (= sub_settings.Nt // 2)
+        # — this is the actual cell whose parity drives the per-block
+        # swap. The eval-side (-1)^dn correction uses (n_eval - n_ref)
+        # too; we enforce sub_n_ref parity == eval_n_ref parity above,
+        # so the sign pattern matches the eval grid's convention.
+        self.n_ref = _sub_n_ref
+        self.is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
+        self.m_diffs = self.xp.asarray(m_diffs).astype(self.xp.int32)
+        self.fdot_vals = self.xp.asarray(fdot_vals)
+        self.norm_freq_single_layer = self.xp.asarray(norm_freq_single_layer)
+
+        # Plan A reads a single pixel; any non-trivial window silently
+        # re-weights the carrier and shifts the stored coefficient. The
+        # outer TDSignal->WDM transform is where windowing belongs, not
+        # the lookup table build.
+        if td_window is not None:
+            _tw = self.xp.asarray(td_window)
+            if not bool(self.xp.allclose(_tw, 1.0)):
+                raise ValueError(
+                    "WDMLookupTable build_kind='n_ref_only' requires "
+                    "td_window=None (or an all-ones array). A non-trivial "
+                    "window biases the stored (m_ref, n_ref) pixel. "
+                    "Apply windowing only at the outer TDSignal->WDM transform."
+                )
+
+        # Build time grid + t_diff use the SUB transform's reference
+        # time (sub_n_ref * layer_dt) — this IS the wavelet's effective
+        # center in Cornish-Romano WDM convention, despite t_arr[n]
+        # reading as a "left edge" name. Empirically verified: shifting
+        # build (and matching eval) to (sub_n_ref + 0.5)*layer_dt broke
+        # the lookup (mm jumped from 2e-4 to ~1) because the new t_ref
+        # was half a pixel off-center from the wavelet's actual support
+        # midpoint, rotating every (f-dependent) table entry by huge
+        # angles like 2π·f·0.5·layer_dt.
+        _sub_t_ref = _sub_n_ref * self.sub_settings.layer_dt
+        t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
+        t_diff = t_vals - _sub_t_ref
+
+        # Build the full f-axis: one layer worth of norm_freq, replicated
+        # across every m_diff block (matches the self.f_vals property).
+        # f_steps = norm_f_steps * len(m_diffs).
+        total_f_fdot_vals = self.f_steps * self.fdot_steps
+        if self.run_fdot:
+            _f_grid, _fdot_grid = self.xp.meshgrid(self.f_vals, self.fdot_vals)
+            _f_vals = _f_grid.ravel()
+            _fdot_vals = _fdot_grid.ravel()
+        else:
+            _f_vals = self.f_vals.copy()
+            _fdot_vals = self.xp.zeros_like(_f_vals)
+
+        # Per-entry m_diff_block (which block of m_diffs each f_val lives in).
+        # f_vals is concatenated as [norm_freq + m_diffs[0]*df, ..., norm_freq + m_diffs[-1]*df]
+        # so block index is (i % f_steps) // norm_f_steps for the fdot-meshed layout.
+        _block_per_fval = self.xp.repeat(self.m_diffs, self.norm_f_steps)
+        if self.run_fdot:
+            _block_per_entry = self.xp.tile(_block_per_fval, self.fdot_steps)
+        else:
+            _block_per_entry = _block_per_fval
+
+        if batch_size_gen == -1:
+            batch_size_gen = total_f_fdot_vals
+
+        batches = np.arange(0, total_f_fdot_vals, batch_size_gen)
+        if batches[-1] < total_f_fdot_vals:
+            batches = np.append(batches, np.array([total_f_fdot_vals]))
+
+        if td_window is None:
+            td_window = self.xp.ones_like(t_diff)
+        self.td_window = td_window
+
+        _table_sin = self.xp.zeros((total_f_fdot_vals,))
+        _table_cos = self.xp.zeros((total_f_fdot_vals,))
+
+        import time as _time
+        _n_batches = len(batches) - 1
+        _t_start = _time.perf_counter()
+        if verbose:
+            print(f"[build n_ref_only] starting: {_n_batches} batches  "
+                  f"f_steps={self.f_steps}  fdot_steps={self.fdot_steps}  "
+                  f"total={total_f_fdot_vals}", flush=True)
+
+        for _bi, (st_batch, end_batch) in enumerate(zip(batches[:-1], batches[1:])):
+            _t_batch = _time.perf_counter()
+            inds = np.arange(st_batch, end_batch)
+
+            phase = 2 * np.pi * (
+                _f_vals[inds, None] * t_diff[None, :]
+                + 0.5 * _fdot_vals[inds, None] * t_diff[None, :] ** 2
+            )
+            wave_sin = self.xp.sin(phase)
+            wave_cos = self.xp.cos(phase)
+
+            wave_sin_wdm = TDSignal(
+                wave_sin,
+                TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend),
+            ).wdmtransform(settings=self.sub_settings, window=self.td_window)
+            wave_cos_wdm = TDSignal(
+                wave_cos,
+                TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend),
+            ).wdmtransform(settings=self.sub_settings, window=self.td_window)
+
+            # Read at the SUB transform's centre pixel, not the EVAL's
+            # n_ref — by WDM time-shift invariance these are equivalent,
+            # and the sub transform is small/fast.
+            raw_sin = wave_sin_wdm[:, self.m_ref, _sub_n_ref]
+            raw_cos = wave_cos_wdm[:, self.m_ref, _sub_n_ref]
+
+            # 1) m-rotation: the WDM basis at (m, n) has a (m+n)π/2 phase
+            # factor, so translating from (m_ref, n_ref) read to
+            # (m_ref - k, n_ref) crosses |k| basis-parity boundaries.
+            # Empirical test (diag_plan_a_fdot_per_pixel.py) shows for
+            # source-with-fdot the rotation per ODD-parity-transition is
+            # R(-90°) when (m_ref+n_ref) is ODD and R(+90°) when EVEN —
+            # i.e., the direction is fixed by the m_ref/n_ref reference
+            # parity, not by the SIGN of k. Crossing two boundaries
+            # (k=±2) gives ODD→EVEN→ODD which cancels: net identity.
+            #   k EVEN  -> identity        k ODD -> R(±90°)  (sign from m_ref+n_ref parity)
+            # R(-90°)(a, b) = (b, -a),  R(+90°)(a, b) = (-b, a)
+            _block_per_inds = _block_per_entry[inds].astype(int)
+            _k_is_odd = (_block_per_inds & 1) != 0
+            # Sign: -1 (i.e., R(-90°)) when (m_ref + n_ref) is ODD.
+            if self.is_m_ref_n_ref_even:
+                # EVEN reference: ODD k → R(+90°) = (-b, a)
+                sin_rot = self.xp.where(_k_is_odd, -raw_cos, raw_sin)
+                cos_rot = self.xp.where(_k_is_odd,  raw_sin, raw_cos)
+            else:
+                # ODD reference: ODD k → R(-90°) = (b, -a)
+                sin_rot = self.xp.where(_k_is_odd,  raw_cos, raw_sin)
+                cos_rot = self.xp.where(_k_is_odd, -raw_sin, raw_cos)
+
+            # 2) Per-block parity swap mimicking per_n's per-cell swap at
+            # n=n_ref. per_n swaps iff (m_current + n_current) is ODD with
+            # m_current = m_ref + m_diff_BUILD. At n=n_ref this collapses
+            # to a per-block boolean keyed by (m_ref + k + n_ref) parity.
+            _is_odd_per_inds = (
+                ((self.m_ref + _block_per_inds + self.n_ref) % 2) == 1
+            )
+            sin_pixel = self.xp.where(_is_odd_per_inds, cos_rot, sin_rot)
+            cos_pixel = self.xp.where(_is_odd_per_inds, sin_rot, cos_rot)
+
+            # 3) Bake (-1)^|k|. Together with the per-block swap this
+            # keeps adjacent block samples sign-aligned at f_norm
+            # boundaries. The eval-side FFT-mirror post-multiply
+            # ((-1)^((ms_to_use - m_ref) parity)) undoes it per source.
+            _block_sign = self.xp.where((_block_per_inds & 1) != 0, -1.0, 1.0)
+            sin_pixel = sin_pixel * _block_sign
+            cos_pixel = cos_pixel * _block_sign
+
+            _table_sin[inds] = sin_pixel
+            _table_cos[inds] = cos_pixel
+
+            if verbose:
+                _elapsed = _time.perf_counter() - _t_start
+                _per_batch = _elapsed / (_bi + 1)
+                _eta = _per_batch * (_n_batches - _bi - 1)
+                print(f"[build n_ref_only] batch {_bi + 1:4d}/{_n_batches}  "
+                      f"inds=[{int(st_batch):5d}, {int(end_batch):5d})  "
+                      f"this_batch={_time.perf_counter() - _t_batch:.2f}s  "
+                      f"elapsed={_elapsed/60.0:5.2f}m  ETA={_eta/60.0:5.2f}m",
+                      flush=True)
+
+        _table_sin = _table_sin.reshape(self.fdot_steps, self.f_steps).copy()
+        _table_cos = _table_cos.reshape(self.fdot_steps, self.f_steps).copy()
+        assert _table_sin.shape == (self.fdot_vals.shape[0], self.f_vals.shape[0])
+        assert _table_cos.shape == (self.fdot_vals.shape[0], self.f_vals.shape[0])
+
+        self.table_sin = _table_sin
+        self.table_cos = _table_cos
+
         if store_path is not None:
             self.to_file(store_path)
 
@@ -2393,10 +2791,8 @@ class WDMLookupTable(WDMSettings):
     
     @staticmethod
     def get(x: np.ndarray) -> np.ndarray:
-        try:
-            return x.get()
-        except AttributeError:
-            return x
+        """Return ``x`` as a NumPy array. Thin wrapper around :func:`asnumpy`."""
+        return asnumpy(x)
 
     @property
     def points(self) -> np.ndarray:
@@ -2443,44 +2839,84 @@ class WDMLookupTable(WDMSettings):
         return WDMSettings(*self.args, **self.kwargs)
 
     def build_interpolator(self, table: np.ndarray):
-        """Construct a scipy/cupyx interpolator over ``table`` for fast template generation."""
+        """Construct a scipy/cupyx interpolator over ``table`` for fast template generation.
+
+        Dispatches on ``self.build_kind``:
+          * ``"n_ref_only"`` — 1-D ``interp1d`` over ``f_vals_norm`` (no fdot),
+            or 2-D ``RegularGridInterpolator`` over ``(fdot_vals, f_vals_norm)``.
+          * ``"per_n"`` — legacy 1-D ``interp1d`` over the
+            ``(f_norm, n)``-encoded coordinate; fdot lookup unimplemented.
+        """
         if self.backend.uses_cupy:
             interpolate = interpolate_gpu
         else:
             interpolate = interpolate_cpu
 
-        # TODO: vectorized versions?
-        if self.run_fdot:
-            raise NotImplementedError
-            return [interpolate.LinearNDInterpolator(self.norm_points, tmp.flatten(), rescale=True) for tmp in table]
-        else:
+        if self.build_kind == "n_ref_only":
+            if self.run_fdot:
+                # table shape: (fdot_steps, f_steps)
+                return interpolate.RegularGridInterpolator(
+                    (self.fdot_vals, self.f_vals_norm),
+                    table,
+                    method="linear",
+                    bounds_error=False,
+                    fill_value=0.0,
+                )
+            # table shape: (1, f_steps) — flatten for interp1d
+            return interpolate.interp1d(self.f_vals_norm, table.ravel())
+
+        if self.build_kind == "per_n":
+            if self.run_fdot:
+                raise NotImplementedError(
+                    "build_kind='per_n' + run_fdot is not wired up; "
+                    "use build_kind='n_ref_only' instead."
+                )
             # TODO: is this an okay way to linear spline?
-            self.factor_spacing = 1e-3
-            assert (self.norm_points.max() - self.norm_points.min()) < self.factor_spacing
-        
+            # factor_spacing separates time-layer-encoded coordinates; must
+            # exceed the f_vals_norm span so the (f_norm + factor_spacing*n)
+            # encoding stays monotone across n.
+            span = float(self.norm_points.max() - self.norm_points.min())
+            self.factor_spacing = max(1e-3, 10.0 * span)
+            assert span < self.factor_spacing
+
             norm_points_in = self.xp.tile(self.norm_points, (self.Nt, 1)).flatten()
             n_arr_in = self.xp.repeat(self.xp.arange(self.Nt)[:, None], self.norm_points.shape[0], axis=-1).flatten()
             x_points_in = self.get_x_points_no_fdot(norm_points_in, n_arr_in)
             y_points_in = table.flatten()
             return interpolate.interp1d(x_points_in, y_points_in)
-        
+
+        raise ValueError(f"Unknown WDMLookupTable.build_kind={self.build_kind!r}")
+
     def get_x_points_no_fdot(self, f_norm: np.ndarray, n_arr: np.ndarray) -> np.ndarray:
-        """1D evaluation coordinate that encodes both ``f_norm`` and the time-pixel index."""
+        """1D evaluation coordinate that encodes both ``f_norm`` and the time-pixel index (per_n build only)."""
         return (f_norm + self.factor_spacing * n_arr)
 
     def get_table_coeffs(self, f_norm: np.ndarray, fdot_arr: np.ndarray, n_arr: np.ndarray) -> np.ndarray:
-        """Look up sin/cos coefficients at the requested ``(f_norm, fdot, n)`` points."""
-        # ms = (f_arr // self.layer_df).astype(int)
-        # TODO: vectorize?
-        if self.run_fdot:
-            raise NotImplementedError
-            sin_coeffs = self.table_sin_interpolate(f_norm, fdot_arr)
-            cos_coeffs = self.table_cos_interpolate(f_norm, fdot_arr)
-            #breakpoint()
-        else:
+        """Look up sin/cos coefficients at the requested ``(f_norm, fdot, n)`` points.
+
+        For ``build_kind='n_ref_only'`` the ``n_arr`` argument is unused
+        (the table has no time-pixel axis) but kept in the signature so
+        callers do not need to branch.
+        """
+        if self.build_kind == "n_ref_only":
+            if self.run_fdot:
+                pts = self.xp.stack([fdot_arr, f_norm], axis=-1)
+                sin_coeffs = self.table_sin_interpolate(pts)
+                cos_coeffs = self.table_cos_interpolate(pts)
+            else:
+                sin_coeffs = self.table_sin_interpolate(f_norm)
+                cos_coeffs = self.table_cos_interpolate(f_norm)
+        elif self.build_kind == "per_n":
+            if self.run_fdot:
+                raise NotImplementedError(
+                    "build_kind='per_n' + run_fdot is not wired up; "
+                    "use build_kind='n_ref_only' instead."
+                )
             x_points_in = self.get_x_points_no_fdot(f_norm, n_arr)
             sin_coeffs = self.table_sin_interpolate(x_points_in)
             cos_coeffs = self.table_cos_interpolate(x_points_in)
+        else:
+            raise ValueError(f"Unknown WDMLookupTable.build_kind={self.build_kind!r}")
 
         sin_coeffs[np.isnan(sin_coeffs)] = 0.0
         cos_coeffs[np.isnan(cos_coeffs)] = 0.0
@@ -2524,23 +2960,60 @@ class WDMLookupTable(WDMSettings):
             assert self.xp.all((fdot_arr[keep_now] >= self.fdot_vals.min()) & (fdot_arr[keep_now] <= self.fdot_vals.max()))
 
             _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_norm, fdot_arr[keep_now], n_arr[keep_now])
-            is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0))
-            is_m_even = (ms_to_use[keep_now] % 2 == 0)
 
-            sin_coeffs = self.xp.zeros_like(_sin_coeffs)
-            cos_coeffs = self.xp.zeros_like(_cos_coeffs)
+            if self.build_kind == "n_ref_only":
+                # Plan A — n-translation from per_n_at_n_ref to per_n_at_n_eval.
+                # Currently only the (-1)^dn parity sign is applied; this is
+                # exact for fdot=0 sources and an approximation for chirp.
+                # Note re fdot: the fdot dependence enters at BUILD time
+                # (each table cell stores the response for a chirp source
+                # with that fdot) and at EVAL time via the per-pixel
+                # instantaneous frequency f_arr = f0 + fdot·τ + the
+                # caller-passed phi_t which already includes the chirp
+                # accumulated phase. No additional per-pixel chirp
+                # rotation here — I tried R(±π·fdot·τ²) and it broke
+                # both fdot=0 (regression) and made fdot != 0 worse.
+                _dn_sign = self.xp.where(
+                    ((n_arr[keep_now] - self.n_ref) % 2 == 1), -1.0, 1.0
+                )
+                _sin_coeffs = _sin_coeffs * _dn_sign
+                _cos_coeffs = _cos_coeffs * _dn_sign
 
-            sin_coeffs[~is_m_plus_n_even & is_m_even] = _sin_coeffs[~is_m_plus_n_even & is_m_even]
-            cos_coeffs[~is_m_plus_n_even & is_m_even] = _cos_coeffs[~is_m_plus_n_even & is_m_even]
+                is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0))
+                is_m_even = (ms_to_use[keep_now] % 2 == 0)
 
-            sin_coeffs[~is_m_plus_n_even & ~is_m_even] = _sin_coeffs[~is_m_plus_n_even & ~is_m_even]
-            cos_coeffs[~is_m_plus_n_even & ~is_m_even] = _cos_coeffs[~is_m_plus_n_even & ~is_m_even]
+                sin_coeffs = self.xp.zeros_like(_sin_coeffs)
+                cos_coeffs = self.xp.zeros_like(_cos_coeffs)
 
-            sin_coeffs[is_m_plus_n_even & is_m_even] = _cos_coeffs[is_m_plus_n_even & is_m_even]
-            cos_coeffs[is_m_plus_n_even & is_m_even] = _sin_coeffs[is_m_plus_n_even & is_m_even]
+                sin_coeffs[~is_m_plus_n_even & is_m_even] = _sin_coeffs[~is_m_plus_n_even & is_m_even]
+                cos_coeffs[~is_m_plus_n_even & is_m_even] = _cos_coeffs[~is_m_plus_n_even & is_m_even]
 
-            sin_coeffs[is_m_plus_n_even & ~is_m_even] = _cos_coeffs[is_m_plus_n_even & ~is_m_even]
-            cos_coeffs[is_m_plus_n_even & ~is_m_even] = _sin_coeffs[is_m_plus_n_even & ~is_m_even]
+                sin_coeffs[~is_m_plus_n_even & ~is_m_even] = _sin_coeffs[~is_m_plus_n_even & ~is_m_even]
+                cos_coeffs[~is_m_plus_n_even & ~is_m_even] = _cos_coeffs[~is_m_plus_n_even & ~is_m_even]
+
+                sin_coeffs[is_m_plus_n_even & is_m_even] = _cos_coeffs[is_m_plus_n_even & is_m_even]
+                cos_coeffs[is_m_plus_n_even & is_m_even] = _sin_coeffs[is_m_plus_n_even & is_m_even]
+
+                sin_coeffs[is_m_plus_n_even & ~is_m_even] = _cos_coeffs[is_m_plus_n_even & ~is_m_even]
+                cos_coeffs[is_m_plus_n_even & ~is_m_even] = _sin_coeffs[is_m_plus_n_even & ~is_m_even]
+            else:
+                is_m_plus_n_even = (((ms_to_use[keep_now] + n_arr[keep_now]) % 2 == 0))
+                is_m_even = (ms_to_use[keep_now] % 2 == 0)
+
+                sin_coeffs = self.xp.zeros_like(_sin_coeffs)
+                cos_coeffs = self.xp.zeros_like(_cos_coeffs)
+
+                sin_coeffs[~is_m_plus_n_even & is_m_even] = _sin_coeffs[~is_m_plus_n_even & is_m_even]
+                cos_coeffs[~is_m_plus_n_even & is_m_even] = _cos_coeffs[~is_m_plus_n_even & is_m_even]
+
+                sin_coeffs[~is_m_plus_n_even & ~is_m_even] = _sin_coeffs[~is_m_plus_n_even & ~is_m_even]
+                cos_coeffs[~is_m_plus_n_even & ~is_m_even] = _cos_coeffs[~is_m_plus_n_even & ~is_m_even]
+
+                sin_coeffs[is_m_plus_n_even & is_m_even] = _cos_coeffs[is_m_plus_n_even & is_m_even]
+                cos_coeffs[is_m_plus_n_even & is_m_even] = _sin_coeffs[is_m_plus_n_even & is_m_even]
+
+                sin_coeffs[is_m_plus_n_even & ~is_m_even] = _cos_coeffs[is_m_plus_n_even & ~is_m_even]
+                cos_coeffs[is_m_plus_n_even & ~is_m_even] = _sin_coeffs[is_m_plus_n_even & ~is_m_even]
 
             wdm_coeffs_out[keep_now, i] = amp_arr[keep_now] * (sin_coeffs * self.xp.sin(phi_arr[keep_now]) + cos_coeffs * self.xp.cos(phi_arr[keep_now]))
 

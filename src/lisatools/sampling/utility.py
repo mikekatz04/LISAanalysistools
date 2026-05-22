@@ -15,6 +15,8 @@ from eryn.state import BranchSupplemental, State
 from eryn.utils.transform import TransformContainer
 from eryn.utils.utility import groups_from_inds
 
+from ..utils.utility import asnumpy
+
 
 class DetermineGBGroups:
     """Group equivalent GB sources across walkers using waveform mismatches.
@@ -235,11 +237,7 @@ class DetermineGBGroups:
             test1 = np.abs(
                 1.0 - normalized_autocorr.real
             )  # (numerator / norm_for_test[None, :]).real)
-            best = test1.argmin(axis=1)
-            try:
-                best = best.get()
-            except AttributeError:
-                pass
+            best = asnumpy(test1.argmin(axis=1))
             best_mismatch = test1[(np.arange(test1.shape[0]), best)]
             check_normalized_against_test = np.abs(
                 1.0 - normalized_against_test[(np.arange(test1.shape[0]), best)]

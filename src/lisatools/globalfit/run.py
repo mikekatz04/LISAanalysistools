@@ -15,8 +15,10 @@ from mpi4py import MPI
 
 try:
     import cupy as xp
+    _xp_is_cupy = True
 except (ModuleNotFoundError, ImportError):
     import numpy as xp
+    _xp_is_cupy = False
 
     print(
         "cupy not found, using numpy instead. This will be very slow for large runs. "
@@ -339,30 +341,26 @@ class GlobalFit:
         """
         Set up AnalysisContainerArray for likelihood computations.
 
-        Creates analysis containers for each walker, initializing data residuals
-        and sensitivity curves. Adds initial signal templates to the residuals.
+        Creates analysis containers for each walker, initializing data
+        residuals and sensitivity curves. Domain dispatch (FD / STFT / WDM)
+        flows through ``general_info.input_data_residual_array`` and the
+        configured :class:`XYZSensitivityBackend`, so nothing in this
+        method is FD-specific.
 
         Args:
             state: GFState object containing current parameter values.
 
         Returns:
-            AnalysisContainerArray containing data, residuals, and sensitivity for all walkers.
+            AnalysisContainerArray containing data, residuals, and
+            sensitivity for all walkers.
         """
         general_info = self.curr.general_info
-        if xp.__name__ == "cupy":
-            assert general_info.gpus is not None
+        if _xp_is_cupy and general_info.gpus is not None:
             xp.cuda.runtime.setDevice(general_info.gpus[0])
-
-        # df = self.curr.general_info.df
-        # N = self.curr.general_info.injection[0].shape[-1]
-
-        # f_arr = (np.arange(N) + self.curr.general_info.start_freq_ind) * df
 
         acs_tmp = []
         for w in range(self.nwalkers):
-            # data_res_arr = DataResidualArray(deepcopy(self.curr.general_info.injection), f_arr=f_arr, df=df)
             data_res_arr = deepcopy(general_info.input_data_residual_array)
-            # TODO: make an option for other runs where psd is fixed
             if "psd" in state.branches_coords.keys():
                 psd_params = state.branches_coords["psd"][0, w, 0]
                 # need to generalize for other stochastic functions
@@ -370,53 +368,21 @@ class GlobalFit:
                     galfor_params = state.branches_coords["galfor"][0, w, 0]
                 else:
                     galfor_params = None
-                sens_here = self.curr.general_info.sensitivity_backend(
-                    f"walker_{w}", psd_params, transform_fn=self.curr.source_info["psd"].transform_fn, 
-                                               galfor_params=galfor_params
+                sens_here = general_info.sensitivity_backend(
+                    f"walker_{w}",
+                    psd_params,
+                    transform_fn=self.curr.source_info["psd"].transform_fn,
+                    galfor_params=galfor_params,
                 )
             else:
-                # TODO: update this
                 sens_here = general_info.sensitivity_backend(
-                    f"walker_{w}", **self.curr.general_info.fixed_psd_kwargs
+                    f"walker_{w}", **general_info.fixed_psd_kwargs
                 )
 
-            # sens_AE[0] = psd[0][w]
-            # sens_AE[1] = psd[1][w]
             acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here)))
 
         gpus = general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
-
-        # breakpoint()
-
-        for name, source_info in self.curr.source_info.items():
-            breakpoint()
-            if name not in self.curr.engine_info.branch_names:
-                continue
-
-            print("want to remove this emri thing eventually")
-            if True:  # name == "psd" or name == "emri":
-                continue
-
-            templates_tmp = xp.asarray(
-                source_info["get_templates"](state, source_info, self.curr.general_info)
-            )
-
-            acs.add_signal_to_residual(
-                templates_tmp
-            )  # no need to adjust data index or start_freq_ind as it is taken care of
-
-            del templates_tmp
-            if xp.__name__ == "cupy":
-                xp.get_default_memory_pool().free_all_blocks()
-            print(f"added {name} to acs.")
-        # generated_info = generate(state, self.curr.settings_dict, include_gbs=False, include_mbhs=False, include_psd=True, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
-        # generated_info_with_gbs = generate(state, self.curr.settings_dict, include_psd=True, include_mbhs=False, include_lisasens=True, include_ll=True, include_source_only_ll=True, n_gen_in=self.nwalkers, return_prior_val=False, fix_val_in_gen=["gb", "psd", "mbh"])
-
-        # data = generated_info["data"]
-        # psd = generated_info["psd"]
-        # lisasens = generated_info["lisasens"]
-        # breakpoint()
         return acs
 
     @property
@@ -577,6 +543,16 @@ class GlobalFit:
                     }
 
             if not backend.initialized:
+                # ``key_order`` mirrors what eryn's EnsembleSampler would
+                # pass to ``backend.reset`` itself when the backend is fresh;
+                # we have to feed it in here because our pre-reset disables
+                # that branch (``self.backend.initialized`` becomes True
+                # before the sampler is constructed). Without it, the
+                # sampler's later ``self.key_order != self.backend.key_order``
+                # check fires.
+                key_order = {
+                    key: value.key_order for key, value in priors.items()
+                }
                 backend.reset(
                     nwalkers,
                     ndims,
@@ -586,8 +562,19 @@ class GlobalFit:
                     nbranches=len(branch_names),
                     rj=False,
                     moves=None,
+                    key_order=key_order,
                     **extra_reset_kwargs,
                 )
+
+                # Persist the domain settings (FD / STFT / WDM) and the
+                # optional WDM lookup table so a re-run can reconstruct
+                # everything from a single HDF5 file. ``general_info``
+                # already holds the resolved instances at this point.
+                domain_settings = general_info.domain_settings
+                if domain_settings is not None:
+                    backend.write_domain_settings(domain_settings)
+                if getattr(general_info, "wdm_lookup_table", None) is not None:
+                    backend.write_wdm_lookup_table(general_info.wdm_lookup_table)
 
             # setup_info_all = None
             # for name in branch_names:
@@ -608,6 +595,7 @@ class GlobalFit:
             setup_info_all = self.curr.settings_dict.setup_function(
                 self.recipe, self.engine_info, self.curr, acs, priors, state
             )
+
             print("need to setup moves that use parallel resources")
 
             # backend.grow(1, None)
@@ -674,6 +662,17 @@ class GlobalFit:
                 truths=self.curr.get_truths_dict(),
             )
 
+            # Wrap ``periodic`` as a ``PeriodicContainer`` with ``key_order``
+            # so eryn doesn't reject the string-keyed dict. The key_order
+            # for each branch comes from its prior's ``key_order``.
+            from eryn.utils import PeriodicContainer
+
+            periodic_key_order = {
+                key: value.key_order for key, value in priors.items()
+            }
+            if periodic and not isinstance(periodic, PeriodicContainer):
+                periodic = PeriodicContainer(periodic, key_order=periodic_key_order)
+
             sampler_mix = GlobalFitEngine(
                 acs,
                 self.nwalkers,
@@ -710,7 +709,10 @@ class GlobalFit:
             self.recipe.backend = backend
             backend.add_recipe(self.recipe)
 
-            state.log_like[:] = acs.likelihood(sum_instead_of_trapz=False, complex=False)[None, :]
+            # ``sum_instead_of_trapz`` was a legacy ``inner_product`` knob
+            # that no longer exists; the modern inner_product already does
+            # the sum-style integration by default.
+            state.log_like[:] = acs.likelihood(complex=False)[None, :]
             state.log_prior = np.zeros_like(
                 state.log_like
             )  # sampler_mix.compute_log_prior(state.branches_coords, inds=state.branches_inds, supps=supps)

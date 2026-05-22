@@ -99,8 +99,11 @@ def inner_product(
 
     basis = sig1.data_res_arr.settings
 
-    # get psd weighting
-    if not isinstance(psd, SensitivityMatrix):
+    # get psd weighting. ``XYZSensitivityBackend`` and friends are
+    # ``SensitivityMatrixBase`` subclasses but not ``SensitivityMatrix``
+    # — accept anything in the base hierarchy so callers can pass a
+    # backend-built matrix directly.
+    if not isinstance(psd, SensitivityMatrixBase):
         psd = SensitivityMatrix(basis, [psd], *psd_args, **psd_kwargs)
 
     else:

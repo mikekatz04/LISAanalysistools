@@ -101,6 +101,31 @@ class AnalysisContainer:
         """Pass-through to :attr:`DataResidualArray.start_freq_ind`."""
         return self.data_res_arr.start_freq_ind
 
+    @property
+    def start_freq_layer_ind(self):
+        """Pass-through to :attr:`DataResidualArray.start_freq_layer_ind` (WDM only)."""
+        return self.data_res_arr.start_freq_layer_ind
+
+    @property
+    def start_time_layer_ind(self):
+        """Pass-through to :attr:`DataResidualArray.start_time_layer_ind` (WDM only).
+
+        For an :class:`AnalysisContainerArray` covering a WDM grid, every
+        container shares the same active time range, so this value is the
+        same across all containers.
+        """
+        return self.data_res_arr.start_time_layer_ind
+
+    @property
+    def layer_df(self):
+        """Pass-through to :attr:`DataResidualArray.layer_df` (WDM only)."""
+        return self.data_res_arr.layer_df
+
+    @property
+    def layer_dt(self):
+        """Pass-through to :attr:`DataResidualArray.layer_dt` (WDM only)."""
+        return self.data_res_arr.layer_dt
+
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
 
@@ -839,6 +864,36 @@ class AnalysisContainerArray:
     def start_freq_ind(self):
         """Per-container ``start_freq_ind`` reshaped to :attr:`acs_shape`."""
         return self._loop_operation("start_freq_ind")
+
+    @property
+    def start_freq_layer_inds(self):
+        """Per-container WDM ``start_freq_layer_ind`` reshaped to :attr:`acs_shape`.
+
+        Each AC's view is ``Nf_active`` frequency layers wide centred on
+        its layer of interest, so this array varies across containers
+        (analogous to :attr:`start_freq_ind` in the FD case).
+        """
+        return self._loop_operation("start_freq_layer_ind")
+
+    @property
+    def start_time_layer_inds(self):
+        """Per-container WDM ``start_time_layer_ind`` reshaped to :attr:`acs_shape`.
+
+        Every container in the array covers the same active time range,
+        so every entry is the same value. Kept as an array for API
+        symmetry with :attr:`start_freq_layer_inds`.
+        """
+        return self._loop_operation("start_time_layer_ind")
+
+    @property
+    def layer_df(self):
+        """WDM layer frequency spacing of the first container (shared across the array)."""
+        return self.acs[0].layer_df
+
+    @property
+    def layer_dt(self):
+        """WDM layer time spacing of the first container (shared across the array)."""
+        return self.acs[0].layer_dt
 
     def inner_product(self, **kwargs):
         """Per-container :meth:`AnalysisContainer.inner_product` reshaped to :attr:`acs_shape`."""

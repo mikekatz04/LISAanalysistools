@@ -25,7 +25,7 @@ from ...sampling.stopping import SearchConvergeStopping
 from ...sensitivity import AET1SensitivityMatrix
 from ...utils.constants import *
 from ...utils.parallelbase import LISAToolsParallelModule
-from ...utils.utility import tukey
+from ...utils.utility import asnumpy, tukey
 
 # from eryn.state import State
 from ..state import GFState
@@ -87,7 +87,7 @@ def search_likelihood_wrap(
     wave_gen.d_d = cp.asarray(d_d_vals[data_index])
     fd, all_data, psd, df = like_args
 
-    ll = wave_gen.get_direct_ll(
+    ll = asnumpy(wave_gen.get_direct_ll(
         fd,
         all_data,
         psd,
@@ -98,7 +98,7 @@ def search_likelihood_wrap(
         t_obs_start=t_obs_start,
         t_obs_end=t_obs_end,
         **mbh_kwargs,
-    ).real.get()
+    ).real)
 
     return ll
 
@@ -212,7 +212,7 @@ class MBHSpecialMove(
             nwalkers = 50
 
             # take inverse FFT
-            At, Et = np.fft.irfft(data[0].get() / dt), np.fft.irfft(data[1].get() / dt)
+            At, Et = np.fft.irfft(asnumpy(data[0]) / dt), np.fft.irfft(asnumpy(data[1]) / dt)
             full_length = len(At)
             # TODO: do anything with incoming tukey window?
 
@@ -478,13 +478,13 @@ class MBHSpecialMove(
             full_kwargs["phase_marginalize"] = False
             _coords_check = coords_post_like.copy()
             # adjust phase due to phase marginalizations
-            _coords_check[:, 5] = _coords_check[:, 5] + 1.0 / 2.0 * phase_change.get()
+            _coords_check[:, 5] = _coords_check[:, 5] + 1.0 / 2.0 * asnumpy(phase_change)
             _ll_check = search_likelihood_wrap(_coords_check, *like_args)
 
             assert np.allclose(_ll_check, new_ll)
 
             # NEED THIS TO GET ADJUSTED PHASE FROM MAXIMIZATION
-            coords_post_like[:, 5] = coords_post_like[:, 5] + 1.0 / 2.0 * phase_change.get()
+            coords_post_like[:, 5] = coords_post_like[:, 5] + 1.0 / 2.0 * asnumpy(phase_change)
             # TODO: make option / DECIDE ABOUT THIS
             self.snr_det_lim = 30.0
 

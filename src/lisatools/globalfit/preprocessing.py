@@ -804,7 +804,7 @@ class BaseProcessingStep(SignalProcessor):
         Returns:
             DataResidualArray | tuple[DataResidualArray, Orbits]: The data residual array in the specified domain, and optionally the orbits instance.
         """
-
+        
         data_residual_array = DataResidualArray(
             data_res_in=self.td_signal,
             signal_domain=settings,

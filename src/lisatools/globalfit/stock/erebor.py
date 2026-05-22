@@ -28,6 +28,7 @@ from gbgpu.utils.utility import get_fdot, get_N
 from lisatools.utils.utility import AET, detrend, tukey
 from lisatools.utils.constants import YRSID_SI, PC_SI
 
+from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ..engine import Settings, Setup, GeneralSetup
 from ..loginfo import init_logger
 
@@ -51,7 +52,7 @@ class GBSettings(Settings):
     beta_lims: typing.List[float] = dataclasses.field(default_factory=list)
     start_freq: float = 0.0001  # this might get adjusted ?
     end_freq: float = 0.025
-    oversample: int = 4
+    oversample: int = 4. # FD
     extra_buffer: int = 5
     start_resample_iter: Optional[typing.Tuple[int]] = (-1,)  # -1 so that it starts right at the start of PE
     iter_count_per_resample: Optional[int] = 10
@@ -60,12 +61,17 @@ class GBSettings(Settings):
     t0: Optional[float] = 0.0
     tdi_setup: Optional[str] = "XYZ" # other options are AET and AE.
     use_tdi2: Optional[bool] = True
+    # Domain selection for this branch. The user passes the same
+    # ``DomainSettingsBase`` that lives on the parent ``GeneralSetup``
+    # (FDSettings, STFTSettings, WDMSettings, ...). The band structure /
+    # waveform-engine selection branches on ``isinstance(domain_settings, ...)``
+    # — no string mode flag.
+    domain_settings: Optional[DomainSettingsBase] = None
     # Optional WDM-domain likelihood object (a
     # ``fastlisaresponse.gbcomps.GBWDMComputations`` instance). Required when
-    # the parent :class:`AnalysisContainer` carries a
-    # :class:`lisatools.domains.WDMSettings` basis; ignored when running in
-    # the frequency domain. Domain selection itself comes from the user-
-    # supplied DomainSettings on the AC, not from a separate string flag.
+    # ``domain_settings`` is a :class:`WDMSettings`; ignored otherwise. The
+    # user builds this once their WDM grid + lookup table are known
+    # (see global-fit input scripts).
     gb_wdm_comp: typing.Any = None
 
 # basic transform functions for pickling
@@ -132,7 +138,10 @@ class GBSetup(Setup, GBSettings):
             )
 
         if self.periodic is None:
-            self.periodic = {"gb": {"phi0": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}}
+            # Use integer indices (relative to ``input_basis``) so eryn's
+            # ``PeriodicContainer`` can build without needing ``key_order``;
+            # the underlying parameter order is ``input_basis``.
+            self.periodic = {"gb": {3: 2 * np.pi, 5: np.pi, 6: 2 * np.pi}}
 
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
@@ -186,6 +195,12 @@ class GBSetup(Setup, GBSettings):
         if self.initialize_kwargs is None:
             self.initialize_kwargs = {}
 
+        # GBGPU FD waveform kwargs. The WDM-domain engine in
+        # ``_gb_likelihood.WDMBandLikelihoodEngine`` ignores
+        # ``start_freq_ind`` / ``oversample`` (it dispatches to the WDM C
+        # kernel via ``GBWDMComputations``), but we keep the same dict so
+        # the down-stream Buffer's ``tdi_channel_setup`` read still works
+        # on either path.
         self.waveform_kwargs = dict(
             dt=self.dt,
             T=self.Tobs,
@@ -220,9 +235,16 @@ class GBSetup(Setup, GBSettings):
             self.branch_backend = GBHDFBackend
 
     def init_band_structure(self):
-        """Compute :attr:`band_edges` and :attr:`band_N_vals` from the GB frequency range."""
-        # band separation setup
+        """Compute :attr:`band_edges` and :attr:`band_N_vals` from the GB frequency range.
 
+        Both FD and WDM domains use a frequency-banded layout. The edges
+        are derived from ``df = 1/Tobs`` (always meaningful for either
+        basis) and the FD-oversampled per-band N. For WDM runs the
+        per-band ``band_N_vals`` is unused by the WDM likelihood engine
+        (which sizes its buffers from ``WDMSettings.Nf_active`` /
+        ``Nt_active``) but is preserved for shape parity.
+        """
+        # band separation setup
         if self.oversample is None and self.Tobs < YRSID_SI / 2.0:
             self.oversample = 2
         elif self.oversample is None:
@@ -230,27 +252,73 @@ class GBSetup(Setup, GBSettings):
 
         assert self.oversample >= 1
 
-        # TODO: assign to binned f or leave general? probably better to be general
-        band_edges_in_reverse_order = [self.end_freq]
-        band_N_vals_reverse_order = []
-        # determines N from high_Frequency edge of sub-band
-        current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
-        band_N_vals_reverse_order.append(current_N)
+        # Clamp the GB band to the WDM active band when running on a WDM
+        # grid. The WDM kernel only carries layers in [ind_min_f, ind_max_f];
+        # putting band edges outside that range silently produces zero-fill
+        # behaviour, so we trim to stay inside.
+        if isinstance(self.domain_settings, WDMSettings):
+            wdm = self.domain_settings
+            wdm_min = float(wdm.ind_min_f * wdm.layer_df)
+            wdm_max = float(wdm.ind_max_f * wdm.layer_df)
+            self.start_freq = max(self.start_freq, wdm_min)
+            self.end_freq = min(self.end_freq, wdm_max)
+            if self.start_freq >= self.end_freq:
+                raise ValueError(
+                    "WDM active band [{:.4e}, {:.4e}] does not overlap GB "
+                    "frequency range; widen WDMSettings.min_freq/max_freq "
+                    "or the GB start/end_freq.".format(wdm_min, wdm_max)
+                )
 
-        current_freq = self.end_freq
-        last_freq = self.end_freq
-        while current_freq > self.start_freq:
-            current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df
-            band_edges_in_reverse_order.append(current_freq)
-            current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
+        if isinstance(self.domain_settings, WDMSettings):
+            # WDM path: one band per WDM frequency layer. Edges land on
+            # ``k * layer_df`` boundaries so the band grid aligns with the
+            # WDM grid; ``band_N_vals`` is unused by the WDM likelihood
+            # engine but is preserved with one entry per band for shape
+            # parity with the FD layout.
+            wdm = self.domain_settings
+            layer_df = float(wdm.layer_df)
+            k_lo = int(np.ceil(self.start_freq / layer_df))
+            k_hi = int(np.floor(self.end_freq / layer_df))
+            if k_hi <= k_lo:
+                raise ValueError(
+                    "GB frequency range [{:.4e}, {:.4e}] spans fewer than "
+                    "one WDM layer (layer_df={:.4e}).".format(
+                        self.start_freq, self.end_freq, layer_df
+                    )
+                )
+            self.band_edges = np.asarray(
+                [k * layer_df for k in range(k_lo, k_hi + 1)]
+            )
+            self.band_N_vals = np.asarray(
+                [
+                    get_N(1e-30, edge, self.Tobs, oversample=self.oversample).item()
+                    for edge in self.band_edges[:-1]
+                ]
+            )
+        else:
+            # FD path: bands sized in multiples of ``df = 1/Tobs`` using the
+            # FD-oversampled per-band N. Walks down from ``end_freq``.
+            # TODO: assign to binned f or leave general? probably better to be general
+            band_edges_in_reverse_order = [self.end_freq]
+            band_N_vals_reverse_order = []
+            # determines N from high_Frequency edge of sub-band
+            current_N = get_N(1e-30, self.end_freq, self.Tobs, oversample=self.oversample).item()
             band_N_vals_reverse_order.append(current_N)
-            last_freq = current_freq
-        band_edges_in_reverse_order.append(
-            last_freq - (current_N * 2 + self.extra_buffer) * self.df
-        )
 
-        self.band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
-        self.band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
+            current_freq = self.end_freq
+            last_freq = self.end_freq
+            while current_freq > self.start_freq:
+                current_freq = last_freq - (current_N * 2 + self.extra_buffer) * self.df
+                band_edges_in_reverse_order.append(current_freq)
+                current_N = get_N(1e-30, current_freq, self.Tobs, oversample=self.oversample).item()
+                band_N_vals_reverse_order.append(current_N)
+                last_freq = current_freq
+            band_edges_in_reverse_order.append(
+                last_freq - (current_N * 2 + self.extra_buffer) * self.df
+            )
+
+            self.band_edges = np.asarray(band_edges_in_reverse_order)[::-1]
+            self.band_N_vals = np.asarray(band_N_vals_reverse_order)[::-1]
 
         self.logger.debug("NEED TO THINK ABOUT mCHIRP prior")
         self.f0_lims = [self.band_edges[1].min(), self.band_edges[-2].max()]
@@ -273,7 +341,7 @@ def gpc_to_mpc(x):
     return x * 1e3
 
 
-# from bbhx.utils.transform import *
+from bbhx.utils.transform import LISA_to_SSB, mT_q  # used by MBHSetup.init_sampling_info
 from eryn.moves import Move
 
 from ..hdfbackend import MBHHDFBackend

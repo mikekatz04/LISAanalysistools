@@ -19,7 +19,7 @@ from scipy import interpolate
 from scipy.ndimage import gaussian_filter1d as np_gaussian_filter1d
 from scipy.signal import find_peaks
 
-from .utils.utility import get_array_module
+from .utils.utility import asnumpy, get_array_module
 
 from . import domains
 
@@ -1710,6 +1710,22 @@ def get_sensitivity(
             "sens_fn must be a string for a stock option or a class with a get_Sn method."
         )
 
+    # Back-compat: callers from ``gbgpu`` (and other downstreams that pre-date
+    # the DomainSettings-first signature) pass a raw frequency scalar/array
+    # here. Dispatch straight to ``sensitivity.get_Sn`` on those inputs so
+    # neighbouring packages don't break on the new contract.
+    if not isinstance(basis_settings, domains.DomainSettingsBase):
+        PSD = sensitivity.get_Sn(basis_settings, *args, **kwargs)
+        if fill_nans is not None:
+            PSD = np.nan_to_num(PSD, nan=fill_nans)
+        if return_type == "PSD":
+            return PSD
+        if return_type == "ASD":
+            return np.sqrt(PSD)
+        if return_type == "char_strain":
+            return np.sqrt(np.asarray(basis_settings) * PSD)
+        raise ValueError(f"return_type {return_type!r} not supported.")
+
     if isinstance(basis_settings, domains.FDSettings):
         PSD = sensitivity.get_Sn(basis_settings.f_arr, *args, **kwargs)
 
@@ -2090,9 +2106,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def _find_dips_with_percentage(self, tf, mask_percentage=0.05):
         """Return indices of bins within ``mask_percentage`` of every transfer-function dip."""
-        if hasattr(self.f_arr, "get"):
-            f_arr = self.f_arr.get()
-            tf = tf.get()
+        f_arr = asnumpy(self.f_arr)
+        tf = asnumpy(tf)
 
         peaks = find_peaks(-tf)[0]
 
@@ -2486,13 +2501,27 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Perform log-frequency smoothing of the sensitivity matrix to get rid of the very sharp dips.
 
         Args:
-            matrix_in: Input sensitivity matrix. Shape (3, 3, num_times, num_freqs)
+            matrix_in: Input sensitivity matrix. Trailing axes match
+                ``basis_shape_active`` — ``(num_freqs,)`` for FD,
+                ``(num_freqs, num_times)`` for WDM.
             sigma: Width of the Gaussian smoothing kernel in frequency bins.
         """
         filter_func = np_gaussian_filter1d if self.xp == np else cp_gaussian_filter1d
 
         smoothed_matrix = matrix_in.copy()
-        mask = self.dips_mask.reshape(self.num_times, self.num_freqs).squeeze() # if num_times=1, remove the time dimension for masking. it means we are doing FD analysis and the mask is the same for all times.
+        # ``dips_mask`` is stored flat as ``(num_times, num_freqs)`` rows;
+        # the sensitivity matrix's trailing axes are
+        # ``basis_shape_active`` which is ``(num_freqs,)`` for FD and
+        # ``(num_freqs, num_times)`` for WDM. Reshape and transpose so the
+        # mask matches the matrix layout.
+        mask = self.dips_mask.reshape(self.num_times, self.num_freqs)
+        if self.num_times == 1:
+            # FD: squeeze the time axis; mask is (num_freqs,).
+            mask = mask[0]
+        else:
+            # WDM: swap to (num_freqs, num_times) to match basis_shape_active.
+            mask = mask.T
+
         _smoothed = filter_func(matrix_in, sigma=sigma, axis=-1)
 
         smoothed_matrix[..., mask] = _smoothed[..., mask]

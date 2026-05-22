@@ -28,6 +28,7 @@ from gbgpu.gbgpu import GBGPU
 
 from lisatools.sampling.prior import GBPriorWrap
 from lisatools.utils.multigpudataholder import MultiGPUDataHolder
+from lisatools.utils.utility import asnumpy
 
 warnings.filterwarnings("ignore")
 
@@ -123,7 +124,7 @@ def log_like(x, freqs, data, gb, df, data_length, supps=None, **sens_kwargs):
     #     inner_product = 4 * df * (xp.sum(data[0].conj() * data[0] / psd[0]) + xp.sum(data[1].conj() * data[1] / psd[1])).real
     #     ll2[i] = -1/2 * inner_product - xp.sum(xp.log(xp.asarray(psd)))
     # assert np.allclose(ll.get(), ll2.get())
-    return ll.get()
+    return asnumpy(ll)
 
 
 class PSDwithGBPriorWrap:
@@ -246,11 +247,7 @@ class PSDwithGBPriorWrap:
             gb_logpdf_contrib = self.priors["gb"].logpdf(gb_params_in)
             logpdf_contribution = np.zeros_like(gb_inds_in, dtype=np.float64)
 
-            try:
-                tmp = gb_logpdf_contrib.get()
-            except AttributeError:
-                tmp = gb_logpdf_contrib
-            logpdf_contribution[gb_inds_in] = tmp
+            logpdf_contribution[gb_inds_in] = asnumpy(gb_logpdf_contrib)
             gb_logpdf = logpdf_contribution.sum(axis=-1)
 
         else:

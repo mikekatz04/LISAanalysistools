@@ -18,6 +18,7 @@ import numpy as np
 
 from lisatools.detector import sangria
 from lisatools.sensitivity import get_sensitivity
+from .utility import asnumpy
 
 
 class MultiGPUDataHolder:
@@ -817,16 +818,14 @@ class MultiGPUDataHolder:
                         (overall_index_here + 1) * self.data_length,
                     )
 
-                    psd_term_here = (
+                    psd_term_here = asnumpy(
                         xp.sum(
                             (
                                 xp.log(self.channel1_psd[gpu_i][inds_slice])
                                 + xp.log(self.channel2_psd[gpu_i][inds_slice])
                             )
                         )
-                        .get()
-                        .item()
-                    )
+                    ).item()
                     xp.cuda.runtime.deviceSynchronize()
                     if np.isnan(psd_term_here):
                         breakpoint()
@@ -1036,10 +1035,7 @@ class MultiGPUDataHolder:
                     if np.all(np.isnan(inner_here)):
                         breakpoint()
 
-                    try:
-                        inner_term[i] = inner_here.get()
-                    except AttributeError:
-                        inner_term[i] = inner_here
+                    inner_term[i] = asnumpy(inner_here)
 
         for gpu_i, (gpu, gpu_split) in enumerate(zip(self.gpus, self.gpu_splits)):
             with xp.cuda.device.Device(gpu):
@@ -1179,7 +1175,7 @@ class MultiGPUDataHolder:
                 out[key_2] = []
                 for gpu_i, (gpu, gpu_split_tmp) in enumerate(zip(self.gpus, self.gpu_splits)):
                     out[key_2].append(
-                        getattr(self, key_2)[gpu_i].get().copy().reshape(-1, self.data_length)
+                        asnumpy(getattr(self, key_2)[gpu_i]).copy().reshape(-1, self.data_length)
                     )
 
         return out

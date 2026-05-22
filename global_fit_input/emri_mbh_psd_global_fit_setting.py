@@ -1,13 +1,32 @@
+"""Global-fit settings: EMRI + MBH + PSD run.
+
+Edit this file directly. ``MBHSpecialMove`` is FD-only — switch the MBH
+branch to :class:`ResidualAddOneRemoveOneMove` when running STFT / WDM.
+"""
+
 import h5py
 import numpy as np
 import shutil
+import logging
+from copy import deepcopy
 
+
+# ============================================================
+# *** Backend selection ***
+# ============================================================
 try:
     import cupy as cp
+
+    GPU_BACKEND = "cuda12x"
     gpu_available = True
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     import numpy as cp
-    gpu_available = True
+
+    GPU_BACKEND = "cpu"
+    gpu_available = False
+# ============================================================
+
+logger = logging.getLogger(__name__)
 
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
@@ -47,10 +66,19 @@ from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings  # noqa: F401
 
-
-# import few
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
+from lisatools.globalfit.preprocessing import SangriaProcessingStep
+
+
+# ============================================================
+# *** Domain selection ***
+# ============================================================
+DOMAIN_CHOICE = FDSettings.make_factory(min_freq=0.0, max_freq=None)
+# DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=0.0, max_freq=None)
+# DOMAIN_CHOICE = WDMSettings.make_factory(Nf=2048, Nt=8192, min_freq=0.0, max_freq=None)
+# ============================================================
 
 
 from eryn.utils.updates import Update
@@ -145,28 +173,26 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
    
     emri_info = curr.source_info["emri"]
     mbh_info = curr.source_info["mbh"]
-    # TODO: adjust this indide current info
     general_info = curr.general_info
     nwalkers = curr.general_info.nwalkers
     ntemps = curr.general_info.ntemps
 
     gpus = curr.general_info.gpus
-    cp.cuda.runtime.setDevice(gpus[0])
-    
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
+
     # setup psd search move
-    effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
+    effective_ndim = engine_info.ndims["psd"]
     temperature_control = TemperatureControl(effective_ndim, nwalkers, ntemps=ntemps, Tmax=np.inf, permute=False)
-    
+
     psd_move_args = (acs, priors)
 
     psd_move_kwargs = dict(
         num_repeats=500,
         live_dangerously=True,
-        # gibbs_sampling_setup=[{
-        #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
-        #     "galfor": np.ones((1, engine_info.ndims["galfor"]), dtype=bool)
-        # }],
-        temperature_control=temperature_control
+        temperature_control=temperature_control,
+        sensitivity_backend=general_info.sensitivity_backend,
+        psd_transform_fn=curr.source_info["psd"].transform_fn,
     )
     
     psd_search_move = PSDMove(
@@ -246,60 +272,73 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     mbh_search_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     recipe.add_recipe_component(MBHSearchStep(moves=[mbh_search_moves], n_iters=5, verbose=True), name="mbh search")
 
-    wave_gen = WrapEMRI(EMRITDIWaveform(**emri_info.initialize_kwargs), acs.nchannels, curr.general_info.tukey_alpha, curr.general_info.start_freq_ind, curr.general_info.end_freq_ind, curr.general_info.dt)
+    from lisatools.domains import TDSettings, TDSignal, DomainBaseArray
+    domain_settings_obj = general_info.domain_settings
+
+    class _DomainAwareEMRIWaveform:
+        def __init__(self, td_gen, nchannels, dt, target_domain):
+            self.td_gen = td_gen
+            self.nchannels = nchannels
+            self.dt = dt
+            self.target_domain = target_domain
+
+        def __call__(self, *args, **kwargs):
+            AET_t = self.td_gen(*args, **kwargs)
+            xp = cp if hasattr(AET_t, "device") else np
+            arr = xp.asarray(AET_t)[: self.nchannels]
+            td_settings = TDSettings(
+                arr.shape[-1], self.dt, force_backend=self.target_domain.backend
+            )
+            td_signal = TDSignal(arr, td_settings)
+            return td_signal.transform(self.target_domain)
+
+    wave_gen = _DomainAwareEMRIWaveform(
+        EMRITDIWaveform(**emri_info.initialize_kwargs),
+        acs.nchannels,
+        general_info.dt,
+        domain_settings_obj,
+    )
     if np.any(emri_inds := state.branches_inds["emri"][0]):
         for leaf in range(emri_inds.shape[-1]):
-            if emri_inds[0, leaf]:
-                assert np.all(emri_inds[:, leaf])
-                inj_coords = state.branches_coords["emri"][0, :, leaf]
-                inj_coords_in = emri_info.transform.both_transforms(inj_coords)
-    
-                AET = cp.zeros((inj_coords.shape[0], acs.nchannels, acs.data_length), dtype=complex)
-                for i in range(inj_coords.shape[0]):
-                    AET[i] = wave_gen(*inj_coords_in[i],  **emri_info.waveform_kwargs)
-                acs.add_signal_to_residual(AET[:, :2])
-    
-    print('need to fix emri betas_all setup')
+            if not emri_inds[0, leaf]:
+                continue
+            assert np.all(emri_inds[:, leaf])
+            inj_coords = state.branches_coords["emri"][0, :, leaf]
+            inj_coords_in = emri_info.transform.both_transforms(inj_coords)
+            signals = [
+                wave_gen(*inj_coords_in[i], **emri_info.waveform_kwargs)
+                for i in range(inj_coords.shape[0])
+            ]
+            acs.add_signal_to_residual(DomainBaseArray(signals))
 
+    print("need to fix emri betas_all setup")
     betas_all = np.tile(make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1))
-
-    # to make the states work 
-    betas = betas_all[0]
     state.sub_states["emri"].betas_all = betas_all
 
     inner_moves = emri_info.inner_moves.copy()
-    tempering_kwargs = dict(ntemps=ntemps, Tmax=np.inf, permute=False)
-    
     coords_shape = (ntemps, nwalkers, emri_info.nleaves_max, emri_info.ndim)
+    info_matrix_move = (deepcopy(emri_info.inner_moves[-1][0]), 1)
 
-    info_matrix_move = (deepcopy(emri_info.inner_moves[-1][0]), 1)  # assuming last is info_matrix move
-
-    emri_search_move_args = (
+    emri_search_move = ResidualAddOneRemoveOneMove(
         "emri",
         coords_shape,
         wave_gen,
-        tempering_kwargs,
         emri_info.waveform_kwargs.copy(),
         emri_info.waveform_kwargs.copy(),
         acs,
         emri_info.num_prop_repeats,
         emri_info.transform,
         priors,
-        [info_matrix_move],  # skip stretch for search
-        acs.df
+        [info_matrix_move],
+        Tmax=np.inf,
+        betas_all=betas_all,
     )
-
-    emri_search_move = ResidualAddOneRemoveOneMove(*emri_search_move_args)
-
     emri_search_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
-    print("skipping emri search for now")    
-    #recipe.add_recipe_component(EMRISearchRecipeStep(moves=[emri_search_move]), name="emri search")
 
-    emri_move_args = (
+    emri_pe_move = ResidualAddOneRemoveOneMove(
         "emri",
         coords_shape,
         wave_gen,
-        tempering_kwargs,
         emri_info.waveform_kwargs.copy(),
         emri_info.waveform_kwargs.copy(),
         acs,
@@ -307,9 +346,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         emri_info.transform,
         priors,
         inner_moves,
-        acs.df
+        Tmax=np.inf,
+        betas_all=betas_all,
     )
-    emri_pe_move = ResidualAddOneRemoveOneMove(*emri_move_args)
 
     pe_moves = GFCombineMove(moves=[mbh_pe_move, emri_pe_move, psd_pe_move], share_temperature_control=False)
     pe_moves.accepted = np.zeros((ntemps, nwalkers), dtype=int)
@@ -558,36 +597,45 @@ def get_general_erebor_settings() -> GeneralSetup:
     base_file_name = "emri_mbh_psd_1st_try"
     file_store_dir = "/data/asantini/packages/LISAanalysistools/global_fit_output/"
 
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
-
-    gpus = [0]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
+    gpus = [0] if gpu_available else None
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
     nwalkers = 36
     ntemps = 1
 
-    tukey_alpha = 0.05
+    window_taper_duration = 0.05 * Tobs
 
     orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    gpu_orbits = EqualArmlengthOrbits(force_backend=GPU_BACKEND)
+
+    domain_settings = DOMAIN_CHOICE
+
+    processor_init_kwargs = dict(
+        data_input_path=emri_source_file,
+        remove_from_data=["dgb", "igb", "vgb"],
+    )
+
+    sensitivity_init_kwargs = dict(tdi_generation=2)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        data_input_path=emri_source_file,
         orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        start_freq_ind=0,
-        end_freq_ind=None,
+        gpu_orbits=gpu_orbits,
+        domain_settings=domain_settings,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        window_type="tukey",
+        window_taper_duration=window_taper_duration,
+        gpu_backend=GPU_BACKEND,
         gpus=gpus,
-        remove_from_data=["dgb", "igb", "vgb"],
+        data_processor=SangriaProcessingStep,
+        processor_init_kwargs=processor_init_kwargs,
+        sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
     general_setup = GeneralSetup(general_settings)

@@ -6,6 +6,7 @@ from scipy import stats
 
 from ..sensitivity import get_sensitivity
 from ..utils.constants import *
+from ..utils.utility import asnumpy
 
 try:
     from ..cutils.psd_gpu import compute_logpdf
@@ -364,7 +365,7 @@ class AmplitudeFromSNR:
         if use_cupy and not isinstance(self.fd, cp.ndarray):
             self.fd = cp.asarray(self.fd)
         elif not use_cupy and isinstance(self.fd, cp.ndarray):
-            self.fd = self.fd.get()
+            self.fd = asnumpy(self.fd)
 
     def interp_psd(self, f0, psds, walker_inds=None):
         """Linearly interpolate sampled PSDs at frequencies ``f0``.
@@ -444,7 +445,7 @@ class AmplitudeFromSNR:
             if not isinstance(f0, type(Sn_f)):
                 if isinstance(f0, np.ndarray):
                     assert isinstance(Sn_f, cp.ndarray)
-                    Sn_f = Sn_f.get()
+                    Sn_f = asnumpy(Sn_f)
                 else:
                     assert isinstance(Sn_f, np.ndarray)
                     f0 = cp.asarray(f0)

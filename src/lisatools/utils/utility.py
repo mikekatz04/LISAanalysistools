@@ -242,6 +242,21 @@ def get_array_module(arr: np.ndarray | cp.ndarray) -> object:
         raise ValueError("arr must be a numpy or cupy array.")
 
 
+def asnumpy(arr) -> np.ndarray:
+    """Return ``arr`` as a numpy array, copying off-device when needed.
+
+    Mirrors ``cupy.asnumpy`` but is safe to call on inputs that are
+    already numpy (or any array-like): cupy arrays are pulled to the
+    host via ``.get()``; numpy / array-like inputs go through
+    ``np.asarray`` without a copy when possible.
+    """
+    if isinstance(arr, np.ndarray):
+        return arr
+    if hasattr(arr, "get"):  # cupy.ndarray, multi-GPU views, etc.
+        return arr.get()
+    return np.asarray(arr)
+
+
 def generate_noise_fd(
     N: int,
     df: float,

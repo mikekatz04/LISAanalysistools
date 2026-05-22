@@ -1,13 +1,32 @@
+"""Global-fit settings: PSD-only run.
+
+Edit this file directly. The *backend* block below picks the array
+module + GPU backend; ``DOMAIN_CHOICE`` (further down) picks the basis
+grid as a :class:`DomainSettingsBase` / factory the engine consumes.
+"""
+
+import logging
 import h5py
 import numpy as np
 import shutil
 
+
+# ============================================================
+# *** Backend selection ***
+# ============================================================
 try:
     import cupy as cp
+
+    GPU_BACKEND = "cuda12x"  # change to "cuda11x" / "cuda13x" if needed
     gpu_available = True
-except (ModuleNotFoundError, ImportError) as e:
+except (ModuleNotFoundError, ImportError):
     import numpy as cp
-    gpu_available = True
+
+    GPU_BACKEND = "cpu"
+    gpu_available = False
+# ============================================================
+
+logger = logging.getLogger(__name__)
 
 from eryn.moves.tempering import TemperatureControl, make_ladder
 
@@ -19,12 +38,9 @@ from eryn.state import BranchSupplemental
 from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
 from lisatools.globalfit.utils import SetupInfoTransfer, AllSetupInfoTransfer
 from lisatools.globalfit.run import CurrentInfoGlobalFit, GlobalFit
-# from global_fit_input.global_fit_settings import get_global_fit_settings
 
 from lisatools.globalfit.state import GFBranchInfo, AllGFBranchInfo
 from lisatools.globalfit.state import MBHState, EMRIState, GBState
-
-from bbhx.utils.transform import *
 
 from lisatools.globalfit.generatefuncs import *
 from lisatools.utils.utility import AET
@@ -39,18 +55,22 @@ from eryn.prior import uniform_dist
 from eryn.utils import TransformContainer
 from eryn.prior import ProbDistContainer
 
-from eryn.moves import StretchMove
+from eryn.moves import StretchMove, CombineMove
 from lisatools.sampling.moves.skymodehop import SkyMove
 
-from eryn.moves import CombineMove
-from lisatools.globalfit.moves import GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove, GBSpecialRJPriorMove, PSDMove, MBHSpecialMove, ResidualAddOneRemoveOneMove, GBSpecialRJSerialSearchMCMC, GFCombineMove
+from lisatools.globalfit.moves import (
+    GBSpecialStretchMove, GBSpecialRJRefitMove, GBSpecialRJSearchMove,
+    GBSpecialRJPriorMove, PSDMove, MBHSpecialMove,
+    ResidualAddOneRemoveOneMove, GBSpecialRJSerialSearchMCMC, GFCombineMove,
+)
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings, WDMLookupTable
 
 
-# import few
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings
+from lisatools.globalfit.preprocessing import SangriaProcessingStep
 
 
 from eryn.utils.updates import Update
@@ -99,14 +119,14 @@ from lisatools.sampling.stopping import SearchConvergeStopping
 
 
 def setup_recipe(recipe, engine_info, curr, acs, priors, state):
-   
-    # TODO: adjust this indide current info
+
     general_info = curr.general_info
     nwalkers = curr.general_info.nwalkers
     ntemps = curr.general_info.ntemps
 
     gpus = curr.general_info.gpus
-    cp.cuda.runtime.setDevice(gpus[0])
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
     
     # setup psd search move
     effective_ndim = engine_info.ndims["psd"]  #  + engine_info.ndims["galfor"]
@@ -118,22 +138,20 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_move_kwargs = dict(
         num_repeats=60,
         live_dangerously=True,
-        # gibbs_sampling_setup=[{
-        #     "psd": np.ones((1, engine_info.ndims["psd"]), dtype=bool),
-        #     "galfor": np.ones((1, engine_info.ndims["galfor"]), dtype=bool)
-        # }],
-        temperature_control=temperature_control
+        temperature_control=temperature_control,
+        sensitivity_backend=general_info.sensitivity_backend,
+        psd_transform_fn=curr.source_info["psd"].transform_fn,
     )
-    
+
     psd_search_move = PSDMove(
-        *psd_move_args, 
+        *psd_move_args,
         max_logl_mode=True,
         name="psd search move",
         **psd_move_kwargs,
     )
 
     psd_pe_move = PSDMove(
-        *psd_move_args, 
+        *psd_move_args,
         max_logl_mode=False,
         name="psd pe move",
         **psd_move_kwargs,
@@ -188,52 +206,75 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
 
 
+# ============================================================
+# *** Domain selection ***
+# ============================================================
+#
+# ``DOMAIN_CHOICE`` is the value the engine consumes via
+# ``GeneralSettings.domain_settings`` — either a :class:`DomainSettingsBase`
+# instance or a factory ``(times, dt, force_backend) -> DomainSettings``.
+# Each Settings class exposes a ``make_factory(...)`` classmethod that
+# returns one. Edit this line directly:
+DOMAIN_CHOICE = FDSettings.make_factory(min_freq=0.0, max_freq=None)
+# Example WDM / STFT alternatives:
+# DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=0.0, max_freq=None)
+# DOMAIN_CHOICE = WDMSettings.make_factory(Nf=2048, Nt=8192, min_freq=0.0, max_freq=None)
+# ============================================================
+
+
 def get_general_erebor_settings() -> GeneralSetup:
-       # limits on parameters
-    delta_safe = 1e-5
-    # now with negative fdots
-    
     from lisatools.utils.constants import YRSID_SI
-    Tobs = 2. * YRSID_SI / 12.0
+
+    Tobs = 2.0 * YRSID_SI / 12.0
     dt = 5.0
 
-    head_dir = "/data/asantini/packages/LISAanalysistools/"
-    #ldc_source_file = head_dir + "emri_sangria_injection.h5"
-    ldc_source_file = head_dir + "LDC2_sangria_training_v2.h5"
-    base_file_name = "psd_separate_8th_try"
-    file_store_dir = head_dir + "global_fit_output/"
+    ldc_source_file = "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5"
+    base_file_name = "psd_only_smoke_test"
+    file_store_dir = "./gf_output/"
 
-    # TODO: connect LISA to SSB for MBHs to numerical orbits
+    gpus = [0] if gpu_available else None
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
+    # Small smoke-test config — CPU run, lightweight memory.
+    nwalkers = 4
+    ntemps = 2
 
-    gpus = [3]
-    cp.cuda.runtime.setDevice(gpus[0])
-    # few.get_backend('cuda12x')
-    nwalkers = 36
-    ntemps = 4
-
-    tukey_alpha = 0.05
+    # Window taper: previously ``tukey_alpha=0.05`` over the full Nt; the
+    # engine rebuilds the window from ``window_taper_duration`` (in
+    # seconds) and the domain-specific Nt.
+    window_taper_duration = 0.05 * (Tobs)
 
     orbits = EqualArmlengthOrbits()
-    gpu_orbits = EqualArmlengthOrbits(force_backend="cuda12x")
+    gpu_orbits = EqualArmlengthOrbits(force_backend=GPU_BACKEND)
+
+    domain_settings = DOMAIN_CHOICE
+
+    processor_init_kwargs = dict(
+        data_input_path=ldc_source_file,
+        remove_from_data=["mbhb", "dgb", "igb", "vgb"],
+    )
+
+    sensitivity_init_kwargs = dict(tdi_generation=2)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        data_input_path=ldc_source_file,
         orbits=orbits,
-        gpu_orbits=gpu_orbits, 
-        start_freq_ind=0,
-        end_freq_ind=None,
+        gpu_orbits=gpu_orbits,
+        domain_settings=domain_settings,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
         ntemps=ntemps,
-        tukey_alpha=tukey_alpha,
+        window_type="tukey",
+        window_taper_duration=window_taper_duration,
+        gpu_backend=GPU_BACKEND,
         gpus=gpus,
-        remove_from_data=["mbhb", "dgb", "igb", "vgb"],
-        channels=["A", "E"],  # , "T"
+        data_processor=SangriaProcessingStep,
+        processor_init_kwargs=processor_init_kwargs,
+        sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 
     general_setup = GeneralSetup(general_settings)

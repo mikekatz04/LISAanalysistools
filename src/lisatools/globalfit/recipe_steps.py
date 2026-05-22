@@ -13,6 +13,7 @@ except ModuleNotFoundError:
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.datacontainer import DataResidualArray
+from lisatools.domains import FDSettings, WDMSettings
 
 # from bbhx.utils.transform import SSB_to_LISA
 from eryn.moves.tempering import TemperatureControl, make_ladder
@@ -498,21 +499,38 @@ def build_gb_moves(
     band_N_vals = gb_info.band_N_vals
     gb_betas = gb_info.betas
     gpus: list[int] = general_info.gpus
-    
-    #* Setting up gbgpu on correct backend and gpu(s) for correct orbits and timeshift
-    from gbgpu.gbgpu import GBGPU
-    import gbgpu 
-    _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
-    _gb_backend.set_cuda_device(gpus[0])
-    gb = GBGPU(force_backend=general_info.gpu_backend, orbits=general_info.gpu_orbits, t0=gb_info.t0)
-    cp.cuda.runtime.setDevice(gpus[0])
-    gb.gpus = gpus
 
-    #* Make sure that priors are evaluated on gpus
+    domain_settings = general_info.domain_settings
+
+    #* Setting up gbgpu on the correct backend and (if any) gpu(s).
+    #* CPU path keeps numpy and avoids the cupy-only setDevice call.
+    from gbgpu.gbgpu import GBGPU
+    import gbgpu
+
+    gb_force_backend = general_info.force_backend
+    _gb_backend = gbgpu.get_backend(gb_force_backend)
+    if gpus is not None:
+        _gb_backend.set_cuda_device(gpus[0])
+    # NOTE: ``GBGPU.__init__`` no longer accepts ``t0``; it gets the
+    # reference time from the orbits object's t0. We keep ``gb_info.t0``
+    # around because the WDM-domain ``GBWDMComputations`` consumes it
+    # directly.
+    gb = GBGPU(force_backend=gb_force_backend, orbits=general_info.gpu_orbits)
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
+        gb.gpus = gpus
+    else:
+        gb.gpus = None
+
+    #* Make sure that priors are evaluated on gpus (when available).
+    # On CPU runs we keep ``use_cupy=False`` because eryn's prior.xp reads
+    # ``cp`` unconditionally when ``use_cupy=True`` and raises NameError
+    # if cupy isn't installed.
+    use_gpu_priors = gpus is not None
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
     for _, item in gpu_priors_in.items():
-        item.use_cupy = True
-    gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
+        item.use_cupy = use_gpu_priors
+    gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=use_gpu_priors)}
     
     nleaves_max_gb = state.branches["gb"].shape[-2]
     waveform_kwargs = gb_info.waveform_kwargs
@@ -521,7 +539,7 @@ def build_gb_moves(
 
     #* This checks if the initialization has any gbs in it and adjusts acs accordingly
     if state.branches["gb"].inds[0].sum() > 0:
-        
+
         coords_out_gb = state.branches["gb"].coords[0,
             state.branches["gb"].inds[0]
         ]
@@ -529,7 +547,7 @@ def build_gb_moves(
         coords_out_gb[:, 3] = coords_out_gb[:, 3] % (2 * np.pi)
         coords_out_gb[:, 5] = coords_out_gb[:, 5] % (1 * np.pi)
         coords_out_gb[:, 6] = coords_out_gb[:, 6] % (2 * np.pi)
-        
+
         check = priors["gb"].logpdf(coords_out_gb)
         if np.any(np.isinf(check)):
             raise ValueError("Starting priors are inf.")
@@ -544,30 +562,57 @@ def build_gb_moves(
 
         data_index_1 = walker_vals  # ((band_inds % 2) + 0) * nwalkers + walker_vals
 
-        data_index = cp.asarray(data_index_1).astype(
-            cp.int32
-        )
-        # goes in as -h
+        data_index = cp.asarray(data_index_1).astype(cp.int32)
+        # goes in as -h (subtract initial template from data residual)
         factors = -cp.ones_like(data_index, dtype=cp.float64)
 
         N_vals = band_N_vals[band_inds]
 
         logger.debug("Generating global GB template")
-        # TODO: add test to make sure that the genertor send in the general information matches this one
-        gb.gpus = gpus
-        template_in: cp.ndarray = acs.linear_data_arr
-        gb.generate_global_template(
-            coords_in_in,
-            data_index,
-            acs.linear_data_arr,
-            data_length=acs.data_length,
-            factors=factors,
-            data_splits=acs.gpu_map,
-            N=N_vals,
-            **waveform_kwargs,
-        )
-        max_diff_templates = cp.abs(template_in-acs.linear_data_arr).max()
-        logger.debug(f"Global GB template generated with max template in/out diff = {max_diff_templates:5e}")
+        if gpus is not None:
+            gb.gpus = gpus
+
+        if isinstance(domain_settings, FDSettings):
+            #* TODO: add test to make sure the generator matches the general information.
+            template_in = acs.linear_data_arr
+            gb.generate_global_template(
+                coords_in_in,
+                data_index,
+                acs.linear_data_arr,
+                data_length=acs.data_length,
+                factors=factors,
+                data_splits=acs.gpu_map,
+                N=N_vals,
+                **waveform_kwargs,
+            )
+            max_diff_templates = cp.abs(template_in - acs.linear_data_arr).max()
+            logger.debug(
+                f"Global GB template generated with max template in/out diff = "
+                f"{max_diff_templates:5e}"
+            )
+        elif isinstance(domain_settings, WDMSettings):
+            if gb_info.gb_wdm_comp is None:
+                raise ValueError(
+                    "WDM-domain GB initialization requires "
+                    "gb_info.gb_wdm_comp; build a GBWDMComputations in the "
+                    "settings file and pass it via GBSettings.gb_wdm_comp."
+                )
+            num_bin = coords_in_in.shape[0]
+            xp = gb_info.gb_wdm_comp.xp
+            factors_arr = xp.asarray(factors).astype(xp.float64)
+            gb_info.gb_wdm_comp.fill_global_wdm(
+                acs.linear_data_arr[0],
+                coords_in_in,
+                acs,
+                convert_to_ra_dec=False,
+                data_index=xp.asarray(data_index),
+                factors=factors_arr,
+            )
+        else:
+            raise NotImplementedError(
+                f"Domain settings {type(domain_settings).__name__} are not "
+                f"supported for GB initialization."
+            )
 
 
     #* Check if we need to adjust the band temps, and adjust if required
@@ -598,13 +643,15 @@ def build_gb_moves(
     # )
         
     #* Assembling args and kwargs
+    #* ``fd`` is no longer a positional — the move derives it from
+    #* ``acs.settings`` so the same call works for FDSettings and
+    #* WDMSettings (and any future domain).
     gb_move_args = (
         gb,
         priors,
         gb_info.start_freq_ind,
         acs.data_length,
         acs,
-        general_info.domain_settings.f_arr,
         band_edges,
         band_N_vals,
         gpu_priors,
@@ -616,7 +663,7 @@ def build_gb_moves(
         provide_betas=True,
         skip_supp_names_update=["group_move_points"],
         random_seed=general_info.random_seed,
-        force_backend=general_info.gpu_backend,
+        force_backend=general_info.force_backend,
         nfriends=nwalkers,
         # gb_wdm_comp is None for the FD path (default) and a
         # GBWDMComputations instance for the WDM path. The move's Buffer

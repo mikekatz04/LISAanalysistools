@@ -26,6 +26,7 @@ from ...datacontainer import DataResidualArray
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
+from ...utils.utility import asnumpy
 from ..galaxyglobal import fit_each_leaf, make_gmm, run_gb_bulk_search
 from ._gb_likelihood import (
     BandLikelihoodEngine,
@@ -70,11 +71,9 @@ class _NoOpMempool:
         return
 
 
-def _to_numpy(arr):
-    """Cupy/numpy-agnostic ``.get()``: returns a numpy view."""
-    if hasattr(arr, "get"):
-        return arr.get()
-    return np.asarray(arr)
+# ``_to_numpy`` was the file-local cupy/numpy-agnostic ``.get()`` helper.
+# Use the central :func:`lisatools.utils.utility.asnumpy` instead.
+_to_numpy = asnumpy
 
 
 def gb_search_func(comm, curr, main_rank, class_extra_gpus, class_ranks_list):
@@ -757,9 +756,10 @@ class Buffer(LISAToolsParallelModule):
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
             ac_list.append(AnalysisContainer(data_res_arr, sm))
 
+        gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
         return AnalysisContainerArray(
             ac_list,
-            gpus=[self.gb.gpus[0]],
+            gpus=[gpus_in[0]] if gpus_in else None,
             complex_psd=False,
         )
 
@@ -971,7 +971,7 @@ class Buffer(LISAToolsParallelModule):
 
         inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
         self.reset_psd_buffers(inds_fill=inds_fill)
-        
+
         self.psd_buffer[inds_fill] = acs.psd_shaped[0][inds_get_psd]
         del inds_get_psd
 
@@ -993,15 +993,18 @@ class Buffer(LISAToolsParallelModule):
 
             if is_psd and self.tdi_channel_setup == "XYZ":
                 # target shape: (len(inds_fill), nchannels, nchannels, Nf_active, Nt_active)
-                inds1 = (
-                    self.unique_band_combos[inds_fill, 1][:, None, None, None, None]
-                    * self.nchannels
-                    + cp.arange(self.nchannels)[None, :, None, None, None]
-                )
-                inds2 = cp.arange(self.nchannels)[None, None, :, None, None]
-                inds3 = cp.arange(Nf_active)[None, None, None, :, None]
-                inds4 = cp.arange(Nt_active)[None, None, None, None, :]
-                return inds1, inds2, inds3, inds4
+                # The parent WDM ACA's psd_shaped[0] has shape
+                # ``(num_walkers, nchan, nchan, Nf_active, Nt_active)`` — one
+                # entry per walker with channels as inner axes. Unlike the FD
+                # path (which flattens walker*channel into axis 0), here we
+                # index axis 0 with the raw walker index and need a full
+                # 5-tuple to cover all five axes.
+                inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None, None]
+                inds2 = cp.arange(self.nchannels)[None, :, None, None, None]
+                inds3 = cp.arange(self.nchannels)[None, None, :, None, None]
+                inds4 = cp.arange(Nf_active)[None, None, None, :, None]
+                inds5 = cp.arange(Nt_active)[None, None, None, None, :]
+                return inds1, inds2, inds3, inds4, inds5
 
             # target shape: (len(inds_fill), nchannels, Nf_active, Nt_active)
             inds1 = self.unique_band_combos[inds_fill, 1][:, None, None, None]
@@ -1570,10 +1573,15 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     Args:
         gb: :class:`gbgpu.GBGPU` instance.
         priors: :class:`ProbDistContainer` for in-model GB parameters.
-        start_freq_ind: Inclusive starting index into the global ``f_arr``.
-        data_length: Length of the data array per channel.
-        mgh: Multi-GPU data holder / analysis container.
-        fd: Frequency array.
+        start_freq_ind: Inclusive starting index into the global ``f_arr``
+            (FD path); ignored on the WDM path.
+        data_length: Length of the data array per channel (FD path); the
+            WDM path sizes its per-band buffers from
+            ``WDMSettings.Nf_active`` / ``Nt_active`` instead.
+        mgh: Shared :class:`AnalysisContainerArray`. The basis-domain
+            settings on ``mgh.settings`` drive every domain-dependent
+            choice (FD vs WDM); ``df`` / ``f_arr`` are derived from it
+            rather than being passed separately.
         band_edges: Frequency-band edges.
         band_N_vals: Per-band waveform sample counts.
         gpu_priors: Branch-keyed GPU-resident priors.
@@ -1592,6 +1600,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         run_swaps: Whether to run band-temperature swaps.
         max_data_store_size: Cap on the per-iteration data store size.
         force_backend: Optional backend override.
+        gb_wdm_comp: Optional :class:`fastlisaresponse.gbcomps.GBWDMComputations`
+            instance. Required when ``mgh.settings`` is a
+            :class:`~lisatools.domains.WDMSettings`; ignored otherwise.
     """
 
     @property
@@ -1606,7 +1617,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         start_freq_ind,
         data_length,
         mgh,
-        fd,
         band_edges,
         band_N_vals,
         gpu_priors,
@@ -1683,9 +1693,24 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.data_length = data_length
         self.waveform_kwargs = waveform_kwargs
         self.parameter_transforms = parameter_transforms
-        self.fd = fd
-        self.df = (fd[1] - fd[0]).item()
         self.mgh = mgh
+
+        # Derive ``self.fd`` and ``self.df`` from the parent
+        # AnalysisContainerArray's basis settings. The band-index math in
+        # this move uses ``df = 1 / Tobs`` consistently across FD and WDM
+        # (FD: equals ``acs.df``; WDM: ``acs.df == layer_df`` differs, so
+        # we recompute). ``self.fd`` is only meaningful in the FD path.
+        if isinstance(mgh.settings, FDSettings):
+            self.fd = mgh.f_arr.copy()
+            self.df = float(self.fd[1] - self.fd[0])
+        elif isinstance(mgh.settings, WDMSettings):
+            self.fd = None
+            self.df = 1.0 / mgh.settings.Tobs
+        else:
+            raise NotImplementedError(
+                f"GBSpecialBase does not support basis domain "
+                f"{type(mgh.settings).__name__}."
+            )
         self.phase_maximize = phase_maximize
 
         self.snr_lim = snr_lim
@@ -1738,7 +1763,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         left_inds, right_inds = self.find_friends_init(all_temp_fs)
 
-        start_inds = left_inds.copy().get()
+        start_inds = asnumpy(left_inds.copy())
 
         start_inds_all = -np.ones_like(inds, dtype=np.int32)
         start_inds_all[inds] = start_inds.astype(np.int32)
@@ -1914,7 +1939,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         self.find_friends_init(all_temp_fs)
 
-        start_inds = left_inds.copy().get()
+        start_inds = asnumpy(left_inds.copy())
         # TODO: remove .get()?
         band_sorter.friend_start_inds[new_inds] = start_inds_all
 
@@ -2461,9 +2486,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                         band_sorter.band_inds[inds_to_update],
                     )
                     map_to_update_cpu = (
-                        band_sorter.temp_inds[inds_to_update].get(),
-                        band_sorter.walker_inds[inds_to_update].get(),
-                        band_sorter.band_inds[inds_to_update].get(),
+                        asnumpy(band_sorter.temp_inds[inds_to_update]),
+                        asnumpy(band_sorter.walker_inds[inds_to_update]),
+                        asnumpy(band_sorter.band_inds[inds_to_update]),
                     )
                     if self.xp.any(params_to_update[:, 0] < -100.0):
                         breakpoint()
@@ -3093,8 +3118,16 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
             self.xp.cuda.runtime.setDevice(model.analysis_container_arr.gpus[0])
         # nchannels = model.analysis_container_arr.nchannels
         # data_length = model.analysis_container_arr.data_length
-        self.fd = model.analysis_container_arr.f_arr.copy()
-        self.df = model.analysis_container_arr.df
+        # Refresh fd/df from the live ACA in case the parent attached a new
+        # one between construction and propose-time. Same FD-vs-WDM
+        # dispatch as in __init__.
+        acs_settings = model.analysis_container_arr.settings
+        if isinstance(acs_settings, FDSettings):
+            self.fd = model.analysis_container_arr.f_arr.copy()
+            self.df = float(model.analysis_container_arr.df)
+        elif isinstance(acs_settings, WDMSettings):
+            self.fd = None
+            self.df = 1.0 / acs_settings.Tobs
         self.current_state = state
         np.random.seed(10)
         # print("start stretch")
@@ -4034,20 +4067,19 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
 
         samples = self.xp.asarray(para_sampler.get_chain()[:, :, 0])
         check_ll = para_sampler.get_log_like()[:, :, 0]
-        sample_ll = (
-            para_log_like(samples.reshape(-1, 8), *ll_args).reshape(samples.shape[:-1]).get()
+        sample_ll = asnumpy(
+            para_log_like(samples.reshape(-1, 8), *ll_args).reshape(samples.shape[:-1])
         )
 
-        check_real_ll_phase_maximized = (
+        check_real_ll_phase_maximized = asnumpy(
             para_log_like(samples.reshape(-1, 8), *ll_args, fstat=False)
             .reshape(samples.shape[:-1])
-            .get()
         )
         check_real_ll, opt_snr = para_log_like(
             samples.reshape(-1, 8), *ll_args_2, fstat=False, return_snr=True
         )
-        check_real_ll = check_real_ll.reshape(samples.shape[:-1]).get()
-        opt_snr = opt_snr.reshape(samples.shape[:-1]).get()
+        check_real_ll = asnumpy(check_real_ll.reshape(samples.shape[:-1]))
+        opt_snr = asnumpy(opt_snr.reshape(samples.shape[:-1]))
 
         # np.save("opt_snr_from_ldc_parasampler_check.npy", opt_snr)
         # np.save("samples_from_ldc_parasampler_check.npy", samples)
@@ -4122,15 +4154,13 @@ class GBSpecialRJSerialSearchMCMC(GBSpecialBase):
         samples_2 = self.xp.asarray(para_sampler_2.get_chain()[:, :, 0])
         check_ll_2 = para_sampler_2.get_log_like()[:, :, 0]
 
-        check_real_ll_phase_maximized_2 = (
+        check_real_ll_phase_maximized_2 = asnumpy(
             para_log_like(samples_2.reshape(-1, 8), *ll_args, fstat=False)
             .reshape(samples_2.shape[:-1])
-            .get()
         )
-        check_real_ll_2 = (
+        check_real_ll_2 = asnumpy(
             para_log_like(samples_2.reshape(-1, 8), *ll_args_2, fstat=False)
             .reshape(samples_2.shape[:-1])
-            .get()
         )
 
         # TODO: add removal of bands that consistently dont find things
@@ -4218,16 +4248,16 @@ class GBSpecialRJSearchMove(GBSpecialBase): #? only needed for mutli GPU usage
                 random_ind = np.random.randint(self.nwalkers)
 
                 data = [
-                    self.mgh.data_shaped[0][0][random_ind].get(),
-                    self.mgh.data_shaped[1][0][random_ind].get(),
+                    asnumpy(self.mgh.data_shaped[0][0][random_ind]),
+                    asnumpy(self.mgh.data_shaped[1][0][random_ind]),
                 ]
                 psd = [
-                    self.mgh.psd_shaped[0][0][random_ind].get(),
-                    self.mgh.psd_shaped[1][0][random_ind].get(),
+                    asnumpy(self.mgh.psd_shaped[0][0][random_ind]),
+                    asnumpy(self.mgh.psd_shaped[1][0][random_ind]),
                 ]
                 lisasens = [
-                    self.mgh.psd_shaped[0][0][random_ind].get(),
-                    self.mgh.lisasens_shaped[1][0][random_ind].get(),
+                    asnumpy(self.mgh.psd_shaped[0][0][random_ind]),
+                    asnumpy(self.mgh.lisasens_shaped[1][0][random_ind]),
                 ]
 
                 output_data = dict(data=data, psd=psd, lisasens=lisasens)
@@ -4290,9 +4320,17 @@ class GBSpecialRJRefitMove(GBSpecialBase):
 
         num_compare_samples = 1
         nwalkers = 30
-        gpu = self.xp.cuda.runtime.getDevice()
+        gpu = self.xp.cuda.runtime.getDevice() if self.backend.uses_cupy else -1
+        # ``gather_gb_samples`` builds FD waveforms for the GMM refit;
+        # the WDM equivalent has not been wired in yet.
+        if not isinstance(model.analysis_container_arr.settings, FDSettings):
+            raise NotImplementedError(
+                "GBSpecialRJRefitMove currently requires the FD basis "
+                "(GMM refit fits FD waveforms)."
+            )
+        fd = model.analysis_container_arr.f_arr.copy()
         groups = gather_gb_samples(
-            self.fd,
+            fd,
             self.parameter_transforms,
             self.gb,
             self.waveform_kwargs.copy(),

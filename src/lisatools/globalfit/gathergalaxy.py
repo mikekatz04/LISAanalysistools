@@ -18,6 +18,7 @@ from gbgpu.gbgpu import GBGPU
 from gbgpu.utils.utility import get_N
 
 from lisatools.utils.constants import *
+from lisatools.utils.utility import asnumpy
 
 
 class GBGrouping:
@@ -254,10 +255,10 @@ class GBGrouping:
                 **self.waveform_kwargs,
             )
 
-            overlap[stind:endind] = (
+            overlap[stind:endind] = asnumpy(
                 np.real(self.gb.add_remove)
                 / np.sqrt(self.gb.add_add.real * self.gb.remove_remove.real)
-            ).get()
+            )
         return overlap
 
     def get_sample(self, sample_i: int) -> np.ndarray:
@@ -696,7 +697,7 @@ class GBGrouping:
             still_good = (
                 np.abs(params_base_in[:, 1] - params_check_in[:, 1])
                 / self.current_info.general_info["df"]
-            ).astype(int) < (N.get() / 2)
+            ).astype(int) < (asnumpy(N) / 2)
 
             self.gb.gpus = None
 
@@ -1007,7 +1008,7 @@ class GBGrouping:
         self.gb.gpus = None
         _ = self.gb.get_ll(self.params_in, self.fake_data, self.psd, **waveform_kwargs)
         self.gb.gpus = gpus_back
-        return np.sqrt(self.gb.h_h.real.get())
+        return np.sqrt(asnumpy(self.gb.h_h.real))
 
     @property
     def group_pop(self) -> np.ndarray:
@@ -1122,7 +1123,7 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
     optimal_snr = gb.h_h.real ** (1 / 2)
 
     gb_snrs = np.full(gb_inds.shape, -1e10)
-    gb_snrs[gb_inds] = optimal_snr.get()
+    gb_snrs[gb_inds] = asnumpy(optimal_snr)
 
     st1 = time.perf_counter()
     gb.gpus = [gpu]
@@ -1227,7 +1228,7 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 
     _ = gb.get_ll(gbs_check_in, fake_data, psd_in, **waveform_kwargs)
     gb.gpus = old_gpus
-    optimal_snr_check = gb.h_h.real.get() ** (1 / 2)
+    optimal_snr_check = asnumpy(gb.h_h.real) ** (1 / 2)
 
     gbs_check = gbs_check_in[optimal_snr_check > 7.0][:, np.array([0, 1, 2, 4, 5, 6, 7, 8])]
 
@@ -1508,7 +1509,7 @@ def gather_gb_samples(
     optimal_snr = gb.h_h.real ** (1 / 2)
 
     gb_snrs = np.full(gb_inds.shape, -1e10)
-    gb_snrs[gb_inds] = optimal_snr.get()
+    gb_snrs[gb_inds] = asnumpy(optimal_snr)
     gb_inds_tmp = gb_inds.copy()
 
     keep_groups = []
@@ -1558,7 +1559,7 @@ def gather_gb_samples(
         binaries_for_test = np.concatenate(binaries_for_test, axis=0)
         binaries_base_sample = np.concatenate(binaries_base_sample, axis=0)
         band_inds = (
-            np.searchsorted(band_edges.get(), binaries_for_test[:, 1] / 1e3, side="right") - 1
+            np.searchsorted(asnumpy(band_edges), binaries_for_test[:, 1] / 1e3, side="right") - 1
         )
 
         N_vals = band_N_vals[band_inds]
@@ -1596,9 +1597,9 @@ def gather_gb_samples(
             )
 
             # ll_diff[start_ind:end_ind] = (-1/2 * (gb.add_add + gb.remove_remove - 2 * gb.add_remove).real).get()
-            ll_diff[start_ind:end_ind] = (
+            ll_diff[start_ind:end_ind] = asnumpy(
                 gb.add_remove.real / np.sqrt(gb.add_add.real * gb.remove_remove.real)
-            ).get()
+            )
             print(start_ind, len(inds_split) - 1)
 
         for i, keep_map_i in enumerate(keep_map):
@@ -1726,7 +1727,7 @@ def gather_gb_samples(
         new_group_map = np.concatenate(new_group_map, axis=0)
         old_group_map = np.concatenate(old_group_map, axis=0)
 
-        band_inds = np.searchsorted(band_edges.get(), base_bins[:, 1] / 1e3, side="right") - 1
+        band_inds = np.searchsorted(asnumpy(band_edges), base_bins[:, 1] / 1e3, side="right") - 1
         N_vals = band_N_vals[band_inds]
 
         batch_size = int(1e7)
@@ -1759,11 +1760,11 @@ def gather_gb_samples(
                 phase_marginalize=True,
                 **waveform_kwargs,
             )
-            ll_diff[start_ind:end_ind] = (
+            ll_diff[start_ind:end_ind] = asnumpy(
                 gb.add_remove.real / np.sqrt(gb.add_add.real * gb.remove_remove.real)
-            ).get()
-            snr1[start_ind:end_ind] = np.sqrt(gb.add_add.real).get()
-            snr2[start_ind:end_ind] = np.sqrt(gb.remove_remove.real).get()
+            )
+            snr1[start_ind:end_ind] = asnumpy(np.sqrt(gb.add_add.real))
+            snr2[start_ind:end_ind] = asnumpy(np.sqrt(gb.remove_remove.real))
         keep = (ll_diff > overlap_lim) & (np.abs(snr2 - snr1) < snr_diff_lim)
         ll_diff_keep = ll_diff[keep]
         new_group_keep = new_group_map[keep]

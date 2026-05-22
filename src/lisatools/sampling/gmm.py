@@ -27,7 +27,7 @@ except (ModuleNotFoundError, ImportError) as e:
 # from ..utils._param_validation import Interval, StrOptions
 # from ..utils.validation import check_is_fitted, validate_data
 from lisatools.sampling.prior import FullGaussianMixtureModel
-from lisatools.utils.utility import searchsorted2d_vec
+from lisatools.utils.utility import asnumpy, searchsorted2d_vec
 
 
 def _check_shape(param, param_shape, name, xp=None):
@@ -1380,10 +1380,7 @@ class GaussianMixtureModel:
                 _samples = means[:, k][:, None, :] + self.xp.einsum(
                     "ijk,imk->imj", chol_decomp[:, k], z
                 )
-                try:
-                    repeat_arg = list(n_samp_k.get())
-                except AttributeError:
-                    repeat_arg = list(n_samp_k)
+                repeat_arg = list(asnumpy(n_samp_k))
 
                 tmp0 = self.xp.repeat(self.xp.arange(n_groups), repeat_arg)
                 _tmp = self.xp.tile(self.xp.arange(n_samp_k_max), (n_groups, 1))
@@ -2190,7 +2187,7 @@ if __name__ == "__main__":
     samp_logpdf = full_gmm.logpdf(samp_gen)
     import matplotlib.pyplot as plt
 
-    plt.scatter(samp_gen[:, 1].get(), samp_gen[:, 0].get())
+    plt.scatter(asnumpy(samp_gen[:, 1]), asnumpy(samp_gen[:, 0]))
     plt.savefig("check0.png")
     breakpoint()
 
