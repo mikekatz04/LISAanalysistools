@@ -92,7 +92,10 @@ from lisatools.globalfit.stock.erebor import (
     MBHSetup,
     PSDSettings,
     PSDSetup,
+    SOBBHSettings,
+    SOBBHSetup,
 )
+from lisatools.sources.sobbh import SOBBHWaveform
 from lisatools.utils.constants import YRSID_SI
 
 
@@ -182,7 +185,7 @@ EMRI_SUM_KWARGS = {"pad_output": True}
 # 1e-2 threshold keeps things fast; tighten once on GPU.
 EMRI_MODE_SELECTOR_KWARGS = {"mode_selection_threshold": 1e-2}
 
-_WAVE_GEN_CACHE = {}
+_EMRI_WAVE_GEN_CACHE = {}
 
 
 def get_emri_response_wrapper(
@@ -203,8 +206,8 @@ def get_emri_response_wrapper(
     building two on CPU exhausts RAM.
     """
     key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
-    if key in _WAVE_GEN_CACHE:
-        return _WAVE_GEN_CACHE[key]
+    if key in _EMRI_WAVE_GEN_CACHE:
+        return _EMRI_WAVE_GEN_CACHE[key]
 
     few_generator = GenerateEMRIWaveform(
         "FastKerrEccentricEquatorialFlux",
@@ -238,7 +241,7 @@ def get_emri_response_wrapper(
         t0=t_start,
         **response_kwargs,
     )
-    _WAVE_GEN_CACHE[key] = wave_gen
+    _EMRI_WAVE_GEN_CACHE[key] = wave_gen
     return wave_gen
 
 
@@ -248,6 +251,139 @@ class EMRIWaveWrap:
     Output is a :class:`DomainBase` subclass (FDSignal / WDMSignal / ...)
     so ACA dispatch and the EMRI move's ``get_waveform_here`` land on the
     right kernels.
+    """
+
+    def __init__(
+        self,
+        wave_gen,
+        td_settings: TDSettings,
+        target_domain,
+        td_window=None,
+        runtime_kwargs: Optional[dict] = None,
+        nchannels: Optional[int] = None,
+    ):
+        self.wave_gen = wave_gen
+        self.td_settings = td_settings
+        self.target_domain = target_domain
+        self.td_window = td_window
+        self.runtime_kwargs = runtime_kwargs or {}
+        self.nchannels = nchannels
+
+    def __call__(self, *params, **kwargs):
+        call_kwargs = dict(self.runtime_kwargs)
+        call_kwargs.update(kwargs)
+        call_kwargs.setdefault("convert_to_ra_dec", False)
+        arr = np.asarray(self.wave_gen(*params, **call_kwargs))
+        if self.nchannels is not None:
+            arr = arr[: self.nchannels]
+        return TDSignal(arr, self.td_settings).transform(
+            self.target_domain, window=self.td_window
+        )
+
+
+# ============================================================
+# *** SOBBH injection (synthetic, in-process) ***
+# ============================================================
+# Output-basis order consumed by :class:`SOBBHWaveform.__call__` (11 params):
+#   m1 (M_sun), m2 (M_sun), s1, s2, dist (Gpc), inc (rad), f_low (Hz),
+#   lam (ecliptic longitude, rad), beta (ecliptic latitude, rad),
+#   psi (polarization, rad), phi0 (coalescence-phase offset, rad).
+#
+# Sampling basis (consumed by ``SOBBHSetup.transform``, 11 params):
+#   logm1, logm2, s1, s2, dist, cosinc, f_low, phiS, cosqS, psi, phi0
+# with cosqS -> beta = pi/2 - arccos(cosqS) and phiS -> lam.
+SOBBH_INJECTION_PARAMS_FULL_BASIS = np.array(
+    [
+        40.0,        # m1 (M_sun)
+        30.0,        # m2 (M_sun)
+        0.3,         # s1
+        -0.2,        # s2
+        1.0,         # dist (Gpc)
+        np.pi / 3,   # inc
+        1.5e-2,      # f_low (Hz)
+        1.0,         # lam   (phiS in sampling basis)
+        np.pi / 4,   # beta  (cosqS = cos(pi/2 - beta) in sampling basis)
+        0.3,         # psi
+        0.0,         # phi0
+    ]
+)
+
+
+def sobbh_full_to_sampling(params_full):
+    """Convert an 11-param SOBBH waveform-basis vector to the 11-param sampling basis."""
+    p = np.asarray(params_full, dtype=float).copy()
+    p[0] = np.log(p[0])                       # m1 -> logm1
+    p[1] = np.log(p[1])                       # m2 -> logm2
+    p[5] = np.cos(p[5])                       # inc -> cosinc
+    # p[7] stays: lam -> phiS (same value)
+    p[8] = np.cos(np.pi / 2.0 - p[8])         # beta -> cosqS
+    return p
+
+
+_SOBBH_WAVE_GEN_CACHE = {}
+
+
+def get_sobbh_response_wrapper(
+    *,
+    Tobs: float,
+    dt: float,
+    t_start: float,
+    tdi_config: TDIConfig,
+    tdi_chan: str = "XYZ",
+    role: str = "template",
+    order: int = 40,
+    t_buffer: float = 3e4,
+    force_backend: str = "cpu",
+):
+    """Build (and cache) a :class:`ResponseWrapper` around :class:`SOBBHWaveform`.
+
+    Mirrors :func:`get_emri_response_wrapper`; one generator per
+    ``(Tobs, dt, t_start, tdi_chan, order, force_backend)`` cache key so
+    the injection path and the template path share the same instance.
+    """
+    key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
+    if key in _SOBBH_WAVE_GEN_CACHE:
+        return _SOBBH_WAVE_GEN_CACHE[key]
+
+    sobbh_generator = SOBBHWaveform(
+        Tobs=Tobs,
+        dt=dt,
+        t0=t_start,
+        force_backend=force_backend,
+    )
+
+    response_kwargs = {
+        "Tobs": Tobs / YRSID_SI,
+        "dt": dt,
+        "index_lambda": 7,
+        "index_beta": 8,
+        "flip_hx": True,
+        "force_backend": force_backend,
+        "tdi": tdi_config,
+        "tdi_chan": tdi_chan,
+        "order": order,
+        "remove_garbage": "zero",
+        "is_ecliptic_latitude": True,
+        "t_buffer": t_buffer,
+    }
+
+    orbits = EqualArmlengthOrbits(force_backend=force_backend)
+    wave_gen = ResponseWrapper(
+        sobbh_generator,
+        orbits=orbits,
+        t0=t_start,
+        **response_kwargs,
+    )
+    _SOBBH_WAVE_GEN_CACHE[key] = wave_gen
+    return wave_gen
+
+
+class SOBBHWaveWrap:
+    """Run the cached SOBBH ResponseWrapper and project to the run's domain.
+
+    Mirrors :class:`EMRIWaveWrap` — output is a :class:`DomainBase`
+    subclass (FDSignal / WDMSignal / ...) so ACA dispatch and the SOBBH
+    move's ``get_waveform_here`` land on the right kernels.
     """
 
     def __init__(
@@ -332,6 +468,59 @@ class SyntheticEMRIProcessingStep(BaseProcessingStep):
         # ``ResponseWrapper`` can produce a couple fewer samples than
         # ``Tobs/dt`` (Lagrange buffer / remove_garbage). Pad/clip to
         # exactly ``Tobs/dt`` so downstream WDM ``N = Nf*Nt`` matches.
+        target_N = int(round(Tobs / dt))
+        if td_signal.shape[-1] < target_N:
+            pad = target_N - td_signal.shape[-1]
+            td_signal = np.pad(td_signal, ((0, 0), (0, pad)), mode="constant")
+        elif td_signal.shape[-1] > target_N:
+            td_signal = td_signal[:, :target_N]
+
+        times = np.arange(target_N) * dt + t_start
+        fs = 1.0 / dt
+
+        BaseProcessingStep.__init__(
+            self, times, td_signal, fs, verbose=verbose, do_plots=do_plots
+        )
+        self.orbits = None
+        self.injection_params_full_basis = injection_params_full_basis
+        self.tdi_chan = tdi_chan
+
+
+class SyntheticSOBBHProcessingStep(BaseProcessingStep):
+    """Generate the SOBBH injection in-process via the shared ResponseWrapper.
+
+    Mirrors :class:`SyntheticEMRIProcessingStep` — pads/clips to exactly
+    ``Tobs/dt`` so downstream WDM ``N = Nf*Nt`` matches.
+    """
+
+    def __init__(
+        self,
+        Tobs: float,
+        dt: float,
+        t_start: float,
+        injection_params_full_basis: np.ndarray,
+        tdi_chan: str = "XYZ",
+        nchannels: int = 3,
+        force_backend: str = "cpu",
+        verbose: bool = True,
+        do_plots: bool = False,
+    ):
+        tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
+        wave_gen = get_sobbh_response_wrapper(
+            Tobs=Tobs,
+            dt=dt,
+            t_start=t_start,
+            tdi_config=tdi_config,
+            tdi_chan=tdi_chan,
+            role="injection",
+            force_backend=force_backend,
+        )
+
+        td_signal = np.asarray(
+            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
+        )
+        td_signal = np.atleast_2d(td_signal)[:nchannels]
+
         target_N = int(round(Tobs / dt))
         if td_signal.shape[-1] < target_N:
             pad = target_N - td_signal.shape[-1]
@@ -574,12 +763,19 @@ def setup_recipe(
     if "emri" in curr.source_info:
         emri_pe_move = _build_emri_move(curr, acs, priors, state)
 
+    #* ================================= SOBBH =================================
+    sobbh_pe_move = None
+    if "sobbh" in curr.source_info:
+        sobbh_pe_move = _build_sobbh_move(curr, acs, priors, state)
+
     #* ================================= COMBINE =================================
     pe_moves = [psd_pe_move] + gb_pe_moves
     if mbh_pe_move is not None:
         pe_moves.append(mbh_pe_move)
     if emri_pe_move is not None:
         pe_moves.append(emri_pe_move)
+    if sobbh_pe_move is not None:
+        pe_moves.append(sobbh_pe_move)
 
     gf_pe_move = GFCombineMove(
         moves=pe_moves, verbose=True, share_temperature_control=False

@@ -336,6 +336,30 @@ class EMRIState(eryn_State):
         return dict(num_emris=self.num_emris)  # self.betas_all.shape[0]
 
 
+class SOBBHState(eryn_State):
+    """Stellar-origin BBH (SOBBH) sampler state with per-leaf temperature ladder.
+
+    Mirrors :class:`EMRIState` — one row of ``betas_all`` per SOBBH leaf so each
+    source carries its own tempering ladder.
+    """
+
+    remove_kwargs = ["betas_all"]
+
+    def __init__(self, possible_state, betas_all=None, copy=False, **kwargs):
+        if isinstance(possible_state, self.__class__):
+            dc = deepcopy if copy else return_x
+            self.betas_all = dc(possible_state.betas_all)
+            self.num_sobbhs = betas_all.shape[0] if betas_all is not None else 20
+        else:
+            self.betas_all = betas_all
+            self.num_sobbhs = possible_state["sobbh"].shape[-2]
+
+    @property
+    def reset_kwargs(self):
+        """Kwargs passed back to the backend when re-initializing the state."""
+        return dict(num_sobbhs=self.num_sobbhs)
+
+
 class GFState(eryn_State):
     """Composite global-fit state holding per-source-class sub-states.
 

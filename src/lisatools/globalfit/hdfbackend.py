@@ -16,7 +16,7 @@ from ..domains import (
     WDMSettings,
 )
 from .plot import RunResultsProduction
-from .state import EMRIState, GBState, GFState, MBHState
+from .state import EMRIState, GBState, GFState, MBHState, SOBBHState
 
 
 # ----------------------------------------------------------------------
@@ -1148,4 +1148,99 @@ class EMRIHDFBackend(eryn_HDFBackend):
         betas_all = self.get_betas_all(discard=discard, thin=thin)
 
         sample = EMRIState(None, betas_all=betas_all)
+        return sample
+
+
+class SOBBHHDFBackend(eryn_HDFBackend):
+    """Sub-backend that persists the per-leaf SOBBH temperature ladder.
+
+    Mirrors :class:`EMRIHDFBackend` — one ``betas_all`` row per leaf, sliced
+    out at save time and restored from disk for warm-starts.
+    """
+
+    def reset(self, nwalkers, *args, ntemps=1, num_sobbhs: int = None, **kwargs):
+        """Create a ``betas_all`` dataset of shape ``(*, num_sobbhs, ntemps)``."""
+        if num_sobbhs is None:
+            raise ValueError("Must provide num_sobbhs kwarg.")
+
+        with self.open("a") as f:
+            g = f[self.name]["sub_backend"]
+
+            sobbh_group = g.create_group("sobbh")
+
+            sobbh_group.attrs["num_sobbhs"] = num_sobbhs
+
+            sobbh_group.create_dataset(
+                "betas_all",
+                (0, num_sobbhs, ntemps),
+                maxshape=(None, num_sobbhs, ntemps),
+                dtype=self.dtype,
+                compression=self.compression,
+                compression_opts=self.compression_opts,
+            )
+
+    @property
+    def num_sobbhs(self):
+        """Get num_sobbhs from h5 file."""
+        with self.open() as f:
+            return f[self.name].attrs["num_sobbhs"]
+
+    @property
+    def reset_kwargs(self):
+        """Get reset_kwargs from h5 file."""
+        return dict(num_sobbhs=self.num_sobbhs)
+
+    def grow(self, ngrow, *args):
+        """Grow ``betas_all`` by ``ngrow`` rows."""
+        with self.open("a") as f:
+            g = f[self.name]
+            sobbh_group = f[self.name]["sub_backend"]["sobbh"]
+            ntot = g.attrs["iteration"] + ngrow
+            sobbh_group["betas_all"].resize(ntot, axis=0)
+
+    def get_value(self, name, thin=1, discard=0, slice_vals=None):
+        """Return ``betas_all`` slices from the file. See :meth:`EMRIHDFBackend.get_value`."""
+        if not self.initialized:
+            raise AttributeError(
+                "You must run the sampler with 'store == True' before accessing the results"
+            )
+
+        if name != "betas_all":
+            raise ValueError(f"No {name} in this backend.")
+
+        if slice_vals is None:
+            slice_vals = slice(discard + thin - 1, self.iteration, thin)
+
+        with self.open() as f:
+            g = f[self.name]
+            iteration = g.attrs["iteration"]
+            if iteration <= 0:
+                raise AttributeError(
+                    "You must run the sampler with 'store == True' before accessing the results"
+                )
+
+            sobbh_group = g["sub_backend"]["sobbh"]
+            v_all = sobbh_group["betas_all"][slice_vals]
+        return v_all
+
+    def get_betas_all(self, **kwargs):
+        """Get the stored SOBBH ``betas_all`` history."""
+        return self.get_value("betas_all", **kwargs)
+
+    def save_step(self, state, *args, **kwargs):
+        """Persist this iteration's ``betas_all`` from the current SOBBH sub-state."""
+        with self.open("a") as f:
+            g = f[self.name]
+            iteration = g.attrs["iteration"] - 1
+            sobbh_group = g["sub_backend"]["sobbh"]
+            sobbh_group["betas_all"][iteration] = state.sub_states["sobbh"].betas_all
+
+    def get_a_sample(self, it):
+        """Access a sample in the chain. See :meth:`EMRIHDFBackend.get_a_sample`."""
+        thin = self.iteration - it if it != self.iteration else 1
+        discard = it + 1 - thin
+
+        betas_all = self.get_betas_all(discard=discard, thin=thin)
+
+        sample = SOBBHState(None, betas_all=betas_all)
         return sample
