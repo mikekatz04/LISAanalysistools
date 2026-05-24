@@ -39,6 +39,14 @@ add_backends = {
     "lisatools_cuda13x": LISAToolsCuda13xBackend,
 }
 
+# Pure-JAX backend (subpackage gated on `import jax`). Optional.
+try:
+    from .jax import LISAToolsJaxBackend as _LISAToolsJaxBackend
+    if _LISAToolsJaxBackend is not None:
+        add_backends["lisatools_jax"] = _LISAToolsJaxBackend
+except (ImportError, ModuleNotFoundError):
+    pass
+
 Globals().backends_manager.add_backends(add_backends)
 
 from gpubackendtools import get_backend as _get_backend

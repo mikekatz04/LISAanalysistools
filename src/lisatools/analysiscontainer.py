@@ -621,6 +621,110 @@ class AnalysisContainer:
         else:
             raise ValueError("x must be a 1D or 2D array.")
 
+    def eryn_likelihood_wrap(
+        self,
+        x: np.ndarray | list | tuple,
+        *args: Any,
+        use_vmap: bool = False,
+        source_only: bool = False,
+        **kwargs: Any,
+    ) -> np.ndarray | float:
+        """Vectorized Eryn-compatible log-likelihood.
+
+        Eryn's :class:`~eryn.ensemble.EnsembleSampler` calls its
+        ``log_like_fn`` with all walkers at once when
+        ``vectorize=True``. This method is the batched analog of
+        :meth:`eryn_likelihood_function`: it accepts ``x`` of shape
+        ``(nwalkers, n_params)`` (or ``(n_params,)`` for a single
+        walker) and returns a vector of log-likelihoods.
+
+        Two batching paths are supported:
+
+        * ``use_vmap=True`` -- expects ``self.signal_gen`` to be a
+          jax-traceable function returning a JAX array; the whole
+          per-walker pipeline (signal generation +
+          :meth:`template_likelihood`) is then batched through
+          :func:`jax.vmap`. This is what you want for the JAX
+          TDI-on-the-fly GB likelihood.
+        * ``use_vmap=False`` (default) -- a Python ``for`` loop over
+          the walker axis using :meth:`calculate_signal_likelihood`
+          per walker (same code path as
+          :meth:`eryn_likelihood_function`, just exposed under the
+          name Eryn picks up via ``hasattr``).
+
+        Args:
+            x: Parameters. ``(n_params,)`` for a single walker or
+                ``(nwalkers, n_params)`` for a batch.
+            *args: Extra positional args forwarded to ``signal_gen``.
+            use_vmap: Vectorize via :func:`jax.vmap`. Requires
+                ``signal_gen`` to be jax-traceable and to return a JAX
+                array of shape ``(nchannels, basis_length)``.
+            source_only: Forwarded to :meth:`template_likelihood`.
+            **kwargs: Forwarded to :meth:`template_likelihood`.
+
+        Returns:
+            Scalar (1D input) or ``(nwalkers,)`` array (2D input) of
+            log-likelihood values.
+        """
+        assert self.signal_gen is not None
+
+        if isinstance(x, (list, tuple)):
+            x = np.asarray(x)
+
+        if not hasattr(x, "ndim"):
+            x = np.asarray(x)
+
+        if x.ndim == 1:
+            input_vals = tuple(x) + tuple(args)
+            return self.calculate_signal_likelihood(
+                *input_vals, source_only=source_only, **kwargs
+            )
+
+        if x.ndim != 2:
+            raise ValueError("x must be a 1D or 2D array.")
+
+        if not use_vmap:
+            out = np.zeros(x.shape[0])
+            for i in range(x.shape[0]):
+                input_vals = tuple(x[i]) + tuple(args)
+                out[i] = self.calculate_signal_likelihood(
+                    *input_vals, source_only=source_only, **kwargs
+                )
+            return out
+
+        # vmap path -- pull jax lazily so the import isn't required
+        # when use_vmap=False.
+        try:
+            import jax
+            import jax.numpy as jnp
+        except (ImportError, ModuleNotFoundError) as e:
+            raise RuntimeError(
+                "use_vmap=True requires `jax` to be installed."
+            ) from e
+
+        basis_settings = self.data_res_arr.data_res_arr.settings
+        x_jnp = jnp.asarray(x)
+
+        # ``source_only`` is implemented through ``calculate_signal_likelihood``
+        # (which dispatches to the right code path) and isn't a kwarg
+        # of ``template_likelihood``. The vmap path uses
+        # ``template_likelihood`` directly, so we translate the flag
+        # via ``include_psd_info`` (the complement).
+        template_likelihood_kwargs = dict(kwargs)
+        if not source_only:
+            template_likelihood_kwargs.setdefault("include_psd_info", False)
+
+        def _ll_single(theta):
+            template_arr = self.signal_gen(*theta, *args)
+            template = DataResidualArray(
+                template_arr, input_signal_domain=basis_settings,
+            )
+            return self.template_likelihood(
+                template, **template_likelihood_kwargs,
+            )
+
+        return jax.vmap(_ll_single)(x_jnp)
+
 
 class AnalysisContainerArray:
     """Container for multiple :class:`AnalysisContainer` objects.

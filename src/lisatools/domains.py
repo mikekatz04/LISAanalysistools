@@ -838,14 +838,25 @@ class FDSignal(FDSettings, DomainBase):
             cache = self.xp.fft.config.get_plan_cache()
             cache.clear()
         
-        tmp_w_mn = self.xp.zeros((self.nchannels, settings.Nf + 1, settings.Nt), dtype=float)
+        is_complex = bool(getattr(settings, "is_complex", False))
+        out_dtype = complex if is_complex else float
+        tmp_w_mn = self.xp.zeros((self.nchannels, settings.Nf + 1, settings.Nt), dtype=out_dtype)
         kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
         m_here = np.concatenate([m, np.full((1, settings.Nt), settings.Nf)], axis=0)
         n_here = np.concatenate([n, np.array([np.arange(settings.Nt)])], axis=0)
         set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
-        tmp_w_mn[:, ~set_zero] = kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[:, ~set_zero])
-        
-        w_mn = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=float)
+        projected = self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[:, ~set_zero]
+        if is_complex:
+            # keep both Re (standard WDM) and Im (Hilbert/quadrature companion)
+            tmp_w_mn[:, ~set_zero] = (
+                kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * projected
+            )
+        else:
+            tmp_w_mn[:, ~set_zero] = (
+                kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(projected)
+            )
+
+        w_mn = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=out_dtype)
         w_mn[:, 1:] = tmp_w_mn[:, 1:-1]
         w_mn[:, 0, 0::2] = tmp_w_mn[:, 0, 0::2] / np.sqrt(2.)
         w_mn[:, 0, 1::2] = tmp_w_mn[:, settings.Nf, 0::2] / np.sqrt(2.)
@@ -1402,6 +1413,7 @@ class WDMSettings(DomainSettingsBase):
         max_freq: Optional[float] = None,
         min_time: Optional[float] = None,
         max_time: Optional[float] = None,
+        is_complex: bool = False,
         **kwargs
     ):
         DomainSettingsBase.__init__(self, **kwargs)
@@ -1414,6 +1426,17 @@ class WDMSettings(DomainSettingsBase):
         self.layer_dt = self.Nf * self.data_dt
         self.layer_df = 1. / (2. * self.Nf * self.data_dt)
         self.t0 = t0
+        # Complex/quadrature WDM mode -- when True the wavelet basis carries
+        # both the standard real coefficient and its quadrature (Hilbert-pair)
+        # companion as the imaginary part of a complex coefficient. The
+        # differential_component is halved (0.125 instead of 0.25) so that the
+        # diagnostic inner_product (which sums Re*Re + Im*Im via np.real of
+        # sig1.conj()*sig2) recovers the same time-domain power as the
+        # real-only WDM. NB: at the folded boundary layer m=0 (which packs
+        # DC and Nyquist) the imag part is set to zero, so the correction is
+        # exact for narrowband signals away from DC/Nyquist and slightly
+        # over-corrects when boundary layers carry non-trivial power.
+        self.is_complex = bool(is_complex)
 
         # these have to come after layer_df b/c setters
         # sets ind_min and ind_max
@@ -1541,6 +1564,7 @@ class WDMSettings(DomainSettingsBase):
             and (value.ind_max_t == self.ind_max_t)
             and (value.ind_min_f == self.ind_min_f)
             and (value.ind_max_f == self.ind_max_f)
+            and (bool(getattr(value, "is_complex", False)) == bool(self.is_complex))
         )
 
     def eq_without_inds(self, value):
@@ -1550,6 +1574,7 @@ class WDMSettings(DomainSettingsBase):
             (value.Nt == self.Nt) and (value.Nf == self.Nf)
             and (value.layer_dt == self.layer_dt) and (value.layer_df == self.layer_df)
             and (value.data_dt == self.data_dt)
+            and (bool(getattr(value, "is_complex", False)) == bool(self.is_complex))
         )
 
     @property
@@ -1827,24 +1852,30 @@ class WDMSettings(DomainSettingsBase):
     @property
     def kwargs(self) -> dict:
         return dict(
-            oversample=self.oversample, 
-            window=self.window, 
-            # norm=self.norm, 
-            omega=self.omega, 
-            min_freq=self.min_freq, 
-            max_freq=self.max_freq, 
-            min_time=self.min_time, 
-            max_time=self.max_time, 
+            oversample=self.oversample,
+            window=self.window,
+            # norm=self.norm,
+            omega=self.omega,
+            min_freq=self.min_freq,
+            max_freq=self.max_freq,
+            min_time=self.min_time,
+            max_time=self.max_time,
+            is_complex=self.is_complex,
             force_backend=self.backend
         )
 
     @property
     def args(self) -> tuple:
-        return (self.Nf, self.Nt, self.data_dt)   
-    
+        return (self.Nf, self.Nt, self.data_dt)
+
     @property
     def differential_component(self) -> float:
-        return 0.25
+        # Real-only WDM is a tight frame; inner_product uses
+        # 4 * sum(...) * differential_component. The complex/quadrature WDM
+        # sums Re*Re + Im*Im, which is approximately 2x the real-only power
+        # (the Hilbert companion has matching variance), so halve the
+        # differential to keep the inner-product value invariant.
+        return 0.125 if getattr(self, "is_complex", False) else 0.25
 
     @property
     def total_terms(self) -> int:
@@ -1946,6 +1977,16 @@ class WDMSignal(WDMSettings, DomainBase):
         Returns:
             :class:`FDSignal`.
         """
+        if getattr(self, "is_complex", False):
+            warnings.warn(
+                "wdm_to_fd called on a complex/quadrature WDMSignal; inverting "
+                "the real part only (the quadrature companion is dropped). "
+                "Convert explicitly to a real WDMSignal beforehand to silence "
+                "this warning."
+            )
+            real_settings = WDMSettings(*self.args, **{**self.kwargs, "is_complex": False})
+            real_signal = WDMSignal(self.xp.real(self.arr).copy(), real_settings)
+            return real_signal.wdm_to_fd(settings=settings, window=window)
         if settings is None:
             _tmp_fd = np.fft.rfftfreq(self.N, self.data_dt)
             Nfd = len(_tmp_fd)
@@ -2175,6 +2216,7 @@ class WDMLookupTable(WDMSettings):
     _H5_DATASET_KEYS = (
         "table_sin",
         "table_cos",
+        "table_cx",
         "fdot_vals",
         "norm_freq_single_layer",
         "m_diffs",
@@ -2212,8 +2254,13 @@ class WDMLookupTable(WDMSettings):
         group.attrs["n_ref"] = self.n_ref
         group.attrs["nchannels"] = self.nchannels
         group.attrs["table_kind"] = self.build_kind
-        group.create_dataset("table_sin", data=self.get(self.table_sin))
-        group.create_dataset("table_cos", data=self.get(self.table_cos))
+        # Persist whichever storage variant the build produced. Real path
+        # writes table_sin + table_cos; complex path writes table_cx.
+        if self.build_kind == "n_ref_complex":
+            group.create_dataset("table_cx", data=self.get(self.table_cx))
+        else:
+            group.create_dataset("table_sin", data=self.get(self.table_sin))
+            group.create_dataset("table_cos", data=self.get(self.table_cos))
         group.create_dataset("fdot_vals", data=self.get(self.fdot_vals))
         group.create_dataset(
             "norm_freq_single_layer", data=self.get(self.norm_freq_single_layer)
@@ -2307,8 +2354,11 @@ class WDMLookupTable(WDMSettings):
 
         obj.norm_freq_single_layer = obj.xp.asarray(group["norm_freq_single_layer"][:])
         obj.m_diffs = obj.xp.asarray(group["m_diffs"][:])
-        obj.table_sin = obj.xp.asarray(group["table_sin"][:])
-        obj.table_cos = obj.xp.asarray(group["table_cos"][:])
+        if table_kind == "n_ref_complex":
+            obj.table_cx = obj.xp.asarray(group["table_cx"][:])
+        else:
+            obj.table_sin = obj.xp.asarray(group["table_sin"][:])
+            obj.table_cos = obj.xp.asarray(group["table_cos"][:])
         return obj
 
     def to_file(self, fp: str) -> None:
@@ -2346,8 +2396,11 @@ class WDMLookupTable(WDMSettings):
         self.nchannels = loaded.nchannels
         self.norm_freq_single_layer = loaded.norm_freq_single_layer
         self.m_diffs = loaded.m_diffs
-        self.table_sin = loaded.table_sin
-        self.table_cos = loaded.table_cos
+        if loaded.build_kind == "n_ref_complex":
+            self.table_cx = loaded.table_cx
+        else:
+            self.table_sin = loaded.table_sin
+            self.table_cos = loaded.table_cos
             
     @staticmethod
     def apply_eps_fdot(eps: float, settings: WDMSettings, fdot_max_factor: float= 8.0) -> np.ndarray:
@@ -2414,12 +2467,18 @@ class WDMLookupTable(WDMSettings):
                 store_path, batch_size_gen, td_window=td_window,
                 time_layers=time_layers, verbose=verbose,
             )
+        if self.build_kind == "n_ref_complex":
+            return self._build_lookup_table_n_ref_complex(
+                m_ref, m_diffs, norm_freq_single_layer, fdot_vals,
+                store_path, batch_size_gen, td_window=td_window,
+                time_layers=time_layers, verbose=verbose,
+            )
         if self.build_kind == "per_n":
             return self._build_lookup_table_per_n(
                 m_ref, m_diffs, norm_freq_single_layer, fdot_vals,
                 store_path, batch_size_gen, td_window=td_window, verbose=verbose,
             )
-        raise ValueError(f"Unknown WDMLookupTable.build_kind={self.build_kind!r}; expected 'n_ref_only' or 'per_n'.")
+        raise ValueError(f"Unknown WDMLookupTable.build_kind={self.build_kind!r}; expected 'n_ref_only', 'n_ref_complex', or 'per_n'.")
 
     def _build_lookup_table_per_n(self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray, fdot_vals: np.ndarray, store_path: str, batch_size_gen: int, td_window: Optional[np.ndarray] = None, verbose: bool = False) -> None:
         """Plan B (fallback) — per-(n, m_diff) build. fdot lookup not yet wired."""
@@ -2753,6 +2812,172 @@ class WDMLookupTable(WDMSettings):
         if store_path is not None:
             self.to_file(store_path)
 
+    def _build_lookup_table_n_ref_complex(
+        self, m_ref: int, m_diffs: np.ndarray, norm_freq_single_layer: np.ndarray,
+        fdot_vals: np.ndarray, store_path: str, batch_size_gen: int,
+        td_window: Optional[np.ndarray] = None, time_layers: Optional[int] = None,
+        verbose: bool = False,
+    ) -> None:
+        """Plan A (complex variant) — same table layout as ``n_ref_only`` but built
+        with ONE ``is_complex=True`` WDM transform instead of two real ones.
+
+        Identical accuracy and identical eval-side mapping to the real path
+        (the build's m-rotation / per-block parity-swap / ``(-1)^|k|``
+        baking is retained, applied to Re/Im of the single complex
+        transform). The single saving is the 2x build-time speedup from
+        replacing the (sin-carrier, cos-carrier) pair of WDM transforms
+        with one complex-WDM transform whose Re/Im carry both quadratures
+        of the response.
+
+        The stored complex value satisfies
+        ``Re(table_cx) == table_cos`` and ``Im(table_cx) == table_sin``
+        of the real path, so the existing real-path eval logic
+        (``build_kind == 'n_ref_only'`` branch in ``get_wdm_coeffs``) can
+        consume the Re/Im split without modification.
+        """
+        if time_layers is None:
+            time_layers = int(self.Nt)
+        time_layers = int(time_layers)
+        _eval_n_ref = int(self.Nt) // 2
+        _sub_n_ref = time_layers // 2
+        if (_sub_n_ref % 2) != (_eval_n_ref % 2):
+            raise ValueError(
+                f"time_layers={time_layers} gives sub_n_ref={_sub_n_ref} "
+                f"with parity {_sub_n_ref % 2}, but the EVAL's n_ref="
+                f"{_eval_n_ref} has parity {_eval_n_ref % 2}."
+            )
+        if _sub_n_ref < 4:
+            raise ValueError(
+                f"time_layers={time_layers} gives sub_n_ref={_sub_n_ref}; "
+                "need at least 8 to keep the wavelet basis clear of edges."
+            )
+
+        # Sub-build uses is_complex=True; we read the (m_ref, sub_n_ref) pixel
+        # of the resulting complex WDM coefficient grid.
+        self.sub_settings = WDMSettings(
+            self.Nf, time_layers, self.data_dt,
+            is_complex=True, force_backend=self.force_backend,
+        )
+        self.m_ref = m_ref
+        self.n_ref = _sub_n_ref
+        self.is_m_ref_n_ref_even = (self.m_ref + self.n_ref) % 2 == 0
+        self.m_diffs = self.xp.asarray(m_diffs).astype(self.xp.int32)
+        self.fdot_vals = self.xp.asarray(fdot_vals)
+        self.norm_freq_single_layer = self.xp.asarray(norm_freq_single_layer)
+
+        if td_window is not None:
+            _tw = self.xp.asarray(td_window)
+            if not bool(self.xp.allclose(_tw, 1.0)):
+                raise ValueError(
+                    "WDMLookupTable build_kind='n_ref_complex' requires "
+                    "td_window=None (or an all-ones array)."
+                )
+
+        _sub_t_ref = _sub_n_ref * self.sub_settings.layer_dt
+        t_vals = self.xp.arange(self.sub_settings.N) * self.data_dt
+        t_diff = t_vals - _sub_t_ref
+
+        total_f_fdot_vals = self.f_steps * self.fdot_steps
+        if self.run_fdot:
+            _f_grid, _fdot_grid = self.xp.meshgrid(self.f_vals, self.fdot_vals)
+            _f_vals = _f_grid.ravel()
+            _fdot_vals = _fdot_grid.ravel()
+        else:
+            _f_vals = self.f_vals.copy()
+            _fdot_vals = self.xp.zeros_like(_f_vals)
+
+        if batch_size_gen == -1:
+            batch_size_gen = total_f_fdot_vals
+        batches = np.arange(0, total_f_fdot_vals, batch_size_gen)
+        if batches[-1] < total_f_fdot_vals:
+            batches = np.append(batches, np.array([total_f_fdot_vals]))
+
+        if td_window is None:
+            td_window = self.xp.ones_like(t_diff)
+        self.td_window = td_window
+
+        # Per-entry m_diff_block (which block of m_diffs each f_val sits in).
+        _block_per_fval = self.xp.repeat(self.m_diffs, self.norm_f_steps)
+        if self.run_fdot:
+            _block_per_entry = self.xp.tile(_block_per_fval, self.fdot_steps)
+        else:
+            _block_per_entry = _block_per_fval
+
+        _table_cx = self.xp.zeros((total_f_fdot_vals,), dtype=complex)
+
+        import time as _time
+        _n_batches = len(batches) - 1
+        _t_start = _time.perf_counter()
+        if verbose:
+            print(f"[build n_ref_complex] starting: {_n_batches} batches  "
+                  f"f_steps={self.f_steps}  fdot_steps={self.fdot_steps}  "
+                  f"total={total_f_fdot_vals}", flush=True)
+
+        for _bi, (st_batch, end_batch) in enumerate(zip(batches[:-1], batches[1:])):
+            _t_batch = _time.perf_counter()
+            inds = np.arange(st_batch, end_batch)
+
+            phase = 2 * np.pi * (
+                _f_vals[inds, None] * t_diff[None, :]
+                + 0.5 * _fdot_vals[inds, None] * t_diff[None, :] ** 2
+            )
+            # Single complex WDM transform: feeding the cos(phase) carrier
+            # to ``is_complex=True`` yields a coefficient whose Re equals
+            # the real cos-carrier WDM coefficient and Im equals the real
+            # sin-carrier WDM coefficient at the same pixel (Hilbert
+            # companion). This replaces the (sin, cos) pair of transforms
+            # in ``_build_lookup_table_n_ref`` for the 2x build speedup.
+            wave_in = self.xp.cos(phase)
+            wave_wdm = TDSignal(
+                wave_in,
+                TDSettings(self.sub_settings.N, self.sub_settings.data_dt, force_backend=self.force_backend),
+            ).wdmtransform(settings=self.sub_settings, window=self.td_window)
+
+            raw_pix = wave_wdm[:, self.m_ref, _sub_n_ref]
+            raw_cos = self.xp.real(raw_pix)
+            raw_sin = self.xp.imag(raw_pix)
+
+            # From here on the storage mirrors ``_build_lookup_table_n_ref``
+            # so the eval-side (real-path) logic in ``get_wdm_coeffs`` can
+            # consume Re/Im of ``table_cx`` as drop-in replacements for
+            # (cos_table, sin_table). Each step below has the same meaning
+            # as in the real build path; see that method for the detailed
+            # derivation comments.
+            _block_per_inds = _block_per_entry[inds].astype(int)
+            _k_is_odd = (_block_per_inds & 1) != 0
+            if self.is_m_ref_n_ref_even:
+                sin_rot = self.xp.where(_k_is_odd, -raw_cos, raw_sin)
+                cos_rot = self.xp.where(_k_is_odd,  raw_sin, raw_cos)
+            else:
+                sin_rot = self.xp.where(_k_is_odd,  raw_cos, raw_sin)
+                cos_rot = self.xp.where(_k_is_odd, -raw_sin, raw_cos)
+            _is_odd_per_inds = (
+                ((self.m_ref + _block_per_inds + self.n_ref) % 2) == 1
+            )
+            sin_pixel = self.xp.where(_is_odd_per_inds, cos_rot, sin_rot)
+            cos_pixel = self.xp.where(_is_odd_per_inds, sin_rot, cos_rot)
+            _block_sign = self.xp.where(_k_is_odd, -1.0, 1.0)
+            sin_pixel = sin_pixel * _block_sign
+            cos_pixel = cos_pixel * _block_sign
+            _table_cx[inds] = cos_pixel + 1j * sin_pixel
+
+            if verbose:
+                _elapsed = _time.perf_counter() - _t_start
+                _per_batch = _elapsed / (_bi + 1)
+                _eta = _per_batch * (_n_batches - _bi - 1)
+                print(f"[build n_ref_complex] batch {_bi + 1:4d}/{_n_batches}  "
+                      f"inds=[{int(st_batch):5d}, {int(end_batch):5d})  "
+                      f"this_batch={_time.perf_counter() - _t_batch:.2f}s  "
+                      f"elapsed={_elapsed/60.0:5.2f}m  ETA={_eta/60.0:5.2f}m",
+                      flush=True)
+
+        _table_cx = _table_cx.reshape(self.fdot_steps, self.f_steps).copy()
+        assert _table_cx.shape == (self.fdot_vals.shape[0], self.f_vals.shape[0])
+        self.table_cx = _table_cx
+
+        if store_path is not None:
+            self.to_file(store_path)
+
     @property
     def run_fdot(self) -> bool:
         return not (len(self.fdot_vals) == 1 and self.fdot_vals[0] == 0.0)
@@ -2835,6 +3060,32 @@ class WDMLookupTable(WDMSettings):
         self._table_cos_interpolate = self.build_interpolator(table_cos)
 
     @property
+    def table_cx(self) -> np.ndarray:
+        return self._table_cx
+
+    @property
+    def table_cx_re_interpolate(self) -> np.ndarray:
+        return self._table_cx_re_interpolate
+
+    @property
+    def table_cx_im_interpolate(self) -> np.ndarray:
+        return self._table_cx_im_interpolate
+
+    @table_cx.setter
+    def table_cx(self, table_cx: np.ndarray):
+        # Build_kind 'n_ref_complex' stores ONE complex 2-D table; we
+        # interpolate Re and Im separately on the same grid (equivalent to
+        # interpolating the complex value, but compatible with the same
+        # scipy/cupyx Real interpolators used by the real path).
+        self._table_cx = table_cx
+        self._table_cx_re_interpolate = self.build_interpolator(
+            self.xp.real(table_cx).copy()
+        )
+        self._table_cx_im_interpolate = self.build_interpolator(
+            self.xp.imag(table_cx).copy()
+        )
+
+    @property
     def settings(self) -> TDSettings:
         return WDMSettings(*self.args, **self.kwargs)
 
@@ -2852,7 +3103,9 @@ class WDMLookupTable(WDMSettings):
         else:
             interpolate = interpolate_cpu
 
-        if self.build_kind == "n_ref_only":
+        if self.build_kind in ("n_ref_only", "n_ref_complex"):
+            # Both kinds use the same (fdot, f_norm) grid; the complex
+            # variant invokes this twice (Re and Im) on the same axes.
             if self.run_fdot:
                 # table shape: (fdot_steps, f_steps)
                 return interpolate.RegularGridInterpolator(
@@ -2896,7 +3149,9 @@ class WDMLookupTable(WDMSettings):
 
         For ``build_kind='n_ref_only'`` the ``n_arr`` argument is unused
         (the table has no time-pixel axis) but kept in the signature so
-        callers do not need to branch.
+        callers do not need to branch. The ``n_ref_complex`` build packs
+        cos into ``Re(table_cx)`` and sin into ``Im(table_cx)``, so the
+        eval path just reads Re/Im from the same interpolators.
         """
         if self.build_kind == "n_ref_only":
             if self.run_fdot:
@@ -2906,6 +3161,14 @@ class WDMLookupTable(WDMSettings):
             else:
                 sin_coeffs = self.table_sin_interpolate(f_norm)
                 cos_coeffs = self.table_cos_interpolate(f_norm)
+        elif self.build_kind == "n_ref_complex":
+            if self.run_fdot:
+                pts = self.xp.stack([fdot_arr, f_norm], axis=-1)
+                cos_coeffs = self.table_cx_re_interpolate(pts)
+                sin_coeffs = self.table_cx_im_interpolate(pts)
+            else:
+                cos_coeffs = self.table_cx_re_interpolate(f_norm)
+                sin_coeffs = self.table_cx_im_interpolate(f_norm)
         elif self.build_kind == "per_n":
             if self.run_fdot:
                 raise NotImplementedError(
@@ -2961,7 +3224,10 @@ class WDMLookupTable(WDMSettings):
 
             _sin_coeffs, _cos_coeffs = self.get_table_coeffs(f_norm, fdot_arr[keep_now], n_arr[keep_now])
 
-            if self.build_kind == "n_ref_only":
+            # The n_ref_complex storage packs (cos, sin) into (Re, Im) of
+            # table_cx after the same build-time heroics; the eval path
+            # below reuses the real-path branch unchanged.
+            if self.build_kind in ("n_ref_only", "n_ref_complex"):
                 # Plan A — n-translation from per_n_at_n_ref to per_n_at_n_eval.
                 # Currently only the (-1)^dn parity sign is applied; this is
                 # exact for fdot=0 sources and an approximation for chirp.

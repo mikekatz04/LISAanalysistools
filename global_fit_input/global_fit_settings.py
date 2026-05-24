@@ -1,4 +1,4 @@
-"""Top-level global-fit settings (GB + foreground + PSD + MBH + EMRI).
+"""Top-level global-fit settings (GB + foreground + PSD + MBH + EMRI + SOBBH).
 
 Edit this file directly. The *backend* block below picks the array
 module + GPU backend; ``DOMAIN_CHOICE`` (further down) picks the basis
@@ -11,6 +11,8 @@ Built on the same pieces the smoke-test settings files use:
 * The EMRI branch reuses the cached ``GenerateEMRIWaveform`` +
   ``ResponseWrapper`` pattern from ``emri_only_global_fit_settings.py``
   via :class:`EMRIWaveWrap`, with one waveform held in RAM at a time.
+* The SOBBH branch mirrors EMRI with :class:`SOBBHWaveform` (3.5PN,
+  aligned spins) + ``ResponseWrapper`` via :class:`SOBBHWaveWrap`.
 * MBH is wired through :class:`MBHSpecialMove` with ``BBHWaveformFD``.
 """
 
@@ -931,6 +933,84 @@ def _build_emri_move(
     return emri_pe_move
 
 
+def _build_sobbh_move(
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state,
+):
+    """SOBBH move with cached generator + per-walker pre-injection.
+
+    Mirrors :func:`_build_emri_move`. One waveform held in RAM at a time
+    during pre-injection so peak memory stays at a single template's worth.
+    """
+    general_info = curr.general_info
+    sobbh_info = curr.source_info["sobbh"]
+    nwalkers = general_info.nwalkers
+    ntemps = general_info.ntemps
+
+    force_backend = "cpu" if not gpu_available else GPU_BACKEND
+    tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
+    template_wave_gen = get_sobbh_response_wrapper(
+        Tobs=general_info.Tobs,
+        dt=general_info.dt,
+        t_start=T_START,
+        tdi_config=tdi_config,
+        tdi_chan="XYZ",
+        role="template",
+        force_backend=force_backend,
+    )
+    td_settings = TDSettings(
+        int(round(general_info.Tobs / general_info.dt)),
+        general_info.dt,
+        force_backend=force_backend,
+    )
+    wave_gen = SOBBHWaveWrap(
+        template_wave_gen,
+        td_settings,
+        general_info.domain_settings,
+        td_window=None,
+        nchannels=acs.nchannels,
+    )
+
+    # Per-walker pre-injection — keeps peak RAM at one template's worth.
+    if np.any(sobbh_inds := state.branches_inds["sobbh"][0]):
+        for leaf in range(sobbh_inds.shape[-1]):
+            if not sobbh_inds[0, leaf]:
+                continue
+            assert np.all(sobbh_inds[:, leaf])
+            inj_coords = state.branches_coords["sobbh"][0, :, leaf]
+            inj_coords_in = sobbh_info.transform.both_transforms(inj_coords)
+            for i in range(inj_coords.shape[0]):
+                sig = wave_gen(*inj_coords_in[i], **sobbh_info.waveform_kwargs)
+                acs.add_signal_to_residual([sig], data_index=np.array([i]))
+                del sig
+                gc.collect()
+
+    betas_all = np.tile(
+        make_ladder(sobbh_info.ndim, ntemps=ntemps), (sobbh_info.nleaves_max, 1)
+    )
+    state.sub_states["sobbh"].betas_all = betas_all
+
+    coords_shape = (ntemps, nwalkers, sobbh_info.nleaves_max, sobbh_info.ndim)
+    sobbh_pe_move = ResidualAddOneRemoveOneMove(
+        "sobbh",
+        coords_shape,
+        wave_gen,
+        sobbh_info.waveform_kwargs.copy(),
+        sobbh_info.waveform_kwargs.copy(),
+        acs,
+        sobbh_info.num_prop_repeats,
+        sobbh_info.transform,
+        priors,
+        sobbh_info.inner_moves,
+        Tmax=np.inf,
+        betas_all=betas_all,
+    )
+    sobbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    return sobbh_pe_move
+
+
 #######################
 ##### SETTINGS ###########
 ###############
@@ -1141,6 +1221,78 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     return EMRISetup(emri_settings)
 
 
+def get_sobbh_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
+    """Build the SOBBH :class:`SOBBHSetup`.
+
+    ``initialize_kwargs`` is consumed by :class:`SOBBHSetup` only to track
+    metadata for the run; the active waveform path is the cached
+    generator in :func:`_build_sobbh_move`.
+    """
+    force_backend = "cpu" if not gpu_available else GPU_BACKEND
+    initialize_kwargs_sobbh = dict(
+        T=general_set.Tobs / YRSID_SI,
+        dt=general_set.dt,
+        sobbh_waveform_args=("SOBBHWaveform",),
+        sobbh_waveform_kwargs=dict(force_backend=force_backend),
+        response_kwargs=dict(
+            t0=T_START,
+            order=40,
+            tdi="2nd generation",
+            tdi_chan="XYZ",
+            force_backend=force_backend,
+            remove_garbage="zero",
+        ),
+    )
+
+    waveform_kwargs_pe = dict()
+
+    delta_prior = 1e-2
+    injection_sampling = sobbh_full_to_sampling(SOBBH_INJECTION_PARAMS_FULL_BASIS)
+
+    logm1_lims = [
+        (1 - delta_prior) * injection_sampling[0],
+        (1 + delta_prior) * injection_sampling[0],
+    ]
+    logm2_lims = [
+        (1 - delta_prior) * injection_sampling[1],
+        (1 + delta_prior) * injection_sampling[1],
+    ]
+    s1_inj = injection_sampling[2]
+    s1_lims = [max(-0.99, s1_inj - delta_prior), min(0.99, s1_inj + delta_prior)]
+    s2_inj = injection_sampling[3]
+    s2_lims = [max(-0.99, s2_inj - delta_prior), min(0.99, s2_inj + delta_prior)]
+    f_low_inj = injection_sampling[6]
+    f_low_lims = [
+        (1 - delta_prior) * f_low_inj,
+        (1 + delta_prior) * f_low_inj,
+    ]
+
+    inner_moves = [(StretchMove(), 1.0)]
+    fill_values = np.array([])  # no non-sampled SOBBH params at default
+
+    sobbh_settings = SOBBHSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        fill_values=fill_values,
+        logm1_lims=logm1_lims,
+        logm2_lims=logm2_lims,
+        s1_lims=s1_lims,
+        s2_lims=s2_lims,
+        f_low_lims=f_low_lims,
+        injection=injection_sampling,
+        num_prop_repeats=2,
+        initialize_kwargs=initialize_kwargs_sobbh,
+        waveform_kwargs=waveform_kwargs_pe,
+        info_matrix_gen=None,
+        inner_moves=inner_moves,
+        nleaves_max=1,
+        nleaves_min=1,
+        ndim=11,
+    )
+
+    return SOBBHSetup(sobbh_settings)
+
+
 def get_general_erebor_settings() -> GeneralSetup:
     Tobs = TOBS
     dt = DT
@@ -1225,6 +1377,7 @@ def get_global_fit_settings(copy_settings_file=False):
     galfor_setup = get_galfor_erebor_settings(general_setup)
     mbh_setup = get_mbh_erebor_settings(general_setup)
     emri_setup = get_emri_erebor_settings(general_setup)
+    sobbh_setup = get_sobbh_erebor_settings(general_setup)
 
     gf_settings = GlobalFitSettings(
         source_info={
@@ -1233,6 +1386,7 @@ def get_global_fit_settings(copy_settings_file=False):
             "galfor": galfor_setup,
             "mbh": mbh_setup,
             "emri": emri_setup,
+            "sobbh": sobbh_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,

@@ -247,14 +247,22 @@ def inner_product(
 
     out /= normalization_value
 
-    # remove from cupy if needed
+    # remove from cupy if needed -- but skip the concretization for jax
+    # arrays / tracers (calling ``.item()`` inside ``jax.grad`` raises a
+    # ``ConcretizationTypeError`` and would drop the trace).
     try:
-        out = out.item()
-    except AttributeError:
-        pass
+        import jax
+        _is_jax = isinstance(out, (jax.Array, jax.core.Tracer))
+    except (ImportError, ModuleNotFoundError):
+        _is_jax = False
+    if not _is_jax:
+        try:
+            out = out.item()
+        except AttributeError:
+            pass
 
     # add copy function to complex value for compatibility
-    if complex:
+    if complex and not _is_jax:
         out = np.complex128(out)
 
     return out

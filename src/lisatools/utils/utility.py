@@ -228,18 +228,26 @@ def detrend(t, y):
 
 
 def get_array_module(arr: np.ndarray | cp.ndarray) -> object:
-    """Return array library of an array (np/cp).
+    """Return array library of an array (np/cp/jnp).
 
     Args:
-        arr: Numpy or Cupy array.
+        arr: Numpy, Cupy, or JAX array (including ``jax.Array`` /
+            ``jax.core.Tracer`` inside a ``jax.jit`` / ``jax.grad`` trace).
 
     """
     if isinstance(arr, np.ndarray):
         return np
-    elif isinstance(arr, cp.ndarray):
+    if isinstance(arr, cp.ndarray):
         return cp
-    else:
-        raise ValueError("arr must be a numpy or cupy array.")
+    # JAX arrays / tracers — gated so importing this module never requires jax.
+    try:
+        import jax
+        import jax.numpy as jnp
+    except (ImportError, ModuleNotFoundError):
+        jax = None
+    if jax is not None and isinstance(arr, (jax.Array, jax.core.Tracer)):
+        return jnp
+    raise ValueError("arr must be a numpy, cupy, or jax array.")
 
 
 def asnumpy(arr) -> np.ndarray:

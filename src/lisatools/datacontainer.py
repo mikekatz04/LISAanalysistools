@@ -70,9 +70,15 @@ class DataResidualArray:
 
         else:
             if not isinstance(data_res_in, domains.DomainBase):
-                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
-
-                xp = get_array_module(data_res_in)
+                # Accept numpy, cupy, or jax arrays (the array-module
+                # dispatch via ``get_array_module`` handles all three).
+                try:
+                    xp = get_array_module(data_res_in)
+                except ValueError as e:
+                    raise AssertionError(
+                        "data_res_in must be a numpy / cupy / jax array, "
+                        "DomainBase, or DataResidualArray."
+                    ) from e
                 data_res_in = xp.atleast_2d(data_res_in)
                 if input_signal_domain is None:
                     raise ValueError(
