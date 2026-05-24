@@ -61,7 +61,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     Tmax: float = 1.0e6
-    permute_every: int = 30
+    permute_every: int = 25
 
     mbh_info = curr.source_info["mbh"]
     psd_info = curr.source_info["psd"]
@@ -113,7 +113,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         curr.source_info["mbh"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = np.array([1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1])
+        spread = np.array([1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1])
 
         scatter_around_injection(
             state,
@@ -154,7 +154,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
         pad_out_of_prior=True,
         run_async=True,
         run_threaded=True,
-        randomize_split=False
+        randomize_split=True
     )
 
     mbh_pe_move = TDMBHSpecialMove(**mbh_move_kwargs)
@@ -276,15 +276,81 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     betas = 1 / 1.2 ** np.arange(general_set.ntemps)  # Geometric ladder with ratio 1.2
 
+    basis = [
+        r"$\log M$",
+        r"$Q$",
+        r"$s_{1z}$",
+        r"$s_{2z}$",
+        r"$d_L$",
+        r"$\phi_{\rm ref}$",
+        r"$\cos \iota$",
+        r"$\psi$",
+        r"$\alpha$",
+        r"$\sin \delta$",
+        r"$t_{\rm plunge}$",
+    ]
+
+    def gpc_to_mpc(x):
+        """
+        Transform from Gpc to Mpc, for distance prior.
+        """
+        return x * 1e3
+
+    def mT_Q(M, Q):
+        """
+        Transform from total mass and mass ratio m1/m2 to m1 and m2.
+        """
+        m2 = M / (1 + Q)
+        m1 = Q * m2
+        assert np.all(m1 >= m2), "m1 should be the larger mass"
+        return m1, m2
+
+    mbh_transform_fn_in = {
+        r"$\log M$": np.exp,
+        r"$d_L$": gpc_to_mpc,
+        r"$\cos \iota$": np.arccos,
+        r"$\sin \delta$": np.arcsin,
+        (r"$\log M$", r"$Q$"): mT_Q,
+        # (r"$t_{\rm plunge}$", r"$\lambda$", r"$\sin \delta$", r"$\psi$"): LISA_to_SSB,
+        # ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
+    }
+
+    transform = TransformContainer(
+        input_basis=basis,
+        output_basis=basis,
+        parameter_transforms=mbh_transform_fn_in,
+        fill_dict={},
+    )
+
+    periodic = {"mbh": {r"$\phi_{\rm ref}$": 2 * np.pi, r"$\alpha$": 2 * np.pi, r"$\psi$": np.pi}}
+
+    priors_mbh = {
+                r"$\log M$": uniform_dist(np.log(1e5), np.log(1e8)),
+                r"$Q$": log_uniform(1., 10.),
+                r"$s_{1z}$": uniform_dist(-0.99999999, +0.99999999),
+                r"$s_{2z}$": uniform_dist(-0.99999999, +0.99999999),
+                r"$d_L$": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
+                r"$\phi_{\rm ref}$": uniform_dist(0.0, 2 * np.pi),
+                r"$\cos \iota$": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                r"$\psi$": uniform_dist(0.0, np.pi), #is this right?
+                r"$\alpha$": uniform_dist(0.0, 2 * np.pi),
+                r"$\sin \delta$": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                r"$t_{\rm plunge}$": uniform_dist(0.0, general_set.Tobs + 3600.0),
+            }
+    priors = {"mbh": ProbDistContainer(priors_mbh)}
+
     mbh_settings = MBHSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=waveform_init_kwargs,
+        transform=transform,
+        periodic=periodic,
+        priors=priors,
         waveform_kwargs=waveform_runtime_kwargs,
         nleaves_max=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         nleaves_min=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         ndim=11,
-        num_prop_repeats=20,
+        num_prop_repeats=25,
         log_dir=general_set.file_store_dir,
         betas=betas,
         inner_moves=[StretchMove(),]
@@ -319,13 +385,13 @@ def get_general_erebor_settings() -> GeneralSetup:
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
-    comment = "3 MBHBs after fixing another bug."
+    comment = "6 MBHBs after fixing another bug."
 
     submission_folder = None#"/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
     num_iterations = 600
 
-    source_ids = [18, 5, 16]#, 7, 2, 12]
+    source_ids = [18, 5, 16, 7, 2, 12]
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
@@ -334,10 +400,10 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "3_mbhbs_18_5_16" #"6_mbhbs_18_5_16_7_2_12"
+    base_file_name = "6_mbhbs_18_5_16_7_2_12"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [0]
+    gpus = [0, 1, 2]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -345,8 +411,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 20
-    ntemps = 3
+    nwalkers = 60
+    ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
