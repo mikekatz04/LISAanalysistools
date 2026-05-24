@@ -98,3 +98,88 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `Makefile` at the repo root is leftover from a previous project (`lisacattools`) — ignore it; build with `pip` / `cmake` as described above.
 - When editing native code, remember the `.cu → .cxx` copy step: a change to `Detector.cu` rebuilds both CPU and GPU targets.
 - When adding Python code that needs to work on both CPU and GPU, follow the `xp` pattern (resolve the array module from an input array via `get_array_module`) rather than importing `cupy` unconditionally.
+
+## Backend implementation hierarchy (sprint-wide rule)
+
+When implementing or modifying an algorithm that exists across multiple
+backends (GPU C++ / CPU C++ / JAX), follow this hierarchy:
+
+1. **GPU C++ (CUDA) leads.** This is the canonical performance target
+   and reference implementation. New algorithms and optimizations are
+   designed for the GPU first; CPU and JAX paths follow.
+
+2. **CPU C++ mirrors GPU C++ as closely as possible.** Same kernel
+   structure, same algorithm, same data flow — use `#ifdef __CUDACC__`
+   or shared compile-time macros (`CUDA_SHARED`, `THREAD_START`,
+   `BLOCK_INCR`, …) to bridge platform differences. The CPU path
+   exists primarily for testing and CPU-only environments; it must
+   not diverge in algorithm or output beyond floating-point order of
+   operations.
+
+3. **CPU C++ must reproduce the overall lisatools computation.**
+   Against the lisatools reference (e.g. `FDSignal.transform`,
+   `TDSignal.transform`, `XYZ2SensitivityMatrix`), match to machine
+   precision (≤ 1e-15 mismatch) in direct modes; cache/approximation
+   modes have documented per-feature error budgets.
+
+4. **JAX may diverge internally** — design it to be JAX-efficient.
+   JAX-CPU and JAX-GPU compilation targets may even differ. Use
+   JAX-native idioms (`jax.lax.scan`, `jax.vmap`, static-shape
+   `dynamic_slice` + masks, functional carries) rather than
+   mechanically translating CUDA shared memory / register caches.
+
+5. **JAX must match C++ inner-product outputs.** End-to-end
+   likelihood quantities (`<d|h>`, `<h|h>`, swap_ll 5 terms) must
+   match the C++ to floating-point precision (reldiff ≲ 1e-12) on
+   representative test cases. Intermediate quantities (raw templates,
+   per-chunk WDM coefficients) may differ at FP precision due to
+   summation order — validate at the inner-product level.
+
+**Workflow for a new feature.** GPU C++ → CPU C++ via `#ifdef` → JAX
+with JAX-native idioms → cross-backend inner-product validation.
+
+
+
+## Narrowband mismatches mm2 / mm5 (chunked-het / WDM validation)
+
+When verifying a chunked-heterodyne or other narrowband WDM template
+against a lisatools reference signal, the canonical narrowband
+mismatches are:
+
+- **`mm5`** -- "5-layer" mismatch over a 5-m-layer band around the
+  carrier `f0`. The band is defined by frequency bounds
+  `[f0 - 3*layer_df, f0 + 2*layer_df]` (slightly asymmetric to cover
+  the spectral tails on the side where the WDM transform spreads). Use
+  this as the **primary** chunked-het accuracy metric -- it captures
+  the dominant carrier + first-neighbour m-layers.
+
+- **`mm2`** -- "2-layer" mismatch over just `m_floor` and `m_floor + 1`
+  (the two layers that hold the bulk of a near-monochromatic GB
+  signal). Band bounds: `[(m_floor - 0.5)*layer_df,
+  (m_floor + 1 + 0.5)*layer_df]`. Use this as a tighter check
+  isolating the carrier itself; it strips away spectral-tail
+  contributions.
+
+Both are **`1 - normalized overlap`**:
+
+```python
+mm = 1 - <d|h> / sqrt(<d|d> <h|h>)
+```
+
+via `AnalysisContainer.template_inner_product(..., normalize=True)`,
+after slicing both `data` and `template` to the same narrow band by
+building a per-binary `WDMSettings(min_freq=..., max_freq=...)` and
+reusing the parent grid for layer-index alignment.
+
+The canonical implementation lives in
+`gb_chunked_prior_draws.py:283-340` (the `mm5` and `mm2` blocks).
+SOBBH and other source-class versions should mirror the same band
+definition for direct cross-source comparison.
+
+Acceptance thresholds (current chunked-het with N_cp_sig=48,
+N_cp_orbit=32, half-day wavelets, full angular prior):
+- median mm5 ~ 1e-9, 90% < 8e-9, 99% < 3e-7
+- low-frequency (m_floor < 100) sources occasionally show mm5 ~ 1e-7
+  due to spectral-tail extension below ind_min_f -- documented
+  systematic, not a bug.
+

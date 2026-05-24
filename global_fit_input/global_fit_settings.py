@@ -60,7 +60,8 @@ from lisatools.domains import (
     DomainBaseArray,
     TDSettings,
     TDSignal,
-    WDMLookupTable,
+    # WDMLookupTable removed -- chunked-heterodyne pipeline replaces the
+    # lookup-table machinery (see sprint root CLAUDE.md and gb_wdm_het).
     WDMSettings,
 )
 from lisatools.globalfit.engine import (
@@ -129,13 +130,17 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
     min_time=20 * 3600.0,
     max_time=(NT - 20) * 3600.0,
 )
-WDM_LOOKUP_TABLE = lambda wdm_settings: WDMLookupTable.from_file(
-    "wdm_lookup_n_ref_NF720_NT2160_3mo.h5",
-    force_backend=GPU_BACKEND,
-)
+# Lookup-table WDM path removed -- pending chunked-heterodyne integration.
+# Setting to None makes the GB pipeline fall back to its FD path; once
+# the chunked-het adapter is wired through fastlisaresponse.gbcomps it
+# replaces this entirely.
+WDM_LOOKUP_TABLE = None
+# WDM_LOOKUP_TABLE = lambda wdm_settings: WDMLookupTable.from_file(
+#     "wdm_lookup_n_ref_NF720_NT2160_3mo.h5",
+#     force_backend=GPU_BACKEND,
+# )
 # Alternates (import FDSettings / STFTSettings from lisatools.domains first):
 # DOMAIN_CHOICE = FDSettings.make_factory(min_freq=5e-5, max_freq=3e-2)
-# WDM_LOOKUP_TABLE = None
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
 # ============================================================
 

@@ -114,7 +114,12 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
-from lisatools.domains import WDMLookupTable, WDMSettings
+# NOTE: WDMLookupTable removed -- chunked-heterodyne template pipeline
+# (gb_wdm_het.GBWDMHeterodyne) replaces the lookup-table machinery. See
+# the sprint root CLAUDE.md "mm2/mm5" and "backend hierarchy" sections.
+# Re-add WDMLookupTable here only if you're temporarily falling back to
+# the lookup path for debugging.
+from lisatools.domains import WDMSettings
 
 # basic transform functions for pickling
 def f_ms_to_s(x):
@@ -264,13 +269,17 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
     min_time=20 * 3600.0,
     max_time=(2160 - 20) * 3600.0,
 )
-WDM_LOOKUP_TABLE = lambda wdm_settings: WDMLookupTable.from_file(
-    "wdm_lookup_n_ref_NF720_NT2160_3mo.h5",
-    force_backend=GPU_BACKEND,
-)
+# Lookup-table WDM path removed -- pending chunked-heterodyne integration.
+# The lookup table builder is preserved (commented) so the FD fallback
+# is used by default; once the chunked-het adapter is wired into
+# fastlisaresponse.gbcomps it will replace this entirely.
+WDM_LOOKUP_TABLE = None
+# WDM_LOOKUP_TABLE = lambda wdm_settings: WDMLookupTable.from_file(
+#     "wdm_lookup_n_ref_NF720_NT2160_3mo.h5",
+#     force_backend=GPU_BACKEND,
+# )
 # Example alternates:
 # DOMAIN_CHOICE = FDSettings.make_factory(min_freq=5e-5, max_freq=3e-2)
-# WDM_LOOKUP_TABLE = None
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
 # ============================================================
 
