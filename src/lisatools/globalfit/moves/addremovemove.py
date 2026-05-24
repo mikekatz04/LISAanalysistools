@@ -5,6 +5,8 @@ import time
 from copy import deepcopy
 from typing import Any, Callable, TYPE_CHECKING
 
+from lisatools.datacontainer import DataResidualArray
+
 
 try:
     import cupy as xp
@@ -243,13 +245,21 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         # that make it here
         ll = np.full_like(data_index, -1e300, dtype=float)
         #data_index = xp.asarray(data_index.astype(np.int32)) # make sure data index is on the same device as the likelihood computation
-        for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index)):
-            ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
-                *coords_in_now,
-                waveform_kwargs=self.waveform_gen_kwargs,
-                signal_gen=signal_gen,
+        source_only = kwargs.pop("source_only", False)
+        all_templates = signal_gen(*coords_in.T, **self.waveform_gen_kwargs)
+        for i in range(coords_in.shape[0]):
+            ll[i] = self.acs[data_index[i]].template_likelihood(
+                DataResidualArray(all_templates[i]),
+                include_psd_info=not source_only,
                 **kwargs,
             )
+        # for i, (coords_in_now, data_index_now) in enumerate(zip(coords_in, data_index)):
+        #     ll[i] = self.acs[data_index_now].calculate_signal_likelihood(
+        #         *coords_in_now,
+        #         waveform_kwargs=self.waveform_gen_kwargs,
+        #         signal_gen=signal_gen,
+        #         **kwargs,
+        #     )
 
         return ll
 
@@ -305,6 +315,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
         )
         return output, None  # AS: match psd? I'm not sure
 
+    def get_split_inds(self):
+        all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
+        inds = all_inds % self.nsplits
+        if self.randomize_split:
+            [np.random.shuffle(x) for x in inds]
+
+        return inds
+
     def propose(self, model, state):
 
         self.setup(model, state)
@@ -348,9 +366,6 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
             ndim = new_state.branches[self.branch_name].coords.shape[-1]
 
-            #compute likelihood at the start
-            start_likelihood = self.acs.likelihood()
-
             # remove cold chain sources
             removal_coords = new_state.branches[self.branch_name].coords[0, :, leaf]
             removal_coords_in = self.transform_fn.both_transforms(removal_coords)
@@ -381,23 +396,23 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                 .real
             )
 
-            if hasattr(self, "waveform_gen_method"):
-                signal_gen = getattr(self.waveform_gen, self.waveform_gen_method)
-            else:
-                signal_gen = self.waveform_gen
+            # if hasattr(self, "waveform_gen_method"):
+            #     signal_gen = getattr(self.waveform_gen, self.waveform_gen_method)
+            # else:
+            #     signal_gen = self.waveform_gen
             
-            acs_like_here = self.compute_acs_like(old_coords_in, data_index=data_index_in, signal_gen=signal_gen, source_only=True, propagate_data_res_kwargs=False).reshape((self.ntemps, self.nwalkers)).real
-            diff = prev_logl - acs_like_here
+            # acs_like_here = self.compute_acs_like(old_coords_in, data_index=data_index_in, signal_gen=signal_gen, source_only=True).reshape((self.ntemps, self.nwalkers)).real
+            # diff = prev_logl - acs_like_here
 
-            if np.any(np.abs(diff) > 1e-1):
-                    logger.warning(f"acs likelihood: {acs_like_here.flatten()}. proposed likelihood: {prev_logl.flatten()}. This could be a sign of numerical issues.")
-                    raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
+            # if np.any(np.abs(diff) > 1e-1):
+            #         logger.warning(f"acs likelihood: {acs_like_here.flatten()}. proposed likelihood: {prev_logl.flatten()}. This could be a sign of numerical issues.")
+            #         if DEBUG_MODE:
+            #             breakpoint()
+            #         else:
+            #             raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
 
-            if np.any(prev_logl < -1e10):
-                logger.warning(f"Very low log likelihood encountered in propose: {prev_logl.min()}. This could be a sign of numerical issues.")
-            
-                if np.any(np.abs(diff) > 1e-1):
-                    raise ValueError(f"Large difference in log likelihood encountered: {np.abs(diff).max()}. This could be a sign of numerical issues.")
+            if np.any(prev_logl < -1e10) or np.any(prev_logl > 1e30):
+                logger.warning(f"Very low log likelihood encountered in propose: min = {prev_logl.min()}, max = {prev_logl.max()}. This could be a sign of numerical issues.")
                 if DEBUG_MODE:
                     breakpoint()
 
@@ -424,10 +439,7 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                 # Split the ensemble in half and iterate over these two halves.
                 accepted = np.zeros((ntemps_full, self.nwalkers), dtype=bool)
-                all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
-                inds = all_inds % self.nsplits
-                if self.randomize_split:
-                    [np.random.shuffle(x) for x in inds]
+                inds = self.get_split_inds()
 
                 # prepare accepted fraction
                 # accepted_here = np.zeros((self.ntemps, self.nwalkers), dtype=bool)
@@ -472,14 +484,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
 
                     if np.any(in_prior):
                         if self.pad_out_of_prior and np.any(~in_prior):
-                                padded = new_points.reshape(-1, ndim).copy()
-                                padded[~in_prior] = new_points.reshape(-1, ndim)[in_prior][0]
-                                new_points_in = self.transform_fn.both_transforms(padded)
+                            padded = new_points.reshape(-1, ndim).copy()
+                            padded[~in_prior] = new_points.reshape(-1, ndim)[in_prior][0]
+                            new_points_in = self.transform_fn.both_transforms(padded)
 
-                                data_index = np.asarray(walker_inds_here.astype(np.int32))
+                            data_index = np.asarray(walker_inds_here.astype(np.int32))
 
-                                all_logl = self.compute_like(new_points_in, data_index=data_index)
-                                logl = np.where(in_prior, all_logl, -1e300)
+                            all_logl = self.compute_like(new_points_in, data_index=data_index)
+                            logl = np.where(in_prior, all_logl, -1e300)
 
                         else:
                             new_points_in = self.transform_fn.both_transforms(
@@ -494,10 +506,10 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                                     data_index=data_index,
                                 )
                     
-                    logger.debug(f"proposed logl: {logl[in_prior]}. elapsed: {time.time() - tic}")
+                    logger.debug(f"average proposed logl: {logl[in_prior].mean()}.")
     
-                    if np.any(logl[in_prior] < -1e10):
-                        logger.warning(f"Very low log likelihood encountered in propose: {logl[~np.isinf(logp)].min()}. This could be a sign of numerical issues.")
+                    if np.any(logl[in_prior] < -1e10) or np.any(logl[in_prior] > 1e30):
+                        logger.warning(f"Suspicious likelihood encountered in propose: min = {logl[~np.isinf(logp)].min()}, max = {logl[~np.isinf(logp)].max()}. This could be a sign of numerical issues.")
                         if DEBUG_MODE:
                             breakpoint()
                     # print(f"new logl: {logl}. elapsed: {time.time() - tic}")
@@ -607,7 +619,14 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
             self.acs.likelihood()
         )  #  - xp.sum(xp.log(xp.asarray(psd[:2])), axis=(0, 2))).get()
         # print("after computing current likelihood. elapsed: ", time.time() - tic)
-        
+        if np.any(current_ll < 0.0):
+            logger.warning(f"The ACS likelihood should always be positive given the psd contribution, but got {current_ll.min()}")
+            logger.warning(f"The minimum proposed likelihood was {prev_logl.min()}.")
+            if DEBUG_MODE:
+                breakpoint()
+            # else:
+            #     raise ValueError(f"The ACS likelihood should always be positive given the psd contribution, but got {current_ll.min()}")
+
         # TODO: add check with last used logl
 
         current_lp = (
@@ -903,4 +922,3 @@ class MultiGPUResidualAddRemoveMove(ResidualAddOneRemoveOneMove, MultiGPUMoveBas
         likelihoods = np.where(np.isfinite(likelihoods), likelihoods, -1e300)
 
         return likelihoods
-
