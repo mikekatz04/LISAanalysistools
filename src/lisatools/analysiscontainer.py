@@ -747,8 +747,12 @@ class AnalysisContainerArray:
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
             start_index = intra_split_index * (self.nchannels * self.data_length)
             end_index = (intra_split_index + 1) * (self.nchannels * self.data_length)
+
+            flat_data_res_here = ac.data_res_arr.flatten()
+            if hasattr(flat_data_res_here, "get"):
+                flat_data_res_here = flat_data_res_here.get()
             self.linear_data_arr[split][start_index:end_index] = self.xp.asarray(
-                ac.data_res_arr.flatten()
+                flat_data_res_here
             )
             # ac.data_res_arr._data_res_arr = signal_class(arr=self.linear_data_arr[split][start_index:end_index].reshape(self.nchannels, *self.data_shape), settings=settings)     #as todo check: are those 2 lines the same?
             ac.data_res_arr.data_res_arr._arr = self.linear_data_arr[split][
@@ -775,8 +779,13 @@ class AnalysisContainerArray:
             intra_split_index = np.where(self.gpu_splits[split] == i)[0][0]
             start_index = intra_split_index * (np.prod(self.shape_sens) * self.data_length)
             end_index = (intra_split_index + 1) * (np.prod(self.shape_sens) * self.data_length)
+            # invC may live on a different GPU (always computed on GPU 0).
+            # Route through CPU to avoid broken P2P cross-device copies.
+            invC_src = ac.sens_mat.invC
+            if hasattr(invC_src, 'get'):
+                invC_src = invC_src.get()
             self.linear_psd_arr[split][start_index:end_index] = self.xp.asarray(
-                ac.sens_mat.invC.flatten()
+                invC_src.flatten()
             )
             ac.sens_mat.invC = self.linear_psd_arr[split][start_index:end_index].reshape(
                 self.shape_sens + self.end_shape
@@ -1166,7 +1175,13 @@ class AnalysisContainerArray:
                     with self.xp.cuda.Device(template_arr.device.id):
                         template_arr = self.xp.ascontiguousarray(template_arr)
                 self.xp.cuda.runtime.setDevice(gpu)
-                template_arr = self.xp.asarray(template_arr)
+                # cp.asarray does NOT copy a CuPy array to the current device — it returns
+                # the same object.  Route through CPU when the source lives on a different
+                # GPU so we never rely on P2P between non-adjacent devices.
+                if isinstance(template_arr, self.xp.ndarray) and template_arr.device.id != gpu:
+                    template_arr = self.xp.asarray(template_arr.get())
+                else:
+                    template_arr = self.xp.asarray(template_arr)
                 # template_settings = template_settings.__class__(*template_settings.args, **template_settings.kwargs)  # make sure settings are on the correct device
 
             if isinstance(template_settings, domains.STFTSettings):

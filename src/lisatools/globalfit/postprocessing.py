@@ -779,6 +779,13 @@ class GlobalFitPlotter:
             "input_data.h5",
         )
 
+        if not os.path.exists(os.path.dirname(filepath)):
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            logger.info(f"Created directory {os.path.dirname(filepath)} for saving converted input data.")
+
+        if os.path.exists(filepath):
+            logger.warning(f"File {filepath} already exists. It will be overwritten.")
+
         with h5py.File(filepath, "w") as f:
             for k, v in converted_data.items():
                 f.create_dataset(k, data=v)

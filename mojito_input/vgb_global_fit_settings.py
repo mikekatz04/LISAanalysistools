@@ -99,11 +99,13 @@ def setup_recipe(
     
     #* ========================== SETUP PARAMETER ESTIMATION ========================== 
     all_pe_moves = gb_pe_moves 
-    pe_weights = [0.8, 0.16, 0.04] # [0.05, 0.45, 0.5] # 
+    pe_weights = [0.8, 0.19, 0.01] # [0.05, 0.45, 0.5] # 
     recipe.add_recipe_component(PERecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=1, convergence_iter=500), name="gb_pe")
     
     moves_info = "".join([f"Move {all_pe_moves[i].name} has weight {w}, " for i, w in enumerate(pe_weights)])
     logger.info(f"For PE: {moves_info}")
+
+    
 
 
 #######################
@@ -246,7 +248,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D" #todo populate repositories
     comment = "making a shorter run to have something for tomorrow"
 
-    submission_folder = "/workspace/rrondeel/erebor/vgb_run_2/"
+    submission_folder = None # "/workspace/rrondeel/erebor/vgb_run_2/"
 
     # source_ids = [18, 5, 16]
 
@@ -255,10 +257,15 @@ def get_general_erebor_settings() -> GeneralSetup:
     start_freq = 1e-4
     end_freq = 1.1e-2
 
-    head_dir = "/workspace/rrondeel/erebor/"
-    data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
-    base_file_name = global_fit_version #"test_mbh_18_with_covariance"
-    file_store_dir = head_dir + "vgb_run_2/"
+    # head_dir = "/workspace/rrondeel/erebor/"
+    # data_input_path = "/workspace/ggfitlisa/ldc/mojito_light/"
+    # base_file_name = global_fit_version #"test_mbh_18_with_covariance"
+    # file_store_dir = head_dir + "vgb_run_2/"
+    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
+    base_file_name = "dev_vgb"
+    file_store_dir = head_dir + "mojito_output/"
+
 
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
@@ -269,7 +276,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 30
-    ntemps = 24
+    ntemps = 10
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq

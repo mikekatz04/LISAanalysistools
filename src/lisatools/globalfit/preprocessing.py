@@ -223,6 +223,18 @@ class L1DataLoader:
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
                 tdi_times = f.tdis.time_sampling.t()
 
+                if self.store_individual_timeseries:
+                    noise_covariance = f.noise_estimates.xyz[:] / (f.laser_frequency**2)
+                    noise_frequencies = f.noise_estimates.freq_sampling.f()
+                    noise_times = f.noise_estimates.time_sampling.t()
+
+                    _individual_timeseries["NOISE"] = (
+                        xyz.T.copy()
+                    )  # store the noise timeseries separately if needed
+                    _individual_timeseries["PSD_MATRIX"] = noise_covariance
+                    _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
+                    _individual_timeseries["PSD_TIMES"] = noise_times
+
             self.source_types.remove("NOISE")
 
             if self.verbose:
@@ -230,18 +242,6 @@ class L1DataLoader:
                 logger.info(f"data, times and orbits initialized from NOISE file.")
                 logger.info(f"TDI time step: {tdi_dt} seconds")
                 logger.info(f"TDI sampling frequency: {tdi_fs} Hz")
-
-            if self.store_individual_timeseries:
-                noise_covariance = f.noise_estimates.xyz[:] / (f.laser_frequency**2)
-                noise_frequencies = f.noise_estimates.freq_sampling.f()
-                noise_times = f.noise_estimates.time_sampling.t()
-
-                _individual_timeseries["NOISE"] = (
-                    xyz.T.copy()
-                )  # store the noise timeseries separately if needed
-                _individual_timeseries["PSD_MATRIX"] = noise_covariance
-                _individual_timeseries["PSD_FREQUENCIES"] = noise_frequencies
-                _individual_timeseries["PSD_TIMES"] = noise_times
 
         for source_type in self.source_types:
 

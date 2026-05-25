@@ -54,7 +54,7 @@ class RJRecipeStep(BaseRecipeStep):
         thin_by: int = 1, 
         **kwargs
     ):
-        RecipeStep.__init__(self, *args, **kwargs)
+        BaseRecipeStep.__init__(self, *args, **kwargs)
         self.convergence_iter = convergence_iter
         self.thin_by = thin_by
 
@@ -126,6 +126,8 @@ def scatter_around_injection(
     spread: float | np.ndarray,
     reverse_transform: typing.Callable | None = None,
     betas: np.ndarray | None = None,
+    priors: ProbDistContainer | None = None,
+    max_resample_tries: int = 50,
 ):
     """
     Initialize branch coordinates by scattering walkers around injection parameters.
@@ -134,6 +136,13 @@ def scatter_around_injection(
     the (transformed) injection parameters.  Higher-temperature chains receive
     proportionally wider scatter when ``betas`` is provided.  Initialized
     leaves are marked as active (``inds = True``).
+
+    When ``priors`` is supplied, any draw that lies outside the prior support
+    (``logpdf == -inf``) is rejected and redrawn.  This is essential for
+    sampling bases that contain ``arcsin``/``arccos`` transforms (e.g. MBH
+    ``sin_beta``, ``cos_iota``) where an out-of-support initial coordinate
+    silently produces NaN once the transform pipeline runs, eventually
+    surfacing as a CUDA illegal-memory-access in downstream kernels.
 
     The function modifies ``state`` in-place, so it can be called from
     ``setup_recipe`` (before MCMC) or from a ``RecipeStep.setup_run``
@@ -167,6 +176,18 @@ def scatter_around_injection(
         Inverse-temperature ladder.  When provided the covariance for
         temperature index *t* is scaled by ``1 / betas[t]`` so that
         hotter chains start with a wider scatter.
+    priors : ProbDistContainer, optional
+        Prior container for ``branch_name``.  When given, walker draws
+        outside the prior support are rejected and redrawn (up to
+        ``max_resample_tries`` per walker).  Without it, this routine can
+        seed walkers that lie outside arcsin/arccos domains, producing
+        NaNs once the transform pipeline runs.
+    max_resample_tries : int, optional
+        Hard cap on resampling attempts per walker before raising.  Only
+        used when ``priors`` is supplied.  Default 50 — for any reasonable
+        scatter and prior, this is wildly more than needed; the cap exists
+        only to surface pathological configs (e.g. the entire scatter
+        landing outside the prior) instead of looping forever.
     """
     coords = state.branches_coords[branch_name]
     ntemps, nwalkers, nleaves_max, ndim = coords.shape
@@ -204,6 +225,9 @@ def scatter_around_injection(
 
     if betas is not None:
         logger.info(f"Scaling initial covariance by betas: {betas}")
+
+    leaf_prior = priors[branch_name] if priors is not None else None
+
     for leaf in range(nleaves_init):
         center = injection_sampling[leaf]
         leaf_cov = covs[leaf]
@@ -214,6 +238,29 @@ def scatter_around_injection(
                 scaled_cov = leaf_cov
 
             draws = np.random.multivariate_normal(center, scaled_cov, size=nwalkers)
+
+            if leaf_prior is not None:
+                bad = ~np.isfinite(leaf_prior.logpdf(draws))
+                tries = 0
+                while bad.any():
+                    if tries >= max_resample_tries:
+                        n_bad = int(bad.sum())
+                        raise RuntimeError(
+                            f"scatter_around_injection: leaf={leaf} temp={t}: "
+                            f"{n_bad}/{nwalkers} walkers still outside prior support "
+                            f"after {max_resample_tries} resample passes. "
+                            f"Injection sampling-basis params = {center.tolist()}. "
+                            f"Likely the injection sits on / outside a prior edge, or "
+                            f"the scatter is too wide for the prior range."
+                            f"Last resampled points (showing up to 10): {draws[bad][:10].tolist()}"
+                        )
+                    redraws = np.random.multivariate_normal(
+                        center, scaled_cov, size=int(bad.sum())
+                    )
+                    draws[bad] = redraws
+                    bad = ~np.isfinite(leaf_prior.logpdf(draws))
+                    tries += 1
+
             coords[t, :, leaf] = draws
 
         state.branches_inds[branch_name][:, :, leaf] = True
@@ -256,22 +303,24 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float 
     cos_iota = np.cos(float(catalogue_entry["InclinationAngle"]))
 
     # Sky coordinates: ICRS -> ecliptic -> SSB -> LISA
-    ra = float(catalogue_entry["RightAscension"])
+    ra = float(catalogue_entry["RightAscension"]) % (2 * np.pi)
     dec = float(catalogue_entry["Declination"])
-    psi_icrs = float(catalogue_entry["PolarisationAngle"])
+    sin_dec = np.sin(dec)
+    psi_icrs = float(catalogue_entry["PolarisationAngle"]) % np.pi  # ensure polarization is within [0, pi]
     lam_ecl, beta_ecl, psi_ssb = icrs_to_ecliptic(ra, dec, psi_icrs)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
-    logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
+    # logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
     
-    t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
+    # t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
     
-    lam_L = lam_L % (2 * np.pi)
-    psi_L = psi_L % np.pi
-    logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
-    sin_beta_L = np.sin(beta_L)
+    # lam_L = lam_L % (2 * np.pi)
+    # psi_L = psi_L % np.pi
+    # logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
+    # sin_beta_L = np.sin(beta_L)
 
-    return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    #return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_icrs, ra, sin_dec, t_ssb])
 
 
 def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
@@ -308,11 +357,11 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot)
     
     f0_mHz = f_init * 1e3
-    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"])) % (np.pi)
+    cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
 
     ra = np.array(catalogue_entry["RightAscension"]) # alpha
     dec = np.array(catalogue_entry["Declination"]) # delta
-    psi_icrs = np.array(catalogue_entry["PolarisationAngle"])
+    psi_icrs = np.array(catalogue_entry["PolarisationAngle"]) % np.pi  # ensure polarization is within [0, pi]
     # lam_ecl, beta_ecl, psi_ecl= icrs_to_ecliptic(ra, dec, psi_icrs)
 
     alpha = ra % (2 * np.pi)
@@ -321,7 +370,7 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     return np.array([logA, f0_mHz, fdot, phi_init, cos_iota, psi_icrs, alpha, sin_delta]).T
 
 
-def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None):
+def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source_type: str, branch_name: str, spread: float | np.ndarray  = 1e-5, subset_inds = None, priors: ProbDistContainer | None = None):
     """Initialize 'branch_name' walkers from catalogue injection parameters"""
 
     catalogue = getattr(curr.general_info, "catalogue", {})
@@ -356,9 +405,9 @@ def setup_state_for_injection(curr: CurrentInfoGlobalFit, state: GFState, source
             setattr(curr.source_info[branch_name], "injection", injection_params)
         except AttributeError:
             logger.warning(f"No injection data is saved for {branch_name}.")
-
+        
         scatter_around_injection(
-            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas")
+            state, branch_name, injection_params, spread, betas=getattr(curr.source_info[branch_name], "betas"), priors=priors
         )
 
 
@@ -369,7 +418,7 @@ def subtract_initial_signal(
     source_name: str,
     source_info: Setup,
 ):
-    
+    xp = acs.xp
     if np.any(inds := state.branches_inds[source_name][0]):
         logger.info(f"Subtracting initial signals for {source_name}")
         counter = 0
@@ -377,13 +426,33 @@ def subtract_initial_signal(
             if inds[0, leaf]:
                 assert np.all(inds[:, leaf])
                 inj_coords = state.branches_coords[source_name][0, :, leaf]
-                inj_coords_in = source_info.transform.both_transforms(inj_coords)
-                signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
+                inj_coords_in = xp.asarray(source_info.transform.both_transforms(inj_coords))
+
+                # logger.debug(f"CUDA device here: {cp.cuda.runtime.getDevice()}")  # Debugging line to check current CUDA device
+
+                # C-order columns are non-contiguous (stride = ndim*8), so ascontiguousarray
+                # is forced to allocate a fresh, pool-aligned buffer for each parameter —
+                # avoiding the misalignment that arises with F-order when nwalkers is odd.
+                signals_in = wave_gen(*[xp.ascontiguousarray(col) for col in inj_coords_in.T], **source_info.waveform_kwargs)
                 for w in range(len(signals_in)):
                     ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
-                    logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}")
+                #     if acs.gpus is not None:
+                #         device = acs.gpu_map[w]
+                #         with cp.cuda.Device(device):
+                #             ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
+                #     else:
+                #         ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
+
+                    logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}.")
                 acs.add_signal_to_residual(signals_in)
                 counter += 1
+                
+                # if acs.gpus is not None:
+                #     acs.synchronize()  # Ensure GPU computations are complete before logging
+                #     # acs.xp.get_default_memory_pool().free_all_blocks()
+                #     cp.cuda.runtime.setDevice(main_device)  # Switch back to main device after subtraction
+                #     logger.debug(f"Switched back to main CUDA device {main_device} after subtraction.")
+                    
         logger.debug(f"Subtracted {counter} initial signals for {source_name}")
     else:
         logger.info(f"No initial signals for {source_name}")
@@ -430,8 +499,9 @@ def build_psd_moves(
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     psd_info = curr.source_info["psd"]
+    galfor_info = curr.source_info.get("galfor", None)
 
-    effective_ndim = engine_info.ndims["psd"]
+    effective_ndim = engine_info.ndims["psd"] if galfor_info is None else engine_info.ndims["galfor"] + engine_info.ndims["psd"] 
     temperature_control = TemperatureControl(
         effective_ndim, nwalkers, ntemps=ntemps, Tmax=Tmax, permute=False
     )
@@ -440,7 +510,8 @@ def build_psd_moves(
         num_repeats=num_repeats,
         permute_every=permute_every,
         live_dangerously=True,
-        psd_transform_fn=psd_info.transform_fn,
+        psd_transform_fn=psd_info.transform,
+        galfor_transform_fn=galfor_info.transform if galfor_info is not None else None,
         sensitivity_backend=general_info.sensitivity_backend,
         temperature_control=temperature_control,
         use_gpu=True,
@@ -628,6 +699,15 @@ def build_gb_moves(
         
         check = priors["gb"].logpdf(coords_out_gb)
         if np.any(np.isinf(check)):
+
+            # check which prior is inf
+            inf_indices = np.where(np.isinf(check))[0]
+            inf_coords = coords_out_gb[inf_indices]
+            logger.error(f"Found {len(inf_indices)} coordinates with inf logpdf under GB priors. Example inf coordinates: {inf_coords[:5]}") 
+
+            logger.info("Prior bounds for GB parameters:")
+            for param_name, prior in priors["gb"].priors_in.items():
+                logger.info(f"  {param_name}: [{prior.min_val},{prior.max_val}]")
             breakpoint()
             raise ValueError("Starting priors are inf. If injecting, try reducing spread.")
 

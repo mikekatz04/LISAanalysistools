@@ -61,7 +61,7 @@ class DataResidualArray:
 
         else:
             if not isinstance(data_res_in, DomainBase):
-                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray)
+                assert isinstance(data_res_in, np.ndarray) or isinstance(data_res_in, cp.ndarray), f"Input must be a DataResidualArray, an instance of DomainBase, numpy or cupy array. Got {type(data_res_in)}."
 
                 xp = get_array_module(data_res_in)
                 data_res_in = xp.atleast_2d(data_res_in)
@@ -243,7 +243,7 @@ class DataResidualArray:
         return self.settings.f_arr
 
     @property
-    def data_res_arr(self) -> np.ndarray:
+    def data_res_arr(self) -> DomainBase:
         """Actual data residual array"""
         return self._data_res_arr
 
