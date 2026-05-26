@@ -2104,7 +2104,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             )
 
             # Build host-side quadrature geometry
-            setup = self.sensitivity_backend.backend.GalacticGridSetup()
+            setup = self.backend.GalacticGridSetup()
             setup.compute(
                 N_lambda=N_lambda,
                 N_beta=N_beta,
@@ -2123,7 +2123,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
             xp = self.xp
 
-            self.sensitivity_backend.initialize_galactic_grid(
+            self._initialize_galactic_grid(
                 times=xp.asarray(_t_arr),
                 R_d=float(R_d),
                 z_d=float(z_d),
