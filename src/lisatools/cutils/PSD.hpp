@@ -104,6 +104,7 @@ public:
     CUDA_DEVICE gcmplx::complex<double> oms_xy_unequal_armlength(double f, double avg_d_ij, double avg_d_ik, double avg_d_jk, double delta_d_ij);
     CUDA_DEVICE double tm_xx_unequal_armlength(double f, double avg_d_ij, double avg_d_ik);
     CUDA_DEVICE gcmplx::complex<double> tm_xy_unequal_armlength(double f, double avg_d_ij, double avg_d_ik, double avg_d_jk, double delta_d_ij);
+    CUDA_DEVICE double galaxy_common_tdi_factor(double f);
 
     CUDA_DEVICE void get_noise_tfs(
         double f,
