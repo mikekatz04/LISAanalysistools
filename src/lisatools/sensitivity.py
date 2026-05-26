@@ -1678,6 +1678,8 @@ def get_sensitivity(
     fill_nans: float = np.nan,
     args_list: Optional[List[tuple]] = None,
     kwargs_list: Optional[List[dict]] = None,
+    wdm_psd_method: str = "fold",
+    stationary: bool = True,
     **kwargs,
 ) -> float | np.ndarray:
     """Generic sensitivity generator
@@ -1692,6 +1694,16 @@ def get_sensitivity(
             PSD, or char_strain (characteristic strain). Default is ASD.
         fill_nans: Value to fill nans in sensitivity (at 0 frequency).
             If ``None``, thens nans will be left in the array.
+        wdm_psd_method: How to build the WDM (wavelet) noise PSD (ignored for
+            non-WDM domains). ``"fold"`` (default) folds the full-resolution
+            Fourier-domain PSD into the wavelet basis (matches the forward WDM
+            transform; ``E[w_mn^2] == S_wdm[m]``). ``"layer_constant"`` is the
+            faster approximation that treats the PSD as constant across a
+            wavelet layer, ``S_wdm[m] = (1/2) Sn(f_layer_center)``.
+        stationary: For WDM, whether the noise PSD is the same for every time
+            pixel. When ``True`` (default) the Fourier-domain PSD is evaluated
+            once and broadcast across all time pixels. ``False`` (time-varying
+            noise) is not yet implemented.
         **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
 
     Return:
@@ -1760,7 +1772,7 @@ def get_sensitivity(
         # npts = 3
         # x = np.linspace(basis_settings.f_arr_edges[:-1],  basis_settings.f_arr_edges[1:], num=npts, axis=-1)
         # integrand = xp.asarray([sensitivity.get_Sn(x, *_args, **_kwargs) for _args, _kwargs in zip(args_list, kwargs_list)]).transpose(1, 0, 2)
-        
+
         # # this is to match tyson's code. I have questions
         # h = 1.0
         # f0 = integrand[:, :, 0]
@@ -1770,14 +1782,47 @@ def get_sensitivity(
         # 0.25 is fudge factor from tysons code
         # f_c = np.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
         # psd = sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
-        
+
         # psd_fd = domains.FDSignal(psd, settings=domains.FDSettings(f_c.shape[0], f_c[1] - f_c[0]))
         # PSD = psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
-        f_c = basis_settings.f_arr
 
-        # STATIONARY
-        PSD_layer = 1 / 2 * sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
-        PSD = xp.repeat(PSD_layer[:, None], basis_settings.Nt_active, axis=-1)
+        if wdm_psd_method not in ("fold", "layer_constant"):
+            raise ValueError(
+                f"wdm_psd_method must be 'fold' or 'layer_constant', got {wdm_psd_method!r}."
+            )
+
+        if not stationary:
+            # Phase 2: time-varying confusion noise. Would evaluate a separate
+            # Fourier-domain PSD per wavelet time column (via args_list /
+            # kwargs_list) and fold each one.
+            raise NotImplementedError(
+                "Non-stationary (time-varying) WDM noise is not yet implemented. "
+                "Pass stationary=True."
+            )
+
+        if wdm_psd_method == "layer_constant":
+            # STATIONARY (approximation): PSD constant across each wavelet layer,
+            # evaluated at the layer centre frequencies.
+            f_c = basis_settings.f_arr
+            PSD_layer = 1 / 2 * sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
+            PSD = xp.repeat(PSD_layer[:, None], basis_settings.Nt_active, axis=-1)
+
+        else:
+            # STATIONARY (exact): fold the full-resolution Fourier-domain PSD
+            # into the wavelet basis. Validated so that E[w_mn^2] == S_wdm[m]
+            # against the forward WDM transform (see wdm_noise_validation.py).
+            f_full = xp.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
+            df = float(f_full[1] - f_full[0])
+            psd_full = sensitivity.get_Sn(f_full, *args_list[0], **kwargs_list[0])
+            psd_fd = domains.FDSignal(
+                psd_full,
+                domains.FDSettings(
+                    f_full.shape[0], df, force_backend=basis_settings.backend
+                ),
+            )
+            PSD = xp.real(
+                psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
+            )
 
     else:
         raise ValueError(
