@@ -56,9 +56,9 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
-    Tmax: float = 1.0e1
+    Tmax: float = 1e6
     num_repeats: int = 100
-    permute_every: int = 101
+    permute_every: int = 50
 
     psd_info = curr.source_info["psd"]
     # mbh_info = curr.source_info["mbh"]
@@ -87,7 +87,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     psd_search_move.accepted = np.zeros((ntemps, nwalkers))
     psd_pe_move.accepted = np.zeros((ntemps, nwalkers))
 
-    #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, permute_every=50)
+    #psd_search_move, psd_pe_move = build_psd_moves(engine_info, curr, acs, priors, num_repeats=num_repeats, permute_every=permute_every, Tmax=Tmax)
 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="psd search")
 
@@ -172,14 +172,14 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     source_ids = [18]
 
-    Tobs = 9.0 * YRSID_SI / 12.0
+    Tobs = 3.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
     end_freq = 2.9e-2
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "9_months_psd_noswaps_debug" #"test_mbh_18_with_covariance"
+    base_file_name = "3_months_psd_noswaps_debug_newmove" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
@@ -190,7 +190,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 24
-    ntemps = 1
+    ntemps = 10
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq

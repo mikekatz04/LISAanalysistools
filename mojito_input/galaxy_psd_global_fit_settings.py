@@ -128,8 +128,8 @@ def setup_recipe(
     #* ================================= SETUP SEARCH ================================= 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="init psd search")
 
-    # search_weights = [0.8, 0.15, 0.05]
-    # recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
+    search_weights = [0.8, 0.15, 0.05]
+    recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
     
     #* ========================== SETUP PARAMETER ESTIMATION ========================== 
 

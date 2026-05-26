@@ -26,6 +26,7 @@ from ...sensitivity import XYZSensitivityBackend
 
 logger = logging.getLogger(__name__)
 
+DEBUG_MODE = False
 
 class PSDMove(GlobalFitMove, StretchMove):
     """
@@ -78,7 +79,6 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.permute_every = permute_every
         self.tolerance = tolerance
 
-        self._debug_sanity_checks = True
         self._propose_call_count = 0
         self._sanity_atol = 1e-1
 
@@ -124,8 +124,17 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         xp = self.acs.xp  # Use the appropriate array library (numpy or cupy)
 
-        Soms_d_in_all = xp.ascontiguousarray(psd_pars[:, 0])
-        Sa_a_in_all = xp.ascontiguousarray(psd_pars[:, 1])
+        # Use .copy() (not xp.ascontiguousarray) to guarantee each kernel input
+        # owns an independent allocation. ascontiguousarray is a no-op when the
+        # slice is already contiguous — which is the case for a column of a
+        # Fortran-order 2D array (as produced by DCGA's unpack_coords on the
+        # MultiGPU path). In that case Soms_d_in_all and Sa_a_in_all would
+        # alias psd_pars's buffer, and the CUDA kernel would read through those
+        # aliased pointers — exposing it to cupy memory-pool reuse hazards
+        # while the kernel runs asynchronously. .copy() forces a fresh,
+        # contiguous, owning allocation.
+        Soms_d_in_all = psd_pars[:, 0].copy()
+        Sa_a_in_all = psd_pars[:, 1].copy()
 
         if self.sensitivity_backend.use_splines:
             knots_positions = xp.asarray(psd_pars[:, 3::2])
@@ -153,11 +162,26 @@ class PSDMove(GlobalFitMove, StretchMove):
             spline_knots_position = None
             spline_knots_amplitude = None
 
-        galfor_pars_c = xp.ascontiguousarray(galfor_pars.T)
+        # Same defensive copy for the galactic-foreground components. The
+        # previous code unpacked `*xp.ascontiguousarray(galfor_pars.T)` which,
+        # for an already-contiguous input, would unpack 5 views into the same
+        # base array — same aliasing hazard as Soms/Sa. Copying each row
+        # independently gives 5 owning 1D arrays.
+        galfor_pars_T = galfor_pars.T  # view; transpose is always free
+        Amp_all = galfor_pars_T[0].copy()
+        alpha_all = galfor_pars_T[1].copy()
+        f_1_all = galfor_pars_T[2].copy()
+        kn_all = galfor_pars_T[3].copy()
+        f_2_all = galfor_pars_T[4].copy()
+
         likelihood_args = (
             Soms_d_in_all,
             Sa_a_in_all,
-            *galfor_pars_c,
+            Amp_all,
+            alpha_all,
+            f_1_all,
+            kn_all,
+            f_2_all,
             spline_knots_position,
             spline_knots_amplitude,
         )
@@ -345,7 +369,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         # relative to the stored coords. Most likely suspect: the line ~400
         # `new_state.log_like[0] = after_vals` overwrite at the end of the
         # previous propose.
-        if self._debug_sanity_checks:
+        if DEBUG_MODE:
             diff_in = np.abs(tmp_state.log_like - state.log_like)
             mask_in = diff_in > self._sanity_atol
             if mask_in.any():
@@ -429,7 +453,7 @@ class PSDMove(GlobalFitMove, StretchMove):
         # the MCMC dynamics used — producing apparent "spikes" without actually
         # breaking the chain. Divergence here points at the per-walker
         # sens_mat installation loop above (lines ~370-395) or stale acs cache.
-        if self._debug_sanity_checks:
+        if DEBUG_MODE:
             mcmc_logl = self.compute_log_like(
                 new_state.branches_coords, supps=new_state.supplemental
             )[0]
@@ -486,10 +510,25 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
         )
         MultiGPUMoveBase.__init__(self, dcga, run_async=run_async, run_threaded=run_threaded)
 
+        # TEST FLAG: when True, MultiGPUPSDMove.psd_log_like delegates to the
+        # parent PSDMove.psd_log_like, completely bypassing DCGA's unpack/place/
+        # loop_operation machinery. Only meaningful on single-GPU setups.
+        # If flipping this to True makes CHECK1/CHECK2 stop firing, the bug is
+        # localized to the DCGA path (unpack_coords/place_on_device/
+        # _loop_operation/_compute_group_likelihood). Set from the settings
+        # file via `psd_move._force_parent_path = True` after move construction.
+        self._force_parent_path = False
+
     def psd_log_like(self, x: list[np.ndarray], supps=None, **sens_kwargs):
         """ """
         if supps is None:
             raise ValueError("Must provide supps to identify the data streams.")
+
+        # Single-GPU debug path: skip DCGA entirely and run the parent's direct
+        # sensitivity_backend.compute_log_like call. This isolates whether the
+        # bug is in the MultiGPU routing (DCGA unpack/place/loop) or elsewhere.
+        if getattr(self, "_force_parent_path", False):
+            return PSDMove.psd_log_like(self, x, supps=supps, **sens_kwargs)
 
         wi = supps["walker_inds"]
 
@@ -536,4 +575,5 @@ class MultiGPUPSDMove(PSDMove, MultiGPUMoveBase):
                 )
             ll[invalid_knots_mask] = -1e300
 
+        self.dcga.free_gpu_memory()
         return ll

@@ -2495,7 +2495,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         new_sens_mat = XYZSensitivityBackend(**self.kwargs)
 
-        self.name = name
+        #self.name = name
+        new_sens_mat.name = name # why was it self?
 
         if self.use_splines: #assume transformed input.
             Soms_d = psd_params[0]

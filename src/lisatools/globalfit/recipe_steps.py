@@ -303,22 +303,24 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float 
     cos_iota = np.cos(float(catalogue_entry["InclinationAngle"]))
 
     # Sky coordinates: ICRS -> ecliptic -> SSB -> LISA
-    ra = float(catalogue_entry["RightAscension"])
+    ra = float(catalogue_entry["RightAscension"]) % (2 * np.pi)
     dec = float(catalogue_entry["Declination"])
-    psi_icrs = float(catalogue_entry["PolarisationAngle"])
+    sin_dec = np.sin(dec)
+    psi_icrs = float(catalogue_entry["PolarisationAngle"]) % np.pi  # ensure polarization is within [0, pi]
     lam_ecl, beta_ecl, psi_ssb = icrs_to_ecliptic(ra, dec, psi_icrs)
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
-    logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
+    # logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
     
-    t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
+    # t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
     
-    lam_L = lam_L % (2 * np.pi)
-    psi_L = psi_L % np.pi
-    logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
-    sin_beta_L = np.sin(beta_L)
+    # lam_L = lam_L % (2 * np.pi)
+    # psi_L = psi_L % np.pi
+    # logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
+    # sin_beta_L = np.sin(beta_L)
 
-    return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    #return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    return np.array([logM, Q, s1z, s2z, dist, phi_ref, cos_iota, psi_icrs, ra, sin_dec, t_ssb])
 
 
 def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float = 0.0) -> np.ndarray:
