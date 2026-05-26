@@ -78,6 +78,10 @@ class PSDMove(GlobalFitMove, StretchMove):
         self.permute_every = permute_every
         self.tolerance = tolerance
 
+        self._debug_sanity_checks = True
+        self._propose_call_count = 0
+        self._sanity_atol = 1e-1
+
     def transform_coords(self, coords: list[np.ndarray], return_cupy: bool = False, xp=None) -> tuple[np.ndarray | cp.ndarray, np.ndarray | cp.ndarray]:
         """
         Prepare the coordinates for the move. This can include transforming the parameters if necessary.
@@ -246,7 +250,7 @@ class PSDMove(GlobalFitMove, StretchMove):
     def run_move(self, move_i, model, state):
         new_state, accepted = super(PSDMove, self).propose(model, state)
 
-        if move_i % self.permute_every == 0:
+        if move_i % self.permute_every == 0 and move_i > 0:
             x = new_state.branches_coords
             logl = new_state.log_like
             logp = new_state.log_prior
@@ -332,6 +336,27 @@ class PSDMove(GlobalFitMove, StretchMove):
             tmp_branches_coords, logp=tmp_state.log_prior, supps=tmp_state.supplemental
         )[0]
         self.starting_now = False
+
+        self._propose_call_count += 1
+
+        # CHECK 1: stored vs freshly-recomputed log_like at propose entry.
+        # Fires when the (params, log_like) coming IN to propose is inconsistent —
+        # i.e., something between iterations is corrupting the stored log_like
+        # relative to the stored coords. Most likely suspect: the line ~400
+        # `new_state.log_like[0] = after_vals` overwrite at the end of the
+        # previous propose.
+        if self._debug_sanity_checks:
+            diff_in = np.abs(tmp_state.log_like - state.log_like)
+            mask_in = diff_in > self._sanity_atol
+            if mask_in.any():
+                bad = np.where(mask_in)
+                logger.warning(
+                    "[CHECK1 propose#%d entry] stored vs fresh log_like diverge "
+                    "at %s: stored=%s, fresh=%s, max_diff=%.3e",
+                    self._propose_call_count, list(zip(*bad)),
+                    state.log_like[bad], tmp_state.log_like[bad],
+                    float(diff_in.max()),
+                )
         # if np.any(np.abs(before_vals - tmp_state.log_like[0]) > 1e-4) :
         #     breakpoint()
 
@@ -396,6 +421,31 @@ class PSDMove(GlobalFitMove, StretchMove):
 
         self.acs.reset_linear_psd_arr()
         after_vals = self.acs.likelihood()
+
+        # CHECK 2: acs.likelihood() (cached sens_mat path) vs compute_log_like
+        # (MCMC's stateless path) for the cold chain. The MCMC accepted/rejected
+        # using compute_log_like values; if `after_vals` disagrees, the value
+        # we're about to store and hand back to the backend is NOT the value
+        # the MCMC dynamics used — producing apparent "spikes" without actually
+        # breaking the chain. Divergence here points at the per-walker
+        # sens_mat installation loop above (lines ~370-395) or stale acs cache.
+        if self._debug_sanity_checks:
+            mcmc_logl = self.compute_log_like(
+                new_state.branches_coords, supps=new_state.supplemental
+            )[0]
+            diff_paths = np.abs(after_vals - mcmc_logl[0])
+            mask_paths = diff_paths > self._sanity_atol
+            if mask_paths.any():
+                bad_w = np.where(mask_paths)[0]
+                logger.warning(
+                    "[CHECK2 propose#%d exit] acs.likelihood vs compute_log_like "
+                    "diverge at walkers=%s: acs=%s, mcmc=%s, "
+                    "psd_coords=%s, max_diff=%.3e",
+                    self._propose_call_count, bad_w.tolist(),
+                    after_vals[bad_w], mcmc_logl[0][bad_w],
+                    new_state.branches_coords["psd"][0][bad_w].tolist(),
+                    float(diff_paths.max()),
+                )
 
         new_state.log_like[0] = after_vals
         return new_state, accepted

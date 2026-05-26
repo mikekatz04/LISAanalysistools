@@ -968,6 +968,64 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         strain = h_plus + 1j * h_cross
 
+        # Diagnostic + safety guard: the response CUDA kernel reads
+        # input_in[batch_ind * num_inputs + jj] where `jj` derives from
+        # delays computed via orbits.get_pos(t, ...). If `shifted_t_arr[:, 0]`
+        # is outside the orbit time range (or contains NaN/Inf), the
+        # extrapolated orbit positions yield huge delays → out-of-bounds
+        # read → `cudaErrorIllegalAddress` at LISAResponse.cu:758.
+        # _data_time_check only guards the upper bound; we add a symmetric
+        # check here and log per-source diagnostics so the offending source
+        # is identified at the Python level before the kernel ever fires.
+        try:
+            _orbit_t_min = float(self.response.response_orbits.sc_t_base.min())
+            _orbit_t_max = float(self.response.response_orbits.sc_t_base.max())
+            _ltt_t_min = float(self.response.response_orbits.ltt_t.min())
+            _ltt_t_max = float(self.response.response_orbits.ltt_t.max())
+        except Exception:
+            _orbit_t_min = _orbit_t_max = _ltt_t_min = _ltt_t_max = None
+
+        _t0_arr = shifted_t_arr[:, 0]
+        _t_last_arr = shifted_t_arr[:, -1]
+        _t0_min = float(_t0_arr.min())
+        _t0_max = float(_t0_arr.max())
+        _t_last_min = float(_t_last_arr.min())
+        _t_last_max = float(_t_last_arr.max())
+        _has_nan = bool(
+            self.xp.isnan(strain).any() or self.xp.isnan(shifted_t_arr).any()
+        )
+        _has_inf = bool(
+            self.xp.isinf(strain).any() or self.xp.isinf(shifted_t_arr).any()
+        )
+
+        logger.debug(
+            "_apply_response: batch=%d num_pts=%d t0=[%.6e, %.6e] t_last=[%.6e, %.6e] "
+            "orbit_sc_t=[%s, %s] orbit_ltt_t=[%s, %s] merger_time=%s nan=%s inf=%s",
+            int(shifted_t_arr.shape[0]), num_pts, _t0_min, _t0_max, _t_last_min, _t_last_max,
+            f"{_orbit_t_min:.6e}" if _orbit_t_min is not None else "?",
+            f"{_orbit_t_max:.6e}" if _orbit_t_max is not None else "?",
+            f"{_ltt_t_min:.6e}" if _ltt_t_min is not None else "?",
+            f"{_ltt_t_max:.6e}" if _ltt_t_max is not None else "?",
+            merger_time.tolist() if hasattr(merger_time, "tolist") else merger_time,
+            _has_nan, _has_inf,
+        )
+
+        if _has_nan or _has_inf:
+            raise ValueError(
+                f"_apply_response: NaN/Inf detected before response kernel "
+                f"(nan={_has_nan}, inf={_has_inf}, merger_time={merger_time}, t0=[{_t0_min}, {_t0_max}])."
+            )
+
+        if _orbit_t_min is not None and (
+            _t0_min < _orbit_t_min or _t_last_max > _orbit_t_max
+        ):
+            raise ValueError(
+                f"_apply_response: requested time window [{_t0_min:.6e}, {_t_last_max:.6e}] "
+                f"falls outside orbit sc_t range [{_orbit_t_min:.6e}, {_orbit_t_max:.6e}]. "
+                f"This would cause the response CUDA kernel to read out-of-bounds. "
+                f"merger_time={merger_time}, t_arr[0]={float(t_arr[:, 0].min()):.6e}."
+            )
+
         self.response.get_projections(
             strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
         )

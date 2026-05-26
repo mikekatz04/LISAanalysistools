@@ -699,9 +699,9 @@ class L1Orbits(Orbits):
 
         with self.open() as f:
             # Load light travel times and their time array
-            self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6)
+            self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6) 
             self.ltt_t = f.ltts.time_sampling.t()  # Shape: (N_ltt_times,)
-
+            
             # Load spacecraft positions and their time array
             pos_icrs = f.orbits.positions[:]  # Shape: (N_pos_times, 3, 3)
             if self.frame == "ecliptic":
@@ -941,11 +941,13 @@ class L1Orbits(Orbits):
             rec_idx = rec_indices[i]
             emit_idx = emit_indices[i]
 
-            # Interpolate LTT for this link
-            cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
-            ltt_i = cs_ltt(t_arr)
-            # try to save memory
-            del cs_ltt
+            # LTTs are stored at TDI cadence (~2.5 s), much denser than the
+            # 600 s target grid — linear interpolation here matches the input
+            # discretization and avoids a CubicSpline tridiagonal solve over
+            # tens of millions of points (the dominant cost in this method).
+            # cs_ltt = interpolate.CubicSpline(self.ltt_t, self.ltt[:, i])
+            # ltt_i = cs_ltt(t_arr)
+            ltt_i = np.interp(t_arr, self.ltt_t, self.ltt[:, i])
             # Emission time
             t_emit = t_arr - ltt_i
 
