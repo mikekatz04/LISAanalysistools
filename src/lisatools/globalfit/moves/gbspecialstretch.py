@@ -933,6 +933,63 @@ class Buffer(LISAToolsParallelModule):
             waveform_kwargs=self.waveform_kwargs,
         )
 
+    def get_ll_grad(self, params, data_index, noise_index, N_vals,
+                     *, backend="jax", param_eps=None, chunk=None):
+        """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
+
+        Dispatches to ``self._likelihood_engine.get_ll_grad`` -- only
+        the chunked-het backend implements this; the legacy FD path
+        raises NotImplementedError. Returns ``(num_proposals, nparams)``
+        on the engine's xp module.
+
+        Used by the in-model NUTS / gradient move (the chunked-het
+        replacement for the legacy info-matrix Cholesky proposal). The
+        buffer must hold the source-of-interest's *clean* residual --
+        i.e. ``remove_sources_from_band_buffer`` has been called for
+        that source already -- before invoking this.
+        """
+        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        return self._likelihood_engine.get_ll_grad(
+            self.acs_buffer,
+            params_phys,
+            data_index=data_index,
+            noise_index=noise_index,
+            N_vals=N_vals,
+            backend=backend,
+            param_eps=param_eps,
+            chunk=chunk,
+            waveform_kwargs=self.waveform_kwargs,
+        )
+
+    def hessian(self, params, data_index, noise_index, N_vals,
+                 *, backend="jax", chunk=None,
+                 psd_fix=False, psd_floor_rel=1e-30):
+        """Per-source Hessian of ``L = <d|h> - 0.5 <h|h>``.
+
+        Dispatches to ``self._likelihood_engine.hessian``. Returns
+        ``(num_proposals, nparams, nparams)``. With ``psd_fix=True``,
+        returns ``M = |-H|`` (eigendecompose-then-abs, with a relative
+        floor) -- ready to feed to ``NUTSSampler(metric=M)`` as a
+        per-leaf mass matrix.
+
+        Same buffer-state precondition as :meth:`get_ll_grad`: the
+        active source must have been removed from the band buffer
+        before calling.
+        """
+        params_phys = self.transform_fn.both_transforms(params, xp=cp)
+        return self._likelihood_engine.hessian(
+            self.acs_buffer,
+            params_phys,
+            data_index=data_index,
+            noise_index=noise_index,
+            N_vals=N_vals,
+            backend=backend,
+            chunk=chunk,
+            psd_fix=psd_fix,
+            psd_floor_rel=psd_floor_rel,
+            waveform_kwargs=self.waveform_kwargs,
+        )
+
     def reset_residual_buffers(self, inds_fill=None):
         if inds_fill is None:
             inds_fill = cp.arange(self.num_bands_now)     
@@ -2056,8 +2113,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         
         # random start to rotation around
         start_unit = model.random.randint(units)
-        fixed_coords_for_info_mat = band_sorter.coords.copy()
-        has_fixed_coords = band_sorter.inds.copy()
+        # NOTE: ``fixed_coords_for_info_mat`` / ``has_fixed_coords`` removed
+        # along with the info-matrix Cholesky cache. The chunked-het NUTS
+        # path recomputes the per-source Hessian metric each propose() call
+        # for only the sources picked for update, so no cross-iteration
+        # caching is needed.
         for tmp in range(units):
             # continue
             remainder = (start_unit + tmp) % units
@@ -2258,27 +2318,11 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     300  # self.num_repeat_proposals  #  if not self.is_rj_prop else max_counts
                 )
 
-                # it will reset them each loop of num_proposals here
-                try:
-                    del has_chol, inds_map_chol, chol_store, chol_params_fixed
-                except NameError:
-                    pass
-                
-                # max_sources = source_map_now.shape[0]
-                # chol_store = self.xp.zeros((max_sources, 8, 8))
-                # chol_params_fixed = self.xp.zeros((max_sources, 8))
-                # inds_map_chol = -self.xp.ones((max_sources, ), type=int)
-                # has_chol = self.xp.zeros(max_sources, dtype=bool)
-                has_chol = self.xp.zeros_like(source_map_now, dtype=bool)
-                inds_map_chol = self.xp.zeros((0,), dtype=int)
-                chol_store = self.xp.zeros((0, 8, 8))
-                chol_params_fixed = self.xp.zeros((0, 8))
-
+                # NUTS path: no per-source Cholesky cache anymore. Each
+                # in-model propose() step recomputes the Hessian for only
+                # the sources picked for update against the *clean* per-band
+                # buffer (h_curr already removed). See Chunk 4 wiring below.
                 been_picked_for_rj_update = self.xp.zeros_like(source_map_now, dtype=bool)
-
-                # trick parameters that are there
-                # by fixing parameters at which info mat is calculated
-                # that way the recalculation technically only changes newly found sources
                 have_not_run_in_model = True
                 previous_inds = band_sorter.inds.copy()
                 for move_i in range(num_proposals_here):
@@ -2324,127 +2368,14 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             band_sorter.inds[source_map_now[sources_picked_for_update]]
                         )
 
-                        new_chol = (~has_chol) & band_sorter.inds[source_map_now]
-                        num_chol_new = new_chol.sum().item()
-
-                        if num_chol_new > 0:
-                            has_chol[new_chol] = True
-
-                            # due to fixed, it will not change during run through of the proposal
-                            # unless rj causes leaf addition/removal
-                            new_chol_params_fixed = fixed_coords_for_info_mat[
-                                source_map_now[new_chol]
-                            ]  # band_sorter.coords[source_map_now[new_chol]]
-                            new_inds_map_chol = source_map_now[new_chol]
-
-                            _test_inds = self.parameter_transforms.fill_dict["test_inds"]
-
-                            info_mat_params = self.xp.zeros((num_chol_new, 9))
-                            info_mat_params[:, _test_inds] = new_chol_params_fixed
-                            fdot_scale = 1e-16
-                            info_mat_transforms_global = self.parameter_transforms.original_parameter_transforms
-                            
-                            info_mat_transforms = {
-                                0: info_mat_transforms_global[r"$\log A$"],
-                                1: info_mat_transforms_global[r"$f_0$"],
-                                2: lambda x: x * fdot_scale,
-                                5: info_mat_transforms_global[r"$\cos\iota$"],
-                                8: info_mat_transforms_global[r"$\sin\beta$"],
-                            }
-
-                            # transform fdot
-                            info_mat_params[:, 2] /= fdot_scale
-
-                            _tmp_waveform_kwargs = self.waveform_kwargs.copy()
-                            _tmp_waveform_kwargs.pop("start_freq_ind")
-                            info_mat = self.xp.zeros((info_mat_params.shape[0], 8, 8))
-                            batch_size = 1000
-                            assert len(info_mat_params) > 0
-
-                            batches = np.arange(0, len(info_mat_params), batch_size, dtype=int)
-
-                            if batches[-1] < len(info_mat_params):
-                                batches = np.concatenate(
-                                    [
-                                        batches,
-                                        np.array([len(info_mat_params)], dtype=int),
-                                    ],
-                                    dtype=int,
-                                )
-                            
-                            for start_batch, end_batch in zip(batches[:-1], batches[1:]):
-                                info_mat[start_batch:end_batch] = self.gb.information_matrix(
-                                    info_mat_params[start_batch:end_batch].T,
-                                    eps=1e-9,
-                                    parameter_transforms=info_mat_transforms,
-                                    inds=_test_inds,
-                                    N=1024,
-                                    psd_func=sensitivity.XYZSensitivityBackend,
-                                    psd_kwargs=dict(
-                                        name="info_matrix",
-                                        psd_params=cp.array([15e-12, 3e-15]),
-                                        galfor_params=None, # TODO change in future foreground params
-                                    ),
-                                    easy_central_difference=False,
-                                    return_gpu=True,
-                                    **_tmp_waveform_kwargs,
-                                )
-
-                            self.mempool.free_all_blocks()
-
-                            # chol(cov) -> chol(inv(info_mat))
-                            new_chol_store = self.xp.linalg.cholesky(self.xp.linalg.inv(info_mat))
-                            _chol_store = self.xp.concatenate(
-                                [chol_store.copy(), new_chol_store], axis=0
-                            )
-                            _chol_params_fixed = self.xp.concatenate(
-                                [chol_params_fixed.copy(), new_chol_params_fixed],
-                                axis=0,
-                            )
-                            _inds_map_chol = self.xp.concatenate(
-                                [inds_map_chol.copy(), new_inds_map_chol]
-                            )
-
-                            del chol_store, chol_params_fixed, inds_map_chol
-                            self.mempool.free_all_blocks()
-                            # reference transfer (not rewriting)
-                            chol_store = _chol_store
-                            chol_params_fixed = _chol_params_fixed
-                            inds_map_chol = _inds_map_chol
-
-                        remove_chol = has_chol & (~band_sorter.inds[source_map_now])
-                        num_chol_remove = remove_chol.sum().item()
-
-                        if num_chol_remove > 0:
-                            has_chol[remove_chol] = False
-                            remove_inds = self.xp.arange(inds_map_chol.shape[0])[
-                                self.xp.isin(inds_map_chol, source_map_now[remove_chol])
-                            ]
-
-                            _chol_store = self.xp.delete(chol_store, remove_inds, axis=0).copy()
-                            _chol_params_fixed = self.xp.delete(
-                                chol_params_fixed, remove_inds, axis=0
-                            ).copy()
-                            _inds_map_chol = self.xp.delete(
-                                inds_map_chol, remove_inds, axis=0
-                            ).copy()
-
-                            del chol_store, chol_params_fixed, inds_map_chol
-                            self.mempool.free_all_blocks()
-                            # reference transfer (not rewriting)
-                            chol_store = _chol_store
-                            chol_params_fixed = _chol_params_fixed
-                            inds_map_chol = _inds_map_chol
-
-                        # if have_not_run_in_model:
-                        #     self.setup_gb_friends(band_sorter)
-                        #     have_not_run_in_model = False
-                        # else:
-                        #     is_new = (band_sorter.inds & (~previous_inds))
-                        #     if self.xp.any(is_new):
-                        #         breakpoint()
-                        #         new_inds_friends = self.xp.arange(band_sorter.inds.shape[0])[is_new]
-                        #         self.fix_friends(band_sorter, new_inds_friends)
+                        # === info-matrix path REMOVED (Chunk 3) ===
+                        # The Fisher / Cholesky cache that produced the
+                        # in-model Gaussian proposal has been excised. Its
+                        # replacement -- per-source NUTS over the band buffer
+                        # with the source temporarily subtracted -- lives in
+                        # the proposal block below (Chunk 4). No caching is
+                        # done across propose() calls; the Hessian metric is
+                        # rebuilt for each picked source every call.
 
                     # st_1 = time.perf_counter()
                     else:
@@ -2518,24 +2449,91 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             new_coords = q["gb"][0, :, 0, :]
 
                         else:
-                            mapped_chol_inds = self.xp.searchsorted(
-                                inds_map_chol, inds_to_update, side="left"
+                            # === Chunk 4: buffer-flip + per-leaf NUTS step ===
+                            # Workflow per source picked for in-model update:
+                            #   1) subtract h_curr from the band buffer so the
+                            #      residual is "clean" (d - h_other) for that
+                            #      band and the Hessian / leapfrog navigate L
+                            #      on a self-consistent buffer.
+                            #   2) compute the per-leaf Hessian metric (jax
+                            #      autograd; psd_fix=True takes |-H| as the
+                            #      mass matrix).
+                            #   3) run one NUTS iteration -- closures supply
+                            #      the per-leaf tempered log-posterior and
+                            #      gradient (curr_beta * L; the prior is
+                            #      gated downstream by curr_logp).
+                            #   4) leave the buffer flipped; the outer M-H
+                            #      accept logic decides which template
+                            #      (old_coords on reject, new_coords on
+                            #      accept) gets added back to the buffer in
+                            #      the post-flip block.
+                            from eryn.moves.nuts import NUTSSampler
+                            nuts_subtract_index = data_index_to_update.copy()
+                            nuts_N_vals = self.band_N_vals[
+                                band_sorter.band_inds[inds_to_update]
+                            ].copy()
+                            buffer_obj.remove_sources_from_band_buffer(
+                                old_coords, nuts_subtract_index, nuts_N_vals,
                             )
-                            # TODO: asserts/checks
-                            tmp_chols_here = chol_store[mapped_chol_inds]
+                            M_metric = buffer_obj.hessian(
+                                old_coords, nuts_subtract_index, nuts_subtract_index,
+                                nuts_N_vals, backend="jax", psd_fix=True,
+                            )
+                            M_metric = self.xp.asarray(M_metric)
 
-                            # TODO: change einsum for speed?
-                            # TODO: adjusting jump_factor over time?
-                            jump_factor = 0.005
-                            _rand_draw = self.xp.random.randn(mapped_chol_inds.shape[0], 8)
-                            old_coords_scaled_fdot = old_coords.copy()
-                            # TODO: add this to whole thing
-                            old_coords_scaled_fdot[:, 2] /= fdot_scale
-                            new_coords = old_coords_scaled_fdot + jump_factor * self.xp.einsum(
-                                "...ij,...j->...i", tmp_chols_here, _rand_draw
+                            # Per-leaf inverse temperature (one entry per
+                            # picked source). Closes over via curr_beta_nuts.
+                            curr_beta_nuts = band_temps[map_to_update[2], map_to_update[0]]
+
+                            def _log_post_fn(x_batch,
+                                              _bidx=nuts_subtract_index,
+                                              _Nv=nuts_N_vals,
+                                              _beta=curr_beta_nuts):
+                                d_h, h_h = buffer_obj.get_ll(
+                                    self.xp.asarray(x_batch),
+                                    _bidx, _bidx, _Nv,
+                                )
+                                ll = self.xp.asarray(d_h) - 0.5 * self.xp.asarray(h_h)
+                                return _beta * ll
+
+                            def _grad_log_post_fn(x_batch,
+                                                   _bidx=nuts_subtract_index,
+                                                   _Nv=nuts_N_vals,
+                                                   _beta=curr_beta_nuts):
+                                g = buffer_obj.get_ll_grad(
+                                    self.xp.asarray(x_batch),
+                                    _bidx, _bidx, _Nv,
+                                    backend="jax",
+                                )
+                                return _beta[:, None] * self.xp.asarray(g)
+
+                            nuts = NUTSSampler(
+                                grad_log_posterior_fn=_grad_log_post_fn,
+                                log_posterior_fn=_log_post_fn,
+                                ndim=8,
+                                metric=M_metric,
+                                step_size=float(getattr(self, "nuts_step_size", 0.1)),
+                                max_tree_depth=int(getattr(self, "nuts_max_tree_depth", 4)),
+                                adapt_step_size=False,
                             )
-                            new_coords[:, 2] *= fdot_scale
-                            update_factors = self.xp.zeros(new_coords.shape[0])  # symmetric draws
+                            nuts_out = nuts.step(old_coords)
+                            new_coords = (nuts_out[0] if isinstance(nuts_out, tuple)
+                                          else nuts_out)
+                            # NUTS leapfrog preserves detailed balance, so
+                            # no log-Jacobian correction is needed at the
+                            # outer M-H gate.
+                            update_factors = self.xp.zeros(new_coords.shape[0])
+                            # Restore the buffer to its pre-flip state by
+                            # adding h_curr (old_coords) back. The
+                            # downstream accept-path then runs its own
+                            # remove(old)/add(new) cycle for accepted
+                            # sources from a clean baseline, identical to
+                            # how the legacy Cholesky proposal left it.
+                            # ll_diff=0 in the swap_ll branch ensures the
+                            # outer M-H gate is prior-only for in-model.
+                            buffer_obj.add_sources_to_band_buffer(
+                                old_coords, nuts_subtract_index, nuts_N_vals,
+                            )
 
                         new_coords[:] = self.periodic.wrap(
                             {"gb": new_coords[:, None, :]}, xp=self.xp
@@ -2663,17 +2661,28 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                     ].copy()
 
                     # CANNOT COPY PARAMETER ARRAYS, IN PLACE ADJUSTMENT IF PHASE MAXIMIZING
-                    ll_diff[keep2] = buffer_obj.get_swap_ll(
-                        params_remove,
-                        params_add,
-                        data_index,
-                        swap_N_vals,
-                        phase_maximize=self.phase_maximize,
-                    )
-                        
-                    # in case there is phase marginalization, need to adjust in new_coords
-                    if self.phase_maximize:
-                        new_coords[keep2] = params_add[:]
+                    if is_rj_now:
+                        # RJ swap (add-one / remove-one): canonical swap_ll
+                        # on the unflipped buffer. Phase-maximisation is
+                        # allowed here -- it's the analytic phi0 marginal
+                        # the legacy RJ path has always used.
+                        ll_diff[keep2] = buffer_obj.get_swap_ll(
+                            params_remove,
+                            params_add,
+                            data_index,
+                            swap_N_vals,
+                            phase_maximize=self.phase_maximize,
+                        )
+                        # in case there is phase marginalization, need to adjust in new_coords
+                        if self.phase_maximize:
+                            new_coords[keep2] = params_add[:]
+                    else:
+                        # In-model NUTS path: leapfrog already integrated
+                        # the tempered likelihood, so the outer M-H gate
+                        # is on prior support only. Setting ll_diff=0
+                        # collapses ``curr_beta * ll_diff + (curr_logp -
+                        # prev_logp)`` down to the prior delta.
+                        ll_diff[keep2] = 0.0
 
                     curr_beta = band_temps[map_to_update[2], map_to_update[0]]
                     # print("change priors?, need to adjust here")
@@ -2720,16 +2729,9 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             band_sorter.inds[inds_update_accept] = ~band_sorter.inds[
                                 inds_update_accept
                             ]
-                            # must be done after inds
-
-                            add_fixed_coords = (~has_fixed_coords) & band_sorter.inds
-                            fixed_coords_for_info_mat[add_fixed_coords] = band_sorter.coords[
-                                add_fixed_coords
-                            ]
-
-                            # remove fixed_coords (just need the bool)
-                            remove_fixed_coords = has_fixed_coords & (~band_sorter.inds)
-                            has_fixed_coords[remove_fixed_coords] = False
+                            # NOTE: the fixed_coords_for_info_mat / has_fixed_coords
+                            # bookkeeping that used to update here has been removed
+                            # along with the info-matrix Cholesky cache (Chunk 3).
 
                         temp_inds_accept = band_sorter.temp_inds[inds_update_accept]
                         walker_inds_accept = band_sorter.walker_inds[inds_update_accept]

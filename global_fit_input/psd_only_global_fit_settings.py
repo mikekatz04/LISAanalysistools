@@ -66,7 +66,7 @@ from lisatools.globalfit.moves import (
 from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
-from lisatools.domains import FDSettings, STFTSettings, WDMSettings  # WDMLookupTable removed (chunked-het migration)
+from lisatools.domains import FDSettings, STFTSettings, WDMSettings
 
 
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings

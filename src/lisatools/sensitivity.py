@@ -2067,7 +2067,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self.window_normalization,
         ]
 
-        self.pycpp_sensitivity_matrix = self.backend.SensitivityMatrixWrap(*self.pycppsensmat_args)
+        # XYZBackend disabled (symbol issues on Linux): SensitivityMatrixWrap may be absent.
+        _SensitivityMatrixWrap = getattr(self.backend, "SensitivityMatrixWrap", None)
+        if _SensitivityMatrixWrap is None:
+            self.pycpp_sensitivity_matrix = None
+        else:
+            self.pycpp_sensitivity_matrix = _SensitivityMatrixWrap(*self.pycppsensmat_args)
 
         self._init_basis_settings()
 
@@ -2175,6 +2180,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             splines_in_isi_oms = xp.zeros(len(freqs), dtype=xp.float64)
             spline_in_testmass = xp.zeros(len(freqs), dtype=xp.float64)
 
+        if self.pycpp_sensitivity_matrix is None:
+            raise RuntimeError("XYZBackend disabled (symbol issues on Linux): get_noise_covariance unavailable.")
         self.pycpp_sensitivity_matrix.get_noise_covariance_wrap(
             xp.asarray(freqs),
             self.time_indices,
@@ -2336,6 +2343,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         det = xp.empty(total_terms, dtype=xp.float64)
 
+        if self.pycpp_sensitivity_matrix is None:
+            raise RuntimeError("XYZBackend disabled (symbol issues on Linux): get_inverse_det unavailable.")
         self.pycpp_sensitivity_matrix.get_inverse_det_wrap(
             c00, c01, c02, c11, c12, c22, i00, i01, i02, i11, i12, i22, det, total_terms
         )
@@ -2381,6 +2390,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         tm_xz = xp.empty(shape=(total_shape,), dtype=xp.complex128)
         tm_yz = xp.empty(shape=(total_shape,), dtype=xp.complex128)
 
+        if self.pycpp_sensitivity_matrix is None:
+            raise RuntimeError("XYZBackend disabled (symbol issues on Linux): get_noise_tfs unavailable.")
         self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
             xp.asarray(freqs),
             oms_xx,
@@ -2468,6 +2479,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             splines_weights_isi_oms = xp.zeros(shape=(num_psds * self.num_freqs))
             splines_weights_testmass = xp.zeros(shape=(num_psds * self.num_freqs))
 
+        if self.pycpp_sensitivity_matrix is None:
+            raise RuntimeError("XYZBackend disabled (symbol issues on Linux): psd_likelihood unavailable.")
         self.pycpp_sensitivity_matrix.psd_likelihood_wrap(
             log_like_out,
             self.f_arr,

@@ -14,15 +14,16 @@
 // ============================================================================
 using cmplx = gcmplx::complex<double>;
 
-#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
-#define XYZSensitivityMatrix XYZSensitivityMatrixGPU
-#define NoiseLevels NoiseLevelsGPU
-
-#else
-#define XYZSensitivityMatrix XYZSensitivityMatrixCPU
-#define NoiseLevels NoiseLevelsCPU
-
-#endif
+// === XYZBackend disabled (symbol issues on Linux) ===
+// #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+// #define XYZSensitivityMatrix XYZSensitivityMatrixGPU
+// #define NoiseLevels NoiseLevelsGPU
+//
+// #else
+// #define XYZSensitivityMatrix XYZSensitivityMatrixCPU
+// #define NoiseLevels NoiseLevelsCPU
+//
+// #endif
 // ============================================================================
 #define NUM_THREADS 64
 #define NUM_THREADS_LIKE 256
@@ -121,6 +122,7 @@ int link_to_index(int link)
  * @param[in] Sa_a_in Acceleration noise amplitude (m/s^2/sqrt(Hz)).
  * @param[in] return_relative_frequency If true, return in relative frequency units.
  */
+#if 0  // === XYZBackend disabled (symbol issues on Linux): NoiseLevels methods ===
 CUDA_DEVICE
 void NoiseLevels::get_testmass_noise(double *S_tm, double f, double Sa_a_in, double spline_in_testmass)
 {
@@ -185,9 +187,10 @@ void NoiseLevels::get_isi_oms_noise(double *S_oms, double f, double Soms_d_in, d
 CUDA_DEVICE
 void NoiseLevels::get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double slope_1, double f_knee, double slope_2)
 {
-    *S_gal = Amp * exp(-pow(f, alpha) * slope_1) * pow(f, -7.0/3.0) 
+    *S_gal = Amp * exp(-pow(f, alpha) * slope_1) * pow(f, -7.0/3.0)
            * 0.5 * (1.0 + tanh(-(f - f_knee) * slope_2));
 }
+#endif  // === end NoiseLevels methods ===
 
 // ============================================================================
 // 3x3 Hermitian Matrix Operations
@@ -296,13 +299,14 @@ double quadratic_form(
  * @param differential_component Frequency resolution.
  * @param num_psds Number of PSD configurations (batch size).
  */
+#if 0  // === XYZBackend disabled (symbol issues on Linux): psd_likelihood_xyz_kernel ===
 CUDA_KERNEL void psd_likelihood_xyz_kernel(
     double *like_contrib, double *f_arr, cmplx *data_in,
     int *data_index_all, int *time_index_all,
     double *Soms_d_in_all, double *Sa_a_in_all,
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all,
     double *spline_in_isi_oms_all, double *spline_in_testmass_all,
-    double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds, 
+    double differential_component, int num_freqs, int num_times, bool *dips_mask, int num_psds,
     XYZSensitivityMatrix &sensitivity_matrix)
 {
     int tid;
@@ -480,6 +484,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 #endif
     }
 }
+#endif  // === end psd_likelihood_xyz_kernel ===
 
 CUDA_KERNEL void like_sum_from_contrib(double *like_contrib_final, double *like_contrib, int num_blocks_per_psd, int num_psds)
 {
@@ -534,8 +539,9 @@ CUDA_KERNEL void like_sum_from_contrib(double *like_contrib_final, double *like_
     }
 }
 
+#if 0  // === XYZBackend disabled (symbol issues on Linux): XYZSensitivityMatrix members ===
 void XYZSensitivityMatrix::psd_likelihood_wrap(
-    double *like_contrib_final, double *f_arr, cmplx *data, 
+    double *like_contrib_final, double *f_arr, cmplx *data,
     int *data_index_all, int *time_index_all,
     double *Soms_d_in_all, double *Sa_a_in_all, 
     double *Amp_all, double *alpha_all, double *slope_1_all, double *f_knee_all, double *slope_2_all, 
@@ -1026,6 +1032,7 @@ void XYZSensitivityMatrix::get_inverse_det_arr(
     );
 #endif
 }
+#endif  // === end XYZSensitivityMatrix members ===
 
 // ============================================================================
 // pdf calculation from sangria psd file

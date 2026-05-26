@@ -5,16 +5,18 @@
 #include "cuda_complex.hpp"
 #include <iostream>
 
-#if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
-#define XYZSensitivityMatrix XYZSensitivityMatrixGPU
-#define NoiseLevels NoiseLevelsGPU
-#else
-#define XYZSensitivityMatrix XYZSensitivityMatrixCPU
-#define NoiseLevels NoiseLevelsCPU
-#endif
+// === XYZBackend disabled (symbol issues on Linux) ===
+// #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
+// #define XYZSensitivityMatrix XYZSensitivityMatrixGPU
+// #define NoiseLevels NoiseLevelsGPU
+// #else
+// #define XYZSensitivityMatrix XYZSensitivityMatrixCPU
+// #define NoiseLevels NoiseLevelsCPU
+// #endif
 
 #define Clight 299792458.
 
+#if 0  // === XYZBackend disabled (symbol issues on Linux) ===
 class NoiseLevels {
 public:
     bool return_relative_frequency;
@@ -118,6 +120,7 @@ class XYZSensitivityMatrix {
     void dealloc() {};
 
 };
+#endif  // === end XYZBackend disabled ===
 
 // from Sangria setup
 void compute_logpdf_wrap(double *logpdf_out, int *component_index, double *points,

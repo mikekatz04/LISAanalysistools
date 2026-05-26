@@ -148,6 +148,49 @@ class BandLikelihoodEngine(Protocol):
         """
         ...
 
+    def get_ll_grad(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        backend: str = "jax",
+        param_eps=None,
+        chunk: Optional[int] = None,
+        waveform_kwargs: dict | None = None,
+    ):
+        """Per-source gradient of ``L = <d|h> - 0.5<h|h>``.
+
+        Returns ``(num_proposals, nparams)``. Only the chunked-het
+        backend implements this; the FD legacy path raises.
+        """
+        ...
+
+    def hessian(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        backend: str = "jax",
+        chunk: Optional[int] = None,
+        psd_fix: bool = False,
+        psd_floor_rel: float = 1e-30,
+        waveform_kwargs: dict | None = None,
+    ):
+        """Per-source Hessian of ``L = <d|h> - 0.5<h|h>``.
+
+        Returns ``(num_proposals, nparams, nparams)``. When
+        ``psd_fix=True`` returns ``M = |-H|`` ready to feed to a NUTS
+        sampler as a mass matrix. Only the chunked-het backend
+        implements this; the FD legacy path raises.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Frequency-domain engine (wraps gbgpu.GBGPU)
@@ -355,6 +398,28 @@ class FDBandLikelihoodEngine:
             kept=keep,
         )
 
+    # ---------- get_ll_grad / hessian (NOT YET implemented for FD) -----------
+    #
+    # The FD analogues (``GBFDComputations.get_ll_grad_fd`` / a future
+    # ``hessian_fd``) would slot in here once the JAX-FD autograd path
+    # is wired. For now the FD legacy generator lacks a Hessian method,
+    # and the NUTS-in-globalfit work uses the WDM/chunked-het backend
+    # exclusively. These stubs make the Protocol contract explicit:
+    # caller will get a clear error rather than AttributeError.
+    def get_ll_grad(self, *_args, **_kwargs):
+        raise NotImplementedError(
+            "FDBandLikelihoodEngine.get_ll_grad is not implemented yet. "
+            "Use the WDM/chunked-het Buffer for gradient (NUTS) moves; "
+            "an FD JAX-autograd path is planned."
+        )
+
+    def hessian(self, *_args, **_kwargs):
+        raise NotImplementedError(
+            "FDBandLikelihoodEngine.hessian is not implemented yet. "
+            "Use the WDM/chunked-het Buffer for NUTS metric construction; "
+            "an FD JAX-autograd path is planned."
+        )
+
 
 # ---------------------------------------------------------------------------
 # WDM-domain engine (wraps fastlisaresponse.GBWDMComputations)
@@ -413,11 +478,11 @@ class WDMBandLikelihoodEngine:
         num_bin = params_phys.shape[0]
         factors_arr = xp.full(num_bin, float(factor), dtype=xp.float64)
 
-        # The Python signature expects the *templates* buffer (the flat WDM
-        # template array). buffer_aca.linear_data_arr[0] is that buffer.
+        # ``fill_global_wdm`` signature is (params, templates, wdm_holder, ...).
+        # buffer_aca.linear_data_arr[0] is the flat WDM template buffer.
         self.gb_comps.fill_global_wdm(
-            buffer_aca.linear_data_arr[0],
             params_phys,
+            buffer_aca.linear_data_arr[0],
             buffer_aca,
             convert_to_ra_dec=False,
             data_index=params_index,
@@ -553,6 +618,84 @@ class WDMBandLikelihoodEngine:
             opt_snr_add=opt_snr,
             phase_angle=None,
             kept=keep,
+        )
+
+    # ---------- get_ll_grad / hessian (chunked-het backends only) ----------
+    #
+    # These two methods are present on ``gb_comps`` only when the
+    # underlying generator is :class:`GBWDMHeterodyne` (the chunked-het
+    # backend). The legacy lookup-table ``GBWDMComputations`` does not
+    # expose ``hessian_wdm`` (its FD ``get_ll_grad_wdm`` is implemented
+    # but the in-the-kernel info-matrix path it served has been retired).
+    # We probe at call time so a global fit running on the legacy
+    # generator fails loudly rather than silently masking a config bug.
+
+    def _require_chunked_het(self, method_name: str):
+        if not hasattr(self.gb_comps, method_name):
+            raise NotImplementedError(
+                f"WDMBandLikelihoodEngine.{method_name.replace('_wdm','')}: "
+                f"underlying gb_comps ({type(self.gb_comps).__name__}) "
+                f"does not expose {method_name!r}. The gradient / Hessian "
+                "paths require a GBWDMHeterodyne backend; rebuild the "
+                "Buffer with the chunked-het generator."
+            )
+
+    def get_ll_grad(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        backend: str = "jax",
+        param_eps=None,
+        chunk: Optional[int] = None,
+        waveform_kwargs: dict | None = None,
+    ):
+        """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
+
+        Returns ``(num_proposals, nparams)`` -- one row per source.
+
+        ``backend="jax"`` uses JAX autograd, ``"cpp"`` uses central-FD
+        over the C++ get_ll. The chunked-het backend handles both.
+        """
+        self._require_chunked_het("get_ll_grad_wdm")
+        del N_vals, waveform_kwargs  # chunked-het doesn't gate by N here
+        return self.gb_comps.get_ll_grad_wdm(
+            params_phys, buffer_aca,
+            param_eps=param_eps,
+            data_index=data_index, noise_index=noise_index,
+            convert_to_ra_dec=False, backend=backend, chunk=chunk,
+        )
+
+    def hessian(
+        self,
+        buffer_aca: AnalysisContainerArray,
+        params_phys,
+        *,
+        data_index,
+        noise_index,
+        N_vals,
+        backend: str = "jax",
+        chunk: Optional[int] = None,
+        psd_fix: bool = False,
+        psd_floor_rel: float = 1e-30,
+        waveform_kwargs: dict | None = None,
+    ):
+        """Per-source Hessian of ``L = <d|h> - 0.5 <h|h>``.
+
+        Returns ``(num_proposals, nparams, nparams)``. When
+        ``psd_fix=True`` returns ``M = |−H|`` (eigendecompose +
+        ``|lambda|``), ready to feed to ``NUTSSampler(metric=M)``.
+        """
+        self._require_chunked_het("hessian_wdm")
+        del N_vals, waveform_kwargs
+        return self.gb_comps.hessian_wdm(
+            params_phys, buffer_aca,
+            data_index=data_index, noise_index=noise_index,
+            convert_to_ra_dec=False, backend=backend,
+            chunk=chunk, psd_fix=psd_fix, psd_floor_rel=psd_floor_rel,
         )
 
 

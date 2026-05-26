@@ -72,7 +72,7 @@ def _jax_methods_loader() -> LISAToolsBackendMethods:
         OrbitsWrap=OrbitsWrapJAX,
         Orbits=OrbitsWrapJAX,                          # JAX side: same class
         check_orbits=_check_orbits_jax,
-        SensitivityMatrixWrap=_unimplemented("SensitivityMatrixWrap"),
+        # SensitivityMatrixWrap=_unimplemented("SensitivityMatrixWrap"),  # XYZBackend disabled
         xp=jnp,
     )
 

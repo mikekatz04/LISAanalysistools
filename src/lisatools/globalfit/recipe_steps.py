@@ -601,8 +601,8 @@ def build_gb_moves(
             xp = gb_info.gb_wdm_comp.xp
             factors_arr = xp.asarray(factors).astype(xp.float64)
             gb_info.gb_wdm_comp.fill_global_wdm(
-                acs.linear_data_arr[0],
                 coords_in_in,
+                acs.linear_data_arr[0],
                 acs,
                 convert_to_ra_dec=False,
                 data_index=xp.asarray(data_index),

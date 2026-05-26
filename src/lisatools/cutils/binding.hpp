@@ -113,13 +113,15 @@ class OrbitsWrap {
 
 };
 
+// === XYZBackend disabled (symbol issues on Linux) ===
 // XYZ Sensitivity Matrix Wrap
-#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#define XYZSensitivityMatrixWrap XYZSensitivityMatrixWrapGPU
-#else
-#define XYZSensitivityMatrixWrap XYZSensitivityMatrixWrapCPU
-#endif
+// #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+// #define XYZSensitivityMatrixWrap XYZSensitivityMatrixWrapGPU
+// #else
+// #define XYZSensitivityMatrixWrap XYZSensitivityMatrixWrapCPU
+// #endif
 
+#if 0  // === XYZBackend disabled ===
 class XYZSensitivityMatrixWrap {
 public:
     XYZSensitivityMatrix *sensitivity_matrix;
@@ -190,6 +192,7 @@ public:
         return ptr1;
     };
 };
+#endif  // === end XYZBackend disabled ===
 
 
 #endif // __BINDING_HPP__

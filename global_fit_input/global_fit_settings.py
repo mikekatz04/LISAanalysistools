@@ -18,6 +18,7 @@ Built on the same pieces the smoke-test settings files use:
 
 import gc
 import logging
+import os
 import shutil
 from copy import deepcopy
 from typing import Optional
@@ -60,8 +61,6 @@ from lisatools.domains import (
     DomainBaseArray,
     TDSettings,
     TDSignal,
-    # WDMLookupTable removed -- chunked-heterodyne pipeline replaces the
-    # lookup-table machinery (see sprint root CLAUDE.md and gb_wdm_het).
     WDMSettings,
 )
 from lisatools.globalfit.engine import (
@@ -130,15 +129,10 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
     min_time=20 * 3600.0,
     max_time=(NT - 20) * 3600.0,
 )
-# Lookup-table WDM path removed -- pending chunked-heterodyne integration.
-# Setting to None makes the GB pipeline fall back to its FD path; once
-# the chunked-het adapter is wired through fastlisaresponse.gbcomps it
-# replaces this entirely.
-WDM_LOOKUP_TABLE = None
-# WDM_LOOKUP_TABLE = lambda wdm_settings: WDMLookupTable.from_file(
-#     "wdm_lookup_n_ref_NF720_NT2160_3mo.h5",
-#     force_backend=GPU_BACKEND,
-# )
+# WDM lookup table removed sprint-wide -- the chunked-heterodyne
+# template pipeline (gb_wdm_het.GBWDMHeterodyne) is now the only WDM
+# backend. The build is wired in ``setup_recipe`` below; no lookup
+# table is needed (or supported).
 # Alternates (import FDSettings / STFTSettings from lisatools.domains first):
 # DOMAIN_CHOICE = FDSettings.make_factory(min_freq=5e-5, max_freq=3e-2)
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
@@ -728,22 +722,34 @@ def setup_recipe(
     # Build the WDM-domain GB likelihood here (after the deepcopy in
     # ``CurrentInfoGlobalFit.__init__``) — the underlying C++ orbits wrap
     # is not picklable, so it must live outside the settings dataclass.
+    # Chunked-heterodyne is the only WDM backend (legacy lookup-table
+    # path removed sprint-wide); see ``gb_and_foreground_global_fit_settings.py``
+    # for the same wiring rationale.
     gb_info = curr.source_info["gb"]
     if (
         isinstance(general_info.domain_settings, WDMSettings)
-        and general_info.wdm_lookup_table is not None
         and gb_info.gb_wdm_comp is None
     ):
-        from fastlisaresponse.gbcomps import GBWDMComputations
+        import sys
+        if "/Users/mkatz/Research/lisa_sprint_2026" not in sys.path:
+            sys.path.insert(0, "/Users/mkatz/Research/lisa_sprint_2026")
+        from gb_wdm_het import GBWDMHeterodyne
 
-        gb_info.gb_wdm_comp = GBWDMComputations(
-            wdm_lookup_table=general_info.wdm_lookup_table,
-            T=general_info.Tobs,
-            t_ref=gb_info.t0,
+        _wdm = general_info.domain_settings
+        _t_obs_start = float(getattr(general_info, "t_obs_start", 0.0))
+        gb_info.gb_wdm_comp = GBWDMHeterodyne(
+            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
+            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+            Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
+            n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
+            N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
+            nchannels=3,
+            backend=general_info.force_backend,
+            tdi_gen="2nd generation" if gb_info.use_tdi2 else "1st generation",
             orbits=general_info.gpu_orbits,
-            tdi_config="2nd generation" if gb_info.use_tdi2 else "1st generation",
-            force_backend=general_info.force_backend,
-            tdi_type=gb_info.tdi_setup,
+            t_obs_start=_t_obs_start,
+            N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
+            N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
         )
 
     #* ================================= PSD =================================
@@ -1313,13 +1319,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 4
     ntemps = 2
 
-    # No Tukey taper — matches the WDM lookup table (built without
-    # windowing). ``window_taper_duration = 0`` gives alpha = 0
+    # No Tukey taper. ``window_taper_duration = 0`` gives alpha = 0
     # (rectangular) inside :func:`lisatools.utils.utility.windowfun`.
     window_taper_duration = 0.0
 
     domain_settings = DOMAIN_CHOICE
-    wdm_lookup_table = WDM_LOOKUP_TABLE
 
     processor_init_kwargs = dict(data_input_path=ldc_source_file)
 
@@ -1345,7 +1349,6 @@ def get_general_erebor_settings() -> GeneralSetup:
         base_file_name=base_file_name,
         main_file_key="testing",
         domain_settings=domain_settings,
-        wdm_lookup_table=wdm_lookup_table,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,

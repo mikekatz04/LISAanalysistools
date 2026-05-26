@@ -114,11 +114,6 @@ from lisatools.globalfit.galaxyglobal import make_gmm
 from lisatools.globalfit.moves import GlobalFitMove
 from lisatools.utils.utility import tukey
 from lisatools.analysiscontainer import AnalysisContainerArray
-# NOTE: WDMLookupTable removed -- chunked-heterodyne template pipeline
-# (gb_wdm_het.GBWDMHeterodyne) replaces the lookup-table machinery. See
-# the sprint root CLAUDE.md "mm2/mm5" and "backend hierarchy" sections.
-# Re-add WDMLookupTable here only if you're temporarily falling back to
-# the lookup path for debugging.
 from lisatools.domains import WDMSettings
 
 # basic transform functions for pickling
@@ -166,22 +161,55 @@ def setup_recipe(
     # Build the WDM-domain GB likelihood here (after the deepcopy in
     # ``CurrentInfoGlobalFit.__init__``) — the underlying C++ orbits wrap
     # is not picklable, so it must live outside the settings dataclass.
+    #
+    # The chunked-heterodyne ``GBWDMHeterodyne`` is the only WDM backend
+    # supported here -- the lookup-table path has been removed sprint-wide.
+    # The instance exposes the same ``get_ll_wdm`` / ``get_swap_ll_wdm`` /
+    # ``get_ll_grad_wdm`` / ``hessian_wdm`` / ``fill_global_wdm`` surface
+    # that :class:`WDMBandLikelihoodEngine` consumes; ``hessian_wdm`` is
+    # what lets the chunked-het NUTS / gradient move replace the
+    # info-matrix Cholesky proposal (see
+    # ``LISAanalysistools/src/lisatools/globalfit/moves/gbspecialstretch.py``).
     gb_info = curr.source_info["gb"]
     if (
         isinstance(general_info.domain_settings, WDMSettings)
-        and general_info.wdm_lookup_table is not None
         and gb_info.gb_wdm_comp is None
     ):
-        from fastlisaresponse.gbcomps import GBWDMComputations
+        # Chunked-heterodyne backend. Reads grid params off the resolved
+        # WDM domain settings; injection / orbit start time comes from
+        # the data processor (defaults to 0 -- adjust if the data has
+        # been offset). N_cp_sig=48 / N_cp_orbit=32 are the validated
+        # defaults (median mm5 ~1e-9; see CLAUDE.md sprint root).
+        import sys
+        if "/Users/mkatz/Research/lisa_sprint_2026" not in sys.path:
+            sys.path.insert(0, "/Users/mkatz/Research/lisa_sprint_2026")
+        from gb_wdm_het import GBWDMHeterodyne
 
-        gb_info.gb_wdm_comp = GBWDMComputations(
-            wdm_lookup_table=general_info.wdm_lookup_table,
-            T=general_info.Tobs,
-            t_ref=gb_info.t0,
+        _wdm = general_info.domain_settings
+        _t_obs_start = float(getattr(general_info, "t_obs_start", 0.0))
+        gb_info.gb_wdm_comp = GBWDMHeterodyne(
+            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
+            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+            Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
+            n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
+            N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
+            nchannels=3,
+            backend=general_info.force_backend,
+            tdi_gen="2nd generation" if gb_info.use_tdi2 else "1st generation",
             orbits=general_info.gpu_orbits,
-            tdi_config="2nd generation" if gb_info.use_tdi2 else "1st generation",
-            force_backend=general_info.force_backend,
-            tdi_type=gb_info.tdi_setup,
+            t_obs_start=_t_obs_start,
+            N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
+            N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
+        )
+        logger.info(
+            "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
+            "N_cp_sig=%d N_cp_orbit=%d (t_obs_start=%.3e t_ref=%.3e)",
+            _wdm.Nf, _wdm.Nt,
+            gb_info.gb_wdm_comp.Nt_sub,
+            gb_info.gb_wdm_comp.N_sparse,
+            gb_info.gb_wdm_comp.N_cp_sig,
+            gb_info.gb_wdm_comp.N_cp_orbit,
+            _t_obs_start, gb_info.t0,
         )
 
     #* ================================= BUILD MOVES =================================
@@ -250,9 +278,6 @@ def setup_recipe(
 #   STFT: DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24*3600.0, ...)
 #   WDM : DOMAIN_CHOICE = WDMSettings.make_factory(Nf=2048, Nt=8192, ...)
 #
-# When running WDM, also set ``WDM_LOOKUP_TABLE`` (instance or
-# ``(WDMSettings) -> WDMLookupTable`` factory) so the table is built
-# once the WDM grid is known.
 # Smoke test: 3-month Tobs (= 90 d) on Sangria's dt = 5 s gives a total
 # of 1,555,200 samples. With ~1-hour wavelets (layer_dt = Nf*dt = 3600 s),
 # Nf = 720 and Nt = 2160 (both even). layer_df = 1/(2*Nf*dt) ≈ 1.389e-4 Hz.
@@ -269,15 +294,9 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
     min_time=20 * 3600.0,
     max_time=(2160 - 20) * 3600.0,
 )
-# Lookup-table WDM path removed -- pending chunked-heterodyne integration.
-# The lookup table builder is preserved (commented) so the FD fallback
-# is used by default; once the chunked-het adapter is wired into
-# fastlisaresponse.gbcomps it will replace this entirely.
-WDM_LOOKUP_TABLE = None
-# WDM_LOOKUP_TABLE = lambda wdm_settings: WDMLookupTable.from_file(
-#     "wdm_lookup_n_ref_NF720_NT2160_3mo.h5",
-#     force_backend=GPU_BACKEND,
-# )
+# WDM lookup table removed sprint-wide -- the chunked-heterodyne template
+# pipeline (gb_wdm_het.GBWDMHeterodyne) is now the only WDM backend. The
+# build is wired in ``setup_recipe`` above when the domain is WDM.
 # Example alternates:
 # DOMAIN_CHOICE = FDSettings.make_factory(min_freq=5e-5, max_freq=3e-2)
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=5e-5, max_freq=3e-2)
@@ -426,11 +445,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     # rectangular window inside :func:`lisatools.utils.utility.windowfun`.
     window_taper_duration = 0.0
 
-    # The basis grid and (optional) WDM lookup table are configured at
-    # the top of this file (``DOMAIN_CHOICE`` / ``WDM_LOOKUP_TABLE``);
-    # we just forward them here.
+    # The basis grid is configured at the top of this file
+    # (``DOMAIN_CHOICE``); we just forward it here. The WDM lookup
+    # table has been removed -- chunked-het is built lazily in
+    # ``setup_recipe``.
     domain_settings = DOMAIN_CHOICE
-    wdm_lookup_table = WDM_LOOKUP_TABLE
 
     processor_init_kwargs = dict(
         data_input_path=ldc_source_file,
@@ -450,7 +469,6 @@ def get_general_erebor_settings() -> GeneralSetup:
         base_file_name=base_file_name,
         main_file_key="testing",
         domain_settings=domain_settings,
-        wdm_lookup_table=wdm_lookup_table,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,

@@ -65,6 +65,7 @@ void check_orbits(Orbits *orbits)
     printf("%e\n", orbits->x_arr[0]);
 }
 
+#if 0  // === XYZBackend disabled (symbol issues on Linux): XYZSensitivityMatrixWrap impls ===
 void XYZSensitivityMatrixWrap::get_noise_tfs_wrap(array_type<double> freqs,
                           array_type<double> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz, array_type<double> oms_yy, array_type<std::complex<double>> oms_yz, array_type<double> oms_zz,
                           array_type<double> tm_xx, array_type<std::complex<double>> tm_xy, array_type<std::complex<double>> tm_xz, array_type<double> tm_yy, array_type<std::complex<double>> tm_yz, array_type<double> tm_zz,
@@ -175,6 +176,7 @@ void XYZSensitivityMatrixWrap::get_inverse_det_wrap(
         num
     );
 }
+#endif  // === end XYZSensitivityMatrixWrap impls ===
 
 
 std::string get_module_path() {
@@ -338,6 +340,7 @@ void detector_part(py::module &m) {
 
     ;
 
+#if 0  // === XYZBackend disabled (symbol issues on Linux): pybind11 class bindings ===
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
     py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapGPU")
 #else
@@ -365,6 +368,7 @@ void detector_part(py::module &m) {
     .def(py::init<double *, double *, int, double, int, bool, double>(),
             py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
     ;
+#endif  // === end pybind11 class bindings ===
 }
 
 
