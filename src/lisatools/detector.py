@@ -274,6 +274,11 @@ class Orbits(LISAToolsParallelModule, ABC):
         """Set Spacecraft velocities."""
         return self._v
 
+    @property
+    def average_ltt(self) -> float:
+        """Average light travel time."""
+        return float(np.mean(self.ltt))
+
     def configure(
         self,
         t_arr: Optional[np.ndarray] = None,
