@@ -1,4 +1,4 @@
-from lisatools.composite_sensitivity import (
+from lisatools.sensitivity import (
         InstrumentNoise,
         GalacticForeground,
         SGWB,
@@ -12,7 +12,7 @@ from scipy.interpolate import interp1d
 
 from matplotlib.colors import LogNorm
 
-def scalo(ax, arr, wdm, *, log=False, vmin=None, vmax=None, cmap="viridis", title="", logy=False):
+def scalo(arr, wdm, *, log=False, vmin=None, vmax=None, cmap="viridis", title="", logy=False):
     """pcolormesh scalogram (freq on y [log], time on x) with physical axes."""
     a = np.abs(np.asarray(arr))  # (Nf, Nt)
     t_days = np.asarray(wdm.t_arr_edges, dtype=float) / 86400.0  # (Nt+1,)
@@ -21,35 +21,41 @@ def scalo(ax, arr, wdm, *, log=False, vmin=None, vmax=None, cmap="viridis", titl
     # nudge any non-positive edge below the lowest real layer and crop it via ylim
     f_lo = f_mHz[f_mHz > 0].min()
     f_mHz = f_mHz.copy()
-    f_mHz[f_mHz <= 0] = f_lo * 1e-3
+    f_mHz[f_mHz <= 0.0] = f_lo * 1e-3
     norm = LogNorm(vmin=vmin, vmax=vmax) if log else None
+    fig, ax = plt.subplots()
     im = ax.pcolormesh(
         t_days, f_mHz, a, norm=norm,
         vmin=None if log else vmin, vmax=None if log else vmax,
         cmap=cmap, shading="flat",
     )
+    plt.colorbar(im)
     if logy:
         ax.set_yscale("log")
     ax.set_ylim(f_lo, float(f_mHz[-1]))
     ax.set_xlabel("time [days]")
     ax.set_ylabel("frequency [mHz]")
     ax.set_title(title)
-    return im
+    plt.show()
+    plt.close()
+    return
 
 
 if __name__ == '__main__':
     # Nt=338 is roughly one month of data
-    Nf = 1536
-    Nt = 338*12
+    Nf = 1536*4
+    Nt = 338*24//4
     dt = 5
 
     settings = domains.WDMSettings(Nf=Nf,
                                 Nt=Nt,
                                 dt=dt,
                                 min_freq=3e-4,
-                                max_freq=2e-2,
+                                max_freq=8e-3,
                                 force_backend="cpu")
 
+    # note that this is tuned to match Sangria.
+    # the mojito noise starts at a different angle (confusion starts peaked)
     glass_modulation = np.loadtxt("./modulation.dat")
     modulation = np.array([
         [glass_modulation[:,1], glass_modulation[:,4], glass_modulation[:,5]],
@@ -70,27 +76,18 @@ if __name__ == '__main__':
                     2.95774596e03,  # slope 2
                     ],
                 modulation = modulation_interped,
-                model='sangria', # why is this here??
                 ),
             SGWB(
-                sgwb_params = [-8.45, 2./3.],
+                sgwb_params = [-20.45, 2./3.],
                 stochastic_fn = "PowerLawSGWB",
                 modulation = None,
-                model='sangria', # why is this here??
                 ),
             ]
     sensmat = CompositeSensitivityMatrix(settings, components)
 
-    # generate fake data
     XXcov = sensmat.sens_mat[0,0,:]
     XYcov = sensmat.sens_mat[0,1,:]
     ZZcov = sensmat.sens_mat[2,2,:]
-    fig, ax = plt.subplots()
-    scalo(ax, XXcov, settings, log=True, logy=True)
-    plt.show()
-    fig, ax = plt.subplots()
-    scalo(ax, np.abs(XYcov), settings, log=True, logy=True)
-    plt.show()
-    fig, ax = plt.subplots()
-    scalo(ax, np.abs(ZZcov), settings, log=True, logy=True)
-    plt.show()
+    scalo(XXcov, settings, log=True, logy=False, cmap='viridis')
+    scalo(np.abs(XYcov), settings, log=True, logy=False, cmap='viridis')
+    scalo(np.abs(ZZcov), settings, log=True, logy=False, cmap='viridis')
