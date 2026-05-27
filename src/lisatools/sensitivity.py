@@ -1720,8 +1720,10 @@ def get_sensitivity(
             wavelet layer, ``S_wdm[m] = (1/2) Sn(f_layer_center)``.
         stationary: For WDM, whether the noise PSD is the same for every time
             pixel. When ``True`` (default) the Fourier-domain PSD is evaluated
-            once and broadcast across all time pixels. ``False`` (time-varying
-            noise) is not yet implemented.
+            once and broadcast across all time pixels. When ``False``
+            (time-varying noise) the stationary ``wdm_psd_method`` calculation is
+            repeated per wavelet time column, each using its own Fourier-domain
+            PSD supplied through ``args_list`` / ``kwargs_list`` (length ``Nt``).
         include_instrument: Forwarded to ``get_Sn`` (in ``kwargs``). ``True``
             (default) returns instrument + stochastic; ``False`` returns only the
             stochastic contribution (``model`` then unused) — folded through the
@@ -1813,38 +1815,50 @@ def get_sensitivity(
                 f"wdm_psd_method must be 'fold' or 'layer_constant', got {wdm_psd_method!r}."
             )
 
-        if not stationary:
-            # Phase 2: time-varying confusion noise. Would evaluate a separate
-            # Fourier-domain PSD per wavelet time column (via args_list /
-            # kwargs_list) and fold each one.
-            raise NotImplementedError(
-                "Non-stationary (time-varying) WDM noise is not yet implemented. "
-                "Pass stationary=True."
-            )
+        def _wdm_layer_psd(_args, _kwargs):
+            """Per-layer wavelet PSD column (length ``Nf_active``) for a single
+            Fourier-domain noise spectrum. For locally stationary noise the
+            folded PSD is independent of the wavelet time pixel, so one column
+            fully describes it; the non-stationary path calls this once per
+            time column with that column's own spectrum."""
+            if wdm_psd_method == "layer_constant":
+                # approximation: PSD constant across each wavelet layer,
+                # evaluated at the layer centre frequencies.
+                f_c = basis_settings.f_arr
+                return 1 / 2 * sensitivity.get_Sn(f_c, *_args, **_kwargs)
 
-        if wdm_psd_method == "layer_constant":
-            # STATIONARY (approximation): PSD constant across each wavelet layer,
-            # evaluated at the layer centre frequencies.
-            f_c = basis_settings.f_arr
-            PSD_layer = 1 / 2 * sensitivity.get_Sn(f_c, *args_list[0], **kwargs_list[0])
-            PSD = xp.repeat(PSD_layer[:, None], basis_settings.Nt_active, axis=-1)
-
-        else:
-            # STATIONARY (exact): fold the full-resolution Fourier-domain PSD
-            # into the wavelet basis. Validated so that E[w_mn^2] == S_wdm[m]
-            # against the forward WDM transform (see wdm_noise_validation.py).
+            # exact: fold the full-resolution Fourier-domain PSD into the
+            # wavelet basis. Validated so that E[w_mn^2] == S_wdm[m] against the
+            # forward WDM transform (see wdm_noise_validation.py). The fold is
+            # time-column independent, so we keep a single representative column.
             f_full = xp.fft.rfftfreq(basis_settings.N, basis_settings.data_dt)
             df = float(f_full[1] - f_full[0])
-            psd_full = sensitivity.get_Sn(f_full, *args_list[0], **kwargs_list[0])
+            psd_full = sensitivity.get_Sn(f_full, *_args, **_kwargs)
             psd_fd = domains.FDSignal(
                 psd_full,
                 domains.FDSettings(
                     f_full.shape[0], df, force_backend=basis_settings.backend
                 ),
             )
-            PSD = xp.real(
-                psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0]
-            )
+            folded = xp.real(psd_fd.wdmtransform(settings=basis_settings, is_psd=True)[0])
+            return folded[:, 0]
+
+        if stationary:
+            # STATIONARY: evaluate the Fourier-domain PSD once and broadcast the
+            # single folded layer column across every wavelet time pixel.
+            col = _wdm_layer_psd(args_list[0], kwargs_list[0])
+            PSD = xp.repeat(col[:, None], basis_settings.Nt_active, axis=-1)
+
+        else:
+            # NON-STATIONARY (time-varying): repeat the stationary fold /
+            # layer_constant calculation per wavelet time column, each with its
+            # own Fourier-domain PSD supplied through args_list / kwargs_list
+            # (both length Nt). active_slice_t selects the active columns.
+            cols = [
+                _wdm_layer_psd(args_list[g], kwargs_list[g])
+                for g in range(basis_settings.ind_min_t, basis_settings.ind_max_t + 1)
+            ]
+            PSD = xp.stack(cols, axis=-1)
 
     else:
         raise ValueError(
