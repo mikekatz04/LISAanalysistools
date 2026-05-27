@@ -285,41 +285,25 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
 
 # --------------------------------------------------------------------------- #
 # Stochastic gravitational-wave background (SGWB) spectral templates.
-#
-# Ported from GLASS ``glass_noise_model.c`` (``sgwb_powerlaw``,
-# ``sgwb_lognormal``, ``sgwb_phase_transition``). Each returns the GW spectral
-# density ``Sgw(f)`` *before* the LISA/TDI response. The XYZ response is applied
-# downstream by the TDI sensitivity classes' ``stochastic_transform`` (the
-# equal-arm isotropic monopole response ``R_XX = 4 x^2 sin^2 x`` with
-# off-diagonals ``-1/2 R_XX``), which is the equal-arm limit of GLASS's
-# precomputed ``sgwb_response_xyz2.dat``. So these plug into ``get_sensitivity``
-# and ``CompositeSensitivityMatrix`` exactly like the galactic foreground.
-#
-# The constants below mirror the GLASS C ``#define``s (H0, Hscale, cgOr0).
+# For now, these are 
 # --------------------------------------------------------------------------- #
 
-# Hubble constant [1/s]: H0 = 70 km/s/Mpc (3.24078e-20 converts km/s/Mpc -> 1/s).
-_SGWB_H0_SI = 70.0 * 3.24078e-20  # GLASS: #define H0 (70*3.24078e-20)
+# Hubble constant [1/s]: H0 = 70 km/s/Mpc * 3.24078e-20 Mpc/km
+_SGWB_H0_SI = 70.0 * 3.24078e-20
 
-# Omega_GW(f) -> one-sided strain PSD S_h(f) prefactor: S_h = (3 H0^2 / 4 pi^2)
-# Omega_GW / f^3.
-SGWB_HSCALE = 3.0 * _SGWB_H0_SI**2 / (4.0 * np.pi**2)  # GLASS: #define Hscale
+# common cosmology units to PSD factor
+SGWB_HSCALE = 3.0 * _SGWB_H0_SI**2 / (4.0 * np.pi**2)
 
-# Scalar-induced-GW factor used only by the log-normal template:
-# c_g * Omega_{r,0} (radiation d.o.f. factor times present-day radiation energy
-# density). GLASS: #define cgOr0 (1.6e-5/(0.7*0.7)).
+# c_g * Omega_{r,0} (radiation d.o.f. factor times present-day radiation energy density)
+# change the denominator if you change H0!
 SGWB_CGOR0 = 1.6e-5 / (0.7 * 0.7)
 
-# Power-law pivot frequency [Hz] (GLASS ``sgwb_powerlaw`` ``fref``).
-SGWB_FREF = 25.0
-
-
 class PowerLawSGWB(StochasticContribution):
-    """Power-law SGWB spectral template (GLASS ``sgwb_powerlaw``).
+    """Power-law SGWB spectral template
 
     .. math::
 
-        S_\\text{gw}(f) = \\frac{H_\\text{scale}}{f^3}\\, A\\,
+        S_\\text{gw}(f) =  A\\,
                           \\left(\\frac{f}{f_\\text{ref}}\\right)^{\\alpha},
 
     with :math:`A = 10^{\\log_{10}A}` and :math:`f_\\text{ref}` =
@@ -327,6 +311,7 @@ class PowerLawSGWB(StochasticContribution):
     """
 
     ndim = 2
+    fref = 25.0 # Hz
 
     @staticmethod
     def specific_Sh_function(
@@ -343,15 +328,15 @@ class PowerLawSGWB(StochasticContribution):
             GW spectral density ``Sgw(f)`` (pre-response).
         """
         A = 10.0**log10_A
-        # Sgw ~ 1/f^3 diverges at f=0; return NaN there (GLASS zeroes f=0).
+        # Sgw ~ 1/f^3 diverges at f=0; return NaN there.
         with np.errstate(divide="ignore", invalid="ignore"):
             prefactor = SGWB_HSCALE / (f * f * f)
-            Sgw = prefactor * A * (f / SGWB_FREF) ** alpha
+            Sgw = prefactor * A * (f / fref) ** alpha
         return np.where(np.asarray(f) > 0.0, Sgw, np.nan)
 
 
 class LogNormalSGWB(StochasticContribution):
-    """Log-normal (scalar-induced) SGWB template (GLASS ``sgwb_lognormal``).
+    """Log-normal (scalar-induced) SGWB template
 
     Pi & Sasaki, JCAP 2020 (arXiv:2005.12306), wide-:math:`\\Delta` limit,
     eq. (3.29). For :math:`D \\geq 9` the closed form suffers catastrophic
@@ -423,14 +408,13 @@ class LogNormalSGWB(StochasticContribution):
 
 
 class PhaseTransitionSGWB(StochasticContribution):
-    """Phase-transition SGWB template (GLASS ``sgwb_phase_transition``).
+    """Phase-transition SGWB template.
 
     Parameters are ``(rb, b, log10_Ap, log10_fp)`` with a double-broken
-    power-law shape :math:`M(f)`:
+    power-law shape.
 
-    .. math::
+    See https://arxiv.org/abs/2209.13277
 
-        S_\\text{gw}(f) = A_p\\, M(f)\\, \\frac{H_\\text{scale}}{f^3}.
     """
 
     ndim = 4
