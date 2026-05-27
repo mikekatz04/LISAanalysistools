@@ -788,7 +788,6 @@ class FDSignal(FDSettings, DomainBase):
         # phif = phitilde_vec_norm(settings.Nf, settings.Nt, 4.0)
         m = self.xp.repeat(self.xp.arange(0, settings.Nf)[:, None], settings.Nt, axis=-1)
         n = self.xp.tile(self.xp.arange(settings.Nt), (settings.Nf, 1))
-
         m_special = self.xp.repeat(self.xp.arange(0, settings.Nf + 1)[:, None], settings.Nt, axis=-1)
         
         # removed zero frequency and mirrored
