@@ -170,18 +170,27 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
 
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
-    
-    # waveform kwargs
+
     initialize_kwargs_psd = dict()
 
-    from lisatools.utils.constants import YRSID_SI
-    Tobs = YRSID_SI
-    dt = 10.0
+    # Match gb_and_foreground's PSD prior + injection so the smoke test
+    # exercises the same 2-parameter (Soms_d, Sa_a) parameterisation that
+    # CompositeSensitivityBackend consumes.
+    priors_psd = {
+        r"$S_{\rm oms}$": uniform_dist(6.0e-12, 20.0e-11),
+        r"$S_{\rm tm}$": uniform_dist(1.0e-15, 20.0e-14),
+    }
+    priors = {"psd": ProbDistContainer(priors_psd)}
+    injection = np.array([15e-12, 3e-15])
 
     psd_settings = PSDSettings(
+        ndim=2,
+        injection=injection,
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
+        priors=priors,
+        log_dir=general_set.file_store_dir,
     )
 
     return PSDSetup(psd_settings)
@@ -215,18 +224,32 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 # instance or a factory ``(times, dt, force_backend) -> DomainSettings``.
 # Each Settings class exposes a ``make_factory(...)`` classmethod that
 # returns one. Edit this line directly:
-DOMAIN_CHOICE = FDSettings.make_factory(min_freq=0.0, max_freq=None)
-# Example WDM / STFT alternatives:
+#
+# WDM smoke-test grid. ``Tobs = NF * NT * DT`` keeps the data length an
+# exact multiple of ``Nf * Nt`` so the WDM transform fits without padding.
+# 720 * 2160 * 5 = 7,776,000 s = 90 days ≈ 3 months — matches the wider
+# smoke-test config used by gb_and_foreground / full settings.
+NF = 720
+NT = 2160
+DT = 5.0
+TOBS = NF * NT * DT
+DOMAIN_CHOICE = WDMSettings.make_factory(
+    Nf=NF,
+    Nt=NT,
+    min_freq=1e-4,
+    max_freq=2.5e-2,
+    min_time=20 * 3600.0,
+    max_time=(NT - 20) * 3600.0,
+)
+# Example FD / STFT alternatives:
+# DOMAIN_CHOICE = FDSettings.make_factory(min_freq=0.0, max_freq=None)
 # DOMAIN_CHOICE = STFTSettings.make_factory(big_dt=24 * 3600.0, min_freq=0.0, max_freq=None)
-# DOMAIN_CHOICE = WDMSettings.make_factory(Nf=2048, Nt=8192, min_freq=0.0, max_freq=None)
 # ============================================================
 
 
 def get_general_erebor_settings() -> GeneralSetup:
-    from lisatools.utils.constants import YRSID_SI
-
-    Tobs = 2.0 * YRSID_SI / 12.0
-    dt = 5.0
+    Tobs = TOBS
+    dt = DT
 
     ldc_source_file = "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5"
     base_file_name = "psd_only_smoke_test"
@@ -239,10 +262,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     nwalkers = 4
     ntemps = 2
 
-    # Window taper: previously ``tukey_alpha=0.05`` over the full Nt; the
-    # engine rebuilds the window from ``window_taper_duration`` (in
-    # seconds) and the domain-specific Nt.
-    window_taper_duration = 0.05 * (Tobs)
+    # WDM smoke test: rectangular window (alpha = 0). Matches the
+    # gb_and_foreground smoke-test config so the data path is consistent.
+    window_taper_duration = 0.0
 
     orbits = EqualArmlengthOrbits()
     gpu_orbits = EqualArmlengthOrbits(force_backend=GPU_BACKEND)
@@ -254,6 +276,19 @@ def get_general_erebor_settings() -> GeneralSetup:
         remove_from_data=["mbhb", "dgb", "igb", "vgb"],
     )
 
+    # The synthesised data already covers exactly Tobs = Nf*Nt*dt; skip the
+    # default highpass + edge-trim so we don't lose samples (the default Tobs
+    # trim uses ``T=(N-1)*dt`` which would break the WDM ``Nf*Nt`` shape).
+    preprocess_kwargs = dict(
+        highpass_kwargs=None,
+        trim_kwargs=None,
+        Tobs=None,
+        normalize=False,
+    )
+
+    # Only ``tdi_generation`` is relevant for the (default)
+    # CompositeSensitivityBackend; ``mask_percentage`` / ``use_splines`` are
+    # XYZ-only and filtered out at the engine.
     sensitivity_init_kwargs = dict(tdi_generation=2)
 
     general_settings = GeneralSettings(
@@ -274,6 +309,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         gpus=gpus,
         data_processor=SangriaProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
+        preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
     )
 

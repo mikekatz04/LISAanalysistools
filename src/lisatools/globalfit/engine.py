@@ -37,6 +37,7 @@ from ..sensitivity import (
     AE1SensitivityMatrix,
     AE2SensitivityMatrix,
     AET2SensitivityMatrix,
+    CompositeSensitivityBackend,
     XYZ1SensitivityMatrix,
     XYZ2SensitivityMatrix,
     XYZSensitivityBackend,
@@ -187,6 +188,12 @@ class GeneralSettings(Settings):
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
+    # Class used to build ``self.sensitivity_backend``. Defaults to
+    # :class:`CompositeSensitivityBackend`, which yields a
+    # :class:`CompositeSensitivityMatrix` per walker (InstrumentNoise plus
+    # optional GalacticForeground / SGWB components). Set to
+    # :class:`XYZSensitivityBackend` for the legacy C++/CUDA matrix path.
+    sensitivity_backend_class: Optional[type] = None
     normalize_window: bool = False
     catalogue: typing.Optional[dict] = None
 
@@ -437,14 +444,39 @@ class GeneralSetup(Setup, GeneralSettings):
                     "a WDMSettings; remove it or switch the domain."
                 )
 
-        # TODO: AET sensitivity backend wiring.
-        self.sensitivity_backend = XYZSensitivityBackend(
-            orbits=self.gpu_orbits,
-            settings=domain_settings,
-            force_backend=self.force_backend,
-            window_values=window if self.normalize_window else None,
-            **self.sensitivity_init_kwargs,
-        )
+        # Sensitivity backend: defaults to CompositeSensitivityBackend, which
+        # builds a CompositeSensitivityMatrix (InstrumentNoise + optional
+        # GalacticForeground / SGWB components) per walker. Set
+        # ``sensitivity_backend_class=XYZSensitivityBackend`` to fall back to
+        # the legacy C++/CUDA matrix path.
+        sensitivity_init_kwargs = dict(self.sensitivity_init_kwargs or {})
+        backend_cls = self.sensitivity_backend_class or CompositeSensitivityBackend
+        if backend_cls is CompositeSensitivityBackend or (
+            isinstance(backend_cls, type)
+            and issubclass(backend_cls, CompositeSensitivityBackend)
+        ):
+            # Drop kwargs that are specific to the legacy XYZ backend so a
+            # settings file can be switched over without editing every kwarg.
+            xyz_only = ("mask_percentage", "use_splines", "spline_order")
+            for k in xyz_only:
+                if k in sensitivity_init_kwargs:
+                    self.logger.debug(
+                        f"Ignoring XYZ-only sensitivity kwarg {k!r} for "
+                        "CompositeSensitivityBackend."
+                    )
+                    sensitivity_init_kwargs.pop(k)
+            self.sensitivity_backend = backend_cls(
+                settings=domain_settings,
+                **sensitivity_init_kwargs,
+            )
+        else:
+            self.sensitivity_backend = backend_cls(
+                orbits=self.gpu_orbits,
+                settings=domain_settings,
+                force_backend=self.force_backend,
+                window_values=window if self.normalize_window else None,
+                **sensitivity_init_kwargs,
+            )
 
 
 @dataclasses.dataclass

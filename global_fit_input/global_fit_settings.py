@@ -1338,9 +1338,10 @@ def get_general_erebor_settings() -> GeneralSetup:
         normalize=False,
     )
 
-    sensitivity_init_kwargs = dict(
-        tdi_generation=2, mask_percentage=0.02, use_splines=False
-    )
+    # CompositeSensitivityBackend is the default; only ``tdi_generation`` is
+    # consumed. The legacy XYZ-only kwargs (mask_percentage / use_splines /
+    # spline_order) are filtered out at the engine.
+    sensitivity_init_kwargs = dict(tdi_generation=2)
 
     general_settings = GeneralSettings(
         Tobs=Tobs,

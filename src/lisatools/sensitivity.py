@@ -7,6 +7,7 @@ Stas Babak and Antoine Petiteau for the LDC team.
 from __future__ import annotations
 
 import math
+import operator
 import os
 import warnings
 from abc import ABC
@@ -1079,6 +1080,12 @@ class SensitivityMatrixBase:
         self.data_shape = self.basis_settings.basis_shape_active
 
         self.do_inv_det = not skip_inv_det
+        # invC / detC are evaluated lazily on first read; this flag tracks
+        # whether sens_mat has changed since the last computation. Subsequent
+        # in-place updates (``__setitem__``) and arithmetic ops (``__add__`` /
+        # ``__sub__``) flip this back to True so the inverse is recomputed only
+        # when the caller actually needs it.
+        self._inv_det_dirty = False
 
     @property
     def basis_settings(self) -> np.ndarray:
@@ -1283,8 +1290,11 @@ class SensitivityMatrixBase:
 
         self.channel_shape = self._sens_mat.shape[: -len(self.data_shape)]
 
-        if self.do_inv_det:
-            self._setup_det_and_inv()
+        # Defer inv/det computation: a subsequent read of ``invC`` / ``detC``
+        # will trigger ``_setup_det_and_inv`` once. This lets a chain like
+        # ``A + B + C`` pay the inverse cost only at the final access, not
+        # after every intermediate operation.
+        self._inv_det_dirty = True
 
     @property
     def differential_component(self) -> float:
@@ -1358,8 +1368,8 @@ class SensitivityMatrixBase:
 
         # setup detC
         if len(self.channel_shape) == 1:
-            self.detC = xp.prod(self.sens_mat, axis=0)
-            self.invC = 1 / self.sens_mat
+            self._detC = xp.prod(self.sens_mat, axis=0)
+            self._invC = 1 / self.sens_mat
 
         # TODO switch to Cholesky decomposition and inversion!
         else:
@@ -1369,12 +1379,12 @@ class SensitivityMatrixBase:
             basis_axes = full_shape[-len(self.data_shape):]
             mat_axes = full_shape[:-len(self.data_shape)]
             transpose_shape = basis_axes + mat_axes
-            self.detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
+            self._detC = xp.linalg.det(self.sens_mat.transpose(transpose_shape))
 
             tmp = self.sens_mat.transpose(transpose_shape).reshape((-1,) + self.channel_shape)
-            
+
             _invC = xp.zeros_like(tmp)
-            
+
             # adjust for nans in off-diagonals
             for i in range(3):
                 for j in range(3):
@@ -1399,9 +1409,9 @@ class SensitivityMatrixBase:
                 # print(ind_st)
 
             inds_bad = np.asarray(inds_bad)
-    
+
             invC = _invC.reshape(self.data_shape + self.channel_shape)
-            
+
             # switch them after they were effectively switched above
 
             full_shape_rev = tuple(range(len(invC.shape)))
@@ -1409,8 +1419,91 @@ class SensitivityMatrixBase:
             basis_axes_rev = full_shape_rev[:len(self.data_shape)]
             mat_axes_rev = full_shape_rev[len(self.data_shape):]
             transpose_shape_rev = mat_axes_rev + basis_axes_rev
-            self.invC = invC.transpose(transpose_shape_rev)   
+            self._invC = invC.transpose(transpose_shape_rev)
+        self._inv_det_dirty = False
             
+    @property
+    def invC(self) -> np.ndarray:
+        """Inverse covariance Σ⁻¹.
+
+        Computed lazily: a fresh ``sens_mat`` (from construction, ``__setitem__``,
+        or an arithmetic op) just flips a dirty flag; the actual matrix inverse
+        runs on the first read of ``invC`` (or ``detC``) afterwards. A chain
+        ``A + B + C + …`` therefore pays the inverse cost exactly once, at the
+        final access. ``do_inv_det=False`` (e.g. after slicing) suppresses the
+        auto-recompute and returns whatever was last assigned.
+        """
+        if self._inv_det_dirty and self.do_inv_det:
+            self._setup_det_and_inv()
+        return self._invC
+
+    @invC.setter
+    def invC(self, value: np.ndarray) -> None:
+        # Explicit assignment wins: clear the dirty flag so subsequent reads
+        # return the just-assigned value rather than recomputing over it.
+        self._invC = value
+        self._inv_det_dirty = False
+
+    @property
+    def detC(self) -> np.ndarray:
+        """Determinant det[Σ]. Lazily computed; see :attr:`invC` for semantics."""
+        if self._inv_det_dirty and self.do_inv_det:
+            self._setup_det_and_inv()
+        return self._detC
+
+    @detC.setter
+    def detC(self, value: np.ndarray) -> None:
+        self._detC = value
+        self._inv_det_dirty = False
+
+    def compute_inv_det(self) -> None:
+        """Force-compute ``invC`` / ``detC`` now (rather than waiting for first read)."""
+        self.do_inv_det = True
+        if self._inv_det_dirty:
+            self._setup_det_and_inv()
+
+    def _combine(
+        self,
+        other: "SensitivityMatrixBase | np.ndarray | float",
+        op: Callable,
+    ) -> "SensitivityMatrixBase":
+        """Combine ``self.sens_mat`` with ``other`` via ``op`` and return a new instance.
+
+        The returned matrix shares ``basis_settings`` with ``self`` and starts
+        out *dirty* — ``invC`` / ``detC`` are not computed until first read.
+        """
+        if isinstance(other, SensitivityMatrixBase):
+            other_arr = other.sens_mat
+        elif isinstance(other, (np.ndarray, cp.ndarray)):
+            other_arr = other
+        else:
+            return NotImplemented
+
+        if other_arr.shape != self.sens_mat.shape:
+            raise ValueError(
+                f"Shape mismatch combining SensitivityMatrixBase: "
+                f"self.sens_mat.shape={self.sens_mat.shape} vs "
+                f"other.shape={other_arr.shape}."
+            )
+
+        new = SensitivityMatrixBase(self.basis_settings)
+        new.sens_mat = op(self.sens_mat, other_arr)
+        return new
+
+    def __add__(self, other):
+        return self._combine(other, operator.add)
+
+    def __sub__(self, other):
+        return self._combine(other, operator.sub)
+
+    def add(self, other) -> "SensitivityMatrixBase":
+        """Object-oriented equivalent of ``self + other``. Returns a new matrix."""
+        return self._combine(other, operator.add)
+
+    def subtract(self, other) -> "SensitivityMatrixBase":
+        """Object-oriented equivalent of ``self - other``. Returns a new matrix."""
+        return self._combine(other, operator.sub)
+
     def __getitem__(self, index: Any) -> np.ndarray:
         """Indexing the class indexes the array."""
         return self.sens_mat[index]
@@ -1418,7 +1511,7 @@ class SensitivityMatrixBase:
     def __setitem__(self, index: Any, value: np.ndarray) -> np.ndarray:
         """Indexing the class indexes the array."""
         self.sens_mat[index] = value
-        self._setup_det_and_inv()
+        self._inv_det_dirty = True
 
     @property
     def ndim(self) -> int:
@@ -3069,12 +3162,119 @@ class CompositeSensitivityMatrix(SensitivityMatrixBase):
         for i in indices:
             self._contrib_cache[i] = self.components[i].covariance(self.basis_settings)
 
-        C = None
-        for i in range(len(self.components)):
-            contrib = self._contrib_cache[i]
-            C = contrib if C is None else C + contrib
-        self.sens_mat = C  # triggers detC / invC in SensitivityMatrixBase
+        # Object-oriented sum: every intermediate ``+`` returns a
+        # :class:`SensitivityMatrixBase` with dirty ``invC`` / ``detC``, so the
+        # matrix inverse runs exactly once -- when this method's caller (or the
+        # likelihood code) first reads off the inverse.
+        accum = SensitivityMatrixBase(self.basis_settings)
+        accum.sens_mat = self._contrib_cache[0]
+        for i in range(1, len(self.components)):
+            accum = accum + self._contrib_cache[i]
+        # adopt the summed array onto self; the assignment marks self dirty so
+        # invC / detC will be lazily computed on first read off the composite.
+        self.sens_mat = accum.sens_mat
 
     def update_component(self, index: int) -> None:
         """Recompute a single component (after changing its params) and re-sum."""
         self.rebuild(indices=[index])
+
+
+class CompositeSensitivityBackend:
+    """Callable wrapper that produces :class:`CompositeSensitivityMatrix` instances
+    parameterised by per-walker PSD (and optional galactic-foreground / SGWB)
+    coordinates.
+
+    The call signature mirrors :meth:`XYZSensitivityBackend.__call__` so the
+    object can be slotted into ``GeneralSetup.sensitivity_backend`` without any
+    changes in the global-fit run/move code. Each call returns a fresh
+    :class:`CompositeSensitivityMatrix` that sums an :class:`InstrumentNoise`
+    component (rebuilt with the walker's Soms_d / Sa_a) and optionally a
+    :class:`GalacticForeground` component (when ``galfor_params`` is supplied),
+    plus any extra stationary components passed at construction.
+
+    Args:
+        settings: Domain settings the matrix is evaluated on (FD, WDM, ...).
+        tdi_generation: 1 (TDI 1.5) or 2 (TDI 2.0).
+        model_name: Name to record on the constructed :class:`LISAModel`.
+        instrument_fill_nans: ``fill_nans`` value forwarded to
+            :class:`InstrumentNoise`. Defaults to ``0.0`` so the WDM fold of
+            the FD ``f=0`` divergence doesn't leave NaNs in the matrix; the
+            zeroed cells get filtered by :func:`noise_likelihood_term`'s
+            ``detC`` mask downstream.
+        galfor_stochastic_fn: Stochastic-model class used for the optional
+            :class:`GalacticForeground` component (only used when the caller
+            supplies ``galfor_params``).
+        extra_components: Additional :class:`NoiseComponent` instances added
+            to every constructed matrix — e.g. a stationary SGWB. These are
+            held by reference so they're built once and reused.
+    """
+
+    def __init__(
+        self,
+        settings: DomainSettingsBase,
+        *,
+        tdi_generation: int = 2,
+        model_name: str = "sangria",
+        instrument_fill_nans: float = 0.0,
+        galfor_stochastic_fn=HyperbolicTangentGalacticForeground,
+        extra_components: Optional[Sequence[NoiseComponent]] = None,
+    ):
+        self.basis_settings = settings
+        self.tdi_generation = tdi_generation
+        self.model_name = model_name
+        self.instrument_fill_nans = instrument_fill_nans
+        self.galfor_stochastic_fn = galfor_stochastic_fn
+        self.extra_components = list(extra_components) if extra_components else []
+        # ``LISAModel.lisanoises`` only reads Soms_d / Sa_a — the orbits field
+        # is just a carrier here, so one shared instance is fine.
+        self._orbits = lisa_models.DefaultOrbits()
+
+    def __call__(
+        self,
+        name: str,
+        psd_params,
+        galfor_params=None,
+        transform_fn: Optional[TransformContainer] = None,
+    ) -> CompositeSensitivityMatrix:
+        """Build a per-walker :class:`CompositeSensitivityMatrix`.
+
+        Args:
+            name: Identifier (e.g. ``"walker_3"``) recorded on the LISAModel.
+            psd_params: ``[Soms_d, Sa_a]`` in linear (square-root) units, matching
+                the convention used by :class:`XYZSensitivityBackend`.
+            galfor_params: Optional galactic-foreground parameters. When given,
+                a :class:`GalacticForeground` component is added.
+            transform_fn: Optional :class:`TransformContainer`. Applied to
+                ``psd_params`` first if provided.
+
+        Returns:
+            A freshly built :class:`CompositeSensitivityMatrix`.
+        """
+        params = np.asarray(psd_params, dtype=float)
+        if transform_fn is not None:
+            params = transform_fn.both_transforms(
+                params, copy=True, return_transpose=False
+            )
+            params = np.atleast_1d(np.asarray(params).squeeze())
+        Soms_d = float(params[0])
+        Sa_a = float(params[1])
+        model = lisa_models.LISAModel(
+            Soms_d ** 2, Sa_a ** 2, self._orbits, f"{self.model_name}:{name}"
+        )
+        components: list[NoiseComponent] = [
+            InstrumentNoise(
+                tdi_generation=self.tdi_generation,
+                model=model,
+                fill_nans=self.instrument_fill_nans,
+            ),
+        ]
+        if galfor_params is not None:
+            components.append(
+                GalacticForeground(
+                    foreground_params=np.asarray(galfor_params, dtype=float),
+                    tdi_generation=self.tdi_generation,
+                    stochastic_fn=self.galfor_stochastic_fn,
+                )
+            )
+        components.extend(self.extra_components)
+        return CompositeSensitivityMatrix(self.basis_settings, components)
