@@ -92,6 +92,7 @@ class Sensitivity(ABC):
         cls,
         f: float | np.ndarray,
         model: Optional[lisa_models.LISAModel | str] = lisa_models.sangria,
+        include_instrument: bool = True,
         **kwargs: dict,
     ) -> float | np.ndarray:
         """Calculate the PSD
@@ -114,29 +115,37 @@ class Sensitivity(ABC):
                     "T": CubicSpline(f, Sn_T))
                 }
                 ```
+            include_instrument: If ``True`` (default), include the instrument
+                noise term. If ``False``, return only the (transformed) stochastic
+                contribution — ``model`` is then unused. Used to build
+                stochastic-only covariance components (galactic foreground, SGWB).
             **kwargs: For interoperability.
 
         Returns:
             PSD values.
 
         """
-        # spline or stock computation
-        if hasattr(model, "Sn_spl") and model.Sn_spl is not None:
-            spl = model.Sn_spl
-            if cls.channel not in spl:
-                raise ValueError("Calling a channel that is not available.")
+        if include_instrument:
+            # spline or stock computation
+            if hasattr(model, "Sn_spl") and model.Sn_spl is not None:
+                spl = model.Sn_spl
+                if cls.channel not in spl:
+                    raise ValueError("Calling a channel that is not available.")
 
-            Sout = spl[cls.channel](f)
+                Sout = spl[cls.channel](f)
 
+            else:
+                model = lisa_models.check_lisa_model(model)
+                # assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
+
+                # get noise values
+                noise_levels = model.lisanoises(f)
+
+                # transform as desired for TDI combination
+                Sout = cls.transform(f, noise_levels, **kwargs)
         else:
-            model = lisa_models.check_lisa_model(model)
-            # assert hasattr(model, "Soms_d") and hasattr(model, "Sa_a")
-
-            # get noise values
-            noise_levels = model.lisanoises(f)
-
-            # transform as desired for TDI combination
-            Sout = cls.transform(f, noise_levels, **kwargs)
+            # stochastic-only: skip the instrument term entirely (no model needed)
+            Sout = 0.0
 
         # will add zero if ignored
         stochastic_contribution = cls.stochastic_transform(
@@ -912,6 +921,7 @@ class LISASens(Sensitivity):
         f: float | np.ndarray,
         model: Optional[lisa_models.LISAModel | str] = lisa_models.sangria,
         average: bool = True,
+        include_instrument: bool = True,
         **kwargs: dict,
     ) -> float | np.ndarray:
         """Compute the base LISA sensitivity function.
@@ -922,37 +932,44 @@ class LISASens(Sensitivity):
             average: Whether to apply averaging factors to sensitivity curve.
                 Antenna response: ``av_resp = np.sqrt(5) if average else 1.0``
                 Projection effect: ``Proj = 2.0 / np.sqrt(3) if average else 1.0``
+            include_instrument: If ``True`` (default), include the instrument
+                noise term. If ``False``, return only the stochastic contribution
+                (``model`` is then unused).
             **kwargs: Keyword arguments to pass to :func:`get_stochastic_contribution`. # TODO: fix
 
         Returns:
             Sensitivity array.
 
         """
-        model = lisa_models.check_lisa_model(model)
+        if include_instrument:
+            model = lisa_models.check_lisa_model(model)
 
-        if not isinstance(model, lisa_models.LISAModel):
-            raise NotImplementedError(
-                "This function has not been implemented for ExtendedLISAModel yet."
-            )
+            if not isinstance(model, lisa_models.LISAModel):
+                raise NotImplementedError(
+                    "This function has not been implemented for ExtendedLISAModel yet."
+                )
 
-        # get noise values
-        noise_values = model.lisanoises(f, unit="displacement")
+            # get noise values
+            noise_values = model.lisanoises(f, unit="displacement")
 
-        Sa_d = noise_values.tm_noise
-        Sop = noise_values.isi_oms_noise
+            Sa_d = noise_values.tm_noise
+            Sop = noise_values.isi_oms_noise
 
-        all_m = np.sqrt(4.0 * Sa_d + Sop)
-        ## Average the antenna response
-        av_resp = np.sqrt(5) if average else 1.0
+            all_m = np.sqrt(4.0 * Sa_d + Sop)
+            ## Average the antenna response
+            av_resp = np.sqrt(5) if average else 1.0
 
-        ## Projection effect
-        Proj = 2.0 / np.sqrt(3) if average else 1.0
+            ## Projection effect
+            Proj = 2.0 / np.sqrt(3) if average else 1.0
 
-        ## Approximative transfer function
-        f0 = 1.0 / (2.0 * lisaLT)
-        a = 0.41
-        T = np.sqrt(1 + (f / (a * f0)) ** 2)
-        sens = (av_resp * Proj * T * all_m / lisaL) ** 2
+            ## Approximative transfer function
+            f0 = 1.0 / (2.0 * lisaLT)
+            a = 0.41
+            T = np.sqrt(1 + (f / (a * f0)) ** 2)
+            sens = (av_resp * Proj * T * all_m / lisaL) ** 2
+        else:
+            # stochastic-only: skip the instrument term entirely (no model needed)
+            sens = 0.0
 
         # will add zero if ignored
         sens += cls.get_stochastic_contribution(f, **kwargs)
@@ -1704,6 +1721,10 @@ def get_sensitivity(
             pixel. When ``True`` (default) the Fourier-domain PSD is evaluated
             once and broadcast across all time pixels. ``False`` (time-varying
             noise) is not yet implemented.
+        include_instrument: Forwarded to ``get_Sn`` (in ``kwargs``). ``True``
+            (default) returns instrument + stochastic; ``False`` returns only the
+            stochastic contribution (``model`` then unused) — folded through the
+            same domain dispatch, so it works in FD, WDM, etc.
         **kwargs: Keyword arguments to pass to sensitivity function ``get_Sn`` method.
 
     Return:

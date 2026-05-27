@@ -223,12 +223,12 @@ class InstrumentNoise(SeparableComponent):
 class GalacticForeground(SeparableComponent):
     """Galactic confusion foreground with a per-element time modulation.
 
-    Base covariance (GLASS convention): the foreground *magnitude*
+    Base covariance : the foreground *magnitude*
     ``Sgal_mag[basis]`` — the auto-channel (XX) foreground in the domain basis —
-    is placed on every element, computed domain-agnostically as the difference of
-    the X-channel sensitivity with and without the stochastic foreground. The
-    per-element structure (including the off-diagonal sign) and the slow time
-    variation live entirely in the modulation.
+    is placed on every element, computed domain-agnostically as the X-channel
+    *stochastic-only* sensitivity (``include_instrument=False``), so no instrument
+    term is included here. The per-element structure (including the off-diagonal
+    sign) and the slow time variation live entirely in the modulation.
 
     Args:
         foreground_params: Parameters for ``stochastic_fn`` (for the default
@@ -241,7 +241,6 @@ class GalacticForeground(SeparableComponent):
             six per-element functions with :func:`modulation_from_elements`).
         tdi_generation: 1 or 2 (used to pick the X-channel sensitivity used to
             extract the foreground magnitude).
-        model: LISA noise model (must match the instrument component).
         stochastic_fn: Stochastic foreground model (class or name).
     """
 
@@ -252,7 +251,6 @@ class GalacticForeground(SeparableComponent):
         foreground_params: Sequence[float],
         modulation: Optional[object] = None,
         tdi_generation: int = 2,
-        model="sangria",
         stochastic_fn=HyperbolicTangentGalacticForeground,
     ):
         if tdi_generation not in _XYZ_ELEMENT_SENS:
@@ -260,24 +258,22 @@ class GalacticForeground(SeparableComponent):
         self.foreground_params = tuple(foreground_params)
         self._modulation = modulation
         self.tdi_generation = tdi_generation
-        self.model = model
         self.stochastic_fn = check_stochastic(stochastic_fn)
 
     def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
         xp = settings.xp
         nch = self.nchannels
         Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
-        # foreground magnitude in the domain basis = (instrument + foreground) - instrument
-        with_fg = get_sensitivity(
+        # foreground magnitude in the domain basis: stochastic contribution only
+        # (no instrument term), folded through the same domain dispatch.
+        mag = get_sensitivity(
             settings,
             sens_fn=Xsens,
-            model=self.model,
             stochastic_params=self.foreground_params,
             stochastic_function=self.stochastic_fn,
+            include_instrument=False,
             fill_nans=0.0,
         )
-        instr = get_sensitivity(settings, sens_fn=Xsens, model=self.model, fill_nans=0.0)
-        mag = with_fg - instr
         C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=mag.dtype)
         for (i, j) in ELEMENTS:
             C[i, j] = mag
@@ -314,11 +310,12 @@ class SGWB(SeparableComponent):
     response (``R_XX = 4 x^2 sin^2 x``, off-diagonals ``-1/2 R_XX``) and summed
     into the covariance. Like the galactic foreground, the *magnitude* — the
     auto-channel (XX) response in the domain basis — is extracted
-    domain-agnostically as the difference of the X-channel sensitivity with and
-    without the SGWB template, and placed on every element; the per-element
-    structure lives in the modulation. The isotropic default (diag ``1``,
-    off-diag ``-1/2``) reproduces the equal-arm covariance ``C_XY = -1/2 C_XX``.
-    Pass a ``modulation`` for an anisotropic / time-varying background.
+    domain-agnostically as the X-channel *stochastic-only* sensitivity
+    (``include_instrument=False``, no instrument term), and placed on every
+    element; the per-element structure lives in the modulation. The isotropic
+    default (diag ``1``, off-diag ``-1/2``) reproduces the equal-arm covariance
+    ``C_XY = -1/2 C_XX``. Pass a ``modulation`` for an anisotropic / time-varying
+    background.
 
     This uses the analytic equal-arm response (the equal-arm limit of GLASS's
     precomputed ``sgwb_response_xyz2.dat``); a tabulated unequal-arm response is
@@ -337,7 +334,6 @@ class SGWB(SeparableComponent):
             callable ``t_arr -> (nch, nch, Ntime)``.
         tdi_generation: 1 or 2 (used to pick the X-channel sensitivity used to
             extract the SGWB magnitude).
-        model: LISA noise model (must match the instrument component).
     """
 
     name = "sgwb"
@@ -348,31 +344,28 @@ class SGWB(SeparableComponent):
         stochastic_fn,
         modulation: Optional[object] = None,
         tdi_generation: int = 2,
-        model="sangria",
     ):
         if tdi_generation not in _XYZ_ELEMENT_SENS:
             raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
         self.sgwb_params = tuple(sgwb_params)
         self._modulation = modulation
         self.tdi_generation = tdi_generation
-        self.model = model
         self.stochastic_fn = check_stochastic(stochastic_fn)
 
     def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
         xp = settings.xp
         nch = self.nchannels
         Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
-        # SGWB magnitude in the domain basis = (instrument + SGWB) - instrument
-        with_sgwb = get_sensitivity(
+        # SGWB magnitude in the domain basis: stochastic contribution only
+        # (no instrument term), folded through the same domain dispatch.
+        mag = get_sensitivity(
             settings,
             sens_fn=Xsens,
-            model=self.model,
             stochastic_params=self.sgwb_params,
             stochastic_function=self.stochastic_fn,
+            include_instrument=False,
             fill_nans=0.0,
         )
-        instr = get_sensitivity(settings, sens_fn=Xsens, model=self.model, fill_nans=0.0)
-        mag = with_sgwb - instr
         C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=mag.dtype)
         for (i, j) in ELEMENTS:
             C[i, j] = mag
