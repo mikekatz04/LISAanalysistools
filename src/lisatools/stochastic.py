@@ -285,7 +285,6 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
 
 # --------------------------------------------------------------------------- #
 # Stochastic gravitational-wave background (SGWB) spectral templates.
-# For now, these are 
 # --------------------------------------------------------------------------- #
 
 # Hubble constant [1/s]: H0 = 70 km/s/Mpc * 3.24078e-20 Mpc/km
