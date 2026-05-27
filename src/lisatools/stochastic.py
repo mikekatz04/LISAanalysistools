@@ -311,11 +311,10 @@ class PowerLawSGWB(StochasticContribution):
     """
 
     ndim = 2
-    fref = 25.0 # Hz
 
     @staticmethod
     def specific_Sh_function(
-        f: float | np.ndarray, log10_A: float, alpha: float
+            f: float | np.ndarray, log10_A: float, alpha: float, fref: float = 25.0 #Hz
     ) -> float | np.ndarray:
         """Power-law SGWB.
 
