@@ -2043,13 +2043,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             kwargs: Dictionary of galactic grid parameters to check. Expected keys include:
                 - R_d: Disk radial scale length [kpc]
                 - z_d: Disk vertical scale height [kpc]
-                - alpha0: LISA orbit initial phase (rad)
-                - beta0: LISA orbit inclination (rad)
+                - t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
                 - N_lambda: Number of ecliptic longitude points for quadrature (optional, default 90)
                 - N_beta: Number of ecliptic latitude points for quadrature (optional, default 60)
                 - galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
         """
-        required_keys = ["R_d", "z_d", "alpha0", "beta0"]
+        required_keys = ["R_d", "z_d", "t0"]
         for key in required_keys:
             if key not in kwargs:
                 raise ValueError(f"Missing required galactic_grid_kwargs parameter: {key}")
@@ -2069,8 +2068,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             self,
             R_d: float,
             z_d: float,
-            alpha0: float,
-            beta0: float,
+            t0: float,
             N_lambda: Optional[int] = 90,
             N_beta: Optional[int] = 60,
             galactic_grid: Optional[Any] = None
@@ -2086,8 +2084,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Args:
             R_d: Disk radial scale length [kpc]
             z_d: Disk vertical scale height [kpc]
-            alpha0: LISA orbit initial phase (rad)
-            beta0: LISA orbit inclination (rad)
+            t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
             N_lambda: Number of ecliptic longitude points for quadrature (default 90)
             N_beta: Number of ecliptic latitude points for quadrature (default 60)
             galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
@@ -2098,6 +2095,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             logger.info("Using provided galactic grid object, skipping re-initialization.")
             
         else:
+            alpha0, beta0 = self.orbits.get_constellation_angles(t0)
+
             logger.debug(
                 f"Initializing galactic grid: R_d={R_d} kpc, z_d={z_d} kpc, "
                 f"alpha0={alpha0:.4f} rad, beta0={beta0:.4f} rad"
