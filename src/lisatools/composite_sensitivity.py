@@ -307,6 +307,101 @@ class GalacticForeground(SeparableComponent):
         return xp.asarray(self._modulation)
 
 
+class SGWB(SeparableComponent):
+    """Stochastic gravitational-wave background component (stationary by default).
+
+    The SGWB spectral template ``Sgw(f)`` is folded through the equal-arm TDI
+    response (``R_XX = 4 x^2 sin^2 x``, off-diagonals ``-1/2 R_XX``) and summed
+    into the covariance. Like the galactic foreground, the *magnitude* — the
+    auto-channel (XX) response in the domain basis — is extracted
+    domain-agnostically as the difference of the X-channel sensitivity with and
+    without the SGWB template, and placed on every element; the per-element
+    structure lives in the modulation. The isotropic default (diag ``1``,
+    off-diag ``-1/2``) reproduces the equal-arm covariance ``C_XY = -1/2 C_XX``.
+    Pass a ``modulation`` for an anisotropic / time-varying background.
+
+    This uses the analytic equal-arm response (the equal-arm limit of GLASS's
+    precomputed ``sgwb_response_xyz2.dat``); a tabulated unequal-arm response is
+    a possible later enhancement.
+
+    Args:
+        sgwb_params: Parameters for ``stochastic_fn`` — e.g.
+            :class:`~lisatools.stochastic.PowerLawSGWB` ``(log10_A, alpha)``,
+            :class:`~lisatools.stochastic.LogNormalSGWB`
+            ``(log10_A, log10_fstar, log10_D)``,
+            :class:`~lisatools.stochastic.PhaseTransitionSGWB`
+            ``(rb, b, log10_Ap, log10_fp)``.
+        stochastic_fn: SGWB spectral template (class or stock name).
+        modulation: ``None`` (stationary isotropic — the usual case); a
+            ``(nch, nch)`` constant matrix; a ``(nch, nch, Ntime)`` array; or a
+            callable ``t_arr -> (nch, nch, Ntime)``.
+        tdi_generation: 1 or 2 (used to pick the X-channel sensitivity used to
+            extract the SGWB magnitude).
+        model: LISA noise model (must match the instrument component).
+    """
+
+    name = "sgwb"
+
+    def __init__(
+        self,
+        sgwb_params: Sequence[float],
+        stochastic_fn,
+        modulation: Optional[object] = None,
+        tdi_generation: int = 2,
+        model="sangria",
+    ):
+        if tdi_generation not in _XYZ_ELEMENT_SENS:
+            raise ValueError(f"tdi_generation must be 1 or 2, got {tdi_generation!r}.")
+        self.sgwb_params = tuple(sgwb_params)
+        self._modulation = modulation
+        self.tdi_generation = tdi_generation
+        self.model = model
+        self.stochastic_fn = check_stochastic(stochastic_fn)
+
+    def base_covariance(self, settings: domains.DomainSettingsBase) -> np.ndarray:
+        xp = settings.xp
+        nch = self.nchannels
+        Xsens = _XYZ_ELEMENT_SENS[self.tdi_generation][0]
+        # SGWB magnitude in the domain basis = (instrument + SGWB) - instrument
+        with_sgwb = get_sensitivity(
+            settings,
+            sens_fn=Xsens,
+            model=self.model,
+            stochastic_params=self.sgwb_params,
+            stochastic_function=self.stochastic_fn,
+            fill_nans=0.0,
+        )
+        instr = get_sensitivity(settings, sens_fn=Xsens, model=self.model, fill_nans=0.0)
+        mag = with_sgwb - instr
+        C = xp.zeros((nch, nch) + tuple(settings.basis_shape_active), dtype=mag.dtype)
+        for (i, j) in ELEMENTS:
+            C[i, j] = mag
+            C[j, i] = mag
+        return C
+
+    def time_modulation(self, settings: domains.DomainSettingsBase):
+        xp = settings.xp
+        nch = self.nchannels
+
+        if self._modulation is None:
+            # isotropic / stationary limit: diag = 1, off-diag = -1/2 (constant)
+            M = xp.full((nch, nch), -0.5)
+            for i in range(nch):
+                M[i, i] = 1.0
+            return M
+
+        if callable(self._modulation):
+            time_axis = _basis_time_axis(settings)
+            if time_axis is None:
+                raise ValueError(
+                    f"{type(settings).__name__} has no time axis; cannot evaluate a "
+                    "callable (time-varying) SGWB modulation here."
+                )
+            return self._modulation(settings.t_arr)
+
+        return xp.asarray(self._modulation)
+
+
 class CompositeSensitivityMatrix(SensitivityMatrixBase):
     """Sensitivity matrix built as a sum of :class:`NoiseComponent` objects.
 

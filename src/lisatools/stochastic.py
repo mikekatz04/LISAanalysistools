@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import interpolate
+from scipy.special import erfc
 
 try:
     import cupy as cp
@@ -282,6 +283,211 @@ class FittedHyperbolicTangentGalacticForeground(HyperbolicTangentGalacticForegro
         )
 
 
+# --------------------------------------------------------------------------- #
+# Stochastic gravitational-wave background (SGWB) spectral templates.
+#
+# Ported from GLASS ``glass_noise_model.c`` (``sgwb_powerlaw``,
+# ``sgwb_lognormal``, ``sgwb_phase_transition``). Each returns the GW spectral
+# density ``Sgw(f)`` *before* the LISA/TDI response. The XYZ response is applied
+# downstream by the TDI sensitivity classes' ``stochastic_transform`` (the
+# equal-arm isotropic monopole response ``R_XX = 4 x^2 sin^2 x`` with
+# off-diagonals ``-1/2 R_XX``), which is the equal-arm limit of GLASS's
+# precomputed ``sgwb_response_xyz2.dat``. So these plug into ``get_sensitivity``
+# and ``CompositeSensitivityMatrix`` exactly like the galactic foreground.
+#
+# The constants below mirror the GLASS C ``#define``s (H0, Hscale, cgOr0).
+# --------------------------------------------------------------------------- #
+
+# Hubble constant [1/s]: H0 = 70 km/s/Mpc (3.24078e-20 converts km/s/Mpc -> 1/s).
+_SGWB_H0_SI = 70.0 * 3.24078e-20  # GLASS: #define H0 (70*3.24078e-20)
+
+# Omega_GW(f) -> one-sided strain PSD S_h(f) prefactor: S_h = (3 H0^2 / 4 pi^2)
+# Omega_GW / f^3.
+SGWB_HSCALE = 3.0 * _SGWB_H0_SI**2 / (4.0 * np.pi**2)  # GLASS: #define Hscale
+
+# Scalar-induced-GW factor used only by the log-normal template:
+# c_g * Omega_{r,0} (radiation d.o.f. factor times present-day radiation energy
+# density). GLASS: #define cgOr0 (1.6e-5/(0.7*0.7)).
+SGWB_CGOR0 = 1.6e-5 / (0.7 * 0.7)
+
+# Power-law pivot frequency [Hz] (GLASS ``sgwb_powerlaw`` ``fref``).
+SGWB_FREF = 25.0
+
+
+class PowerLawSGWB(StochasticContribution):
+    """Power-law SGWB spectral template (GLASS ``sgwb_powerlaw``).
+
+    .. math::
+
+        S_\\text{gw}(f) = \\frac{H_\\text{scale}}{f^3}\\, A\\,
+                          \\left(\\frac{f}{f_\\text{ref}}\\right)^{\\alpha},
+
+    with :math:`A = 10^{\\log_{10}A}` and :math:`f_\\text{ref}` =
+    :data:`SGWB_FREF`.
+    """
+
+    ndim = 2
+
+    @staticmethod
+    def specific_Sh_function(
+        f: float | np.ndarray, log10_A: float, alpha: float
+    ) -> float | np.ndarray:
+        """Power-law SGWB.
+
+        Args:
+            f: Frequency array [Hz].
+            log10_A: Base-10 log of the amplitude at ``SGWB_FREF``.
+            alpha: Power-law spectral index.
+
+        Returns:
+            GW spectral density ``Sgw(f)`` (pre-response).
+        """
+        A = 10.0**log10_A
+        # Sgw ~ 1/f^3 diverges at f=0; return NaN there (GLASS zeroes f=0).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            prefactor = SGWB_HSCALE / (f * f * f)
+            Sgw = prefactor * A * (f / SGWB_FREF) ** alpha
+        return np.where(np.asarray(f) > 0.0, Sgw, np.nan)
+
+
+class LogNormalSGWB(StochasticContribution):
+    """Log-normal (scalar-induced) SGWB template (GLASS ``sgwb_lognormal``).
+
+    Pi & Sasaki, JCAP 2020 (arXiv:2005.12306), wide-:math:`\\Delta` limit,
+    eq. (3.29). For :math:`D \\geq 9` the closed form suffers catastrophic
+    cancellation, so the asymptotic numerical value (eq. 3.33) is used instead.
+
+    Parameters are ``(log10_A, log10_fstar, log10_D)``.
+    """
+
+    ndim = 3
+
+    @staticmethod
+    def specific_Sh_function(
+        f: float | np.ndarray, log10_A: float, log10_fstar: float, log10_D: float
+    ) -> float | np.ndarray:
+        """Log-normal SGWB (see class docstring for the reference).
+
+        Args:
+            f: Frequency array [Hz].
+            log10_A: Base-10 log of the (scalar) amplitude.
+            log10_fstar: Base-10 log of the peak frequency [Hz].
+            log10_D: Base-10 log of the (dimensionless) width :math:`D`.
+
+        Returns:
+            GW spectral density ``Sgw(f)`` (pre-response).
+        """
+        A = 10.0**log10_A
+        fstar = 10.0**log10_fstar
+        D = 10.0**log10_D
+        # Sgw ~ 1/f^3 (and log f) diverge at f=0; return NaN there (GLASS zeroes f=0).
+        f_pos = np.asarray(f) > 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            prefactor = SGWB_HSCALE / (f * f * f)
+            ft = f / fstar
+            if D < 9.0:
+                logft = np.log(ft)
+                logK = logft + 1.5 * D * D
+                sqrtpi = np.sqrt(np.pi)
+                half_log32 = 0.5 * np.log(1.5)
+                D2 = D * D
+                t1 = (
+                    4.0 / 5.0 / sqrtpi
+                    * ft**3
+                    * np.exp(9.0 * D2 / 4.0) / D
+                    * (
+                        (logK * logK + 0.5 * D2) * erfc((logK + half_log32) / D)
+                        - D / sqrtpi
+                        * np.exp(-((logK + half_log32) ** 2) / D2)
+                        * (logK - half_log32)
+                    )
+                )
+                t2 = (
+                    0.0659 / D2
+                    * ft**2
+                    * np.exp(D2)
+                    * np.exp(-((logft + D2 - 0.5 * np.log(4.0 / 3.0)) ** 2) / D2)
+                )
+                t3 = (
+                    (1.0 / 3.0) * np.sqrt(2.0) / sqrtpi
+                    * ft ** (-4)
+                    * np.exp(8.0 * D2) / D
+                    * np.exp(-(logft * logft) / (2.0 * D2))
+                    * erfc((4.0 * D2 - logft + np.log(4.0)) / (D * np.sqrt(2.0)))
+                )
+                Sgw = prefactor * SGWB_CGOR0 * A * A * (t1 + t2 + t3)
+            else:
+                # Numerical asymptote from Pi & Sasaki eq. (3.33).
+                Sgw = prefactor * SGWB_CGOR0 * A * A * 0.783 / 1e3
+        return np.where(f_pos, Sgw, np.nan)
+
+
+class PhaseTransitionSGWB(StochasticContribution):
+    """Phase-transition SGWB template (GLASS ``sgwb_phase_transition``).
+
+    Parameters are ``(rb, b, log10_Ap, log10_fp)`` with a double-broken
+    power-law shape :math:`M(f)`:
+
+    .. math::
+
+        S_\\text{gw}(f) = A_p\\, M(f)\\, \\frac{H_\\text{scale}}{f^3}.
+    """
+
+    ndim = 4
+
+    @staticmethod
+    def specific_Sh_function(
+        f: float | np.ndarray, rb: float, b: float, log10_Ap: float, log10_fp: float
+    ) -> float | np.ndarray:
+        """Phase-transition SGWB.
+
+        Args:
+            f: Frequency array [Hz].
+            rb: Low-/high-frequency slope ratio parameter.
+            b: Spectral shape parameter.
+            log10_Ap: Base-10 log of the peak amplitude.
+            log10_fp: Base-10 log of the peak frequency [Hz].
+
+        Returns:
+            GW spectral density ``Sgw(f)`` (pre-response).
+        """
+        Ap = 10.0**log10_Ap
+        fp = 10.0**log10_fp
+        rb4 = rb * rb * rb * rb
+        m = (9.0 * rb4 + b) / (rb4 + 1.0)
+        # Sgw ~ 1/f^3 diverges at f=0 (and M is ill-defined there); return NaN
+        # at f=0 (GLASS zeroes f=0).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            s = f / fp
+            s4 = s * s * s * s
+            s9 = s4 * s4 * s
+            M = (
+                s9
+                * ((1.0 + rb4) / (rb4 + s4)) ** ((9.0 - b) / 4.0)
+                * ((b + 4.0) / (b + 4.0 - m + m * s * s)) ** ((b + 4.0) / 2.0)
+            )
+            prefactor = SGWB_HSCALE / (f * f * f)
+            Sgw = Ap * M * prefactor
+        return np.where(np.asarray(f) > 0.0, Sgw, np.nan)
+
+
+__stock_sgwb_options__ = [
+    "PowerLawSGWB",
+    "LogNormalSGWB",
+    "PhaseTransitionSGWB",
+]
+
+
+def get_stock_sgwb_options() -> List[StochasticContribution]:
+    """Get stock options for SGWB spectral templates.
+
+    Returns:
+        List of stock SGWB template names.
+
+    """
+    return __stock_sgwb_options__
+
+
 __stock_gb_stochastic_options__ = [
     "HyperbolicTangentGalacticForeground",
     "FittedHyperbolicTangentGalacticForeground",
@@ -308,7 +514,7 @@ def get_default_stochastic_from_str(stochastic: str) -> StochasticContribution:
         Stochastic contribution associated to that ``str``.
 
     """
-    if stochastic not in __stock_gb_stochastic_options__:
+    if stochastic not in (__stock_gb_stochastic_options__ + __stock_sgwb_options__):
         raise ValueError(
             "Requested string stochastic is not available. See lisatools.stochastic documentation."
         )
