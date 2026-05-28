@@ -1,17 +1,23 @@
-"""Combined smoke-test settings: GB + galfor + PSD + EMRI + SOBBH (no MBH).
+"""Combined smoke-test settings: GB + galfor + PSD + EMRI + SOBBH + MBH (phentax).
 
 Reuses the pieces defined in ``global_fit_settings.py`` (the per-branch
-``get_*_erebor_settings`` helpers, ``setup_recipe``, the shared waveform
-wrappers, injection-parameter constants). The two unique bits here are:
+``get_*_erebor_settings`` helpers, the shared EMRI / SOBBH waveform
+wrappers, the EMRI/SOBBH per-walker pre-injection helpers, injection
+constants) and the MBH-phentax wiring from
+``mbh_phentax_only_global_fit_settings.py``. The unique bits here are:
 
 * A custom :class:`SangriaPlusInjectionsProcessingStep` that loads Sangria
   data (mbhb removed, keeping the GB / galactic-foreground content) and
-  adds the synthetic EMRI + SOBBH time-domain waveforms on top.
-* A ``get_global_fit_settings`` that drops MBH from ``source_info`` so
-  the shared ``setup_recipe`` skips the MBH branch.
+  sums synthetic FD instrument noise plus EMRI, SOBBH **and phentax MBH**
+  TD waveforms on top.
+* A local :func:`setup_recipe` that wires the GB + PSD + galfor + EMRI +
+  SOBBH branches via the imports from ``global_fit_settings.py`` and
+  swaps the MBH branch onto the phentax + :class:`ResidualAddOneRemoveOneMove`
+  path (rather than the legacy ``BBHWaveformFD`` + ``MBHSpecialMove`` path
+  in ``global_fit_settings._build_mbh_move``).
 
-PSD is fit against the Sangria instrument noise that's already baked into
-the data.
+PSD is fit against the synthetic instrument noise injected here (Sangria
+noise removed via ``remove_from_data=["noise", "mbhb"]``).
 """
 
 import gc
@@ -78,17 +84,51 @@ from global_fit_settings import (
     SOBBH_INJECTION_PARAMS_FULL_BASIS as _SINGLE_SOBBH_INJECTION,
     T_START,
     TOBS,
+    _build_emri_move,
+    _build_sobbh_move,
     emri_full_to_sampling,
     get_emri_response_wrapper,
     get_galfor_erebor_settings,
     get_gb_erebor_settings,
     get_psd_erebor_settings,
     get_sobbh_response_wrapper,
-    setup_recipe,
     sobbh_full_to_sampling,
 )
-from lisatools.globalfit.stock.erebor import EMRISettings, EMRISetup, SOBBHSettings, SOBBHSetup
+
+# MBH-phentax wiring lives in the standalone smoke-test file; reuse the
+# waveform adapter, response-wrapper builder, transform builder, and
+# injection constants directly so this combined file stays in lock-step
+# with the single-branch smoke test.
+from mbh_phentax_only_global_fit_settings import (
+    INJECTION_PARAMS_FULL_BASIS as _SINGLE_MBH_PHENTAX_INJECTION,
+    IMRPhenomTHMWaveform,
+    MBHWaveWrap,
+    _build_mbh_phentax_transform,
+    get_mbh_phentax_response_wrapper,
+    mbh_full_to_sampling,
+)
+
+from lisatools.analysiscontainer import AnalysisContainerArray
+from lisatools.domains import TDSettings
+from lisatools.globalfit.engine import Setup
+from lisatools.globalfit.moves import GFCombineMove, ResidualAddOneRemoveOneMove
+from lisatools.globalfit.recipe import Recipe
+from lisatools.globalfit.recipe_steps import (
+    PERecipeStep,
+    build_gb_moves,
+    build_psd_moves,
+)
+from lisatools.globalfit.stock.erebor import (
+    EMRISettings,
+    EMRISetup,
+    MBHSettings,
+    MBHSetup,
+    SOBBHSettings,
+    SOBBHSetup,
+)
 from eryn.moves import StretchMove
+from eryn.moves.tempering import make_ladder
+from eryn.prior import ProbDistContainer, uniform_dist
 
 
 # ============================================================
@@ -171,6 +211,38 @@ EMRI_INJECTIONS_FULL_BASIS = _make_emri_injections()    # shape (3, 14)
 SOBBH_INJECTIONS_FULL_BASIS = _make_sobbh_injections()  # shape (3, 11)
 N_EMRI_INJECTIONS = EMRI_INJECTIONS_FULL_BASIS.shape[0]
 N_SOBBH_INJECTIONS = SOBBH_INJECTIONS_FULL_BASIS.shape[0]
+
+
+# MBH (phentax): 11-param waveform basis matching
+# :meth:`IMRPhenomTHMWaveform.__call__`:
+#   [m1, m2, s1z, s2z, dist, phi_ref, inc, psi, lam, beta, t_plunge]
+# Three sources placed at distinct sky positions and merger times within
+# the observation. Same intrinsic masses / spins so a single tight
+# ``logM / q / s1z / s2z`` prior covers all three.
+def _make_mbh_injections() -> np.ndarray:
+    base = _SINGLE_MBH_PHENTAX_INJECTION.copy()
+    rows = []
+    sky_phase_specs = [
+        # (dist, phi_ref, inc,           psi,  lam, beta,            t_plunge_frac)
+        (10.0,  1.0,      np.pi / 3.0,   0.5,  1.5,  0.3,             0.35),
+        (15.0,  2.5,      np.pi / 4.0,   1.2, -1.2,  0.6,             0.55),
+        (20.0,  4.8,      0.7 * np.pi/2, 2.4,  3.0, -0.4,             0.75),
+    ]
+    for dist, phi_ref, inc, psi, lam, beta, t_frac in sky_phase_specs:
+        row = base.copy()
+        row[4] = dist
+        row[5] = phi_ref
+        row[6] = inc
+        row[7] = psi
+        row[8] = lam
+        row[9] = beta
+        row[10] = t_frac * TOBS
+        rows.append(row)
+    return np.stack(rows, axis=0)
+
+
+MBH_INJECTIONS_FULL_BASIS = _make_mbh_injections()  # shape (3, 11)
+N_MBH_INJECTIONS = MBH_INJECTIONS_FULL_BASIS.shape[0]
 
 
 # ============================================================
@@ -258,7 +330,7 @@ def _generate_correlated_fd_noise(
 
 class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
     """Build smoke-test data from Sangria GBs + synthetic FD noise +
-    synthetic EMRI + synthetic SOBBH.
+    synthetic EMRI + synthetic SOBBH + synthetic phentax MBH.
 
     Data composition:
 
@@ -268,8 +340,9 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
     2. :func:`_generate_correlated_fd_noise` synthesises correlated XYZ
        noise from the chosen LISA instrument model in the FD domain and
        inverse-rFFTs it to TD.
-    3. Synthetic EMRI and SOBBH waveforms are produced by the shared
-       response wrappers used elsewhere in the move pre-injection paths.
+    3. Synthetic EMRI, SOBBH and MBH (phentax) waveforms are produced by
+       the shared response wrappers used elsewhere in the move
+       pre-injection paths.
 
     All four streams are padded/clipped to exactly ``N = Tobs/dt`` samples
     so the downstream WDM transform's ``N = Nf*Nt`` shape is exact.
@@ -283,6 +356,7 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         data_input_path: str,
         emri_injection_params_full_basis: np.ndarray,
         sobbh_injection_params_full_basis: np.ndarray,
+        mbh_injection_params_full_basis: Optional[np.ndarray] = None,
         noise_Soms_d: float = 15e-12,
         noise_Sa_a: float = 3e-15,
         noise_seed: int = 12345,
@@ -297,6 +371,11 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         target_N = int(round(Tobs / dt))
         emri_injections = np.atleast_2d(emri_injection_params_full_basis)
         sobbh_injections = np.atleast_2d(sobbh_injection_params_full_basis)
+        mbh_injections = (
+            np.atleast_2d(mbh_injection_params_full_basis)
+            if mbh_injection_params_full_basis is not None
+            else np.zeros((0, 11))
+        )
 
         # --- Sangria GB sky-only slice ---------------------------------------
         sangria = SangriaDataLoader(
@@ -357,7 +436,24 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
             sobbh_td = sobbh_td + sig
             logger.info(f"  SOBBH {i+1}/{len(sobbh_injections)}: done")
 
-        combined = sangria_data + noise_td + emri_td + sobbh_td
+        # --- MBH (phentax) injections (sum over multiple sources) -----------
+        mbh_td = np.zeros_like(sangria_data)
+        if mbh_injections.shape[0] > 0:
+            mbh_wave_gen = get_mbh_phentax_response_wrapper(
+                Tobs=Tobs,
+                dt=dt,
+                t_start=t_start,
+                tdi_config=tdi_config,
+                tdi_chan=tdi_chan,
+                role="injection",
+                force_backend=force_backend,
+            )
+            for i, params in enumerate(mbh_injections):
+                sig = np.asarray(mbh_wave_gen(*params, convert_to_ra_dec=False))
+                sig = _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
+                mbh_td = mbh_td + sig
+
+        combined = sangria_data + noise_td + emri_td + sobbh_td + mbh_td
 
         times = np.arange(target_N) * dt + t_start
         BaseProcessingStep.__init__(
@@ -367,6 +463,7 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         self.tdi_chan = tdi_chan
         self.emri_injection_params_full_basis = emri_injections
         self.sobbh_injection_params_full_basis = sobbh_injections
+        self.mbh_injection_params_full_basis = mbh_injections
 
 
 def get_general_erebor_settings() -> GeneralSetup:
@@ -397,6 +494,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         data_input_path=ldc_source_file,
         emri_injection_params_full_basis=EMRI_INJECTIONS_FULL_BASIS,
         sobbh_injection_params_full_basis=SOBBH_INJECTIONS_FULL_BASIS,
+        mbh_injection_params_full_basis=MBH_INJECTIONS_FULL_BASIS,
         remove_from_data=("noise", "mbhb"),
         tdi_chan="XYZ",
         nchannels=3,
@@ -570,6 +668,285 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
     return SOBBHSetup(sobbh_settings)
 
 
+def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
+    """Multi-leaf (3 source) MBH :class:`MBHSetup` for the phentax wiring.
+
+    Mirrors :func:`mbh_phentax_only_global_fit_settings.get_mbh_phentax_erebor_settings`
+    but stacks the per-leaf injection vectors and bumps
+    ``nleaves_max = nleaves_min = N_MBH_INJECTIONS`` so
+    :class:`ResidualAddOneRemoveOneMove` iterates one leaf per source.
+    Intrinsic params (logM, q, s1z, s2z) stay tied across leaves so a
+    tight shared prior covers all three; only the per-leaf
+    ``t_plunge`` prior is widened to bracket every injection.
+    """
+    force_backend = "cpu" if not gpu_available else GPU_BACKEND
+    initialize_kwargs_mbh = dict(
+        T=general_set.Tobs / YRSID_SI,
+        dt=general_set.dt,
+        mbh_waveform="phentax.IMRPhenomTHM",
+        mbh_waveform_kwargs=dict(higher_modes="all", force_backend=force_backend),
+        response_kwargs=dict(
+            t0=T_START,
+            order=40,
+            tdi="2nd generation",
+            tdi_chan="XYZ",
+            force_backend=force_backend,
+            remove_garbage="zero",
+        ),
+    )
+
+    delta_prior = 1e-2
+    injection_sampling_per_leaf = np.stack(
+        [mbh_full_to_sampling(row) for row in MBH_INJECTIONS_FULL_BASIS],
+        axis=0,
+    )
+    # All intrinsic params (positions 0..3) are identical across leaves;
+    # tighten priors around the first leaf for those, and broaden the
+    # extrinsic ones to span the union of leaves with a small pad.
+    base = injection_sampling_per_leaf[0]
+    logM_inj = float(base[0])
+    q_inj = float(base[1])
+    s1z_inj = float(base[2])
+    s2z_inj = float(base[3])
+
+    dist_min = float(injection_sampling_per_leaf[:, 4].min())
+    dist_max = float(injection_sampling_per_leaf[:, 4].max())
+    t_plunge_min = float(injection_sampling_per_leaf[:, 10].min())
+    t_plunge_max = float(injection_sampling_per_leaf[:, 10].max())
+
+    priors_mbh = {
+        "logM":     uniform_dist((1 - delta_prior) * logM_inj,
+                                 (1 + delta_prior) * logM_inj),
+        "q":        uniform_dist(max(0.01, (1 - delta_prior) * q_inj),
+                                 min(0.999, (1 + delta_prior) * q_inj)),
+        "s1z":      uniform_dist(max(-0.99, s1z_inj - delta_prior),
+                                 min(0.99, s1z_inj + delta_prior)),
+        "s2z":      uniform_dist(max(-0.99, s2z_inj - delta_prior),
+                                 min(0.99, s2z_inj + delta_prior)),
+        "dist":     uniform_dist((1 - delta_prior) * dist_min,
+                                 (1 + delta_prior) * dist_max),
+        # Angles use the full prior on (0, 2pi) / (-1, 1): the 3 leaves
+        # land at very different sky positions / phases so a tight per-
+        # leaf prior would exclude two of them.
+        "phi_ref":  uniform_dist(0.0, 2 * np.pi),
+        "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+        "psi":      uniform_dist(0.0, 2 * np.pi),
+        "lam":      uniform_dist(0.0, 2 * np.pi),
+        "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+        "t_plunge": uniform_dist(max(0.0, t_plunge_min - 60.0),
+                                 t_plunge_max + 60.0),
+    }
+    priors = {"mbh": ProbDistContainer(priors_mbh)}
+
+    mbh_settings = MBHSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        injection=injection_sampling_per_leaf,
+        num_prop_repeats=2,
+        initialize_kwargs=initialize_kwargs_mbh,
+        waveform_kwargs=dict(),
+        inner_moves=[(StretchMove(), 1.0)],
+        nleaves_max=N_MBH_INJECTIONS,
+        nleaves_min=N_MBH_INJECTIONS,
+        ndim=11,
+        transform=_build_mbh_phentax_transform(),
+        priors=priors,
+        periodic={"mbh": {"phi_ref": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}},
+        log_dir=general_set.file_store_dir,
+    )
+
+    return MBHSetup(mbh_settings)
+
+
+def _build_mbh_phentax_move(
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state,
+):
+    """MBH move using phentax + :class:`ResidualAddOneRemoveOneMove`.
+
+    Mirrors :func:`global_fit_settings._build_emri_move` and
+    :func:`global_fit_settings._build_sobbh_move` — the EMRI/SOBBH pattern
+    rather than the legacy ``MBHSpecialMove`` + ``BBHWaveformFD`` path:
+
+    1. Pull the cached :class:`ResponseWrapper` (built once at data-load
+       time by the synthetic injection processor) and wrap it for the
+       template path via :class:`MBHWaveWrap` so the output is a
+       :class:`DomainBase` subclass that the ACA and the per-walker move
+       both understand.
+    2. Pre-subtract each walker's starting MBH waveform from its residual,
+       one template at a time, so peak RAM stays at one waveform.
+    3. Build and return the :class:`ResidualAddOneRemoveOneMove` (PE only,
+       no inner search loop).
+    """
+    general_info = curr.general_info
+    mbh_info = curr.source_info["mbh"]
+    nwalkers = general_info.nwalkers
+    ntemps = general_info.ntemps
+
+    force_backend = "cpu" if not gpu_available else GPU_BACKEND
+    tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
+    template_wave_gen = get_mbh_phentax_response_wrapper(
+        Tobs=general_info.Tobs,
+        dt=general_info.dt,
+        t_start=T_START,
+        tdi_config=tdi_config,
+        tdi_chan="XYZ",
+        role="template",
+        force_backend=force_backend,
+    )
+    td_settings = TDSettings(
+        int(round(general_info.Tobs / general_info.dt)),
+        general_info.dt,
+        force_backend=force_backend,
+    )
+    wave_gen = MBHWaveWrap(
+        template_wave_gen,
+        td_settings,
+        general_info.domain_settings,
+        td_window=None,
+        nchannels=acs.nchannels,
+    )
+
+    # Per-walker pre-injection — keeps peak RAM at one template's worth.
+    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
+        for leaf in range(mbh_inds.shape[-1]):
+            if not mbh_inds[0, leaf]:
+                continue
+            assert np.all(mbh_inds[:, leaf])
+            inj_coords = state.branches_coords["mbh"][0, :, leaf]
+            inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
+            for i in range(inj_coords.shape[0]):
+                sig = wave_gen(*inj_coords_in[i], **mbh_info.waveform_kwargs)
+                acs.add_signal_to_residual([sig], data_index=np.array([i]))
+                del sig
+                gc.collect()
+
+    betas_all = np.tile(
+        make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1)
+    )
+    state.sub_states["mbh"].betas_all = betas_all
+
+    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
+    mbh_pe_move = ResidualAddOneRemoveOneMove(
+        "mbh",
+        coords_shape,
+        wave_gen,
+        mbh_info.waveform_kwargs.copy(),
+        mbh_info.waveform_kwargs.copy(),
+        acs,
+        mbh_info.num_prop_repeats,
+        mbh_info.transform,
+        priors,
+        mbh_info.inner_moves,
+        Tmax=np.inf,
+        betas_all=betas_all,
+    )
+    mbh_pe_move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
+    return mbh_pe_move
+
+
+def setup_recipe(
+    recipe: Recipe,
+    engine_info,
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state,
+):
+    """Combined-smoke setup_recipe with phentax MBH wiring.
+
+    Mirrors :func:`global_fit_settings.setup_recipe` for PSD / GB / EMRI /
+    SOBBH but swaps the MBH branch onto the phentax +
+    :class:`ResidualAddOneRemoveOneMove` path (:func:`_build_mbh_phentax_move`)
+    instead of the legacy ``BBHWaveformFD`` + ``MBHSpecialMove`` builder.
+    """
+    general_info = curr.general_info
+    nwalkers: int = general_info.nwalkers
+    ntemps: int = general_info.ntemps
+    gpus = general_info.gpus
+    if gpus is not None:
+        cp.cuda.runtime.setDevice(gpus[0])
+
+    # Build the WDM-domain GB likelihood here (after the deepcopy in
+    # ``CurrentInfoGlobalFit.__init__``) — the underlying C++ orbits wrap
+    # is not picklable, so it must live outside the settings dataclass.
+    # Logic copied verbatim from ``global_fit_settings.setup_recipe``.
+    gb_info = curr.source_info["gb"]
+    if (
+        isinstance(general_info.domain_settings, WDMSettings)
+        and gb_info.gb_wdm_comp is None
+    ):
+        import sys
+        if "/Users/mkatz/Research/lisa_sprint_2026" not in sys.path:
+            sys.path.insert(0, "/Users/mkatz/Research/lisa_sprint_2026")
+        from gb_wdm_het import GBWDMHeterodyne
+
+        _wdm = general_info.domain_settings
+        _t_obs_start = float(getattr(general_info, "t_obs_start", 0.0))
+        gb_info.gb_wdm_comp = GBWDMHeterodyne(
+            Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
+            T_full=general_info.Tobs, t_ref_full=gb_info.t0,
+            Nt_sub=int(os.environ.get("CHUNKED_NT_SUB", 256)),
+            n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
+            N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
+            nchannels=3,
+            force_backend=general_info.force_backend,
+            tdi_gen="2nd generation" if gb_info.use_tdi2 else "1st generation",
+            orbits=general_info.gpu_orbits,
+            t_obs_start=_t_obs_start,
+            N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
+            N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
+        )
+
+    #* ============================== PSD ===============================
+    num_repeats_psd = 5 if not gpu_available else 60
+    _psd_search_move, psd_pe_move = build_psd_moves(
+        engine_info, curr, acs, priors, num_repeats=num_repeats_psd,
+    )
+
+    #* ============================== GB ================================
+    _gb_search_moves, gb_pe_moves = build_gb_moves(
+        engine_info, curr, acs, priors, state
+    )
+    # Smoke-friendly: keep only the prior-based RJ proposal in PE mode.
+    gb_pe_moves = [m for m in gb_pe_moves if "prior" in m.name]
+
+    #* ============================== MBH (phentax) =====================
+    mbh_pe_move = None
+    if "mbh" in curr.source_info:
+        mbh_pe_move = _build_mbh_phentax_move(curr, acs, priors, state)
+
+    #* ============================== EMRI ==============================
+    emri_pe_move = None
+    if "emri" in curr.source_info:
+        emri_pe_move = _build_emri_move(curr, acs, priors, state)
+
+    #* ============================== SOBBH =============================
+    sobbh_pe_move = None
+    if "sobbh" in curr.source_info:
+        sobbh_pe_move = _build_sobbh_move(curr, acs, priors, state)
+
+    #* ============================== COMBINE ===========================
+    pe_moves = [psd_pe_move] + gb_pe_moves
+    if mbh_pe_move is not None:
+        pe_moves.append(mbh_pe_move)
+    if emri_pe_move is not None:
+        pe_moves.append(emri_pe_move)
+    if sobbh_pe_move is not None:
+        pe_moves.append(sobbh_pe_move)
+
+    gf_pe_move = GFCombineMove(
+        moves=pe_moves, verbose=True, share_temperature_control=False
+    )
+    gf_pe_move.accepted = np.zeros((ntemps, nwalkers))
+
+    recipe.add_recipe_component(
+        PERecipeStep(moves=[gf_pe_move]), name="full pe"
+    )
+
+
 def get_global_fit_settings(copy_settings_file=False):
     general_setup = get_general_erebor_settings()
 
@@ -589,13 +966,15 @@ def get_global_fit_settings(copy_settings_file=False):
     galfor_setup = get_galfor_erebor_settings(general_setup)
     emri_setup = get_emri_multi_erebor_settings(general_setup)
     sobbh_setup = get_sobbh_multi_erebor_settings(general_setup)
+    mbh_setup = get_mbh_phentax_multi_erebor_settings(general_setup)
 
-    # No MBH — ``setup_recipe`` already gates on ``"mbh" in source_info``.
-    # GB goes last for debugging: if it errors there, we know it made it through all other proposals.
+    # GB goes last for debugging: if it errors there, we know it made it
+    # through all other proposals.
     gf_settings = GlobalFitSettings(
         source_info={
             "psd": psd_setup,
             "galfor": galfor_setup,
+            "mbh": mbh_setup,
             "emri": emri_setup,
             "sobbh": sobbh_setup,
             "gb": gb_setup,
@@ -609,4 +988,4 @@ def get_global_fit_settings(copy_settings_file=False):
 
 if __name__ == "__main__":
     settings = get_global_fit_settings()
-    print("Combined GB+galfor+PSD+EMRI+SOBBH smoke settings constructed OK")
+    print("Combined GB+galfor+PSD+MBH+EMRI+SOBBH smoke settings constructed OK")
