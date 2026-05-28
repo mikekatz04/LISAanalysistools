@@ -320,6 +320,7 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         tdi_config = TDIConfig("2nd generation", force_backend=force_backend)
 
         # --- EMRI injections (sum over multiple sources) ---------------------
+        logger.info(f"Generating {len(emri_injections)} EMRI injection(s)...")
         emri_wave_gen = get_emri_response_wrapper(
             Tobs=Tobs,
             dt=dt,
@@ -331,11 +332,14 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         )
         emri_td = np.zeros_like(sangria_data)
         for i, params in enumerate(emri_injections):
+            logger.info(f"  EMRI {i+1}/{len(emri_injections)}: generating waveform...")
             sig = np.asarray(emri_wave_gen(*params, convert_to_ra_dec=False))
             sig = _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
             emri_td = emri_td + sig
+            logger.info(f"  EMRI {i+1}/{len(emri_injections)}: done")
 
         # --- SOBBH injections (sum over multiple sources) --------------------
+        logger.info(f"Generating {len(sobbh_injections)} SOBBH injection(s)...")
         sobbh_wave_gen = get_sobbh_response_wrapper(
             Tobs=Tobs,
             dt=dt,
@@ -347,9 +351,11 @@ class SangriaPlusInjectionsProcessingStep(BaseProcessingStep):
         )
         sobbh_td = np.zeros_like(sangria_data)
         for i, params in enumerate(sobbh_injections):
+            logger.info(f"  SOBBH {i+1}/{len(sobbh_injections)}: generating waveform...")
             sig = np.asarray(sobbh_wave_gen(*params, convert_to_ra_dec=False))
             sig = _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
             sobbh_td = sobbh_td + sig
+            logger.info(f"  SOBBH {i+1}/{len(sobbh_injections)}: done")
 
         combined = sangria_data + noise_td + emri_td + sobbh_td
 

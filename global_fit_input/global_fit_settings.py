@@ -782,7 +782,7 @@ def setup_recipe(
         sobbh_pe_move = _build_sobbh_move(curr, acs, priors, state)
 
     #* ================================= COMBINE =================================
-    pe_moves = [psd_pe_move] + gb_pe_moves
+    pe_moves = [psd_pe_move]
     if mbh_pe_move is not None:
         pe_moves.append(mbh_pe_move)
     if emri_pe_move is not None:
@@ -790,6 +790,8 @@ def setup_recipe(
     if sobbh_pe_move is not None:
         pe_moves.append(sobbh_pe_move)
 
+    pe_moves +=  gb_pe_moves
+    
     gf_pe_move = GFCombineMove(
         moves=pe_moves, verbose=True, share_temperature_control=False
     )
