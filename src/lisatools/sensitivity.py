@@ -2114,9 +2114,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             if hasattr(self.basis_settings, "t_arr"):
                 _t_arr = self.basis_settings.t_arr.copy()
             else:
-                _t_arr = np.array([0.0])
+                _t_arr = np.array([t0])
                 logger.warning(
-                "FD domain detected — using t=0 for galactic sky average. "
+                f"FD domain detected — using t=t0={t0} for galactic sky average. "
                 "This is correct only for stationary (non-cyclostationary) analyses."
             )
 
@@ -2136,6 +2136,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                 N_sky=setup.N_sky,
                 alpha0=float(alpha0),
                 beta0=float(beta0),
+                t0=float(t0)
             )
 
             logger.info("Galactic grid initialized.")
@@ -2158,6 +2159,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         N_sky: int,
         alpha0: float,
         beta0: float,
+        t0: float
     ) -> None:
         """
         Build the GalacticGridWrap, compute fixed sky weights and R_avg, and
@@ -2179,6 +2181,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             N_sky:        Number of sky pixels
             alpha0:       LISA orbit initial phase (rad)
             beta0:        LISA orbit inclination (rad)
+            t0:           Reference time for constellation angles (s)
         """
         xp = self.xp
 
@@ -2195,6 +2198,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             N_sky,
             alpha0,
             beta0,
+            t0,
             self.num_times,
             self.num_freqs,
         )
