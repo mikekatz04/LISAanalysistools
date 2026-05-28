@@ -4,6 +4,8 @@ from lisatools.sensitivity import (
         SGWB,
         CompositeSensitivityMatrix
 )
+from lisatools.datacontainer import DataResidualArray
+from lisatools.diagnostic import inner_product, noise_likelihood_term
 from lisatools import domains
 import numpy as np
 
@@ -88,6 +90,38 @@ if __name__ == '__main__':
     XXcov = sensmat.sens_mat[0,0,:]
     XYcov = sensmat.sens_mat[0,1,:]
     ZZcov = sensmat.sens_mat[2,2,:]
-    scalo(XXcov, settings, log=True, logy=False, cmap='viridis')
+    scalo(XXcov        , settings, log=True, logy=False, cmap='viridis')
     scalo(np.abs(XYcov), settings, log=True, logy=False, cmap='viridis')
     scalo(np.abs(ZZcov), settings, log=True, logy=False, cmap='viridis')
+
+    # let's inject noise and do inference now
+    # sens_mat is already on the active grid (3, 3, Nf_active, Nt_active); do NOT
+    # re-slice with active_slice_* (those index the full grid and would double-trim).
+    C = sensmat.sens_mat
+    nf, nt = C.shape[2], C.shape[3]
+    Cp = C.transpose(2, 3, 0, 1).reshape(-1, 3, 3)  # (Npix, 3, 3), pixel = f*nt + t
+    L = np.linalg.cholesky(Cp)
+    rng = np.random.default_rng(0)
+    z = rng.standard_normal((Cp.shape[0], 3, 1))
+    data_raw = L @ z  # (Npix, 3, 1)
+    print(data_raw.shape)
+
+    # invert the transpose(2,3,0,1).reshape(-1,3,3) flattening (pixel = f*nt + t)
+    data_inj = data_raw[:, :, 0].reshape(nf, nt, 3).transpose(2, 0, 1).real  # (3, nf, nt)
+    scalo(np.abs(data_inj[0]), settings, log=True, logy=False)
+
+    # inject the drawn realization (not zeros)
+    data = DataResidualArray(data_inj, input_signal_domain=settings)
+
+    ip = inner_product(data, data, psd=sensmat)
+    nlt = noise_likelihood_term(sensmat)
+
+    # recovery check: data drawn from C, weighted by inv(C) -> chi^2 with
+    # n_channels * Npix dof (the WDM differential_component cancels the
+    # factor of 4 in inner_product, so 4 * 0.25 = 1).
+    npix = nf * nt
+    expected = 3 * npix
+    print(f"<d|d>  = {ip:.1f}   expected ~ {expected} +/- {np.sqrt(2 * expected):.1f}")
+    print(f"nlt    = {nlt:.1f}")
+    print(f"logL   = {nlt - 0.5 * ip:.1f}")
+
