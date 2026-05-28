@@ -135,8 +135,11 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     
     psd_move_args = (acs, priors)
 
+    # Smoke test: 2 repeats per outer iteration so the WDM Composite path
+    # cycles in seconds rather than ~20 min on CPU. Bump back up to ~60
+    # for a real run.
     psd_move_kwargs = dict(
-        num_repeats=60,
+        num_repeats=2,
         live_dangerously=True,
         temperature_control=temperature_control,
         sensitivity_backend=general_info.sensitivity_backend,

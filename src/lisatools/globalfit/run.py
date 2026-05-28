@@ -308,9 +308,50 @@ class GlobalFit:
                 self.logger.debug("override emri starting coords to be close to the injection")
                 factor = 1e-5
 
-                coords["emri"] = self.curr.source_info["emri"].injection + factor * np.random.randn(
-                    self.ntemps, self.nwalkers, self.engine_info.nleaves_max["emri"]
+                # Multi-leaf safe: accepts either a flat ``(ndim,)`` injection
+                # (broadcast across all leaves) or a per-leaf ``(nleaves, ndim)``
+                # injection. The trailing axis is always ``ndim`` so the
+                # randn matches the engine's ``(ntemps, nwalkers, nleaves, ndim)``
+                # coord layout.
+                inj = np.asarray(self.curr.source_info["emri"].injection)
+                if inj.ndim == 1:
+                    inj = inj[None, :]
+                nleaves_emri = self.engine_info.nleaves_max["emri"]
+                ndim_emri = inj.shape[-1]
+                if inj.shape[0] == 1:
+                    inj = np.broadcast_to(inj, (nleaves_emri, ndim_emri))
+                assert inj.shape == (nleaves_emri, ndim_emri), (
+                    f"EMRI injection shape {inj.shape} doesn't match "
+                    f"(nleaves_max={nleaves_emri}, ndim={ndim_emri})."
                 )
+                coords["emri"] = inj[None, None] + factor * np.random.randn(
+                    self.ntemps, self.nwalkers, nleaves_emri, ndim_emri
+                )
+            if "sobbh" in inds:
+                inds["sobbh"][:] = True
+                self.logger.debug("initializing sobbh inds to true")
+                if (
+                    "sobbh" in self.curr.source_info
+                    and self.curr.source_info["sobbh"].injection is not None
+                ):
+                    self.logger.debug(
+                        "override sobbh starting coords to be close to the injection"
+                    )
+                    factor = 1e-5
+                    inj = np.asarray(self.curr.source_info["sobbh"].injection)
+                    if inj.ndim == 1:
+                        inj = inj[None, :]
+                    nleaves_sobbh = self.engine_info.nleaves_max["sobbh"]
+                    ndim_sobbh = inj.shape[-1]
+                    if inj.shape[0] == 1:
+                        inj = np.broadcast_to(inj, (nleaves_sobbh, ndim_sobbh))
+                    assert inj.shape == (nleaves_sobbh, ndim_sobbh), (
+                        f"SOBBH injection shape {inj.shape} doesn't match "
+                        f"(nleaves_max={nleaves_sobbh}, ndim={ndim_sobbh})."
+                    )
+                    coords["sobbh"] = inj[None, None] + factor * np.random.randn(
+                        self.ntemps, self.nwalkers, nleaves_sobbh, ndim_sobbh
+                    )
 
             state = GFState(
                 coords,

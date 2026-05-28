@@ -194,7 +194,7 @@ def setup_recipe(
             n_pad=int(os.environ.get("CHUNKED_N_PAD", 32)),
             N_sparse=int(os.environ.get("CHUNKED_N_SPARSE", 256)),
             nchannels=3,
-            backend=general_info.force_backend,
+            force_backend=general_info.force_backend,
             tdi_gen="2nd generation" if gb_info.use_tdi2 else "1st generation",
             orbits=general_info.gpu_orbits,
             t_obs_start=_t_obs_start,
