@@ -48,16 +48,6 @@ from .utils.parallelbase import LISAToolsParallelModule
 from . import cutils
 import dataclasses
 
-
-# TODO/DOCS: this stub appears to be a forward declaration that the
-# ``@dataclass``-decorated definition below shadows; verify whether it's still
-# needed.
-class DomainSettingsBase(LISAToolsParallelModule):
-    force_backend: str = None
-    def __init__(self, force_backend: str = None):
-        self.force_backend = force_backend
-
-
 @dataclasses.dataclass
 class DomainSettingsBase(LISAToolsParallelModule):
     """Base class for domain settings (TD, FD, STFT, WDM, ...).
@@ -76,6 +66,7 @@ class DomainSettingsBase(LISAToolsParallelModule):
     force_backend: str = None
 
     def __init__(self, force_backend: str = None):
+        self.force_backend = force_backend
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
 
     @classmethod
@@ -694,7 +685,7 @@ class FDSignal(FDSettings, DomainBase):
     def pad_array(self, arr: np.ndarray) -> np.ndarray:
         """Zero-pad ``arr`` (2D) back to the full ``N``-bin grid before an inverse transform."""
         assert arr.ndim == 2
-        _arr = np.pad(arr, ((0, 0), (self.ind_min - 1, self.N - 1 - self.ind_max)), mode="constant", constant_values=0.0)
+        _arr = self.xp.pad(arr, ((0, 0), (self.ind_min - 1, self.N - 1 - self.ind_max)), mode="constant", constant_values=0.0)
         return _arr
 
     def ifft(self, settings=None, window=None):
@@ -841,8 +832,8 @@ class FDSignal(FDSettings, DomainBase):
         out_dtype = complex if is_complex else float
         tmp_w_mn = self.xp.zeros((self.nchannels, settings.Nf + 1, settings.Nt), dtype=out_dtype)
         kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
-        m_here = np.concatenate([m, np.full((1, settings.Nt), settings.Nf)], axis=0)
-        n_here = np.concatenate([n, np.array([np.arange(settings.Nt)])], axis=0)
+        m_here = self.xp.concatenate([m, self.xp.full((1, settings.Nt), settings.Nf)], axis=0)
+        n_here = self.xp.concatenate([n, self.xp.array([self.xp.arange(settings.Nt)])], axis=0)
         set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
         projected = self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[:, ~set_zero]
         if is_complex:
@@ -1631,7 +1622,7 @@ class WDMSettings(DomainSettingsBase):
         """Return ``1`` for even ``(m + n)`` and ``1j`` for odd ``(m + n)``."""
         m_in = self.xp.atleast_1d(m)
         n_in = self.xp.atleast_1d(n)
-        output = np.zeros(m_in.shape, dtype=complex)
+        output = self.xp.zeros(m_in.shape, dtype=complex)
         is_even = ((m_in + n_in) % 2) == 0
         output[is_even] = 1.0
         output[~is_even] = 1j
