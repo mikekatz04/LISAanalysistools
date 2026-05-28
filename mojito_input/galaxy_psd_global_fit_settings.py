@@ -75,6 +75,7 @@ def ten_to_the_x(x):
     return 10.0 ** x
 
 MOJITO_REFERENCE_TIME = 97729089.327664
+MOJITO_AVERAGE_ARMLENGTH = 2493162305.42235
 
 #####################
 
@@ -487,7 +488,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=backend, frame="icrs"),  # icrs
+        orbits_kwargs=dict(force_backend=backend, frame="icrs", armlength=MOJITO_AVERAGE_ARMLENGTH),  # icrs
     )
 
     downsample_kwargs = {
@@ -524,8 +525,6 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
-
     # ---- Fixed galactic grid parameters (NOT inferred) ----
     # alpha0, beta0: LISA orbit orientation angles [rad].
     # These should match the orbit file used; 0.0 is the default for
@@ -539,6 +538,8 @@ def get_general_erebor_settings() -> GeneralSetup:
         N_lambda=90, # sky grid longitude points
         N_beta=60,   # sky grid latitude points
     )
+
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, galactic_grid_kwargs=galactic_grid_kwargs)
 
     general_settings = GeneralSettings(
         num_iterations=num_iterations,

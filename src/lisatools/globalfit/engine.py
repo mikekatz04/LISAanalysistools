@@ -134,11 +134,6 @@ class GeneralSettings(Settings):
     sensitivity_init_kwargs: Optional[dict] = None
     normalize_window: bool = False
     # catalogue: typing.Optional[dict] = None
-    # ---- Galactic foreground geometry (fixed, not inferred) ----
-    # If None, the galactic foreground is disabled in the likelihood.
-    # Keys: R_d [kpc], z_d [kpc], alpha0 [rad], beta0 [rad],
-    #       N_lambda (int, default 90), N_beta (int, default 60)
-    galactic_grid_kwargs: Optional[typing.Dict[str, typing.Any]] = None
 
     # --- run metadata (propagated to RunMetadata.from_curr) ---
     global_fit_codename: Optional[str] = None
@@ -350,90 +345,10 @@ class GeneralSetup(Setup, GeneralSettings):
             window_values=window if self.normalize_window else None,
             **self.sensitivity_init_kwargs,
         )
-
-        # ---- Galactic grid — initialized once, never recomputed during inference ----
-        # Only the spectral envelope params (Amp, alpha, f_1, f_knee, f_2)
-        # are inferred; the sky geometry (R_d, z_d, alpha0, beta0) is fixed here.
-        if self.galactic_grid_kwargs is not None:
-            self._init_galactic_grid(domain_settings)
-
         # --- Store preprocessing --- #
         self.data_processor = data_processor
 
-    def _init_galactic_grid(self, domain_settings):
-        """
-        Compute the fixed galactic sky geometry and attach it to the sensitivity backend.
-
-        Called once during setup.  After this call, sensitivity_backend.pycpp_sensitivity_matrix
-        has gal_R_avg wired in and will include the galactic foreground in every likelihood
-        evaluation automatically, scaled by the per-walker spectral parameters passed via
-        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all.
-
-        Args:
-            domain_settings: Domain settings object (STFTSettings or FDSettings),
-                             used to extract the segment centre times array.
-        """
-        gkw = self.galactic_grid_kwargs
-
-        # Validate required keys
-        for key in ("R_d", "z_d", "alpha0", "beta0"):
-            if key not in gkw:
-                raise ValueError(
-                    f"galactic_grid_kwargs must contain '{key}'. " f"Got keys: {list(gkw.keys())}"
-                )
-
-        self.logger.info(
-            f"Initializing galactic grid: R_d={gkw['R_d']} kpc, z_d={gkw['z_d']} kpc, "
-            f"alpha0={gkw['alpha0']:.4f} rad, beta0={gkw['beta0']:.4f} rad"
-        )
-
-        # Build host-side quadrature geometry
-        setup = self.sensitivity_backend.backend.GalacticGridSetup()
-        setup.compute(
-            N_lambda=gkw.get("N_lambda", 90),
-            N_beta=gkw.get("N_beta", 60),
-        )
-
-        self.logger.info(f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}")
-
-        # Get segment centre times from domain settings.
-        # For STFT: domain_settings.t_arr contains the segment centres.
-        # For FD: there is only one time bin; pass a length-1 array at t=0.
-        if hasattr(domain_settings, "t_arr"):
-            t_arr = domain_settings.t_arr
-        else:
-            t_arr = np.array([0.0])
-            self.logger.warning(
-                "FD domain detected — using t=0 for galactic sky average. "
-                "This is correct only for stationary (non-cyclostationary) analyses."
-            )
-
-        # xp is cupy on GPU, numpy on CPU
-        xp = self.sensitivity_backend.xp
-
-        # Initialize the galactic grid on the sensitivity backend.
-        # This calls GalacticGrid::initialize(R_d, z_d, times, N_times) on the C++ side,
-        # which computes and stores weights and R_avg — then wires R_avg into the
-        # C++ XYZSensitivityMatrix so get_noise_covariance can access it.
-        self.sensitivity_backend.initialize_galactic_grid(
-            times=xp.asarray(t_arr),
-            R_d=float(gkw["R_d"]),
-            z_d=float(gkw["z_d"]),
-            R_vals_quad=xp.asarray(setup.R_vals_quad),
-            z_vals_quad=xp.asarray(setup.z_vals_quad),
-            quad_weights=xp.asarray(setup.quad_weights),
-            cos_beta_ecl=xp.asarray(setup.cos_beta_ecl),
-            lam_ecl=xp.asarray(setup.lam_ecl),
-            beta_ecl=xp.asarray(setup.beta_ecl),
-            N_quad=setup.N_quad,
-            N_sky=setup.N_sky,
-            alpha0=float(gkw["alpha0"]),
-            beta0=float(gkw["beta0"]),
-        )
-
-        self.logger.info("Galactic grid initialized and attached to sensitivity backend.")
-
-
+    
 @dataclasses.dataclass
 class GlobalFitSettings:
     source_info: typing.Dict[str, Setup]

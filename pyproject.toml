@@ -199,6 +199,6 @@ dev = [
 ]
 
 [tool.uv.sources]
-mojito = { index = "gitlab-esa-commons" }
+mojito = { index = "pypi" }
 lisaconstants = { index = "pypi" }
 mojito-processor = { index = "testpypi" }  # TODO: switch to pypi once published there

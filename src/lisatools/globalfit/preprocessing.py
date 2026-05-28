@@ -207,17 +207,24 @@ class L1DataLoader:
                 {}
             )  # to store individual timeseries for each source type and ID, if needed for debugging or further analysis.
 
+        import time as _t
         if "NOISE" in self.source_types:
             subfolder = os.path.join(self.data_folder, "INSTRUMENT", "L1")
             file_path = find_file(subfolder, "NOISE", 00)
 
             if orbits is None:
+                _t0 = _t.perf_counter()
                 orbits = self.orbits_class(file_path, **(self.orbits_kwargs or {}))
+                print(f"[load_data] L1Orbits(...) (incl. _setup) took {_t.perf_counter()-_t0:.2f}s", flush=True)
+                _t0 = _t.perf_counter()
                 orbits.configure(linear_interp_setup=True)
+                print(f"[load_data] orbits.configure(linear_interp_setup=True) took {_t.perf_counter()-_t0:.2f}s", flush=True)
                 logger.info(f"Initialized orbits from NOISE file.")
 
             with self._open(file_path) as f:
+                _t0 = _t.perf_counter()
                 xyz = f.tdis.xyz_doppler[:]
+                print(f"[load_data] NOISE f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={xyz.shape}", flush=True)
 
                 tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
                 tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
@@ -257,59 +264,62 @@ class L1DataLoader:
             if len(ids) == 0:
                 raise ValueError(f"No source IDs provided for source type '{source_type}'.")
 
-            binary_params = h5py.File(
-                os.path.join(self.catalogues_folder, self.catalogues_map.get(source_type)),
-                "r",
-            )["Binaries"]
+            catalogue_path = os.path.join(
+                self.catalogues_folder, self.catalogues_map.get(source_type)
+            )
 
             self.catalogue[source_type] = {}
 
             if self.verbose:
                 logger.info(f"Loading data for source type '{source_type}'")
 
-            for source_id in tqdm(
-                ids, desc=f"Loading {source_type} sources", disable=not self.verbose
-            ):
-                file_path = find_file(subfolder, source_type, source_id)
+            with h5py.File(catalogue_path, "r") as catalogue_file:
+                binary_params = catalogue_file["Binaries"]
+                for source_id in tqdm(
+                    ids, desc=f"Loading {source_type} sources", disable=not self.verbose
+                ):
+                    file_path = find_file(subfolder, source_type, source_id)
 
-                self.catalogue[source_type][source_id] = self.load_single_binary(
-                    binary_params, source_id, source_type
-                )
-                if self.verbose:
-                    logger.info(
-                        f"Loaded catalogue parameters for {source_type} source ID {source_id} from catalogue."
+                    self.catalogue[source_type][source_id] = self.load_single_binary(
+                        binary_params, source_id, source_type
                     )
+                    if self.verbose:
+                        logger.info(
+                            f"Loaded catalogue parameters for {source_type} source ID {source_id} from catalogue."
+                        )
 
-                with self._open(file_path) as f:
-                    _xyz = f.tdis.xyz_doppler[:]
-                    _tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
-                    _tdi_times = f.tdis.time_sampling.t()
-                    _tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
-                    if xyz is None:
-                        xyz = _xyz
-                        tdi_dt = _tdi_dt
-                        tdi_times = _tdi_times
-                        tdi_fs = _tdi_fs
+                    with self._open(file_path) as f:
+                        _t0 = _t.perf_counter()
+                        _xyz = f.tdis.xyz_doppler[:]
+                        print(f"[load_data] {source_type} source {source_id} f.tdis.xyz_doppler[:] took {_t.perf_counter()-_t0:.2f}s shape={_xyz.shape}", flush=True)
+                        _tdi_dt = f.tdis.time_sampling.dt  # time step in seconds
+                        _tdi_times = f.tdis.time_sampling.t()
+                        _tdi_fs = f.tdis.time_sampling.fs  # sampling frequency in Hz
+                        if xyz is None:
+                            xyz = _xyz
+                            tdi_dt = _tdi_dt
+                            tdi_times = _tdi_times
+                            tdi_fs = _tdi_fs
 
-                        if orbits is None:
-                            orbits: Orbits = self.orbits_class(
-                                file_path, **(self.orbits_kwargs or {})
-                            )
-                            orbits.configure(linear_interp_setup=True)
-                            logger.info(f"Initialized orbits from {source_type} file.")
+                            if orbits is None:
+                                orbits: Orbits = self.orbits_class(
+                                    file_path, **(self.orbits_kwargs or {})
+                                )
+                                orbits.configure(linear_interp_setup=True)
+                                logger.info(f"Initialized orbits from {source_type} file.")
 
-                    else:
-                        xyz += _xyz
-                        assert tdi_dt == _tdi_dt, "Time steps do not match between files."
-                        assert tdi_fs == _tdi_fs, "Sampling frequencies do not match between files."
-                        assert (
-                            tdi_times == _tdi_times
-                        ).all(), "Time arrays do not match between files."
+                        else:
+                            xyz += _xyz
+                            assert tdi_dt == _tdi_dt, "Time steps do not match between files."
+                            assert tdi_fs == _tdi_fs, "Sampling frequencies do not match between files."
+                            assert (
+                                tdi_times == _tdi_times
+                            ).all(), "Time arrays do not match between files."
 
-                    if self.store_individual_timeseries:
-                        _individual_timeseries[f"{source_type}_{source_id}"] = (
-                            _xyz.T.copy()
-                        )  # store individual timeseries for this source
+                        if self.store_individual_timeseries:
+                            _individual_timeseries[f"{source_type}_{source_id}"] = (
+                                _xyz.T.copy()
+                            )  # store individual timeseries for this source
 
         xyz = xyz.T  # Transpose to have shape (n_channels, n_times)
         assert (

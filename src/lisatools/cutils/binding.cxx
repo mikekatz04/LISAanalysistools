@@ -380,13 +380,13 @@ void detector_part(py::module &m) {
              array_type<double>, array_type<double>,  // quad_weights, cos_beta_ecl
              array_type<double>, array_type<double>,  // lam_ecl, beta_ecl
              int, int,                                // N_quad, N_sky
-             double, double,                          // alpha0, beta0
+             double, double, double,                  // alpha0, beta0, t0
              int, int>(),                             // N_times, N_freqs
          py::arg("R_vals_quad"), py::arg("z_vals_quad"),
          py::arg("quad_weights"), py::arg("cos_beta_ecl"),
          py::arg("lam_ecl"), py::arg("beta_ecl"),
          py::arg("N_quad"), py::arg("N_sky"),
-         py::arg("alpha0"), py::arg("beta0"),
+         py::arg("alpha0"), py::arg("beta0"), py::arg("t0"),
          py::arg("N_times"), py::arg("N_freqs"),
          "Construct and allocate galactic grid on device.\n"
          "Call initialize_wrap() once before inference starts.")
