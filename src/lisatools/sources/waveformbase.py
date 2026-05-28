@@ -770,14 +770,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         self.buffer_time = buffer_time
         self.run_async = run_async
 
-        # Record which CUDA device the response/orbits were allocated on so that
-        # _apply_response can restore this context before calling get_projections,
-        # preventing illegal-memory-access when the caller leaves a different device current.
-        # if hasattr(self, 'xp') and hasattr(self.xp, 'cuda'):
-        #     self._response_device_id = self.xp.cuda.runtime.getDevice()
-        # else:
-        #     self._response_device_id = None
-
     @property
     def wrapper_kwargs(self) -> dict:
         """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
@@ -908,20 +900,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         Returns:
             Tuple of (times_batch, channels_batch) where times_batch is the time array after shifting and padding with shape (Nbatch, Ntimes), and channels_batch is the TDI response with shape (Nbatch, num_channels, num_times).
         """
-        # If we know which device the response/orbits live on, ensure that device is
-        # current for the entire computation.  This prevents an illegal-memory-access
-        # when a previous caller (e.g. template_likelihood on a GPU-2 walker) left a
-        # different device current and cudaMalloc inside get_response would then
-        # allocate orbits_gpu on the wrong GPU while n_arr/ltt_arr/x_arr still
-        # address GPU-0 memory.
-        # _response_device_id = getattr(self, '_response_device_id', None)
-        # if _response_device_id is not None:
-        #     _saved_device = self.xp.cuda.runtime.getDevice()
-        #     if _saved_device != _response_device_id:
-        #         self.xp.cuda.runtime.setDevice(_response_device_id)
-        # else:
-        #     _saved_device = None
-
         single_source = isinstance(ra, float)
 
         ra = self.xp.atleast_1d(ra)
@@ -933,13 +911,12 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         h_cross = self.xp.atleast_2d(h_cross)
 
         shifted_t_arr = t_arr + self.xp.asarray(merger_time)[:, None] + self.waveform_t0
-        # add 500 seconds to the end to prevent problems with the response
 
-        # pad with zeros by num_pad
-        num_pad = int(self.buffer_time / self.dt)
+        # pad with zeros by num_buffer_ponts
+        num_buffer_ponts = int(self.buffer_time / self.dt)
 
-        pad_idx_right = self.xp.arange(1, num_pad + 1)[None, :]
-        pad_idx_left = self.xp.arange(num_pad, 0, -1)[None, :]
+        pad_idx_right = self.xp.arange(1, num_buffer_ponts + 1)[None, :]
+        # pad_idx_left = self.xp.arange(num_buffer_ponts, 0, -1)[None, :]
 
         shifted_t_arr = self.xp.concatenate(
             [
@@ -952,8 +929,8 @@ class TDPyResponseWaveformBase(TDWaveformBase):
 
         # condition the signal with a small taper at the start to mitigate edge effects in the response
         num_orig_pts = h_plus.shape[-1]
-        taper_points = num_pad
-        alpha = taper_points / num_orig_pts
+        
+        alpha = (self.tdi_buffer_time / self.dt) / num_orig_pts #todo check if this works with the new polarization padding!! 
         window_orig = tukey(num_orig_pts, alpha=alpha, xp=self.xp)
         window_orig[num_orig_pts//2:] = 1.0  # Only taper the start!
 
@@ -961,8 +938,8 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         h_cross = h_cross * window_orig[None, :]
 
         # Pad zeros to both the front (buffer) and the back
-        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_pad)), mode="constant", constant_values=0.0)
-        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_pad)), mode="constant", constant_values=0.0)
+        h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_buffer_ponts)), mode="constant", constant_values=0.0)
+        h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_buffer_ponts)), mode="constant", constant_values=0.0)
 
         num_pts = shifted_t_arr.shape[-1]
         self.response.num_pts = num_pts
@@ -1036,9 +1013,9 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         if len(tdis.shape) == 3:
             tdis = tdis.transpose(1, 0, 2)
 
-        tdis = tdis[..., :-num_pad] # remove the padded points
-        tdis[..., :num_pad] = 0.0  # zero out the corrupted points at the start
-        shifted_t_arr = shifted_t_arr[:, :-num_pad]
+        tdis = tdis[..., :-num_buffer_ponts] # remove the padded points
+        tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start
+        shifted_t_arr = shifted_t_arr[:, :-num_buffer_ponts]
 
         t_arr_shift = (self.data_t0 - shifted_t_arr[:, 0]) % self.dt
         shifted_t_arr += t_arr_shift[:, None]
