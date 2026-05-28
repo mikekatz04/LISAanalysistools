@@ -367,7 +367,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     Tobs = TOBS
     dt = DT
 
-    ldc_source_file = "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5"
+    ldc_source_file = "/Users/mlkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5"
     base_file_name = "combined_smoke_test"
     file_store_dir = "./gf_output/"
 
@@ -375,8 +375,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     if gpus is not None:
         cp.cuda.runtime.setDevice(gpus[0])
 
-    nwalkers = 4
-    ntemps = 2
+    nwalkers = 6
+    ntemps = 3
 
     # Rectangular window (alpha = 0) — matches the rest of the WDM smoke
     # configs.
@@ -585,13 +585,14 @@ def get_global_fit_settings(copy_settings_file=False):
     sobbh_setup = get_sobbh_multi_erebor_settings(general_setup)
 
     # No MBH — ``setup_recipe`` already gates on ``"mbh" in source_info``.
+    # GB goes last for debugging: if it errors there, we know it made it through all other proposals.
     gf_settings = GlobalFitSettings(
         source_info={
-            "gb": gb_setup,
             "psd": psd_setup,
             "galfor": galfor_setup,
             "emri": emri_setup,
             "sobbh": sobbh_setup,
+            "gb": gb_setup,
         },
         general_info=general_setup,
         rank_info=rank_info,

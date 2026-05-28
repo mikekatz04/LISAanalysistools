@@ -2050,7 +2050,13 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
     def adjust_sources_in_residual_buffer(
         self, factor, model, band_sorter: BandSorter, *args, **kwargs
     ) -> None:
+        """Add or remove sources from the main residual buffer.
 
+        Domain-agnostic: uses ``self._likelihood_engine.fill_template`` to
+        work with both FD and WDM domains. The ``factor`` controls whether
+        sources are added (``-1``, reducing the residual) or removed (``+1``,
+        restoring them to the residual).
+        """
         assert isinstance(factor, int) and (factor == -1 or factor == +1)
 
         subset = band_sorter.get_subset(*args, **kwargs)
@@ -2058,28 +2064,31 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         if subset is None or subset.inds.sum().item() == 0:
             return
 
-        factors_tmp = factor * cp.ones_like(subset.walker_inds[subset.inds], dtype=float)
-        
         params_in = subset.coords_in[subset.inds]
         walkers_in = subset.walker_inds[subset.inds].astype(self.xp.int32)
         N_vals_in = subset.N_vals[subset.inds]
-        
-        if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] + (N_vals_in / 2)  >  model.analysis_container_arr.data_length):
-            breakpoint()
-        if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] - (N_vals_in / 2) < 0):
-            breakpoint()
-        
+
+        # FD-specific bounds checks (only meaningful when basis is FD).
+        # WDM bounds are checked internally by the engine's layer-indexing.
+        if isinstance(self._basis_settings, FDSettings):
+            if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] + (N_vals_in / 2)  >  model.analysis_container_arr.data_length):
+                breakpoint()
+            if np.any((params_in[:, 1] / self.df).astype(int) - self.waveform_kwargs["start_freq_ind"] - (N_vals_in / 2) < 0):
+                breakpoint()
+
+        # Debug snapshots (kept for back-compat with existing diagnostic paths).
         ac_data_arr_in = model.analysis_container_arr.linear_data_arr.copy()
         ll_before_update = model.analysis_container_arr.likelihood().copy()
-        self.gb.generate_global_template(
-            params_in,
+
+        # Transform to physical units and dispatch via the engine.
+        params_phys = self.transform_fn.both_transforms(params_in, xp=cp)
+        self._likelihood_engine.fill_template(
+            model.analysis_container_arr,
+            params_phys,
             walkers_in,
-            model.analysis_container_arr.linear_data_arr,
-            data_length=model.analysis_container_arr.data_length,
-            factors=factors_tmp,
-            data_splits=model.analysis_container_arr.gpu_map,
-            N=N_vals_in,
-            **self.waveform_kwargs,
+            N_vals_in,
+            factor=factor,
+            waveform_kwargs=self.waveform_kwargs,
         )
 
     def remove_cold_chain_sources_from_residual(self, *args, **kwargs) -> None:

@@ -731,8 +731,8 @@ def setup_recipe(
         and gb_info.gb_wdm_comp is None
     ):
         import sys
-        if "/Users/mkatz/Research/lisa_sprint_2026" not in sys.path:
-            sys.path.insert(0, "/Users/mkatz/Research/lisa_sprint_2026")
+        if "/Users/mlkatz/Research/sprint_2026" not in sys.path:
+            sys.path.insert(0, "/Users/mlkatz/Research/sprint_2026")
         from gb_wdm_het import GBWDMHeterodyne
 
         _wdm = general_info.domain_settings
