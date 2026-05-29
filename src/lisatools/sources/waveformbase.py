@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 class AETTDIWaveform(ABC):
     """Base class for an AET TDI Waveform."""
@@ -812,72 +812,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             "Batched calls require implementing wave_gen_batch in the subclass."
         )
 
-    # def _apply_response_single(
-    #     self,
-    #     t_arr: NDArrayLike,
-    #     h_plus: NDArrayLike,
-    #     h_cross: NDArrayLike,
-    #     ra: float,
-    #     dec: float,
-    #     merger_time: float,
-    # ) -> Tuple[NDArrayLike, NDArrayLike]:
-    #     """Apply the TDI response to a single source and return a TDSignal.
-
-    #     Args:
-    #         t_arr: Time array relative to zero (output of wave_gen).
-    #         h_plus: Plus polarization.
-    #         h_cross: Cross polarization.
-    #         ra: Right ascension in radians.
-    #         dec: Declination in radians.
-    #         merger_time: Time of merger in seconds (relative to waveform_t0).
-
-    #     Returns:
-    #         Tuple of (times, channels) where times is the time array after shifting and padding, and channels is the TDI response with shape (num_channels, num_times).
-    #     """
-    #     shifted_t_arr = t_arr + merger_time + self.waveform_t0
-    #     # add 500 seconds to the end to prevent problems with the response
-
-    #     # pad both sides with zeros by num_pad
-    #     num_pad = int(self.buffer_time / self.dt)
-
-    #     shifted_t_arr = self.xp.concatenate(
-    #         [
-    #             #shifted_t_arr[0] - self.dt * self.xp.arange(1, num_pad + 1),
-    #             shifted_t_arr,
-    #             shifted_t_arr[-1] + self.dt * self.xp.arange(1, num_pad + 1),
-    #         ]
-    #     )
-
-    #     h_plus = self.xp.pad(h_plus, (0, num_pad), mode="edge")
-    #     h_cross = self.xp.pad(h_cross, (0, num_pad), mode="edge")
-
-    #     self.response.num_pts = shifted_t_arr.shape[-1]
-
-    #     strain = h_plus + 1j * h_cross
-
-    #     self.response.get_projections(
-    #         strain, lam=ra, beta=dec, t0=float(shifted_t_arr[0]), t_buffer=self.buffer_time, run_async=self.run_async
-    #     )
-    #     tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async))
-
-    #     # trim the invalid points
-    #     shifted_t_arr = shifted_t_arr[:-num_pad]
-    #     tdis[:, :num_pad] = 0.0  # zero out the corrupted points at the start
-    #     tdis = tdis[:, :-num_pad]
-
-    #     # now shift the time arrays so that the abs(t_arr[0] - data_t0) is an integer multiple of dt
-    #     t_arr_shift = (self.data_t0 - shifted_t_arr[0]) % self.dt
-    #     shifted_t_arr += t_arr_shift
-
-    #     # now remove everything before the start of the data
-    #     start_ind = int((self.data_t0 - shifted_t_arr[0]) / self.dt)
-    #     if start_ind > 0:
-    #         shifted_t_arr = shifted_t_arr[start_ind:]
-    #         tdis = tdis[:, start_ind:]
-
-    #     return shifted_t_arr, tdis
-
-
     def _apply_response(
         self,
         t_arr: NDArrayLike,
@@ -928,14 +862,14 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         )
 
         # condition the signal with a small taper at the start to mitigate edge effects in the response
-        num_orig_pts = h_plus.shape[-1]
+        # num_orig_pts = h_plus.shape[-1]
         
-        alpha = (self.tdi_buffer_time / self.dt) / num_orig_pts #todo check if this works with the new polarization padding!! 
-        window_orig = tukey(num_orig_pts, alpha=alpha, xp=self.xp)
-        window_orig[num_orig_pts//2:] = 1.0  # Only taper the start!
+        # alpha = (self.tdi_buffer_time / self.dt) / num_orig_pts #todo check if this works with the new polarization padding!! 
+        # window_orig = tukey(num_orig_pts, alpha=alpha, xp=self.xp)
+        # window_orig[num_orig_pts//2:] = 1.0  # Only taper the start!
 
-        h_plus = h_plus * window_orig[None, :]
-        h_cross = h_cross * window_orig[None, :]
+        # h_plus = h_plus * window_orig[None, :]
+        # h_cross = h_cross * window_orig[None, :]
 
         # Pad zeros to both the front (buffer) and the back
         h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_buffer_ponts)), mode="constant", constant_values=0.0)

@@ -262,7 +262,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         * YRSID_SI,  # this is only for the waveform generation, not the data, which is still general_set.Tobs
         start_freq=7e-5,
         use_reference_time=True,
-        buffer_time=25_000,
+        buffer_time=10_000,
         stft_dt=general_set.stft_dt,
         freq_min=general_set.start_freq,
         freq_max=general_set.end_freq,
@@ -398,12 +398,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     start_freq = 1e-4
     end_freq = 2.9e-2
 
-    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    head_dir = "/data/asantini/globalfit/erebor/moijto_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "6_mbhbs_18_5_16_7_2_12"
+    base_file_name = "6_mbhbs_18_5_16_7_2_12_without_response_tapering"
     file_store_dir = head_dir + "mojito_output/"
 
-    gpus = [0, 1, 2]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -411,8 +411,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 60
-    ntemps = 4
+    nwalkers = 15
+    ntemps = 2
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
