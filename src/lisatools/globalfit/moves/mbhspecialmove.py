@@ -18,7 +18,8 @@ from lisatools.sensitivity import A1TDISens, E1TDISens, SensitivityMatrix
 from lisatools.stochastic import HyperbolicTangentGalacticForeground
 
 from ...analysiscontainer import AnalysisContainer
-from ...datacontainer import DataResidualArray
+# DataResidualArray replaced by direct DomainBase (FDSignal) construction below.
+from ...domains import FDSettings, FDSignal
 from ...detector import sangria
 from ...sampling.moves.skymodehop import SkyMove
 from ...sampling.stopping import SearchConvergeStopping
@@ -286,10 +287,10 @@ class MBHSpecialMove(
                 else:
                     assert length_check == len(Af)
 
-                data_res_arr = DataResidualArray(
-                    [Af, Ef, np.zeros_like(Ef)],
-                    f_arr=fd_short,
-                    df=df_short,
+                fd_set_short = FDSettings(N=len(fd_short), df=df_short)
+                data_domain = FDSignal(
+                    np.asarray([Af, Ef, np.zeros_like(Ef)]),
+                    fd_set_short,
                 )
                 _psd_A = A1TDISens.get_Sn(fd_short, model=model_A, **stochastic_kwargs)
                 _psd_E = E1TDISens.get_Sn(fd_short, model=model_E, **stochastic_kwargs)
@@ -301,10 +302,10 @@ class MBHSpecialMove(
                     _psd_E[0] = 1e10
 
                 tmp_mat = [_psd_A, _psd_E, _psd_T]
-                sens_mat = SensitivityMatrix(fd_short, tmp_mat)
+                sens_mat = SensitivityMatrix(fd_set_short, tmp_mat)
 
                 analysis = AnalysisContainer(
-                    data_res_arr, sens_mat
+                    data_domain, sens_mat
                 )  # , signal_gen=MBHWrap(wave_gen))
                 acs_tmp.append(analysis)
 

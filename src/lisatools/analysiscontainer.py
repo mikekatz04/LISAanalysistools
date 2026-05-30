@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import warnings
 from abc import ABC
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,42 +35,137 @@ from .diagnostic import (
 from .sensitivity import SensitivityMatrix, SensitivityMatrixBase
 from .stochastic import FittedHyperbolicTangentGalacticForeground, StochasticContribution
 from .utils.constants import *
-from .utils.utility import AET, get_array_module
+from .utils.utility import AET, get_array_module, asnumpy
+
+
+SignalGenSpec = Union[Callable, Mapping[str, Callable]]
+
+
+def _coerce_to_domain_base(obj) -> DomainBase:
+    """Return ``obj`` as a :class:`DomainBase` (unwrap a :class:`DataResidualArray`)."""
+    if isinstance(obj, DomainBase):
+        return obj
+    if isinstance(obj, DataResidualArray):
+        # ``DataResidualArray.data_res_arr`` is the underlying DomainBase.
+        return obj.data_res_arr
+    raise TypeError(
+        f"Expected a DomainBase child (FDSignal, WDMSignal, TDSignal, STFTSignal) "
+        f"or a DataResidualArray; got {type(obj).__name__}."
+    )
 
 
 class AnalysisContainer:
     """Combinatorial container that combines sensitivity and data information.
 
     Args:
-        data_res_arr: Data / Residual / Signal array.
-        sens_mat: Sensitivity information.
-        signal_gen: Callable object that takes information through ``*args`` and ``**kwargs`` and
-            generates a signal in the proper channel setup employed in ``data_res_arr`` and ``sens_mat``.
+        data: Data / Residual / Signal information. May be a :class:`DomainBase`
+            child (e.g. :class:`~lisatools.domains.FDSignal`,
+            :class:`~lisatools.domains.WDMSignal`) or a legacy
+            :class:`DataResidualArray` (transparently unwrapped).
+        sens_mat: Sensitivity information. Accepts either:
+
+            - an instance of :class:`~lisatools.sensitivity.SensitivityMatrixBase`
+              (used directly), or
+            - a subclass of :class:`~lisatools.sensitivity.SensitivityMatrixBase`
+              -- the class is instantiated on the fly as
+              ``sens_mat(data.settings, **sens_mat_kwargs)`` so callers don't
+              have to repeat the settings extraction at every construction site.
+
+        signal_gen: Either
+
+            - a single ``Callable`` (legacy single-model usage), or
+            - a ``dict`` mapping ``model_name -> Callable``. When a dict is
+              given, the multi-model API in
+              :meth:`calculate_signal_likelihood` / ``_inner_product`` /
+              ``_snr`` is enabled: pass a ``dict`` of per-model parameter
+              arrays (1D or 2D), and per-model templates are summed within
+              each model along axis 0 and then across models before the
+              inner-product step.
+
+            In either case, the generator's output is automatically converted
+            into ``data.settings`` (via :meth:`DomainBase.transform`) if the
+            generator returns a :class:`DomainBase` in a different domain.
+
+        sens_mat_kwargs: Extra keyword arguments forwarded when ``sens_mat`` is
+            a class (the auto-instantiate path). Must be empty when
+            ``sens_mat`` is already an instance.
+
+        data_res_arr: Deprecated alias of ``data`` (kept for backward compatibility).
 
     """
 
     def __init__(
         self,
-        data_res_arr: DataResidualArray,
-        sens_mat: SensitivityMatrixBase,
-        signal_gen: Optional[callable] = None,
+        data: Union[DomainBase, DataResidualArray, None] = None,
+        sens_mat: Union[SensitivityMatrixBase, type, None] = None,
+        signal_gen: Optional[SignalGenSpec] = None,
+        sens_mat_kwargs: Optional[dict] = None,
+        *,
+        data_res_arr: Union[DomainBase, DataResidualArray, None] = None,
     ) -> None:
-        self.data_res_arr = data_res_arr
-        self.sens_mat = sens_mat
+        if data is None and data_res_arr is not None:
+            # Backward-compat: old kw name was ``data_res_arr``.
+            data = data_res_arr
+        if data is None:
+            raise TypeError("AnalysisContainer requires a ``data`` argument.")
+        if sens_mat is None:
+            raise TypeError("AnalysisContainer requires a ``sens_mat`` argument.")
 
+        # 1. normalise data to a DomainBase
+        self._data: DomainBase = _coerce_to_domain_base(data)
+
+        # 2. normalise sens_mat (instance | subclass)
+        sens_mat_kwargs = sens_mat_kwargs or {}
+        if isinstance(sens_mat, type):
+            if not issubclass(sens_mat, SensitivityMatrixBase):
+                raise TypeError(
+                    "If passing sens_mat as a class, it must subclass "
+                    "SensitivityMatrixBase."
+                )
+            sens_mat = sens_mat(self._data.settings, **sens_mat_kwargs)
+        elif sens_mat_kwargs:
+            raise ValueError(
+                "sens_mat_kwargs is only meaningful when ``sens_mat`` is a "
+                "SensitivityMatrixBase subclass (the auto-instantiate path)."
+            )
+
+        if not isinstance(sens_mat, SensitivityMatrixBase):
+            raise TypeError(
+                "sens_mat must be a SensitivityMatrixBase instance or a "
+                "SensitivityMatrixBase subclass class."
+            )
+        self._sens_mat = sens_mat
+
+        # 3. signal generator (callable or dict)
         if signal_gen is not None:
             self.signal_gen = signal_gen
 
+    # ------------------------------------------------------------------
+    # Data access (new + legacy)
+    # ------------------------------------------------------------------
+
     @property
-    def data_res_arr(self) -> DataResidualArray:
-        """Data information."""
-        return self._data_res_arr
+    def data(self) -> DomainBase:
+        """The underlying :class:`DomainBase` data/residual/template signal."""
+        return self._data
+
+    @data.setter
+    def data(self, value: Union[DomainBase, DataResidualArray]) -> None:
+        self._data = _coerce_to_domain_base(value)
+
+    @property
+    def data_res_arr(self) -> DomainBase:
+        """Legacy alias of :attr:`data`.
+
+        Returns a :class:`DomainBase` directly (not a :class:`DataResidualArray`).
+        The chain ``ac.data_res_arr.data_res_arr`` keeps working because
+        :attr:`DomainBase.data_res_arr` is a self-reference.
+        """
+        return self._data
 
     @data_res_arr.setter
-    def data_res_arr(self, data_res_arr: DataResidualArray) -> None:
-        """Set data."""
-        assert isinstance(data_res_arr, DataResidualArray)
-        self._data_res_arr = data_res_arr
+    def data_res_arr(self, value: Union[DomainBase, DataResidualArray]) -> None:
+        self._data = _coerce_to_domain_base(value)
 
     @property
     def sens_mat(self) -> SensitivityMatrixBase:
@@ -79,52 +174,271 @@ class AnalysisContainer:
 
     @sens_mat.setter
     def sens_mat(self, sens_mat: SensitivityMatrixBase) -> None:
-        "Set sensitivity information."
-        assert isinstance(sens_mat, SensitivityMatrixBase)
+        if not isinstance(sens_mat, SensitivityMatrixBase):
+            raise TypeError(
+                "sens_mat must be a SensitivityMatrixBase instance. To "
+                "auto-instantiate from a class, pass it (and any "
+                "``sens_mat_kwargs``) at AnalysisContainer construction."
+            )
         self._sens_mat = sens_mat
 
+    # ------------------------------------------------------------------
+    # Signal generator (callable | dict[str, callable])
+    # ------------------------------------------------------------------
+
     @property
-    def signal_gen(self) -> callable:
-        """Signal generator."""
+    def signal_gen(self) -> SignalGenSpec:
+        """Signal generator (callable or ``{model_name: callable}`` dict)."""
         if not hasattr(self, "_signal_gen"):
             raise ValueError("User must input signal_gen kwarg to use the signal generator.")
         return self._signal_gen
 
     @signal_gen.setter
-    def signal_gen(self, signal_gen: callable):
-        """Set signal generator."""
-        assert hasattr(signal_gen, "__call__")
-        self._signal_gen = signal_gen
+    def signal_gen(self, signal_gen: SignalGenSpec) -> None:
+        if isinstance(signal_gen, Mapping):
+            if not signal_gen:
+                raise ValueError("signal_gen dict cannot be empty.")
+            for name, fn in signal_gen.items():
+                if not callable(fn):
+                    raise TypeError(
+                        f"signal_gen[{name!r}] must be callable; got {type(fn).__name__}."
+                    )
+            # store a shallow copy so external mutation can't surprise us
+            self._signal_gen = dict(signal_gen)
+        else:
+            if not callable(signal_gen):
+                raise TypeError(
+                    f"signal_gen must be callable or a dict of callables; got "
+                    f"{type(signal_gen).__name__}."
+                )
+            self._signal_gen = signal_gen
+
+    @property
+    def is_multi_model(self) -> bool:
+        """``True`` iff :attr:`signal_gen` is configured as a per-model dict."""
+        return hasattr(self, "_signal_gen") and isinstance(self._signal_gen, Mapping)
+
+    @property
+    def model_names(self) -> List[str]:
+        """List of model names when :attr:`signal_gen` is a dict (else empty list)."""
+        return list(self._signal_gen.keys()) if self.is_multi_model else []
+
+    # ------------------------------------------------------------------
+    # Generator output -> data-domain DomainBase
+    # ------------------------------------------------------------------
+
+    def _to_data_domain(self, gen_out, gen_fn: Optional[Callable] = None) -> DomainBase:
+        """Normalise the output of a signal generator into ``self.data.settings``.
+
+        Accepts:
+
+        - a :class:`DomainBase` (transformed to ``self.data.settings`` if its
+          domain differs from the data's),
+        - a :class:`DataResidualArray` (legacy; unwrapped then transformed),
+        - a raw NumPy / CuPy / JAX array (interpreted as already living in
+          ``self.data.settings``).
+        """
+        target = self._data.settings
+        if isinstance(gen_out, DataResidualArray):
+            gen_out = gen_out.data_res_arr
+        if isinstance(gen_out, DomainBase):
+            if gen_out.settings == target:
+                return gen_out
+            try:
+                return gen_out.transform(target)
+            except Exception as exc:
+                raise ValueError(
+                    f"Could not transform signal_gen output (domain "
+                    f"{type(gen_out.settings).__name__}) into the data domain "
+                    f"{type(target).__name__}: {exc}"
+                ) from exc
+
+        # Raw array path: trust the caller that this matches the data domain.
+        try:
+            arr = self._data.xp.asarray(gen_out)
+        except Exception:
+            arr = gen_out
+        return target.associated_class(arr, target)
+
+    # ------------------------------------------------------------------
+    # Multi-model template assembly
+    # ------------------------------------------------------------------
+
+    def _call_single_model(self, fn: Callable, params, waveform_kwargs: dict) -> DomainBase:
+        """Call ``fn(*params, **waveform_kwargs)`` (params may be 1D or 2D).
+
+        For a 2D ``params`` of shape ``(n_signals, n_par)`` the call iterates
+        over the rows and sums the per-row outputs (in the data domain).
+        Returns a single :class:`DomainBase` in the data domain.
+        """
+        arr = np.asarray(params, dtype=object) if not hasattr(params, "ndim") else params
+        if getattr(arr, "ndim", 1) == 1:
+            return self._to_data_domain(fn(*tuple(params), **waveform_kwargs), fn)
+        if arr.ndim != 2:
+            raise ValueError(
+                f"Per-model params must be 1D (single signal) or 2D "
+                f"(batch of signals); got ndim={arr.ndim}."
+            )
+        accum: Optional[DomainBase] = None
+        for row in arr:
+            row_dom = self._to_data_domain(fn(*tuple(row), **waveform_kwargs), fn)
+            if accum is None:
+                accum = self._data.settings.associated_class(
+                    row_dom.arr.copy(), self._data.settings,
+                )
+            else:
+                accum.add_signal(row_dom, sign=+1)
+        return accum
+
+    def build_template(
+        self,
+        params: Union[tuple, list, np.ndarray, Mapping[str, Any]],
+        waveform_kwargs: Union[dict, Mapping[str, dict], None] = None,
+        per_model_per_signal: bool = False,
+    ):
+        """Build a combined template from ``params`` using :attr:`signal_gen`.
+
+        - **Single-model**: ``signal_gen`` is a callable, ``params`` is a
+          1D (single signal) or 2D (batch summed within model) parameter
+          array. Returns a single :class:`DomainBase` template living in
+          ``self.data.settings``.
+        - **Multi-model**: ``signal_gen`` is a dict, ``params`` is a dict
+          mapping ``model_name -> 1D or 2D params``. Per-model batch rows
+          are summed (within-model), then summed across models. Returns a
+          single :class:`DomainBase` (or, with ``per_model_per_signal=True``,
+          a structured ``dict`` of per-model un-summed
+          ``list[DomainBase]`` -- intended for diagnostics, not summed).
+
+        Args:
+            params: Parameters; structure must match :attr:`signal_gen`.
+            waveform_kwargs: ``dict`` of kwargs forwarded to each generator
+                (single-model), or ``{model_name: dict}`` of per-model kwargs
+                (multi-model).
+            per_model_per_signal: If ``True``, in the multi-model case return
+                the per-model / per-signal :class:`DomainBase` list without
+                summing -- handy for inspecting individual contributions.
+
+        Returns:
+            A :class:`DomainBase` template (or a structured dict when
+            ``per_model_per_signal=True`` in multi-model mode).
+        """
+        waveform_kwargs = waveform_kwargs or {}
+
+        if not self.is_multi_model:
+            if isinstance(params, Mapping):
+                raise TypeError(
+                    "signal_gen is a single callable, but params is a dict. "
+                    "Either pass tuple/array params, or configure signal_gen "
+                    "as a dict of per-model generators."
+                )
+            return self._call_single_model(
+                self._signal_gen, params,
+                waveform_kwargs if isinstance(waveform_kwargs, dict) else {},
+            )
+
+        # multi-model path
+        if not isinstance(params, Mapping):
+            raise TypeError(
+                "signal_gen is a dict of per-model generators; "
+                "params must also be a dict {model_name: 1D/2D array}."
+            )
+        unknown = set(params) - set(self._signal_gen)
+        if unknown:
+            raise KeyError(
+                f"Unknown model name(s) in params: {sorted(unknown)}. "
+                f"Known models: {sorted(self._signal_gen)}."
+            )
+        if isinstance(waveform_kwargs, Mapping) and waveform_kwargs and all(
+            isinstance(v, dict) for v in waveform_kwargs.values()
+        ):
+            per_model_kwargs = waveform_kwargs
+        else:
+            # treat as shared kwargs across all models
+            per_model_kwargs = {name: dict(waveform_kwargs) for name in params}
+
+        if per_model_per_signal:
+            structured: Dict[str, List[DomainBase]] = {}
+            for name, p in params.items():
+                fn = self._signal_gen[name]
+                wf = per_model_kwargs.get(name, {})
+                arr_like = np.asarray(p, dtype=object) if not hasattr(p, "ndim") else p
+                if getattr(arr_like, "ndim", 1) == 1:
+                    structured[name] = [self._to_data_domain(fn(*tuple(p), **wf), fn)]
+                else:
+                    structured[name] = [
+                        self._to_data_domain(fn(*tuple(row), **wf), fn) for row in arr_like
+                    ]
+            return structured
+
+        combined: Optional[DomainBase] = None
+        for name, p in params.items():
+            fn = self._signal_gen[name]
+            wf = per_model_kwargs.get(name, {})
+            per_model = self._call_single_model(fn, p, wf)
+            if combined is None:
+                combined = self._data.settings.associated_class(
+                    per_model.arr.copy(), self._data.settings,
+                )
+            else:
+                combined.add_signal(per_model, sign=+1)
+        return combined
+
+    # ------------------------------------------------------------------
+    # WDM/FD start-index passthroughs (now sourced from DomainBase)
+    # ------------------------------------------------------------------
 
     @property
     def start_freq_ind(self):
-        """Pass-through to :attr:`DataResidualArray.start_freq_ind`."""
-        return self.data_res_arr.start_freq_ind
+        """Pass-through to :attr:`DomainBase.start_freq_ind`."""
+        return self._data.start_freq_ind
 
     @property
     def start_freq_layer_ind(self):
-        """Pass-through to :attr:`DataResidualArray.start_freq_layer_ind` (WDM only)."""
-        return self.data_res_arr.start_freq_layer_ind
+        """Pass-through to :attr:`DomainBase.start_freq_layer_ind` (WDM only)."""
+        return self._data.start_freq_layer_ind
 
     @property
     def start_time_layer_ind(self):
-        """Pass-through to :attr:`DataResidualArray.start_time_layer_ind` (WDM only).
+        """Pass-through to :attr:`DomainBase.start_time_layer_ind` (WDM only).
 
         For an :class:`AnalysisContainerArray` covering a WDM grid, every
         container shares the same active time range, so this value is the
         same across all containers.
         """
-        return self.data_res_arr.start_time_layer_ind
+        return self._data.start_time_layer_ind
 
     @property
     def layer_df(self):
-        """Pass-through to :attr:`DataResidualArray.layer_df` (WDM only)."""
-        return self.data_res_arr.layer_df
+        """WDM layer frequency spacing (``None`` if data is not WDM)."""
+        return getattr(self._data.settings, "layer_df", None)
 
     @property
     def layer_dt(self):
-        """Pass-through to :attr:`DataResidualArray.layer_dt` (WDM only)."""
-        return self.data_res_arr.layer_dt
+        """WDM layer time spacing (``None`` if data is not WDM)."""
+        return getattr(self._data.settings, "layer_dt", None)
+
+    # ------------------------------------------------------------------
+    # Direct add/subtract of templates against the data residual
+    # ------------------------------------------------------------------
+
+    def add_signal_to_data(self, template, sign: int = +1) -> DomainBase:
+        """Add ``template`` to ``self.data`` (in-place, domain-aware).
+
+        ``template`` may be a :class:`DomainBase`, a :class:`DataResidualArray`,
+        a tuple/array of parameters, or a multi-model params ``dict``. In the
+        latter cases :meth:`build_template` is used to assemble the combined
+        template from :attr:`signal_gen`.
+        """
+        if isinstance(template, (DomainBase, DataResidualArray)):
+            tmpl = self._to_data_domain(template)
+        else:
+            tmpl = self.build_template(template)
+        self._data.add_signal(tmpl, sign=sign)
+        return self._data
+
+    def subtract_signal_from_data(self, template) -> DomainBase:
+        """Subtract ``template`` from ``self.data`` (in-place, see :meth:`add_signal_to_data`)."""
+        return self.add_signal_to_data(template, sign=-1)
 
     def loglog(self) -> Tuple[plt.Figure, plt.Axes]:
         """Produce loglog plot of both source and sensitivity information.
@@ -133,26 +447,27 @@ class AnalysisContainer:
             Matplotlib figure and axes object in a 2-tuple.
 
         """
-        assert isinstance(self.data_res_arr.data_res_arr.settings, domains.FDSettings)
+        assert isinstance(self._data.settings, domains.FDSettings)
         fig, ax = self.sens_mat.loglog(char_strain=True)
+        f_arr = self._data.f_arr
         if self.sens_mat.ndim == 3:
             # 3x3 most likely
             for i in range(self.sens_mat.shape[0]):
                 for j in range(i, self.sens_mat.shape[1]):
                     # char strain
                     ax[i * self.sens_mat.shape[1] + j].loglog(
-                        self.data_res_arr.data_res_arr.f_arr,
-                        self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
+                        f_arr,
+                        f_arr * np.abs(self._data[i]),
                     )
                     ax[i * self.sens_mat.shape[1] + j].loglog(
-                        self.data_res_arr.data_res_arr.f_arr,
-                        self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[j]),
+                        f_arr,
+                        f_arr * np.abs(self._data[j]),
                     )
         else:
             for i in range(self.sens_mat.shape[0]):
                 ax[i].loglog(
-                    self.data_res_arr.data_res_arr.f_arr,
-                    self.data_res_arr.data_res_arr.f_arr * np.abs(self.data_res_arr[i]),
+                    f_arr,
+                    f_arr * np.abs(self._data[i]),
                 )
         return (fig, ax)
 
@@ -169,7 +484,7 @@ class AnalysisContainer:
         if "psd" in kwargs:
             kwargs.pop("psd")
 
-        return inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs)
+        return inner_product(self._data, self._data, psd=self.sens_mat, **kwargs)
 
     def snr(self, **kwargs: dict) -> float:
         """Return the SNR of the current set of information
@@ -184,19 +499,21 @@ class AnalysisContainer:
         return self.inner_product(**kwargs).real ** (1 / 2)
 
     def _slice_to_template(
-        self, template: DataResidualArray
-    ) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
-        """Slice the data residual array to the same shape as the template.
+        self, template: Union[DomainBase, DataResidualArray]
+    ) -> Tuple[DomainBase, DomainBase, SensitivityMatrixBase]:
+        """Slice the data to the same shape as the template.
 
-        This is used for calculating inner products and likelihoods with templates that are shorter than the data.
+        This is used for calculating inner products and likelihoods with
+        templates that are shorter than the data.
 
         Args:
-            template: Template signal.
+            template: Template signal (``DomainBase`` or legacy ``DataResidualArray``).
         """
-        data_settings = self.data_res_arr.settings
+        template = _coerce_to_domain_base(template)
+        data_settings = self._data.settings
         templ_settings = template.settings
 
-        if type(data_settings) != type(templ_settings):
+        if type(data_settings) is not type(templ_settings):
             raise ValueError(
                 f"Data domain ({type(data_settings).__name__}) and template domain "
                 f"({type(templ_settings).__name__}) must match."
@@ -204,7 +521,7 @@ class AnalysisContainer:
 
         # Fast path: settings identical → no slicing needed
         if data_settings == templ_settings:
-            return self.data_res_arr, template, self.sens_mat
+            return self._data, template, self.sens_mat
 
         elif isinstance(data_settings, domains.STFTSettings):
             return self._slice_stft_to_template(template)
@@ -216,20 +533,18 @@ class AnalysisContainer:
             )
 
     def _slice_stft_to_template(
-        self, template: DataResidualArray
-    ) -> Tuple[DataResidualArray, DataResidualArray, SensitivityMatrixBase]:
-        """
-        Slice the data residual array and sensitivity matrix to the time and frequency region covered
-        by the template, for the case of STFT domain settings.
+        self, template: DomainBase
+    ) -> Tuple[DomainBase, DomainBase, SensitivityMatrixBase]:
+        """STFT-specific slice helper used by :meth:`_slice_to_template`.
 
         Args:
-            template: Template signal.
+            template: Template signal (already coerced to a :class:`DomainBase`).
 
         Returns:
-            Tuple of (sliced data residual array, sliced template, sliced sensitivity matrix).
+            ``(sliced_data, sliced_template, sliced_sens_mat)`` as
+            :class:`DomainBase` / :class:`DomainBase` / :class:`SensitivityMatrixBase`.
         """
-
-        data_settings = self.data_res_arr.settings
+        data_settings = self._data.settings
         templ_settings = template.settings
 
         # validate grids
@@ -243,38 +558,29 @@ class AnalysisContainer:
                 f"Data df ({data_settings.df}) and template df ({templ_settings.df}) must match."
             )
 
-        # find indices for slicing
         templ_tmin, templ_tmax = (
             templ_settings.t0,
             templ_settings.t0 + templ_settings.NT * templ_settings.dt,
         )
-
-        # now limit the time range to the data range if necessary, and print a warning if this is the case
         data_tmin, data_tmax = (
             data_settings.t0,
             data_settings.t0 + data_settings.NT * data_settings.dt,
         )
-
         tmin = max(templ_tmin, data_tmin)
         tmax = min(templ_tmax, data_tmax)
 
         fmin, fmax = templ_settings.f_arr[0], templ_settings.f_arr[-1]
-
         slices = data_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
-        
-        sliced_data_res_arr = DataResidualArray(
-            self.data_res_arr.data_res_arr.get_array_slice(slices)
-        )
+        sliced_data = self._data.get_array_slice(slices)
         sliced_sens_mat = self.sens_mat.get_slice(slices)
 
         templ_slice = templ_settings.compute_slice_indices(tmin, tmax, fmin, fmax)
-        
-        sliced_template = DataResidualArray(template.data_res_arr.get_array_slice(templ_slice))
+        sliced_template = template.get_array_slice(templ_slice)
 
-        return sliced_data_res_arr, sliced_template, sliced_sens_mat
+        return sliced_data, sliced_template, sliced_sens_mat
 
     def template_inner_product(
-        self, template: DataResidualArray, **kwargs: dict
+        self, template: Union[DomainBase, DataResidualArray], **kwargs: dict
     ) -> float | complex:
         """Calculate the inner product of a template with the data.
 
@@ -298,7 +604,7 @@ class AnalysisContainer:
         return ip_val
 
     def template_snr(
-        self, template: DataResidualArray, phase_maximize: bool = False, **kwargs: dict
+        self, template: Union[DomainBase, DataResidualArray], phase_maximize: bool = False, **kwargs: dict
     ) -> Tuple[float, float]:
         """Calculate the SNR of a template, both optimal and detected.
 
@@ -338,7 +644,7 @@ class AnalysisContainer:
 
     def template_likelihood(
         self,
-        template: DataResidualArray,
+        template: Union[DomainBase, DataResidualArray],
         include_psd_info: bool = False,
         phase_maximize: bool = False,
         amp_maximize: bool = False,
@@ -369,7 +675,7 @@ class AnalysisContainer:
         # when computing the <d|d> term we need the full data and sensitivity matrix.
 
         # TODO: should we cache?
-        d_d = inner_product(self.data_res_arr, self.data_res_arr, psd=self.sens_mat, **kwargs_in)
+        d_d = inner_product(self._data, self._data, psd=self.sens_mat, **kwargs_in)
         h_h = inner_product(template_sliced, template_sliced, psd=sens_mat_sliced, **kwargs_in)
 
         non_marg_d_h = inner_product(
@@ -415,10 +721,10 @@ class AnalysisContainer:
         elif noise_only:
             return noise_likelihood_term(self.sens_mat)
         elif source_only:
-            return residual_source_likelihood_term(self.data_res_arr, psd=self.sens_mat, **kwargs)
+            return residual_source_likelihood_term(self._data, psd=self.sens_mat, **kwargs)
         else:
             return residual_full_source_and_noise_likelihood(
-                self.data_res_arr, self.sens_mat, **kwargs
+                self._data, self.sens_mat, **kwargs
             )
 
     # TODO: make sure there is a way for backends to check TDI channel structure/domain is equivalent
@@ -428,49 +734,92 @@ class AnalysisContainer:
         calc: str,
         *args: Any,
         source_only: bool = False,
-        waveform_kwargs: Optional[dict] = {},
-        data_res_arr_kwargs: Optional[dict] = {},
-        propagate_data_res_kwargs: bool = True,
+        waveform_kwargs: Optional[Union[dict, Mapping[str, dict]]] = None,
         transform_fn: Optional[TransformContainer] = None,
-        signal_gen: Optional[callable] = None,
+        signal_gen: Optional[SignalGenSpec] = None,
+        per_model_per_signal: bool = False,
         **kwargs: dict,
     ) -> float | complex:
-        """Return the likelihood of a generated signal with the data.
+        """Build a template from ``signal_gen`` and run a likelihood/SNR/inner-product op.
 
         Args:
-            calc: Type of calculation to do. Options are ``"likelihood"``, ``"inner_product"``, or ``"snr"``.
-            *args: Arguments to waveform generating function. Must include parameters.
-            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
-            waveform_kwargs: Keyword arguments to pass to waveform generator.
-            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
-                This can be used if any transforms are desired prior to the Likelihood computation. If it is not input and ``propagate_data_res_kwargs`` is ``True``,
-                the kwargs are taken to be the same as those used to initalize ``self.data_res_arr``.
-            transform_fn: Transform information for signal parameters if they
-                are entered on a basis other than the waveform basis.
-            signal_gen: In scope waveform generator. Replaces ``self.signal_gen`` if this input is not ``None``.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
+            calc: One of ``"likelihood"``, ``"inner_product"``, ``"snr"``.
+            *args: Parameter input. For the **single-model** case (signal_gen
+                is a callable), this is the waveform's positional parameter
+                list (1D), or a single 2D ndarray to batch-sum within model.
+                For the **multi-model** case (signal_gen is a dict), pass
+                exactly one positional argument: a ``dict`` mapping
+                ``model_name -> 1D/2D params``.
+            source_only: If ``True`` return the source-only Likelihood
+                (leave out noise part).
+            waveform_kwargs: Keyword arguments forwarded to the generator(s).
+                In multi-model mode this can also be a
+                ``{model_name: dict}`` mapping.
+            transform_fn: Optional :class:`~eryn.utils.TransformContainer`
+                applied to the parameters before generation (single-model
+                only).
+            signal_gen: In-scope waveform generator (callable or dict).
+                Replaces :attr:`signal_gen` for this call when given.
+            per_model_per_signal: Multi-model only. If ``True``, skip the
+                summation step and return a structured per-model /
+                per-signal dict of results instead of a scalar.
+            **kwargs: Forwarded to :func:`lisatools.diagnostic.inner_product`.
 
         Returns:
-            Likelihood value.
-
+            Likelihood / inner-product / SNR value, or a structured dict
+            (per_model_per_signal mode).
         """
+        # Temporarily swap in a per-call signal_gen if provided.
+        prev_gen = self._signal_gen if hasattr(self, "_signal_gen") else None
+        if signal_gen is not None:
+            self.signal_gen = signal_gen
+        try:
+            multi = self.is_multi_model
 
-        if data_res_arr_kwargs == {} and propagate_data_res_kwargs:
-            data_res_arr_kwargs = self.data_res_arr.init_kwargs
+            if multi:
+                if len(args) != 1 or not isinstance(args[0], Mapping):
+                    raise TypeError(
+                        "signal_gen is a dict; pass a single dict of per-model "
+                        "params as the only positional argument."
+                    )
+                if transform_fn is not None:
+                    raise NotImplementedError(
+                        "transform_fn is not supported in multi-model mode; "
+                        "apply parameter transforms inside each model's "
+                        "signal_gen callable."
+                    )
+                params = args[0]
+                template_or_struct = self.build_template(
+                    params,
+                    waveform_kwargs=waveform_kwargs or {},
+                    per_model_per_signal=per_model_per_signal,
+                )
 
-        if transform_fn is not None:
-            args_tmp = np.asarray(args)
-            args_in = tuple(transform_fn.both_transforms(args_tmp))
-        else:
-            args_in = args
-
-        signal_gen_here = self.signal_gen if signal_gen is None else signal_gen
-
-        template = DataResidualArray(
-            signal_gen_here(*args_in, **waveform_kwargs), **data_res_arr_kwargs
-        )
-
-        args_2 = (template,)
+                if per_model_per_signal:
+                    # Return per-model / per-signal results, evaluated by ``calc``.
+                    return self._evaluate_structured_templates(
+                        calc,
+                        template_or_struct,
+                        source_only=source_only,
+                        **kwargs,
+                    )
+                template = template_or_struct
+            else:
+                if transform_fn is not None:
+                    args_tmp = np.asarray(args)
+                    args_in = tuple(transform_fn.both_transforms(args_tmp))
+                else:
+                    args_in = args
+                template = self.build_template(
+                    args_in,
+                    waveform_kwargs=waveform_kwargs or {},
+                )
+        finally:
+            if signal_gen is not None:
+                if prev_gen is None:
+                    del self._signal_gen
+                else:
+                    self._signal_gen = prev_gen
 
         if "include_psd_info" in kwargs:
             assert kwargs["include_psd_info"] == (not source_only)
@@ -480,35 +829,62 @@ class AnalysisContainer:
 
         if calc == "likelihood":
             kwargs["include_psd_info"] = not source_only
-            return self.template_likelihood(*args_2, **kwargs)
+            return self.template_likelihood(template, **kwargs)
         elif calc == "inner_product":
-            return self.template_inner_product(*args_2, **kwargs)
+            return self.template_inner_product(template, **kwargs)
         elif calc == "snr":
-            return self.template_snr(*args_2, **kwargs)
+            return self.template_snr(template, **kwargs)
         else:
             raise ValueError("`calc` must be 'likelihood', 'inner_product', or 'snr'.")
+
+    def _evaluate_structured_templates(
+        self,
+        calc: str,
+        structured: Dict[str, List[DomainBase]],
+        source_only: bool = False,
+        **kwargs: dict,
+    ) -> Dict[str, List[Any]]:
+        """Run ``calc`` per-model / per-signal on a structured template dict.
+
+        Used by :meth:`_calculate_signal_operation` when
+        ``per_model_per_signal=True``. Each individual template is evaluated
+        against the data; the dict preserves the input shape so callers can
+        inspect per-source contributions.
+        """
+        if "include_psd_info" in kwargs:
+            kwargs.pop("include_psd_info")
+        op_kwargs = dict(psd=self.sens_mat, **kwargs)
+        if calc == "likelihood":
+            op_kwargs["include_psd_info"] = not source_only
+            op = self.template_likelihood
+        elif calc == "inner_product":
+            op = self.template_inner_product
+        elif calc == "snr":
+            op = self.template_snr
+        else:
+            raise ValueError("`calc` must be 'likelihood', 'inner_product', or 'snr'.")
+
+        return {
+            name: [op(tmpl, **op_kwargs) for tmpl in tmpl_list]
+            for name, tmpl_list in structured.items()
+        }
 
     def calculate_signal_likelihood(
         self,
         *args: Any,
         source_only: bool = False,
-        waveform_kwargs: Optional[dict] = {},
-        data_res_arr_kwargs: Optional[dict] = {},
+        waveform_kwargs: Optional[Union[dict, Mapping[str, dict]]] = None,
+        per_model_per_signal: bool = False,
         **kwargs: dict,
-    ) -> float | complex:
-        """Return the likelihood of a generated signal with the data.
+    ) -> Union[float, complex, Dict[str, List[Any]]]:
+        """Return the likelihood of a generator-produced signal against the data.
 
-        Args:
-            params: Arguments to waveform generating function. Must include parameters.
-            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
-            waveform_kwargs: Keyword arguments to pass to waveform generator.
-            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
-                This can be used if any transforms are desired prior to the Likelihood computation.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
-
-        Returns:
-            Likelihood value.
-
+        Single-model: ``*args`` are the waveform parameters (1D), or a single
+        2D ndarray batch (summed within model).
+        Multi-model (``signal_gen`` is a dict): pass exactly one positional
+        argument, a ``dict`` of ``{model_name: 1D or 2D params}``.
+        ``per_model_per_signal=True`` (multi-model) returns the un-summed
+        per-source results instead of the combined-template scalar.
         """
 
         return self._calculate_signal_operation(
@@ -516,7 +892,7 @@ class AnalysisContainer:
             *args,
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
-            data_res_arr_kwargs=data_res_arr_kwargs,
+            per_model_per_signal=per_model_per_signal,
             **kwargs,
         )
 
@@ -524,23 +900,14 @@ class AnalysisContainer:
         self,
         *args: Any,
         source_only: bool = False,
-        waveform_kwargs: Optional[dict] = {},
-        data_res_arr_kwargs: Optional[dict] = {},
+        waveform_kwargs: Optional[Union[dict, Mapping[str, dict]]] = None,
+        per_model_per_signal: bool = False,
         **kwargs: dict,
-    ) -> float | complex:
-        """Return the inner product of a generated signal with the data.
+    ) -> Union[float, complex, Dict[str, List[Any]]]:
+        """Return the inner product of a generator-produced signal against the data.
 
-        Args:
-            *args: Arguments to waveform generating function. Must include parameters.
-            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
-            waveform_kwargs: Keyword arguments to pass to waveform generator.
-            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
-                This can be used if any transforms are desired prior to the Likelihood computation.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
-
-        Returns:
-            Inner product value.
-
+        See :meth:`calculate_signal_likelihood` for the multi-model API and
+        ``per_model_per_signal`` flag.
         """
 
         return self._calculate_signal_operation(
@@ -548,7 +915,7 @@ class AnalysisContainer:
             *args,
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
-            data_res_arr_kwargs=data_res_arr_kwargs,
+            per_model_per_signal=per_model_per_signal,
             **kwargs,
         )
 
@@ -556,23 +923,14 @@ class AnalysisContainer:
         self,
         *args: Any,
         source_only: bool = False,
-        waveform_kwargs: Optional[dict] = {},
-        data_res_arr_kwargs: Optional[dict] = {},
+        waveform_kwargs: Optional[Union[dict, Mapping[str, dict]]] = None,
+        per_model_per_signal: bool = False,
         **kwargs: dict,
-    ) -> Tuple[float, float]:
-        """Return the SNR of a generated signal with the data.
+    ) -> Union[Tuple[float, float], Dict[str, List[Tuple[float, float]]]]:
+        """Return the SNR (optimal, detected) of a generator-produced signal.
 
-        Args:
-            *args: Arguments to waveform generating function. Must include parameters.
-            source_only: If ``True`` return the source-only Likelihood (leave out noise part).
-            waveform_kwargs: Keyword arguments to pass to waveform generator.
-            data_res_arr_kwargs: Keyword arguments for instantiation of :class:`DataResidualArray`.
-                This can be used if any transforms are desired prior to the Likelihood computation.
-            **kwargs: Keyword arguments to pass to :func:`lisatools.diagnostic.inner_product`
-
-        Returns:
-            Snr values (optimal, detected).
-
+        See :meth:`calculate_signal_likelihood` for the multi-model API and
+        ``per_model_per_signal`` flag.
         """
 
         return self._calculate_signal_operation(
@@ -580,7 +938,7 @@ class AnalysisContainer:
             *args,
             source_only=source_only,
             waveform_kwargs=waveform_kwargs,
-            data_res_arr_kwargs=data_res_arr_kwargs,
+            per_model_per_signal=per_model_per_signal,
             **kwargs,
         )
 
@@ -702,7 +1060,7 @@ class AnalysisContainer:
                 "use_vmap=True requires `jax` to be installed."
             ) from e
 
-        basis_settings = self.data_res_arr.data_res_arr.settings
+        basis_settings = self._data.settings
         x_jnp = jnp.asarray(x)
 
         # ``source_only`` is implemented through ``calculate_signal_likelihood``
@@ -714,11 +1072,15 @@ class AnalysisContainer:
         if not source_only:
             template_likelihood_kwargs.setdefault("include_psd_info", False)
 
-        def _ll_single(theta):
-            template_arr = self.signal_gen(*theta, *args)
-            template = DataResidualArray(
-                template_arr, input_signal_domain=basis_settings,
+        if self.is_multi_model:
+            raise NotImplementedError(
+                "use_vmap=True is not currently supported with a multi-model "
+                "signal_gen dict; build the combined template yourself."
             )
+
+        def _ll_single(theta):
+            template_arr = self._signal_gen(*theta, *args)
+            template = basis_settings.associated_class(template_arr, basis_settings)
             return self.template_likelihood(
                 template, **template_likelihood_kwargs,
             )
@@ -1015,189 +1377,6 @@ class AnalysisContainerArray:
         return self.acs[index]
 
     # ------------------------------------------------------------------
-    # Domain-specific helpers for signal_operation
-    # ------------------------------------------------------------------
-
-    def _apply_stft_signal(
-        self,
-        sign: int,
-        template_arr,
-        template_settings: domains.STFTSettings,
-        data_res_arr: DataResidualArray,
-    ) -> None:
-        """Add or subtract an STFT template from *data_res_arr*.
-
-        Handles partial time support (template may cover only a sub-range of
-        the data time axis) and computes the frequency intersection between
-        template and data active frequency ranges.
-
-        Args:
-            sign: +1 to add, -1 to subtract.
-            template_arr: Array of shape ``(nchannels, NT_tmpl, NF_tmpl_active)``.
-            template_settings: Settings for the template STFT grid.
-            data_res_arr: Target data residual array.
-
-        """
-        data_settings = data_res_arr.settings
-
-        if not np.isclose(data_settings.df, template_settings.df):
-            raise ValueError(
-                f"Data df ({data_settings.df}) and template df "
-                f"({template_settings.df}) must match."
-            )
-        if data_settings.NF != template_settings.NF:
-            raise ValueError(
-                f"Data NF ({data_settings.NF}) and template NF "
-                f"({template_settings.NF}) must match."
-            )
-
-        # --- time offset (in number of time bins) ---
-        time_offset = int(round((template_settings.t0 - data_settings.t0) / data_settings.dt))
-        t_start_data = max(0, time_offset)
-        t_end_data = min(data_settings.NT, time_offset + template_settings.NT)
-
-        if t_start_data >= t_end_data:
-            warnings.warn(
-                f"STFT template time range does not overlap with data. Skipping. "
-                f"Template t0={template_settings.t0}, NT={template_settings.NT}, "
-                f"dt={template_settings.dt}; "
-                f"Data t0={data_settings.t0}, NT={data_settings.NT}, "
-                f"dt={data_settings.dt}."
-            )
-            return
-
-        tmpl_t_start = t_start_data - time_offset
-        tmpl_t_end = t_end_data - time_offset
-
-        # --- frequency intersection (in active-freq-bin coordinates) ---
-        data_f0 = float(data_settings.f_arr[0])
-        tmpl_f0 = float(template_settings.f_arr[0])
-        data_f1 = float(data_settings.f_arr[-1])
-        tmpl_f1 = float(template_settings.f_arr[-1])
-
-        f_lo = max(data_f0, tmpl_f0)
-        f_hi = min(data_f1, tmpl_f1)
-
-        if f_lo > f_hi:
-            warnings.warn("STFT template and data frequency ranges do not overlap. Skipping.")
-            return
-
-        f_start_data = int(round((f_lo - data_f0) / data_settings.df))
-        f_end_data = int(round((f_hi - data_f0) / data_settings.df)) + 1
-        f_start_tmpl = int(round((f_lo - tmpl_f0) / template_settings.df))
-        f_end_tmpl = f_start_tmpl + (f_end_data - f_start_data)
-
-        data_res_arr[:, t_start_data:t_end_data, f_start_data:f_end_data] += (
-            sign * template_arr[:, tmpl_t_start:tmpl_t_end, f_start_tmpl:f_end_tmpl]
-        )
-
-    def _apply_fd_signal(
-        self,
-        sign: int,
-        template_arr,
-        template_settings: domains.FDSettings,
-        data_res_arr: DataResidualArray,
-    ) -> None:
-        """Add or subtract an FD template from *data_res_arr*.
-
-        Computes the frequency intersection between template and data active
-        frequency ranges and applies only in the overlapping region.
-
-        Args:
-            sign: +1 to add, -1 to subtract.
-            template_arr: Array of shape ``(nchannels, NF_tmpl_active)``.
-            template_settings: Settings for the template FD grid.
-            data_res_arr: Target data residual array.
-
-        """
-        data_settings = data_res_arr.settings
-
-        if not np.isclose(data_settings.df, template_settings.df):
-            raise ValueError(
-                f"Data df ({data_settings.df}) and template df "
-                f"({template_settings.df}) must match."
-            )
-
-        data_f0 = float(data_settings.f_arr[0])
-        tmpl_f0 = float(template_settings.f_arr[0])
-        data_f1 = float(data_settings.f_arr[-1])
-        tmpl_f1 = float(template_settings.f_arr[-1])
-
-        f_lo = max(data_f0, tmpl_f0)
-        f_hi = min(data_f1, tmpl_f1)
-
-        if f_lo > f_hi:
-            warnings.warn("FD template and data frequency ranges do not overlap. Skipping.")
-            return
-
-        f_start_data = int(round((f_lo - data_f0) / data_settings.df))
-        f_end_data = int(round((f_hi - data_f0) / data_settings.df)) + 1
-        f_start_tmpl = int(round((f_lo - tmpl_f0) / template_settings.df))
-        f_end_tmpl = f_start_tmpl + (f_end_data - f_start_data)
-
-        data_res_arr[:, f_start_data:f_end_data] += sign * template_arr[:, f_start_tmpl:f_end_tmpl]
-
-    def _apply_td_signal(
-        self,
-        sign: int,
-        template_arr,
-        template_settings: domains.TDSettings,
-        data_res_arr: DataResidualArray,
-    ) -> None:
-        """Add or subtract a TD template from *data_res_arr*.
-
-        Handles partial time support (template may cover only a sub-range of
-        the data time axis).
-
-        Args:
-            sign: +1 to add, -1 to subtract.
-            template_arr: Array of shape ``(nchannels, N_tmpl)``.
-            template_settings: Settings for the template TD grid.
-            data_res_arr: Target data residual array.
-
-        """
-        data_settings = data_res_arr.settings
-
-        if not np.isclose(data_settings.dt, template_settings.dt):
-            raise ValueError(
-                f"Data dt ({data_settings.dt}) and template dt "
-                f"({template_settings.dt}) must match."
-            )
-
-        time_offset = int(round((template_settings.t0 - data_settings.t0) / data_settings.dt))
-        t_start_data = max(0, time_offset)
-        t_end_data = min(data_settings.N, time_offset + template_settings.N)
-
-        if t_start_data >= t_end_data:
-            warnings.warn(
-                f"TD template time range does not overlap with data. Skipping. "
-                f"Template t0={template_settings.t0}, N={template_settings.N}; "
-                f"Data t0={data_settings.t0}, N={data_settings.N}."
-            )
-            return
-
-        tmpl_t_start = t_start_data - time_offset
-        tmpl_t_end = t_end_data - time_offset
-
-        data_res_arr[:, t_start_data:t_end_data] += sign * template_arr[:, tmpl_t_start:tmpl_t_end]
-
-    def _apply_wdm_signal(
-        self,
-        sign: int,
-        template_arr,
-        data_res_arr: DataResidualArray,
-    ) -> None:
-        """Add or subtract a WDM template (full support) from *data_res_arr*.
-
-        Args:
-            sign: +1 to add, -1 to subtract.
-            template_arr: Array with the same shape as the data.
-            data_res_arr: Target data residual array.
-
-        """
-        data_res_arr[:] += sign * template_arr
-
-    # ------------------------------------------------------------------
     # Public signal operation API
     # ------------------------------------------------------------------
 
@@ -1210,9 +1389,9 @@ class AnalysisContainerArray:
     ) -> None:
         """Apply ``sign * template`` to each targeted data residual array.
 
-        Templates are applied in a domain-aware manner: time or frequency
-        offsets are inferred from the template's domain settings, and only
-        the overlapping support is modified.
+        Domain-aware: per-template add/subtract is delegated to
+        :meth:`DomainBase.add_signal`, which handles partial time/frequency
+        overlap for each domain.
 
         Args:
             sign: ``+1`` to add, ``-1`` to subtract.
@@ -1221,7 +1400,7 @@ class AnalysisContainerArray:
                 * a :class:`~lisatools.domains.DomainBaseArray` (recommended),
                 * a list of :class:`~lisatools.domains.DomainBase` objects,
                 * a single :class:`~lisatools.domains.DomainBase` (possibly batched),
-                * a raw ``np.ndarray`` / ``cp.ndarray`` (legacy – deprecated).
+                * a raw ``np.ndarray`` / ``cp.ndarray`` (legacy -- deprecated).
 
             data_index: 1-D integer array mapping ``templates[i]`` to
                 ``self.acs.flatten()[data_index[i]]``.  When ``None``, a
@@ -1231,13 +1410,10 @@ class AnalysisContainerArray:
                 Ignored when domain-aware templates are supplied.
 
         """
-        # ---- normalise *templates* to a flat list of DomainBase ----
         if isinstance(templates, DomainBaseArray):
             item_list = list(templates)
-
         elif isinstance(templates, list):
             item_list = templates
-
         elif isinstance(templates, DomainBase):
             if templates.is_batched:
                 settings = templates.settings
@@ -1247,25 +1423,23 @@ class AnalysisContainerArray:
                 ]
             else:
                 item_list = [templates]
-
         elif isinstance(templates, (np.ndarray, cp.ndarray)):
-            # ---- legacy path: raw array ----
+            # legacy raw-array path
             warnings.warn(
                 "Passing a raw ndarray to signal_operation is deprecated. "
                 "Wrap your templates in a DomainBase (or DomainBaseArray) instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
-            # Determine domain from the first AC
-            ac0_settings = self.acs.flatten()[0].data_res_arr.settings
+            ac0_data = self.acs.flatten()[0].data
+            ac0_settings = ac0_data.settings
             if isinstance(ac0_settings, domains.WDMSettings):
                 if templates.ndim == 2:
                     templates = templates[None, :]
-                num_templates = templates.shape[0]
             else:
                 if templates.ndim == 3:
                     templates = templates[None, :]
-                num_templates = templates.shape[0]
+            num_templates = templates.shape[0]
 
             if data_index is None:
                 assert num_templates == self.acs_total_entries
@@ -1280,36 +1454,17 @@ class AnalysisContainerArray:
 
             template_length = int(np.prod(templates.shape[2:]))
             for i, (di, si) in enumerate(zip(data_index, start_index)):
-                self.acs.flatten()[di].data_res_arr[:, si : si + template_length] += (
+                self.acs.flatten()[di].data[:, si : si + template_length] += (
                     sign * templates[i]
                 )
             return
-        # assert isinstance(templates, np.ndarray) or isinstance(templates, cp.ndarray)
-        
-        # if isinstance(self.acs[0].data_res_arr.basis_settings, domains.WDMSettings):
-        #     if templates.ndim == 2:
-        #         _nchannels, template_length = templates.shape
-        #         num_templates = 1
-        #         templates = templates[None, :]
-        #     elif templates.ndim == 3:
-        #         num_templates, _nchannels, template_length = templates.shape
-        # else:
-        #     if templates.ndim == 3:
-        #         _nchannels, template_m, template_n = templates.shape
-        #         templates = templates[None, :]
-        #         num_templates = 1
-        #     elif templates.ndim == 4:
-        #         num_templates, _nchannels, template_m, template_n = templates.shape
-        #     template_length = template_m * template_n
         else:
             raise TypeError(
                 f"templates must be a DomainBase, list of DomainBase, "
                 f"DomainBaseArray, or ndarray (legacy). Got {type(templates)}."
             )
 
-        # ---- domain-aware path ----
         num_templates = len(item_list)
-
         if data_index is None:
             assert num_templates == self.acs_total_entries, (
                 f"Number of templates ({num_templates}) must equal the number of "
@@ -1323,20 +1478,9 @@ class AnalysisContainerArray:
         acs_flat = self.acs.flatten()
         for i, di in enumerate(data_index):
             signal = item_list[i]
-            data_res_arr = acs_flat[di].data_res_arr
-            template_arr = signal.arr
-            template_settings = signal.settings
-
-            if isinstance(template_settings, domains.STFTSettings):
-                self._apply_stft_signal(sign, template_arr, template_settings, data_res_arr)
-            elif isinstance(template_settings, domains.FDSettings):
-                self._apply_fd_signal(sign, template_arr, template_settings, data_res_arr)
-            elif isinstance(template_settings, domains.WDMSettings):
-                self._apply_wdm_signal(sign, template_arr, data_res_arr)
-            elif isinstance(template_settings, domains.TDSettings):
-                self._apply_td_signal(sign, template_arr, template_settings, data_res_arr)
-            else:
-                raise ValueError(f"Unknown domain type for template {i}: {type(template_settings)}")
+            # Delegate to DomainBase.add_signal, which encapsulates the
+            # per-domain partial-overlap handling (STFT/FD/TD/WDM).
+            acs_flat[di].data.add_signal(signal, sign=sign)
 
     def add_signal_to_residual(self, templates, data_index=None, **kwargs) -> None:
         """Subtract templates from the residual (residual = data - signal).

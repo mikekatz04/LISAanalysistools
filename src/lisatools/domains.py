@@ -203,6 +203,322 @@ class DomainBase:
         new_settings = self.settings.get_slice(index)
         return self.settings.associated_class(new_arr, new_settings)
 
+    # ------------------------------------------------------------------
+    # Data-residual / signal-handling capabilities
+    #
+    # Folded in from the (deprecated) DataResidualArray so a DomainBase
+    # child is sufficient on its own as the data/residual/template object
+    # held by AnalysisContainer. The legacy
+    # ``data_res_arr.data_res_arr.<attr>`` chain keeps working because
+    # :attr:`data_res_arr` returns ``self`` (so chained access reaches the
+    # same object).
+    # ------------------------------------------------------------------
+
+    @property
+    def data_res_arr(self) -> "DomainBase":
+        """Self-reference for legacy ``.data_res_arr.<attr>`` access chains."""
+        return self
+
+    @property
+    def ndim(self) -> int:
+        """Number of dimensions of the underlying array."""
+        return self.arr.ndim
+
+    @property
+    def data_shape(self) -> tuple:
+        """Active basis shape (``settings.basis_shape_active``)."""
+        return self.settings.basis_shape_active
+
+    # ---- frequency / time grid passthroughs --------------------------
+
+    @property
+    def f_arr(self) -> np.ndarray:
+        """Frequency array of the underlying basis (FD bins / WDM layer centres).
+
+        Note: concrete signal classes (FDSignal, WDMSignal, STFTSignal) inherit
+        ``f_arr`` directly from their settings class, which is earlier in the
+        MRO. This base-class definition is the fallback and supplies a uniform
+        access path so ``isinstance(x, DomainBase)`` checks can rely on it.
+        """
+        return self.settings.f_arr
+
+    @property
+    def frequency_arr(self) -> np.ndarray:
+        """Alias for :attr:`f_arr` (kept from DataResidualArray for API parity)."""
+        return self.settings.f_arr
+
+    # NB: ``df``, ``dt``, ``Tobs``, ``layer_df``, ``layer_dt`` are deliberately
+    # NOT added here. Those names are *set* as instance attributes by the
+    # ``*Settings`` constructors (TDSettings.__init__: self.dt = ..., etc.).
+    # Concrete *Signal classes inherit ``Settings`` and ``DomainBase``; if
+    # DomainBase declared these as @property descriptors, the descriptor would
+    # win in the MRO and the Settings constructor would raise AttributeError.
+    # Access them domain-specifically: ``td_signal.dt``, ``fd_signal.df``,
+    # ``wdm_signal.layer_df`` -- all already available via settings
+    # inheritance. For a uniform handle, use ``settings.differential_component``.
+
+    @property
+    def fmax(self) -> Optional[float]:
+        """Highest frequency in the active band; ``None`` if not applicable."""
+        if not hasattr(self.settings, "f_arr"):
+            return None
+        arr = self.settings.f_arr
+        return float(arr.max())
+
+    # ---- WDM-specific layer-index passthroughs -----------------------
+
+    @property
+    def start_freq_ind(self) -> Optional[int]:
+        """First frequency-bin / frequency-layer index relative to a uniform grid."""
+        if isinstance(self.settings, WDMSettings):
+            return int(self.settings.ind_min_f)
+        if isinstance(self.settings, FDSettings):
+            return int(self.settings.ind_min)
+        return None
+
+    @property
+    def start_freq_layer_ind(self) -> Optional[int]:
+        """First active WDM frequency-layer index (``ind_min_f``); ``None`` if not WDM."""
+        if isinstance(self.settings, WDMSettings):
+            return int(self.settings.ind_min_f)
+        return None
+
+    @property
+    def start_time_layer_ind(self) -> Optional[int]:
+        """First active WDM time-layer index (``ind_min_t``); ``None`` if not WDM."""
+        if isinstance(self.settings, WDMSettings):
+            return int(self.settings.ind_min_t)
+        return None
+
+    # NB: ``layer_df`` and ``layer_dt`` are also deliberately NOT added here.
+    # ``WDMSettings.__init__`` does ``self.layer_df = ...`` / ``self.layer_dt = ...``
+    # as plain instance-attribute assignments, and ``WDMSignal`` inherits both
+    # ``WDMSettings`` and ``DomainBase`` -- a property on ``DomainBase`` without
+    # a setter would win in the MRO and raise during ``WDMSettings.__init__``.
+    # Access ``wdm_signal.layer_df`` / ``wdm_signal.layer_dt`` directly via the
+    # inherited ``WDMSettings`` attribute. For non-WDM domains those names
+    # simply do not exist (raise ``AttributeError``), which is the historical
+    # behaviour (the old ``DataResidualArray`` returned ``None``).
+
+    # ---- characteristic strain / plotting ----------------------------
+
+    @property
+    def char_strain(self) -> np.ndarray:
+        """Characteristic strain representation ``sqrt(f) * |arr|`` (FD only)."""
+        return self.xp.sqrt(self.f_arr) * self.xp.abs(self.arr)
+
+    def loglog(
+        self,
+        ax: Optional["list[plt.Axes] | plt.Axes"] = None,
+        fig: Optional["plt.Figure"] = None,
+        inds: Optional["list[int] | int"] = None,
+        char_strain: bool = False,
+        **kwargs: dict,
+    ):
+        """Produce a log-log plot of the (FD-domain) signal.
+
+        Args:
+            ax: Matplotlib Axes (or list of Axes) to draw on. If ``None`` a new figure is created.
+            fig: Matplotlib Figure. Not used directly when ``ax`` is created here.
+            inds: Channel indices to draw. Defaults to all channels.
+            char_strain: If ``True``, plot ``f * |arr|`` instead of ``|arr|``.
+            **kwargs: Forwarded to ``ax.loglog``.
+
+        Returns:
+            ``(fig, ax)`` tuple.
+        """
+        assert isinstance(self.settings, FDSettings), \
+            "loglog is only defined on FD-domain signals."
+        if ax is None:
+            fig, ax = plt.subplots(1, self.shape[0], sharex=True, sharey=True)
+            ax = np.atleast_1d(ax).ravel()
+            inds_list = list(range(len(ax)))
+        elif isinstance(ax, plt.Axes):
+            ax = [ax]
+            inds_list = [0] if inds is None else ([inds] if isinstance(inds, int) else list(inds))
+        else:
+            inds_list = list(range(len(ax))) if inds is None else list(inds)
+
+        _f = asnumpy(self.f_arr)
+        _arr = asnumpy(self.arr)
+        for i, ax_i in zip(inds_list, ax):
+            plot_in = np.abs(_arr[i])
+            if char_strain:
+                plot_in *= _f
+            ax_i.loglog(_f, plot_in, **kwargs)
+        return (fig, ax)
+
+    # ---- domain-aware add / subtract of a template -------------------
+
+    def add_signal(
+        self, template: "DomainBase", sign: int = +1, copy: bool = False,
+    ) -> "DomainBase":
+        """Add (``sign=+1``) or subtract (``sign=-1``) ``template`` from this array.
+
+        Domain-aware: handles partial overlap in time/frequency when the
+        template covers a sub-range of ``self`` (FD, TD, STFT). For WDM
+        signals the template must already share ``self``'s active grid.
+
+        Args:
+            template: A :class:`DomainBase` of the same domain family as ``self``.
+            sign: +1 to add, -1 to subtract. Use :meth:`subtract_signal` for clarity.
+            copy: If ``True``, operate on a copy and return it. If ``False``
+                (default), modify ``self`` in place and return ``self``.
+
+        Returns:
+            ``self`` (or the copy when ``copy=True``).
+        """
+        if sign not in (+1, -1):
+            raise ValueError("sign must be +1 or -1")
+        if not isinstance(template, DomainBase):
+            raise TypeError(
+                f"template must be a DomainBase; got {type(template).__name__}"
+            )
+
+        target = self
+        if copy:
+            target = self.__class__(self.arr.copy(), self.settings)
+
+        t_settings = template.settings
+        s_settings = target.settings
+        if type(t_settings) is not type(s_settings):
+            raise ValueError(
+                f"Template domain ({type(t_settings).__name__}) does not match "
+                f"data domain ({type(s_settings).__name__})."
+            )
+
+        if isinstance(s_settings, FDSettings):
+            _apply_fd_add(target, sign, template.arr, t_settings)
+        elif isinstance(s_settings, TDSettings):
+            _apply_td_add(target, sign, template.arr, t_settings)
+        elif isinstance(s_settings, STFTSettings):
+            _apply_stft_add(target, sign, template.arr, t_settings)
+        elif isinstance(s_settings, WDMSettings):
+            _apply_wdm_add(target, sign, template.arr, t_settings)
+        else:
+            raise ValueError(
+                f"add_signal is not implemented for domain {type(s_settings).__name__}."
+            )
+        return target
+
+    def subtract_signal(self, template: "DomainBase", copy: bool = False) -> "DomainBase":
+        """In-place subtract ``template`` from this signal (see :meth:`add_signal`)."""
+        return self.add_signal(template, sign=-1, copy=copy)
+
+
+# ----------------------------------------------------------------------
+# Domain-specific add helpers used by DomainBase.add_signal. Kept at
+# module scope so DomainBase doesn't need a giant per-domain dispatch
+# body. They each modify ``target.arr`` in place.
+# ----------------------------------------------------------------------
+
+
+def _apply_fd_add(target, sign, template_arr, template_settings):
+    """Add ``sign * template_arr`` (FD) to ``target.arr`` over the f-band overlap."""
+    data_settings = target.settings
+    if not np.isclose(data_settings.df, template_settings.df):
+        raise ValueError(
+            f"Data df ({data_settings.df}) and template df "
+            f"({template_settings.df}) must match for FD add_signal."
+        )
+
+    data_f0 = float(data_settings.f_arr[0])
+    tmpl_f0 = float(template_settings.f_arr[0])
+    data_f1 = float(data_settings.f_arr[-1])
+    tmpl_f1 = float(template_settings.f_arr[-1])
+
+    f_lo = max(data_f0, tmpl_f0)
+    f_hi = min(data_f1, tmpl_f1)
+    if f_lo > f_hi:
+        warnings.warn("FD template and data frequency ranges do not overlap. Skipping.")
+        return
+
+    f_start_data = int(round((f_lo - data_f0) / data_settings.df))
+    f_end_data = int(round((f_hi - data_f0) / data_settings.df)) + 1
+    f_start_tmpl = int(round((f_lo - tmpl_f0) / template_settings.df))
+    f_end_tmpl = f_start_tmpl + (f_end_data - f_start_data)
+
+    target.arr[..., f_start_data:f_end_data] += (
+        sign * template_arr[..., f_start_tmpl:f_end_tmpl]
+    )
+
+
+def _apply_td_add(target, sign, template_arr, template_settings):
+    """Add ``sign * template_arr`` (TD) to ``target.arr`` over the time-range overlap."""
+    data_settings = target.settings
+    if not np.isclose(data_settings.dt, template_settings.dt):
+        raise ValueError(
+            f"Data dt ({data_settings.dt}) and template dt "
+            f"({template_settings.dt}) must match for TD add_signal."
+        )
+
+    time_offset = int(round((template_settings.t0 - data_settings.t0) / data_settings.dt))
+    t_start_data = max(0, time_offset)
+    t_end_data = min(data_settings.N, time_offset + template_settings.N)
+    if t_start_data >= t_end_data:
+        warnings.warn("TD template and data time ranges do not overlap. Skipping.")
+        return
+
+    tmpl_t_start = t_start_data - time_offset
+    tmpl_t_end = t_end_data - time_offset
+    target.arr[..., t_start_data:t_end_data] += (
+        sign * template_arr[..., tmpl_t_start:tmpl_t_end]
+    )
+
+
+def _apply_stft_add(target, sign, template_arr, template_settings):
+    """Add ``sign * template_arr`` (STFT) to ``target.arr`` over the (t, f) overlap."""
+    data_settings = target.settings
+    if not np.isclose(data_settings.df, template_settings.df):
+        raise ValueError(
+            f"Data df ({data_settings.df}) and template df "
+            f"({template_settings.df}) must match for STFT add_signal."
+        )
+    if data_settings.NF != template_settings.NF:
+        raise ValueError(
+            f"Data NF ({data_settings.NF}) and template NF "
+            f"({template_settings.NF}) must match for STFT add_signal."
+        )
+
+    time_offset = int(round((template_settings.t0 - data_settings.t0) / data_settings.dt))
+    t_start_data = max(0, time_offset)
+    t_end_data = min(data_settings.NT, time_offset + template_settings.NT)
+    if t_start_data >= t_end_data:
+        warnings.warn("STFT template and data time ranges do not overlap. Skipping.")
+        return
+
+    tmpl_t_start = t_start_data - time_offset
+    tmpl_t_end = t_end_data - time_offset
+
+    data_f0 = float(data_settings.f_arr[0])
+    tmpl_f0 = float(template_settings.f_arr[0])
+    data_f1 = float(data_settings.f_arr[-1])
+    tmpl_f1 = float(template_settings.f_arr[-1])
+    f_lo = max(data_f0, tmpl_f0)
+    f_hi = min(data_f1, tmpl_f1)
+    if f_lo > f_hi:
+        warnings.warn("STFT template and data frequency ranges do not overlap. Skipping.")
+        return
+
+    f_start_data = int(round((f_lo - data_f0) / data_settings.df))
+    f_end_data = int(round((f_hi - data_f0) / data_settings.df)) + 1
+    f_start_tmpl = int(round((f_lo - tmpl_f0) / template_settings.df))
+    f_end_tmpl = f_start_tmpl + (f_end_data - f_start_data)
+
+    target.arr[..., t_start_data:t_end_data, f_start_data:f_end_data] += (
+        sign * template_arr[..., tmpl_t_start:tmpl_t_end, f_start_tmpl:f_end_tmpl]
+    )
+
+
+def _apply_wdm_add(target, sign, template_arr, template_settings):
+    """Add ``sign * template_arr`` (WDM) to ``target.arr``; shapes must already match."""
+    if target.arr.shape[-2:] != template_arr.shape[-2:]:
+        raise ValueError(
+            f"WDM add_signal requires matching (Nf_active, Nt_active) shapes; "
+            f"got data {target.arr.shape[-2:]} vs template {template_arr.shape[-2:]}."
+        )
+    target.arr[...] += sign * template_arr
+
 
 class TDSettings(DomainSettingsBase):
     """Time-domain basis settings.

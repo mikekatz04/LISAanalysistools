@@ -15,7 +15,7 @@ from mojito import MojitoL1File
 from MojitoProcessor import SignalProcessor as MPSignalProcessor
 from tqdm import tqdm
 
-from ..datacontainer import DataResidualArray
+from ..domains import DomainBase
 from ..detector import L1Orbits, Orbits
 from ..domains import DomainBase, DomainSettingsBase, TDSettings, TDSignal
 from ..utils.utility import get_array_module
@@ -792,7 +792,7 @@ class BaseProcessingStep(SignalProcessor):
         settings: DomainSettingsBase,
         window: Optional[np.ndarray | str] = None,
         return_orbits: bool = False,
-    ) -> DataResidualArray | tuple[DataResidualArray, Orbits]:
+    ) -> "DomainBase | tuple[DomainBase, Orbits]":
         """
         Pour the loaded and preprocessed data into a domain instance.
 
@@ -802,19 +802,20 @@ class BaseProcessingStep(SignalProcessor):
             return_orbits (bool, optional): Whether to return the orbits instance along with the domain. Defaults to False.
 
         Returns:
-            DataResidualArray | tuple[DataResidualArray, Orbits]: The data residual array in the specified domain, and optionally the orbits instance.
+            A :class:`DomainBase` child (FDSignal / WDMSignal / TDSignal / STFTSignal)
+            in the requested domain. Optionally also returns the orbits instance.
         """
-        
-        data_residual_array = DataResidualArray(
-            data_res_in=self.td_signal,
-            signal_domain=settings,
-            input_signal_domain=self.td_signal.settings,
-            window=window,
-        )
+
+        # The TD signal is already a DomainBase; ``.transform(settings, window)``
+        # produces the matching DomainBase child in the target domain.
+        if self.td_signal.settings == settings:
+            data_signal = self.td_signal
+        else:
+            data_signal = self.td_signal.transform(settings, window=window)
 
         if return_orbits:
-            return data_residual_array, self.orbits
-        return data_residual_array
+            return data_signal, self.orbits
+        return data_signal
 
 
 class L1ProcessingStep(L1DataLoader, BaseProcessingStep):

@@ -72,9 +72,23 @@ def inner_product(
         Inner product value.
 
     """
-    # initial input checks and setup
-    sig1 = DataResidualArray(sig1, input_signal_domain=basis_settings)
-    sig2 = DataResidualArray(sig2, input_signal_domain=basis_settings)
+    # initial input checks and setup -- accept DomainBase directly to avoid
+    # the DataResidualArray deprecation chatter; only wrap raw arrays.
+    def _coerce(sig):
+        if isinstance(sig, domains.DomainBase):
+            return sig
+        if isinstance(sig, DataResidualArray):
+            return sig.data_res_arr
+        if basis_settings is None:
+            raise ValueError(
+                "inner_product: raw-array inputs require ``basis_settings``."
+            )
+        xp = get_array_module(sig)
+        arr = xp.atleast_2d(sig)
+        return basis_settings.associated_class(arr, basis_settings)
+
+    sig1 = _coerce(sig1)
+    sig2 = _coerce(sig2)
 
     if sig1.nchannels != sig2.nchannels:
         raise ValueError(

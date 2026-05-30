@@ -110,8 +110,8 @@ backends (GPU C++ / CPU C++ / JAX), follow this hierarchy:
 
 2. **CPU C++ mirrors GPU C++ as closely as possible.** Same kernel
    structure, same algorithm, same data flow — use `#ifdef __CUDACC__`
-   or shared compile-time macros (`CUDA_SHARED`, `THREAD_START`,
-   `BLOCK_INCR`, …) to bridge platform differences. The CPU path
+   or shared compile-time macros (`CUDA_SHARED`, `THREAD_START_X`,
+   `BLOCK_INCR_X`, …) to bridge platform differences. The CPU path
    exists primarily for testing and CPU-only environments; it must
    not diverge in algorithm or output beyond floating-point order of
    operations.
