@@ -33,26 +33,27 @@ class DataResidualArray:
 
 
 class DataResidualArray:
-    """Container to hold Data, residual, or template information.
+    """Deprecated container — kept as a thin shim around :class:`~lisatools.domains.DomainBase`.
 
-    This class abstracts the connection with the sensitivity matrices to make this analysis
-    as generic as possible for the user frontend, while handling
-    special computations in the backend.
+    All capabilities (slicing, add/subtract signals, ``f_arr``/``start_freq_ind``/
+    ``layer_df`` accessors, ``char_strain``, ``loglog``, etc.) have moved onto
+    :class:`~lisatools.domains.DomainBase` and its concrete subclasses
+    (:class:`~lisatools.domains.FDSignal`, :class:`~lisatools.domains.WDMSignal`,
+    :class:`~lisatools.domains.TDSignal`, :class:`~lisatools.domains.STFTSignal`).
+    Pass those directly to :class:`~lisatools.analysiscontainer.AnalysisContainer`.
+
+    This class is retained as a transparent wrapper so existing code keeps
+    working; a :class:`DeprecationWarning` is emitted at construction to flag
+    call sites that should migrate. The constructor still accepts a raw NumPy /
+    CuPy / JAX array (plus ``input_signal_domain``), an existing
+    :class:`~lisatools.domains.DomainBase`, or another :class:`DataResidualArray`.
 
     Args:
-        data_res_in: Data, residual, or template input information. Can be a list, NumPy/CuPy array
-            or another :class:`DataResidualArray`. May also be a domain-aware array
-            (subclass of :class:`~lisatools.domains.DomainBase`).
-        signal_domain: Target domain settings the underlying array should live in.
-            If ``None``, defaults to the ``input_signal_domain`` (or, for time-domain inputs,
-            the matching :class:`~lisatools.domains.FDSettings`).
-        input_signal_domain: Domain settings describing the raw ``data_res_in`` array.
-            Required when ``data_res_in`` is a plain NumPy/CuPy array so the container knows
-            how to interpret it.
-        window: Optional window applied during a domain transform from ``input_signal_domain``
-            to ``signal_domain``.
+        data_res_in: Data, residual, or template input.
+        signal_domain: Target domain (defaults to ``input_signal_domain``).
+        input_signal_domain: Domain of the raw input array (required for raw arrays).
+        window: Optional window applied during a domain transform.
         **kwargs: For future compatibility.
-
     """
 
     def __init__(
@@ -63,6 +64,13 @@ class DataResidualArray:
         window: np.ndarray | cp.ndarray | None = None,
         **kwargs: dict,
     ) -> None:
+        warnings.warn(
+            "DataResidualArray is deprecated. Pass a DomainBase child "
+            "(FDSignal / WDMSignal / TDSignal / STFTSignal) directly to "
+            "AnalysisContainer and downstream APIs instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.data_res_in_orig_input = data_res_in
         if isinstance(data_res_in, DataResidualArray):
             for key, item in data_res_in.__dict__.items():

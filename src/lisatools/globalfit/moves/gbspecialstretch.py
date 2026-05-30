@@ -22,7 +22,8 @@ from ... import sensitivity
 from ...detector import sangria
 from ...utils.constants import *
 from ...analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ...datacontainer import DataResidualArray
+# DataResidualArray is deprecated; AnalysisContainer now accepts DomainBase children
+# directly (FDSignal / WDMSignal / TDSignal / STFTSignal).
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
@@ -703,16 +704,12 @@ class Buffer(LISAToolsParallelModule):
         ac_list = []
         for _ in range(self.num_bands_now):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
-            data_res_arr = DataResidualArray(
-                res_data,
-                signal_domain=per_band_settings,
-                input_signal_domain=per_band_settings,
-            )
+            data_domain = per_band_settings.associated_class(res_data, per_band_settings)
             sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
             sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
-            ac_list.append(AnalysisContainer(data_res_arr, sm))
+            ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
         return AnalysisContainerArray(
@@ -745,16 +742,12 @@ class Buffer(LISAToolsParallelModule):
         ac_list = []
         for _ in range(self.num_bands_now):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
-            data_res_arr = DataResidualArray(
-                res_data,
-                signal_domain=per_band_settings,
-                input_signal_domain=per_band_settings,
-            )
+            data_domain = per_band_settings.associated_class(res_data, per_band_settings)
             sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
             sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
-            ac_list.append(AnalysisContainer(data_res_arr, sm))
+            ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
         return AnalysisContainerArray(
