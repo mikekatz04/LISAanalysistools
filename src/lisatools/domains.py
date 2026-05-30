@@ -776,11 +776,21 @@ class FDSignal(FDSettings, DomainBase):
             raise ValueError("Must provide WDMSettings for WDM transform.")
         assert isinstance(settings, WDMSettings)
 
-        # phif = phitilde_vec_norm(settings.Nf, settings.Nt, 4.0)
-        m = self.xp.repeat(self.xp.arange(0, settings.Nf)[:, None], settings.Nt, axis=-1)
-        n = self.xp.tile(self.xp.arange(settings.Nt), (settings.Nf, 1))
-        m_special = self.xp.repeat(self.xp.arange(0, settings.Nf + 1)[:, None], settings.Nt, axis=-1)
-        
+        # Only transform layers inside the active band [ind_min_f, ind_max_f].
+        # When ind_min_f == 0 we additionally need layer Nf because the m=0
+        # odd-n slots of the final w_mn are sourced from layer Nf's even-n IFFT.
+        Nf_act = settings.Nf_active
+        include_top = (settings.ind_min_f == 0)
+        n_special = Nf_act + (1 if include_top else 0)
+        if include_top:
+            m_special_1d = self.xp.concatenate([
+                self.xp.arange(settings.ind_min_f, settings.ind_max_f + 1),
+                self.xp.array([settings.Nf]),
+            ])
+        else:
+            m_special_1d = self.xp.arange(settings.ind_min_f, settings.ind_max_f + 1)
+        m_special = self.xp.repeat(m_special_1d[:, None], settings.Nt, axis=-1)
+
         # removed zero frequency and mirrored
         # TODO: WITH ROBBIE CHECK SECOND TO TOP INDEX START AND END
         k = settings.get_shift_map(m_special)
@@ -791,7 +801,7 @@ class FDSignal(FDSettings, DomainBase):
         base_window = (settings.window[:])
 
         arr_in = self.arr.copy()
-        
+
         if self.ind_min != 0 or self.ind_max != self.N - 1:
             warnings.warn("Doing an ifft with a trimmed frequency domain array. Zero-padding.")
             arr_in = self.pad_array(arr_in)
@@ -809,31 +819,35 @@ class FDSignal(FDSettings, DomainBase):
             psd_sum_tmp = tmp_arr.sum(axis=-1)
             psd_sum_tmp /= settings.Nf * settings.Nt   # = N
 
-            wdmpsd = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=complex)
+            wdmpsd_active = self.xp.zeros((self.nchannels, Nf_act, settings.Nt), dtype=complex)
+            if include_top:
+                # row 0 == m=0, row -1 == m=Nf, rows 1..Nf_act-1 == m=1..ind_max_f
+                wdmpsd_active[:, 1:] = psd_sum_tmp[:, 1:Nf_act, None]
+                wdmpsd_active[:, 0, 0::2] = psd_sum_tmp[:, 0, None]
+                wdmpsd_active[:, 0, 1::2] = psd_sum_tmp[:, -1, None]
+            else:
+                # rows 0..Nf_act-1 map directly to m=ind_min_f..ind_max_f
+                wdmpsd_active[:] = psd_sum_tmp[:, :Nf_act, None]
 
-            wdmpsd[:, 1:] = psd_sum_tmp[:, 1:settings.Nf, None]          # regular layers
-            wdmpsd[:, 0, 0::2] = psd_sum_tmp[:, 0, None]           # DC at even rows
-            wdmpsd[:, 0, 1::2] = psd_sum_tmp[:, settings.Nf, None]
-
-            wdmpsd_out = wdmpsd[:, settings.active_slice_f, settings.active_slice_t]
+            wdmpsd_out = wdmpsd_active[:, :, settings.active_slice_t]
             return wdmpsd_out
 
         before_ifft[:] *= base_window[None, None, :]
         after_ifft = self.xp.fft.ifft(before_ifft, axis=-1)
-        
+
         # TODO: fix this
 
         if self.backend.uses_cupy:
             # some issue with cupy and xp.real/imag
             cache = self.xp.fft.config.get_plan_cache()
             cache.clear()
-        
+
         is_complex = bool(getattr(settings, "is_complex", False))
         out_dtype = complex if is_complex else float
-        tmp_w_mn = self.xp.zeros((self.nchannels, settings.Nf + 1, settings.Nt), dtype=out_dtype)
+        tmp_w_mn = self.xp.zeros((self.nchannels, n_special, settings.Nt), dtype=out_dtype)
         kappa = 2 * np.sqrt(np.pi * settings.data_dt) / settings.Nf
-        m_here = self.xp.concatenate([m, self.xp.full((1, settings.Nt), settings.Nf)], axis=0)
-        n_here = self.xp.concatenate([n, self.xp.array([self.xp.arange(settings.Nt)])], axis=0)
+        m_here = self.xp.repeat(m_special_1d[:, None], settings.Nt, axis=-1)
+        n_here = self.xp.tile(self.xp.arange(settings.Nt), (n_special, 1))
         set_zero = ((m_here == settings.Nf) | (m_here == 0)) & ((m_here + n_here) % 2 != 0)
         projected = self.xp.conj(settings.get_Cmn(m_here[~set_zero], n_here[~set_zero])) * after_ifft[:, ~set_zero]
         if is_complex:
@@ -846,16 +860,15 @@ class FDSignal(FDSettings, DomainBase):
                 kappa * (-1) ** ((m_here + 1) * n_here)[~set_zero] * self.xp.real(projected)
             )
 
-        w_mn = self.xp.zeros((self.nchannels, settings.Nf, settings.Nt), dtype=out_dtype)
-        w_mn[:, 1:] = tmp_w_mn[:, 1:-1]
-        w_mn[:, 0, 0::2] = tmp_w_mn[:, 0, 0::2] / np.sqrt(2.)
-        w_mn[:, 0, 1::2] = tmp_w_mn[:, settings.Nf, 0::2] / np.sqrt(2.)
+        w_mn_active = self.xp.zeros((self.nchannels, Nf_act, settings.Nt), dtype=out_dtype)
+        if include_top:
+            w_mn_active[:, 1:] = tmp_w_mn[:, 1:Nf_act]
+            w_mn_active[:, 0, 0::2] = tmp_w_mn[:, 0, 0::2] / np.sqrt(2.)
+            w_mn_active[:, 0, 1::2] = tmp_w_mn[:, -1, 0::2] / np.sqrt(2.)
+        else:
+            w_mn_active[:] = tmp_w_mn[:, :Nf_act]
 
-        # if return_transpose_time_axis_first:
-        #     output = w_mn[:, settings.active_slice_f, settings.active_slice_t].transpose(0, 2, 1).copy()
-        # else:
-        
-        output = w_mn[:, settings.active_slice_f, settings.active_slice_t]
+        output = w_mn_active[:, :, settings.active_slice_t]
 
         return WDMSignal(output, settings=settings)
 
@@ -1967,6 +1980,12 @@ class WDMSignal(WDMSettings, DomainBase):
         Returns:
             :class:`FDSignal`.
         """
+        if self.settings.Nf_active != self.settings.Nf:
+            raise ValueError(
+                "wdm_to_fd requires the WDM signal to span the full frequency "
+                f"band [0, Nf-1]; got ind_min_f={self.settings.ind_min_f}, "
+                f"ind_max_f={self.settings.ind_max_f} (Nf={self.settings.Nf})."
+            )
         if getattr(self, "is_complex", False):
             warnings.warn(
                 "wdm_to_fd called on a complex/quadrature WDMSignal; inverting "

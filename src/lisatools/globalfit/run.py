@@ -246,15 +246,22 @@ class GlobalFit:
         """
         self.logger.debug("need to adjust file path")
         # TODO: update to generalize
+        state = None
         backend_path = self.curr.general_info.main_file_path
         if os.path.exists(backend_path):
-            state = GFHDFBackend(
+            backend = GFHDFBackend(
                 backend_path,
                 sub_state_bases=self.engine_info.branch_states,
                 sub_backend=self.engine_info.branch_backends,
-            ).get_last_sample()  # .get_a_sample(0)
+            )
+            # Only load if the backend has been initialized AND has at least
+            # one stored sample. Otherwise fall through to past-file or prior
+            # initialization. (An empty file gets created when the run sets
+            # up artifacts, before the first save_step.)
+            if getattr(backend, "initialized", False) and getattr(backend, "iteration", 0) > 0:
+                state = backend.get_last_sample()  # .get_a_sample(0)
 
-        elif self.curr.general_info.past_file_for_start is not None:
+        if state is None and self.curr.general_info.past_file_for_start is not None:
             # THIS DOES A DIRECT RESTART FROM AN OLD FILE, NO STATISTICAL GENERATION
             if not os.path.exists((file_for_restart := self.curr.general_info.past_file_for_start)):
                 raise ValueError(
@@ -278,7 +285,7 @@ class GlobalFit:
                 band_temps,
             )
 
-        else:
+        if state is None:
             self.logger.debug("update this somehow")
             # print("update this somehow")
             # # breakpoint()
