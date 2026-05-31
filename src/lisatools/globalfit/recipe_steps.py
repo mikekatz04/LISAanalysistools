@@ -12,7 +12,8 @@ except ModuleNotFoundError:
     import numpy as cp
 
 from lisatools.analysiscontainer import AnalysisContainerArray
-from lisatools.datacontainer import DataResidualArray
+# DataResidualArray is now a deprecation shim; we pass DomainBase children
+# (or raw arrays via the AnalysisContainer/template APIs) directly.
 from lisatools.domains import FDSettings, WDMSettings
 
 # from bbhx.utils.transform import SSB_to_LISA
@@ -316,7 +317,7 @@ def subtract_initial_signal(
                 inj_coords_in = source_info.transform.both_transforms(inj_coords)
                 signals_in = wave_gen(*inj_coords_in.T, **source_info.waveform_kwargs)
                 for w in range(len(signals_in)):
-                    ll_here = acs.acs[w].template_likelihood(template=DataResidualArray(signals_in[w]), include_psd_info=False)
+                    ll_here = acs.acs[w].template_likelihood(template=signals_in[w], include_psd_info=False)
                     logger.debug(f"Initial log-likelihood contribution from walker {w}, leaf {leaf}: {ll_here}")
                 acs.add_signal_to_residual(signals_in)
                 counter += 1

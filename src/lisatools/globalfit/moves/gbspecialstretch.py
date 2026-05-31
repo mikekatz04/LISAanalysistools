@@ -22,7 +22,8 @@ from ... import sensitivity
 from ...detector import sangria
 from ...utils.constants import *
 from ...analysiscontainer import AnalysisContainer, AnalysisContainerArray
-from ...datacontainer import DataResidualArray
+# DataResidualArray is deprecated; AnalysisContainer now accepts DomainBase children
+# directly (FDSignal / WDMSignal / TDSignal / STFTSignal).
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
 from ...sensitivity import SensitivityMatrixBase
 from ...utils.parallelbase import LISAToolsParallelModule
@@ -703,16 +704,12 @@ class Buffer(LISAToolsParallelModule):
         ac_list = []
         for _ in range(self.num_bands_now):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
-            data_res_arr = DataResidualArray(
-                res_data,
-                signal_domain=per_band_settings,
-                input_signal_domain=per_band_settings,
-            )
+            data_domain = per_band_settings.associated_class(res_data, per_band_settings)
             sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
             sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
-            ac_list.append(AnalysisContainer(data_res_arr, sm))
+            ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
         return AnalysisContainerArray(
@@ -745,16 +742,12 @@ class Buffer(LISAToolsParallelModule):
         ac_list = []
         for _ in range(self.num_bands_now):
             res_data = cp.zeros(data_shape, dtype=data_dtype)
-            data_res_arr = DataResidualArray(
-                res_data,
-                signal_domain=per_band_settings,
-                input_signal_domain=per_band_settings,
-            )
+            data_domain = per_band_settings.associated_class(res_data, per_band_settings)
             sm = SensitivityMatrixBase(per_band_settings, skip_inv_det=True)
             sm.sens_mat = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.invC = cp.zeros(sens_shape, dtype=sens_dtype)
             sm.channel_shape = sens_shape[: -len(per_band_settings.basis_shape_active)]
-            ac_list.append(AnalysisContainer(data_res_arr, sm))
+            ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
         return AnalysisContainerArray(
@@ -934,7 +927,7 @@ class Buffer(LISAToolsParallelModule):
         )
 
     def get_ll_grad(self, params, data_index, noise_index, N_vals,
-                     *, backend="jax", param_eps=None, chunk=None):
+                     *, param_eps=None, chunk=None):
         """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
 
         Dispatches to ``self._likelihood_engine.get_ll_grad`` -- only
@@ -947,6 +940,12 @@ class Buffer(LISAToolsParallelModule):
         buffer must hold the source-of-interest's *clean* residual --
         i.e. ``remove_sources_from_band_buffer`` has been called for
         that source already -- before invoking this.
+
+        The compute backend (C++ central-FD or JAX autograd) is fixed
+        on the ``GBWDMHeterodyne`` instance passed in at Buffer
+        construction time via ``gb_wdm_comp``. Per the sprint-wide
+        rule there is no runtime ``backend=`` kwarg; build a JAX-
+        backed ``gb_wdm_comp`` if you need the autograd path.
         """
         params_phys = self.transform_fn.both_transforms(params, xp=cp)
         return self._likelihood_engine.get_ll_grad(
@@ -955,14 +954,13 @@ class Buffer(LISAToolsParallelModule):
             data_index=data_index,
             noise_index=noise_index,
             N_vals=N_vals,
-            backend=backend,
             param_eps=param_eps,
             chunk=chunk,
             waveform_kwargs=self.waveform_kwargs,
         )
 
     def hessian(self, params, data_index, noise_index, N_vals,
-                 *, backend="jax", chunk=None,
+                 *, chunk=None,
                  psd_fix=False, psd_floor_rel=1e-30):
         """Per-source Hessian of ``L = <d|h> - 0.5 <h|h>``.
 
@@ -975,6 +973,12 @@ class Buffer(LISAToolsParallelModule):
         Same buffer-state precondition as :meth:`get_ll_grad`: the
         active source must have been removed from the band buffer
         before calling.
+
+        Currently only the JAX-backed chunked-het generator
+        implements ``hessian_wdm``; the C++ chunked-het backend
+        raises until the native Hessian kernel lands. Per the
+        sprint-wide rule the backend is fixed on the underlying
+        ``gb_wdm_comp`` instance -- no runtime ``backend=`` kwarg.
         """
         params_phys = self.transform_fn.both_transforms(params, xp=cp)
         return self._likelihood_engine.hessian(
@@ -983,7 +987,6 @@ class Buffer(LISAToolsParallelModule):
             data_index=data_index,
             noise_index=noise_index,
             N_vals=N_vals,
-            backend=backend,
             chunk=chunk,
             psd_fix=psd_fix,
             psd_floor_rel=psd_floor_rel,
@@ -2484,9 +2487,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                             buffer_obj.remove_sources_from_band_buffer(
                                 old_coords, nuts_subtract_index, nuts_N_vals,
                             )
+                            # Backend (JAX autograd) is fixed on the
+                            # Buffer's gb_wdm_comp at construction; no
+                            # runtime backend= kwarg per the sprint rule.
                             M_metric = buffer_obj.hessian(
                                 old_coords, nuts_subtract_index, nuts_subtract_index,
-                                nuts_N_vals, backend="jax", psd_fix=True,
+                                nuts_N_vals, psd_fix=True,
                             )
                             M_metric = self.xp.asarray(M_metric)
 
@@ -2512,7 +2518,6 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
                                 g = buffer_obj.get_ll_grad(
                                     self.xp.asarray(x_batch),
                                     _bidx, _bidx, _Nv,
-                                    backend="jax",
                                 )
                                 return _beta[:, None] * self.xp.asarray(g)
 

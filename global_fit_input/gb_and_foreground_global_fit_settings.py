@@ -180,6 +180,16 @@ def setup_recipe(
         # the data processor (defaults to 0 -- adjust if the data has
         # been offset). N_cp_sig=48 / N_cp_orbit=32 are the validated
         # defaults (median mm5 ~1e-9; see CLAUDE.md sprint root).
+        #
+        # ``force_backend`` is the single point at which the chunked-het
+        # compute backend (cpu / cuda12x / ... / jax) is selected for
+        # ``gb_wdm_comp``. Per the sprint-wide "no runtime backend
+        # kwarg" rule, the Buffer / WDMBandLikelihoodEngine no longer
+        # accept ``backend=`` at call time — get_ll, swap_ll, get_ll_grad
+        # and hessian all dispatch through whichever backend this
+        # instance was built with. To run the JAX-autograd grad/hessian
+        # path, build a separate ``GBWDMHeterodyne(force_backend="jax")``
+        # and hand it to the Buffer.
         import sys
         if "/Users/mkatz/Research/lisa_sprint_2026" not in sys.path:
             sys.path.insert(0, "/Users/mkatz/Research/lisa_sprint_2026")
@@ -187,6 +197,12 @@ def setup_recipe(
 
         _wdm = general_info.domain_settings
         _t_obs_start = float(getattr(general_info, "t_obs_start", 0.0))
+        # CHUNKED_JAX_CHUNK env knob lets a JAX-backed instance split
+        # the leaf axis for memory; unused on the C++ backends. None
+        # falls through to GBWDMHeterodyne's _resolve_jax_chunk which
+        # honours GBHET_JAX_CHUNK / JAX_GRAD_CHUNK at call time.
+        _jax_chunk_env = os.environ.get("CHUNKED_JAX_CHUNK")
+        _jax_chunk = int(_jax_chunk_env) if _jax_chunk_env else None
         gb_info.gb_wdm_comp = GBWDMHeterodyne(
             Nf=_wdm.Nf, Nt=_wdm.Nt, dt=general_info.dt,
             T_full=general_info.Tobs, t_ref_full=gb_info.t0,
@@ -200,6 +216,7 @@ def setup_recipe(
             t_obs_start=_t_obs_start,
             N_cp_sig=int(os.environ.get("CHUNKED_N_CP_SIG", 48)),
             N_cp_orbit=int(os.environ.get("CHUNKED_N_CP_ORBIT", 32)),
+            jax_chunk=_jax_chunk,
         )
         logger.info(
             "Chunked-het GB likelihood: Nf=%d Nt=%d Nt_sub=%d N_sparse=%d "
