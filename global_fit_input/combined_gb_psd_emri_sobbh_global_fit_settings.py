@@ -464,7 +464,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     Tobs = TOBS
     dt = DT
 
-    ldc_source_file = "/Users/mlkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5"
+    ldc_source_file = "/Users/mkatz/Research/LISAanalysistools/LDC2_sangria_training_v2.h5"
     base_file_name = "combined_smoke_test"
     file_store_dir = "./gf_output/"
 
