@@ -156,7 +156,6 @@ class BandLikelihoodEngine(Protocol):
         data_index,
         noise_index,
         N_vals,
-        backend: str = "jax",
         param_eps=None,
         chunk: Optional[int] = None,
         waveform_kwargs: dict | None = None,
@@ -164,7 +163,10 @@ class BandLikelihoodEngine(Protocol):
         """Per-source gradient of ``L = <d|h> - 0.5<h|h>``.
 
         Returns ``(num_proposals, nparams)``. Only the chunked-het
-        backend implements this; the FD legacy path raises.
+        backend implements this; the FD legacy path raises. The
+        compute backend (C++ central-FD vs JAX autograd) is fixed at
+        engine construction; per the sprint-wide rule there is no
+        runtime ``backend=`` kwarg.
         """
         ...
 
@@ -176,7 +178,6 @@ class BandLikelihoodEngine(Protocol):
         data_index,
         noise_index,
         N_vals,
-        backend: str = "jax",
         chunk: Optional[int] = None,
         psd_fix: bool = False,
         psd_floor_rel: float = 1e-30,
@@ -187,7 +188,9 @@ class BandLikelihoodEngine(Protocol):
         Returns ``(num_proposals, nparams, nparams)``. When
         ``psd_fix=True`` returns ``M = |-H|`` ready to feed to a NUTS
         sampler as a mass matrix. Only the chunked-het backend
-        implements this; the FD legacy path raises.
+        implements this; the FD legacy path raises. The compute
+        backend (currently JAX autograd only) is fixed at engine
+        construction.
         """
         ...
 
@@ -648,7 +651,6 @@ class WDMBandLikelihoodEngine:
         data_index,
         noise_index,
         N_vals,
-        backend: str = "jax",
         param_eps=None,
         chunk: Optional[int] = None,
         waveform_kwargs: dict | None = None,
@@ -656,9 +658,10 @@ class WDMBandLikelihoodEngine:
         """Per-source gradient of ``L = <d|h> - 0.5 <h|h>`` w.r.t. params.
 
         Returns ``(num_proposals, nparams)`` -- one row per source.
-
-        ``backend="jax"`` uses JAX autograd, ``"cpp"`` uses central-FD
-        over the C++ get_ll. The chunked-het backend handles both.
+        The compute backend (C++ central-FD vs JAX autograd) is fixed
+        at the ``GBWDMHeterodyne``'s construction-time
+        ``force_backend``; per the sprint-wide rule no ``backend=``
+        runtime kwarg is taken.
         """
         self._require_chunked_het("get_ll_grad_wdm")
         del N_vals, waveform_kwargs  # chunked-het doesn't gate by N here
@@ -666,7 +669,7 @@ class WDMBandLikelihoodEngine:
             params_phys, buffer_aca,
             param_eps=param_eps,
             data_index=data_index, noise_index=noise_index,
-            convert_to_ra_dec=False, backend=backend, chunk=chunk,
+            convert_to_ra_dec=False, chunk=chunk,
         )
 
     def hessian(
@@ -677,7 +680,6 @@ class WDMBandLikelihoodEngine:
         data_index,
         noise_index,
         N_vals,
-        backend: str = "jax",
         chunk: Optional[int] = None,
         psd_fix: bool = False,
         psd_floor_rel: float = 1e-30,
@@ -687,14 +689,18 @@ class WDMBandLikelihoodEngine:
 
         Returns ``(num_proposals, nparams, nparams)``. When
         ``psd_fix=True`` returns ``M = |−H|`` (eigendecompose +
-        ``|lambda|``), ready to feed to ``NUTSSampler(metric=M)``.
+        ``|lambda|``), ready to feed to ``NUTSSampler(metric=M)``. The
+        compute backend (JAX autograd only at present) is fixed at
+        ``GBWDMHeterodyne`` construction; calling this on a non-JAX
+        chunked-het instance raises ``NotImplementedError`` inside
+        ``hessian_wdm``.
         """
         self._require_chunked_het("hessian_wdm")
         del N_vals, waveform_kwargs
         return self.gb_comps.hessian_wdm(
             params_phys, buffer_aca,
             data_index=data_index, noise_index=noise_index,
-            convert_to_ra_dec=False, backend=backend,
+            convert_to_ra_dec=False,
             chunk=chunk, psd_fix=psd_fix, psd_floor_rel=psd_floor_rel,
         )
 
