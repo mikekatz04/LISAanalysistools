@@ -670,6 +670,7 @@ def evolve_galactic_binary(
     phi_start: float | np.ndarray, 
     fdot_start: float | np.ndarray, 
     fddot: float | np.ndarray = 0.0,
+    phase_sign: int = 1,
     Mc: Optional[float | np.ndarray] = None
 ) -> (
     Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray]
@@ -684,21 +685,22 @@ def evolve_galactic_binary(
         phi_start (float | np.ndarray): Start/initial phase of the binaries before evolving.
         fdot_start (float | np.ndarray): Start/initial frequency derivative of the binary before evolving. Only evolves when chirp mass Mc is provided or fddot is not zero.
         fddot (float | np.ndarray): Second order frequency derivative of the binary. Standard value is 0.0
+        phase_sign (int): Sign of the phase evolution.  JaxGB assumes -1, while the GBGPU implementation assumes +1. This enters as: :math:`\\phi(t) = \\text{sign} \\phi_0 + ...`
         Mc (float | np.ndarray | None): The chrip mass of the binary to evolve the binary using gravitationally driven quadrupolar radiation. Standard is None.
         
     Returns:
         Tuple of (f_end, phi_end, fdot_end).
         (Tuple[float | np.ndarray, float | np.ndarray, float | np.ndarray])
-    """ 
+    """
+    assert phase_sign in [1, -1], "phase_sign must be either +1 or -1"
     
     if Mc is None:
        delta_t = t_end - t_start
        fdot_end = fdot_start + fddot * delta_t
        f_end = f_start + fdot_start * delta_t + 1/2 * fddot * delta_t ** 2
-       phi_end = phi_start + 2 * np.pi * (f_start * delta_t + 1/2 * fdot_start * delta_t ** 2 + 1/6 * fddot * delta_t ** 3) 
+       phi_end = phi_start + phase_sign * 2 * np.pi * (f_start * delta_t + 1/2 * fdot_start * delta_t ** 2 + 1/6 * fddot * delta_t ** 3) 
        phi_end = phi_end % (2 * np.pi)
        return f_end, phi_end, fdot_end
        
     else:
         raise NotImplementedError("Currently, the galactic binaries can only be evolved using the linear approximation")
-       

@@ -352,9 +352,9 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     
     assert len(t_ref) == 1
     t_ref = t_ref.item()
-    t_init = t_ref + 850.5 + trim_duration
+    t_init = t_ref + trim_duration
     
-    f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot)
+    f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot, phase_sign=-1)
     
     f0_mHz = f_init * 1e3
     cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
