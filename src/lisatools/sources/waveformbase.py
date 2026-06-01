@@ -770,14 +770,6 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         self.buffer_time = buffer_time
         self.run_async = run_async
 
-        # Record which CUDA device the response/orbits were allocated on so that
-        # _apply_response can restore this context before calling get_projections,
-        # preventing illegal-memory-access when the caller leaves a different device current.
-        # if hasattr(self, 'xp') and hasattr(self.xp, 'cuda'):
-        #     self._response_device_id = self.xp.cuda.runtime.getDevice()
-        # else:
-        #     self._response_device_id = None
-
     @property
     def wrapper_kwargs(self) -> dict:
         """Dictionary of waveform settings used to initialize the waveform, for reproducibility and debugging."""
