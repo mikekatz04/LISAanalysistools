@@ -89,7 +89,7 @@ if(LISATOOLS_WITH_CPU)
     )
 
   # Add L1Detector.cxx to the sources
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx)
+  add_library(lisaanalysistools_cpu_detector_static SHARED Detector.cxx PSD.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
   
@@ -98,11 +98,27 @@ if(LISATOOLS_WITH_CPU)
                                         Detector.hpp  PSD.hpp)
 
   pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
+  
+  set_target_properties(lisaanalysistools_cpu_pycppdetector PROPERTIES 
+                      INSTALL_RPATH "$ORIGIN")
+  
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
   target_include_directories(lisaanalysistools_cpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
                                       binding.hpp)
+  
+# 1. Associate the target with the export name AND install the headers
+install(TARGETS lisaanalysistools_cpu_detector_static 
+        EXPORT LISAanalysistoolsTargets
+        LIBRARY DESTINATION lisatools_backend_cpu   # <--- Put it next to the module
+        FILE_SET HEADERS DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lisatools)
+
+# 2. Install the actual CMake configuration file that fastlisaresponse will use
+install(EXPORT LISAanalysistoolsTargets
+        FILE LISAanalysistoolsConfig.cmake
+        NAMESPACE LISAanalysistools::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/LISAanalysistools)
 endif()
 
 # III. Declare the GPU backend
