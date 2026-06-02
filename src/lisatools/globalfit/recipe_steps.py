@@ -745,6 +745,8 @@ def build_gb_moves(
         del template_in
         logger.debug(f"The difference in residuals in/out = {max_diff_templates:5e}")
 
+    acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
+
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False
     state_band_info = getattr(state, "band_info", None)

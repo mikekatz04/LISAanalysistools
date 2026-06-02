@@ -338,6 +338,10 @@ class GeneralSetup(Setup, GeneralSettings):
         self.init_orbit_information()
 
         # ---- Sensitivity backend ----
+        if self.sensitivity_init_kwargs is not None and "galactic_grid_kwargs" in self.sensitivity_init_kwargs:
+            if "t0" not in self.sensitivity_init_kwargs["galactic_grid_kwargs"]:
+                self.sensitivity_init_kwargs["galactic_grid_kwargs"]["t0"] = self.data_t0
+                
         self.sensitivity_backend = XYZSensitivityBackend(
             orbits=self.gpu_orbits,
             settings=domain_settings,

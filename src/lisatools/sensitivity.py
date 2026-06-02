@@ -1855,8 +1855,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if include_galaxy:
             self._sanitize_galactic_grid_kwargs(galactic_grid_kwargs)
             self._setup_galactic_grid(**galactic_grid_kwargs)
-        else:
-            logger.debug(f"Galactic grid not included in sensitivity matrix. To include, pass non-empty galactic_grid_kwargs dictionary to constructor.")
+        # else:
+        #     logger.debug(f"Galactic grid not included in sensitivity matrix. To include, pass non-empty galactic_grid_kwargs dictionary to constructor.")
 
     @property
     def kwargs(self):
@@ -1876,6 +1876,11 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     def xp(self):
         """Array module."""
         return self.backend.xp
+
+    @property
+    def smoothing_sigma(self):
+        """Sigma for smoothing the sensitivity matrix around the zero dips."""
+        return 5
 
     @property
     def time_indices(self):
@@ -2092,15 +2097,15 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if galactic_grid is not None:
             self._galactic_grid = galactic_grid
 
-            logger.info("Using provided galactic grid object, skipping re-initialization.")
+            # logger.info("Using provided galactic grid object, skipping re-initialization.")
             
         else:
             alpha0, beta0 = self.orbits.get_constellation_angles(t0)
 
-            logger.debug(
-                f"Initializing galactic grid: R_d={R_d} kpc, z_d={z_d} kpc, "
-                f"alpha0={alpha0:.4f} rad, beta0={beta0:.4f} rad"
-            )
+            # logger.debug(
+            #     f"Initializing galactic grid: R_d={R_d} kpc, z_d={z_d} kpc, "
+            #     f"alpha0={alpha0:.4f} rad, beta0={beta0:.4f} rad"
+            # )
 
             # Build host-side quadrature geometry
             setup = self.backend.GalacticGridSetup()
@@ -2109,29 +2114,27 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                 N_beta=N_beta,
             )
             
-            logger.debug(f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}")
+            # logger.debug(f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}")
 
             if hasattr(self.basis_settings, "t_arr"):
                 _t_arr = self.basis_settings.t_arr.copy()
             else:
                 _t_arr = np.array([t0])
-                logger.warning(
-                f"FD domain detected — using t=t0={t0} for galactic sky average. "
-                "This is correct only for stationary (non-cyclostationary) analyses."
-            )
-
-            xp = self.xp
+            #     logger.warning(
+            #     f"FD domain detected — using t=t0={t0} for galactic sky average. "
+            #     "This is correct only for stationary (non-cyclostationary) analyses."
+            # )
 
             self._initialize_galactic_grid(
-                times=xp.asarray(_t_arr),
+                times=self.xp.asarray(_t_arr),
                 R_d=float(R_d),
                 z_d=float(z_d),
-                R_vals_quad=xp.asarray(setup.R_vals_quad),
-                z_vals_quad=xp.asarray(setup.z_vals_quad),
-                quad_weights=xp.asarray(setup.quad_weights),
-                cos_beta_ecl=xp.asarray(setup.cos_beta_ecl),
-                lam_ecl=xp.asarray(setup.lam_ecl),
-                beta_ecl=xp.asarray(setup.beta_ecl),
+                R_vals_quad=self.xp.asarray(setup.R_vals_quad),
+                z_vals_quad=self.xp.asarray(setup.z_vals_quad),
+                quad_weights=self.xp.asarray(setup.quad_weights),
+                cos_beta_ecl=self.xp.asarray(setup.cos_beta_ecl),
+                lam_ecl=self.xp.asarray(setup.lam_ecl),
+                beta_ecl=self.xp.asarray(setup.beta_ecl),
                 N_quad=setup.N_quad,
                 N_sky=setup.N_sky,
                 alpha0=float(alpha0),
@@ -2139,11 +2142,11 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                 t0=float(t0)
             )
 
-            logger.info("Galactic grid initialized.")
+            # logger.info("Galactic grid initialized.")
 
         self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
-        logger.info("Galactic grid attached to sensitivity backend.")
-    
+        # logger.info("Galactic grid attached to sensitivity backend.")
+
     def _initialize_galactic_grid(
         self,
         times: np.ndarray,
@@ -2183,17 +2186,15 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             beta0:        LISA orbit inclination (rad)
             t0:           Reference time for constellation angles (s)
         """
-        xp = self.xp
-
         GalWrap = self.backend.GalacticGridWrap
 
         self._galactic_grid = GalWrap(
-            xp.asarray(R_vals_quad),
-            xp.asarray(z_vals_quad),
-            xp.asarray(quad_weights),
-            xp.asarray(cos_beta_ecl),
-            xp.asarray(lam_ecl),
-            xp.asarray(beta_ecl),
+            self.xp.asarray(R_vals_quad),
+            self.xp.asarray(z_vals_quad),
+            self.xp.asarray(quad_weights),
+            self.xp.asarray(cos_beta_ecl),
+            self.xp.asarray(lam_ecl),
+            self.xp.asarray(beta_ecl),
             N_quad,
             N_sky,
             alpha0,
@@ -2204,7 +2205,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         )
 
         self._galactic_grid.initialize_wrap(
-            xp.asarray(times),
+            self.xp.asarray(times),
             R_d,
             z_d,
             len(times),
@@ -2334,6 +2335,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         f_2=0,
         knots_position_all: np.ndarray | cp.ndarray = None,
         knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        smooth: bool = False,
     ):
         """Compute the full 3x3 sensitivity matrix using the c++ backend."""
         c00, c11, c22, c01, c02, c12 = self._compute_matrix_elements(
@@ -2349,6 +2351,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             knots_amplitude_all,
         )
         matrix = self._fill_matrix(c00, c11, c22, c01, c02, c12)
+        
+        if smooth:
+            matrix = self.smooth_sensitivity_matrix(matrix, sigma=self.smoothing_sigma)
+
         return matrix
 
     def set_sensitivity_matrix(
@@ -2380,7 +2386,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         sens_mat = self._fill_matrix(c00, c11, c22, c01, c02, c12)
 
-        self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=5)
+        self.sens_mat = self.smooth_sensitivity_matrix(sens_mat, sigma=self.smoothing_sigma)
 
     def _setup_det_and_inv(self):
         """use the c++ backend to compute the log-determinant and inverse of the sensitivity matrix."""
@@ -2619,7 +2625,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Returns:
             self: a configured copy of the sensitivity matrix backend.
         """
-
         new_sens_mat = XYZSensitivityBackend(**self.kwargs)
 
         #self.name = name

@@ -87,8 +87,10 @@ class GBSetup(Setup, GBSettings):
             gb_transform_fn_in = {
                 r"$\log A$": np.exp,
                 r"$f_0$": f_ms_to_s,
+                r"$\phi_0$": lambda x: -1 * x,  # flip sign of phi0 to match JaxGB convention.
                 r"$\cos\iota$": np.arccos,
                 r"$\sin\delta$": np.arcsin,
+
             }
 
             output_basis = [
