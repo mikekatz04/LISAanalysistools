@@ -64,12 +64,12 @@ _GB_PARAM_INFO: Dict[str, ParameterInfo] = {
 }
 
 _MBH_PARAM_INFO: Dict[str, ParameterInfo] = {
-    "m1": ParameterInfo("mass1", r"$m_1\,[M_\odot]$", "solMass"),
-    "m2": ParameterInfo("mass2", r"$m_2\,[M_\odot]$", "solMass"),
+    "m1": ParameterInfo("primary_mass_det_frame", r"$m_1\,[M_\odot]$", "solMass"),
+    "m2": ParameterInfo("secondary_mass_det_frame", r"$m_2\,[M_\odot]$", "solMass"),
     "s1z": ParameterInfo("spin1", r"$s_{1z}$", "dimensionless"),
     "s2z": ParameterInfo("spin2", r"$s_{2z}$", "dimensionless"),
     "distance": ParameterInfo("luminosity_distance", r"$d_L\,[\mathrm{Gpc}]$", "Gpc"),
-    "phi_ref": ParameterInfo("reference_phase", r"$\phi_{\mathrm{ref}}\,[\mathrm{rad}]$", "rad"),
+    "phi_ref": ParameterInfo("phase_at_reference_time", r"$\phi_{\mathrm{ref}}\,[\mathrm{rad}]$", "rad"),
     "iota": ParameterInfo("inclination", r"$\iota\,[\mathrm{rad}]$", "rad"),
     "psi": ParameterInfo("polarization", r"$\psi\,[\mathrm{rad}]$", "rad"),
     "ra": ParameterInfo("right_ascension", r"$\alpha\,[\mathrm{rad}]$", "rad"),
@@ -811,7 +811,6 @@ def _extract_sensitivity_metadata(gi) -> tuple[dict, dict]:
     kwargs.pop("settings")
     kwargs.pop("window_values")
     kwargs["force_backend"] = "cpu"
-    kwargs.pop("galactic_grid") if "galactic_grid" in kwargs else None
 
     domain_metadata = {
         "class": domain_class,
@@ -1224,12 +1223,20 @@ class SubmissionWriter(BackendConsumer):
 
         self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(
             ess=ess, return_inds=True
-        )  # todo missing prior and likelihood
+        )
 
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
         self.run_metadata = RunMetadata.from_curr(self.curr)
 
-    @property
+    def prepare_samples_for submission(self):
+        """
+        Prepare the samples for submission by clustering the GBs, and sorting the mbhbs according to the coalescence time.
+        Each source type needs a callable to handle the specific processing, and this method act as a dispatcher.
+        """
+
+        raise NotImplementedError("Not implemented yet")
+
+
     def submission_folder(self) -> str:
         """Return the full path to the submission folder for this run."""
         return self.run_metadata.submission_folder
@@ -1299,7 +1306,7 @@ class SubmissionWriter(BackendConsumer):
         metadata.detection_statistic = self.detection_criteria.detection_statistics(
                 samples, inds
             ).tolist()
-
+        
         posterior_files_map: dict[str, str] = {} # map each individual source to the relevant posterior file. posterior file will be repeated if there are multiple sources in the same block
 
         num_leaves = samples.shape[1]
@@ -1334,6 +1341,18 @@ class SubmissionWriter(BackendConsumer):
                 f"Saved posterior samples for branch '{branch}', leaves {leaves} to {filepath}"
             )
 
+        detections = []
+        for j, source_idx in enumerate(posterior_files_map.keys()):
+            detections.append({
+                "source_id": str(source_idx),
+                "posterior_id": str(source_idx),
+                "quality_flag": int(metadata.quality_flags[j]) if j < len(metadata.quality_flags) else 0,
+                "detection_statistic": float(metadata.detection_statistics[j]),
+                "comment": "",
+            })
+        
+        metadata.detections = detections
+
         metadata.posterior_files = list(posterior_files_map.values())
 
         # now save the metadata for this source
@@ -1349,11 +1368,18 @@ class SubmissionWriter(BackendConsumer):
         with h5py.File(metadata_h5_filepath, "w") as f:
             source_group = f.create_group(name="sources")
             posterior_group = source_group.create_group(name="posterior_files")
-            detection_statistic_group = source_group.create_group(name="detection_statistic")
+            detection_group = source_group.create_group(name="detection")
 
             for j, (source_idx, posterior_file_path) in enumerate(posterior_files_map.items()):
                 posterior_group.create_dataset(source_idx, data=str(posterior_file_path))
-                detection_statistic_group.create_dataset(source_idx, data=float(metadata.detection_statistics[j]))
+                det = detections[j]
+    
+                detection_group.create_dataset("source_id", data=det["source_id"])
+                detection_group.create_dataset("posterior_id", data=det["posterior_id"])
+                detection_group.create_dataset("quality_flag", data=det["quality_flag"])
+                detection_group.create_dataset("detection_statistic", data=det["detection_statistic"])
+                detection_group.create_dataset("comment", data=det["comment"])
+
             _save_metadata_attributes(f, metadata)
 
         logger.info(f"Saved metadata for branch '{branch}' to {metadata_h5_filepath}")
