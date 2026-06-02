@@ -6,13 +6,13 @@ from matplotlib import pyplot as plt
 from copy import deepcopy
 
 # allow importing gf_dev helpers without installing them as a package
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "LISAanalysistools", "gf_dev"))
-from galfor_model_py import (
-    _fiducial_galfor_params,
-    S_gal,
-    galaxy_common_tdi_factor,
-    hot_path_foreground,
-)
+# sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "LISAanalysistools", "gf_dev"))
+# from galfor_model_py import (
+#     _fiducial_galfor_params,
+#     S_gal,
+#     galaxy_common_tdi_factor,
+#     hot_path_foreground,
+# )
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["CUDA_VISIBLE_DEVICES"] = "3"
