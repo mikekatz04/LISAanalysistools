@@ -21,7 +21,12 @@ from scipy import stats
 from ... import sensitivity
 from ...detector import sangria
 from ...utils.constants import *
-from ...analysiscontainer import AnalysisContainer, AnalysisContainerArray
+from ...analysiscontainer import (
+    AnalysisContainer,
+    AnalysisContainerArray,
+    BandView,
+    band_gpu_assignment,
+)
 # DataResidualArray is deprecated; AnalysisContainer now accepts DomainBase children
 # directly (FDSignal / WDMSignal / TDSignal / STFTSignal).
 from ...domains import DomainSettingsBase, FDSettings, WDMSettings
@@ -534,35 +539,77 @@ class Buffer(LISAToolsParallelModule):
         """Internal :class:`AnalysisContainerArray` backing the per-band residual buffers."""
         return self._acs_buffer
 
+    # ------------------------------------------------------------------
+    # Per-band buffer accessors
+    # ------------------------------------------------------------------
+    # In multi-GPU mode the buffer ACA holds the bands sharded across
+    # GPUs (striped by default; see ``_build_fd_band_aca``). The shaped
+    # accessors below return a :class:`BandView` that lets callers
+    # index by global band number; reads/writes route to the owning
+    # shard. In single-GPU mode they return the underlying ndarray
+    # view directly (no overhead). The ``*_tmp`` flat accessors stay
+    # single-GPU-only -- with multi-shard there is no single flat
+    # ndarray, so callers should use the engine path (gb_likelihood
+    # passes the list-of-shards through ``buffer_aca.linear_data_arr``
+    # / ``linear_psd_arr`` directly).
+
+    def _shaped_or_view(self, acs, kind: str):
+        """Return either the single-shard reshape (single-GPU) or a BandView (multi-GPU)."""
+        if len(acs.linear_data_arr) == 1:
+            return acs.data_shaped[0] if kind == "data" else acs.psd_shaped[0]
+        return acs.data_shaped_view() if kind == "data" else acs.psd_shaped_view()
+
+    def _flat_or_raise(self, acs, kind: str):
+        if len(acs.linear_data_arr) == 1:
+            return (
+                acs.linear_data_arr[0] if kind == "data" else acs.linear_psd_arr[0]
+            )
+        raise RuntimeError(
+            f"{kind}_buffer_tmp is only valid in single-GPU mode "
+            "(multi-GPU buffers are a list of per-GPU shards). Use the "
+            "engine path or BandView accessors instead."
+        )
+
     @property
     def band_buffer_tmp(self):
-        """Flat per-GPU residual buffer (1D view into the internal ACA)."""
-        return self._acs_buffer.linear_data_arr[0]
+        """Flat per-GPU residual buffer (1D view; single-GPU only)."""
+        return self._flat_or_raise(self._acs_buffer, "data")
 
     @property
     def band_buffer(self):
-        """Per-band residual buffer reshaped to ``(num_bands_now, nchannels, data_length)``."""
-        return self._acs_buffer.data_shaped[0]
+        """Per-band residual buffer indexable by global band id.
+
+        Single-GPU: returns the ``(num_bands_now, nchannels, data_length)``
+        reshape directly. Multi-GPU: returns a :class:`BandView` that
+        routes per-band reads/writes through the owning shard.
+        """
+        return self._shaped_or_view(self._acs_buffer, "data")
 
     @property
     def psd_buffer_tmp(self):
-        """Flat per-GPU inverse-PSD buffer (1D view into the internal ACA)."""
-        return self._acs_buffer.linear_psd_arr[0]
+        """Flat per-GPU inverse-PSD buffer (1D view; single-GPU only)."""
+        return self._flat_or_raise(self._acs_buffer, "psd")
 
     @property
     def psd_buffer(self):
-        """Per-band inverse-PSD buffer reshaped to :attr:`psd_shape`."""
-        return self._acs_buffer.psd_shaped[0]
+        """Per-band inverse-PSD buffer indexable by global band id.
+
+        Same single-GPU / multi-GPU behaviour as :attr:`band_buffer`.
+        """
+        return self._shaped_or_view(self._acs_buffer, "psd")
 
     @property
     def template_buffer_tmp(self):
-        """Flat per-GPU template buffer (only valid when ``use_template_arr`` is True)."""
-        return self._acs_template_buffer.linear_data_arr[0]
+        """Flat per-GPU template buffer (single-GPU only; ``use_template_arr`` True)."""
+        return self._flat_or_raise(self._acs_template_buffer, "data")
 
     @property
     def template_buffer(self):
-        """Per-band template buffer reshaped to ``(num_bands_now, nchannels, data_length)``."""
-        return self._acs_template_buffer.data_shaped[0]
+        """Per-band template buffer indexable by global band id.
+
+        Same single-GPU / multi-GPU behaviour as :attr:`band_buffer`.
+        """
+        return self._shaped_or_view(self._acs_template_buffer, "data")
 
     # ------------------------------------------------------------------
     # Domain-aware allocation helpers
@@ -712,10 +759,22 @@ class Buffer(LISAToolsParallelModule):
             ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
+        # Multi-GPU at the GB band-tree level: pass the full gpus list and a
+        # striped band assignment so consecutive bands land on different
+        # GPUs. The BandSorter even/odd within-pass invariant keeps bands in
+        # one pass non-overlapping in time-frequency support, so striping is
+        # safe. The per-band Buffer accessors (band_buffer / psd_buffer /
+        # template_buffer) automatically fall back to a single ndarray view
+        # for single-GPU runs and return a BandView (multi-shard router)
+        # otherwise -- see the accessor block in the Buffer class.
+        gpu_assignment = (
+            band_gpu_assignment(len(ac_list), list(gpus_in)) if gpus_in else None
+        )
         return AnalysisContainerArray(
             ac_list,
-            gpus=[gpus_in[0]] if gpus_in else None,
+            gpus=list(gpus_in) if gpus_in else None,
             complex_psd=True,
+            gpu_assignment=gpu_assignment,
         )
 
     def _build_wdm_band_aca(self) -> AnalysisContainerArray:
@@ -750,10 +809,17 @@ class Buffer(LISAToolsParallelModule):
             ac_list.append(AnalysisContainer(data_domain, sm))
 
         gpus_in = getattr(self.gb, "gpus", None) if self.backend.uses_cupy else None
+        # Same multi-GPU semantics as _build_fd_band_aca; see the docstring
+        # there. BandView wraps the multi-shard reshape views so per-band
+        # reads/writes by global band id keep working transparently.
+        gpu_assignment = (
+            band_gpu_assignment(len(ac_list), list(gpus_in)) if gpus_in else None
+        )
         return AnalysisContainerArray(
             ac_list,
-            gpus=[gpus_in[0]] if gpus_in else None,
+            gpus=list(gpus_in) if gpus_in else None,
             complex_psd=False,
+            gpu_assignment=gpu_assignment,
         )
 
     def update_special_indices(self, new_special_indices, inds_fill=None):
@@ -819,45 +885,65 @@ class Buffer(LISAToolsParallelModule):
     def special_indices_unique_sort(self):
         return self._special_indices_unique_sort
 
+    @staticmethod
+    def _materialize(buf):
+        """Return a single ndarray view for ``buf``.
+
+        Single-shard runs already expose ``buf`` as a reshape view of the
+        underlying ndarray, so this is a no-op (returns ``buf`` itself).
+        Multi-shard runs expose ``buf`` as a :class:`BandView` -- gather it
+        to a single ndarray on ``gpus[0]`` so downstream einsum / boolean
+        indexing / sum kernels see a contiguous array.
+        """
+        if isinstance(buf, BandView):
+            return buf.gather()
+        return buf
+
     def likelihood(self, source_only: bool = False, noise_only: bool = False) -> float:
         assert not (source_only and noise_only)
 
-        # THIS HAS TO HAVE THE .COPY()
-        numerator_in = self.band_buffer.copy()
+        # band_buffer / template_buffer / psd_buffer are either ndarrays
+        # (single-GPU; in-place mutation rolls back into the underlying
+        # buffer) or BandView (multi-GPU; mutating after materialisation
+        # has no effect on the shards). Either way numerator_in needs the
+        # explicit ``.copy()`` so the in-place ``-= self.template_buffer``
+        # below doesn't corrupt the residual buffer.
+        numerator_in = self._materialize(self.band_buffer).copy()
         if self.use_template_arr:
-            numerator_in -= self.template_buffer
+            numerator_in -= self._materialize(self.template_buffer)
+        psd_buffer = self._materialize(self.psd_buffer)
 
         if self.tdi_channel_setup == "XYZ":
             # using einstein summation: b=bands, i=channel 1, j=channel 2, k=frequency
             source_term = (
                 - (1.0 / 2.0) * 4.0 * self.df
                 * cp.einsum(
-                    "bik,bijk,bjk->b", numerator_in.conj(), self.psd_buffer, numerator_in
+                    "bik,bijk,bjk->b", numerator_in.conj(), psd_buffer, numerator_in
                 ).real
-            )
-            
-            if noise_only:
-                raise NotImplementedError("Noise-only likelihood requires log=determinant over frequency for XYZ CSD.")
-        
-        else:
-            source_term = (
-                - (1.0 / 2.0) * 4.0 * self.df
-                * cp.sum((numerator_in.conj() * numerator_in) * self.psd_buffer, axis=(1, 2)).real
             )
 
             if noise_only:
-                return -cp.sum(cp.log(cp.abs(1 / self.psd_buffer[self.psd_buffer != 0.0])))
-            
+                raise NotImplementedError("Noise-only likelihood requires log=determinant over frequency for XYZ CSD.")
+
+        else:
+            source_term = (
+                - (1.0 / 2.0) * 4.0 * self.df
+                * cp.sum((numerator_in.conj() * numerator_in) * psd_buffer, axis=(1, 2)).real
+            )
+
+            if noise_only:
+                return -cp.sum(cp.log(cp.abs(1 / psd_buffer[psd_buffer != 0.0])))
+
         if source_only:
             return source_term
-        
+
         # Diagonal noise_term fall_back # TODO check if this is sufficient not used currently anyway
-        psd_term = -cp.sum(cp.log(cp.abs(self.psd_buffer[self.psd_buffer != 0.0])))
+        psd_term = -cp.sum(cp.log(cp.abs(psd_buffer[psd_buffer != 0.0])))
         if self.tdi_channel_setup == "XYZ":
             warnings.warn("The current psd ll calculation is not correct for XYZ CSD channel setup.")
-        
+
         # cp.get_default_memory_pool().free_all_blocks()
-        
+
         return source_term + psd_term
     
 
@@ -1016,23 +1102,31 @@ class Buffer(LISAToolsParallelModule):
     def fill_buffer_residual_and_psd_from_acs(
         self, acs: AnalysisContainerArray, inds_fill: Optional[cp.ndarray] = None
     ) -> None:
-        
+        # The outer ``acs`` is accessed via tuple-fancy indexing
+        # ``data_shaped[0][inds1, inds2, inds3]`` (3-tuple for AET, 5-tuple
+        # for XYZ CSD). BandView routes the tuple-fancy index through the
+        # owning shard at the right intra-shard band position; on
+        # single-shard ACAs the reshape view is touched directly. No
+        # outer-buffer materialisation needed.
         if inds_fill is None:
             inds_fill = cp.arange(self.num_bands_now)
 
+        outer_data_view = acs.data_shaped_view()
+        outer_psd_view = acs.psd_shaped_view()
+
         inds_get_data = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=False)
-        
+
         # load rest of data into buffer (has current sources removed)
         self.reset_residual_buffers(inds_fill=inds_fill)
-        
-        # By removing `.flatten()` during indexing, broadcasting gives us the exact shape natively. 
-        self.band_buffer[inds_fill] += acs.data_shaped[0][inds_get_data]
+
+        # By removing `.flatten()` during indexing, broadcasting gives us the exact shape natively.
+        self.band_buffer[inds_fill] += outer_data_view[inds_get_data]
         del inds_get_data
 
         inds_get_psd = self._get_fill_buffer_ind_map(acs, inds_fill=inds_fill, is_psd=True)
         self.reset_psd_buffers(inds_fill=inds_fill)
 
-        self.psd_buffer[inds_fill] = acs.psd_shaped[0][inds_get_psd]
+        self.psd_buffer[inds_fill] = outer_psd_view[inds_get_psd]
         del inds_get_psd
 
     def _get_fill_buffer_ind_map(
@@ -3244,7 +3338,12 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
 
         # get non-gb contribution
         self.remove_cold_chain_sources_from_residual(model, band_sorter, apply_inds=True)
-        self.reset_non_gb_linear_data_arr = model.analysis_container_arr.linear_data_arr[0].copy()
+        # Multi-GPU: snapshot every per-GPU shard of linear_data_arr inside its
+        # owning device context so the copies live on the right device. Restored
+        # in check_ll_inject() symmetrically.
+        self.reset_non_gb_linear_data_arr = self._snapshot_linear_data_arr(
+            model.analysis_container_arr
+        )
         self.add_cold_chain_sources_to_residual(model, band_sorter, apply_inds=True)
         ll_after = model.analysis_container_arr.likelihood(
             source_only=False
@@ -3491,10 +3590,46 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         # breakpoint()
         init_like = model.analysis_container_arr.likelihood()
         model.analysis_container_arr.zero_out_data_arr()
-        model.analysis_container_arr.linear_data_arr[0][:] = self.reset_non_gb_linear_data_arr[:]        
+        # Restore the non-GB residual snapshot per-shard inside each owning
+        # device context. Matches the snapshot loop in propose().
+        self._restore_linear_data_arr(
+            model.analysis_container_arr, self.reset_non_gb_linear_data_arr
+        )
         self.add_cold_chain_sources_to_residual(model, band_sorter, apply_inds=True)
         final_like = model.analysis_container_arr.likelihood()
         return final_like
+
+    @staticmethod
+    def _snapshot_linear_data_arr(aca):
+        """Per-GPU shard copy of ``aca.linear_data_arr``. Returns a list of
+        device-local buffers (one per entry in ``aca.linear_data_arr``).
+        """
+        if aca.gpus is None:
+            return [b.copy() for b in aca.linear_data_arr]
+        main_gpu = cp.cuda.runtime.getDevice()
+        try:
+            out = []
+            for i, gpu in enumerate(aca.gpus):
+                with cp.cuda.Device(int(gpu)):
+                    out.append(aca.linear_data_arr[i].copy())
+            return out
+        finally:
+            cp.cuda.runtime.setDevice(main_gpu)
+
+    @staticmethod
+    def _restore_linear_data_arr(aca, snapshot):
+        """In-place restore of every shard from the matching snapshot entry."""
+        if aca.gpus is None:
+            for buf, snap in zip(aca.linear_data_arr, snapshot):
+                buf[:] = snap[:]
+            return
+        main_gpu = cp.cuda.runtime.getDevice()
+        try:
+            for i, gpu in enumerate(aca.gpus):
+                with cp.cuda.Device(int(gpu)):
+                    aca.linear_data_arr[i][:] = snapshot[i][:]
+        finally:
+            cp.cuda.runtime.setDevice(main_gpu)
             
     @property
     def ranks_needed(self):

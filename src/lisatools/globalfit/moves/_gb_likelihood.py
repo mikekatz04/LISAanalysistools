@@ -237,6 +237,17 @@ class FDBandLikelihoodEngine:
     def xp(self):
         return cp
 
+    @staticmethod
+    def _data_splits(buffer_aca: AnalysisContainerArray):
+        """Per-band GPU assignment array consumed by ``GBGPU.*`` calls.
+
+        Mirrors the shape of ``params_index`` / ``data_index`` semantics:
+        ``data_splits[band_i] = gpu_id_owning_band_i``. Sourced directly from
+        ``buffer_aca.gpu_map`` so the GBGPU kernel-dispatch loop picks the
+        right per-GPU buffer from the list we hand it.
+        """
+        return np.asarray(buffer_aca.gpu_map, dtype=int)
+
     # ---------- fill_template ------------------------------------------------
 
     def fill_template(
@@ -253,19 +264,23 @@ class FDBandLikelihoodEngine:
         wave_kwargs = waveform_kwargs.copy()
         wave_kwargs.pop("start_freq_ind", None)
 
-        flat_band = buffer_aca.linear_data_arr[0]
-        # Per-band data buffer shape: (num_bands, nchannels, data_length).
-        num_bands = buffer_aca.data_shaped[0].shape[0]
+        # Multi-GPU contract: pass the full per-GPU buffer list and the
+        # per-band GPU assignment as data_splits. GBGPU's kernel dispatch
+        # loop at gbgpu.py:1546 iterates over self.gb.gpus and indexes
+        # templates_in[gpu_i] -- so when len(gpus) > 1, the list-per-GPU
+        # form is required. When gpus is None or single-GPU, a single-
+        # element list still works.
+        flat_bands = buffer_aca.linear_data_arr
+        data_splits = self._data_splits(buffer_aca)
 
         factors_change = factor * cp.ones_like(params_index, dtype=float)
-        gpu0 = self.gb.gpus[0] if getattr(self.gb, "gpus", None) else 0
         self.gb.generate_global_template(
             params_phys,
             params_index,
-            flat_band,
+            flat_bands,
             data_length=self.data_length,
             factors=factors_change,
-            data_splits=np.full(num_bands, gpu0),
+            data_splits=data_splits,
             N=N_vals,
             start_freq_ind=self.start_freq_inds,
             **wave_kwargs,
@@ -286,21 +301,23 @@ class FDBandLikelihoodEngine:
         wave_kwargs = waveform_kwargs.copy()
         wave_kwargs.pop("start_freq_ind", None)
 
-        band_buffer = buffer_aca.data_shaped[0]
-        num_bands = band_buffer.shape[0]
-        flat_band = buffer_aca.linear_data_arr[0]
-        flat_psd = buffer_aca.linear_psd_arr[0]
+        flat_bands = buffer_aca.linear_data_arr
+        flat_psds = buffer_aca.linear_psd_arr
+        data_splits = self._data_splits(buffer_aca)
+        # Per-band frequency-bin count is constant across bands in this engine,
+        # so any shard's reshape is fine for the data_length argument.
+        data_length_bins = buffer_aca.data_shaped[0].shape[-1]
 
         self.gb.get_ll(
             params_phys,
-            flat_band,
-            flat_psd,
+            flat_bands,
+            flat_psds,
             start_freq_ind=self.start_freq_inds,
             data_index=data_index,
             noise_index=noise_index,
             N=N_vals,
-            data_length=band_buffer.shape[-1],
-            data_splits=np.full(num_bands, self.gb.gpus[0] if getattr(self.gb, "gpus", None) else 0),
+            data_length=data_length_bins,
+            data_splits=data_splits,
             phase_marginalize=False,
             return_cupy=True,
             **wave_kwargs,
@@ -326,11 +343,11 @@ class FDBandLikelihoodEngine:
         wave_kwargs = waveform_kwargs.copy()
         wave_kwargs.pop("start_freq_ind", None)
 
-        band_buffer = buffer_aca.data_shaped[0]
-        num_bands = band_buffer.shape[0]
-        flat_band = buffer_aca.linear_data_arr[0]
-        flat_psd = buffer_aca.linear_psd_arr[0]
-        data_length_bins = band_buffer.shape[-1]
+        flat_bands = buffer_aca.linear_data_arr
+        flat_psds = buffer_aca.linear_psd_arr
+        data_splits = self._data_splits(buffer_aca)
+        # Per-band frequency-bin count is constant across bands; any shard works.
+        data_length_bins = buffer_aca.data_shaped[0].shape[-1]
 
         # Reject proposals whose ±N/2 window would fall outside the per-band
         # FD buffer. This is the FD-only sanity check; the kernel would crash
@@ -370,15 +387,15 @@ class FDBandLikelihoodEngine:
                 self.gb.swap_likelihood_difference(
                     params_remove_phys[keep],
                     params_add_phys[keep],
-                    flat_band,
-                    flat_psd,
+                    flat_bands,
+                    flat_psds,
                     start_freq_ind=self.start_freq_inds,
                     data_index=data_index[keep],
                     noise_index=noise_index[keep],
                     adjust_inplace=False,
                     N=N_vals[keep],
                     data_length=data_length_bins,
-                    data_splits=np.full(num_bands, self.gb.gpus[0] if getattr(self.gb, "gpus", None) else 0),
+                    data_splits=data_splits,
                     phase_marginalize=phase_marginalize,
                     return_cupy=True,
                     **wave_kwargs,

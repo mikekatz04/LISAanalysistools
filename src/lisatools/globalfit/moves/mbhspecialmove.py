@@ -176,8 +176,11 @@ class MBHSpecialMove(
         _moves = [(move_i, weight_i) for move_i, weight_i in zip(self.moves, self.move_weights)]
         max_logl_walker = np.argmax(acs_all.likelihood()).item()
 
-        data = acs_all.data_shaped[0][max_logl_walker].copy()
-        psd = acs_all.psd_shaped[0][max_logl_walker].copy()
+        # MBH search picks one walker's residual + PSD. With multi-GPU outer
+        # ACA, route through BandView so we read from the shard that owns
+        # ``max_logl_walker``; for single-GPU this is a no-overhead reshape.
+        data = acs_all.data_shaped_view()[max_logl_walker].copy()
+        psd = acs_all.psd_shaped_view()[max_logl_walker].copy()
 
         # TODO: connect this general_info.fixed_psd_kwargs
         model_A = deepcopy(sangria)
@@ -408,8 +411,11 @@ class MBHSpecialMove(
                 self.transform_fn,
                 (
                     cp.asarray(fd_short),
-                    acs.linear_data_arr[0],
-                    1.0 / acs.linear_psd_arr[0],
+                    # MBH search reads the residual / inverse-PSD as a single
+                    # flat buffer. Use gather_* to support multi-GPU ACAs;
+                    # for single-GPU it returns the underlying buffer directly.
+                    acs.gather_linear_data_arr(),
+                    1.0 / acs.gather_linear_psd_arr(),
                     df_short,
                 ),
                 full_kwargs,
@@ -612,11 +618,14 @@ class MBHSpecialMove(
         #     constants_index=data_index
         # )
 
+        # NewHeterodynedLikelihood expects single ndarrays for data + PSD.
+        # Use gather_*_shaped so multi-GPU outer ACAs get materialised onto
+        # gpus[0]; single-GPU returns the underlying reshape view directly.
         self.like_fn = NewHeterodynedLikelihood(
             self.waveform_gen,
             self.fd,
-            self.acs.data_shaped[0],
-            self.acs.psd_shaped[0],
+            self.acs.gather_data_shaped(),
+            self.acs.gather_psd_shaped(),
             het_coords,
             256,
             data_index=data_index,
