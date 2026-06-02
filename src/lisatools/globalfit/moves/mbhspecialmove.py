@@ -103,6 +103,7 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
         Tmax: float = np.inf,
         betas_all: np.ndarray = None,
         permute_every: int = 20,
+        pad_out_of_prior: bool = False,
         run_async: bool = False,
         run_threaded: bool = False,
         **kwargs
@@ -133,12 +134,31 @@ class TDMBHSpecialMove(MultiGPUResidualAddRemoveMove):
             Tmax,
             betas_all,
             permute_every,
+            pad_out_of_prior,
             run_async,
             run_threaded,
             waveform_like_method,
             **kwargs
         )
             
+    def get_split_inds(self) -> np.ndarray:
+            """
+            Get the indices for splitting the ensemble. Override the parent method to ensure splits where all the gpus have the same number of entries to prevent recompilation.
+            """
+            all_inds = np.tile(np.arange(self.nwalkers), (self.ntemps, 1))
+            inds = all_inds % self.nsplits
+            if self.randomize_split:
+                if self.dcga.gpus is None:
+                    [np.random.shuffle(x) for x in inds]
+                
+                else:
+                    num_per_gpu = self.nwalkers // len(self.dcga.gpus)
+                    for row in inds:
+                        for gpu in self.dcga.gpus:
+                            start = gpu * num_per_gpu
+                            end = (gpu + 1) * num_per_gpu
+                            np.random.shuffle(row[start:end])
+            return inds
 
 
 

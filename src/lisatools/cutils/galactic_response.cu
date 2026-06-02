@@ -176,10 +176,10 @@ double gal_spectral_model(double f, double Amp, double alpha,
 // TDI response device functions (unchanged from original)
 // ============================================================================
 CUDA_DEVICE
-double galaxy_XX(double alpha0, double beta0, double theta_N, double phi_N, double t)
+double galaxy_XX(double alpha0, double beta0, double theta_N, double phi_N, double delta_t)
 {
-    double ot  = OMEGA_LISA * t;
-    double a0t = alpha0 + ot;           // alpha0 + omega*t
+    double ot  = OMEGA_LISA * delta_t;
+    double a0t = alpha0 + ot;           // alpha0 + omega*(t - t0)
     double pi2 = PI2_GAL;
     double s3  = SQRT3_GAL;
 
@@ -254,10 +254,10 @@ double galaxy_XX(double alpha0, double beta0, double theta_N, double phi_N, doub
 // ----------------------------------------------------------------------------
 
 CUDA_DEVICE
-double galaxy_XY(double alpha0, double beta0, double theta_N, double phi_N, double t)
+double galaxy_XY(double alpha0, double beta0, double theta_N, double phi_N, double delta_t)
 {
-    double ot  = OMEGA_LISA * t;
-    double a0t = alpha0 + ot;
+    double ot  = OMEGA_LISA * delta_t;
+    double a0t = alpha0 + ot; // alpha0 + omega*(t - t0)
     double pi2 = PI2_GAL;
     double s3  = SQRT3_GAL;
 
@@ -373,10 +373,10 @@ double galaxy_XY(double alpha0, double beta0, double theta_N, double phi_N, doub
 // ----------------------------------------------------------------------------
 
 CUDA_DEVICE
-double galaxy_YY(double alpha0, double beta0, double theta_N, double phi_N, double t)
+double galaxy_YY(double alpha0, double beta0, double theta_N, double phi_N, double delta_t)
 {
-    double ot  = OMEGA_LISA * t;
-    double a0t = alpha0 + ot;
+    double ot  = OMEGA_LISA * delta_t;
+    double a0t = alpha0 + ot; // alpha0 + omega*(t - t0)
     double pi2 = PI2_GAL;
     double s3  = SQRT3_GAL;
 
@@ -492,10 +492,10 @@ double galaxy_YY(double alpha0, double beta0, double theta_N, double phi_N, doub
 // ----------------------------------------------------------------------------
 
 CUDA_DEVICE
-double galaxy_XZ(double alpha0, double beta0, double theta_N, double phi_N, double t)
+double galaxy_XZ(double alpha0, double beta0, double theta_N, double phi_N, double delta_t)
 {
-    double ot  = OMEGA_LISA * t;
-    double a0t = alpha0 + ot;
+    double ot  = OMEGA_LISA * delta_t;
+    double a0t = alpha0 + ot; // alpha0 + omega*(t - t0)
     double pi2 = PI2_GAL;
     double s3  = SQRT3_GAL;
 
@@ -611,10 +611,10 @@ double galaxy_XZ(double alpha0, double beta0, double theta_N, double phi_N, doub
 // ----------------------------------------------------------------------------
 
 CUDA_DEVICE
-double galaxy_YZ(double alpha0, double beta0, double theta_N, double phi_N, double t)
+double galaxy_YZ(double alpha0, double beta0, double theta_N, double phi_N, double delta_t)
 {
-    double ot  = OMEGA_LISA * t;
-    double a0t = alpha0 + ot;
+    double ot  = OMEGA_LISA * delta_t;
+    double a0t = alpha0 + ot; // alpha0 + omega*(t - t0)
     double pi2 = PI2_GAL;
     double s3  = SQRT3_GAL;
 
@@ -689,10 +689,10 @@ double galaxy_YZ(double alpha0, double beta0, double theta_N, double phi_N, doub
 // ----------------------------------------------------------------------------
 
 CUDA_DEVICE
-double galaxy_ZZ(double alpha0, double beta0, double theta_N, double phi_N, double t)
+double galaxy_ZZ(double alpha0, double beta0, double theta_N, double phi_N, double delta_t)
 {
-    double ot  = OMEGA_LISA * t;
-    double a0t = alpha0 + ot;
+    double ot  = OMEGA_LISA * delta_t;
+    double a0t = alpha0 + ot; // alpha0 + omega*(t - t0)
     double pi2 = PI2_GAL;
     double s3  = SQRT3_GAL;
 
@@ -863,14 +863,14 @@ void sky_average_response_kernel(
     const double *lam_ecl,
     const double *beta_ecl,
     const double *times,
-    double alpha0, double beta0,
+    double alpha0, double beta0, double t0,
     int N_times, int N_sky)
 {
 #ifdef __CUDACC__
     int t_idx = blockIdx.y;
     if (t_idx >= N_times) return;
 
-    double t = times[t_idx];
+    double delta_t = times[t_idx] - t0;
 
     __shared__ double s[6][GAL_THREADS_SKY];
     int tid = threadIdx.x;
@@ -883,12 +883,12 @@ void sky_average_response_kernel(
         double beta = beta_ecl[i];
         double w    = weights[i];
 
-        acc[0] += w * galaxy_XX(alpha0, beta0, beta, lam, t);
-        acc[1] += w * galaxy_XY(alpha0, beta0, beta, lam, t);
-        acc[2] += w * galaxy_XZ(alpha0, beta0, beta, lam, t);
-        acc[3] += w * galaxy_YY(alpha0, beta0, beta, lam, t);
-        acc[4] += w * galaxy_YZ(alpha0, beta0, beta, lam, t);
-        acc[5] += w * galaxy_ZZ(alpha0, beta0, beta, lam, t);
+        acc[0] += w * galaxy_XX(alpha0, beta0, beta, lam, delta_t);
+        acc[1] += w * galaxy_XY(alpha0, beta0, beta, lam, delta_t);
+        acc[2] += w * galaxy_XZ(alpha0, beta0, beta, lam, delta_t);
+        acc[3] += w * galaxy_YY(alpha0, beta0, beta, lam, delta_t);
+        acc[4] += w * galaxy_YZ(alpha0, beta0, beta, lam, delta_t);
+        acc[5] += w * galaxy_ZZ(alpha0, beta0, beta, lam, delta_t);
     }
 
     for (int k = 0; k < 6; k++) s[k][tid] = acc[k];
@@ -908,19 +908,19 @@ void sky_average_response_kernel(
 #else
     for (int t_idx = 0; t_idx < N_times; t_idx++)
     {
-        double t   = times[t_idx];
+        double delta_t   = times[t_idx] - t0;
         double acc[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         for (int i = 0; i < N_sky; i++)
         {
             double lam  = lam_ecl[i];
             double beta = beta_ecl[i];
             double w    = weights[i];
-            acc[0] += w * galaxy_XX(alpha0, beta0, beta, lam, t);
-            acc[1] += w * galaxy_XY(alpha0, beta0, beta, lam, t);
-            acc[2] += w * galaxy_XZ(alpha0, beta0, beta, lam, t);
-            acc[3] += w * galaxy_YY(alpha0, beta0, beta, lam, t);
-            acc[4] += w * galaxy_YZ(alpha0, beta0, beta, lam, t);
-            acc[5] += w * galaxy_ZZ(alpha0, beta0, beta, lam, t);
+            acc[0] += w * galaxy_XX(alpha0, beta0, beta, lam, delta_t);
+            acc[1] += w * galaxy_XY(alpha0, beta0, beta, lam, delta_t);
+            acc[2] += w * galaxy_XZ(alpha0, beta0, beta, lam, delta_t);
+            acc[3] += w * galaxy_YY(alpha0, beta0, beta, lam, delta_t);
+            acc[4] += w * galaxy_YZ(alpha0, beta0, beta, lam, delta_t);
+            acc[5] += w * galaxy_ZZ(alpha0, beta0, beta, lam, delta_t);
         }
         for (int k = 0; k < 6; k++)
             R_avg_out[t_idx * 6 + k] = acc[k];
@@ -981,12 +981,14 @@ void GalacticGrid::allocate_and_setup(
     const double *h_beta_ecl,
     int N_quad_in, int N_sky_in,
     double alpha0_in, double beta0_in,
+    double t0_in,
     int N_times_in, int N_freqs_in)
 {
     N_quad        = N_quad_in;
     N_sky         = N_sky_in;
     alpha0        = alpha0_in;
     beta0         = beta0_in;
+    t0            = t0_in;
     N_times_alloc = N_times_in;
     N_freqs_alloc = N_freqs_in;
     initialized   = false;
@@ -1082,14 +1084,14 @@ void GalacticGrid::compute_sky_average(const double *d_times, int N_times)
     dim3 grid(n_blocks_sky, N_times);
     sky_average_response_kernel<<<grid, GAL_THREADS_SKY>>>(
         R_avg, weights, lam_ecl, beta_ecl, d_times,
-        alpha0, beta0, N_times, N_sky);
+        alpha0, beta0, t0, N_times, N_sky);
     gpuErrchk(cudaGetLastError());
     gpuErrchk(cudaDeviceSynchronize());
 #else
     for (int i = 0; i < N_times * 6; i++) R_avg[i] = 0.0;
     sky_average_response_kernel(
         R_avg, weights, lam_ecl, beta_ecl, d_times,
-        alpha0, beta0, N_times, N_sky);
+        alpha0, beta0, t0, N_times, N_sky);
 #endif
 }
 

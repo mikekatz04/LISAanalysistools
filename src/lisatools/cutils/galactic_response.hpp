@@ -74,6 +74,7 @@ struct GalacticGrid {
     // ---- LISA orientation (fixed at init) ----
     double alpha0;
     double beta0;
+    double t0;
 
     // ---- Sky weights — (N_sky,), computed once from R_d, z_d ----
     double *weights;
@@ -104,6 +105,7 @@ struct GalacticGrid {
         const double *h_beta_ecl,
         int N_quad_in, int N_sky_in,
         double alpha0_in, double beta0_in,
+        double t0_in,
         int N_times_in, int N_freqs_in
     );
 
@@ -159,9 +161,9 @@ struct GalacticGrid {
 // Device functions — TDI angular response (defined in galactic_response.cu)
 // ============================================================================
 
-CUDA_DEVICE double galaxy_XX(double alpha0, double beta0, double theta_N, double phi_N, double t);
-CUDA_DEVICE double galaxy_XY(double alpha0, double beta0, double theta_N, double phi_N, double t);
-CUDA_DEVICE double galaxy_XZ(double alpha0, double beta0, double theta_N, double phi_N, double t);
-CUDA_DEVICE double galaxy_YY(double alpha0, double beta0, double theta_N, double phi_N, double t);
-CUDA_DEVICE double galaxy_YZ(double alpha0, double beta0, double theta_N, double phi_N, double t);
-CUDA_DEVICE double galaxy_ZZ(double alpha0, double beta0, double theta_N, double phi_N, double t);
+CUDA_DEVICE double galaxy_XX(double alpha0, double beta0, double theta_N, double phi_N, double delta_t);
+CUDA_DEVICE double galaxy_XY(double alpha0, double beta0, double theta_N, double phi_N, double delta_t);
+CUDA_DEVICE double galaxy_XZ(double alpha0, double beta0, double theta_N, double phi_N, double delta_t);
+CUDA_DEVICE double galaxy_YY(double alpha0, double beta0, double theta_N, double phi_N, double delta_t);
+CUDA_DEVICE double galaxy_YZ(double alpha0, double beta0, double theta_N, double phi_N, double delta_t);
+CUDA_DEVICE double galaxy_ZZ(double alpha0, double beta0, double theta_N, double phi_N, double delta_t);

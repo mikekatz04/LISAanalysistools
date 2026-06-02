@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 import shutil
 import logging
+import os
 
 try:
     import cupy as cp
@@ -35,7 +36,7 @@ from lisatools.globalfit.generatefuncs import *
 
 from eryn.prior import uniform_dist
 from eryn.utils import TransformContainer
-from eryn.prior import ProbDistContainer
+from eryn.prior import ProbDistContainer, uniform_dist, log_uniform
 
 from lisatools.globalfit.preprocessing import L1ProcessingStep
 from lisatools.globalfit.recipe_steps import (
@@ -74,6 +75,7 @@ def ten_to_the_x(x):
     return 10.0 ** x
 
 MOJITO_REFERENCE_TIME = 97729089.327664
+MOJITO_AVERAGE_ARMLENGTH = 2493162305.42235
 
 #####################
 
@@ -94,19 +96,30 @@ def setup_recipe(
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     cp.cuda.runtime.setDevice(curr.general_info.gpus[0])
+    psd_info = curr.source_info["psd"]
 
     #* =============================== INJECT SOURCES =================================
     # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
-    spread_gb = np.array([1e-9, 1e-11, 1e-17, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
-    iteratively_resolved_population = np.load("/workspace/ggfitlisa/ldc/mojito_light/catalogues/iteratively_resolved_gbs_075yrs_snr7.npy")
+    spread_gb = np.array([1e-12, 1e-12, 1e-20, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
+    iteratively_resolved_population_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "catalogues", "iteratively_resolved_gbs_075yrs_snr7.npy")
+    iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
+
+    frequencies = iteratively_resolved_population["Frequency"]
+
+    # iteratively_resolved_population["Polarization"] = iteratively_resolved_population["Polarization"] % np.pi  # ensure polarization is within [0, pi]
+
+    in_band = (frequencies > curr.source_info["gb"].f0_lims[0]) & (frequencies < curr.source_info["gb"].f0_lims[1])
+    logger.info(f"Keeping {np.sum(in_band)} out of {len(iteratively_resolved_population)} iteratively resolved GB sources within the band limits {curr.source_info['gb'].f0_lims[0]} - {curr.source_info['gb'].f0_lims[1]}")
+    iteratively_resolved_population = iteratively_resolved_population[in_band]
     subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
-    subset_inds = None
-    setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds)
+    logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
+    # subset_inds = None
+    setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds, priors=priors)
 
     
     #* ================================= BUILD MOVES ==================================
     psd_search_move, psd_pe_move = build_psd_moves(
-        engine_info, curr, acs, priors
+        engine_info, curr, acs, priors, num_repeats=psd_info.num_prop_repeats
     )
     
     gb_search_moves, gb_pe_moves = build_gb_moves(
@@ -116,13 +129,17 @@ def setup_recipe(
     #* ================================= SETUP SEARCH ================================= 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="init psd search")
 
-    # search_weights = [0.8, 0.15, 0.05]
-    # recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
+    search_weights = [0.8, 0.15, 0.05]
+    recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
     
     #* ========================== SETUP PARAMETER ESTIMATION ========================== 
-    all_pe_moves = GFCombineMove(moves=(gb_pe_moves + [psd_pe_move]), share_temperature_control=False)
-    pe_weights = [0.4, 0.08, 0.02, 0.5] # [0.05, 0.45, 0.5] # 
-    recipe.add_recipe_component(PERecipeStep(moves=all_pe_moves, weights=pe_weights, thin_by=1, convergence_iter=500), name="gb_pe")
+
+    prior_combined = GFCombineMove(moves=[gb_pe_moves[0], psd_pe_move], share_temperature_control=False)
+    fstat_combined = GFCombineMove(moves=[gb_pe_moves[1], psd_pe_move], share_temperature_control=False)
+    refit_combined = GFCombineMove(moves=[gb_pe_moves[2], psd_pe_move], share_temperature_control=False)
+    # all_pe_moves = GFCombineMove(moves=(gb_pe_moves + [psd_pe_move]), share_temperature_control=False)
+    pe_weights = [0.8, 0.16, 0.04] # [0.05, 0.45, 0.5] # 
+    recipe.add_recipe_component(PERecipeStep(moves=[prior_combined, fstat_combined, refit_combined], weights=pe_weights, thin_by=1, convergence_iter=500), name="gb_pe")
     
     # moves_info = "".join([f"Move {all_pe_moves[i].name} has weight {w}, " for i, w in enumerate(pe_weights)])
     # logger.info(f"For PE: {moves_info}")
@@ -144,85 +161,131 @@ LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
 LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-1))
 
 
-def get_psd_erebor_settings(general_set: GeneralSetup):
-    """
-    Build PSD and galactic foreground branch setups.
+def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
-    PSD branch (ndim=2): [Soms_d, Sa_a]
-
-    Galactic foreground branch (ndim=5): [Amp, f_knee, alpha, f_1, f_2]
-    Parameter ordering must match what PSDMove.psd_log_like expects:
-        galfor_pars[:, 0] = Amp
-        galfor_pars[:, 1] = f_knee   (kn_all)
-        galfor_pars[:, 2] = alpha
-        galfor_pars[:, 3] = f_1  (f_1_all)
-        galfor_pars[:, 4] = f_2  (f_2_all)
-
-    R_d, z_d, alpha0, beta0 are NOT inferred — they are fixed in GeneralSettings
-    via galactic_grid_kwargs and initialized once in GeneralSetup.init_data_information.
-    """
     frequency_ranges = [(general_set.start_freq, general_set.end_freq)]
     prior_model = "uniform"
     model_config = dict(use_splines=False, num_params=2)  # for now just two parameters, but can be extended to include splines or other features in the future
-    
-    initialize_kwargs_psd = dict()
 
-    psd_input_basis = [r'$\log_{10} S_{\rm oms}$', r'$\log_{10} S_{\rm tm}$']
+    if prior_model == "uniform":
+        logger.info("Using uniform prior for PSD parameters.")
+        prior_fn = uniform_dist
+
+    elif prior_model == "log_uniform":
+        logger.info("Using log-uniform prior for PSD parameters.")
+        prior_fn = log_uniform
+    else:
+        raise ValueError(f"Unsupported prior model: {prior_model}")
+    
+    prior_model_config = {
+        r"$S_{\rm oms}$": (-12.0, -10.0),
+        r"$S_{\rm tm}$": (-16.0, -13.0),
+    }
+
+    psd_input_basis = [
+        r"$S_{\rm oms}$",
+        r"$S_{\rm tm}$",
+    ]
+
+
     psd_transform = TransformContainer(
         input_basis=psd_input_basis,
         output_basis=psd_input_basis,
         parameter_transforms={
-            psd_input_basis[0]: ten_to_the_x,
-            psd_input_basis[1]: ten_to_the_x,
+            r"$S_{\rm oms}$": ten_to_the_x,
+            r"$S_{\rm tm}$": ten_to_the_x,
         },
     )
 
-    # ---- PSD priors ----
+    # waveform kwargs
+    initialize_kwargs_psd = dict()
+
     priors_psd = {
-        psd_input_basis[0]: uniform_dist(*LOG10_OMS_ASD_RANGE),
-        psd_input_basis[1]: uniform_dist(*LOG10_TM_ASD_RANGE),
+        r"$S_{\rm oms}$": prior_fn(*prior_model_config[r"$S_{\rm oms}$"]),  # Soms_d
+        r"$S_{\rm tm}$": prior_fn(*prior_model_config[r"$S_{\rm tm}$"]),  # Sa_a
     }
 
+    priors = {"psd": ProbDistContainer(priors_psd)}
+
+    injection = np.array([np.log10(15e-12), np.log10(3e-15)])  # for diagnostic plots
+
+    psd_settings = PSDSettings(
+        Tobs=general_set.Tobs,
+        dt=general_set.dt,
+        initialize_kwargs=initialize_kwargs_psd,
+        priors=priors,
+        ndim=2,
+        injection=injection,
+        log_dir=general_set.file_store_dir,
+        num_prop_repeats=100,
+        transform=psd_transform,
+    )
+
+    psd_metadata = StochasticMetadata(
+        model_config=model_config,
+        frequency_ranges=frequency_ranges,
+        prior_model=prior_model,
+        prior_model_code_link="",  # todo populate repositories
+        prior_model_config=prior_model_config,
+    )
+
+    return PSDSetup(psd_settings), psd_metadata
+
+
+def get_galfor_erebor_settings(general_set: GeneralSetup) -> GalForSetup:
+
+    frequency_ranges = [(general_set.start_freq, general_set.end_freq)]
+    prior_model = "uniform"
+    model_config = dict(num_params=5, galactic_grid_kwargs=general_set.galactic_grid_kwargs)  # for now just two parameters, but can be extended to include splines or other features in the future
+
+    if prior_model == "uniform":
+        logger.info("Using uniform prior for PSD parameters.")
+        prior_fn = uniform_dist
+
+    elif prior_model == "log_uniform":
+        logger.info("Using log-uniform prior for PSD parameters.")
+        prior_fn = log_uniform
+    else:
+        raise ValueError(f"Unsupported prior model: {prior_model}")
+    
     galfor_input_basis = [
         r'$\log_{10} A_{\rm gal}$',
-        r'$\log_{10} f_{\rm knee}$',
         r'$\alpha_{\rm gal}$',
         r'$\log_{10} f_1$',
+        r'$\log_{10} f_{\rm knee}$',
         r'$\log_{10} f_2$',
     ]
+
+    prior_model_config = {
+        r'$\log_{10} A_{\rm gal}$': (-46.0, -43.0),
+        r'$\alpha_{\rm gal}$': (1.0, 8.0),
+        r'$\log_{10} f_1$': (np.log10(1e-4), np.log10(1e-2)),
+        r'$\log_{10} f_{\rm knee}$': (np.log10(1e-3), np.log10(1e-2)),
+        r'$\log_{10} f_2$': (np.log10(1e-3), np.log10(1e-1)),
+    }
+
+
     galfor_transform = TransformContainer(
         input_basis=galfor_input_basis,
         output_basis=galfor_input_basis,
         parameter_transforms={
-            galfor_input_basis[0]: ten_to_the_x,
-            galfor_input_basis[1]: ten_to_the_x,
-            galfor_input_basis[3]: ten_to_the_x,
-            galfor_input_basis[4]: ten_to_the_x,
+            r'$\log_{10} A_{\rm gal}$': ten_to_the_x,
+            r'$\log_{10} f_1$': ten_to_the_x,
+            r'$\log_{10} f_{\rm knee}$': ten_to_the_x,
+            r'$\log_{10} f_2$': ten_to_the_x,
         },
     )
 
     # ---- Galactic foreground spectral priors ----
     # Only the spectral envelope is inferred; the sky geometry (R_avg) is fixed.
     priors_galfor = {
-        galfor_input_basis[0]: uniform_dist(*LOG10_AMP_RANGE),
-        galfor_input_basis[1]: uniform_dist(*LOG10_FKNEE_RANGE),
-        galfor_input_basis[2]: uniform_dist(*ALPHA_RANGE),
-        galfor_input_basis[3]: uniform_dist(*LOG10_FREQ1_RANGE),
-        galfor_input_basis[4]: uniform_dist(*LOG10_FREQ2_RANGE),
+        r'$\log_{10} A_{\rm gal}$': prior_fn(*prior_model_config[r'$\log_{10} A_{\rm gal}$']),
+        r'$\alpha_{\rm gal}$': prior_fn(*prior_model_config[r'$\alpha_{\rm gal}$']),
+        r'$\log_{10} f_1$': prior_fn(*prior_model_config[r'$\log_{10} f_1$']),
+        r'$\log_{10} f_{\rm knee}$': prior_fn(*prior_model_config[r'$\log_{10} f_{\rm knee}$']),
+        r'$\log_{10} f_2$': prior_fn(*prior_model_config[r'$\log_{10} f_2$']),
     }
 
-    # ---- PSD setup ----
-    psd_settings = PSDSettings(
-        Tobs=general_set.Tobs,
-        dt=general_set.dt,
-        initialize_kwargs=initialize_kwargs_psd,
-        psd_kwargs={"transform_fn": psd_transform},
-        priors={"psd": ProbDistContainer(priors_psd)},
-        ndim=2,
-    )
-    psd_setup = PSDSetup(psd_settings)
-
-    # ---- Galactic foreground setup ----
     galfor_settings = GalForSettings(
         Tobs=general_set.Tobs,
         dt=general_set.dt,
@@ -231,13 +294,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup):
         priors={"galfor": ProbDistContainer(priors_galfor)},
         ndim=5,
     )
-    galfor_setup = GalForSetup(galfor_settings)
 
-    prior_model_config = {
-        "S_oms": (6.0e-12, 20.0e-11),
-        "S_tm": (1.0e-15, 20.0e-14),
-    }
-    stoch_metadata = StochasticMetadata(
+    galfor_metadata = StochasticMetadata(
         model_config=model_config,
         frequency_ranges=frequency_ranges,
         prior_model=prior_model,
@@ -245,7 +303,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup):
         prior_model_config=prior_model_config,
     )
 
-    return psd_setup, galfor_setup, stoch_metadata
+    return GalForSetup(galfor_settings), galfor_metadata
 
   
 
@@ -254,33 +312,35 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     waveform_model = "GBGPU"
     waveform_model_code_link = "https://github.com/Erebor-L2D/GBGPU/tree/cdl1-run0"
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
+
+    input_data_arr: DataResidualArray = general_set.input_data_residual_array
+
+    eps = 0.0001  
+    start_freq = float(input_data_arr.settings.f_arr[0]) * (1 + eps)
+    end_freq = float(input_data_arr.settings.f_arr[-1]) * (1 - eps)  # avoid edge effects by staying slightly within the band limits defined by the input data array
+
+    Tobs = 1/getattr(input_data_arr.settings, "df")
     
     delta_safe = 1e-9
 
     A_lims = [10**(-23.2), 1e-20]
-    f0_lims = [1e-4, 0.023] # reset by band limits
-    
+    f0_lims = [start_freq, end_freq]#[general_set.start_freq, general_set.end_freq]  # reset by band limits
+
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
     
-    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")] # also reset in band limits
+    fdot_lims = [get_fdot_mojito(f0_lims[-1] * 2, sign="-"), get_fdot_mojito(f0_lims[-1] * 2, sign="+")] # also reset in band limits
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
     alpha_lims = [0.0, 2 * np.pi]
     delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
-    
-    input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    start_freq = float(input_data_arr.settings.f_arr[0])
-    end_freq = float(input_data_arr.settings.f_arr[-1])
-
-    Tobs = 1/getattr(input_data_arr.settings, "df")
 
     oversample = 4
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
-    start_freq_ind = int(start_freq * general_set.Tobs)
+    start_freq_ind = input_data_arr.start_freq_ind
 
     initialize_kwargs = dict(
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
@@ -291,9 +351,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
     # geometric spacing 
     betas = 1 / 1.2 ** np.arange(general_set.ntemps)
     betas[-1] = 0.0001
-    
-    data_start_freq_ind = int(input_data_arr.settings.f_arr[0] / input_data_arr.settings.df)
-    
+        
     search_kwargs = dict(
         nwalkers = 16,
         ntemps = 24,
@@ -311,7 +369,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         dt=general_set.dt,
         T=Tobs,
         use_c_implementation=True,
-        start_freq_ind=data_start_freq_ind,
+        start_freq_ind=start_freq_ind,
         tdi_channel_setup="XYZ",
         tdi2=True,
         oversample=oversample,
@@ -343,12 +401,12 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
         # Transform, Priors, Periodic (handled later!)
-        nleaves_max=6000,
+        nleaves_max=4000,
         nleaves_min=0,
         ndim=8,
         betas=betas,
         log_dir=general_set.file_store_dir,
-        num_repeat_proposals=50, 
+        num_repeat_proposals=100, 
         search_kwargs=search_kwargs        
     )
 
@@ -378,29 +436,29 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
 def get_general_erebor_settings() -> GeneralSetup:
 
     global_fit_codename = "erebor"
-    global_fit_version = "CDL1run1_v2"
+    global_fit_version = "CDL1run1_v3"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
-    comment = "new test run for galaxy+noise."
+    comment = "first test run for full galaxy+noise."
 
     submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 300
+    num_iterations = 700
 
     # source_ids = [18, 5, 16]
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
-    start_freq = 1e-4
-    end_freq = 2.5e-2
+    start_freq = 1e-3
+    end_freq = 1.5e-3
 
     head_dir = "/data/asantini/packages/LISAanalysistools/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = global_fit_version #"test_mbh_18_with_covariance"
+    base_file_name = "small_band_galaxy" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir + "mojito_output/"
 
     gpus = [0]
@@ -411,8 +469,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 30
-    ntemps = 16
+    nwalkers = 32
+    ntemps = 12
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
@@ -430,7 +488,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=backend, frame="icrs"),  # icrs
+        orbits_kwargs=dict(force_backend=backend, frame="icrs", armlength=MOJITO_AVERAGE_ARMLENGTH),  # icrs
     )
 
     downsample_kwargs = {
@@ -467,7 +525,21 @@ def get_general_erebor_settings() -> GeneralSetup:
         Tobs=Tobs,
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02)
+    # ---- Fixed galactic grid parameters (NOT inferred) ----
+    # alpha0, beta0: LISA orbit orientation angles [rad].
+    # These should match the orbit file used; 0.0 is the default for
+    # equal-armlength/Keplerian orbits.  For numerical orbits, read them
+    # from the orbit file or set to the appropriate value.
+    galactic_grid_kwargs = dict(
+        R_d=2.18,     # disk radial scale length [kpc]
+        z_d=0.48,     # disk vertical scale height [kpc]
+        alpha0=1.006863,  # Initial orbital phase α0 [rad]
+        beta0=2.384498,   # Initial constellation rotation β0 [rad]
+        N_lambda=90, # sky grid longitude points
+        N_beta=60,   # sky grid latitude points
+    )
+
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, galactic_grid_kwargs=galactic_grid_kwargs)
 
     general_settings = GeneralSettings(
         num_iterations=num_iterations,
@@ -491,6 +563,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         preprocess_kwargs=preprocess_kwargs,
         normalize_window=normalize_window,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
+        galactic_grid_kwargs=galactic_grid_kwargs,
         global_fit_codename=global_fit_codename,
         global_fit_version=global_fit_version,
         global_fit_contact=global_fit_contact,
@@ -536,7 +609,9 @@ def get_global_fit_settings(copy_settings_file=False):
     ###  PSD + GalFor Settings  ######
     ##################################
 
-    psd_setup, galfor_setup, stoch_metadata = get_psd_erebor_settings(general_setup)
+    psd_setup, psd_metadata = get_psd_erebor_settings(general_setup)
+
+    galfor_setup, galfor_metadata = get_galfor_erebor_settings(general_setup)
     
     ##################################
     ##################################
@@ -561,7 +636,8 @@ def get_global_fit_settings(copy_settings_file=False):
         setup_function=setup_recipe,
         source_metadata={
             "gb": gb_metadata,
-            "psd": stoch_metadata,
+            "psd": psd_metadata,
+            "galfor": galfor_metadata,
         }
     )
 

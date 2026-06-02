@@ -181,18 +181,9 @@ void NoiseLevels::get_isi_oms_noise(double* S_oms, double f, double Soms_d_in,
 CUDA_DEVICE
 void NoiseLevels::get_galactic_foreground(double *S_gal, double f, double Amp, double alpha, double f_1, double f_knee, double f_2)
 {
-    double omega_f = 2.0 * M_PI * f;
-    double x       = omega_f * 8.338892595063376;
-
-    // Transfer function: 4*(x*sin(x))^2 * 4*sin(2x)^2
-    double transfer = 4.0 * (x * sin(x)) * (x * sin(x))
-                    * 4.0 * sin(2.0 * x) * sin(2.0 * x);
-
     // Galactic foreground PSD shape
-        double psd_gal = Amp * exp(-pow(f / f_1, alpha)) * pow(f, -7.0 / 3.0)
-            * 0.5 * (1.0 + tanh(-(f - f_knee) / f_2));
-
-    *S_gal = psd_gal * transfer;
+    *S_gal = Amp * exp(-pow(f / f_1, alpha)) * pow(f, -7.0 / 3.0)
+        * 0.5 * (1.0 + tanh(-(f - f_knee) / f_2));
 }
 // ============================================================================
 // 3x3 Hermitian Matrix Operations
@@ -676,6 +667,19 @@ cmplx XYZSensitivityMatrix::tm_xy_unequal_armlength(double f, double avg_d_ij,
 }
 
 CUDA_DEVICE
+double XYZSensitivityMatrix::galaxy_common_tdi_factor(double f){
+  // double x = 2.0 * M_PI * f * 8.338892595063376;
+  double x = omega(f) * armlength / Clight;
+  double _transfer = 4.0 * (x * sin(x)) * (x * sin(x));
+  
+  if (generation == 2) {
+    _transfer *= 4.0 * sin(2.0 * x) * sin(2.0 * x);
+  }
+  
+  return _transfer;
+}
+
+CUDA_DEVICE
 void XYZSensitivityMatrix::get_noise_tfs(
     double f, double* oms_xx, cmplx* oms_xy, cmplx* oms_xz, double* oms_yy,
     cmplx* oms_yz, double* oms_zz, double* tm_xx, cmplx* tm_xy, cmplx* tm_xz,
@@ -845,6 +849,9 @@ void XYZSensitivityMatrix::get_noise_covariance(
     {
         double S_gal;
         noise_levels.get_galactic_foreground(&S_gal, f, Amp, alpha, f_1, f_knee, f_2);
+
+        double common_tdi_factor = galaxy_common_tdi_factor(f);
+        S_gal *= common_tdi_factor;
 
         int base = time_index * 6;
         *c00 += gal_R_avg[base + 0] * S_gal;

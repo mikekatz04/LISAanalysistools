@@ -32,7 +32,7 @@ from cudakima import AkimaInterpolant1D
 NUM_SPLINE_THREADS = 256
 
 from . import detector as lisa_models
-from .detector import L1Orbits
+from .detector import L1Orbits, Orbits
 from .domains import DomainSettingsBase
 from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
@@ -1030,11 +1030,11 @@ class SensitivityMatrixBase:
         self.do_inv_det = not skip_inv_det
 
     @property
-    def basis_settings(self) -> np.ndarray:
+    def basis_settings(self) -> domains.DomainSettingsBase:
         return self._basis_settings
 
     @basis_settings.setter
-    def basis_settings(self, basis_settings: np.ndarray) -> None:
+    def basis_settings(self, basis_settings: domains.DomainSettingsBase) -> None:
         assert isinstance(basis_settings, domains.DomainSettingsBase)
         self._basis_settings = basis_settings
 
@@ -1795,10 +1795,25 @@ class XYZSensitivityBackend:
 
 
 class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
+    """
+    Sensitivity matrix class that interfaces with the c++ backend for efficient computation of TDI sensitivity matrices, including support for spline interpolation and galactic foreground contributions.
+    Currently supports TDI generations 1 and 2, but only XYZ channels. 
+
+    Args:
+    orbits: L1Orbits object containing the orbital information for the LISA constellation.
+    settings: DomainSettingsBase subclass containing the basis information (e.g., frequency array).
+    tdi_generation: Integer indicating which TDI generation to use (1 or 2). Default is 2.
+    use_splines: Whether to use spline interpolation for the sensitivity matrix. Default is False.
+    spline_order: Order of the spline interpolation (e.g., "cubic", "linear"). Default is "cubic". Only relevant if use_splines is True.
+    force_backend: Backend to use for computation. Default is "cpu".
+    mask_percentage: Percentage of frequencies to mask around each "zero" in the sensitivity matrix to avoid numerical issues. Default is 0.05.
+    galactic_grid_kwargs: Optional dictionary of keyword arguments to set up the galactic grid for foreground contributions. If None or empty, the galactic grid will not be included in the sensitivity matrix. Otherswise, this dictionary will be passed to :method:`_setup_galactic_grid`.
+    window_values: Optional array of window values applied to the time domain data. If not None, a normalization factor will be applied to the sensitivity matrix to account for the windowing-induced loss of power.
+    """
 
     def __init__(
         self,
-        orbits: L1Orbits,
+        orbits: Orbits | L1Orbits,
         settings: DomainSettingsBase,
         tdi_generation: int = 2,
         use_splines: bool = False,
@@ -1806,7 +1821,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         force_backend: Optional[str] = "cpu",
         mask_percentage: Optional[float] = None,
         # --- new ---
-        galactic_grid: Optional[Any] = None,  # GalacticGridWrap instance or None
+        galactic_grid_kwargs: Optional[dict] = None, 
         window_values: Optional[np.ndarray | cp.ndarray] = None
     ):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
@@ -1831,15 +1846,17 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
 
-        # galactic grid — stored as reference, not owned
-        self._galactic_grid = galactic_grid
-
         self.window_values = window_values
         self._setup()
-
-        # attach galactic grid to C++ object if provided
-        if self._galactic_grid is not None:
-            self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
+        
+        self.galactic_grid_kwargs = galactic_grid_kwargs # for propagation to copies
+        include_galaxy = (isinstance(galactic_grid_kwargs, dict) and len(galactic_grid_kwargs) > 0)
+        
+        if include_galaxy:
+            self._sanitize_galactic_grid_kwargs(galactic_grid_kwargs)
+            self._setup_galactic_grid(**galactic_grid_kwargs)
+        else:
+            logger.debug(f"Galactic grid not included in sensitivity matrix. To include, pass non-empty galactic_grid_kwargs dictionary to constructor.")
 
     @property
     def kwargs(self):
@@ -1851,7 +1868,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "spline_order": self.spline_order,
             "force_backend": self.backend.backend_name.split("_")[-1],
             "mask_percentage": self.mask_percentage,
-            "galactic_grid": self._galactic_grid,  # propagate to copies
+            "galactic_grid_kwargs": self.galactic_grid_kwargs,  # propagate to copies
             "window_values": self.window_values
         }
 
@@ -2017,6 +2034,186 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         ]
 
         return dips_indices
+
+    def _sanitize_galactic_grid_kwargs(self, kwargs: dict) -> None:
+        """
+        Check that the galactic grid kwargs are valid and contain the necessary parameters.
+        
+        Args:
+            kwargs: Dictionary of galactic grid parameters to check. Expected keys include:
+                - R_d: Disk radial scale length [kpc]
+                - z_d: Disk vertical scale height [kpc]
+                - t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
+                - N_lambda: Number of ecliptic longitude points for quadrature (optional, default 90)
+                - N_beta: Number of ecliptic latitude points for quadrature (optional, default 60)
+                - galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
+        """
+        required_keys = ["R_d", "z_d", "t0"]
+        for key in required_keys:
+            if key not in kwargs:
+                raise ValueError(f"Missing required galactic_grid_kwargs parameter: {key}")
+            if not isinstance(kwargs[key], (int, float)):
+                raise ValueError(f"Galactic grid parameter {key} must be a number (int or float).")
+
+        optional_keys = ["N_lambda", "N_beta", "galactic_grid"]
+        for key in optional_keys:
+            if key in kwargs and key == "galactic_grid":
+                # galactic_grid can be any object, so we won't check its type here
+                continue
+            elif key in kwargs:
+                if not isinstance(kwargs[key], int):
+                    raise ValueError(f"Galactic grid parameter {key} must be an integer.")
+
+    def _setup_galactic_grid(
+            self,
+            R_d: float,
+            z_d: float,
+            t0: float,
+            N_lambda: Optional[int] = 90,
+            N_beta: Optional[int] = 60,
+            galactic_grid: Optional[Any] = None
+        ) -> None:
+        """
+        Compute the fixed galactic sky geometry if not provided, and attach it to the sensitivity backend.
+
+        Called once during setup.  After this call, sensitivity_backend.pycpp_sensitivity_matrix
+        has gal_R_avg wired in and will include the galactic foreground in every likelihood
+        evaluation automatically, scaled by the per-walker spectral parameters passed via
+        Amp_all, alpha_all, f_1_all, f_knee_all, f_2_all.
+
+        Args:
+            R_d: Disk radial scale length [kpc]
+            z_d: Disk vertical scale height [kpc]
+            t0: Reference time at which to compute the initial LISA orbital phase and rotation angle.
+            N_lambda: Number of ecliptic longitude points for quadrature (default 90)
+            N_beta: Number of ecliptic latitude points for quadrature (default 60)
+            galactic_grid: Optional pre-computed galactic grid object (e.g., from another instance) to reuse
+        """
+        if galactic_grid is not None:
+            self._galactic_grid = galactic_grid
+
+            logger.info("Using provided galactic grid object, skipping re-initialization.")
+            
+        else:
+            alpha0, beta0 = self.orbits.get_constellation_angles(t0)
+
+            logger.debug(
+                f"Initializing galactic grid: R_d={R_d} kpc, z_d={z_d} kpc, "
+                f"alpha0={alpha0:.4f} rad, beta0={beta0:.4f} rad"
+            )
+
+            # Build host-side quadrature geometry
+            setup = self.backend.GalacticGridSetup()
+            setup.compute(
+                N_lambda=N_lambda,
+                N_beta=N_beta,
+            )
+            
+            logger.debug(f"Galactic sky grid: N_sky={setup.N_sky}, N_quad={setup.N_quad}")
+
+            if hasattr(self.basis_settings, "t_arr"):
+                _t_arr = self.basis_settings.t_arr.copy()
+            else:
+                _t_arr = np.array([t0])
+                logger.warning(
+                f"FD domain detected — using t=t0={t0} for galactic sky average. "
+                "This is correct only for stationary (non-cyclostationary) analyses."
+            )
+
+            xp = self.xp
+
+            self._initialize_galactic_grid(
+                times=xp.asarray(_t_arr),
+                R_d=float(R_d),
+                z_d=float(z_d),
+                R_vals_quad=xp.asarray(setup.R_vals_quad),
+                z_vals_quad=xp.asarray(setup.z_vals_quad),
+                quad_weights=xp.asarray(setup.quad_weights),
+                cos_beta_ecl=xp.asarray(setup.cos_beta_ecl),
+                lam_ecl=xp.asarray(setup.lam_ecl),
+                beta_ecl=xp.asarray(setup.beta_ecl),
+                N_quad=setup.N_quad,
+                N_sky=setup.N_sky,
+                alpha0=float(alpha0),
+                beta0=float(beta0),
+                t0=float(t0)
+            )
+
+            logger.info("Galactic grid initialized.")
+
+        self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
+        logger.info("Galactic grid attached to sensitivity backend.")
+    
+    def _initialize_galactic_grid(
+        self,
+        times: np.ndarray,
+        R_d: float,
+        z_d: float,
+        R_vals_quad: np.ndarray,
+        z_vals_quad: np.ndarray,
+        quad_weights: np.ndarray,
+        cos_beta_ecl: np.ndarray,
+        lam_ecl: np.ndarray,
+        beta_ecl: np.ndarray,
+        N_quad: int,
+        N_sky: int,
+        alpha0: float,
+        beta0: float,
+        t0: float
+    ) -> None:
+        """
+        Build the GalacticGridWrap, compute fixed sky weights and R_avg, and
+        attach to the C++ sensitivity matrix.  Call once before inference.
+
+        The grid is stored on self and propagated to any copies made via __call__.
+
+        Args:
+            times:        Segment centre times (N_times,)
+            R_d:          Disk radial scale length [kpc]
+            z_d:          Disk vertical scale height [kpc]
+            R_vals_quad:  (N_quad * N_sky,) galactocentric radii
+            z_vals_quad:  (N_quad * N_sky,) heights above disk
+            quad_weights: (N_quad,) Gauss-Legendre weights
+            cos_beta_ecl: (N_sky,) cos(beta) for solid-angle weighting
+            lam_ecl:      (N_sky,) ecliptic longitudes
+            beta_ecl:     (N_sky,) ecliptic latitudes
+            N_quad:       Number of quadrature nodes (16)
+            N_sky:        Number of sky pixels
+            alpha0:       LISA orbit initial phase (rad)
+            beta0:        LISA orbit inclination (rad)
+            t0:           Reference time for constellation angles (s)
+        """
+        xp = self.xp
+
+        GalWrap = self.backend.GalacticGridWrap
+
+        self._galactic_grid = GalWrap(
+            xp.asarray(R_vals_quad),
+            xp.asarray(z_vals_quad),
+            xp.asarray(quad_weights),
+            xp.asarray(cos_beta_ecl),
+            xp.asarray(lam_ecl),
+            xp.asarray(beta_ecl),
+            N_quad,
+            N_sky,
+            alpha0,
+            beta0,
+            t0,
+            self.num_times,
+            self.num_freqs,
+        )
+
+        self._galactic_grid.initialize_wrap(
+            xp.asarray(times),
+            R_d,
+            z_d,
+            len(times),
+        )
+
+    def disable_galactic_grid(self) -> None:
+        """Detach galactic foreground from the likelihood."""
+        self._galactic_grid = None
+        self.pycpp_sensitivity_matrix.disable_galactic_grid()
 
     def _compute_matrix_elements(
         self,
@@ -2393,76 +2590,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         smoothed_matrix[..., mask] = _smoothed[..., mask]
 
         return smoothed_matrix
-    
-    def initialize_galactic_grid(
-        self,
-        times: np.ndarray,
-        R_d: float,
-        z_d: float,
-        R_vals_quad: np.ndarray,
-        z_vals_quad: np.ndarray,
-        quad_weights: np.ndarray,
-        cos_beta_ecl: np.ndarray,
-        lam_ecl: np.ndarray,
-        beta_ecl: np.ndarray,
-        N_quad: int,
-        N_sky: int,
-        alpha0: float,
-        beta0: float,
-    ) -> None:
-        """
-        Build the GalacticGridWrap, compute fixed sky weights and R_avg, and
-        attach to the C++ sensitivity matrix.  Call once before inference.
-
-        The grid is stored on self and propagated to any copies made via __call__.
-
-        Args:
-            times:        Segment centre times (N_times,)
-            R_d:          Disk radial scale length [kpc]
-            z_d:          Disk vertical scale height [kpc]
-            R_vals_quad:  (N_quad * N_sky,) galactocentric radii
-            z_vals_quad:  (N_quad * N_sky,) heights above disk
-            quad_weights: (N_quad,) Gauss-Legendre weights
-            cos_beta_ecl: (N_sky,) cos(beta) for solid-angle weighting
-            lam_ecl:      (N_sky,) ecliptic longitudes
-            beta_ecl:     (N_sky,) ecliptic latitudes
-            N_quad:       Number of quadrature nodes (16)
-            N_sky:        Number of sky pixels
-            alpha0:       LISA orbit initial phase (rad)
-            beta0:        LISA orbit inclination (rad)
-        """
-        xp = self.xp
-
-        GalWrap = self.backend.GalacticGridWrap
-
-        self._galactic_grid = GalWrap(
-            xp.asarray(R_vals_quad),
-            xp.asarray(z_vals_quad),
-            xp.asarray(quad_weights),
-            xp.asarray(cos_beta_ecl),
-            xp.asarray(lam_ecl),
-            xp.asarray(beta_ecl),
-            N_quad,
-            N_sky,
-            alpha0,
-            beta0,
-            self.num_times,
-            self.num_freqs,
-        )
-
-        self._galactic_grid.initialize_wrap(
-            xp.asarray(times),
-            R_d,
-            z_d,
-            len(times),
-        )
-
-        self.pycpp_sensitivity_matrix.set_galactic_grid(self._galactic_grid)
-
-    def disable_galactic_grid(self) -> None:
-        """Detach galactic foreground from the likelihood."""
-        self._galactic_grid = None
-        self.pycpp_sensitivity_matrix.disable_galactic_grid()
 
     def build_spline_arrays(self, spline_params: np.ndarray) -> tuple:
         """Build spline arrays for the c++ backend from the input PSD parameters."""
@@ -2495,7 +2622,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         new_sens_mat = XYZSensitivityBackend(**self.kwargs)
 
-        self.name = name
+        #self.name = name
+        new_sens_mat.name = name # why was it self?
 
         if self.use_splines: #assume transformed input.
             Soms_d = psd_params[0]
