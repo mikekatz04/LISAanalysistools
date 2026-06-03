@@ -5,7 +5,7 @@ import os
 import warnings
 from abc import ABC
 from copy import deepcopy
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 from logging import getLogger
 import matplotlib.pyplot as plt
@@ -29,8 +29,6 @@ except (ModuleNotFoundError, ImportError):
 
 from cudakima import AkimaInterpolant1D
 
-NUM_SPLINE_THREADS = 256
-
 from . import detector as lisa_models
 from .detector import L1Orbits, Orbits
 from .domains import DomainSettingsBase
@@ -43,8 +41,12 @@ from .utils.constants import *
 from .utils.parallelbase import LISAToolsParallelModule
 from .utils.utility import AET, get_array_module
 
+if TYPE_CHECKING:
+    from .utils.typing import NDArrayLike, ArrayModule
+
 logger = getLogger(__name__)
-from eryn.utils import TransformContainer
+
+NUM_SPLINE_THREADS = 256
 
 """
 The sensitivity code is heavily based on an original code by Stas Babak, Antoine Petiteau for the LDC team.
@@ -1822,7 +1824,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         mask_percentage: Optional[float] = None,
         # --- new ---
         galactic_grid_kwargs: Optional[dict] = None, 
-        window_values: Optional[np.ndarray | cp.ndarray] = None
+        window_values: Optional[NDArrayLike] = None
     ):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
@@ -2244,8 +2246,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         f_1=0,
         kn=0,
         f_2=0,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
     ):
         """Compute the 6 sensitivity matrix terms using the c++ backend."""
 
@@ -2343,7 +2345,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def compute_sensitivity_matrix(
         self,
-        freqs: np.ndarray | cp.ndarray,
+        freqs: NDArrayLike,
         Soms_d_in: float = 15e-12,
         Sa_a_in: float = 3e-15,
         Amp: float = 0.0,
@@ -2351,10 +2353,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         f_1: float = 0.0,
         kn: float = 0.0,
         f_2: float = 0.0,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
         smooth: bool = False,
-    ) -> np.ndarray | cp.ndarray:
+    ) -> NDArrayLike:
         """Compute the full 3×3 XYZ covariance matrix at arbitrary frequencies.
 
         Calls the C++ kernel to evaluate all six independent matrix elements
@@ -2412,8 +2414,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self,
         Soms_d_in: float = 15e-12,
         Sa_a_in: float = 3e-15,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
         Amp: float = 0.0,
         alpha: float = 0.0,
         f_1: float = 0.0,
@@ -2469,12 +2471,12 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def _inverse_det_wrapper(
         self,
-        c00: np.ndarray | cp.ndarray,
-        c11: np.ndarray | cp.ndarray,
-        c22: np.ndarray | cp.ndarray,
-        c01: np.ndarray | cp.ndarray,
-        c02: np.ndarray | cp.ndarray,
-        c12: np.ndarray | cp.ndarray,
+        c00: NDArrayLike,
+        c11: NDArrayLike,
+        c22: NDArrayLike,
+        c01: NDArrayLike,
+        c02: NDArrayLike,
+        c12: NDArrayLike,
     ) -> tuple:
         """Wrapper to call c++ backend for inverse log-determinant computation."""
 
@@ -2498,7 +2500,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         return inverse_matrix, det.reshape(self.basis_settings.basis_shape)
 
-    def compute_inverse_det(self, matrix_in: np.ndarray | cp.ndarray) -> tuple:
+    def compute_inverse_det(self, matrix_in: NDArrayLike) -> tuple:
         """
         Invert the 3x3 sensitivity matrix and compute its log-determinant with the c++ backend.
 
@@ -2513,7 +2515,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         inverse_matrix, det = self._inverse_det_wrapper(c00, c11, c22, c01, c02, c12)
         return inverse_matrix, det
 
-    def compute_transfer_functions(self, freqs: np.ndarray | cp.ndarray) -> tuple[np.ndarray, ...]:
+    def compute_transfer_functions(self, freqs: NDArrayLike) -> tuple[NDArrayLike]:
         """Compute the OMS and test-mass noise transfer functions at arbitrary frequencies.
 
         Evaluates the 12 independent transfer-function elements (6 OMS + 6 TM,
@@ -2589,19 +2591,19 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def compute_log_like(
         self,
-        data_in_all: np.ndarray | cp.ndarray,
-        data_index_all: np.ndarray | cp.ndarray,
-        Soms_in_all: np.ndarray | cp.ndarray,
-        Sa_in_all: np.ndarray | cp.ndarray,
-        Amp_in_all: np.ndarray | cp.ndarray,
-        alpha_in_all: np.ndarray | cp.ndarray,
-        f_1_in_all: np.ndarray | cp.ndarray,
-        kn_in_all: np.ndarray | cp.ndarray,
-        f_2_in_all: np.ndarray | cp.ndarray,
-        knots_position_all: np.ndarray | cp.ndarray = None,
-        knots_amplitude_all: np.ndarray | cp.ndarray = None,
+        data_in_all: NDArrayLike,
+        data_index_all: NDArrayLike,
+        Soms_in_all: NDArrayLike,
+        Sa_in_all: NDArrayLike,
+        Amp_in_all: NDArrayLike,
+        alpha_in_all: NDArrayLike,
+        f_1_in_all: NDArrayLike,
+        kn_in_all: NDArrayLike,
+        f_2_in_all: NDArrayLike,
+        knots_position_all: NDArrayLike = None,
+        knots_amplitude_all: NDArrayLike = None,
         run_async: bool = False,
-    ) -> np.ndarray | cp.ndarray:
+    ) -> NDArrayLike:
         """
         Compute log-likelihood using the c++ backend.
 
@@ -2681,9 +2683,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
     def smooth_sensitivity_matrix(
         self,
-        matrix_in: np.ndarray | cp.ndarray,
+        matrix_in: NDArrayLike,
         sigma: float = 5.0,
-    ) -> np.ndarray | cp.ndarray:
+    ) -> NDArrayLike:
         """Smooth the sensitivity matrix around TDI transfer-function notches.
 
         The TDI transfer functions have sharp zeros at multiples of ``f = c/(2L)``
