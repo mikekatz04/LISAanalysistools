@@ -6,6 +6,9 @@
 #include "binding_flr.hpp"
 #include "binding.hpp"
 #include "gbt_binding.hpp"
+// Phase 3L (2026-06-02): generic classes absorbed from lisa-on-gpu's
+// TDIonTheFly carve-out. FDDomain is the first installment.
+#include "binding_fd_domain.hpp"
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #include "pybind11_cuda_array_interface.hpp"
@@ -159,19 +162,47 @@ void response_part(py::module &m) {
     py::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapGPU_responselisa")
 #else
     py::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapCPU_responselisa")
-#endif 
+#endif
 
     // Bind the constructor
-    .def(py::init<array_type<double>, array_type<double>, array_type<double>, array_type<double>, array_type<double>, int, int, int>(), 
+    .def(py::init<array_type<double>, array_type<double>, array_type<double>, array_type<double>, array_type<double>, int, int, int>(),
          py::arg("x0"), py::arg("y0"), py::arg("c1"), py::arg("c2"), py::arg("c3"), py::arg("ninterps"), py::arg("length"), py::arg("spline_type"))
     // Bind member functions
-    
+
     // You can also expose public data members directly using def_readwrite
     .def_readwrite("spline", &CubicSplineWrap_responselisa::spline)
     // .def("get_link_ind", &CubicSplineWrap::get_link_ind, "Get link index.")
     ;
 
-    
+    // Phase 3L: FDDomain + FDDomainWrap absorbed from lisa-on-gpu's
+    // TDIonTheFly.hh / binding_tof.{cxx,hpp}. The C++ class definitions
+    // live in fd_domain.hh / binding_fd_domain.hpp (included above);
+    // this is the SOLE pybind11 registration. lisa-on-gpu's
+    // binding_tof.cxx no longer registers them -- the LISATOOLS_IS_WRAPPER_OWNER
+    // static_assert in its TU guards against any future regression.
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<FDDomainWrap>(m, "FDDomainWrapGPU")
+#else
+    py::class_<FDDomainWrap>(m, "FDDomainWrapCPU")
+#endif
+    .def(py::init<array_type<std::complex<double>>, array_type<double>,
+                  int, int, int, int, int, int, double>(),
+         py::arg("fd_data"), py::arg("fd_invC"),
+         py::arg("n_rfft"), py::arg("num_channel"),
+         py::arg("num_data"), py::arg("num_noise"),
+         py::arg("ind_min"), py::arg("ind_max"), py::arg("df"))
+    .def_readwrite("fd", &FDDomainWrap::fd)
+    ;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<FDDomain>(m, "FDDomainGPU")
+#else
+    py::class_<FDDomain>(m, "FDDomainCPU")
+#endif
+    .def(py::init<cmplx*, double*, int, int, int, int, int, int, double>())
+    ;
+
 }
 
 

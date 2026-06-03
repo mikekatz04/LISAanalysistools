@@ -167,6 +167,9 @@ sdist.include = [
   "src/lisatools/cutils/LISAResponse.hh",
   "src/lisatools/cutils/binding_flr.cxx",
   "src/lisatools/cutils/binding_flr.hpp",
+  # Phase 3L: first installment of the TDIonTheFly C++ carve-out.
+  "src/lisatools/cutils/fd_domain.hh",
+  "src/lisatools/cutils/binding_fd_domain.hpp",
   # Phase 4: citation registry data file (parsed by lisatools.utils.citations).
   "CITATION.cff",
 ]
