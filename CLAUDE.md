@@ -99,6 +99,31 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `orbit_files/` — packaged orbit data files.
 - `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from sprint-root at Phase 2.
 
+## V2 signal-heterodyne work-item (in-flight, 2026-06-02)
+
+A second WDM-domain likelihood path is being developed alongside the
+existing chunked-heterodyne (`gb_wdm_het_*`) family. It uses a polyphase
+per-active-m-layer iFFT + carrier de-rotation to compute sparse complex
+WDM coefficients without the full dense `TDSignal.transform` — Python
+prototype shows ~130× speedup and mm5 ≈ 1.6e-9 median.
+
+- **Plan**: `~/.claude/plans/yes-find-and-read-sprightly-garden.md` (full
+  architecture, kernel signatures, shared-mem budget, file-by-file
+  migration order).
+- **In-flight code**: `scripts/gb_chunked_het/gb_signal_het_wdm_v2*.py`
+  + `scripts/gb_chunked_het/signal_het_cpp/signal_het_views.hpp` (POD
+  view structs that move to `src/lisatools/cutils/signal_het_views.hpp`
+  at landing).
+- **What lands in LAT**: `cutils/SignalHetPolyphase.{hh,cu}`,
+  `cutils/SignalHetConvert.{hh,cu}`, `cutils/SignalHetReconstruct.{hh,cu}`,
+  `cutils/SignalHetBinFold.{hh,cu}`, `cutils/signal_het_views.hpp`,
+  `response/signal_het_comp.py` (`SignalHetComputationsBase`), and
+  `jax/wdm/signal_het_*` JAX mirror. All source-agnostic; per-source
+  `*AbsoluteFD` entries live in GBGPU/BBHx.
+- **Independent of the C++ TDIonTheFly carve-out** — can land before the
+  carve-out is done. Both work-items share the L2 enforcement landed
+  in Phase 3J.
+
 ## Downstream consumption
 
 LAT exposes its public C++/CUDA headers via:
