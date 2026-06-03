@@ -389,7 +389,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 200
+    num_iterations = 100
 
     source_ids = [18, 5, 16, 7, 2, 12]
 
