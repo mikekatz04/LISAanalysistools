@@ -99,14 +99,14 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
     
     from lisatools.utils.constants import YRSID_SI
-    Tobs = 1. * YRSID_SI / 12.0
+    Tobs = .5 * YRSID_SI 
     dt = 2.5
 
     head_dir = "/home/karnesis/work/Git/LISAanalysistools/"
     #ldc_source_file = head_dir + "emri_sangria_injection.h5"
     data_input_path = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/mojito_lite/"
-    base_file_name = "noise-only_tukey_new"
-    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/tukey_new/"
+    base_file_name = "noise-only_tukey_1yr"
+    file_store_dir = "/mnt/wd_hdd_6TB/nikos/DATA/global_fit/gf_output/tukey_1yr/"
 
     # TODO: connect LISA to SSB for MBHs to numerical orbits
 
@@ -120,10 +120,10 @@ def get_general_erebor_settings() -> GeneralSetup:
     ntemps = 4
 
     winalpha = 0.1 # bh tryout
-    wintype = "bh92"
+    wintype = "tukey"
 
     basis_domain = "stft" # fd
-    stft_dt = 24 * 3600.0  # how many hours
+    stft_dt = 7 * 24 * 3600.0  # how many hours
 
     processor_init_kwargs = dict(L1_folder=data_input_path,
                                  source_types=['noise'],
@@ -143,7 +143,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
         start_freq=1e-4,
-        end_freq=1e-2,
+        end_freq=.5e-2,
         basis_domain=basis_domain,
         stft_dt=stft_dt,
         random_seed=12345,
