@@ -930,9 +930,7 @@ class RunMetadata(MetadataBase):
         merged.setdefault("noise_model", type(gi.sensitivity_backend).__name__)
 
         instance = cls(**merged)
-        instance.submission_timestamp = datetime.now().isoformat(
-            timespec="seconds"
-        )  # stop at seconds for cleaner display
+        instance.submission_timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
         instance.observation_period_begin = _seconds_to_l3c_datetime(gi.data_t0)
         instance.observation_period_end = _seconds_to_l3c_datetime(gi.data_t0 + gi.Tobs)
         instance.time_step = float(gi.dt)
