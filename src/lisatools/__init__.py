@@ -27,6 +27,49 @@ try:
 except (ModuleNotFoundError, ImportError):
     _is_editable = False
 
+
+def get_include() -> str:
+    """Absolute path to LISAanalysistools' public C++/CUDA header directory.
+
+    Downstream sprint packages (GBGPU, BBHx, FastEMRIWaveforms) add this
+    to their compiler include path so that
+
+        #include "Detector.hpp"           // class Orbits -- LAT-owned
+        #include "orbits_view.hpp"        // OrbitsView POD (preferred)
+        #include "PSD.hpp"
+        #include "lisatools_header_abi.hpp"   // ABI version + wrapper-owner toggle
+
+    resolve against the installed wheel.
+
+    Pair with ``gpubackendtools.get_include()`` -- a downstream typically
+    needs both: GBT for gbt_global.h + cuda_complex.hpp + InterpolateDevice.hh,
+    LAT for the LISA-specific public headers.
+    """
+    import os.path
+    return os.path.join(os.path.dirname(__file__), "cutils")
+
+
+def get_cmake_module_path() -> str:
+    """Absolute path to the directory containing ``LISAanalysisToolsConfig.cmake``.
+
+    For downstreams that prefer ``find_package(LISAanalysisTools CONFIG)``
+    over the Python shell-out form of :func:`get_include`.
+
+    Example::
+
+        execute_process(
+          COMMAND ${Python_EXECUTABLE} -c
+          "import lisatools; print(lisatools.get_cmake_module_path())"
+          OUTPUT_VARIABLE LAT_CMAKE_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
+        find_package(LISAanalysisTools CONFIG REQUIRED PATHS ${LAT_CMAKE_DIR})
+        target_link_libraries(my_kernel PRIVATE LISAanalysisTools::headers)
+
+    Returns the same directory as :func:`get_include`.
+    """
+    import os.path
+    return os.path.join(os.path.dirname(__file__), "cutils")
+
+
 from gpubackendtools import Globals, get_backend, get_first_backend, has_backend
 
 from . import cutils, utils
@@ -87,6 +130,8 @@ __all__ = [
     "__version__",
     "__version_tuple__",
     "_is_editable",
+    "get_include",
+    "get_cmake_module_path",
     "get_logger",
     "get_config",
     "get_config_setter",

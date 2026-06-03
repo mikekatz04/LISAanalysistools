@@ -30,7 +30,6 @@ from ..domains import (
     DomainSettingsBase,
     FDSettings,
     STFTSettings,
-    WDMLookupTable,
     WDMSettings,
 )
 from ..sensitivity import (
@@ -168,13 +167,6 @@ class GeneralSettings(Settings):
     # loaded ``times`` array; FD/WDM users typically construct the settings
     # directly. No string-level domain flag.
     domain_settings: Optional[DomainSettingsSpec] = None
-    # Optional WDM lookup table. When the basis settings resolve to a
-    # WDMSettings, the user supplies the pre-built lookup table here (or
-    # passes a factory ``(WDMSettings) -> WDMLookupTable``). Stored on the
-    # setup so downstream GB code can pick it up. Ignored otherwise.
-    wdm_lookup_table: Optional[
-        Union[WDMLookupTable, Callable[[WDMSettings], WDMLookupTable]]
-    ] = None
     random_seed: int | None = None
     backup_iter: int | None = None
     nwalkers: int | None = None
@@ -212,9 +204,7 @@ class GeneralSetup(Setup, GeneralSettings):
     3. Resolves ``domain_settings`` (instance or factory) into a concrete
        :class:`~lisatools.domains.DomainSettingsBase`, builds the analysis
        window, and constructs the input :class:`DataResidualArray`.
-    4. Resolves ``wdm_lookup_table`` (instance or factory) when running in
-       the WDM domain.
-    5. Configures :class:`XYZSensitivityBackend` for use in PSD/likelihood
+    4. Configures :class:`XYZSensitivityBackend` for use in PSD/likelihood
        calls.
 
     Args:
@@ -294,27 +284,6 @@ class GeneralSetup(Setup, GeneralSettings):
         raise TypeError(
             f"domain_settings must be a DomainSettingsBase instance or a "
             f"factory callable; got {type(spec).__name__}."
-        )
-
-    def _resolve_wdm_lookup_table(
-        self, domain_settings: WDMSettings
-    ) -> Optional[WDMLookupTable]:
-        """Resolve the (optional) WDM lookup table from the user-supplied spec.
-
-        ``wdm_lookup_table`` may be a fully constructed :class:`WDMLookupTable`
-        (used directly), a factory ``(WDMSettings) -> WDMLookupTable``
-        (called now that the grid is known), or ``None``.
-        """
-        spec = self.wdm_lookup_table
-        if spec is None:
-            return None
-        if isinstance(spec, WDMLookupTable):
-            return spec
-        if callable(spec):
-            return spec(domain_settings)
-        raise TypeError(
-            f"wdm_lookup_table must be a WDMLookupTable instance or a factory; "
-            f"got {type(spec).__name__}."
         )
 
     def init_data_information(self):
@@ -431,18 +400,6 @@ class GeneralSetup(Setup, GeneralSettings):
                 )
 
         self.init_orbit_information()
-
-        # Resolve the (optional) WDM lookup table once the WDM grid is final.
-        if isinstance(domain_settings, WDMSettings):
-            self.wdm_lookup_table = self._resolve_wdm_lookup_table(domain_settings)
-        else:
-            # Forbid a stray lookup table on FD/STFT runs — it would never be
-            # used and signals a setup mistake.
-            if self.wdm_lookup_table is not None:
-                raise ValueError(
-                    "wdm_lookup_table was provided but domain_settings is not "
-                    "a WDMSettings; remove it or switch the domain."
-                )
 
         # Sensitivity backend: defaults to CompositeSensitivityBackend, which
         # builds a CompositeSensitivityMatrix (InstrumentNoise + optional

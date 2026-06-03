@@ -1,52 +1,36 @@
 #ifndef __GLOBAL_HPP__
 #define __GLOBAL_HPP__
 
-#include "cuda_complex.hpp"
+// LAT-specific global header. Most of what used to live here -- the
+// cuda_complex.hpp include, the `cmplx` typedef, CUDA_KERNEL / CUDA_DEVICE /
+// CUDA_SHARED / CUDA_SYNCTHREADS macros, the gpuErrchk macro -- is now owned
+// by GPUBackendTools' gbt_global.h. We pick those up via that header so
+// there is one sprint-wide copy. Only LAT-specific symbols (Clight,
+// CUDA_CHECK_AND_EXIT) remain here.
 
-typedef gcmplx::complex<double> cmplx;
+#include "gbt_global.h"
+
+// gbt_global.h does not provide CUDA_SYNCTHREADS (only CUDA_SYNC_THREADS).
+// Keep the old spelling here as a backwards-compatibility alias for LAT
+// code that uses the no-underscore form.
+#ifndef CUDA_SYNCTHREADS
+#define CUDA_SYNCTHREADS CUDA_SYNC_THREADS
+#endif
+
 #define Clight 299792458.
 
-
 #ifdef __CUDACC__
-#define CUDA_KERNEL __global__
-#define CUDA_DEVICE __device__
-#define CUDA_SYNCTHREADS __syncthreads()
-#define CUDA_SHARED __shared__
-
-#else // __CUDACC__
-#define CUDA_KERNEL 
-#define CUDA_DEVICE  
-#define CUDA_SYNCTHREADS
-#define CUDA_SHARED
-
-#endif // __CUDACC__
-
-#ifdef __CUDACC__
-#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess)
-   {
-      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-      if (abort) exit(code);
-   }
-}
-
-// TODO: copied from GBGPU constants file. Need to merge all the constants.
 
 #ifndef CUDA_CHECK_AND_EXIT
 #    define CUDA_CHECK_AND_EXIT(error)                                                                      \
         {                                                                                                   \
             auto status = static_cast<cudaError_t>(error);                                                  \
-            if (status != cudaSuccess) {                                                    throw std::invalid_argument(cudaGetErrorString(status) );                \
-                /*std::cout << cudaGetErrorString(status) << " " << __FILE__ << ":" << __LINE__ << std::endl; \
-                std::exit(status);*/                                                                          \
+            if (status != cudaSuccess) {                                                                    \
+                throw std::invalid_argument(cudaGetErrorString(status));                                    \
             }                                                                                               \
         }
 #endif // CUDA_CHECK_AND_EXIT
 
-
-#endif //__CUDACC__
-
+#endif // __CUDACC__
 
 #endif // __GLOBAL_HPP__

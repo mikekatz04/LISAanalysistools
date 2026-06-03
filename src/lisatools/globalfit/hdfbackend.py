@@ -12,7 +12,6 @@ from ..domains import (
     DomainSettingsBase,
     FDSettings,
     STFTSettings,
-    WDMLookupTable,
     WDMSettings,
 )
 from .plot import RunResultsProduction
@@ -127,38 +126,6 @@ def _read_domain_settings(
         kwargs["force_backend"] = force_backend
     return cls(*args, **kwargs)
 
-
-# ----------------------------------------------------------------------
-# WDM lookup table (de)serialization.
-#
-# Thin wrappers around :meth:`WDMLookupTable.to_h5_group` /
-# :meth:`WDMLookupTable.from_h5_group`. The actual layout (attrs + datasets)
-# lives on the lookup-table class so the standalone ``to_file`` / ``from_file``
-# and this embedded path share the same field set.
-# ----------------------------------------------------------------------
-
-
-_WDM_LOOKUP_GROUP_NAME = "wdm_lookup_table"
-
-
-def _write_wdm_lookup_table(
-    group: h5py.Group, lookup_table: WDMLookupTable
-) -> None:
-    """Persist a :class:`WDMLookupTable` into ``group`` under ``"wdm_lookup_table"``."""
-    if _WDM_LOOKUP_GROUP_NAME in group:
-        del group[_WDM_LOOKUP_GROUP_NAME]
-    lookup_table.to_h5_group(group.create_group(_WDM_LOOKUP_GROUP_NAME))
-
-
-def _read_wdm_lookup_table(
-    group: h5py.Group, force_backend: Optional[str] = None
-) -> Optional[WDMLookupTable]:
-    """Reconstruct a :class:`WDMLookupTable` previously stored via :func:`_write_wdm_lookup_table`."""
-    if _WDM_LOOKUP_GROUP_NAME not in group:
-        return None
-    return WDMLookupTable.from_h5_group(
-        group[_WDM_LOOKUP_GROUP_NAME], force_backend=force_backend
-    )
 
 
 def save_to_backend_asynchronously_and_plot(
@@ -299,40 +266,6 @@ class GFHDFBackend(eryn_HDFBackend):
             if self.name not in f:
                 return None
             return _read_domain_settings(f[self.name], force_backend=force_backend)
-
-    # ------------------------------------------------------------------
-    # WDM lookup-table persistence (optional)
-    # ------------------------------------------------------------------
-
-    def write_wdm_lookup_table(self, lookup_table: WDMLookupTable) -> None:
-        """Embed a :class:`WDMLookupTable` inside the global-fit file.
-
-        Adjusts the lookup-table storage so the global-fit file is the
-        single source of truth — no separate side-car file is required.
-        Replaces any previously written table on a second call.
-        """
-        with self.open("a") as f:
-            _write_wdm_lookup_table(f[self.name], lookup_table)
-
-    def read_wdm_lookup_table(
-        self, force_backend: Optional[str] = None
-    ) -> Optional[WDMLookupTable]:
-        """Reconstruct the :class:`WDMLookupTable` previously stored via :meth:`write_wdm_lookup_table`."""
-        with self.open() as f:
-            if self.name not in f:
-                return None
-            return _read_wdm_lookup_table(
-                f[self.name], force_backend=force_backend
-            )
-
-    @property
-    def has_wdm_lookup_table(self) -> bool:
-        """Whether a WDM lookup table is embedded in this file."""
-        with self.open() as f:
-            return (
-                self.name in f
-                and "wdm_lookup_table" in f[self.name]
-            )
 
     @property
     def reset_kwargs(self):

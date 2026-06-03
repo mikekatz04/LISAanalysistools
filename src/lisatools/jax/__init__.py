@@ -21,10 +21,15 @@ except (ImportError, ModuleNotFoundError):
 if _HAS_JAX:
     from .backend import LISAToolsJaxBackend
     from .orbits import OrbitsWrapJAX
+    # Generic LISA-response + WDM JAX subpackages, absorbed from
+    # fastlisaresponse.jax at Phase 3.
+    from . import response, wdm
 
     __all__ = [
         "LISAToolsJaxBackend",
         "OrbitsWrapJAX",
+        "response",
+        "wdm",
     ]
 else:
     __all__ = []
