@@ -65,7 +65,12 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 
 - `Detector.cu` / `Detector.hpp` — LISA orbit / detector geometry (light travel times, normals, spacecraft positions). The `.cu` file is **copied to `.cxx` at build time** and compiled by the C++ compiler for the CPU backend; the same `.cu` is compiled by `nvcc` for the GPU backend. Code must be valid as both.
 - `PSD.cu` / `PSD.hpp` — PSD-related kernels (treated the same way).
-- `binding.cxx` / `binding.hpp` — pybind11 module exposing the C++/CUDA functions to Python (one shared binding source for both CPU and GPU builds).
+- `LISAResponse.cu` / `LISAResponse.hh` — LISA arm-projection / TDI machinery. **Absorbed from lisa-on-gpu at Phase 3E** (2026-06-02). lisa-on-gpu's CMake references `${LISATOOLS_DIR}/cutils/LISAResponse.cu` so its tdionthefly module still consumes the same source.
+- `binding.cxx` / `binding.hpp` — pybind11 module exposing the C++/CUDA functions to Python. `binding.cxx`'s `PYBIND11_MODULE(pycppdetector, m)` body calls `detector_part(m)` then `response_part(m)` so OrbitsWrap, LISAResponseWrap, TDIConfigWrap, OrbitsWrap_responselisa, CubicSplineWrap_responselisa all register here.
+- `binding_flr.cxx` / `binding_flr.hpp` — `response_part()` implementation + shared wrapper classes (`ReturnPointerBase`, `OrbitsWrap_responselisa`, `CubicSplineWrap_responselisa`, `TDIConfigWrap`, `LISAResponseWrap`). **Absorbed from lisa-on-gpu at Phase 3E**. The `PYBIND11_MODULE(responselisa, m)` block was stripped; LAT's pycppdetector is the sole entry point.
+- `orbits_view.hpp` — `OrbitsView` POD struct, the stable-layout cross-wheel interface downstream packages consume in place of typed `Orbits*` pointers. `binding.cxx` runs `static_assert(sizeof + 15 offsetofs)` confirming layout matches `class Orbits` at every build. See plan section "POD-view side-channel".
+- `lisatools_header_abi.hpp` — `LISATOOLS_HEADER_ABI_VERSION` macro + `LISATOOLS_IS_WRAPPER_OWNER` toggle. **`binding.cxx` sets the toggle to 1** (LAT is the owner); downstream binding TUs leave it at the default 0 and add `static_assert(!LISATOOLS_IS_WRAPPER_OWNER, ...)`. Compile-time enforcement of the single-registrant rule. See `tools/check_single_registrant.sh` at sprint root for the CI-side grep complement.
+- `LISAanalysisToolsConfig.cmake` — `find_package(LISAanalysisTools CONFIG REQUIRED)` → `LISAanalysisTools::headers` interface target for downstream CMake consumers.
 - `pycppdetector.pyx` is a legacy Cython file; the active path is the pybind11 module `pycppdetector` produced from `binding.cxx`.
 
 ## Python Package Layout
@@ -78,11 +83,29 @@ In Python code, the `xp` pattern is used widely — modules do `try: import cupy
 - `diagnostic.py` — inner products and likelihood terms used by `AnalysisContainer`.
 - `domains.py` — frequency / time-frequency domain settings (`DomainSettingsBase` etc.).
 - `stochastic.py` — stochastic foreground models (e.g. `FittedHyperbolicTangentGalacticForeground`).
+- **`response/`** — LISA-response Python frontends, **absorbed from `fastlisaresponse` at Phase 3B+C**:
+  - `parallelbase.py` — `FastLISAResponseParallelModule` backend-dispatch base.
+  - `tdiconfig.py` — `TDIConfig` configuration.
+  - `directresponse.py` — was `fastlisaresponse.response.py`; `pyResponseTDI`, `ResponseWrapper`, `ecliptic_to_icrs`.
+  - `tdionfly.py` — TDI-on-the-fly family.
+- **`jax/`** — pure-JAX backend + LISA-response/WDM JAX implementations:
+  - `backend.py`, `orbits.py` — LAT-native (existing).
+  - `response/` — `base.py` (JaxAmpPhaseSource), `projection.py`, `tdi_config.py`, `amp_phase_extract.py`. **Absorbed at Phase 3D.**
+  - `wdm/` — `wavelet_lookup.py`, `wdm_settings.py`, `wdm_domain.py`, `fast_inner.py`. **Absorbed at Phase 3D.** GB-specific (heterodyne) variants live in `gbgpu.jax.wdm`.
 - `sources/` — waveform generators per source class: `bbh/`, `emri/`, `gb/`, plus `defaultresponse.py` and `waveformbase.py`.
 - `sampling/` — MCMC pieces built on top of `eryn`: priors, likelihood wrappers, custom moves, stopping criteria, GMM utilities.
 - `globalfit/` — the LISA global fit pipeline: `pipeline.py`, `engine.py`, `run.py`, `recipe.py`, plus per-component modules (`mbhglobal.py`, `galaxyglobal.py`, `psdglobal.py`, `mbhsearch.py`, …) and stock recipes in `globalfit/stock/`.
 - `utils/` — `constants.py` (re-exports `lisaconstants`-derived values like `YRSID_SI`), array helpers (`get_array_module`, `AET`), exceptions, multi-GPU data holders.
 - `orbit_files/` — packaged orbit data files.
+- `scripts/` — dev / validation / benchmark / diagnostics scripts (`gb_chunked_het/`, `gb_lookup/`, `sobbh/`, `mbh/`, `emri/`, `wdm/`, `validation/`, `benchmark/`, `diagnostics/`, `notes/`). Migrated from sprint-root at Phase 2.
+
+## Downstream consumption
+
+LAT exposes its public C++/CUDA headers via:
+- `lisatools.get_include() → str` (Python entry point used by downstream CMake via shell-out)
+- `lisatools.get_cmake_module_path() → str` returning the directory containing `LISAanalysisToolsConfig.cmake`.
+
+Downstream waveform packages (GBGPU, BBHx, FastEMRIWaveforms) consume LAT headers (`Detector.hpp`, `LISAResponse.hh`, `binding_flr.hpp`, `orbits_view.hpp`, `lisatools_header_abi.hpp`, ...) but **do not register the shared wrapper classes with pybind11** — that's LAT's sole responsibility (single-registrant rule, enforced by `LISATOOLS_IS_WRAPPER_OWNER`).
 
 ## Key External Dependencies
 

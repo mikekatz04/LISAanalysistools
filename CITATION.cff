@@ -1,0 +1,49 @@
+# Adopted from FastEMRIWaveforms' citation pattern (Phase 4, 2026-06-02).
+# This file lists the canonical bibliography for LISAanalysistools and the
+# papers users should cite when using the package. The
+# `lisatools.utils.citations` module parses this file at runtime so each
+# class can declare a `module_references()` list that gets rendered into
+# a BibTeX string via `MyClass.citation()` or the `lisatools_citations`
+# CLI.
+
+cff-version: 1.2.0
+title: LISAanalysistools
+message: >-
+  If you use this software, please cite both the package itself and
+  the references specific to the modules / classes you use (see each
+  class's `module_references()` method and the documentation).
+type: software
+authors:
+  - given-names: Michael
+    family-names: Katz
+    orcid: 'https://orcid.org/0000-0002-7605-5767'
+    affiliation: NASA Marshall Space Flight Center
+    email: mikekatz04@gmail.com
+repository-code: 'https://github.com/mikekatz04/LISAanalysistools'
+license: Apache-2.0
+abstract: >-
+  Tooling for LISA (Laser Interferometer Space Antenna) data analysis
+  -- orbit definitions, sensitivity matrices, analysis containers,
+  source-class waveform generators, the LISA global fit pipeline, and
+  JAX / CUDA / CPU backends for response and TDI machinery.
+
+# Module-specific references. Each entry's `key` is what classes pass
+# into their `module_references()` list. Keep this list flat (no
+# nesting); new references are appended.
+references:
+  - type: article
+    key: GlobalFitKatz2024
+    title: "Efficient global fit of the LISA data with the gravitational-wave source population"
+    authors:
+      - given-names: Michael L.
+        family-names: Katz
+    year: 2024
+    note: Placeholder -- update with the canonical global-fit paper when published.
+  - type: article
+    key: WDMheterodyne
+    title: "WDM-domain heterodyne template likelihoods for LISA"
+    authors:
+      - given-names: Michael L.
+        family-names: Katz
+    year: 2026
+    note: Placeholder -- chunked-heterodyne paper reference; update when on arXiv.

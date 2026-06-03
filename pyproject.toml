@@ -102,6 +102,11 @@ optional-dependencies.dev = [
   "pylint",
 ]
 
+# Phase 4 (2026-06-02): FEW-pattern adoption -- CLI entry point for the
+# citation registry. `lisatools_citations` -> lisatools.cmd.citations:main.
+# See `lisatools/utils/citations.py` and CITATION.cff at repo root.
+scripts.lisatools_citations = "lisatools.cmd.citations:main"
+
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
 local_scheme = "node-and-date"
@@ -162,6 +167,8 @@ sdist.include = [
   "src/lisatools/cutils/LISAResponse.hh",
   "src/lisatools/cutils/binding_flr.cxx",
   "src/lisatools/cutils/binding_flr.hpp",
+  # Phase 4: citation registry data file (parsed by lisatools.utils.citations).
+  "CITATION.cff",
 ]
 sdist.exclude = [
   ".devcontainer/",
