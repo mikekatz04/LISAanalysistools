@@ -643,7 +643,6 @@ class PSDSettings(Settings):
     nknots: Optional[int] = None
     num_prop_repeats: int = 50
 
-
 class PSDSetup(Setup):
     def __init__(self, psd_settings: PSDSettings):
 

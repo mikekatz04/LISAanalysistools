@@ -29,6 +29,7 @@ from tqdm import tqdm
 
 from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
+from .gathergalaxy import gather_gb_samples
 
 if TYPE_CHECKING:
     from eryn.utils.transform import TransformContainer
@@ -134,8 +135,10 @@ source_types_names = dict(
     galfor="NOISE",  # todo: should we merge noise and stochastic together under a common "stochastic" source type?
 )
 
-MAX_SOURCES_PER_BATCH = 500
+# order of the mojito light mbh sources, sorted by merger time (earliest to latest), for the purpose of assigning `known_injection` labels in the metadata
+_MOJITO_LIGHT_MBH_ORDER = ["source_18", "source_5", "source_16", "source_7", "source_2", "source_12", "source_9", "source_4", "source_0", "source_15", "source_3", "source_10", "source_19", "source_13", "source_6", "source_17", "source_8", "source_1", "source_11", "source_14"] 
 
+MAX_SOURCES_PER_BATCH = 500
 
 def _apply_output_corrections(branch: str, samples_dict: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Apply branch-specific output corrections to a posterior mapping."""
@@ -1228,15 +1231,87 @@ class SubmissionWriter(BackendConsumer):
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
         self.run_metadata = RunMetadata.from_curr(self.curr)
 
-    def prepare_samples_for submission(self):
+    def prepare_samples_for_submission(self):
         """
         Prepare the samples for submission by clustering the GBs, and sorting the mbhbs according to the coalescence time.
         Each source type needs a callable to handle the specific processing, and this method act as a dispatcher.
         """
 
-        raise NotImplementedError("Not implemented yet")
+        for branch in self.branches:
+            prepare_fn = self.prepare_samples_registry.get(branch, None)
+            if prepare_fn:
+                logger.info(f"Preparing samples for branch '{branch}' using '{prepare_fn.__name__}'")
+                self.samples[branch], self.inds[branch] = prepare_fn(
+                    self.samples[branch], self.inds[branch]
+                )
+
+    def _prepare_mbhb_samples(self, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Sort the MBHB samples according to the coalescence time, and cluster them if there are multiple sources in the same block."""
+
+        coalescence_time_idx = list(PARAMETER_INFO_REGISTRY["mbh"].keys()).index("t_c")
+        mean_coalescence_times = samples[:, :, coalescence_time_idx].mean(axis=0) # shape (nleaves_max,)
+        sorted_indices = np.argsort(mean_coalescence_times)
+        samples = samples[:, sorted_indices, :]
+        inds = inds[:, sorted_indices]
+
+        return samples, inds
+    
+    def _prepare_gb_samples(self, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        raise NotImplementedError("GB clustering not implemented yet")
+
+    @property
+    def prepare_samples_registry(self) -> dict[str, Callable[[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]]:
+        """Registry mapping each source type to its corresponding sample preparation function."""
+        return {
+            "mbh": self._prepare_mbhb_samples,
+            "gb": self._prepare_gb_samples,
+        }
+
+    def _get_mbhb_label(self, leaf_samples: np.ndarray, leaf_index: int) -> str:
+        """Get a label for an MBHB source based on its coalescence time."""
+        
+        coalescence_time_idx = list(PARAMETER_INFO_REGISTRY["mbh"].keys()).index("t_c")
+        mean_coalescence_time = int(leaf_samples[:, coalescence_time_idx].mean())
+
+        xxxxx = f"{leaf_index:05d}"
+        yyyyy = f"{mean_coalescence_time}"
+        
+        return f"{xxxxx}_{yyyyy}"
+
+    def _get_gb_label(self, leaf_samples: np.ndarray, leaf_index: int) -> str:
+        """Get a label for a GB source based on its frequency."""
+        
+        frequency_idx = list(PARAMETER_INFO_REGISTRY["gb"].keys()).index("f0")
+        mean_frequency = leaf_samples[:, frequency_idx].mean()
+        mean_frequency_microhz = int(mean_frequency * 1e6)
+
+        xxxxx = f"{leaf_index:05d}"
+        yyyyy = f"{mean_frequency_microhz}"
+
+        return f"{xxxxx}_{yyyyy}"
+    
+    @property
+    def get_source_label_registry(self) -> dict[str, Callable]:
+        """Define how sources should be labelled in the output files.
+        For Mojito light, we use the XXXXX_YYYYY format, with XXXXX a 5 digit ID based on the leaf count (eg, 00000, 00001, etc) and YYYYY a descriptor of the source (eg, coalescence time for MBHBs, frequency for GBs, etc).
+        """
+
+        return {
+            "mbh": self._get_mbhb_label,
+            "gb": self._get_gb_label,
+        }
+
+    @property
+    def known_injections(self) -> dict[str, list[str]]:
+        """Return a dict mapping each source type to a list of known injections for that source type, to be included in the metadata."""
+        # for Mojito light, we don't have any known injections, so we return an empty list for each source type
+        return {
+            'mbh': _MOJITO_LIGHT_MBH_ORDER, 
+            'gb': []
+            }
 
 
+    @property
     def submission_folder(self) -> str:
         """Return the full path to the submission folder for this run."""
         return self.run_metadata.submission_folder
@@ -1284,7 +1359,6 @@ class SubmissionWriter(BackendConsumer):
 
             self._save_source_posterior(branch)
 
-
     def _save_source_posterior(self, branch: str):
         """Save the posterior samples for a single detected source type, identified by `branch`."""
 
@@ -1303,11 +1377,10 @@ class SubmissionWriter(BackendConsumer):
         metadata.parameter_info = parameter_names
         metadata.parameter_units = units
 
-        metadata.detection_statistic = self.detection_criteria.detection_statistics(
-                samples, inds
-            ).tolist()
-        
-        posterior_files_map: dict[str, str] = {} # map each individual source to the relevant posterior file. posterior file will be repeated if there are multiple sources in the same block
+        detection_stats = self.detection_criteria.detection_statistics(samples, inds).tolist()
+
+        posterior_files_map: dict[str, str] = {}
+        label_to_statistic: dict[str, float] = {}
 
         num_leaves = samples.shape[1]
         for leaf_count in range(0, num_leaves, MAX_SOURCES_PER_BATCH):
@@ -1323,7 +1396,8 @@ class SubmissionWriter(BackendConsumer):
             with h5py.File(os.path.join(self.run_metadata.submission_folder, filepath), "w") as f:
                 for leaf in range(num_sources_here):
 
-                    source_label = f"posterior_{leaf_count + leaf}" # todo change this. we also need an estimation of the frequency for GB...
+                    source_label = self.get_source_label_registry[branch](samples_here[:, leaf, :], leaf_count + leaf)
+                    label_to_statistic[source_label] = detection_stats[leaf_count + leaf]
 
                     leaf_samples = _build_leaf_samples_dict(
                         samples_here=samples_here,
@@ -1335,21 +1409,26 @@ class SubmissionWriter(BackendConsumer):
                     )
                     _save_posterior_dataset(f, source_label, leaf_samples)
 
-                    posterior_files_map[source_label] = filepath # we store the relative paths
+                    posterior_files_map[source_label] = filepath
 
             logger.info(
                 f"Saved posterior samples for branch '{branch}', leaves {leaves} to {filepath}"
             )
 
         detections = []
+        known_injections_here = self.known_injections.get(branch, [])
+
         for j, source_idx in enumerate(posterior_files_map.keys()):
             detections.append({
                 "source_id": str(source_idx),
-                "posterior_id": str(source_idx),
-                "quality_flag": int(metadata.quality_flags[j]) if j < len(metadata.quality_flags) else 0,
-                "detection_statistic": float(metadata.detection_statistics[j]),
+                "posterior_id": f"posterior_{source_idx}",
                 "comment": "",
+                "quality_flag": int(metadata.quality_flags[j]) if j < len(metadata.quality_flags) else 0,
+                "known_injection": known_injections_here[j] if j < len(known_injections_here) else "",
+                "detection_statistic": float(label_to_statistic[source_idx]),
             })
+
+        metadata.detection_statistic = list(label_to_statistic.values())
         
         metadata.detections = detections
 
@@ -1372,13 +1451,13 @@ class SubmissionWriter(BackendConsumer):
 
             for j, (source_idx, posterior_file_path) in enumerate(posterior_files_map.items()):
                 posterior_group.create_dataset(source_idx, data=str(posterior_file_path))
-                det = detections[j]
-    
-                detection_group.create_dataset("source_id", data=det["source_id"])
-                detection_group.create_dataset("posterior_id", data=det["posterior_id"])
-                detection_group.create_dataset("quality_flag", data=det["quality_flag"])
-                detection_group.create_dataset("detection_statistic", data=det["detection_statistic"])
-                detection_group.create_dataset("comment", data=det["comment"])
+
+            detection_group.create_dataset("source_id", data=[d["source_id"] for d in detections])
+            detection_group.create_dataset("posterior_id", data=[d["posterior_id"] for d in detections])
+            detection_group.create_dataset("comment", data=[d["comment"] for d in detections])
+            detection_group.create_dataset("quality_flag", data=[d["quality_flag"] for d in detections])
+            detection_group.create_dataset("known_injection", data=[d["known_injection"] for d in detections])
+            detection_group.create_dataset("detection_statistic", data=[d["detection_statistic"] for d in detections])
 
             _save_metadata_attributes(f, metadata)
 
@@ -1448,6 +1527,7 @@ class SubmissionWriter(BackendConsumer):
             log_likelihood=self.log_likelihood,
         )
         param_names = list(samples_dict.keys())
+        physical_param_names = [p for p in param_names if p not in ["logprior", "loglikelihood"]]
         structured_array = _samples_dict_to_structured_array(samples_dict)
 
         effective_branch_name = "noise" #todo or stochastic?
@@ -1456,10 +1536,16 @@ class SubmissionWriter(BackendConsumer):
 
         with h5py.File(os.path.join(self.run_metadata.submission_folder, filepath), "w") as f:
             group = f.create_group(name=effective_branch_name)
-            group.attrs["labels"] = ", ".join(param_names)
-            group.attrs["npars"] = len(param_names)
+            group.attrs["labels"] = ", ".join(physical_param_names)
+            group.attrs["npars"] = len(physical_param_names)
             group.attrs["nsamples"] = len(structured_array)
             group.create_dataset("posterior", data=structured_array)
+
+            # add the noise/p, noise/logprior, noise/loglikelihood as separate datasets for convenience to match the requested setup. I would prefer to keep them as part of the structured array, but this can be easily changed if needed.
+            posterior_samples = np.stack([samples_dict[param] for param in physical_param_names], axis=-1) # we extract the posterior samples as a 2D array of shape (nsamples, npars) for convenience. These do not include the logprior and loglikelihood, which are stored separately.
+            group.create_dataset("p", data=posterior_samples)
+            group.create_dataset("logprior", data=samples_dict["logprior"])
+            group.create_dataset("loglikelihood", data=samples_dict["loglikelihood"]) 
 
         metadata.posterior_file = filepath # we store the relative path to the posterior file in the metadata        
         metadata_base_filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_{self.run_metadata.submission_timestamp}"
@@ -1473,7 +1559,7 @@ class SubmissionWriter(BackendConsumer):
             noise_group = f.create_group(name=effective_branch_name)
             posterior_group = noise_group.create_group(name="posterior_file")
             posterior_group.create_dataset("posterior", data=str(filepath))
-            _save_metadata_attributes(f, metadata)
+            _save_metadata_attributes(noise_group, metadata)
 
         logger.info(f"Saved metadata for stochastic branch(es) to {metadata_h5_filepath}")
 
@@ -1497,6 +1583,7 @@ class SubmissionWriter(BackendConsumer):
     def write_submission(self, acs: AnalysisContainerArray):
         """Run the full submission writing pipeline."""
         self.create_folders()
+        self.prepare_samples_for_submission()
         self.save_posteriors()
 
         # finally save the overall run metadata

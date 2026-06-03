@@ -61,7 +61,7 @@ def setup_recipe(recipe, engine_info, curr, acs, priors, state):
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
     Tmax: float = 1.0e6
-    permute_every: int = 25
+    permute_every: int = 20
 
     mbh_info = curr.source_info["mbh"]
     psd_info = curr.source_info["psd"]
@@ -206,10 +206,10 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
+        log_dir=general_set.artifacts_file_dir,
         priors=priors,
         ndim=2,
         injection=injection,
-        log_dir=general_set.file_store_dir,
         num_prop_repeats=100,
     )
 
@@ -250,7 +250,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         tdi_generation="2nd generation",
         tdi_channels="XYZ",
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits,
-        order=25,
+        order=30,
     )
 
     waveform_init_kwargs = dict(
@@ -262,7 +262,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         * YRSID_SI,  # this is only for the waveform generation, not the data, which is still general_set.Tobs
         start_freq=7e-5,
         use_reference_time=True,
-        buffer_time=10_000,
+        buffer_time=15_000,
         stft_dt=general_set.stft_dt,
         freq_min=general_set.start_freq,
         freq_max=general_set.end_freq,
@@ -340,6 +340,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     priors = {"mbh": ProbDistContainer(priors_mbh)}
 
     mbh_settings = MBHSettings(
+        log_dir=general_set.artifacts_file_dir,
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=waveform_init_kwargs,
@@ -350,8 +351,7 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         nleaves_max=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         nleaves_min=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         ndim=11,
-        num_prop_repeats=25,
-        log_dir=general_set.file_store_dir,
+        num_prop_repeats=40,
         betas=betas,
         inner_moves=[StretchMove(),]
     )
@@ -378,7 +378,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "CDL1run0_v16"
+    global_fit_version = "CDL1run0_v17"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
     global_fit_input_data_link = ""
@@ -387,9 +387,9 @@ def get_general_erebor_settings() -> GeneralSetup:
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
     comment = "6 MBHBs after fixing another bug."
 
-    submission_folder = None#"/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+    submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 600
+    num_iterations = 200
 
     source_ids = [18, 5, 16, 7, 2, 12]
 
@@ -398,12 +398,12 @@ def get_general_erebor_settings() -> GeneralSetup:
     start_freq = 1e-4
     end_freq = 2.9e-2
 
-    head_dir = "/data/asantini/globalfit/erebor/moijto_runs/"
+    head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "6_mbhbs_18_5_16_7_2_12_without_response_tapering"
-    file_store_dir = head_dir + "mojito_output/"
+    base_file_name = "6_mbhbs_submission_test"
+    file_store_dir = head_dir
 
-    gpus = [0]
+    gpus = [0, 1]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -411,8 +411,8 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 15
-    ntemps = 2
+    nwalkers = 50
+    ntemps = 4
 
     window_type = "tukey"
     window_taper_duration = 1 / start_freq
