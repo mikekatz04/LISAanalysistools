@@ -26,7 +26,7 @@ from .globalfitmove import GlobalFitMove
 from .multigpumove import MultiGPUMoveBase
 
 logger = logging.getLogger(__name__)
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 if TYPE_CHECKING:
     from ...sources.waveformbase import TDWaveformBase
