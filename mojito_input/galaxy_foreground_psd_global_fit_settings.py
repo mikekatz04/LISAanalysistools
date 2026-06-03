@@ -178,9 +178,13 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     else:
         raise ValueError(f"Unsupported prior model: {prior_model}")
     
+    # prior_model_config = {
+    #     r"$S_{\rm oms}$": LOG10_OMS_ASD_RANGE,  # Soms_d
+    #     r"$S_{\rm tm}$": LOG10_TM_ASD_RANGE,
+    # }
     prior_model_config = {
-        r"$S_{\rm oms}$": LOG10_OMS_ASD_RANGE,  # Soms_d
-        r"$S_{\rm tm}$": LOG10_TM_ASD_RANGE,
+        r"$S_{\rm oms}$": (6.0e-12, 20.0e-11),
+        r"$S_{\rm tm}$": (1.0e-15, 20.0e-14),
     }
 
     psd_input_basis = [
@@ -189,14 +193,15 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     ]
 
 
-    psd_transform = TransformContainer(
-        input_basis=psd_input_basis,
-        output_basis=psd_input_basis,
-        parameter_transforms={
-            r"$S_{\rm oms}$": ten_to_the_x,
-            r"$S_{\rm tm}$": ten_to_the_x,
-        },
-    )
+    # psd_transform = TransformContainer(
+    #     input_basis=psd_input_basis,
+    #     output_basis=psd_input_basis,
+    #     parameter_transforms={
+    #         r"$S_{\rm oms}$": ten_to_the_x,
+    #         r"$S_{\rm tm}$": ten_to_the_x,
+    #     },
+    # )
+    psd_transform = None
 
     # waveform kwargs
     initialize_kwargs_psd = dict()
@@ -208,7 +213,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
     priors = {"psd": ProbDistContainer(priors_psd)}
 
-    injection = np.array([np.log10(15e-12), np.log10(3e-15)])  # for diagnostic plots
+    #injection = np.array([np.log10(15e-12), np.log10(3e-15)])  # for diagnostic plots
+    injection = np.array([15e-12, 3e-15])
 
     psd_settings = PSDSettings(
         Tobs=general_set.Tobs,
@@ -217,7 +223,7 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         priors=priors,
         ndim=2,
         injection=injection,
-        log_dir=general_set.file_store_dir,
+        log_dir=general_set.artifacts_file_dir,
         num_prop_repeats=100,
         transform=psd_transform,
     )
@@ -406,7 +412,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup, SourceMe
         nleaves_min=0,
         ndim=8,
         betas=betas,
-        log_dir=general_set.file_store_dir,
+        log_dir=general_set.artifacts_file_dir,
         num_repeat_proposals=100, 
         search_kwargs=search_kwargs        
     )
@@ -446,7 +452,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
     comment = "first test run for full galaxy+noise."
 
-    submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
+    submission_folder = None #"/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
     num_iterations = 700
 
