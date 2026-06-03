@@ -67,16 +67,6 @@ if(LISATOOLS_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM
     )
-  
-  # # NEW: Copy L1Detector.cu to L1Detector.cxx for CPU build
-  # add_custom_command(
-  #   OUTPUT "L1Detector.cxx"
-  #   COMMENT "Copy L1Detector.cu to L1Detector.cxx"
-  #   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/L1Detector.cu"
-  #           "${CMAKE_CURRENT_BINARY_DIR}/L1Detector.cxx"
-  #   DEPENDS "L1Detector.cu"
-  #   VERBATIM
-  #   )
 
   # Copy PSD.cu to PSD.cxx for CPU build
   add_custom_command(
@@ -88,40 +78,51 @@ if(LISATOOLS_WITH_CPU)
     VERBATIM
     )
 
-  # Add L1Detector.cxx to the sources
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx)
+  # Phase 3E: copy LISAResponse.cu to LISAResponse.cxx for CPU build
+  add_custom_command(
+    OUTPUT "LISAResponse.cxx"
+    COMMENT "Copy LISAResponse.cu to LISAResponse.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/LISAResponse.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/LISAResponse.cxx"
+    DEPENDS "LISAResponse.cu"
+    VERBATIM
+    )
+
+  # Phase 3E adds LISAResponse.cxx to the detector static library so all
+  # LISA-side C++ symbols live in one .so per backend wheel.
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx LISAResponse.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
-  
-  # Add L1Detector.hpp to header files
-  target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp  PSD.hpp)
 
-  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
+  target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
+                                        Detector.hpp  PSD.hpp  LISAResponse.hh)
+
+  # Phase 3E adds binding_flr.cxx to the pybind11 module so response_part(m)
+  # is linked in alongside detector_part(m).
+  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx binding_flr.cxx)
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
   target_include_directories(lisaanalysistools_cpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                      binding.hpp)
+                                      binding.hpp  binding_flr.hpp)
 endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  # Add L1Detector.cu to the GPU sources
-  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu)
+  # Phase 3E adds LISAResponse.cu to the GPU sources.
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu LISAResponse.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
-  
-  # Add L1Detector.hpp to header files
-  target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp PSD.hpp)
 
-  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
+  target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
+                                        Detector.hpp PSD.hpp LISAResponse.hh)
+
+  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx binding_flr.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
-  
+
   target_include_directories(lisaanalysistools_gpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                      binding.hpp)
+                                      binding.hpp  binding_flr.hpp)
 
 endif()

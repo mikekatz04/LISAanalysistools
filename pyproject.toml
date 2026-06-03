@@ -157,6 +157,11 @@ sdist.include = [
   "src/lisatools/cutils/lisatools_header_abi.hpp",
   "src/lisatools/cutils/orbits_view.hpp",
   "src/lisatools/cutils/LISAanalysisToolsConfig.cmake",
+  # Phase 3E: LISA-response sources absorbed from lisa-on-gpu.
+  "src/lisatools/cutils/LISAResponse.cu",
+  "src/lisatools/cutils/LISAResponse.hh",
+  "src/lisatools/cutils/binding_flr.cxx",
+  "src/lisatools/cutils/binding_flr.hpp",
 ]
 sdist.exclude = [
   ".devcontainer/",
