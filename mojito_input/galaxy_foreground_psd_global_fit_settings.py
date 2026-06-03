@@ -157,7 +157,7 @@ LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
 # Galactic foreground prior ranges
 LOG10_AMP_RANGE = (-47.0, -40.0)
 ALPHA_RANGE = (1.0, 8.0)
-LOG10_FREQ1_RANGE = (np.log10(1e-4), np.log10(10**(-2.5)))
+LOG10_FREQ1_RANGE = (np.log10(5e-4), np.log10(10**(-2.5)))
 LOG10_FREQ2_RANGE = (np.log10(1e-5), np.log10(10**(-2.5)))
 LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-2))
 
