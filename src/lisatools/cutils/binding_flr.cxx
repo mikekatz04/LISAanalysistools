@@ -11,6 +11,7 @@
 #include "binding_fd_domain.hpp"
 #include "binding_wdm_settings.hpp"
 #include "binding_wdm_domain.hpp"
+#include "binding_lat_spline_tdi.hpp"
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #include "pybind11_cuda_array_interface.hpp"
@@ -248,6 +249,60 @@ void response_part(py::module &m) {
          py::arg("ind_min_t"), py::arg("ind_max_t"),
          py::arg("ind_min_f"), py::arg("ind_max_f"),
          py::arg("num_data"), py::arg("num_noise"))
+    ;
+
+    // Phase 3L.6: LISATDIonTheFlyWrap + FDSpline/TDSpline wrap+underlying
+    // absorbed from lisa-on-gpu's binding_tof.{cxx,hpp}. Class defs live in
+    // binding_lat_spline_tdi.hpp / lat_spline_tdi_waveform.hh (included above).
+
+    // FDSplineTDIWaveformWrap
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapGPU")
+#else
+    py::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapCPU")
+#endif
+    .def(py::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("freq_spline"))
+    .def("run_wave_tdi_wrap", &FDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
+    .def("get_buffer_size", &FDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
+    .def_readwrite("orbits", &FDSplineTDIWaveformWrap::orbits)
+    .def_readwrite("tdi_config", &FDSplineTDIWaveformWrap::tdi_config)
+    .def_readwrite("amp_spline", &FDSplineTDIWaveformWrap::amp_spline)
+    .def_readwrite("freq_spline", &FDSplineTDIWaveformWrap::freq_spline)
+    ;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<FDSplineTDIWaveform>(m, "FDSplineTDIWaveformGPU")
+#else
+    py::class_<FDSplineTDIWaveform>(m, "FDSplineTDIWaveformCPU")
+#endif
+    .def(py::init<Orbits *, TDIConfig*, CubicSpline*, CubicSpline*>(),
+         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("freqs_spline"))
+    ;
+
+    // TDSplineTDIWaveformWrap
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapGPU")
+#else
+    py::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapCPU")
+#endif
+    .def(py::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("phase_spline"))
+    .def("run_wave_tdi_wrap", &TDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
+    .def("get_buffer_size", &TDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
+    .def_readwrite("orbits", &TDSplineTDIWaveformWrap::orbits)
+    .def_readwrite("tdi_config", &TDSplineTDIWaveformWrap::tdi_config)
+    .def_readwrite("amp_spline", &TDSplineTDIWaveformWrap::amp_spline)
+    .def_readwrite("phase_spline", &TDSplineTDIWaveformWrap::phase_spline)
+    ;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<TDSplineTDIWaveform>(m, "TDSplineTDIWaveformGPU")
+#else
+    py::class_<TDSplineTDIWaveform>(m, "TDSplineTDIWaveformCPU")
+#endif
+    .def(py::init<Orbits *, TDIConfig*, CubicSpline*, CubicSpline*>(),
+         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("phase_spline"))
     ;
 
 }
