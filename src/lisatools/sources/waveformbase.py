@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEBUG_MODE = True
+DEBUG_MODE = False
 
 class AETTDIWaveform(ABC):
     """Base class for an AET TDI Waveform."""
@@ -871,7 +871,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         # h_plus = h_plus * window_orig[None, :]
         # h_cross = h_cross * window_orig[None, :]
 
-        # Pad zeros to both the front (buffer) and the back
+        # Pad zeros after the original signal to provide a buffer. There the signal is zero anyways
         h_plus = self.xp.pad(h_plus, ((0, 0), (0, num_buffer_ponts)), mode="constant", constant_values=0.0)
         h_cross = self.xp.pad(h_cross, ((0, 0), (0, num_buffer_ponts)), mode="constant", constant_values=0.0)
 
