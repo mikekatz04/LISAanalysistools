@@ -10,6 +10,7 @@
 // TDIonTheFly carve-out.
 #include "binding_fd_domain.hpp"
 #include "binding_wdm_settings.hpp"
+#include "binding_wdm_domain.hpp"
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #include "pybind11_cuda_array_interface.hpp"
@@ -217,6 +218,36 @@ void response_part(py::module &m) {
          py::arg("num_channel"), py::arg("ind_min_t"), py::arg("ind_max_t"),
          py::arg("ind_min_f"), py::arg("ind_max_f"))
     .def_readwrite("wdm_settings", &WDMSettingsWrap::wdm_settings)
+    ;
+
+    // Phase 3L: WDMDomainWrap + WDMDomain absorbed from lisa-on-gpu's
+    // binding_tof.{cxx,hpp}. The class definitions live in
+    // binding_wdm_domain.hpp / wdm_domain.hh (included above).
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<WDMDomainWrap, WDMSettingsWrap>(m, "WDMDomainWrapGPU")
+#else
+    py::class_<WDMDomainWrap, WDMSettingsWrap>(m, "WDMDomainWrapCPU")
+#endif
+    .def(py::init<array_type<double>, array_type<double>, double, double, int, int, int, int, int, int, int, int, int>(),
+         py::arg("wdm_data"), py::arg("wdm_noise"), py::arg("layer_df"), py::arg("layer_dt"),
+         py::arg("Nf"), py::arg("Nt"), py::arg("num_channel"),
+         py::arg("ind_min_t"), py::arg("ind_max_t"),
+         py::arg("ind_min_f"), py::arg("ind_max_f"),
+         py::arg("num_data"), py::arg("num_noise"))
+    .def_readwrite("wdm", &WDMDomainWrap::wdm)
+    ;
+
+#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
+    py::class_<WDMDomain>(m, "WDMDomainGPU")
+#else
+    py::class_<WDMDomain>(m, "WDMDomainCPU")
+#endif
+    .def(py::init<double*, double*, double, double, int, int, int, int, int, int, int, int, int>(),
+         py::arg("wdm_data"), py::arg("wdm_noise"), py::arg("layer_df"), py::arg("layer_dt"),
+         py::arg("Nf"), py::arg("Nt"), py::arg("num_channel"),
+         py::arg("ind_min_t"), py::arg("ind_max_t"),
+         py::arg("ind_min_f"), py::arg("ind_max_f"),
+         py::arg("num_data"), py::arg("num_noise"))
     ;
 
 }

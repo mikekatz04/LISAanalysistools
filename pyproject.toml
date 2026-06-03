@@ -172,6 +172,8 @@ sdist.include = [
   "src/lisatools/cutils/binding_fd_domain.hpp",
   "src/lisatools/cutils/wdm_settings.hh",
   "src/lisatools/cutils/binding_wdm_settings.hpp",
+  "src/lisatools/cutils/wdm_domain.hh",
+  "src/lisatools/cutils/binding_wdm_domain.hpp",
   # Phase 4: citation registry data file (parsed by lisatools.utils.citations).
   "CITATION.cff",
 ]
