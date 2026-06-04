@@ -16,6 +16,15 @@
 #include <stdexcept>
 #include <cmath>
 
+// CUDA CUB block-scan / block-reduce intrinsics; only used in the GPU
+// build (the host build of these helpers degenerates to a loop-based
+// inclusive scan / sum). Missing this include broke the GPU build at
+// Phase 3L.5 -- see lisa-on-gpu/.../TDIonTheFly.cu:10 (the original
+// before the carve-out).
+#ifdef __CUDACC__
+#include <cub/cub.cuh>
+#endif
+
 #ifdef __CUDACC__
 #define NUM_THREADS_HERE 128
 #else

@@ -71,8 +71,13 @@ class DomainSettingsBase(LISAToolsParallelModule):
 
     @classmethod
     def supported_backends(cls):
-        """Return the list of backend names this settings class supports."""
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+        """Return the list of backend names this settings class supports.
+
+        Post-Phase-3E deprecation: returns ``lisatools_*`` names. The old
+        ``fastlisaresponse_*`` names were retired when the responselisa
+        pybind11 module was retired (see lisa-on-gpu's CLAUDE.md).
+        """
+        return ["lisatools_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def get_slice(self, index: tuple) -> DomainSettingsBase:
         """Return a new settings object describing a sliced view of this domain."""
