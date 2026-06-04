@@ -27,13 +27,14 @@ from eryn.utils import get_integrated_act
 from scipy.interpolate import CubicSpline
 from tqdm import tqdm
 
+from ..datacontainer import DataResidualArray
 from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
 from .gathergalaxy import gather_gb_samples
 
 if TYPE_CHECKING:
     from eryn.utils.transform import TransformContainer
-    from ..analysiscontainer import AnalysisContainerArray, AnalysisContainer, DataResidualArray
+    from ..analysiscontainer import AnalysisContainerArray, AnalysisContainer
     from ..detector import Orbits
     from ..domains import DomainSettingsBase, TDSettings
     from ..sensitivity import XYZSensitivityBackend
