@@ -304,7 +304,12 @@ class GBSparseComplexWDMGen:
 
     def _active_m_global(self, params9: np.ndarray) -> np.ndarray:
         f0 = float(np.asarray(params9, dtype=float).reshape(9)[self.f0_param_idx])
-        m_floor = int(round(f0 / self.layer_df))
+        # Floor convention -- matches the canonical mm5/mm2 definition and
+        # ``gb_chunked_prior_draws.py``. Using round() shifts the active band
+        # by one layer when f_frac > 0.5, leaving v2's m_active centred one
+        # row above the source's true carrier layer and producing spurious
+        # r-spikes wherever |c0| drops near the envelope crossings.
+        m_floor = int(np.floor(f0 / self.layer_df))
         m_act = m_floor + np.arange(
             -self.m_active_half_width, self.m_active_half_width + 1
         )

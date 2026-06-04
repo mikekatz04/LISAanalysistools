@@ -209,10 +209,11 @@ def compute_mm(
     layer_df = wdm_set.layer_df
     m_floor = int(f0 / layer_df)
     if band == "mm5":
+        # 5-layer symmetric band: m_floor +/- 2 (matches v2 active band).
         new_wdm_set = WDMSettings(
             wdm_set.Nf, wdm_set.Nt, wdm_set.data_dt,
             min_time=wdm_set.min_time, max_time=wdm_set.max_time,
-            min_freq=f0 - 3 * layer_df,
+            min_freq=f0 - 2 * layer_df,
             max_freq=f0 + 2 * layer_df,
             force_backend=backend,
         )
@@ -298,7 +299,19 @@ def main():
         return np.asarray(spline.eval_tdi(t_arr))[0]
 
     td_set = TDSettings(Nobs, dt, force_backend=backend)
-    window = np.ones(Nobs)
+    # Tukey window in the predetermined heterodyne alpha range
+    # (ALPHA_HET_NARROW=0.05 for N_sparse < 512, ALPHA_HET_WIDE=0.01 else),
+    # from lisa-on-gpu/src/fastlisaresponse/jax/wdm/fast_inner_heterodyne.py.
+    # Applied to BOTH the data wdmtransform AND the rfft fed to v2 so they
+    # see the same windowed signal.
+    from scipy.signal.windows import tukey as _tukey
+    TUKEY_ALPHA = float(os.environ.get("TUKEY_ALPHA", "0.05"))
+    if TUKEY_ALPHA > 0:
+        window = _tukey(Nobs, alpha=TUKEY_ALPHA).astype(float)
+    else:
+        window = np.ones(Nobs)
+    print(f"[window] Tukey alpha={TUKEY_ALPHA} "
+          f"(predetermined range: 0.01 <= alpha <= 0.05)", flush=True)
 
     wdm_set_real = WDMSettings(
         Nf, Nt, dt, t0=t_start,
@@ -407,7 +420,11 @@ def main():
                 params_cand = params_i.copy()
                 params_cand[1] = params_i[1] + DF0_FRAC * layer_df
                 td_cand = real_td_cb(params_cand)
-                fd_rfft_cand = np.fft.rfft(np.asarray(td_cand), axis=-1)
+                # Match the Tukey applied to data wdmtransform so v2's polyphase
+                # input is consistent with what the dense reference sees.
+                fd_rfft_cand = np.fft.rfft(
+                    np.asarray(td_cand) * window, axis=-1,
+                )
                 wdm_cand_real = TDSignal(td_cand, settings=td_set).transform(
                     wdm_set_real, window=window,
                 )
