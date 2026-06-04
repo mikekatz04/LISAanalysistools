@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     except (ImportError, ModuleNotFoundError):
         import numpy as cp  # type: ignore
         Device = Any  # type: ignore
+        from ..utils.typing import NDArrayLike, ArrayModule
 
 
 class BBHSNRWaveform(SNRWaveform):
@@ -191,7 +192,7 @@ class PhenomTHMWaveformBase(JaxBase):
         times: np.ndarray | cp.ndarray,
         mask: np.ndarray | cp.ndarray,
         *,
-        xp,
+        xp: ArrayModule,
         dt: float,
     ) -> np.ndarray | cp.ndarray:
         """
@@ -225,6 +226,26 @@ class PhenomTHMWaveformBase(JaxBase):
         times_out = xp.where(is_invalid, replacement_times, times_out)
 
         return times_out  # shape (Nbatch, max_valid_points)
+    
+    @staticmethod
+    def _leading_onset_ramp(num_points: int, num_pad: int, taper_length: int, xp: ArrayModule) -> NDArrayLike:
+        """
+        Get a leading onset ramp to smoothly turn on the waveform.
+        This avoids the sharp jump from zero to the first valid point.
+
+        Args:
+            num_points: Total number of points in the output array.
+            num_pad: Number of initial points that are invalid.
+            taper_length: Length of the taper in number of points.
+            xp: Array module (numpy or cupy).
+
+        Returns:
+            Ramp array of shape (num_points,).
+        """
+        rj = xp.arange(num_points)
+        offset = rj[None, :] - xp.asarray(num_pad, dtype=int)[:, None]
+        x = xp.clip(offset / float(taper_length), 0.0, 1.0)
+        return 0.5 * (1.0 - xp.cos(xp.pi * x))
 
     def get_reference_quantities(self,
                                 merger_time: float | np.ndarray | cp.ndarray, 
@@ -276,6 +297,9 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         *args: Any,
         **kwargs: Any,
     ) -> None:
+
+        if "coarse_grain" in waveform_kwargs and waveform_kwargs["coarse_grain"] is True:
+            raise ValueError("Applying the response through the `PyresponseTDI` class requires equispaced time arrays")
 
         TDPyResponseWaveformBase.__init__(
             self,
@@ -444,10 +468,14 @@ class PhenomTHMTDIWaveform(TDPyResponseWaveformBase, PhenomTHMWaveformBase):
         times_out = self.trim_and_shift_times(times, mask, xp=self.xp, dt=self.dt)
         num_keep = times_out.shape[-1]
 
+        num_pad = num_keep - mask.sum(axis=1).astype(int)  # (Nbatch,)
+        taper_length = int(self.tdi_buffer_time * 5 / self.dt)
+        ramp = self._leading_onset_ramp(num_points=num_keep, num_pad=num_pad, taper_length=taper_length, xp=self.xp)  # (Nbatch, num_keep)
+
         return (
             times_out,
-            hplus[:, -num_keep:],
-            hcross[:, -num_keep:],
+            hplus[:, -num_keep:] * ramp,  # apply ramp to h_plus to avoid sharp jump at the beginning of the waveform, which can cause issues with the TDI response
+            hcross[:, -num_keep:] * ramp,  # apply ramp to h_cross to avoid sharp jump at the beginning of the waveform, which can cause issues with the TDI response
         )
 
 
@@ -569,7 +597,11 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
 
         num_keep = times_out.shape[-1]
 
-        return times_out, amplitude[..., -num_keep:], phase[..., -num_keep:]
+        num_pad = num_keep - mask.sum(axis=1).astype(int)  # (Nbatch,)
+        taper_length = int(self.tdi_buffer_time * 5 / self.dt)
+        ramp = self._leading_onset_ramp(num_points=num_keep, num_pad=num_pad, taper_length=taper_length, xp=self.xp)  # (Nbatch, num_keep)
+
+        return times_out, amplitude[..., -num_keep:] * ramp, phase[..., -num_keep:] * ramp # should we also apply the ramp to the phase? 
 
     def process_amp_phase(
         self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray

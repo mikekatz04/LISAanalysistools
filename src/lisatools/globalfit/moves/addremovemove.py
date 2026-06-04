@@ -506,7 +506,8 @@ class ResidualAddOneRemoveOneMove(GlobalFitMove, StretchMove, Move):
                                     data_index=data_index,
                                 )
                     
-                    logger.debug(f"average proposed logl: {logl[in_prior].mean()}.")
+                    if DEBUG_MODE:
+                        logger.debug(f"average proposed logl: {logl[in_prior].mean()}.")
     
                     if np.any(logl[in_prior] < -1e10) or np.any(logl[in_prior] > 1e30):
                         logger.warning(f"Suspicious likelihood encountered in propose: min = {logl[~np.isinf(logp)].min()}, max = {logl[~np.isinf(logp)].max()}. This could be a sign of numerical issues.")

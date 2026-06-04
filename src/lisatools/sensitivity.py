@@ -1857,8 +1857,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         if include_galaxy:
             self._sanitize_galactic_grid_kwargs(galactic_grid_kwargs)
             self._setup_galactic_grid(**galactic_grid_kwargs)
-        # else:
-        #     logger.debug(f"Galactic grid not included in sensitivity matrix. To include, pass non-empty galactic_grid_kwargs dictionary to constructor.")
 
     @property
     def kwargs(self):
@@ -1887,6 +1885,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     @property
     def time_indices(self):
         return self._time_indices
+    
 
     @time_indices.setter
     def time_indices(self, x):

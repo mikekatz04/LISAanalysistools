@@ -5,6 +5,7 @@ import logging
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
+from tqdm import tqdm
 
 import cupy as xp
 import h5py
@@ -1399,6 +1400,8 @@ def gather_gb_samples(
     reader,
     sens_mat,
     gpu,
+    gb_samples: Optional[np.ndarray] = None,
+    gb_inds: Optional[np.ndarray] = None,
     num_compare_samples=1,
     samples_keep=1,
     thin_by=1,
@@ -1413,18 +1416,19 @@ def gather_gb_samples(
     fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
     psd_in = [xp.asarray(sens_mat.invC.copy())]
 
-    gb_samples = reader.get_chain(
-        branch_names=["gb"],
-        temp_index=0,
-        discard=reader.iteration - samples_keep,
-        thin=thin_by,
-    )["gb"]
-    gb_inds = reader.get_inds(
-        branch_names=["gb"],
-        temp_index=0,
-        discard=reader.iteration - samples_keep,
-        thin=thin_by,
-    )["gb"]
+    if gb_samples is None or gb_inds is None:
+        gb_samples = reader.get_chain(
+            branch_names=["gb"],
+            temp_index=0,
+            discard=reader.iteration - samples_keep,
+            thin=thin_by,
+        )["gb"]
+        gb_inds = reader.get_inds(
+            branch_names=["gb"],
+            temp_index=0,
+            discard=reader.iteration - samples_keep,
+            thin=thin_by,
+        )["gb"]
 
     gb_samples = gb_samples.reshape(-1, gb_samples.shape[-2], gb_samples.shape[-1])
     gb_inds = gb_inds.reshape(-1, gb_inds.shape[-1])
@@ -1452,7 +1456,7 @@ def gather_gb_samples(
     if num_compare_samples > len(gb_samples):
         num_compare_samples = len(gb_samples)
 
-    for samp_i in range(len(gb_samples) - 1)[:num_compare_samples]:
+    for samp_i in tqdm(range(len(gb_samples) - 1)[:num_compare_samples], desc="Comparing samples"):
 
         first_sample = gb_samples[random_samples[samp_i]].reshape(-1, 8)
         first_sample_snrs = gb_snrs[random_samples[samp_i]].flatten()
