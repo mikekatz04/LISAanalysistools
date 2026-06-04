@@ -15,10 +15,12 @@
 //    `fast_wdm_inner_heterodyne_spline`, `fast_wdm_inner_heterodyne`,
 //    `fast_wdm_inner_heterodyne_direct`, `gb_chunk_fd_to_wdm`)
 //   appended below the macros.
+// - Slice 3-prep: `NUM_THREADS_HERE` block-size knob +
+//   `FAST_WDM_K_PER_THREAD_MAX` register-array sizer (below the
+//   include block).
 // - Slice 3 (pending): the 4 templated chunked-het kernel bodies
 //   (`wdm_het_{fill_global,get_ll,swap_ll,get_fstat_ll}_kernel`) and
-//   their `*_impl<SourceT>` host launchers + the `NUM_THREADS_HERE`
-//   block-size knob + `FAST_WDM_K_PER_THREAD_MAX`.
+//   their `*_impl<SourceT>` host launchers.
 //
 // Once Slice 3 lands, GBGPU and BBHx can instantiate
 // `wdm_het_*_impl<GBTDIonTheFly>` / `wdm_het_*_impl<SOBBHTDIonTheFly>`
@@ -39,15 +41,58 @@
 //     `Orbits`, `Vec`, `NLINKS`, `fit_cubic_spline_pcr`,
 //     `fit_cubic_spline_thomas`, `CUBIC_SPLINE_LINEAR_SPACING`
 //
-// `FAST_WDM_K_PER_THREAD_MAX` is intentionally NOT defined here
-// because it references the host-file's `NUM_THREADS_HERE` macro
-// (a file-scoped per-kernel block-size knob); it will move into
-// this header alongside the templated kernels in Slice 3.
+// `NUM_THREADS_HERE` + `FAST_WDM_K_PER_THREAD_MAX` are owned here so
+// downstream waveform packages instantiating the chunked-het kernels
+// (GBGPU + BBHx after Phase 3L.7 / 3L.8) get a consistent block-size
+// knob without redefining it.
 // ============================================================================
 
 #include "global.hpp"           // -> gbt_global.h -> cmplx + CUDA macros
 #include "lat_wdm_fft.hh"       // wdm_spline_radix2_fft, wdm_fft_dispatch
 #include "lat_tdi_on_the_fly.hh" // LISATDIonTheFly, OrbitsSplineCache, Orbits
+
+
+// ----------------------------------------------------------------------------
+// NUM_THREADS_HERE = blockDim.x for the chunked-heterodyne kernel family.
+// Should be a power of 2 and a multiple of 32 (warp size). At
+// `Nt_sub=256` this also sets the per-thread iteration count for stride
+// loops:
+//   K_PER_THREAD = ceil(Nt_sub / NUM_THREADS_HERE)
+//   (64 -> 4 iters/thread, 128 -> 2 iters/thread, 256 -> 1 iter/thread)
+// Larger `NUM_THREADS_HERE` gives the FFT/iFFT more cooperative
+// parallelism per transform at the cost of per-SM block count (each
+// block holds the same shared mem regardless of thread count). 128 is
+// the empirical sweet spot on A100 for our shared-mem footprint.
+//
+// On CPU this collapses to 1 (the `THREAD_START_X` / `BLOCK_INCR_X`
+// stubs degenerate to a single virtual thread iterating fully).
+//
+// Defined here -- not in the host source file -- so downstream waveform
+// packages instantiating the chunked-het kernels (GBGPU + BBHx after
+// Phase 3L.7 / 3L.8) get a consistent block-size knob without having
+// to redefine it.
+// ----------------------------------------------------------------------------
+#ifdef __CUDACC__
+#define NUM_THREADS_HERE 128
+#else
+#define NUM_THREADS_HERE 1
+#endif
+
+
+// ----------------------------------------------------------------------------
+// Upper bound on the number of thread-strided iterations any per-thread
+// register array sees when sweeping `[0, Nt_sub)` at
+// `blockDim.x = NUM_THREADS_HERE`. Compile-time so it can size
+// `constexpr` arrays.
+//   GPU: ceil(256 / 64) = 4   -> arrays stay in registers
+//   CPU: ceil(4096 / 1) = 4096 (CPU has one virtual thread iterating fully)
+//
+// The previous formula `FAST_WDM_NT_SUB_MAX / FAST_WDM_NCHANNELS_MAX`
+// produced 85 on GPU which spilled the register arrays to local memory
+// (the divisor should be the thread stride, not channel count).
+// ----------------------------------------------------------------------------
+#define FAST_WDM_K_PER_THREAD_MAX \
+    ((FAST_WDM_NT_SUB_MAX + NUM_THREADS_HERE - 1) / NUM_THREADS_HERE)
 
 
 // ----------------------------------------------------------------------------
