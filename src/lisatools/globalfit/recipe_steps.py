@@ -718,6 +718,14 @@ def build_gb_moves(
 
         logger.info("Removing GBs from residuals")
         template_in = deepcopy(acs.linear_data_arr)
+        # acs lays walkers out in contiguous blocks of ``len(gpu_splits[0])`` per
+        # GPU, so ``walker % num_per_gpu_walker`` recovers the intra-split residual
+        # index inside generate_global_template. Required (and only valid) for >1
+        # GPU; left None for single-GPU so GBGPU keeps its 1-GPU fast path. Mirrors
+        # GBSpecialBase.adjust_sources_in_residual_buffer.
+        num_per_gpu_walker = (
+            len(acs.gpu_splits[0]) if (acs.gpus is not None and len(acs.gpus) > 1) else None
+        )
         gb.generate_global_template(
             coords_in_in,
             data_index,
@@ -725,6 +733,7 @@ def build_gb_moves(
             data_length=acs.data_length,
             factors=factors,
             data_splits=acs.gpu_map,
+            num_per_gpu=num_per_gpu_walker,
             N=N_vals,
             **gb_info.waveform_kwargs,
         )
