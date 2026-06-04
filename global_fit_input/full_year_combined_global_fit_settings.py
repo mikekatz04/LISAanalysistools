@@ -150,11 +150,20 @@ from mbh_phentax_only_global_fit_settings import (
     mbh_full_to_sampling,
 )
 
-# SOBBHWDMHeterodyne (chunked-het with JAX gradient path) lives in the
-# sprint root.
-_SPRINT_ROOT = "/Users/mkatz/Research/lisa_sprint_2026"
-if _SPRINT_ROOT not in sys.path:
-    sys.path.insert(0, _SPRINT_ROOT)
+# SOBBHWDMHeterodyne (chunked-het with JAX gradient path) was moved at
+# Phase 2 (2026-06-02) from the sprint root to
+# LISAanalysistools/scripts/gb_chunked_het/. It re-imports utilities from
+# scripts/diagnostics/check_shortened_wdm.py via a bare import, so both
+# subdirectories need to be on sys.path. Computed relative to this file
+# so the script is portable across machines.
+import os as _os_for_path
+_THIS_DIR = _os_for_path.dirname(_os_for_path.abspath(__file__))
+_LAT_SCRIPTS_DIR = _os_for_path.normpath(_os_for_path.join(_THIS_DIR, "..", "scripts"))
+_GB_CHUNKED_HET_DIR = _os_for_path.join(_LAT_SCRIPTS_DIR, "gb_chunked_het")
+_DIAGNOSTICS_DIR = _os_for_path.join(_LAT_SCRIPTS_DIR, "diagnostics")
+for _p in (_DIAGNOSTICS_DIR, _GB_CHUNKED_HET_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 from gb_wdm_het import SOBBHWDMHeterodyne  # noqa: E402
 
 

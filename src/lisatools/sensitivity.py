@@ -1264,21 +1264,12 @@ class SensitivityMatrixBase:
                 for i, matrix_member in enumerate(_flattened_arr):
                     # calculate it
                     if hasattr(matrix_member, "get_Sn") or isinstance(matrix_member, str):
-                        try:
-                            _sens_mat[i, :] = get_sensitivity(
-                                self.basis_settings,
-                                *self.sens_args,
-                                sens_fn=matrix_member,
-                                **self.sens_kwargs.flatten()[i],
-                            )
-                        except ValueError:
-                            breakpoint()
-                            _sens_mat[i, :] = get_sensitivity(
-                                self.basis_settings,
-                                *self.sens_args,
-                                sens_fn=matrix_member,
-                                **self.sens_kwargs.flatten()[i],
-                            )
+                        _sens_mat[i, :] = get_sensitivity(
+                            self.basis_settings,
+                            *self.sens_args,
+                            sens_fn=matrix_member,
+                            **self.sens_kwargs.flatten()[i],
+                        )
 
                     else:
                         raise ValueError
