@@ -1231,7 +1231,7 @@ class SubmissionWriter(BackendConsumer):
         self.detection_criteria = detection_criteria or OccupancyDetectionCriteria()
         self.run_metadata = RunMetadata.from_curr(self.curr)
 
-    def prepare_samples_for_submission(self):
+    def prepare_samples_for_submission(self, acs: AnalysisContainerArray):
         """
         Prepare the samples for submission by clustering the GBs, and sorting the mbhbs according to the coalescence time.
         Each source type needs a callable to handle the specific processing, and this method act as a dispatcher.
@@ -1242,10 +1242,10 @@ class SubmissionWriter(BackendConsumer):
             if prepare_fn:
                 logger.info(f"Preparing samples for branch '{branch}' using '{prepare_fn.__name__}'")
                 self.samples[branch], self.inds[branch] = prepare_fn(
-                    self.samples[branch], self.inds[branch]
+                    acs, self.samples[branch], self.inds[branch]
                 )
 
-    def _prepare_mbhb_samples(self, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _prepare_mbhb_samples(self, acs: AnalysisContainerArray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Sort the MBHB samples according to the coalescence time, and cluster them if there are multiple sources in the same block."""
 
         coalescence_time_idx = list(PARAMETER_INFO_REGISTRY["mbh"].keys()).index("t_c")
@@ -1256,8 +1256,84 @@ class SubmissionWriter(BackendConsumer):
 
         return samples, inds
     
-    def _prepare_gb_samples(self, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        raise NotImplementedError("GB clustering not implemented yet")
+    def _prepare_gb_samples(self, acs: AnalysisContainerArray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Prepare GB samples for submission running the clustering algorithm.
+        """
+        try:
+            import cupy as cp
+        except ImportError:
+            raise ImportError("cupy is required for GB clustering. Please install cupy to use this feature.")
+        
+        from gbgpu.gbgpu import GBGPU
+        from lisatools.globalfit.hdfbackend import GBHDFBackend, GFHDFBackend
+        from lisatools.globalfit.state import GBState
+
+        gb_info = self.curr.source_info["gb"]
+        gb_wave_gen = GBGPU(**gb_info.initialize_kwargs)
+        gb_wave_gen.gpus = self.curr.general_info.gpus[:1] # use only one GPU for the clustering
+
+        cluster_kwargs = dict(
+            num_compare_samples=200,
+            samples_keep=5,
+            thin_by=1,
+            snr_lim_first_cut=7.0,
+            snr_lim_second_cut=5.0,
+            overlap_lim=0.7,
+            snr_diff_lim=20.0,
+        )
+        
+        reader = GFHDFBackend(
+            self.backend.filename, sub_state_bases={"gb": GBState}, sub_backend={"gb": GBHDFBackend}
+        )
+        
+        gb_wave_gen.d_d = 0.0
+        max_logl_walker = np.argmax(acs.likelihood()).item()
+        sens_mat = acs[max_logl_walker].sens_mat
+        
+        if len(acs.gpus) > 1:
+            # we probably need everything on the same GPU
+            cp.cuda.runtime.setDevice(gb_wave_gen.gpus[0])
+            sens_mat._sens_mat = cp.asarray(sens_mat._sens_mat)
+            
+        logger.info('starting to gather GB samples for clustering')
+        
+        groups = gather_gb_samples(
+            acs.f_arr,
+            gb_info.transform,
+            gb_wave_gen,
+            gb_info.waveform_kwargs.copy(),
+            cp.asarray(gb_info.band_edges),
+            gb_info.band_N_vals,
+            reader,
+            sens_mat,
+            gb_wave_gen.gpus[0],
+            gb_samples=samples,
+            gb_inds=inds,
+            **cluster_kwargs,
+        )
+
+        logger.info(f"Completed clustering. Number of groups found: {len(groups)}")
+
+        num_in_groups = np.asarray([len(tmp) for tmp in groups])
+        keep = num_in_groups > reader.nwalkers * cluster_kwargs['samples_keep'] / 2
+
+        logger.info(
+            f"Groups passing sample count filter: {keep.sum()} / {len(keep)}. "
+            f"num_in_groups: {num_in_groups}"
+        )
+        max_num_source = max([tmp.shape[0] for tmp in groups])
+        samples = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
+        for i, group in enumerate(groups):
+            samples[i, : len(group)] = group
+
+        samples_fin = samples[keep]
+        num_in_groups_fin = num_in_groups[keep]
+
+        breakpoint()
+
+
+    # todo resume from here.
 
     @property
     def prepare_samples_registry(self) -> dict[str, Callable[[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]]:
@@ -1583,7 +1659,7 @@ class SubmissionWriter(BackendConsumer):
     def write_submission(self, acs: AnalysisContainerArray):
         """Run the full submission writing pipeline."""
         self.create_folders()
-        self.prepare_samples_for_submission()
+        self.prepare_samples_for_submission(acs)
         self.save_posteriors()
 
         # finally save the overall run metadata
