@@ -2780,23 +2780,34 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         Returns:
             A new :class:`XYZSensitivityBackend` instance with the sensitivity matrix,
             its inverse, and log-determinant set to reflect the supplied parameters.
+
+        Notes:
+            The copy is a **shallow** :func:`copy.copy`, not a re-construction.  All
+            walker-independent state — orbits, spline interpolant, the C++ kernel
+            (``pycpp_sensitivity_matrix``), the galactic grid, ``f_arr``, ``dips_mask``,
+            window normalisation, basis settings — is shared by reference with the
+            parent.  Only the per-walker arrays differ, and they are *rebound* (not
+            mutated in place): :meth:`set_sensitivity_matrix` assigns a fresh
+            ``sens_mat`` whose setter recomputes ``invC``/``detC`` into new arrays, so
+            the parent's arrays are never touched.  This avoids re-allocating the C++
+            kernel / interpolant and recomputing the (walker-independent) light-travel
+            times and transfer-function dip mask on every MCMC step.
         """
-        new_sens_mat = XYZSensitivityBackend(**self.kwargs)
+        from copy import copy
 
-        #self.name = name
-        new_sens_mat.name = name # why was it self?
+        # Shallow copy: shares the kernel, interpolant, orbits, galactic grid and
+        # all immutable basis arrays with the parent. set_sensitivity_matrix below
+        # rebinds sens_mat/invC/detC, so the shared template is never mutated.
+        new_sens_mat = copy(self)
+        new_sens_mat.name = name
 
-        if self.use_splines: #assume transformed input.
-            Soms_d = psd_params[0]
-            Sa_a = psd_params[1]
-
+        Soms_d = psd_params[0]
+        Sa_a = psd_params[1]
+        if self.use_splines:  # assume transformed input.
             spline_knots_position, spline_knots_amplitude = self.build_spline_arrays(psd_params[2:])
-
         else:
             spline_knots_position = None
             spline_knots_amplitude = None
-            Soms_d = psd_params[0]
-            Sa_a = psd_params[1]
 
         if galfor_params is None:
             galfor_params = self.xp.zeros(5)
