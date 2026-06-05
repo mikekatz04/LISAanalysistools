@@ -601,9 +601,13 @@ def build_gb_moves(
             num_bin = coords_in_in.shape[0]
             xp = gb_info.gb_wdm_comp.xp
             factors_arr = xp.asarray(factors).astype(xp.float64)
+            # GB WDM init writes templates into a single flat buffer.
+            # Use gather_linear_data_arr so multi-GPU ACAs gather to one
+            # buffer first; single-GPU runs return the underlying buffer
+            # directly (no copy).
             gb_info.gb_wdm_comp.fill_global_wdm(
                 coords_in_in,
-                acs.linear_data_arr[0],
+                acs.gather_linear_data_arr(),
                 acs,
                 convert_to_ra_dec=False,
                 data_index=xp.asarray(data_index),

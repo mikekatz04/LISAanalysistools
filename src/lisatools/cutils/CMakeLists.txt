@@ -67,16 +67,6 @@ if(LISATOOLS_WITH_CPU)
     DEPENDS "Detector.cu"
     VERBATIM
     )
-  
-  # # NEW: Copy L1Detector.cu to L1Detector.cxx for CPU build
-  # add_custom_command(
-  #   OUTPUT "L1Detector.cxx"
-  #   COMMENT "Copy L1Detector.cu to L1Detector.cxx"
-  #   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/L1Detector.cu"
-  #           "${CMAKE_CURRENT_BINARY_DIR}/L1Detector.cxx"
-  #   DEPENDS "L1Detector.cu"
-  #   VERBATIM
-  #   )
 
   # Copy PSD.cu to PSD.cxx for CPU build
   add_custom_command(
@@ -88,40 +78,79 @@ if(LISATOOLS_WITH_CPU)
     VERBATIM
     )
 
-  # Add L1Detector.cxx to the sources
-  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx)
+  # Phase 3E: copy LISAResponse.cu to LISAResponse.cxx for CPU build
+  add_custom_command(
+    OUTPUT "LISAResponse.cxx"
+    COMMENT "Copy LISAResponse.cu to LISAResponse.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/LISAResponse.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/LISAResponse.cxx"
+    DEPENDS "LISAResponse.cu"
+    VERBATIM
+    )
+
+  # Phase 3L.5: copy lat_tdi_on_the_fly.cu to .cxx for CPU build.
+  add_custom_command(
+    OUTPUT "lat_tdi_on_the_fly.cxx"
+    COMMENT "Copy lat_tdi_on_the_fly.cu to lat_tdi_on_the_fly.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/lat_tdi_on_the_fly.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/lat_tdi_on_the_fly.cxx"
+    DEPENDS "lat_tdi_on_the_fly.cu"
+    VERBATIM
+    )
+
+  # Phase 3L.6: copy lat_spline_tdi_waveform.cu to .cxx for CPU build.
+  add_custom_command(
+    OUTPUT "lat_spline_tdi_waveform.cxx"
+    COMMENT "Copy lat_spline_tdi_waveform.cu to lat_spline_tdi_waveform.cxx"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/lat_spline_tdi_waveform.cu"
+            "${CMAKE_CURRENT_BINARY_DIR}/lat_spline_tdi_waveform.cxx"
+    DEPENDS "lat_spline_tdi_waveform.cu"
+    VERBATIM
+    )
+
+  # Phase 3E adds LISAResponse.cxx to the detector static library so all
+  # LISA-side C++ symbols live in one .so per backend wheel.
+  # Phase 3L.5+3L.6 add lat_tdi_on_the_fly.cxx + lat_spline_tdi_waveform.cxx
+  # so the virtual-method vtables/typeinfo for LISATDIonTheFly +
+  # FDSpline/TDSpline classes are emitted into LAT's own .so (LAT is the
+  # pybind11 registrant; lisa-on-gpu's wheel recompiles the same .cu
+  # files into its own .so under the per-backend alias).
+  add_library(lisaanalysistools_cpu_detector_static STATIC Detector.cxx PSD.cxx LISAResponse.cxx lat_tdi_on_the_fly.cxx lat_spline_tdi_waveform.cxx)
   apply_cpu_backend_common_options(detector lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_cpu_detector_static PUBLIC ${GBT_CUTILS})
-  
-  # Add L1Detector.hpp to header files
-  target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp  PSD.hpp)
 
-  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx)
+  target_sources(lisaanalysistools_cpu_detector_static PUBLIC FILE_SET HEADERS FILES
+                                        Detector.hpp  PSD.hpp  LISAResponse.hh)
+
+  # Phase 3E adds binding_flr.cxx to the pybind11 module so response_part(m)
+  # is linked in alongside detector_part(m).
+  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx binding_flr.cxx)
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
   target_include_directories(lisaanalysistools_cpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_cpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                      binding.hpp)
+                                      binding.hpp  binding_flr.hpp)
 endif()
 
 # III. Declare the GPU backend
 if(LISATOOLS_WITH_GPU)
-  # Add L1Detector.cu to the GPU sources
-  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu)
+  # Phase 3E adds LISAResponse.cu to the GPU sources.
+  # Phase 3L.5+3L.6 add lat_tdi_on_the_fly.cu + lat_spline_tdi_waveform.cu
+  # so LAT's GPU .so emits the typeinfo / vtable for LISATDIonTheFly +
+  # FDSpline/TDSpline (LAT is the pybind11 registrant).
+  add_library(lisaanalysistools_gpu_detector_gpu_static STATIC Detector.cu PSD.cu LISAResponse.cu lat_tdi_on_the_fly.cu lat_spline_tdi_waveform.cu)
   apply_gpu_backend_common_options(detector_gpu lisatools lisaanalysistools true)
   target_include_directories(lisaanalysistools_gpu_detector_gpu_static PUBLIC ${GBT_CUTILS})
-  
-  # Add L1Detector.hpp to header files
-  target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
-                                        Detector.hpp PSD.hpp)
 
-  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx)
+  target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
+                                        Detector.hpp PSD.hpp LISAResponse.hh)
+
+  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx binding_flr.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
-  
+
   target_include_directories(lisaanalysistools_gpu_pycppdetector PUBLIC ${GBT_CUTILS})
   target_sources(lisaanalysistools_gpu_pycppdetector PUBLIC FILE_SET HEADERS FILES
-                                      binding.hpp)
+                                      binding.hpp  binding_flr.hpp)
 
 endif()

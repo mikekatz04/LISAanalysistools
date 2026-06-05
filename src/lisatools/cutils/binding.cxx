@@ -6,11 +6,53 @@
 #include <pybind11/numpy.h>
 #include "binding.hpp"
 
+// Phase 3J: this binding TU is the SOLE registration site for the shared
+// wrapper classes (OrbitsWrap, LISAResponseWrap, TDIConfigWrap,
+// CubicSplineWrap_responselisa, ...). Setting the toggle to 1 BEFORE
+// including lisatools_header_abi.hpp marks this file as the owner; every
+// downstream TU (lisa-on-gpu/binding_tof.cxx, future GBGPU/BBHx bindings)
+// must leave the toggle at its default 0 and adds a static_assert(!toggle, ...)
+// that fires at compile time if they ever try to claim ownership.
+#define LISATOOLS_IS_WRAPPER_OWNER 1
+#include "lisatools_header_abi.hpp"
+
+// Phase 3J.B: ensure OrbitsView's POD layout stays byte-equal to class Orbits.
+// OrbitsView is the cross-wheel POD interface downstream packages consume in
+// place of the typed Orbits* pointer (see plan section "POD-view side-channel").
+// Asserting layout equivalence at every LAT build means a future change to
+// either struct that introduces drift fails at compile time, instead of
+// producing silently-wrong cross-wheel field reads at runtime.
+#include "orbits_view.hpp"
+#include <cstddef>
+static_assert(sizeof(Orbits) == sizeof(OrbitsView),
+    "OrbitsView size drift vs class Orbits -- bump LISATOOLS_HEADER_ABI_VERSION");
+static_assert(offsetof(Orbits, sc_t0)       == offsetof(OrbitsView, sc_t0),       "OrbitsView.sc_t0 layout drift");
+static_assert(offsetof(Orbits, sc_dt)       == offsetof(OrbitsView, sc_dt),       "OrbitsView.sc_dt layout drift");
+static_assert(offsetof(Orbits, sc_N)        == offsetof(OrbitsView, sc_N),        "OrbitsView.sc_N layout drift");
+static_assert(offsetof(Orbits, ltt_t0)      == offsetof(OrbitsView, ltt_t0),      "OrbitsView.ltt_t0 layout drift");
+static_assert(offsetof(Orbits, ltt_dt)      == offsetof(OrbitsView, ltt_dt),      "OrbitsView.ltt_dt layout drift");
+static_assert(offsetof(Orbits, ltt_N)       == offsetof(OrbitsView, ltt_N),       "OrbitsView.ltt_N layout drift");
+static_assert(offsetof(Orbits, n_arr)       == offsetof(OrbitsView, n_arr),       "OrbitsView.n_arr layout drift");
+static_assert(offsetof(Orbits, ltt_arr)     == offsetof(OrbitsView, ltt_arr),     "OrbitsView.ltt_arr layout drift");
+static_assert(offsetof(Orbits, x_arr)       == offsetof(OrbitsView, x_arr),       "OrbitsView.x_arr layout drift");
+static_assert(offsetof(Orbits, nlinks)      == offsetof(OrbitsView, nlinks),      "OrbitsView.nlinks layout drift");
+static_assert(offsetof(Orbits, nspacecraft) == offsetof(OrbitsView, nspacecraft), "OrbitsView.nspacecraft layout drift");
+static_assert(offsetof(Orbits, armlength)   == offsetof(OrbitsView, armlength),   "OrbitsView.armlength layout drift");
+static_assert(offsetof(Orbits, links)       == offsetof(OrbitsView, links),       "OrbitsView.links layout drift");
+static_assert(offsetof(Orbits, sc_r)        == offsetof(OrbitsView, sc_r),        "OrbitsView.sc_r layout drift");
+static_assert(offsetof(Orbits, sc_e)        == offsetof(OrbitsView, sc_e),        "OrbitsView.sc_e layout drift");
+
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
 #include "pybind11_cuda_array_interface.hpp"
 #endif
 
 namespace py = pybind11;
+
+// Phase 3E (2026-06-02): LISAResponse-related pybind11 bindings absorbed
+// from lisa-on-gpu. The actual class definitions and `response_part(py::module&)`
+// implementation live in binding_flr.cxx, which is compiled into the
+// pycppdetector pybind11 module alongside this file.
+void response_part(py::module &m);
 
 void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
 {
@@ -373,10 +415,14 @@ void detector_part(py::module &m) {
 
 
 PYBIND11_MODULE(pycppdetector, m) {
-    m.doc() = "Orbits/Detector C++ plug-in"; // Optional module docstring
+    m.doc() = "Orbits/Detector/Response C++ plug-in"; // Optional module docstring
 
     // Call initialization functions from other files
     detector_part(m);
+    // Phase 3E: LISA-response wrappers (LISAResponseWrap, TDIConfigWrap,
+    // OrbitsWrap_responselisa, CubicSplineWrap_responselisa). Defined in
+    // binding_flr.cxx, absorbed from lisa-on-gpu.
+    response_part(m);
     m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 
     m.def("get_module_path_cpp", &get_module_path, "Returns the file path of the module");

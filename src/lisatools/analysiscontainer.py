@@ -1088,6 +1088,397 @@ class AnalysisContainer:
         return jax.vmap(_ll_single)(x_jnp)
 
 
+class BandView:
+    """Multi-shard view of a per-band buffer indexed by global band id.
+
+    Drop-in replacement for the single-ndarray ``data_shaped[0]`` /
+    ``psd_shaped[0]`` view used by the GB band-tree Buffer when the
+    underlying :class:`AnalysisContainerArray` is sharded across multiple
+    GPUs. Reads and writes by global band index are routed through
+    ``aca.gpu_map`` to the owning shard at the right intra-shard
+    position.
+
+    Three operation classes are supported (these cover every Buffer
+    callsite in ``gbspecialstretch.py`` today):
+
+    1. **Per-band write** (``view[band_inds] = value``): partitions
+       ``band_inds`` by ``aca.split_map``, enters each owning device
+       context once, and writes either a scalar (broadcast) or
+       per-band slabs ``value[k]`` into shard rows.
+
+    2. **Per-band read** (``view[band_inds]``): inverse of (1); gathers
+       the rows from each owning shard into a single contiguous
+       ndarray on ``aca.gpus[0]`` (or the host when ``aca.gpus`` is
+       None). Used by callers that pass the result to further compute
+       (einsum, sum, etc.).
+
+    3. **Whole-buffer gather** (``view.copy()`` / ``view.gather()``):
+       same as ``view[arange(num_bands)]`` -- a single contiguous
+       ``(num_bands, *per_band_shape)`` ndarray on ``aca.gpus[0]``.
+       Used by the Buffer's ``likelihood()`` einsum block where the
+       gathered copy is consumed by a single-GPU kernel.
+
+    The view does NOT support arithmetic in place; callers that need to
+    do math on the gathered buffer should call ``.copy()`` (or index by
+    the full band range) to materialise a single ndarray first.
+    """
+
+    def __init__(self, aca: "AnalysisContainerArray", kind: str = "data"):
+        if kind not in ("data", "psd"):
+            raise ValueError(f"kind must be 'data' or 'psd'; got {kind!r}")
+        self._aca = aca
+        self._kind = kind
+
+    @property
+    def _shards(self):
+        return self._aca.data_shaped if self._kind == "data" else self._aca.psd_shaped
+
+    @property
+    def shape(self) -> tuple:
+        per_band = tuple(self._shards[0].shape[1:])
+        return (int(self._aca.acs_total_entries),) + per_band
+
+    @property
+    def dtype(self):
+        return self._shards[0].dtype
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    def __len__(self) -> int:
+        return int(self._aca.acs_total_entries)
+
+    def _resolve_scalar(self, band: int) -> tuple:
+        """``(shard_id, intra_shard_index)`` for a single band id."""
+        shard = int(self._aca.split_map[int(band)])
+        intra = int(np.where(self._aca.gpu_splits[shard] == int(band))[0][0])
+        return shard, intra
+
+    def _resolve_array(self, band_inds) -> tuple:
+        """Per-row ``(shard_ids, intra_indices)`` arrays for a 1-D band index."""
+        band_inds = np.asarray(asnumpy(band_inds), dtype=int)
+        shard_ids = self._aca.split_map[band_inds]
+        # Intra-shard position: for each shard, the index of the band
+        # within that shard's gpu_splits entry.
+        intra = np.empty(band_inds.shape[0], dtype=int)
+        for s in np.unique(shard_ids):
+            rows = np.where(shard_ids == s)[0]
+            bands_here = band_inds[rows]
+            # gpu_splits[s] is sorted (it comes from np.arange + reorder
+            # under gpu_assignment); use searchsorted-equivalent lookup.
+            order = np.argsort(self._aca.gpu_splits[s])
+            ranks = np.searchsorted(
+                self._aca.gpu_splits[s][order], bands_here
+            )
+            intra[rows] = order[ranks]
+        return shard_ids, intra, band_inds
+
+    def __getitem__(self, idx):
+        # Tuple fancy index -> route to _fancy_get (band axis is idx[0]).
+        if isinstance(idx, tuple):
+            if len(idx) == 0:
+                return self.gather()
+            return self._fancy_get(idx[0], idx[1:])
+        # Scalar -> shard slice (live view, no copy)
+        if isinstance(idx, (int, np.integer)):
+            shard, intra = self._resolve_scalar(int(idx))
+            return self._shards[shard][intra]
+        if isinstance(idx, slice):
+            band_inds = np.arange(*idx.indices(self.shape[0]))
+            return self._gather(band_inds)
+        # Array idx (np or cp)
+        band_inds = np.asarray(asnumpy(idx))
+        if band_inds.ndim == 0:
+            shard, intra = self._resolve_scalar(int(band_inds))
+            return self._shards[shard][intra]
+        if band_inds.dtype == bool:
+            # Boolean mask over (num_bands,). Convert to int positions.
+            if band_inds.shape[0] != self.shape[0]:
+                raise IndexError(
+                    f"boolean index shape {band_inds.shape} mismatches "
+                    f"num_bands={self.shape[0]}"
+                )
+            band_inds = np.where(band_inds)[0]
+        return self._gather(band_inds)
+
+    def __setitem__(self, idx, val):
+        if isinstance(idx, tuple):
+            if len(idx) == 0:
+                raise IndexError("BandView setitem with empty tuple")
+            self._fancy_set(idx[0], idx[1:], val)
+            return
+        if isinstance(idx, (int, np.integer)):
+            shard, intra = self._resolve_scalar(int(idx))
+            self._write_to_shard(shard, intra, val)
+            return
+        if isinstance(idx, slice):
+            band_inds = np.arange(*idx.indices(self.shape[0]))
+            self._scatter(band_inds, val)
+            return
+        band_inds = np.asarray(asnumpy(idx))
+        if band_inds.ndim == 0:
+            shard, intra = self._resolve_scalar(int(band_inds))
+            self._write_to_shard(shard, intra, val)
+            return
+        if band_inds.dtype == bool:
+            if band_inds.shape[0] != self.shape[0]:
+                raise IndexError(
+                    f"boolean index shape {band_inds.shape} mismatches "
+                    f"num_bands={self.shape[0]}"
+                )
+            band_inds = np.where(band_inds)[0]
+        self._scatter(band_inds, val)
+
+    def _fancy_get(self, band_idx, intra_axes: tuple):
+        """Tuple-fancy ``view[band_idx, intra1, intra2, ...]`` read.
+
+        ``band_idx`` indexes axis 0 (band id, global). ``intra_axes`` index
+        the remaining per-band axes (channel, freq, etc.). All entries are
+        broadcastable to a common shape per NumPy's fancy-indexing rules.
+
+        The result is built by:
+
+        1. broadcasting all index arrays to a common shape,
+        2. partitioning the flat result rows by ``aca.split_map[band_id]``,
+        3. running a per-shard fancy index ``shard[(intra_band, *intra_axes)]``
+           against the shard's own ``(n_acs_on_shard, *per_band_shape)``
+           reshape view,
+        4. scattering each shard's contribution into the output (gathered
+           onto ``gpus[0]`` for multi-GPU runs).
+
+        Used by ``Buffer.fill_buffer_residual_and_psd_from_acs`` and other
+        callers that previously had to ``gather_*_shaped()`` the whole
+        outer ACA before fancy-indexing it.
+        """
+        broadcast_arrays, target_shape = self._broadcast_fancy(band_idx, intra_axes)
+        band_b = broadcast_arrays[0]
+        intra_b = broadcast_arrays[1:]
+        return self._fancy_dispatch(
+            band_b, intra_b, target_shape, mode="get", val=None
+        )
+
+    def _fancy_set(self, band_idx, intra_axes: tuple, val) -> None:
+        """Tuple-fancy ``view[band_idx, intra1, ...] = val`` write."""
+        broadcast_arrays, target_shape = self._broadcast_fancy(band_idx, intra_axes)
+        band_b = broadcast_arrays[0]
+        intra_b = broadcast_arrays[1:]
+        self._fancy_dispatch(
+            band_b, intra_b, target_shape, mode="set", val=val
+        )
+
+    @staticmethod
+    def _broadcast_fancy(band_idx, intra_axes):
+        """Broadcast (band_idx, *intra_axes) to a common host-ndarray shape."""
+        arrs = [np.asarray(asnumpy(band_idx))] + [
+            np.asarray(asnumpy(a)) for a in intra_axes
+        ]
+        target_shape = np.broadcast_shapes(*[a.shape for a in arrs])
+        return [np.broadcast_to(a, target_shape) for a in arrs], target_shape
+
+    def _fancy_dispatch(
+        self,
+        band_broadcast: np.ndarray,
+        intra_broadcast: list,
+        target_shape: tuple,
+        mode: str,
+        val,
+    ):
+        """Shared kernel for tuple-fancy read (mode='get') and write (mode='set')."""
+        band_flat = band_broadcast.reshape(-1).astype(int)
+        intra_flat = [a.reshape(-1) for a in intra_broadcast]
+        shard_ids = self._aca.split_map[band_flat]
+
+        is_scalar_val = mode == "set" and (
+            np.isscalar(val) or (hasattr(val, "ndim") and val.ndim == 0)
+        )
+        if mode == "set" and not is_scalar_val:
+            val_arr = np.asarray(asnumpy(val))
+            val_broadcast = np.broadcast_to(val_arr, target_shape).reshape(-1)
+        else:
+            val_broadcast = None
+
+        if mode == "get":
+            if self._aca.gpus is None:
+                out_flat = np.zeros(band_flat.shape[0], dtype=self.dtype)
+            else:
+                target = self._aca.gpus[0]
+                with self._aca.xp.cuda.Device(int(target)):
+                    out_flat = self._aca.xp.zeros(
+                        band_flat.shape[0], dtype=self.dtype
+                    )
+
+        main = (
+            self._aca.xp.cuda.runtime.getDevice() if self._aca.gpus is not None else None
+        )
+        try:
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                bands_here = band_flat[rows]
+                order = np.argsort(self._aca.gpu_splits[s])
+                ranks = np.searchsorted(
+                    self._aca.gpu_splits[s][order], bands_here
+                )
+                intra_band = order[ranks]
+                shard_idx = tuple(
+                    [intra_band] + [arr[rows] for arr in intra_flat]
+                )
+                if self._aca.gpus is None:
+                    if mode == "get":
+                        out_flat[rows] = self._shards[s][shard_idx]
+                    else:
+                        if is_scalar_val:
+                            self._shards[s][shard_idx] = val
+                        else:
+                            self._shards[s][shard_idx] = val_broadcast[rows]
+                else:
+                    if mode == "get":
+                        with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
+                            vals = self._shards[s][shard_idx]
+                        with self._aca.xp.cuda.Device(int(self._aca.gpus[0])):
+                            out_flat[rows] = self._aca.xp.asarray(vals)
+                    else:
+                        with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
+                            if is_scalar_val:
+                                self._shards[s][shard_idx] = val
+                            else:
+                                self._shards[s][shard_idx] = self._aca.xp.asarray(
+                                    val_broadcast[rows]
+                                )
+        finally:
+            if self._aca.gpus is not None:
+                self._aca.xp.cuda.runtime.setDevice(main)
+
+        if mode == "get":
+            return out_flat.reshape(target_shape)
+        return None
+
+    def _write_to_shard(self, shard: int, intra: int, val) -> None:
+        if self._aca.gpus is None:
+            self._shards[shard][intra] = val
+            return
+        main = self._aca.xp.cuda.runtime.getDevice()
+        try:
+            with self._aca.xp.cuda.Device(int(self._aca.gpus[shard])):
+                self._shards[shard][intra] = val
+        finally:
+            self._aca.xp.cuda.runtime.setDevice(main)
+
+    def _gather(self, band_inds: np.ndarray):
+        """Gather rows ``band_inds`` from every shard into one ndarray.
+
+        Output lives on ``aca.gpus[0]`` when multi-GPU, on host when CPU.
+        Each shard contributes its rows; cross-GPU rows are copied via
+        ``xp.asarray`` inside the target device context.
+        """
+        shard_ids, intra, _ = self._resolve_array(band_inds)
+        per_band_shape = tuple(self._shards[0].shape[1:])
+        out_shape = (len(band_inds),) + per_band_shape
+
+        if self._aca.gpus is None:
+            out = np.zeros(out_shape, dtype=self.dtype)
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                out[rows] = self._shards[s][intra[rows]]
+            return out
+
+        target = self._aca.gpus[0]
+        main = self._aca.xp.cuda.runtime.getDevice()
+        try:
+            with self._aca.xp.cuda.Device(int(target)):
+                out = self._aca.xp.zeros(out_shape, dtype=self.dtype)
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
+                    src = self._shards[s][intra[rows]]
+                with self._aca.xp.cuda.Device(int(target)):
+                    out[rows] = self._aca.xp.asarray(src)
+            return out
+        finally:
+            self._aca.xp.cuda.runtime.setDevice(main)
+
+    def _scatter(self, band_inds: np.ndarray, val) -> None:
+        shard_ids, intra, _ = self._resolve_array(band_inds)
+        # Scalar broadcast vs per-row payload
+        is_scalar = (
+            np.isscalar(val)
+            or (hasattr(val, "ndim") and val.ndim == 0)
+        )
+
+        if self._aca.gpus is None:
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                if is_scalar:
+                    self._shards[s][intra[rows]] = val
+                else:
+                    self._shards[s][intra[rows]] = val[rows]
+            return
+
+        main = self._aca.xp.cuda.runtime.getDevice()
+        try:
+            for s in np.unique(shard_ids):
+                rows = np.where(shard_ids == s)[0]
+                with self._aca.xp.cuda.Device(int(self._aca.gpus[s])):
+                    if is_scalar:
+                        self._shards[s][intra[rows]] = val
+                    else:
+                        sub = val[rows] if hasattr(val, "__getitem__") else val
+                        self._shards[s][intra[rows]] = self._aca.xp.asarray(sub)
+        finally:
+            self._aca.xp.cuda.runtime.setDevice(main)
+
+    def gather(self):
+        """Materialise the full (num_bands, *per_band_shape) ndarray on gpus[0]."""
+        return self._gather(np.arange(self.shape[0]))
+
+    def copy(self):
+        """Alias for :meth:`gather` -- matches ndarray's ``.copy()`` semantics."""
+        return self.gather()
+
+
+def band_gpu_assignment(
+    num_bands: int, gpus: Optional[List[int]], mode: str = "striped"
+) -> Optional[np.ndarray]:
+    """Return a per-band GPU id assignment for use with :class:`AnalysisContainerArray`.
+
+    Used by the GB special-move Buffer to shard band buffers across GPUs.
+
+    Parameters
+    ----------
+    num_bands:
+        Number of bands (== ``num_acs`` of the per-band ACA).
+    gpus:
+        Available GPU ids. ``None`` or a single-GPU list returns ``None``
+        (no custom assignment needed; legacy contiguous partition kicks in).
+    mode:
+        ``"striped"`` (default) — ``gpu_map[b] = gpus[b % len(gpus)]``. Keeps
+        the BandSorter even/odd within-pass non-overlap invariant intact,
+        because consecutive bands land on different GPUs and so the
+        edge_buffer overlap region between neighbour buffers never
+        straddles a single shard.
+
+        ``"block"`` — contiguous-block split (legacy). Use only for testing;
+        per the plan, this can violate the no-overlap invariant at shard
+        seams when bands within a BandSorter pass touch their neighbours'
+        edge buffers.
+
+    Returns
+    -------
+    ``np.ndarray`` of shape ``(num_bands,)`` with GPU ids, or ``None`` when
+    no custom assignment is needed.
+    """
+    if gpus is None or len(gpus) <= 1:
+        return None
+    if mode == "striped":
+        return np.asarray([gpus[b % len(gpus)] for b in range(num_bands)], dtype=int)
+    if mode == "block":
+        per = int(np.ceil(num_bands / len(gpus)))
+        return np.asarray(
+            [gpus[min(b // per, len(gpus) - 1)] for b in range(num_bands)], dtype=int
+        )
+    raise ValueError(f"Unknown band_gpu_assignment mode: {mode!r}")
+
+
 class AnalysisContainerArray:
     """Container for multiple :class:`AnalysisContainer` objects.
 
@@ -1120,6 +1511,7 @@ class AnalysisContainerArray:
         analysis_containers: AnalysisContainer | List[AnalysisContainer] | np.ndarray,
         gpus: list | int | None = None,
         complex_psd: bool = False,
+        gpu_assignment: Optional[np.ndarray] = None,
     ) -> None:
 
         if isinstance(analysis_containers, AnalysisContainer):
@@ -1163,14 +1555,18 @@ class AnalysisContainerArray:
             self.data_length = self.m * self.n
             self.end_shape = (self.m, self.n)
 
+        if isinstance(gpus, int):
+            gpus = [gpus]
         self.gpus = gpus
         if gpus is not None:
-            if isinstance(gpus, list):
-                if len(gpus) > 1:
-                    raise NotImplementedError
-                self.xp.cuda.runtime.setDevice(gpus[0])
-            elif isinstance(gpus, int):
-                self.xp.cuda.runtime.setDevice(gpus)
+            # Sanity-check: each entry is a valid device id.
+            for g in gpus:
+                if not isinstance(g, (int, np.integer)):
+                    raise TypeError(f"gpus entries must be int, got {type(g)}")
+            # Allocations below run inside per-GPU `Device` contexts; we save
+            # and restore the caller's main device so __init__ has no
+            # side-effect on global CUDA state.
+            self._main_device_at_init = self.xp.cuda.runtime.getDevice()
 
         ac_tmp = acs.flatten()[0]
         self.shape_sens = shape_sens = ac_tmp.sens_mat.shape[: -len(ac_tmp.sens_mat.data_shape)]
@@ -1184,12 +1580,35 @@ class AnalysisContainerArray:
             
         assert np.all(np.asarray(shape_sens) < 5)  # makes sure it is not length of data
         # reset so that all data are linear in memory
-        num_machines = 1 if gpus is None else len(gpus)
-
-        split_num = int(np.ceil(self.acs_total_entries / num_machines))
-        split_inds = np.arange(split_num, self.acs_total_entries, split_num)
-
-        self.gpu_splits = gpu_splits = np.split(np.arange(self.acs_total_entries), split_inds)
+        # Two partition modes:
+        #   1. gpu_assignment is None (legacy): contiguous-block split of the
+        #      ACs across the given GPUs in input order.
+        #   2. gpu_assignment is provided: shape ``(acs_total_entries,)`` int
+        #      array whose entries are GPU ids drawn from ``gpus``. Used by
+        #      the GB band-tree Buffer to specify a striped/interleaved
+        #      partition so neighbouring bands live on different GPUs.
+        if gpu_assignment is not None and gpus is not None:
+            gpu_assignment = np.asarray(gpu_assignment, dtype=int)
+            if gpu_assignment.shape != (int(self.acs_total_entries),):
+                raise ValueError(
+                    f"gpu_assignment must have shape ({int(self.acs_total_entries)},); "
+                    f"got {gpu_assignment.shape}"
+                )
+            unknown = set(np.unique(gpu_assignment).tolist()) - set(gpus)
+            if unknown:
+                raise ValueError(
+                    f"gpu_assignment references GPU(s) {unknown} not in gpus={gpus}"
+                )
+            self.gpu_splits = gpu_splits = [
+                np.where(gpu_assignment == g)[0] for g in gpus
+            ]
+        else:
+            num_machines = 1 if gpus is None else len(gpus)
+            split_num = int(np.ceil(self.acs_total_entries / num_machines))
+            split_inds = np.arange(split_num, self.acs_total_entries, split_num)
+            self.gpu_splits = gpu_splits = np.split(
+                np.arange(self.acs_total_entries), split_inds
+            )
 
         self.gpu_map = np.zeros(self.acs_total_entries, dtype=int)
         self.split_map = np.zeros(self.acs_total_entries, dtype=int)
@@ -1198,22 +1617,42 @@ class AnalysisContainerArray:
         for i, split in enumerate(gpu_splits):
             if gpus is not None:
                 self.gpu_map[split] = gpus[i]
+                # Allocate this shard's buffers on the owning GPU.
+                with self.xp.cuda.Device(gpus[i]):
+                    self.linear_data_arr.append(
+                        self.xp.zeros(
+                            self.data_length * self.nchannels * len(split),
+                            dtype=self.data_dtype,
+                        )
+                    )
+                    self.linear_psd_arr.append(
+                        self.xp.zeros(
+                            self.data_length * np.prod(shape_sens) * len(split),
+                            dtype=self.noise_dtype,
+                        )
+                    )
             else:
                 self.gpu_map[split] = 0
-            self.split_map[split] = i
-            self.linear_data_arr.append(
-                self.xp.zeros(
-                    self.data_length * self.nchannels * len(split),
-                    dtype=self.data_dtype,
+                self.linear_data_arr.append(
+                    self.xp.zeros(
+                        self.data_length * self.nchannels * len(split),
+                        dtype=self.data_dtype,
+                    )
                 )
-            )
-            self.linear_psd_arr.append(
-                self.xp.zeros(self.data_length * np.prod(shape_sens) * len(split), dtype=self.noise_dtype)
-            )
+                self.linear_psd_arr.append(
+                    self.xp.zeros(
+                        self.data_length * np.prod(shape_sens) * len(split),
+                        dtype=self.noise_dtype,
+                    )
+                )
+            self.split_map[split] = i
 
         self.num_acs = len(acs.flatten())
         self.reset_linear_data_arr()
         self.reset_linear_psd_arr()
+        if gpus is not None:
+            # Restore whatever device the caller was on before __init__.
+            self.xp.cuda.runtime.setDevice(self._main_device_at_init)
 
     def zero_out_data_arr(self):
         """Zero the linear (per-GPU) data buffers in place."""
@@ -1308,28 +1747,182 @@ class AnalysisContainerArray:
     def __len__(self) -> int:
         return len(self.acs)
 
-    def _loop_operation(self, operation: str, **kwargs: Any) -> np.ndarray:
-        """Apply ``operation`` to every container and stack the per-container results."""
-        for i, ac in enumerate(self.acs.flatten()):
-            _tmp = getattr(ac, operation)
-            if callable(_tmp):
-                _tmp_output = _tmp(**kwargs)
-            else:
-                # must be property or attribute
-                _tmp_output = _tmp
+    # ------------------------------------------------------------------
+    # Vectorized dispatcher (replaces the legacy _loop_operation)
+    # ------------------------------------------------------------------
 
-            if i == 0:
-                _type = _tmp_output.dtype if hasattr(_tmp_output, "dtype") else type(_tmp_output)
-                output = np.zeros(self.acs_total_entries, dtype=_type)
+    @staticmethod
+    def _payload_leading(payload) -> int | None:
+        """Leading axis of ``payload`` (single ndarray, dict of ndarrays, or list)."""
+        if payload is None:
+            return None
+        if isinstance(payload, Mapping):
+            n = None
+            for v in payload.values():
+                vn = v.shape[0] if hasattr(v, "shape") else len(v)
+                if n is None:
+                    n = vn
+                elif vn != n:
+                    raise ValueError(
+                        "All dict payload entries must share the leading axis; "
+                        f"got {n} and {vn}."
+                    )
+            return n
+        if hasattr(payload, "shape"):
+            return payload.shape[0]
+        return len(payload)
 
-            output[i] = _tmp_output
+    def _vectorized_dispatch(
+        self,
+        op_name: str,
+        payload: Optional[Any] = None,
+        index: Optional[np.ndarray] = None,
+        op_kwargs: Optional[dict] = None,
+        reshape_to_acs_shape: bool = True,
+    ) -> np.ndarray | tuple:
+        """Apply ``op_name`` on each row of ``payload`` against the AC named by ``index[row]``.
 
-        return output.reshape(self.acs_shape)
+        This is the single dispatcher that replaces the legacy
+        :meth:`_loop_operation`. It is the multi-GPU entry point for every
+        analysis op on :class:`AnalysisContainerArray` (likelihood, inner
+        product, SNR, calculate_signal_*, template_*, property reads).
+
+        Parameters
+        ----------
+        op_name:
+            Name of the attribute (callable method or scalar property) on
+            each :class:`AnalysisContainer`.
+        payload:
+            Per-row input passed as the first positional argument to the op.
+            May be ``None`` (data-only / property), a single ``np.ndarray`` /
+            ``cp.ndarray`` whose leading axis is the row count, or a
+            ``Mapping`` of ``{model_name: ndarray}`` (multi-model signal_gen
+            case) with a consistent leading axis across entries. When
+            ``index`` is None, the leading axis must equal ``num_acs``.
+        index:
+            Optional 1-D int array of length ``N`` with
+            ``index[i] in [0, num_acs)``. When None, defaults to
+            ``arange(num_acs)``; in that case the result is reshaped to
+            ``acs_shape`` for backwards compatibility with the legacy
+            ``_loop_operation`` return.
+        op_kwargs:
+            Extra keyword arguments forwarded to the op.
+        reshape_to_acs_shape:
+            When True and ``index`` was None, reshape the output from
+            ``(num_acs,)`` to ``self.acs_shape``.
+
+        Returns
+        -------
+        np.ndarray of shape ``(N,)`` (or ``acs_shape`` when ``index`` is
+        None and reshape requested), or a tuple of such arrays when the op
+        returns a tuple (e.g. ``snr -> (opt_snr, det_snr)``).
+        """
+        op_kwargs = op_kwargs or {}
+
+        n_payload = self._payload_leading(payload)
+        if index is None:
+            if payload is not None:
+                if n_payload != self.num_acs:
+                    raise ValueError(
+                        f"payload leading axis ({n_payload}) must equal "
+                        f"num_acs ({self.num_acs}) when index is None"
+                    )
+            index_arr = np.arange(self.num_acs)
+            index_was_none = True
+        else:
+            index_arr = np.asarray(index, dtype=int)
+            if payload is not None and n_payload != len(index_arr):
+                raise ValueError(
+                    f"payload leading axis ({n_payload}) must equal "
+                    f"len(index) ({len(index_arr)})"
+                )
+            if index_arr.size and (
+                index_arr.min() < 0 or index_arr.max() >= self.num_acs
+            ):
+                raise ValueError(
+                    f"index entries must be in [0, {self.num_acs}); "
+                    f"got min={index_arr.min()} max={index_arr.max()}"
+                )
+            index_was_none = False
+
+        N = len(index_arr)
+        acs_flat = self.acs.flatten()
+        results: list = [None] * N
+
+        def _slice_row(p, r):
+            if p is None:
+                return None
+            if isinstance(p, Mapping):
+                return {k: v[r] for k, v in p.items()}
+            return p[r]
+
+        def _to_device(p):
+            if p is None or self.gpus is None:
+                return p
+            if isinstance(p, Mapping):
+                return {k: self.xp.asarray(v) for k, v in p.items()}
+            if hasattr(p, "shape"):
+                return self.xp.asarray(p)
+            return p
+
+        def _call_one(ac, p_row):
+            attr = getattr(ac, op_name)
+            if not callable(attr):
+                return attr
+            if p_row is None:
+                return attr(**op_kwargs)
+            if isinstance(p_row, Mapping):
+                # Multi-model path: AC expects a single dict positional arg.
+                return attr(p_row, **op_kwargs)
+            return attr(p_row, **op_kwargs)
+
+        def _to_host(res):
+            if isinstance(res, tuple):
+                return tuple(asnumpy(x) if hasattr(x, "shape") else x for x in res)
+            if hasattr(res, "shape"):
+                return asnumpy(res)
+            return res
+
+        if self.gpus is None:
+            for r in range(N):
+                ac_i = int(index_arr[r])
+                res = _call_one(acs_flat[ac_i], _slice_row(payload, r))
+                results[r] = _to_host(res)
+        else:
+            main_gpu = self.xp.cuda.runtime.getDevice()
+            gpu_per_row = self.gpu_map[index_arr]
+            try:
+                for gpu in np.unique(gpu_per_row):
+                    rows_on_gpu = np.where(gpu_per_row == gpu)[0]
+                    with self.xp.cuda.Device(int(gpu)):
+                        for r in rows_on_gpu:
+                            ac_i = int(index_arr[r])
+                            sub = _to_device(_slice_row(payload, int(r)))
+                            res = _call_one(acs_flat[ac_i], sub)
+                            results[int(r)] = _to_host(res)
+            finally:
+                self.xp.cuda.runtime.setDevice(main_gpu)
+
+        # Stack results. Handle tuple-valued ops (e.g. snr) separately.
+        if N > 0 and isinstance(results[0], tuple):
+            ntup = len(results[0])
+            stacked = tuple(
+                np.array([results[r][k] for r in range(N)])
+                for k in range(ntup)
+            )
+            if reshape_to_acs_shape and index_was_none and self.acs_shape != (N,):
+                stacked = tuple(s.reshape(self.acs_shape) for s in stacked)
+            return stacked
+
+        out = np.array(results)
+        if reshape_to_acs_shape and index_was_none and self.acs_shape != (N,):
+            out = out.reshape(self.acs_shape)
+        return out
 
     @property
     def start_freq_ind(self):
         """Per-container ``start_freq_ind`` reshaped to :attr:`acs_shape`."""
-        return self._loop_operation("start_freq_ind")
+        return self._vectorized_dispatch("start_freq_ind")
 
     @property
     def start_freq_layer_inds(self):
@@ -1339,7 +1932,7 @@ class AnalysisContainerArray:
         its layer of interest, so this array varies across containers
         (analogous to :attr:`start_freq_ind` in the FD case).
         """
-        return self._loop_operation("start_freq_layer_ind")
+        return self._vectorized_dispatch("start_freq_layer_ind")
 
     @property
     def start_time_layer_inds(self):
@@ -1349,7 +1942,7 @@ class AnalysisContainerArray:
         so every entry is the same value. Kept as an array for API
         symmetry with :attr:`start_freq_layer_inds`.
         """
-        return self._loop_operation("start_time_layer_ind")
+        return self._vectorized_dispatch("start_time_layer_ind")
 
     @property
     def layer_df(self):
@@ -1361,17 +1954,127 @@ class AnalysisContainerArray:
         """WDM layer time spacing of the first container (shared across the array)."""
         return self.acs[0].layer_dt
 
-    def inner_product(self, **kwargs):
-        """Per-container :meth:`AnalysisContainer.inner_product` reshaped to :attr:`acs_shape`."""
-        return self._loop_operation("inner_product", **kwargs)
+    # ------------------------------------------------------------------
+    # Vectorized analysis ops (sharded by ``index`` across GPUs)
+    # ------------------------------------------------------------------
+    # All of these accept an optional ``index`` array (1-D int, ``index[i]
+    # in [0, num_acs)``) that maps each input row to an AC. When ``index``
+    # is None, the leading axis of the payload (if any) must equal
+    # ``num_acs`` and the implicit mapping is ``arange(num_acs)`` -- one
+    # row per AC, in flat order. Output is reshaped back to ``acs_shape``
+    # in that case for backwards compatibility with the legacy
+    # ``_loop_operation`` return shape.
 
-    def likelihood(self, **kwargs):
-        """Per-container :meth:`AnalysisContainer.likelihood` reshaped to :attr:`acs_shape`."""
-        return self._loop_operation("likelihood", **kwargs)
+    def inner_product(self, index=None, **kwargs):
+        """Data-only inner product per AC.
 
-    def snr(self, **kwargs):
-        """Per-container :meth:`AnalysisContainer.snr` reshaped to :attr:`acs_shape`."""
-        return self._loop_operation("snr", **kwargs)
+        Sharded by ``index``: each AC's call runs on its owning GPU.
+        ``index=None`` evaluates every AC (legacy behaviour); pass an
+        ``index`` array to evaluate a subset.
+        """
+        return self._vectorized_dispatch(
+            "inner_product", payload=None, index=index, op_kwargs=kwargs
+        )
+
+    def likelihood(self, index=None, **kwargs):
+        """Data-only likelihood per AC. See :meth:`inner_product` for ``index`` semantics."""
+        return self._vectorized_dispatch(
+            "likelihood", payload=None, index=index, op_kwargs=kwargs
+        )
+
+    def snr(self, index=None, **kwargs):
+        """Data-only SNR per AC. See :meth:`inner_product` for ``index`` semantics."""
+        return self._vectorized_dispatch(
+            "snr", payload=None, index=index, op_kwargs=kwargs
+        )
+
+    def calculate_signal_likelihood(self, params, index=None, **kwargs):
+        """Vectorized signal-likelihood across many (params, AC) rows.
+
+        ``params`` is row-major with leading axis ``N`` (and may be a
+        ``Mapping`` of ``{model_name: ndarray}`` in the multi-model
+        ``signal_gen`` case). ``index[i]`` names the AC that row ``i``
+        targets. When ``index`` is None, ``N == num_acs`` is required and
+        the implicit mapping is one row per AC.
+
+        Returns a host ``np.ndarray`` of per-row likelihoods. The
+        dispatcher groups rows by ``self.gpu_map[index]`` so the per-AC
+        compute runs on the owning GPU; CuPy stream concurrency lets
+        multiple GPUs work in parallel from a single Python thread.
+        """
+        return self._vectorized_dispatch(
+            "calculate_signal_likelihood",
+            payload=params,
+            index=index,
+            op_kwargs=kwargs,
+        )
+
+    def calculate_signal_inner_product(self, params, index=None, **kwargs):
+        """Vectorized signal-inner-product across many (params, AC) rows.
+
+        See :meth:`calculate_signal_likelihood` for the ``index`` and
+        ``params`` semantics.
+        """
+        return self._vectorized_dispatch(
+            "calculate_signal_inner_product",
+            payload=params,
+            index=index,
+            op_kwargs=kwargs,
+        )
+
+    def calculate_signal_snr(self, params, index=None, **kwargs):
+        """Vectorized signal SNR (returns tuple-of-arrays: ``(opt, det)``).
+
+        See :meth:`calculate_signal_likelihood` for the ``index`` and
+        ``params`` semantics.
+        """
+        return self._vectorized_dispatch(
+            "calculate_signal_snr",
+            payload=params,
+            index=index,
+            op_kwargs=kwargs,
+        )
+
+    def template_inner_product(self, template, index=None, **kwargs):
+        """Vectorized template inner product (template-per-row).
+
+        ``template`` is row-major with leading axis ``N`` along the row
+        dimension; row ``i`` is passed as the single template argument
+        to ``AC[index[i]].template_inner_product``. See
+        :meth:`calculate_signal_likelihood` for ``index`` semantics.
+        """
+        return self._vectorized_dispatch(
+            "template_inner_product",
+            payload=template,
+            index=index,
+            op_kwargs=kwargs,
+        )
+
+    def template_likelihood(self, template, index=None, **kwargs):
+        """Vectorized template likelihood (template-per-row).
+
+        See :meth:`template_inner_product` for the ``index`` and
+        ``template`` semantics.
+        """
+        return self._vectorized_dispatch(
+            "template_likelihood",
+            payload=template,
+            index=index,
+            op_kwargs=kwargs,
+        )
+
+    def template_snr(self, template, index=None, **kwargs):
+        """Vectorized template SNR (template-per-row).
+
+        See :meth:`template_inner_product` for the ``index`` and
+        ``template`` semantics. Returns a tuple-of-arrays ``(opt, det)``.
+        """
+        return self._vectorized_dispatch(
+            "template_snr",
+            payload=template,
+            index=index,
+            op_kwargs=kwargs,
+        )
 
     def __getitem__(self, index: Any) -> np.ndarray[AnalysisContainer]:
         return self.acs[index]
@@ -1453,10 +2156,26 @@ class AnalysisContainerArray:
                 start_index = np.asarray(start_index)
 
             template_length = int(np.prod(templates.shape[2:]))
-            for i, (di, si) in enumerate(zip(data_index, start_index)):
-                self.acs.flatten()[di].data[:, si : si + template_length] += (
-                    sign * templates[i]
-                )
+            acs_flat = self.acs.flatten()
+            if self.gpus is None:
+                for i, (di, si) in enumerate(zip(data_index, start_index)):
+                    acs_flat[di].data[:, si : si + template_length] += sign * templates[i]
+                return
+            main_gpu = self.xp.cuda.runtime.getDevice()
+            gpu_per_template = self.gpu_map[data_index]
+            try:
+                for gpu in np.unique(gpu_per_template):
+                    mask = gpu_per_template == gpu
+                    rows = np.where(mask)[0]
+                    with self.xp.cuda.Device(int(gpu)):
+                        for i in rows:
+                            di = int(data_index[i])
+                            si = int(start_index[i])
+                            acs_flat[di].data[:, si : si + template_length] += (
+                                sign * templates[i]
+                            )
+            finally:
+                self.xp.cuda.runtime.setDevice(main_gpu)
             return
         else:
             raise TypeError(
@@ -1476,11 +2195,28 @@ class AnalysisContainerArray:
             assert data_index.max() < self.acs_total_entries
 
         acs_flat = self.acs.flatten()
-        for i, di in enumerate(data_index):
-            signal = item_list[i]
-            # Delegate to DomainBase.add_signal, which encapsulates the
-            # per-domain partial-overlap handling (STFT/FD/TD/WDM).
-            acs_flat[di].data.add_signal(signal, sign=sign)
+
+        if self.gpus is None:
+            for i, di in enumerate(data_index):
+                signal = item_list[i]
+                acs_flat[di].data.add_signal(signal, sign=sign)
+            return
+
+        # Multi-GPU: enter each owning device once per shard. Per-domain
+        # partial-overlap handling is delegated to DomainBase.add_signal,
+        # which performs an in-place update on acs_flat[di].data._arr
+        # (a slice of self.linear_data_arr[split] that lives on this GPU).
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        gpu_per_template = self.gpu_map[data_index]
+        try:
+            for gpu in np.unique(gpu_per_template):
+                mask = gpu_per_template == gpu
+                rows = np.where(mask)[0]
+                with self.xp.cuda.Device(int(gpu)):
+                    for i in rows:
+                        acs_flat[int(data_index[i])].data.add_signal(item_list[i], sign=sign)
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
 
     def add_signal_to_residual(self, templates, data_index=None, **kwargs) -> None:
         """Subtract templates from the residual (residual = data - signal).
@@ -1504,22 +2240,157 @@ class AnalysisContainerArray:
         """
         self.signal_operation(+1, templates, data_index=data_index, **kwargs)
 
+    # ------------------------------------------------------------------
+    # Cross-shard gather helpers (for non-GB callers like MBH/PSD)
+    # ------------------------------------------------------------------
+
+    def _gather_per_gpu_to_single(
+        self,
+        per_gpu_list: list,
+        target_gpu: Optional[int] = None,
+    ):
+        """Concatenate per-GPU shards into a single buffer in AC order.
+
+        Used by callers (MBH/PSD recipe steps, etc.) that need a flat
+        single-buffer view of the residual or inverse PSD, e.g. to hand
+        to a kernel that doesn't speak the multi-shard list contract.
+
+        - Single-shard (``len(per_gpu_list) == 1``): returns the buffer
+          directly (no copy); ``target_gpu`` is ignored.
+        - CPU (``self.gpus is None``): returns ``np.concatenate(per_gpu_list)``.
+        - Multi-shard GPU: copies every shard onto ``target_gpu`` (default:
+          ``self.gpus[0]``), then concatenates in AC order so the result is
+          indexable by global AC index just like the original
+          ``linear_*_arr[0]`` was.
+
+        The concatenation is by ``gpu_splits`` order. To preserve global
+        AC order, we sort each shard's entries by their original AC index.
+        """
+        if len(per_gpu_list) == 1:
+            return per_gpu_list[0]
+        if self.gpus is None:
+            return np.concatenate(per_gpu_list)
+
+        if target_gpu is None:
+            target_gpu = self.gpus[0]
+
+        # Per-AC element size = len(buffer) / number_of_acs_on_that_shard.
+        sizes_per_ac = [int(buf.size // max(len(self.gpu_splits[i]), 1))
+                        for i, buf in enumerate(per_gpu_list)]
+        # Sanity: all shards must agree on per-AC size.
+        if sizes_per_ac and len(set(sizes_per_ac)) != 1:
+            raise RuntimeError(
+                f"Per-AC element size mismatch across shards: {sizes_per_ac}. "
+                "Cannot gather; shard layout must be uniform."
+            )
+        per_ac = sizes_per_ac[0] if sizes_per_ac else 0
+
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        try:
+            with self.xp.cuda.Device(int(target_gpu)):
+                gathered = self.xp.zeros(
+                    self.acs_total_entries * per_ac, dtype=per_gpu_list[0].dtype
+                )
+                for i, gpu in enumerate(self.gpus):
+                    split = self.gpu_splits[i]
+                    if len(split) == 0:
+                        continue
+                    # Move this shard's buffer onto target_gpu, then scatter
+                    # back into AC order in `gathered`.
+                    src = self.xp.asarray(per_gpu_list[i])
+                    src = src.reshape(len(split), per_ac)
+                    for intra_i, ac_i in enumerate(split):
+                        gathered[int(ac_i) * per_ac : (int(ac_i) + 1) * per_ac] = (
+                            src[intra_i]
+                        )
+            return gathered
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
+
+    def gather_linear_data_arr(self, target_gpu: Optional[int] = None):
+        """Return the residual buffer as a single flat array (concatenated across shards).
+
+        For single-GPU runs this returns ``linear_data_arr[0]`` directly (no copy).
+        For multi-GPU runs it gathers every shard onto ``target_gpu`` (default
+        ``self.gpus[0]``). Use this for legacy callers that expect a single buffer.
+        """
+        return self._gather_per_gpu_to_single(self.linear_data_arr, target_gpu)
+
+    def gather_linear_psd_arr(self, target_gpu: Optional[int] = None):
+        """Return the inverse-PSD buffer as a single flat array (concatenated across shards).
+
+        Same semantics as :meth:`gather_linear_data_arr` for the PSD side.
+        """
+        return self._gather_per_gpu_to_single(self.linear_psd_arr, target_gpu)
+
+    def gather_data_shaped(self):
+        """Return the full ``(num_acs, nchannels, *end_shape)`` residual ndarray.
+
+        Single-GPU: returns ``data_shaped[0]`` directly (a live reshape
+        view; no copy). Multi-GPU: gathers every shard's slab into a
+        single contiguous ndarray on ``gpus[0]``.
+
+        Use this from legacy callers that expect a single multi-AC array
+        (e.g. ``acs.data_shaped[0]`` passed to a kernel that doesn't
+        understand the multi-shard list).
+        """
+        if len(self.linear_data_arr) == 1:
+            return self.data_shaped[0]
+        return self.data_shaped_view().gather()
+
+    def gather_psd_shaped(self):
+        """Same as :meth:`gather_data_shaped` for the inverse-PSD buffer."""
+        if len(self.linear_psd_arr) == 1:
+            return self.psd_shaped[0]
+        return self.psd_shaped_view().gather()
+
+    def data_shaped_view(self) -> "BandView":
+        """Return a :class:`BandView` over the residual buffer.
+
+        Indexable by global band id (``view[band_inds] = value`` /
+        ``view[band_inds]``). Works for single-GPU and multi-GPU runs
+        uniformly; on single-GPU the underlying shard is touched directly.
+        See :class:`BandView` for the full op contract.
+        """
+        return BandView(self, kind="data")
+
+    def psd_shaped_view(self) -> "BandView":
+        """Return a :class:`BandView` over the inverse-PSD buffer.
+
+        Companion to :meth:`data_shaped_view`. Same semantics.
+        """
+        return BandView(self, kind="psd")
+
     @property
     def data_shaped(self):
         """Per-GPU data buffers reshaped to ``(n_acs_on_gpu, nchannels, *end_shape)``."""
         out = []
-        for i, tmp in enumerate(self.linear_data_arr):
-            if self.gpus is not None:
-                self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape))
+        if self.gpus is None:
+            for tmp in self.linear_data_arr:
+                out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape))
+            return out
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        try:
+            for i, tmp in enumerate(self.linear_data_arr):
+                with self.xp.cuda.Device(self.gpus[i]):
+                    out.append(tmp.reshape((-1, self.nchannels,) + self.end_shape))
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
         return out
 
     @property
     def psd_shaped(self):
         """Per-GPU PSD buffers reshaped to ``(n_acs_on_gpu, *shape_sens, *end_shape)``."""
         out = []
-        for i, tmp in enumerate(self.linear_psd_arr):
-            if self.gpus is not None:
-                self.xp.cuda.runtime.setDevice(self.gpus[i])
-            out.append(tmp.reshape((-1,) + self.shape_sens + self.end_shape))
+        if self.gpus is None:
+            for tmp in self.linear_psd_arr:
+                out.append(tmp.reshape((-1,) + self.shape_sens + self.end_shape))
+            return out
+        main_gpu = self.xp.cuda.runtime.getDevice()
+        try:
+            for i, tmp in enumerate(self.linear_psd_arr):
+                with self.xp.cuda.Device(self.gpus[i]):
+                    out.append(tmp.reshape((-1,) + self.shape_sens + self.end_shape))
+        finally:
+            self.xp.cuda.runtime.setDevice(main_gpu)
         return out

@@ -102,6 +102,11 @@ optional-dependencies.dev = [
   "pylint",
 ]
 
+# Phase 4 (2026-06-02): FEW-pattern adoption -- CLI entry point for the
+# citation registry. `lisatools_citations` -> lisatools.cmd.citations:main.
+# See `lisatools/utils/citations.py` and CITATION.cff at repo root.
+scripts.lisatools_citations = "lisatools.cmd.citations:main"
+
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
 local_scheme = "node-and-date"
@@ -154,6 +159,28 @@ sdist.include = [
   "src/lisatools/cutils/global.hpp",
   "src/lisatools/cutils/binding.cxx",
   "src/lisatools/cutils/binding.hpp",
+  "src/lisatools/cutils/lisatools_header_abi.hpp",
+  "src/lisatools/cutils/orbits_view.hpp",
+  "src/lisatools/cutils/LISAanalysisToolsConfig.cmake",
+  # Phase 3E: LISA-response sources absorbed from lisa-on-gpu.
+  "src/lisatools/cutils/LISAResponse.cu",
+  "src/lisatools/cutils/LISAResponse.hh",
+  "src/lisatools/cutils/binding_flr.cxx",
+  "src/lisatools/cutils/binding_flr.hpp",
+  # Phase 3L: TDIonTheFly C++ carve-out, class by class.
+  "src/lisatools/cutils/fd_domain.hh",
+  "src/lisatools/cutils/binding_fd_domain.hpp",
+  "src/lisatools/cutils/wdm_settings.hh",
+  "src/lisatools/cutils/binding_wdm_settings.hpp",
+  "src/lisatools/cutils/wdm_domain.hh",
+  "src/lisatools/cutils/binding_wdm_domain.hpp",
+  "src/lisatools/cutils/lat_tdi_on_the_fly.hh",
+  "src/lisatools/cutils/lat_tdi_on_the_fly.cu",
+  "src/lisatools/cutils/lat_spline_tdi_waveform.hh",
+  "src/lisatools/cutils/lat_spline_tdi_waveform.cu",
+  "src/lisatools/cutils/binding_lat_spline_tdi.hpp",
+  # Phase 4: citation registry data file (parsed by lisatools.utils.citations).
+  "CITATION.cff",
 ]
 sdist.exclude = [
   ".devcontainer/",

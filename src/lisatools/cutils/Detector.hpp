@@ -1,8 +1,10 @@
 #ifndef __L1DETECTOR_HPP__
 #define __L1DETECTOR_HPP__
 
+// gbt_global.h transitively brings in cuda_complex.hpp + the CUDA_DEVICE /
+// CUDA_KERNEL / cmplx typedef set. Do not add a separate "cuda_complex.hpp"
+// include -- there is one sprint-wide copy, owned by GPUBackendTools.
 #include "gbt_global.h"
-#include "cuda_complex.hpp"
 #include <iostream>
 
 #if defined(__CUDACC__) || defined(__CUDA_COMPILATION__)
