@@ -371,9 +371,7 @@ class SignalProcessor:
         self.times = times
         self.dt = times[1] - times[0]
         self.N = times.shape[0]
-        self.T = (
-            times[-1] - times[0]
-        )  # total duration. Takes into account that times[0] may not be zero.
+        self.T = self.N * self.dt # total duration. Takes into account that times[0] may not be zero.
         self.data = data
         self.fs = fs
         self.verbose = verbose
@@ -775,7 +773,7 @@ class BaseProcessingStep(SignalProcessor):
             )
 
         xp = get_array_module(self.data)
-
+        
         settings = TDSettings(
             t0=self.times[0],
             dt=self.dt,
@@ -811,7 +809,13 @@ class BaseProcessingStep(SignalProcessor):
         if self.td_signal.settings == settings:
             data_signal = self.td_signal
         else:
-            data_signal = self.td_signal.transform(settings, window=window)
+            # TODO: fix this to be chopped based on Tobs originally
+            if self.td_signal.N != settings.N:
+                assert settings.N < self.td_signal.N
+                _td_sig = TDSignal(self.td_signal[:, :settings.N], TDSettings(settings.N, self.td_signal.dt))
+            else:
+                _td_sig = self.td_signal
+            data_signal = _td_sig.transform(settings, window=window)
 
         if return_orbits:
             return data_signal, self.orbits
@@ -833,6 +837,7 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         orbits_kwargs: dict = None,
         verbose: bool = True,
         do_plots: bool = False,
+        Tobs: float = None
     ):
         L1DataLoader.__init__(
             self,
@@ -845,6 +850,11 @@ class L1ProcessingStep(L1DataLoader, BaseProcessingStep):
         )
 
         times, fs, data_xyz, orbits = self.load_data()
+        # TODO: add this to other processors?
+        if Tobs is not None:
+            keep = (times[:] - times[0]) < Tobs
+            times = times[keep]
+            data_xyz = data_xyz[:, keep]
 
         BaseProcessingStep.__init__(self, times, data_xyz, fs, verbose=verbose, do_plots=do_plots)
 

@@ -4,9 +4,7 @@ Source classes
 --------------
 - MBH (phentax IMRPhenomTHM): StretchMove inside ResidualAddOneRemoveOneMove.
 - EMRI                     : StretchMove inside ResidualAddOneRemoveOneMove.
-- SOBBH                    : NUTSMove with JAX gradient via
-                             SOBBHWDMHeterodyne.get_ll_grad_jax, inside
-                             ResidualAddOneRemoveOneMove.
+- SOBBH                    : StretchMove inside ResidualAddOneRemoveOneMove.
 
 No GB branch, no PSD branch, no galactic-foreground (galfor) sampling
 branch. Instrument noise and galactic foreground are fixed components of
@@ -40,9 +38,8 @@ GPU
 Install cupy (cuda12x / cuda13x) and set GPUS = [<dev_id>] in
 :func:`get_general_erebor_settings`. All response wrappers (EMRI, SOBBH,
 MBH) and the synthetic noise generator pick up ``GPU_BACKEND`` when
-``gpu_available``. SOBBH NUTS uses ``force_backend="jax"`` for the
-gradient path regardless of GPU availability (JAX picks the best device
-at runtime).
+``gpu_available``. When cupy isn't available the configuration falls
+back to a pure-CPU run automatically.
 
 WDM grid
 --------
@@ -115,7 +112,7 @@ from lisatools.sensitivity import (
 from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
 from lisatools.utils.constants import YRSID_SI
 
-from eryn.moves import NUTSMove, StretchMove
+from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 
@@ -150,23 +147,6 @@ from mbh_phentax_only_global_fit_settings import (
     mbh_full_to_sampling,
 )
 
-# SOBBHWDMHeterodyne (chunked-het with JAX gradient path) was moved at
-# Phase 2 (2026-06-02) from the sprint root to
-# LISAanalysistools/scripts/gb_chunked_het/. It re-imports utilities from
-# scripts/diagnostics/check_shortened_wdm.py via a bare import, so both
-# subdirectories need to be on sys.path. Computed relative to this file
-# so the script is portable across machines.
-import os as _os_for_path
-_THIS_DIR = _os_for_path.dirname(_os_for_path.abspath(__file__))
-_LAT_SCRIPTS_DIR = _os_for_path.normpath(_os_for_path.join(_THIS_DIR, "..", "scripts"))
-_GB_CHUNKED_HET_DIR = _os_for_path.join(_LAT_SCRIPTS_DIR, "gb_chunked_het")
-_DIAGNOSTICS_DIR = _os_for_path.join(_LAT_SCRIPTS_DIR, "diagnostics")
-for _p in (_DIAGNOSTICS_DIR, _GB_CHUNKED_HET_DIR):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-from gb_wdm_het import SOBBHWDMHeterodyne  # noqa: E402
-
-
 # ============================================================
 # *** Top-of-file knobs (the "surface" the user touches) ***
 # ============================================================
@@ -181,19 +161,19 @@ WAVELET_DUR_BOUNDS = (40000.0, 48000.0)
 # Data source selection.
 #   "mojito"    — load source TD signals from a mojito L1 folder.
 #   "synthetic" — build source TD signals locally for testing.
-DATA_PROCESSOR = os.environ.get("DATA_PROCESSOR", "synthetic")
+DATA_PROCESSOR = os.environ.get("DATA_PROCESSOR", "mojito")
 MOJITO_DATA_PATH = os.environ.get(
     "MOJITO_DATA_PATH",
-    "/data/mojito_L1/",  # USER: set this to the actual L1 folder.
+    "/Users/mlkatz/.mojito_cache/brickmarket/mojito_light_v1_0_0/",  # USER: set this to the actual L1 folder.
 )
 
 # Per-class source IDs (used by both modes — defines the leaf counts).
 # Edit to match the mojito catalog you intend to load. Each class is
 # capped at len(<list>) leaves per branch.
 MOJITO_SOURCE_IDS = {
-    "MBHB": list(range(10)),
-    "EMRI": list(range(10)),
-    "SOBHB": list(range(10)),
+    "MBHB": [0, 3, 5, 6], # range(2)
+    "EMRI": [0, 1, 2], # range(2)
+    "SOBHB": [0, 1, 2], # range(2)
 }
 
 # Synthetic instrument noise (fixed, no PSD branch).
@@ -234,20 +214,6 @@ RANDOM_SEED = 103209
 NWALKERS = 6
 NTEMPS = 3
 WINDOW_TAPER_DURATION = 0.0  # rectangular window
-
-# SOBBH NUTS knobs
-NUTS_STEP_SIZE = 0.6
-NUTS_MAX_TREE_DEPTH = 2
-
-# SOBBHWDMHeterodyne chunking knobs (env-overridable to match the rest
-# of the sprint).
-CHUNKED_NT_SUB = int(os.environ.get("CHUNKED_NT_SUB", 256))
-CHUNKED_N_PAD = int(os.environ.get("CHUNKED_N_PAD", 32))
-CHUNKED_N_SPARSE = int(os.environ.get("CHUNKED_N_SPARSE", 256))
-CHUNKED_N_CP_SIG = int(os.environ.get("CHUNKED_N_CP_SIG", 48))
-CHUNKED_N_CP_ORBIT = int(os.environ.get("CHUNKED_N_CP_ORBIT", 32))
-CHUNKED_JAX_CHUNK_ENV = os.environ.get("CHUNKED_JAX_CHUNK")
-CHUNKED_JAX_CHUNK = int(CHUNKED_JAX_CHUNK_ENV) if CHUNKED_JAX_CHUNK_ENV else None
 
 # Output
 FILE_STORE_DIR = "./gf_output/"
@@ -560,6 +526,7 @@ def _build_synthetic_source_streams(
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
     zero = np.zeros((nchannels, target_N), dtype=np.float64)
 
+    
     emri_td = zero.copy()
     if emri_injections.shape[0] > 0:
         emri_wave_gen = get_emri_response_wrapper(
@@ -567,9 +534,13 @@ def _build_synthetic_source_streams(
             tdi_config=tdi_config, tdi_chan=TDI_CHAN,
             role="injection", force_backend=force_backend,
         )
-        for params in emri_injections:
+        for ii, params in enumerate(emri_injections):
+            print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
+        
             sig = np.asarray(emri_wave_gen(*params, convert_to_ra_dec=False))
             emri_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
+            print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [end]")
+        
 
     sobbh_td = zero.copy()
     if sobbh_injections.shape[0] > 0:
@@ -578,9 +549,11 @@ def _build_synthetic_source_streams(
             tdi_config=tdi_config, tdi_chan=TDI_CHAN,
             role="injection", force_backend=force_backend,
         )
-        for params in sobbh_injections:
+        for ii, params in enumerate(sobbh_injections):
+            print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
             sig = np.asarray(sobbh_wave_gen(*params, convert_to_ra_dec=False))
             sobbh_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
+            print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [end]")
 
     mbh_td = zero.copy()
     if mbh_injections.shape[0] > 0:
@@ -589,10 +562,11 @@ def _build_synthetic_source_streams(
             tdi_config=tdi_config, tdi_chan=TDI_CHAN,
             role="injection", force_backend=force_backend,
         )
-        for params in mbh_injections:
+        for ii, params in enumerate(mbh_injections):
+            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
             sig = np.asarray(mbh_wave_gen(*params, convert_to_ra_dec=False))
             mbh_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
-
+            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
     return emri_td, sobbh_td, mbh_td
 
 
@@ -618,6 +592,7 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         orbits_kwargs: Optional[dict] = None,
         verbose: bool = True,
         do_plots: bool = False,
+        Tobs: float = None
     ):
         # We hardcode source_types to MBHB / EMRI / SOBHB only — instrument
         # noise + galactic foreground come from the synthetic generators
@@ -635,6 +610,7 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
             orbits_kwargs=orbits_kwargs,
             verbose=verbose,
             do_plots=do_plots,
+            Tobs=Tobs
         )
         # super().__init__ already called load_data() and stored .data,
         # .times, .fs, .orbits, .catalogue.
@@ -654,7 +630,7 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         # mojito gives (nch, n_times); align lengths defensively.
         nch = self.data.shape[0]
         self.data = (
-            self.data
+            _pad_or_clip(self.data[:nch], N)
             + _pad_or_clip(noise_td[:nch], N)
             + _pad_or_clip(fg_td[:nch], N)
         )
@@ -800,9 +776,8 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
     """SOBBH setup with ``nleaves_max = N_SOBBH_INJECTIONS``.
 
-    ``inner_moves`` left as the default StretchMove here — the
-    NUTS-with-JAX-gradient inner move is wired in :func:`setup_recipe`
-    after the heterodyne object is built against the runtime orbits.
+    Uses ``StretchMove`` as the inner move (mirrors the EMRI / MBH
+    branches).
     """
     force_backend = _force_backend_for_branch()
     initialize_kwargs_sobbh = dict(
@@ -851,7 +826,6 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
         initialize_kwargs=initialize_kwargs_sobbh,
         waveform_kwargs=dict(),
         info_matrix_gen=None,
-        # Placeholder — overridden in setup_recipe with the NUTS move.
         inner_moves=[(StretchMove(), 1.0)],
         nleaves_max=N_SOBBH_INJECTIONS,
         nleaves_min=N_SOBBH_INJECTIONS,
@@ -1066,74 +1040,21 @@ def _build_mbh_phentax_move_runtime(
     return move
 
 
-def _prior_half_widths_sobbh(sobbh_info) -> np.ndarray:
-    """Per-parameter prior half-widths for the SOBBH sampling basis.
-
-    Used as the ``scale`` argument for :class:`NUTSMove` so each
-    coordinate's natural step is ``~scale``. For uniform priors this is
-    half the interval width; for the sampling-basis ``cos_inc`` etc.
-    coordinates the priors live on ``[-1, 1]`` so the width is 1.
-    """
-    prior_container = sobbh_info.priors["sobbh"]
-    half = np.zeros(sobbh_info.ndim, dtype=float)
-    for i, dist in enumerate(prior_container.priors_in.values()):
-        lo = getattr(dist, "min_val", None)
-        hi = getattr(dist, "max_val", None)
-        if lo is not None and hi is not None:
-            half[i] = 0.5 * (float(hi) - float(lo))
-        else:
-            half[i] = 1.0
-    return half
-
-
-def _build_sobbh_nuts_move(
+def _build_sobbh_move_runtime(
     curr: CurrentInfoGlobalFit,
     acs: AnalysisContainerArray,
     priors: dict,
     state,
 ):
-    """SOBBH move with NUTSMove driven by :meth:`SOBBHWDMHeterodyne.get_ll_grad_jax`.
+    """SOBBH move using the runtime ``general_info.data_t0`` for t_start.
 
-    Mirrors the GB pattern in ``LISAanalysistools/examples/gb_jax_likelihood_grad.py``:
-
-    1. Build a :class:`SOBBHWDMHeterodyne` instance with
-       ``force_backend="jax"`` so ``get_ll_grad_jax`` is available.
-    2. Wrap the JAX-side gradient as ``grad_log_like_eryn(theta_batch)``
-       returning a NumPy array shaped ``(num_walkers, ndim)`` for NUTS.
-    3. Instantiate :class:`NUTSMove` with the gradient callable, prior
-       half-widths as the per-parameter step scale, and a small
-       ``max_tree_depth`` (2 — 4 leapfrog steps per proposal) for cost
-       control.
-    4. Hand the NUTSMove to :class:`ResidualAddOneRemoveOneMove` as the
-       per-leaf inner move so the global-fit residual swap logic
-       composes with the NUTS step.
-
-    KNOWN RISK: NUTSMove's ``grad_log_like_fn`` must see the per-leaf
-    residual that ``ResidualAddOneRemoveOneMove`` maintains. The
-    SOBBHWDMHeterodyne reads the current residual from ``acs`` at call
-    time (via its bound ``data_d`` / ``invC`` view), so the closure stays
-    correct as the outer move iterates leaves — *provided* acs is
-    updated in place by the outer move. If this assumption breaks,
-    surface it with a wrapper that re-reads ``acs.data_residual`` per
-    propose() call.
+    Mirrors the EMRI / MBH stretch builders.
     """
-    import jax
-    import jax.numpy as jnp
-
     general_info = curr.general_info
     sobbh_info = curr.source_info["sobbh"]
     nwalkers = general_info.nwalkers
     ntemps = general_info.ntemps
-    domain = general_info.domain_settings
-    if not isinstance(domain, WDMSettings):
-        raise NotImplementedError(
-            "SOBBH NUTSMove requires the WDM basis; "
-            f"got {type(domain).__name__}."
-        )
 
-    # Cached template generator for the residual pre-injection (same as
-    # the stretch path — the NUTS move proposes new theta, the residual
-    # update path still rebuilds h(theta) via this wrapper).
     force_backend = _force_backend_for_branch()
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
     template_wave_gen = get_sobbh_response_wrapper(
@@ -1152,62 +1073,6 @@ def _build_sobbh_nuts_move(
         td_window=None, nchannels=acs.nchannels,
     )
 
-    # JAX-backed chunked heterodyne for the gradient path.
-    sobbh_het_jax = SOBBHWDMHeterodyne(
-        Nf=domain.Nf, Nt=domain.Nt, dt=general_info.dt,
-        T_full=general_info.Tobs, t_ref_full=general_info.data_t0,
-        Nt_sub=CHUNKED_NT_SUB,
-        n_pad=CHUNKED_N_PAD,
-        N_sparse=CHUNKED_N_SPARSE,
-        nchannels=acs.nchannels,
-        force_backend="jax",
-        tdi_gen=TDI_GEN_STR,
-        orbits=general_info.gpu_orbits,
-        t_obs_start=float(general_info.data_t0),
-        N_cp_sig=CHUNKED_N_CP_SIG,
-        N_cp_orbit=CHUNKED_N_CP_ORBIT,
-        jax_chunk=CHUNKED_JAX_CHUNK,
-    )
-
-    def _residual_views():
-        """Snapshot of (data_d, invC) for the current per-leaf residual.
-
-        Pulled from acs at NUTS call time so the closure tracks the
-        outer ResidualAddOneRemoveOneMove's residual updates. The
-        SOBBHWDMHeterodyne API takes these as JAX arrays.
-        """
-        data_d = jnp.asarray(np.asarray(acs.data_residual))
-        invC = jnp.asarray(np.asarray(acs.invC))
-        return data_d, invC
-
-    def log_like_eryn(theta_batch):
-        theta_jax = jnp.asarray(theta_batch, dtype=jnp.float64)
-        data_d, invC = _residual_views()
-        d_h, h_h = sobbh_het_jax.get_ll_jax(
-            theta_jax, data_d, invC, chunk=CHUNKED_JAX_CHUNK,
-        )
-        # GW likelihood: log L = <d|h> - 0.5 <h|h>
-        return np.asarray(d_h - 0.5 * h_h)
-
-    def grad_log_like_eryn(theta_batch):
-        theta_jax = jnp.asarray(theta_batch, dtype=jnp.float64)
-        data_d, invC = _residual_views()
-        grad = sobbh_het_jax.get_ll_grad_jax(
-            theta_jax, data_d, invC, chunk=CHUNKED_JAX_CHUNK,
-        )
-        return np.asarray(grad)
-
-    nuts_scale = _prior_half_widths_sobbh(sobbh_info)
-    nuts = NUTSMove(
-        grad_log_like_fn=grad_log_like_eryn,
-        ndim=sobbh_info.ndim,
-        scale=nuts_scale,
-        step_size=NUTS_STEP_SIZE,
-        max_tree_depth=NUTS_MAX_TREE_DEPTH,
-    )
-    sobbh_info.inner_moves = [(nuts, 1.0)]
-
-    # Per-walker pre-injection (same residual setup as the stretch path).
     if np.any(sobbh_inds := state.branches_inds["sobbh"][0]):
         for leaf in range(sobbh_inds.shape[-1]):
             if not sobbh_inds[0, leaf]:
@@ -1250,7 +1115,7 @@ def setup_recipe(
     priors: dict,
     state,
 ):
-    """Three source branches — MBH (stretch), EMRI (stretch), SOBBH (NUTS+JAX)."""
+    """Three source branches — MBH (stretch), EMRI (stretch), SOBBH (stretch)."""
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
@@ -1260,7 +1125,7 @@ def setup_recipe(
 
     mbh_pe_move = _build_mbh_phentax_move_runtime(curr, acs, priors, state)
     emri_pe_move = _build_emri_move_runtime(curr, acs, priors, state)
-    sobbh_pe_move = _build_sobbh_nuts_move(curr, acs, priors, state)
+    sobbh_pe_move = _build_sobbh_move_runtime(curr, acs, priors, state)
 
     pe_moves = [mbh_pe_move, emri_pe_move, sobbh_pe_move]
     gf_pe_move = GFCombineMove(
@@ -1290,6 +1155,7 @@ def _select_data_processor():
             ),
             verbose=True,
             do_plots=False,
+            Tobs=TOBS
         )
         return L1ProcessingStepWithSyntheticNoise, kwargs
 
