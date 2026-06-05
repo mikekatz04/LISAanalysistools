@@ -35,7 +35,9 @@ class TDIConfig(FastLISAResponseParallelModule):
 
     @classmethod
     def supported_backends(cls):
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
+        # Phase 3L.7l holdout (fixed 2026-06-05): use `_BACKEND_PREFIX`
+        # ("lisatools" via FastLISAResponseParallelModule).
+        return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
 
     def __init__(self, tdi: str | List[dict], force_backend: Optional[str] = None):
         super().__init__(force_backend=force_backend)

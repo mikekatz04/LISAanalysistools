@@ -314,7 +314,10 @@ class pyResponseTDI(FastLISAResponseParallelModule):
     
     @classmethod
     def supported_backends(cls):
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+        # Phase 3L.7l holdout (fixed 2026-06-05): switch from the stale
+        # `fastlisaresponse_<flavor>` prefix to the canonical
+        # `_BACKEND_PREFIX` ("lisatools" via FastLISAResponseParallelModule).
+        return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def _fill_A_E(self):
         """Set up A and E terms inside the Lagrangian interpolant"""
@@ -774,7 +777,10 @@ class ResponseWrapper(FastLISAResponseParallelModule):
     
     @classmethod
     def supported_backends(cls):
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+        # Phase 3L.7l holdout (fixed 2026-06-05): switch from the stale
+        # `fastlisaresponse_<flavor>` prefix to the canonical
+        # `_BACKEND_PREFIX` ("lisatools" via FastLISAResponseParallelModule).
+        return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def __call__(self, *args, convert_to_ra_dec: bool = True, **kwargs):
         """Run the waveform and response generation

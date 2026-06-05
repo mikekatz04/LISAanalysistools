@@ -15,6 +15,7 @@
    
 .. toctree::
    :maxdepth: 4
-   :caption: Tutorial:
+   :caption: Tutorials:
 
    lisatools_tutorial
+   lisa_response_tutorial
