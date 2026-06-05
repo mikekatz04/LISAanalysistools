@@ -99,22 +99,22 @@ def setup_recipe(
     psd_info = curr.source_info["psd"]
 
     # #* =============================== INJECT SOURCES =================================
-    # # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
-    # spread_gb = 0.0 #np.array([1e-12, 1e-12, 1e-20, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
-    # iteratively_resolved_population_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "catalogues", "iteratively_resolved_gbs_075yrs_snr7.npy")
-    # iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
+    # Sampling basis: ``[logA, f0 [mHz], fdot, phi0, cos_iota, psi, lam, sin_beta]``
+    spread_gb = 0.0 #np.array([1e-12, 1e-12, 1e-20, 1e-10, 1e-10, 1e-10, 1e-10, 1e-10])
+    iteratively_resolved_population_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "catalogues", "iteratively_resolved_gbs_075yrs_snr7.npy")
+    iteratively_resolved_population = np.load(iteratively_resolved_population_path, allow_pickle=True)
 
-    # frequencies = iteratively_resolved_population["Frequency"]
+    frequencies = iteratively_resolved_population["Frequency"]
 
-    # # iteratively_resolved_population["Polarization"] = iteratively_resolved_population["Polarization"] % np.pi  # ensure polarization is within [0, pi]
+    # iteratively_resolved_population["Polarization"] = iteratively_resolved_population["Polarization"] % np.pi  # ensure polarization is within [0, pi]
 
-    # in_band = (frequencies > curr.source_info["gb"].f0_lims[0]) & (frequencies < curr.source_info["gb"].f0_lims[1])
-    # logger.info(f"Keeping {np.sum(in_band)} out of {len(iteratively_resolved_population)} iteratively resolved GB sources within the band limits {curr.source_info['gb'].f0_lims[0]} - {curr.source_info['gb'].f0_lims[1]}")
-    # iteratively_resolved_population = iteratively_resolved_population[in_band]
-    # subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
-    # logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
-    # # subset_inds = None
-    # setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds, priors=priors)
+    in_band = (frequencies > curr.source_info["gb"].f0_lims[0]) & (frequencies < curr.source_info["gb"].f0_lims[1])
+    logger.info(f"Keeping {np.sum(in_band)} out of {len(iteratively_resolved_population)} iteratively resolved GB sources within the band limits {curr.source_info['gb'].f0_lims[0]} - {curr.source_info['gb'].f0_lims[1]}")
+    iteratively_resolved_population = iteratively_resolved_population[in_band]
+    subset_inds = np.array([int(name.split('_')[1]) for name in iteratively_resolved_population["Name"]])
+    logger.info(f"Injecting {len(subset_inds)} GB sources from iteratively resolved population.")
+    # subset_inds = None
+    setup_state_for_injection(curr, state, "GB", "gb", spread=spread_gb, subset_inds=subset_inds, priors=priors)
 
     
     #* ================================= BUILD MOVES ==================================
@@ -122,9 +122,9 @@ def setup_recipe(
         engine_info, curr, acs, priors, num_repeats=psd_info.num_prop_repeats
     )
     
-    # gb_search_moves, gb_pe_moves = build_gb_moves(
-    #     engine_info, curr, acs, priors, state
-    # )
+    gb_search_moves, gb_pe_moves = build_gb_moves(
+        engine_info, curr, acs, priors, state
+    )
 
     #* ================================= SETUP SEARCH ================================= 
     recipe.add_recipe_component(SearchRecipeStep(moves=[psd_search_move]), name="init psd search")
@@ -156,10 +156,10 @@ LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
 
 # Galactic foreground prior ranges
 LOG10_AMP_RANGE = (-47.0, -40.0)
-ALPHA_RANGE = (1.0, 8.0)
-LOG10_FREQ1_RANGE = (np.log10(5e-4), np.log10(10**(-2.5)))
+ALPHA_RANGE = (1.0, 1.0e3)
+LOG10_FREQ1_RANGE = (np.log10(5e-6), np.log10(10**(-2.5)))
 LOG10_FREQ2_RANGE = (np.log10(1e-5), np.log10(10**(-2.5)))
-LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-2))
+LOG10_FKNEE_RANGE = (np.log10(1e-10), np.log10(1e-2))
 
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
