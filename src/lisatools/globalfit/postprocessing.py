@@ -174,7 +174,7 @@ def _filter_removed_params(branch: str, samples_dict: dict[str, np.ndarray]) -> 
     return filtered
 
 
-def _samples_dict_to_structured_array(samples_dict: dict[str, np.ndarray]) -> np.ndarray:
+def posteriors_to_structured_array(samples_dict: dict[str, np.ndarray]) -> np.ndarray:
     """Convert a posterior mapping into a structured NumPy array."""
 
     if not samples_dict:
@@ -187,6 +187,28 @@ def _samples_dict_to_structured_array(samples_dict: dict[str, np.ndarray]) -> np
 
     for name, data in zip(param_names, param_data):
         structured_array[name] = data
+
+    return structured_array
+
+
+def detections_to_structured_array(detections: list[dict]) -> np.ndarray:
+    """Convert detection records into a structured NumPy array for HDF5 storage."""
+
+    str_dtype = h5py.string_dtype(encoding="utf-8")
+    fields = [
+        ("source_id", str_dtype),
+        ("posterior_id", str_dtype),
+        ("comment", str_dtype),
+        ("quality_flag", "i8"),
+        ("known_injection", str_dtype),
+        ("detection_statistic", "f8"),
+    ]
+    structured_array = np.zeros(len(detections), dtype=fields)
+
+    for i, detection in enumerate(detections):
+        for name, field_dtype in fields:
+            value = detection[name]
+            structured_array[name][i] = str(value) if field_dtype is str_dtype else value
 
     return structured_array
 
@@ -215,7 +237,7 @@ def _save_posterior_dataset(
 ) -> None:
     """Write one posterior dataset into an open HDF5 object."""
 
-    h5obj.create_dataset(source_label, data=_samples_dict_to_structured_array(samples_dict))
+    h5obj.create_dataset(source_label, data=posteriors_to_structured_array(samples_dict))
 
 
 def _build_leaf_samples_dict(
@@ -1498,7 +1520,7 @@ class SubmissionWriter(BackendConsumer):
         for j, source_idx in enumerate(posterior_files_map.keys()):
             detections.append({
                 "source_id": str(source_idx),
-                "posterior_id": f"posterior_{source_idx}",
+                "posterior_id": posterior_files_map[source_idx],
                 "comment": "",
                 "quality_flag": int(metadata.quality_flags[j]) if j < len(metadata.quality_flags) else 0,
                 "known_injection": known_injections_here[j] if j < len(known_injections_here) else "",
@@ -1524,17 +1546,13 @@ class SubmissionWriter(BackendConsumer):
         with h5py.File(metadata_h5_filepath, "w") as f:
             source_group = f.create_group(name="sources")
             posterior_group = source_group.create_group(name="posterior_files")
-            detection_group = source_group.create_group(name="detection")
 
             for j, (source_idx, posterior_file_path) in enumerate(posterior_files_map.items()):
                 posterior_group.create_dataset(source_idx, data=str(posterior_file_path))
 
-            detection_group.create_dataset("source_id", data=[d["source_id"] for d in detections])
-            detection_group.create_dataset("posterior_id", data=[d["posterior_id"] for d in detections])
-            detection_group.create_dataset("comment", data=[d["comment"] for d in detections])
-            detection_group.create_dataset("quality_flag", data=[d["quality_flag"] for d in detections])
-            detection_group.create_dataset("known_injection", data=[d["known_injection"] for d in detections])
-            detection_group.create_dataset("detection_statistic", data=[d["detection_statistic"] for d in detections])
+            source_group.create_dataset(
+                "detection", data=detections_to_structured_array(detections)
+            )
 
             _save_metadata_attributes(f, metadata)
 
@@ -1605,7 +1623,7 @@ class SubmissionWriter(BackendConsumer):
         )
         param_names = list(samples_dict.keys())
         physical_param_names = [p for p in param_names if p not in ["logprior", "loglikelihood"]]
-        structured_array = _samples_dict_to_structured_array(samples_dict)
+        structured_array = posteriors_to_structured_array(samples_dict)
 
         effective_branch_name = "noise" #todo or stochastic?
         filename = f"{self.run_metadata.run_type}_{self.run_metadata.global_fit_codename}_{self.run_metadata.run_id}_{effective_branch_name}_posteriors_{self.run_metadata.submission_timestamp}.h5"
