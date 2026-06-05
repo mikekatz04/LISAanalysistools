@@ -427,8 +427,9 @@ NB_MODULE(pycppdetector, m) {
     // Call initialization functions from other files
     detector_part(m);
     // Phase 3E: LISA-response wrappers (LISAResponseWrap, TDIConfigWrap,
-    // OrbitsWrap_responselisa, CubicSplineWrap_responselisa). Defined in
-    // binding_flr.cxx, absorbed from lisa-on-gpu.
+    // CubicSplineWrap_responselisa). Defined in binding_flr.cxx, absorbed
+    // from lisa-on-gpu. (OrbitsWrap_responselisa was deleted at Phase 3L.7p
+    // 2026-06-04 in favor of the canonical OrbitsWrap.)
     response_part(m);
     m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 

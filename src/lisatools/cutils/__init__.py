@@ -54,10 +54,8 @@ class LISAToolsBackendMethods(BackendMethods):
     FDSplineTDIWaveformWrap: object
     LISAResponseWrap: object
     LISAResponse: object
-    # `OrbitsWrap_responselisa` is the lisa-on-gpu-era response-flavored
-    # OrbitsWrap. Kept as a separate field for the transition; consumers
-    # that don't need it should use the plain `OrbitsWrap` above.
-    OrbitsWrap_responselisa: object
+    # Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa removed.
+    # Consumers reach for OrbitsWrap above.
     TDIConfigWrap: object
     TDIConfig: object
     CubicSplineWrap_responselisa: object
@@ -96,7 +94,6 @@ class LISAToolsBackend:
     FDSplineTDIWaveformWrap: object
     LISAResponseWrap: object
     LISAResponse: object
-    OrbitsWrap_responselisa: object
     TDIConfigWrap: object
     TDIConfig: object
     CubicSplineWrap_responselisa: object
@@ -122,7 +119,6 @@ class LISAToolsBackend:
         self.FDSplineTDIWaveformWrap = lisatools_backend_methods.FDSplineTDIWaveformWrap
         self.LISAResponseWrap = lisatools_backend_methods.LISAResponseWrap
         self.LISAResponse = lisatools_backend_methods.LISAResponse
-        self.OrbitsWrap_responselisa = lisatools_backend_methods.OrbitsWrap_responselisa
         self.TDIConfigWrap = lisatools_backend_methods.TDIConfigWrap
         self.TDIConfig = lisatools_backend_methods.TDIConfig
         self.CubicSplineWrap_responselisa = lisatools_backend_methods.CubicSplineWrap_responselisa
@@ -171,7 +167,6 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapCPU,
             LISAResponseWrap=_lat_pd.LISAResponseWrapCPU,
             LISAResponse=_lat_pd.LISAResponseCPU,
-            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapCPU_responselisa,
             TDIConfigWrap=_lat_pd.TDIConfigWrapCPU,
             TDIConfig=_lat_pd.TDIConfigCPU,
             CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapCPU_responselisa,
@@ -230,7 +225,6 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
             LISAResponseWrap=_lat_pd.LISAResponseWrapGPU,
             LISAResponse=_lat_pd.LISAResponseGPU,
-            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapGPU_responselisa,
             TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
             TDIConfig=_lat_pd.TDIConfigGPU,
             CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
@@ -288,7 +282,6 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
             LISAResponseWrap=_lat_pd.LISAResponseWrapGPU,
             LISAResponse=_lat_pd.LISAResponseGPU,
-            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapGPU_responselisa,
             TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
             TDIConfig=_lat_pd.TDIConfigGPU,
             CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
@@ -347,7 +340,6 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
             LISAResponseWrap=_lat_pd.LISAResponseWrapGPU,
             LISAResponse=_lat_pd.LISAResponseGPU,
-            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapGPU_responselisa,
             TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
             TDIConfig=_lat_pd.TDIConfigGPU,
             CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,

@@ -97,7 +97,7 @@ void response_part(nb::module_ &m) {
 #endif 
 
     // Bind the constructor
-    .def(nb::init<OrbitsWrap_responselisa *, TDIConfigWrap *>(), 
+    .def(nb::init<OrbitsWrap *, TDIConfigWrap *>(),
          nb::arg("orbits"), nb::arg("tdi_config"))
     // Bind member functions
     .def("get_tdi_delays_wrap", &LISAResponseWrap::get_tdi_delays_wrap, "Preform TDI combinations.")
@@ -141,25 +141,12 @@ void response_part(nb::module_ &m) {
          nb::arg("unit_starts"), nb::arg("unit_lengths"), nb::arg("tdi_base_link"), nb::arg("tdi_link_combinations"), nb::arg("tdi_signs_in"), nb::arg("channels"), nb::arg("num_units"), nb::arg("num_channels"))
     ;
 
-#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    nb::class_<OrbitsWrap_responselisa>(m, "OrbitsWrapGPU_responselisa")
-#else
-    nb::class_<OrbitsWrap_responselisa>(m, "OrbitsWrapCPU_responselisa")
-#endif
-
-    // Bind the constructor
-    .def(nb::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(),
-         nb::arg("sc_t0"), nb::arg("sc_dt"), nb::arg("sc_N"), nb::arg("ltt_t0"), nb::arg("ltt_dt"), nb::arg("ltt_N"), nb::arg("n_arr"), nb::arg("ltt_arr"), nb::arg("x_arr"), nb::arg("links"), nb::arg("sc_r"), nb::arg("sc_e"), nb::arg("armlength"))
-    // .def(nb::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
-    //      nb::arg("sc_t0"), nb::arg("sc_dt"), nb::arg("sc_N"), nb::arg("ltt_t0"), nb::arg("ltt_dt"), nb::arg("ltt_N"), nb::arg("n_arr"), nb::arg("ltt_arr"), nb::arg("x_arr"), nb::arg("links"), nb::arg("sc_r"), nb::arg("sc_e"), nb::arg("armlength"))
-    // Bind member functions
-    // .def("get_light_travel_time_wrap", &OrbitsWrap::get_light_travel_time_wrap, "Get the light travel time.")
-    // .def("get_pos_wrap", &OrbitsWrap::get_pos_wrap, "Get spacecraft position.")
-    // .def("get_normal_unit_vec_wrap", &OrbitsWrap::get_normal_unit_vec_wrap, "Get link normal vector.")
-    // You can also expose public data members directly using def_rw
-    .def_rw("orbits", &OrbitsWrap_responselisa::orbits)
-    // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
-    ;
+    // Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa class + its pybind
+    // registration deleted. Use OrbitsWrap (binding.hpp) directly -- the two
+    // shipped identical constructor signatures + identical Orbits* fields;
+    // the only structural difference was the (unused) ReturnPointerBase
+    // inheritance. All downstream *TDIonTheFlyWrap / LISAResponseWrap
+    // constructors now take OrbitsWrap *.
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
     nb::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapGPU_responselisa")
@@ -261,7 +248,7 @@ void response_part(nb::module_ &m) {
 #else
     nb::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapCPU")
 #endif
-    .def(nb::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+    .def(nb::init<OrbitsWrap *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
          nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("freq_spline"))
     .def("run_wave_tdi_wrap", &FDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
     .def("get_buffer_size", &FDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
@@ -286,7 +273,7 @@ void response_part(nb::module_ &m) {
 #else
     nb::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapCPU")
 #endif
-    .def(nb::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+    .def(nb::init<OrbitsWrap *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
          nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("phase_spline"))
     .def("run_wave_tdi_wrap", &TDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
     .def("get_buffer_size", &TDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
@@ -310,7 +297,7 @@ void response_part(nb::module_ &m) {
 
 
 // NB_MODULE(responselisa, ...) removed during Phase 3E (2026-06-02):
-// the response classes (LISAResponseWrap, TDIConfigWrap, OrbitsWrap_responselisa,
+// the response classes (LISAResponseWrap, TDIConfigWrap,
 // CubicSplineWrap_responselisa) are now registered into LAT's `pycppdetector`
 // pybind11 module via response_part(m) called from binding.cxx's
 // NB_MODULE(pycppdetector, m) body.

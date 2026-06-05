@@ -2,9 +2,9 @@
 #define __BINDING_LAT_SPLINE_TDI_HPP__
 
 // pybind11 wrappers for the LAT-owned LISATDIonTheFly subclasses:
-//   LISATDIonTheFlyWrap     -- base holder for OrbitsWrap_responselisa +
-//                              TDIConfigWrap (used as a common base for all
-//                              source-class TDIonTheFly wrappers)
+//   LISATDIonTheFlyWrap     -- base holder for OrbitsWrap + TDIConfigWrap
+//                              (used as a common base for all source-class
+//                              TDIonTheFly wrappers)
 //   TDSplineTDIWaveformWrap -- pybind11 holder for TDSplineTDIWaveform
 //   FDSplineTDIWaveformWrap -- pybind11 holder for FDSplineTDIWaveform
 //
@@ -19,9 +19,9 @@
 // same pattern the underlying GBTDIonTheFly / SOBBHTDIonTheFly use to
 // inherit from the LAT-owned LISATDIonTheFly base.
 
-#include "binding_flr.hpp"     // ReturnPointerBase, OrbitsWrap_responselisa,
-                               // TDIConfigWrap, CubicSplineWrap_responselisa,
-                               // array_type<T>
+#include "binding_flr.hpp"     // ReturnPointerBase, TDIConfigWrap,
+                               // CubicSplineWrap_responselisa
+#include "binding.hpp"         // OrbitsWrap, array_type<T>
 #include "lat_spline_tdi_waveform.hh"
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
@@ -35,12 +35,12 @@
 #endif
 
 // Common base for all LISATDIonTheFly Wrap subclasses. Pure data holder
-// for the OrbitsWrap_responselisa + TDIConfigWrap pair.
+// for the OrbitsWrap + TDIConfigWrap pair.
 class LISATDIonTheFlyWrap : public ReturnPointerBase {
   public:
-    OrbitsWrap_responselisa *orbits;
+    OrbitsWrap *orbits;
     TDIConfigWrap *tdi_config;
-    LISATDIonTheFlyWrap(OrbitsWrap_responselisa *orbits_, TDIConfigWrap *tdi_config_){
+    LISATDIonTheFlyWrap(OrbitsWrap *orbits_, TDIConfigWrap *tdi_config_){
         orbits = orbits_;
         tdi_config = tdi_config_;
     };
@@ -51,7 +51,7 @@ class FDSplineTDIWaveformWrap : public LISATDIonTheFlyWrap {
     CubicSplineWrap_responselisa *amp_spline;
     CubicSplineWrap_responselisa *freq_spline;
     FDSplineTDIWaveform *waveform;
-    FDSplineTDIWaveformWrap(OrbitsWrap_responselisa *orbits_, TDIConfigWrap *tdi_config_, CubicSplineWrap_responselisa *amp_spline_, CubicSplineWrap_responselisa *freq_spline_): LISATDIonTheFlyWrap(orbits_, tdi_config_)
+    FDSplineTDIWaveformWrap(OrbitsWrap *orbits_, TDIConfigWrap *tdi_config_, CubicSplineWrap_responselisa *amp_spline_, CubicSplineWrap_responselisa *freq_spline_): LISATDIonTheFlyWrap(orbits_, tdi_config_)
     {
         amp_spline = amp_spline_;
         freq_spline = freq_spline_;
@@ -87,7 +87,7 @@ class TDSplineTDIWaveformWrap : public LISATDIonTheFlyWrap {
     CubicSplineWrap_responselisa *amp_spline;
     CubicSplineWrap_responselisa *phase_spline;
     TDSplineTDIWaveform *waveform;
-    TDSplineTDIWaveformWrap(OrbitsWrap_responselisa *orbits_, TDIConfigWrap *tdi_config_, CubicSplineWrap_responselisa *amp_spline_, CubicSplineWrap_responselisa *phase_spline_): LISATDIonTheFlyWrap(orbits_, tdi_config_)
+    TDSplineTDIWaveformWrap(OrbitsWrap *orbits_, TDIConfigWrap *tdi_config_, CubicSplineWrap_responselisa *amp_spline_, CubicSplineWrap_responselisa *phase_spline_): LISATDIonTheFlyWrap(orbits_, tdi_config_)
     {
         amp_spline = amp_spline_;
         phase_spline = phase_spline_;

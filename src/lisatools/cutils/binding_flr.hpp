@@ -24,12 +24,13 @@ using array_type = nb::ndarray<T, nb::device::cpu>;
 #define LISAResponseWrap LISAResponseWrapCPU
 #endif
 
+// Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa #define aliases dropped;
+// the class was deleted in favor of binding.hpp's canonical OrbitsWrap.
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#define OrbitsWrap_responselisa OrbitsWrapGPU_responselisa
 #define CubicSplineWrap_responselisa CubicSplineWrapGPU_responselisa
 #define TDIConfigWrap TDIConfigWrapGPU
 #else
-#define OrbitsWrap_responselisa OrbitsWrapCPU_responselisa
+#define CubicSplineWrap_responselisa CubicSplineWrapCPU_responselisa
 #define TDIConfigWrap TDIConfigWrapCPU
 #endif
 
@@ -99,26 +100,14 @@ class CubicSplineWrap_responselisa : public ReturnPointerBase {
 
 
 
-class OrbitsWrap_responselisa : public ReturnPointerBase{
-  public:
-    Orbits *orbits;
-    OrbitsWrap_responselisa(double sc_t0_, double sc_dt_, int sc_N_, double ltt_t0_, double ltt_dt_, int ltt_N_, array_type<double>n_arr_, array_type<double>ltt_arr_, array_type<double>x_arr_, array_type<int>links_, array_type<int>sc_r_, array_type<int>sc_e_, double armlength_)
-    {
-
-        double *_n_arr = return_pointer_and_check_length(n_arr_, "n_arr", sc_N_, 6 * 3);
-        double *_ltt_arr = return_pointer_and_check_length(ltt_arr_, "ltt_arr", ltt_N_, 6);
-        double *_x_arr = return_pointer_and_check_length(x_arr_, "x_arr", sc_N_, 3 * 3);
-
-        int *_sc_r = return_pointer_and_check_length(sc_r_, "sc_r", 6, 1);
-        int *_sc_e = return_pointer_and_check_length(sc_e_, "sc_e", 6, 1);
-        int *_links = return_pointer_and_check_length(links_, "links", 6, 1);
-
-        orbits = new Orbits(sc_t0_, sc_dt_, sc_N_, ltt_t0_, ltt_dt_, ltt_N_, _n_arr, _ltt_arr, _x_arr, _links,  _sc_r, _sc_e, armlength_);
-    };
-    ~OrbitsWrap_responselisa(){
-        delete orbits;
-    };
-};
+// Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa deleted -- collapsed
+// into the canonical `OrbitsWrap` (binding.hpp). Both classes always
+// shipped identical constructor signatures; the only structural difference
+// was that this one inherited from ReturnPointerBase for its static
+// `return_pointer*` helpers. No downstream code actually accessed those
+// through an OrbitsWrap_responselisa pointer (and the GPUs can't dispatch
+// virtually anyway), so collapsing was safe. Every downstream `*TDIonTheFlyWrap`
+// / LISAResponseWrap constructor now takes `OrbitsWrap *` directly.
 
 
 class TDIConfigWrap : public ReturnPointerBase{
@@ -144,9 +133,9 @@ class TDIConfigWrap : public ReturnPointerBase{
 class LISAResponseWrap : public ReturnPointerBase {
   public:
     LISAResponse *response;
-    OrbitsWrap_responselisa *orbits;
+    OrbitsWrap *orbits;
     TDIConfigWrap *tdi_config;
-    LISAResponseWrap(OrbitsWrap_responselisa *orbits_, TDIConfigWrap *tdi_config_)
+    LISAResponseWrap(OrbitsWrap *orbits_, TDIConfigWrap *tdi_config_)
     {
         orbits = orbits_;
         tdi_config = tdi_config_;
