@@ -50,6 +50,29 @@
 #include "global.hpp"           // -> gbt_global.h -> cmplx + CUDA macros
 #include "lat_wdm_fft.hh"       // wdm_spline_radix2_fft, wdm_fft_dispatch
 #include "lat_tdi_on_the_fly.hh" // LISATDIonTheFly, OrbitsSplineCache, Orbits
+// GBT's Interpolate.hh provides `fit_cubic_spline_thomas` (CPU) and
+// `fit_cubic_spline_pcr` (GPU). We deliberately do NOT `#include` it
+// here because BBHx ships a same-named, different-purpose
+// `Interpolate.hh` for its PhenomHM-mode interp; that local header
+// uses the same `__INTERPOLATE_HH__` guard, so whoever is included
+// first wins for the whole TU. binding_bbhx.hpp includes the BBHx
+// local first (for its own PhenomHM consumers), which would shadow
+// GBT's even via `<Interpolate.hh>`. Forward-declare the two GBT
+// host launchers directly so this header is self-contained --
+// CubicSpline itself is already pulled in via InterpolateDevice.hh
+// transitively. Phase 3L.8 (2026-06-04).
+class CubicSpline;
+CubicSpline fit_cubic_spline_thomas(double *x, double *y,
+                                    double *c1, double *c2, double *c3,
+                                    double *B,
+                                    int length, int spline_type);
+#ifdef __CUDACC__
+CUDA_DEVICE
+CubicSpline fit_cubic_spline_pcr(double *x, double *y,
+                                 double *c1, double *c2, double *c3,
+                                 double *B, double *pcr_scratch,
+                                 int length, int spline_type);
+#endif
 
 
 // ----------------------------------------------------------------------------
