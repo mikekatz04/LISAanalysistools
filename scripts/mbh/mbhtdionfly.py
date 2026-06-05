@@ -1,7 +1,7 @@
 from typing import Optional
 
 from gpubackendtools.interpolate import CubicSplineInterpolant
-from fastlisaresponse.tdionfly import TDTDIonTheFly
+from lisatools.response.tdionfly import TDTDIonTheFly
 import os 
 
 from astropy.coordinates import SkyCoord
@@ -176,9 +176,9 @@ if __name__ == "__main__":
     from lisatools.detector import L1Orbits
     from lisaconstants import ASTRONOMICAL_YEAR
     from lisatools.utils.constants import YRSID_SI
-    from fastlisaresponse import ResponseWrapper
-    from fastlisaresponse.tdiconfig import TDIConfig
-    from fastlisaresponse.response import icrs_to_ecliptic
+    from lisatools.response.directresponse import ResponseWrapper
+    from lisatools.response.tdiconfig import TDIConfig
+    from lisatools.response.directresponse import icrs_to_ecliptic
     from phentax.waveform import IMRPhenomTHM 
 
     hms = [21, 33, 44]

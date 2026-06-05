@@ -35,7 +35,8 @@ import numpy as np
 # fastlisaresponse registers the fastlisaresponse_* backends that
 # DomainSettingsBase.supported_backends() resolves against; importing
 # lisatools registers the lisatools_* backends.
-import fastlisaresponse  # noqa: F401
+# Phase 3L.7l: import fastlisaresponse removed (no longer registers backends).
+# If a script needs the backend registry, import lisatools / gbgpu / bbhx as appropriate.
 import lisatools
 from lisatools.domains import WDMLookupTable, WDMSettings
 

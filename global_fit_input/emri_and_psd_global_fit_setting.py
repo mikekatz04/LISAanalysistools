@@ -311,7 +311,7 @@ class WrapEMRI:
 def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
     from stableemrifisher.fisher import StableEMRIFisher
-    from fastlisaresponse import ResponseWrapper
+    from lisatools.response.directresponse import ResponseWrapper
     from few.waveform.waveform import GenerateEMRIWaveform
 
     injection_parameters_file = '/data/asantini/packages/LISAanalysistools/injection_params.npz'

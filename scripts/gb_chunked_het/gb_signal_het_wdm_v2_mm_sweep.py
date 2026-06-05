@@ -53,8 +53,8 @@ from lisatools.domains import TDSettings, TDSignal, WDMSettings, WDMSignal
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.utils.constants import YRSID_SI
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils import TransformContainer

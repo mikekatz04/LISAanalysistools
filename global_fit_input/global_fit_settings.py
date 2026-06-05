@@ -49,8 +49,8 @@ from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 
-from fastlisaresponse import ResponseWrapper
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.directresponse import ResponseWrapper
+from lisatools.response.tdiconfig import TDIConfig
 from few.waveform import GenerateEMRIWaveform
 
 from gbgpu.utils.utility import get_fdot

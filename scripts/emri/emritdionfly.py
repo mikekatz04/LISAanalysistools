@@ -2,7 +2,7 @@ from few.utils.utility import get_polarization_angle, get_viewing_angles
 from typing import Optional
 
 from gpubackendtools.interpolate import CubicSplineInterpolant
-from fastlisaresponse.tdionfly import TDTDIonTheFly
+from lisatools.response.tdionfly import TDTDIonTheFly
 import os 
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"

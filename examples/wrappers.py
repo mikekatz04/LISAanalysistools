@@ -6,7 +6,7 @@ from abc import ABC
 from typing import Union, Tuple
 
 from few.waveform import GenerateEMRIWaveform
-from fastlisaresponse import ResponseWrapper
+from lisatools.response.directresponse import ResponseWrapper
 
 from gbgpu.gbgpu import GBGPU
 

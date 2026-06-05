@@ -96,7 +96,7 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-from fastlisaresponse.utils.parallelbase import FastLISAResponseParallelModule
+from lisatools.response.parallelbase import FastLISAResponseParallelModule
 
 
 class GBSignalHetWDMGetLL(FastLISAResponseParallelModule):

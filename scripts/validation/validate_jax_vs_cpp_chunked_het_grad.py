@@ -94,10 +94,10 @@ def main():
 
     # ---- JAX autograd gradient -------------------------------------------
     print("[3/4] computing get_ll JAX autograd grad ...")
-    from fastlisaresponse.jax.orbits import OrbitsWrapJAX
-    from fastlisaresponse.jax.tdi_config import TDIConfigWrapJAX
-    from fastlisaresponse.jax.sources.ucb import JaxUCBSource
-    from fastlisaresponse.jax.wdm.heterodyne_kernels import (
+    from lisatools.jax.orbits import OrbitsWrapJAX
+    from lisatools.jax.response.tdi_config import TDIConfigWrapJAX
+    from gbgpu.jax.sources.ucb import JaxUCBSource
+    from gbgpu.jax.wdm.heterodyne_kernels import (
         gb_wdm_het_get_ll_grad_jax,
         gb_wdm_het_swap_ll_grad_jax,
     )

@@ -44,7 +44,7 @@ plt.style.use = _safe_style_use
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
 from lisatools.domains import WDMSettings
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdiconfig import TDIConfig
 
 from few.waveform import FastKerrEccentricEquatorialFlux
 

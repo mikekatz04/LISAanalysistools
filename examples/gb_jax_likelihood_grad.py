@@ -62,7 +62,7 @@ from fastlisaresponse.jax import (
     TDIConfigWrapJAX,
     gb_run_wave_tdi,
 )
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdiconfig import TDIConfig
 
 # Eryn pieces for the MCMC stage
 from eryn.ensemble import EnsembleSampler

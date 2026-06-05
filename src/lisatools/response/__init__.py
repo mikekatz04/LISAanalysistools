@@ -16,15 +16,10 @@ on first import so users of ``lisatools.response`` do not need to know.
 """
 
 # ruff: noqa: E402,F401
-try:
-    import fastlisaresponse  # noqa: F401 -- forces backend registration
-except (ImportError, ModuleNotFoundError):
-    # fastlisaresponse is being deprecated; if it is not installed,
-    # nothing prevents users from instantiating the moved classes --
-    # they will simply get a `BackendUnavailableException` listing the
-    # missing fastlisaresponse_<flavor> backend, which is the correct
-    # diagnostic in that case.
-    pass
+# Phase 3L.7k (2026-06-04): fastlisaresponse no longer registers any
+# backends -- LISA-response wraps live on lisatools.cutils.LISAToolsBackend
+# directly. The previous force-registration ``import fastlisaresponse``
+# block was removed at Phase 3L.7l.
 
 from .parallelbase import FastLISAResponseParallelModule
 from .tdiconfig import TDIConfig

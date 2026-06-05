@@ -82,7 +82,7 @@ except (ModuleNotFoundError, ImportError):
 logger = logging.getLogger(__name__)
 
 
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.detector import DefaultOrbits, LISAModel

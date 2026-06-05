@@ -32,10 +32,10 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 
 from check_shortened_wdm import CachedHeterodyneGenerator
-from fastlisaresponse.tdionfly import GBTDIonTheFly, SOBBHTDIonTheFly
+from lisatools.response.tdionfly import GBTDIonTheFly, SOBBHTDIonTheFly
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.utils.constants import YRSID_SI, MSUN_SI
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdiconfig import TDIConfig
 
 
 def slow_signal(tdi_amp, tdi_phase, phi_ref, f0_grid, t_off):

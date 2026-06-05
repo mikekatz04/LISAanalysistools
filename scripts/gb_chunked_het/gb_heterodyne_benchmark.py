@@ -43,7 +43,7 @@ import numpy as np
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.domains import WDMSettings
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdiconfig import TDIConfig
 
 
 def _has_gpu_backend(name: str) -> bool:
@@ -147,7 +147,7 @@ def _make_test_params(num_bin: int, rng):
 def run_fd_backend(backend, params, num_bin, Nf, Nt, dt, N_sparse, nchannels,
                    rng):
     """Run GBFDComputations.get_ll_fd on the given backend; return (ll, d_h, h_h, dt_call)."""
-    from fastlisaresponse.gbcomps import GBFDComputations
+    from gbgpu.gbcomps import GBFDComputations
 
     tdi_config, orbits, _wdm, t_start, Tobs, df = _build_setup(
         backend, Nf, Nt, dt, N_sparse, nchannels,
@@ -220,7 +220,7 @@ def run_fd_batched(backend, params, num_bin, Nf, Nt, dt, N_sparse, nchannels,
 def run_wdm_backend(backend, params, num_bin, Nf, Nt, dt, N_sparse, nchannels,
                      rng):
     """Run GBWDMComputations.get_ll_wdm; use Nt_sub=Nt for single-chunk."""
-    from fastlisaresponse.gbcomps import GBWDMComputations
+    from gbgpu.gbcomps import GBWDMComputations
     from lisatools.analysiscontainer import AnalysisContainerArray
     from lisatools.sensitivity import XYZ2SensitivityMatrix
     from lisatools.domains import WDMSignal
@@ -372,7 +372,7 @@ def main():
                     df_b = cupy.asarray(ref_data_fd)
                     invC_b = cupy.asarray(ref_invC)
                     # Build a fresh GBFDComputations with these arrays.
-                    from fastlisaresponse.gbcomps import GBFDComputations
+                    from gbgpu.gbcomps import GBFDComputations
                     tdi_config, orbits, _w, t_start, Tobs, df = _build_setup(
                         backend, args.Nf, args.Nt, args.dt,
                         args.N_sparse, args.nchannels,

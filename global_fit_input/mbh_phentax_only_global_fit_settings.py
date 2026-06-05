@@ -49,8 +49,8 @@ from eryn.moves.tempering import make_ladder
 from eryn.prior import ProbDistContainer, uniform_dist
 from eryn.utils.transform import TransformContainer
 
-from fastlisaresponse import ResponseWrapper
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.directresponse import ResponseWrapper
+from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.domains import (

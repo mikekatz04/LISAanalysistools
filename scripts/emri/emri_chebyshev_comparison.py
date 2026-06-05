@@ -57,8 +57,8 @@ from lisatools.sensitivity import (
 from lisatools.domains import TDSettings, TDSignal, FDSettings, FDSignal
 from lisatools.sources.emri.chebyshevwave import ChebyshevWave
 
-from fastlisaresponse import ResponseWrapper
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.directresponse import ResponseWrapper
+from lisatools.response.tdiconfig import TDIConfig
 
 from few.waveform import GenerateEMRIWaveform
 from few.trajectory.ode import KerrEccEqFlux

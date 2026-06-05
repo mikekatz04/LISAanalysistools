@@ -61,8 +61,8 @@ from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.domains import TDSettings, TDSignal, FDSettings
 from lisatools.diagnostic import inner_product as _inner_product
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 
 # ----------------------------- configuration ------------------------------- #

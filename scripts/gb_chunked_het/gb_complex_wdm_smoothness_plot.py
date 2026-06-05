@@ -37,8 +37,8 @@ from lisatools.detector import ESAOrbits
 from lisatools.domains import TDSettings, TDSignal, WDMSettings
 from lisatools.utils.constants import YRSID_SI
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 
 def build_x0(layer_df):

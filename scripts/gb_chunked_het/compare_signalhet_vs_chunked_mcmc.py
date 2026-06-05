@@ -44,9 +44,9 @@ from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.utils.constants import YRSID_SI
 from lisatools.utils.utility import get_array_module
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.gbcomps import GBWDMComputations
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from gbgpu.gbcomps import GBWDMComputations
 
 from eryn.ensemble import EnsembleSampler
 from eryn.moves import StretchMove

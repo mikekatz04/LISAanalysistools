@@ -42,8 +42,8 @@ from check_shortened_wdm import (
 )
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.domains import FDSettings, FDSignal, WDMSettings
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.utils.parallelbase import FastLISAResponseParallelModule
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.parallelbase import FastLISAResponseParallelModule
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +588,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         between the C++ and JAX implementations -- callers never need
         to pass a ``backend=`` kwarg.
         """
-        return self.backend.name != "fastlisaresponse_jax"
+        return self.backend.name != "gbgpu_jax"
 
     # ------------------------------------------------------------------
     # C++ chunked-het routing
@@ -638,7 +638,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         # bitten by this -- manifested as ``Bad link ind`` from
         # ``Orbits::get_link_ind`` with bogus combination_link values.)
         self._cpp_orbits = self._be.OrbitsWrap(*orbits.pycppdetector_args)
-        from fastlisaresponse.tdiconfig import TDIConfig as _TDIConfig
+        from lisatools.response.tdiconfig import TDIConfig as _TDIConfig
         self._tdi_cfg_py = _TDIConfig(tdi_gen)
         self._cpp_tdi_config = self._be.TDIConfigWrap(
             *self._tdi_cfg_py.pytdiconfig_args
@@ -1219,7 +1219,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
     # Subclass-overridable JAX source factory: () -> JaxAmpPhaseSource
     # built from this instance. GB uses JaxUCBSource; SOBBH would point
     # to its own JAX source class via this hook.
-    _JAX_SOURCE_CLASS_PATH = ("fastlisaresponse.jax.sources.ucb", "JaxUCBSource")
+    _JAX_SOURCE_CLASS_PATH = ("gbgpu.jax.sources.ucb", "JaxUCBSource")
 
     def _ensure_jax_setup(self):
         if getattr(self, "_jax_setup_done", False):
@@ -1232,8 +1232,8 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
         # ``self.jax_xp`` so callers (e.g. gb_chunked_test_script.py) can
         # build JAX-side wrappers without a top-level ``import jax.numpy``.
         try:
-            from fastlisaresponse import get_backend as _get_be
-            self._jax_backend = _get_be("fastlisaresponse_jax")
+            from gbgpu import get_backend as _get_be
+            self._jax_backend = _get_be("gbgpu_jax")
             jnp = self._jax_backend.xp
         except Exception as e:
             # Fallback to direct jax.numpy import (still functional --
@@ -1248,8 +1248,8 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
                 ) from e2
         self._jax_xp = jnp
         from importlib import import_module
-        from fastlisaresponse.jax.orbits import OrbitsWrapJAX
-        from fastlisaresponse.jax.tdi_config import TDIConfigWrapJAX
+        from lisatools.jax.orbits import OrbitsWrapJAX
+        from lisatools.jax.response.tdi_config import TDIConfigWrapJAX
         src_mod = import_module(self._JAX_SOURCE_CLASS_PATH[0])
         SrcCls   = getattr(src_mod, self._JAX_SOURCE_CLASS_PATH[1])
         self._jax_orbits = OrbitsWrapJAX(*self._orbits_py.pycppdetector_args)
@@ -1291,7 +1291,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
             # registry. This path is exercised only when
             # ``fastlisaresponse_jax`` is unavailable in the registry
             # but ``jax`` is importable.
-            from fastlisaresponse.jax.wdm import GBComputationGroupWrapJAX
+            from gbgpu.jax.wdm.computation_group import GBComputationGroupWrapJAX
             self._jax_group = GBComputationGroupWrapJAX()
         else:
             wrap_cls = getattr(self._jax_backend, self._CPP_WRAP_ATTR)
@@ -1651,7 +1651,7 @@ class GBWDMHeterodyne(FastLISAResponseParallelModule):
     def _maybe_ecl_to_icrs(params, convert_to_ra_dec):
         if not convert_to_ra_dec:
             return params
-        from fastlisaresponse.response import ecliptic_to_icrs
+        from lisatools.response.directresponse import ecliptic_to_icrs
         params = np.asarray(params, dtype=float).copy()
         if params.ndim == 1:
             params = params.reshape(1, -1)
@@ -2006,7 +2006,7 @@ class SOBBHWDMHeterodyne(GBWDMHeterodyne):
         # CachedHeterodyneGenerator is constructed. We do this by
         # rebuilding self._gen at the end of __init__.
         super().__init__(*args, **kwargs)
-        from fastlisaresponse.tdionfly import SOBBHTDIonTheFly
+        from lisatools.response.tdionfly import SOBBHTDIonTheFly
         from check_shortened_wdm import CachedHeterodyneGenerator
         self._gen = CachedHeterodyneGenerator(
             T_window=self.T_chunk, t_ref_source=self.t_ref_full,

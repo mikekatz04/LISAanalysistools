@@ -127,7 +127,7 @@ def build_problem(backend: str, num_bin: int, rng):
     from lisatools.detector import EqualArmlengthOrbits
     from lisatools.utils.constants import YRSID_SI
     from lisatools.domains import WDMSettings
-    from fastlisaresponse.tdiconfig import TDIConfig
+    from lisatools.response.tdiconfig import TDIConfig
 
     dt = 10.0
     Nf = int(os.environ.get("NF", 1460))
@@ -213,7 +213,7 @@ def bench_cpp_cuda(prob, holder, params, label="C++/CUDA"):
     so the C++ kernel runs the same algorithm as method (C) cupy single-chunk
     and method (B) JAX single-chunk for apples-to-apples timing.
     """
-    from fastlisaresponse.gbcomps import GBWDMComputations
+    from gbgpu.gbcomps import GBWDMComputations
     import cupy
 
     comp = GBWDMComputations(
@@ -240,7 +240,7 @@ def bench_jax(prob, holder_jax, params, label="JAX/GPU"):
     SINGLE-CHUNK configuration (Nt_sub=Nt, n_pad=0) so JAX runs the same
     single-chunk-whole-obs heterodyne as method (C) cupy.
     """
-    from fastlisaresponse.gbcomps import GBWDMComputations
+    from gbgpu.gbcomps import GBWDMComputations
     import jax.numpy as jnp
 
     comp = GBWDMComputations(

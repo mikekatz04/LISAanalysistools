@@ -21,7 +21,7 @@ plt.rcParams['text.usetex'] = False
 
 # df = 1. / (N * dt)
 
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -31,14 +31,14 @@ try:
 except (ImportError, ModuleNotFoundError) as e:
     pass
 
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
 from lisatools.detector import DefaultOrbits
 from lisatools.utils.constants import *
 from lisatools.utils.utility import AET
 
 from lisatools.domains import WAVELET_DURATION, TDSignal, TDSettings, FDSignal, FDSettings, WDMSignal, WDMSettings, WDMLookupTable
-from fastlisaresponse.gbcomps import GBWDMComputations
+from gbgpu.gbcomps import GBWDMComputations
 from scipy.signal.windows import tukey
 
 force_backend = "cpu"

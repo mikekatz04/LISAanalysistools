@@ -46,9 +46,9 @@ except (ImportError, ModuleNotFoundError):
 
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.gbcomps import GBWDMComputations
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from gbgpu.gbcomps import GBWDMComputations
 
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray

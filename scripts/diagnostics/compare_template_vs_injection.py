@@ -10,12 +10,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import signal
 
-import fastlisaresponse
+# Phase 3L.7l: import fastlisaresponse removed (no longer registers backends).
+# If a script needs the backend registry, import lisatools / gbgpu / bbhx as appropriate.
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.gbcomps import GBWDMComputations
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from gbgpu.gbcomps import GBWDMComputations
 
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray

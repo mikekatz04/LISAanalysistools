@@ -43,10 +43,11 @@ from lisatools.domains import TDSettings, TDSignal, WDMSettings
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.utils.constants import YRSID_SI
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 
-from fastlisaresponse_backend_cpu import tdionthefly as _be
+import lisatools_backend_cpu.pycppdetector as _lat_pd
+import gbgpu_backend_cpu.cgbgpu as _be  # GBComputationGroupWrap lives here post-3L.7g
 
 from gb_signal_het_wdm_v2 import GBSparseComplexWDMGen
 from gb_signal_het_wdm_v2_mm_sweep import build_gb_prior

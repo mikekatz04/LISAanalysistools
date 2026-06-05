@@ -17,9 +17,9 @@ except (ImportError, ModuleNotFoundError) as e:
 from lisatools.detector import ESAOrbits, EqualArmlengthOrbits
 from lisaconstants import ASTRONOMICAL_YEAR
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse import ResponseWrapper
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.response import icrs_to_ecliptic
+from lisatools.response.directresponse import ResponseWrapper
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.directresponse import icrs_to_ecliptic
 
 from phentax.waveform import IMRPhenomTHM 
 from mbhtdionfly import MBHTDIonFly

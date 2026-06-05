@@ -537,7 +537,7 @@ class ChebyshevWave:
         return t, f
 
 
-from fastlisaresponse.tdionfly import FDTDIonTheFly
+from lisatools.response.tdionfly import FDTDIonTheFly
 from gpubackendtools.interpolate import CubicSplineInterpolant
 
 

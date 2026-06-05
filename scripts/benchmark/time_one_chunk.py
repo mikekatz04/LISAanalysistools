@@ -23,8 +23,8 @@ import numpy as np
 
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer
 from lisatools.sensitivity import XYZ2SensitivityMatrix

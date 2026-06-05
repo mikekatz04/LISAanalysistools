@@ -34,9 +34,9 @@ from typing import Optional
 
 import numpy as np
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.utils.parallelbase import FastLISAResponseParallelModule
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from lisatools.response.parallelbase import FastLISAResponseParallelModule
 from lisatools.detector import EqualArmlengthOrbits, Orbits
 
 
@@ -230,7 +230,7 @@ class GBHeterodyneFDGetLL(FastLISAResponseParallelModule):
             )
         if convert_to_ra_dec:
             # Match GBFDComputations._prep_params behaviour.
-            from fastlisaresponse.utils.utility import ecliptic_to_icrs
+            from lisatools.response.directresponse import ecliptic_to_icrs
             p = params.copy()
             lam, beta = ecliptic_to_icrs(p[:, -2].copy(), p[:, -1].copy())
             p = p.at[:, -2].set(lam) if hasattr(p, "at") else p
@@ -347,7 +347,7 @@ def _selftest():
     """Compare batched cupy-optimized path vs. C++ GBFDComputations.get_ll_fd."""
     import time
     from lisatools.utils.constants import YRSID_SI
-    from fastlisaresponse.gbcomps import GBFDComputations
+    from gbgpu.gbcomps import GBFDComputations
 
     BACKEND = "cpu"
     rng = np.random.default_rng(0)

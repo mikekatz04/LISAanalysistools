@@ -40,8 +40,8 @@ if not os.environ.get("MPLBACKEND"):
 import matplotlib.pyplot as plt
 import numpy as np
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 from lisatools.analysiscontainer import AnalysisContainer
 from lisatools.datacontainer import DataResidualArray
 from lisatools.detector import EqualArmlengthOrbits

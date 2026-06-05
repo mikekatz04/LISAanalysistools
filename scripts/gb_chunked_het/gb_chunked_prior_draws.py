@@ -47,8 +47,8 @@ except (ImportError, ModuleNotFoundError):
 
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer
@@ -58,7 +58,7 @@ from lisatools.domains import (
 )
 
 from gb_lookup_prior_draws import build_gb_prior
-from fastlisaresponse.gbcomps import GBWDMComputations
+from gbgpu.gbcomps import GBWDMComputations
 
 
 class _FullGridWDMHolder:

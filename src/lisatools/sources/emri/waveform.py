@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Any, Optional
 
 import numpy as np
-from fastlisaresponse import ResponseWrapper
+from lisatools.response.directresponse import ResponseWrapper
 from few.waveform.waveform import GenerateEMRIWaveform
 
 from ...detector import EqualArmlengthOrbits

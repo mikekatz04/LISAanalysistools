@@ -79,10 +79,10 @@ def main():
     # The JAX kernels accept the same Orbits and TDIConfig args as the
     # C++ side; we build the JAX wrappers from the same pycppdetector
     # tuples that the GBWDMHeterodyne stored on cpp._cpp_orbits etc.
-    from fastlisaresponse.jax.orbits import OrbitsWrapJAX
-    from fastlisaresponse.jax.tdi_config import TDIConfigWrapJAX
-    from fastlisaresponse.jax.sources.ucb import JaxUCBSource
-    from fastlisaresponse.jax.wdm.heterodyne_kernels import (
+    from lisatools.jax.orbits import OrbitsWrapJAX
+    from lisatools.jax.response.tdi_config import TDIConfigWrapJAX
+    from gbgpu.jax.sources.ucb import JaxUCBSource
+    from gbgpu.jax.wdm.heterodyne_kernels import (
         gb_wdm_het_fill_global_jax,
         gb_wdm_het_get_ll_jax,
         gb_wdm_het_swap_ll_jax,

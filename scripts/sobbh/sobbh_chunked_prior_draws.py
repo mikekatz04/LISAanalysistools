@@ -35,8 +35,8 @@ import matplotlib.pyplot as plt
 
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import SOBBHTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import SOBBHTDIonTheFly
 
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer

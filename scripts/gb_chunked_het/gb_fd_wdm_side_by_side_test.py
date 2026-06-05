@@ -49,9 +49,9 @@ from lisatools.analysiscontainer import AnalysisContainer
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.diagnostic import inner_product as lisatools_inner_product
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.gbcomps import GBWDMComputations, GBFDComputations
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from gbgpu.gbcomps import GBWDMComputations, GBFDComputations
 
 
 BACKEND = "cpu"

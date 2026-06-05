@@ -100,7 +100,7 @@ def _td_to_asd(td: np.ndarray, dt: float) -> tuple[np.ndarray, np.ndarray]:
 _SUBPROC_GEN_TEMPLATE = """\
 import os, sys, numpy as np
 sys.path.insert(0, {plot_dir!r})
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.tdiconfig import TDIConfig
 from combined_gb_psd_emri_sobbh_global_fit_settings import (
     DT, TOBS, T_START, _pad_or_clip,
     EMRI_INJECTIONS_FULL_BASIS,

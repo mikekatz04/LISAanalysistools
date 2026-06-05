@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
 
-from fastlisaresponse import ResponseWrapper
-from fastlisaresponse.tdiconfig import TDIConfig
+from lisatools.response.directresponse import ResponseWrapper
+from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.domains import (

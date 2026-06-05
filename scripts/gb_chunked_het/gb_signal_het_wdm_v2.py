@@ -37,7 +37,7 @@ from typing import Callable, Optional
 import numpy as np
 from scipy import special
 
-from fastlisaresponse.utils.parallelbase import FastLISAResponseParallelModule
+from lisatools.response.parallelbase import FastLISAResponseParallelModule
 
 from gb_signal_het_wdm import GBSignalHetWDMGetLL
 

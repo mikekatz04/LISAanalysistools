@@ -15,7 +15,7 @@ import jax.numpy as jnp
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.utils.constants import YRSID_SI
 from lisatools.domains import WDMSettings
-from fastlisaresponse.gbcomps import GBWDMComputations
+from gbgpu.gbcomps import GBWDMComputations
 
 
 DT       = 10.0
@@ -130,10 +130,10 @@ def main():
     print(f"  L_central={L_c:+.6e}")
 
     print("[jax] computing autograd gradient ...")
-    from fastlisaresponse.jax.orbits import OrbitsWrapJAX
-    from fastlisaresponse.jax.tdi_config import TDIConfigWrapJAX
-    from fastlisaresponse.jax.sources.ucb import JaxUCBSource
-    from fastlisaresponse.jax.wdm.heterodyne_kernels import (
+    from lisatools.jax.orbits import OrbitsWrapJAX
+    from lisatools.jax.response.tdi_config import TDIConfigWrapJAX
+    from gbgpu.jax.sources.ucb import JaxUCBSource
+    from gbgpu.jax.wdm.heterodyne_kernels import (
         gb_wdm_het_get_ll_grad_jax,
     )
 

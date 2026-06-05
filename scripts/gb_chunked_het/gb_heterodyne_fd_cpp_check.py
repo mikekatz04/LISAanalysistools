@@ -17,8 +17,8 @@ from __future__ import annotations
 import numpy as np
 from lisatools.detector import EqualArmlengthOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly, GBFDTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly, GBFDTDIonTheFly
 
 
 BACKEND = "cpu"

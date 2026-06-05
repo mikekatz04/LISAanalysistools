@@ -64,9 +64,9 @@ from lisatools.domains import (
     TDSettings, TDSignal, FDSettings, WDMSettings, WDMSignal, WDMLookupTable,
 )
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
-from fastlisaresponse.gbcomps import GBWDMComputations
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
+from gbgpu.gbcomps import GBWDMComputations
 
 
 # ----------------------------------------------------------------------------

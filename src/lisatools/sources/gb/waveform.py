@@ -8,7 +8,7 @@ from typing import Any, Optional, Tuple
 import numpy as np
 
 # imports
-from fastlisaresponse import ResponseWrapper
+from lisatools.response.directresponse import ResponseWrapper
 from few.waveform import GenerateEMRIWaveform
 from gbgpu.gbgpu import GBGPU
 

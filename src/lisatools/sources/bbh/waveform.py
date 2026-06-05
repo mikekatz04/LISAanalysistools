@@ -7,7 +7,7 @@ import numpy as np
 from bbhx.waveformbuild import BBHWaveformFD
 
 # imports
-from fastlisaresponse import ResponseWrapper
+from lisatools.response.directresponse import ResponseWrapper
 
 from ...domains import DomainSettingsBase
 from ...utils.constants import *

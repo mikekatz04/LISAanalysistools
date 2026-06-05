@@ -25,10 +25,10 @@ except (ImportError, ModuleNotFoundError) as e:
 from lisatools.detector import ESAOrbits, EqualArmlengthOrbits
 from lisaconstants import ASTRONOMICAL_YEAR
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse import ResponseWrapper
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.response import icrs_to_ecliptic
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.directresponse import ResponseWrapper
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.directresponse import icrs_to_ecliptic
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer, AnalysisContainerArray
@@ -52,7 +52,7 @@ from eryn.backends import HDFBackend
 # methods follow the parallel-module convention --
 # ``GBWDMComputations(force_backend=...)`` with ``fill_global_wdm``,
 # ``get_ll_wdm``, ``get_swap_ll_wdm``, ``get_ll_grad_wdm``).
-from fastlisaresponse.gbcomps import GBWDMComputations, GBFDComputations
+from gbgpu.gbcomps import GBWDMComputations, GBFDComputations
 
 
 import time
@@ -517,10 +517,10 @@ if __name__ == "__main__":
         # --------------------------------------------------------------
         import jax
         import jax.numpy as _jax_xp                       # alias for clarity
-        from fastlisaresponse.jax.wdm.heterodyne_kernels import (
+        from gbgpu.jax.wdm.heterodyne_kernels import (
             gb_wdm_het_get_ll_jax,
         )
-        from fastlisaresponse.jax.sources.ucb import JaxUCBSource
+        from gbgpu.jax.sources.ucb import JaxUCBSource
 
         gb_wdm_comp_jax = GBWDMComputations(
             wdm_set, t_ref=t_ref,

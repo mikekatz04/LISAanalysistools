@@ -44,8 +44,8 @@ from lisatools.domains import TDSettings, TDSignal, WDMSettings, WDMSignal
 from lisatools.sensitivity import XYZ2SensitivityMatrix
 from lisatools.utils.constants import YRSID_SI
 
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 
 from gb_signal_het_wdm import GBSignalHetWDMGetLL
 

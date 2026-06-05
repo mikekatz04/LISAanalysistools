@@ -26,8 +26,8 @@ import matplotlib.pyplot as plt
 
 from lisatools.detector import ESAOrbits
 from lisatools.utils.constants import YRSID_SI
-from fastlisaresponse.tdiconfig import TDIConfig
-from fastlisaresponse.tdionfly import GBTDIonTheFly
+from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import GBTDIonTheFly
 from lisatools.domains import (
     TDSettings, TDSignal, FDSettings, WDMSettings, WDMSignal, WDMLookupTable,
 )
