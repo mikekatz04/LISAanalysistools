@@ -160,7 +160,7 @@ class TDIonTheFly(FastLISAResponseParallelModule):
         # GPU_RECOMMENDED_WITH_JAX includes 'jax' so that GBTDIonTheFly and
         # SOBBHTDIonTheFly (which inherit this) can dispatch to the pure
         # JAX backend in fastlisaresponse.jax via force_backend='jax'.
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
+        return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
 
     def __call__(self, inc, psi, lam, beta, return_spline: bool =False) -> TDIOutput:
         
@@ -340,7 +340,7 @@ class TDIOutput(FastLISAResponseParallelModule):
 
     @classmethod
     def supported_backends(cls) -> list:
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
+        return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED_WITH_JAX()]
 
     @property
     def X(self) -> np.ndarray:
@@ -586,6 +586,8 @@ class FDTDIonTheFly(TDIonTheFly):
     
 
 class GBFDTDIonTheFly(FastLISAResponseParallelModule):
+    # Phase 3L.7k: needs gbgpu_<flavor> backend (carries GBTDIonTheFlyWrap).
+    _BACKEND_PREFIX = "gbgpu"
     """Heterodyned frequency-domain GB TDI on the fly.
 
     Generates the heterodyne-shifted GB TDI directly in the frequency domain
@@ -652,7 +654,7 @@ class GBFDTDIonTheFly(FastLISAResponseParallelModule):
 
     @classmethod
     def supported_backends(cls):
-        return ["fastlisaresponse_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
+        return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
     def __call__(
         self,
@@ -712,6 +714,8 @@ class GBFDTDIonTheFly(FastLISAResponseParallelModule):
 
 
 class GBTDIonTheFly(TDIonTheFly):
+    # Phase 3L.7k: needs gbgpu_<flavor> backend (carries GBTDIonTheFlyWrap).
+    _BACKEND_PREFIX = "gbgpu"
     def __init__(self,
         t: np.ndarray,
         T: float,
@@ -764,7 +768,7 @@ class GBTDIonTheFly(TDIonTheFly):
         # immutable arrays, no buffer mutation -- so jax.grad / jax.jit
         # work over the full pipeline. The C++ backends keep the
         # in-place buffer signature run_wave_tdi_wrap(buffer, ...).
-        if self.backend.name == "fastlisaresponse_jax":
+        if self.backend.name == self._BACKEND_PREFIX + "_jax":
             params_2d = params.reshape(self.num_sub, self.n_params)
             t_2d = self.t_arr.reshape(self.num_sub, self.N)
             _, tdi_amp_arr, tdi_phase_arr, phase_ref_arr = self.wave_gen.run_wave_tdi(
@@ -810,6 +814,8 @@ class GBTDIonTheFly(TDIonTheFly):
 
 
 class SOBBHTDIonTheFly(TDIonTheFly):
+    # Phase 3L.7k: needs bbhx_<flavor> backend (carries SOBBHTDIonTheFlyWrap).
+    _BACKEND_PREFIX = "bbhx"
     """Stellar-origin black-hole binary TDI on the fly.
 
     Mirrors :class:`GBTDIonTheFly`. The underlying C++ kernel evaluates the
@@ -871,7 +877,7 @@ class SOBBHTDIonTheFly(TDIonTheFly):
         reshape_shape = (self.num_sub, self.tdi_config.nchannels, self.N)
 
         # JAX branch: functional wave_gen.run_wave_tdi (see GBTDIonTheFly).
-        if self.backend.name == "fastlisaresponse_jax":
+        if self.backend.name == self._BACKEND_PREFIX + "_jax":
             params_2d = params.reshape(self.num_sub, self.n_params)
             t_2d = self.t_arr.reshape(self.num_sub, self.N)
             _, tdi_amp_arr, tdi_phase_arr, phase_ref_arr = self.wave_gen.run_wave_tdi(

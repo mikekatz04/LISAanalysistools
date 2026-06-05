@@ -1,5 +1,6 @@
 #include "Detector.hpp"
 #include "PSD.hpp"
+#include "wdm_domain.hh"             // TDI_XYZ / TDI_AET / TDI_AE macros
 #include <string>
 #include <iostream>
 #include <nanobind/nanobind.h>
@@ -414,6 +415,14 @@ void detector_part(nb::module_ &m) {
 
 NB_MODULE(pycppdetector, m) {
     m.doc() = "Orbits/Detector/Response C++ plug-in"; // Optional module docstring
+
+    // Phase 3L.7k (2026-06-04): TDI_XYZ / TDI_AET / TDI_AE module-level
+    // attrs migrated from the (now-retiring) fastlisaresponse_backend_*.
+    // tdionthefly module so LISAToolsBackendMethods.TDITypeDict can be
+    // populated from lisatools_backend_*.pycppdetector directly.
+    m.attr("TDI_XYZ") = TDI_XYZ;
+    m.attr("TDI_AET") = TDI_AET;
+    m.attr("TDI_AE")  = TDI_AE;
 
     // Call initialization functions from other files
     detector_part(m);

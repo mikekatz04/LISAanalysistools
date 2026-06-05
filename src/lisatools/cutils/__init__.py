@@ -45,6 +45,30 @@ class LISAToolsBackendMethods(BackendMethods):
     # psd_likelihood: typing.Callable[(...), None]
     # compute_logpdf: typing.Callable[(...), None]
 
+    # Phase 3L.7k (2026-06-04): LISA-response Wraps absorbed from the
+    # now-retiring fastlisaresponse backend. Owners of the underlying
+    # C++ classes are LAT (pycppdetector); the fields below let consumer
+    # code that used to reach `self.backend.X` on the FLR backend
+    # reach the same names on the LAT backend.
+    TDSplineTDIWaveformWrap: object
+    FDSplineTDIWaveformWrap: object
+    LISAResponseWrap: object
+    LISAResponse: object
+    # `OrbitsWrap_responselisa` is the lisa-on-gpu-era response-flavored
+    # OrbitsWrap. Kept as a separate field for the transition; consumers
+    # that don't need it should use the plain `OrbitsWrap` above.
+    OrbitsWrap_responselisa: object
+    TDIConfigWrap: object
+    TDIConfig: object
+    CubicSplineWrap_responselisa: object
+    WDMSettingsWrap: object
+    WDMDomainWrap: object
+    FDDomainWrap: object
+    # `TDITypeDict`: {"XYZ": TDI_XYZ, "AET": TDI_AET, "AE": TDI_AE} --
+    # consumer-side helper for the TDI flavor int enum used by the
+    # chunked-het + signal-het kernels.
+    TDITypeDict: object
+
 
 class LISAToolsBackend:
     """Mixin attaching LISA-specific native symbols to a backend class.
@@ -67,6 +91,19 @@ class LISAToolsBackend:
     # SensitivityMatrixWrap: object  # XYZBackend disabled (symbol issues on Linux)
     # psd_likelihood: typing.Callable[(...), None]
     # compute_logpdf: typing.Callable[(...), None]
+    # Phase 3L.7k LISA-response Wraps (see LISAToolsBackendMethods).
+    TDSplineTDIWaveformWrap: object
+    FDSplineTDIWaveformWrap: object
+    LISAResponseWrap: object
+    LISAResponse: object
+    OrbitsWrap_responselisa: object
+    TDIConfigWrap: object
+    TDIConfig: object
+    CubicSplineWrap_responselisa: object
+    WDMSettingsWrap: object
+    WDMDomainWrap: object
+    FDDomainWrap: object
+    TDITypeDict: object
 
     def __init__(self, lisatools_backend_methods):
 
@@ -79,6 +116,20 @@ class LISAToolsBackend:
         # self.SensitivityMatrixWrap = lisatools_backend_methods.SensitivityMatrixWrap  # XYZBackend disabled
         # self.psd_likelihood = lisatools_backend_methods.psd_likelihood
         # self.compute_logpdf = lisatools_backend_methods.compute_logpdf
+        # Phase 3L.7k -- LISA-response wraps absorbed from
+        # fastlisaresponse cutils backend (which is being retired).
+        self.TDSplineTDIWaveformWrap = lisatools_backend_methods.TDSplineTDIWaveformWrap
+        self.FDSplineTDIWaveformWrap = lisatools_backend_methods.FDSplineTDIWaveformWrap
+        self.LISAResponseWrap = lisatools_backend_methods.LISAResponseWrap
+        self.LISAResponse = lisatools_backend_methods.LISAResponse
+        self.OrbitsWrap_responselisa = lisatools_backend_methods.OrbitsWrap_responselisa
+        self.TDIConfigWrap = lisatools_backend_methods.TDIConfigWrap
+        self.TDIConfig = lisatools_backend_methods.TDIConfig
+        self.CubicSplineWrap_responselisa = lisatools_backend_methods.CubicSplineWrap_responselisa
+        self.WDMSettingsWrap = lisatools_backend_methods.WDMSettingsWrap
+        self.WDMDomainWrap = lisatools_backend_methods.WDMDomainWrap
+        self.FDDomainWrap = lisatools_backend_methods.FDDomainWrap
+        self.TDITypeDict = lisatools_backend_methods.TDITypeDict
 
 
 class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
@@ -107,13 +158,27 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
 
         numpy = LISAToolsCpuBackend.check_numpy()
 
+        _lat_pd = lisatools_backend_cpu.pycppdetector
         return LISAToolsBackendMethods(
-            OrbitsWrap=lisatools_backend_cpu.pycppdetector.OrbitsWrapCPU,
-            Orbits=lisatools_backend_cpu.pycppdetector.OrbitsCPU,
-            check_orbits=lisatools_backend_cpu.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cpu.pycppdetector.XYZSensitivityMatrixWrapCPU,  # XYZBackend disabled
-            # psd_likelihood=lisatools_backend_cpu.pycppdetector.psd_likelihood,
-            # compute_logpdf=lisatools_backend_cpu.pycppdetector.compute_logpdf,
+            OrbitsWrap=_lat_pd.OrbitsWrapCPU,
+            Orbits=_lat_pd.OrbitsCPU,
+            check_orbits=_lat_pd.check_orbits,
+            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapCPU,  # XYZBackend disabled
+            # psd_likelihood=_lat_pd.psd_likelihood,
+            # compute_logpdf=_lat_pd.compute_logpdf,
+            # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
+            TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapCPU,
+            FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapCPU,
+            LISAResponseWrap=_lat_pd.LISAResponseWrapCPU,
+            LISAResponse=_lat_pd.LISAResponseCPU,
+            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapCPU_responselisa,
+            TDIConfigWrap=_lat_pd.TDIConfigWrapCPU,
+            TDIConfig=_lat_pd.TDIConfigCPU,
+            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapCPU_responselisa,
+            WDMSettingsWrap=_lat_pd.WDMSettingsWrapCPU,
+            WDMDomainWrap=_lat_pd.WDMDomainWrapCPU,
+            FDDomainWrap=_lat_pd.FDDomainWrapCPU,
+            TDITypeDict={"XYZ": _lat_pd.TDI_XYZ, "AET": _lat_pd.TDI_AET, "AE": _lat_pd.TDI_AE},
             xp=numpy,
         )
 
@@ -152,13 +217,27 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
                 "'cuda11x' backend requires cupy", pip_deps=["cupy-cuda11x"]
             ) from e
 
+        _lat_pd = lisatools_backend_cuda11x.pycppdetector
         return LISAToolsBackendMethods(
-            OrbitsWrap=lisatools_backend_cuda11x.pycppdetector.OrbitsWrapGPU,
-            Orbits=lisatools_backend_cuda11x.pycppdetector.OrbitsGPU,
-            check_orbits=lisatools_backend_cuda11x.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cuda11x.pycppdetector.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
-            # psd_likelihood=lisatools_backend_cuda11x.pycppdetector.psd_likelihood,
-            # compute_logpdf=lisatools_backend_cuda11x.pycppdetector.compute_logpdf,
+            OrbitsWrap=_lat_pd.OrbitsWrapGPU,
+            Orbits=_lat_pd.OrbitsGPU,
+            check_orbits=_lat_pd.check_orbits,
+            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
+            # psd_likelihood=_lat_pd.psd_likelihood,
+            # compute_logpdf=_lat_pd.compute_logpdf,
+            # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
+            TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
+            FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
+            LISAResponseWrap=_lat_pd.LISAResponseWrapGPU,
+            LISAResponse=_lat_pd.LISAResponseGPU,
+            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapGPU_responselisa,
+            TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
+            TDIConfig=_lat_pd.TDIConfigGPU,
+            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
+            WDMSettingsWrap=_lat_pd.WDMSettingsWrapGPU,
+            WDMDomainWrap=_lat_pd.WDMDomainWrapGPU,
+            FDDomainWrap=_lat_pd.FDDomainWrapGPU,
+            TDITypeDict={"XYZ": _lat_pd.TDI_XYZ, "AET": _lat_pd.TDI_AET, "AE": _lat_pd.TDI_AE},
             xp=cupy,
         )
 
@@ -196,13 +275,27 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
                 "'cuda12x' backend requires cupy", pip_deps=["cupy-cuda12x"]
             ) from e
 
+        _lat_pd = lisatools_backend_cuda12x.pycppdetector
         return LISAToolsBackendMethods(
-            OrbitsWrap=lisatools_backend_cuda12x.pycppdetector.OrbitsWrapGPU,
-            Orbits=lisatools_backend_cuda12x.pycppdetector.OrbitsGPU,
-            check_orbits=lisatools_backend_cuda12x.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cuda12x.pycppdetector.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
-            # psd_likelihood=lisatools_backend_cuda12x.pycppdetector.psd_likelihood,
-            # compute_logpdf=lisatools_backend_cuda12x.pycppdetector.compute_logpdf,
+            OrbitsWrap=_lat_pd.OrbitsWrapGPU,
+            Orbits=_lat_pd.OrbitsGPU,
+            check_orbits=_lat_pd.check_orbits,
+            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
+            # psd_likelihood=_lat_pd.psd_likelihood,
+            # compute_logpdf=_lat_pd.compute_logpdf,
+            # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
+            TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
+            FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
+            LISAResponseWrap=_lat_pd.LISAResponseWrapGPU,
+            LISAResponse=_lat_pd.LISAResponseGPU,
+            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapGPU_responselisa,
+            TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
+            TDIConfig=_lat_pd.TDIConfigGPU,
+            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
+            WDMSettingsWrap=_lat_pd.WDMSettingsWrapGPU,
+            WDMDomainWrap=_lat_pd.WDMDomainWrapGPU,
+            FDDomainWrap=_lat_pd.FDDomainWrapGPU,
+            TDITypeDict={"XYZ": _lat_pd.TDI_XYZ, "AET": _lat_pd.TDI_AET, "AE": _lat_pd.TDI_AE},
             xp=cupy,
         )
 
@@ -241,13 +334,27 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
                 "'cuda13x' backend requires cupy", pip_deps=["cupy-cuda13x"]
             ) from e
 
+        _lat_pd = lisatools_backend_cuda13x.pycppdetector
         return LISAToolsBackendMethods(
-            OrbitsWrap=lisatools_backend_cuda13x.pycppdetector.OrbitsWrapGPU,
-            Orbits=lisatools_backend_cuda13x.pycppdetector.OrbitsGPU,
-            check_orbits=lisatools_backend_cuda13x.pycppdetector.check_orbits,
-            # SensitivityMatrixWrap=lisatools_backend_cuda13x.pycppdetector.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
-            # psd_likelihood=lisatools_backend_cuda13x.pycppdetector.psd_likelihood,
-            # compute_logpdf=lisatools_backend_cuda13x.pycppdetector.compute_logpdf,
+            OrbitsWrap=_lat_pd.OrbitsWrapGPU,
+            Orbits=_lat_pd.OrbitsGPU,
+            check_orbits=_lat_pd.check_orbits,
+            # SensitivityMatrixWrap=_lat_pd.XYZSensitivityMatrixWrapGPU,  # XYZBackend disabled
+            # psd_likelihood=_lat_pd.psd_likelihood,
+            # compute_logpdf=_lat_pd.compute_logpdf,
+            # Phase 3L.7k LISA-response wraps absorbed from fastlisaresponse.
+            TDSplineTDIWaveformWrap=_lat_pd.TDSplineTDIWaveformWrapGPU,
+            FDSplineTDIWaveformWrap=_lat_pd.FDSplineTDIWaveformWrapGPU,
+            LISAResponseWrap=_lat_pd.LISAResponseWrapGPU,
+            LISAResponse=_lat_pd.LISAResponseGPU,
+            OrbitsWrap_responselisa=_lat_pd.OrbitsWrapGPU_responselisa,
+            TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
+            TDIConfig=_lat_pd.TDIConfigGPU,
+            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
+            WDMSettingsWrap=_lat_pd.WDMSettingsWrapGPU,
+            WDMDomainWrap=_lat_pd.WDMDomainWrapGPU,
+            FDDomainWrap=_lat_pd.FDDomainWrapGPU,
+            TDITypeDict={"XYZ": _lat_pd.TDI_XYZ, "AET": _lat_pd.TDI_AET, "AE": _lat_pd.TDI_AE},
             xp=cupy,
         )
 """List of existing backends, per default order of preference."""
