@@ -1,8 +1,9 @@
 #include "LISAResponse.hh"
 #include <string>
 #include <iostream>
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 #include "binding_flr.hpp"
 #include "binding.hpp"
 #include "gbt_binding.hpp"
@@ -14,10 +15,9 @@
 #include "binding_lat_spline_tdi.hpp"
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#include "pybind11_cuda_array_interface.hpp"
 #endif
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 
 void LISAResponseWrap::get_tdi_delays_wrap(array_type<double> delayed_links_, array_type<double> input_links_, int num_inputs, int num_delays, array_type<double> t_arr_,
@@ -68,17 +68,17 @@ void check_response(LISAResponse *response)
 
 std::string get_module_path_responselisa() {
     // Acquire the GIL if it's not already held (safe to call multiple times)
-    py::gil_scoped_acquire acquire;
+    nb::gil_scoped_acquire acquire;
 
     // Import the module by its name
-    // Note: The module name here ("responselisa") must match the name used in PYBIND11_MODULE
-    py::object module = py::module::import("responselisa");
+    // Note: The module name here ("responselisa") must match the name used in NB_MODULE
+    nb::object module = nb::module_::import_("responselisa");
 
     // Access the __file__ attribute and cast it to a C++ string
     try {
-        std::string path = module.attr("__file__").cast<std::string>();
+        std::string path = nb::cast<std::string>(module.attr("__file__"));
         return path;
-    } catch (const py::error_already_set& e) {
+    } catch (const nb::python_error& e) {
         // Handle the error if __file__ attribute is missing (e.g., if module is a namespace package)
         std::cerr << "Error getting __file__ attribute: " << e.what() << std::endl;
         return "";
@@ -86,94 +86,94 @@ std::string get_module_path_responselisa() {
 }
 
 
-// PYBIND11_MODULE creates the entry point for the Python module
+// NB_MODULE creates the entry point for the Python module
 // The module name here must match the one used in CMakeLists.txt
-void response_part(py::module &m) {
+void response_part(nb::module_ &m) {
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<LISAResponseWrap>(m, "LISAResponseWrapGPU")
+    nb::class_<LISAResponseWrap>(m, "LISAResponseWrapGPU")
 #else
-    py::class_<LISAResponseWrap>(m, "LISAResponseWrapCPU")
+    nb::class_<LISAResponseWrap>(m, "LISAResponseWrapCPU")
 #endif 
 
     // Bind the constructor
-    .def(py::init<OrbitsWrap_responselisa *, TDIConfigWrap *>(), 
-         py::arg("orbits"), py::arg("tdi_config"))
+    .def(nb::init<OrbitsWrap_responselisa *, TDIConfigWrap *>(), 
+         nb::arg("orbits"), nb::arg("tdi_config"))
     // Bind member functions
     .def("get_tdi_delays_wrap", &LISAResponseWrap::get_tdi_delays_wrap, "Preform TDI combinations.")
     .def("get_response_wrap", &LISAResponseWrap::get_response_wrap, "Get detector projections.")
-    // You can also expose public data members directly using def_readwrite
-    .def_readwrite("orbits", &LISAResponseWrap::orbits)
+    // You can also expose public data members directly using def_rw
+    .def_rw("orbits", &LISAResponseWrap::orbits)
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<LISAResponse>(m, "LISAResponseGPU")
+    nb::class_<LISAResponse>(m, "LISAResponseGPU")
 #else
-    py::class_<LISAResponse>(m, "LISAResponseCPU")
+    nb::class_<LISAResponse>(m, "LISAResponseCPU")
 #endif
 
     // Bind the constructor
-    .def(py::init<Orbits *, TDIConfig *>(), 
-         py::arg("orbits"), py::arg("tdi_config"))
+    .def(nb::init<Orbits *, TDIConfig *>(), 
+         nb::arg("orbits"), nb::arg("tdi_config"))
     ;
 
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<TDIConfigWrap>(m, "TDIConfigWrapGPU")
+    nb::class_<TDIConfigWrap>(m, "TDIConfigWrapGPU")
 #else
-    py::class_<TDIConfigWrap>(m, "TDIConfigWrapCPU")
+    nb::class_<TDIConfigWrap>(m, "TDIConfigWrapCPU")
 #endif
 
     // Bind the constructor
-    .def(py::init<array_type<int>, array_type<int>, array_type<int>, array_type<int>, array_type<double>, array_type<int>, int, int>(), 
-         py::arg("unit_starts"), py::arg("unit_lengths"), py::arg("tdi_base_link"), py::arg("tdi_link_combinations"), py::arg("tdi_signs_in"), py::arg("channels"), py::arg("num_units"), py::arg("num_channels"))
+    .def(nb::init<array_type<int>, array_type<int>, array_type<int>, array_type<int>, array_type<double>, array_type<int>, int, int>(), 
+         nb::arg("unit_starts"), nb::arg("unit_lengths"), nb::arg("tdi_base_link"), nb::arg("tdi_link_combinations"), nb::arg("tdi_signs_in"), nb::arg("channels"), nb::arg("num_units"), nb::arg("num_channels"))
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<TDIConfig>(m, "TDIConfigGPU")
+    nb::class_<TDIConfig>(m, "TDIConfigGPU")
 #else
-    py::class_<TDIConfig>(m, "TDIConfigCPU")
+    nb::class_<TDIConfig>(m, "TDIConfigCPU")
 #endif
 
     // Bind the constructor
-    .def(py::init<int*, int*, int*, int*, double*, int*, int, int>(), 
-         py::arg("unit_starts"), py::arg("unit_lengths"), py::arg("tdi_base_link"), py::arg("tdi_link_combinations"), py::arg("tdi_signs_in"), py::arg("channels"), py::arg("num_units"), py::arg("num_channels"))
+    .def(nb::init<int*, int*, int*, int*, double*, int*, int, int>(), 
+         nb::arg("unit_starts"), nb::arg("unit_lengths"), nb::arg("tdi_base_link"), nb::arg("tdi_link_combinations"), nb::arg("tdi_signs_in"), nb::arg("channels"), nb::arg("num_units"), nb::arg("num_channels"))
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<OrbitsWrap_responselisa>(m, "OrbitsWrapGPU_responselisa")
+    nb::class_<OrbitsWrap_responselisa>(m, "OrbitsWrapGPU_responselisa")
 #else
-    py::class_<OrbitsWrap_responselisa>(m, "OrbitsWrapCPU_responselisa")
+    nb::class_<OrbitsWrap_responselisa>(m, "OrbitsWrapCPU_responselisa")
 #endif
 
     // Bind the constructor
-    .def(py::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(),
-         py::arg("sc_t0"), py::arg("sc_dt"), py::arg("sc_N"), py::arg("ltt_t0"), py::arg("ltt_dt"), py::arg("ltt_N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
-    // .def(py::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
-    //      py::arg("sc_t0"), py::arg("sc_dt"), py::arg("sc_N"), py::arg("ltt_t0"), py::arg("ltt_dt"), py::arg("ltt_N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
+    .def(nb::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(),
+         nb::arg("sc_t0"), nb::arg("sc_dt"), nb::arg("sc_N"), nb::arg("ltt_t0"), nb::arg("ltt_dt"), nb::arg("ltt_N"), nb::arg("n_arr"), nb::arg("ltt_arr"), nb::arg("x_arr"), nb::arg("links"), nb::arg("sc_r"), nb::arg("sc_e"), nb::arg("armlength"))
+    // .def(nb::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
+    //      nb::arg("sc_t0"), nb::arg("sc_dt"), nb::arg("sc_N"), nb::arg("ltt_t0"), nb::arg("ltt_dt"), nb::arg("ltt_N"), nb::arg("n_arr"), nb::arg("ltt_arr"), nb::arg("x_arr"), nb::arg("links"), nb::arg("sc_r"), nb::arg("sc_e"), nb::arg("armlength"))
     // Bind member functions
     // .def("get_light_travel_time_wrap", &OrbitsWrap::get_light_travel_time_wrap, "Get the light travel time.")
     // .def("get_pos_wrap", &OrbitsWrap::get_pos_wrap, "Get spacecraft position.")
     // .def("get_normal_unit_vec_wrap", &OrbitsWrap::get_normal_unit_vec_wrap, "Get link normal vector.")
-    // You can also expose public data members directly using def_readwrite
-    .def_readwrite("orbits", &OrbitsWrap_responselisa::orbits)
+    // You can also expose public data members directly using def_rw
+    .def_rw("orbits", &OrbitsWrap_responselisa::orbits)
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapGPU_responselisa")
+    nb::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapGPU_responselisa")
 #else
-    py::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapCPU_responselisa")
+    nb::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapCPU_responselisa")
 #endif
 
     // Bind the constructor
-    .def(py::init<array_type<double>, array_type<double>, array_type<double>, array_type<double>, array_type<double>, int, int, int>(),
-         py::arg("x0"), py::arg("y0"), py::arg("c1"), py::arg("c2"), py::arg("c3"), py::arg("ninterps"), py::arg("length"), py::arg("spline_type"))
+    .def(nb::init<array_type<double>, array_type<double>, array_type<double>, array_type<double>, array_type<double>, int, int, int>(),
+         nb::arg("x0"), nb::arg("y0"), nb::arg("c1"), nb::arg("c2"), nb::arg("c3"), nb::arg("ninterps"), nb::arg("length"), nb::arg("spline_type"))
     // Bind member functions
 
-    // You can also expose public data members directly using def_readwrite
-    .def_readwrite("spline", &CubicSplineWrap_responselisa::spline)
+    // You can also expose public data members directly using def_rw
+    .def_rw("spline", &CubicSplineWrap_responselisa::spline)
     // .def("get_link_ind", &CubicSplineWrap::get_link_ind, "Get link index.")
     ;
 
@@ -185,70 +185,70 @@ void response_part(py::module &m) {
     // static_assert in its TU guards against any future regression.
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<FDDomainWrap>(m, "FDDomainWrapGPU")
+    nb::class_<FDDomainWrap>(m, "FDDomainWrapGPU")
 #else
-    py::class_<FDDomainWrap>(m, "FDDomainWrapCPU")
+    nb::class_<FDDomainWrap>(m, "FDDomainWrapCPU")
 #endif
-    .def(py::init<array_type<std::complex<double>>, array_type<double>,
+    .def(nb::init<array_type<std::complex<double>>, array_type<double>,
                   int, int, int, int, int, int, double>(),
-         py::arg("fd_data"), py::arg("fd_invC"),
-         py::arg("n_rfft"), py::arg("num_channel"),
-         py::arg("num_data"), py::arg("num_noise"),
-         py::arg("ind_min"), py::arg("ind_max"), py::arg("df"))
-    .def_readwrite("fd", &FDDomainWrap::fd)
+         nb::arg("fd_data"), nb::arg("fd_invC"),
+         nb::arg("n_rfft"), nb::arg("num_channel"),
+         nb::arg("num_data"), nb::arg("num_noise"),
+         nb::arg("ind_min"), nb::arg("ind_max"), nb::arg("df"))
+    .def_rw("fd", &FDDomainWrap::fd)
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<FDDomain>(m, "FDDomainGPU")
+    nb::class_<FDDomain>(m, "FDDomainGPU")
 #else
-    py::class_<FDDomain>(m, "FDDomainCPU")
+    nb::class_<FDDomain>(m, "FDDomainCPU")
 #endif
-    .def(py::init<cmplx*, double*, int, int, int, int, int, int, double>())
+    .def(nb::init<cmplx*, double*, int, int, int, int, int, int, double>())
     ;
 
     // Phase 3L: WDMSettingsWrap absorbed from lisa-on-gpu's
     // binding_tof.{cxx,hpp}. The class definition lives in
     // binding_wdm_settings.hpp (included above).
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<WDMSettingsWrap>(m, "WDMSettingsWrapGPU")
+    nb::class_<WDMSettingsWrap>(m, "WDMSettingsWrapGPU")
 #else
-    py::class_<WDMSettingsWrap>(m, "WDMSettingsWrapCPU")
+    nb::class_<WDMSettingsWrap>(m, "WDMSettingsWrapCPU")
 #endif
-    .def(py::init<double, double, int, int, int, int, int, int, int>(),
-         py::arg("layer_df"), py::arg("layer_dt"), py::arg("Nf"), py::arg("Nt"),
-         py::arg("num_channel"), py::arg("ind_min_t"), py::arg("ind_max_t"),
-         py::arg("ind_min_f"), py::arg("ind_max_f"))
-    .def_readwrite("wdm_settings", &WDMSettingsWrap::wdm_settings)
+    .def(nb::init<double, double, int, int, int, int, int, int, int>(),
+         nb::arg("layer_df"), nb::arg("layer_dt"), nb::arg("Nf"), nb::arg("Nt"),
+         nb::arg("num_channel"), nb::arg("ind_min_t"), nb::arg("ind_max_t"),
+         nb::arg("ind_min_f"), nb::arg("ind_max_f"))
+    .def_rw("wdm_settings", &WDMSettingsWrap::wdm_settings)
     ;
 
     // Phase 3L: WDMDomainWrap + WDMDomain absorbed from lisa-on-gpu's
     // binding_tof.{cxx,hpp}. The class definitions live in
     // binding_wdm_domain.hpp / wdm_domain.hh (included above).
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<WDMDomainWrap, WDMSettingsWrap>(m, "WDMDomainWrapGPU")
+    nb::class_<WDMDomainWrap, WDMSettingsWrap>(m, "WDMDomainWrapGPU")
 #else
-    py::class_<WDMDomainWrap, WDMSettingsWrap>(m, "WDMDomainWrapCPU")
+    nb::class_<WDMDomainWrap, WDMSettingsWrap>(m, "WDMDomainWrapCPU")
 #endif
-    .def(py::init<array_type<double>, array_type<double>, double, double, int, int, int, int, int, int, int, int, int>(),
-         py::arg("wdm_data"), py::arg("wdm_noise"), py::arg("layer_df"), py::arg("layer_dt"),
-         py::arg("Nf"), py::arg("Nt"), py::arg("num_channel"),
-         py::arg("ind_min_t"), py::arg("ind_max_t"),
-         py::arg("ind_min_f"), py::arg("ind_max_f"),
-         py::arg("num_data"), py::arg("num_noise"))
-    .def_readwrite("wdm", &WDMDomainWrap::wdm)
+    .def(nb::init<array_type<double>, array_type<double>, double, double, int, int, int, int, int, int, int, int, int>(),
+         nb::arg("wdm_data"), nb::arg("wdm_noise"), nb::arg("layer_df"), nb::arg("layer_dt"),
+         nb::arg("Nf"), nb::arg("Nt"), nb::arg("num_channel"),
+         nb::arg("ind_min_t"), nb::arg("ind_max_t"),
+         nb::arg("ind_min_f"), nb::arg("ind_max_f"),
+         nb::arg("num_data"), nb::arg("num_noise"))
+    .def_rw("wdm", &WDMDomainWrap::wdm)
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<WDMDomain>(m, "WDMDomainGPU")
+    nb::class_<WDMDomain>(m, "WDMDomainGPU")
 #else
-    py::class_<WDMDomain>(m, "WDMDomainCPU")
+    nb::class_<WDMDomain>(m, "WDMDomainCPU")
 #endif
-    .def(py::init<double*, double*, double, double, int, int, int, int, int, int, int, int, int>(),
-         py::arg("wdm_data"), py::arg("wdm_noise"), py::arg("layer_df"), py::arg("layer_dt"),
-         py::arg("Nf"), py::arg("Nt"), py::arg("num_channel"),
-         py::arg("ind_min_t"), py::arg("ind_max_t"),
-         py::arg("ind_min_f"), py::arg("ind_max_f"),
-         py::arg("num_data"), py::arg("num_noise"))
+    .def(nb::init<double*, double*, double, double, int, int, int, int, int, int, int, int, int>(),
+         nb::arg("wdm_data"), nb::arg("wdm_noise"), nb::arg("layer_df"), nb::arg("layer_dt"),
+         nb::arg("Nf"), nb::arg("Nt"), nb::arg("num_channel"),
+         nb::arg("ind_min_t"), nb::arg("ind_max_t"),
+         nb::arg("ind_min_f"), nb::arg("ind_max_f"),
+         nb::arg("num_data"), nb::arg("num_noise"))
     ;
 
     // Phase 3L.6: LISATDIonTheFlyWrap + FDSpline/TDSpline wrap+underlying
@@ -257,65 +257,65 @@ void response_part(py::module &m) {
 
     // FDSplineTDIWaveformWrap
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapGPU")
+    nb::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapGPU")
 #else
-    py::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapCPU")
+    nb::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapCPU")
 #endif
-    .def(py::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
-         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("freq_spline"))
+    .def(nb::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+         nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("freq_spline"))
     .def("run_wave_tdi_wrap", &FDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
     .def("get_buffer_size", &FDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
-    .def_readwrite("orbits", &FDSplineTDIWaveformWrap::orbits)
-    .def_readwrite("tdi_config", &FDSplineTDIWaveformWrap::tdi_config)
-    .def_readwrite("amp_spline", &FDSplineTDIWaveformWrap::amp_spline)
-    .def_readwrite("freq_spline", &FDSplineTDIWaveformWrap::freq_spline)
+    .def_rw("orbits", &FDSplineTDIWaveformWrap::orbits)
+    .def_rw("tdi_config", &FDSplineTDIWaveformWrap::tdi_config)
+    .def_rw("amp_spline", &FDSplineTDIWaveformWrap::amp_spline)
+    .def_rw("freq_spline", &FDSplineTDIWaveformWrap::freq_spline)
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<FDSplineTDIWaveform>(m, "FDSplineTDIWaveformGPU")
+    nb::class_<FDSplineTDIWaveform>(m, "FDSplineTDIWaveformGPU")
 #else
-    py::class_<FDSplineTDIWaveform>(m, "FDSplineTDIWaveformCPU")
+    nb::class_<FDSplineTDIWaveform>(m, "FDSplineTDIWaveformCPU")
 #endif
-    .def(py::init<Orbits *, TDIConfig*, CubicSpline*, CubicSpline*>(),
-         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("freqs_spline"))
+    .def(nb::init<Orbits *, TDIConfig*, CubicSpline*, CubicSpline*>(),
+         nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("freqs_spline"))
     ;
 
     // TDSplineTDIWaveformWrap
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapGPU")
+    nb::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapGPU")
 #else
-    py::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapCPU")
+    nb::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapCPU")
 #endif
-    .def(py::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
-         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("phase_spline"))
+    .def(nb::init<OrbitsWrap_responselisa *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+         nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("phase_spline"))
     .def("run_wave_tdi_wrap", &TDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
     .def("get_buffer_size", &TDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
-    .def_readwrite("orbits", &TDSplineTDIWaveformWrap::orbits)
-    .def_readwrite("tdi_config", &TDSplineTDIWaveformWrap::tdi_config)
-    .def_readwrite("amp_spline", &TDSplineTDIWaveformWrap::amp_spline)
-    .def_readwrite("phase_spline", &TDSplineTDIWaveformWrap::phase_spline)
+    .def_rw("orbits", &TDSplineTDIWaveformWrap::orbits)
+    .def_rw("tdi_config", &TDSplineTDIWaveformWrap::tdi_config)
+    .def_rw("amp_spline", &TDSplineTDIWaveformWrap::amp_spline)
+    .def_rw("phase_spline", &TDSplineTDIWaveformWrap::phase_spline)
     ;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<TDSplineTDIWaveform>(m, "TDSplineTDIWaveformGPU")
+    nb::class_<TDSplineTDIWaveform>(m, "TDSplineTDIWaveformGPU")
 #else
-    py::class_<TDSplineTDIWaveform>(m, "TDSplineTDIWaveformCPU")
+    nb::class_<TDSplineTDIWaveform>(m, "TDSplineTDIWaveformCPU")
 #endif
-    .def(py::init<Orbits *, TDIConfig*, CubicSpline*, CubicSpline*>(),
-         py::arg("orbits"), py::arg("tdi_config"), py::arg("amp_spline"), py::arg("phase_spline"))
+    .def(nb::init<Orbits *, TDIConfig*, CubicSpline*, CubicSpline*>(),
+         nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("phase_spline"))
     ;
 
 }
 
 
 
-// PYBIND11_MODULE(responselisa, ...) removed during Phase 3E (2026-06-02):
+// NB_MODULE(responselisa, ...) removed during Phase 3E (2026-06-02):
 // the response classes (LISAResponseWrap, TDIConfigWrap, OrbitsWrap_responselisa,
 // CubicSplineWrap_responselisa) are now registered into LAT's `pycppdetector`
 // pybind11 module via response_part(m) called from binding.cxx's
-// PYBIND11_MODULE(pycppdetector, m) body.
+// NB_MODULE(pycppdetector, m) body.
 //
 // Helpers `check_response` and `get_module_path_responselisa` were also
-// only used by the deleted PYBIND11_MODULE body; the latter referenced a
+// only used by the deleted NB_MODULE body; the latter referenced a
 // module name that no longer exists.
 

@@ -124,7 +124,7 @@ if(LISATOOLS_WITH_CPU)
 
   # Phase 3E adds binding_flr.cxx to the pybind11 module so response_part(m)
   # is linked in alongside detector_part(m).
-  pybind11_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx binding_flr.cxx)
+  nanobind_add_module(lisaanalysistools_cpu_pycppdetector binding.cxx binding_flr.cxx)
   apply_cpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_cpu_pycppdetector PRIVATE lisaanalysistools_cpu_detector_static)
   target_include_directories(lisaanalysistools_cpu_pycppdetector PUBLIC ${GBT_CUTILS})
@@ -145,7 +145,7 @@ if(LISATOOLS_WITH_GPU)
   target_sources(lisaanalysistools_gpu_detector_gpu_static PUBLIC FILE_SET HEADERS FILES
                                         Detector.hpp PSD.hpp LISAResponse.hh)
 
-  pybind11_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx binding_flr.cxx)
+  nanobind_add_module(lisaanalysistools_gpu_pycppdetector binding.cxx binding_flr.cxx)
   apply_gpu_backend_common_options(pycppdetector lisatools lisaanalysistools false)
   target_link_libraries(lisaanalysistools_gpu_pycppdetector PRIVATE lisaanalysistools_gpu_detector_gpu_static)
 

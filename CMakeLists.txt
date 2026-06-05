@@ -14,7 +14,12 @@ project(lisaanalysistools VERSION ${SKBUILD_PROJECT_VERSION} LANGUAGES CXX) #@AD
 
 # ---- Find required dependencies ----
 find_package(Python COMPONENTS Interpreter Development.Module NumPy REQUIRED)
-find_package(pybind11 CONFIG)
+# Phase 3M (2026-06-04): sprint-wide pybind11 -> nanobind migration.
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+  OUTPUT_VARIABLE nanobind_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE)
+find_package(nanobind CONFIG REQUIRED)
 
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

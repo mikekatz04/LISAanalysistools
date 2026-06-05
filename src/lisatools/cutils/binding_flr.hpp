@@ -5,22 +5,22 @@
 #include "Detector.hpp"
 #include <string>
 #include <iostream>
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 #include "binding.hpp"
 #include "gbt_binding.hpp"
 #include "Interpolate.hh"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#include "pybind11_cuda_array_interface.hpp"
 template<typename T>
-using array_type = cai::cuda_array_t<T>;
+using array_type = nb::ndarray<T, nb::device::cuda>;
 #define LISAResponseWrap LISAResponseWrapGPU
 #else
 template<typename T>
-using array_type = py::array_t<T>;
+using array_type = nb::ndarray<T, nb::device::cpu>;
 #define LISAResponseWrap LISAResponseWrapCPU
 #endif
 
@@ -40,17 +40,15 @@ class ReturnPointerBase {
     static T* return_pointer_and_check_length(array_type<T> input1, std::string name, int N, int multiplier)
     {
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        T *ptr1 = input1.data();
         
 #else
-        py::buffer_info buf1 = input1.request();
-
-        if (buf1.size != N * multiplier)
+        if (input1.size() != static_cast<size_t>(N) * static_cast<size_t>(multiplier))
         {
-            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
+            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(static_cast<size_t>(N) * static_cast<size_t>(multiplier)) + ". It's length is " + std::to_string(input1.size()) + ".";
             throw std::invalid_argument(err_out);
         }
-        T* ptr1 = static_cast<T *>(buf1.ptr);
+        T* ptr1 = input1.data();
 #endif
         return ptr1;
     };
@@ -59,10 +57,9 @@ class ReturnPointerBase {
     static T* return_pointer(array_type<T> input1, std::string name)
     {
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        T *ptr1 = input1.data();
 #else
-        py::buffer_info buf1 = input1.request();
-        T* ptr1 = static_cast<T *>(buf1.ptr);
+        T* ptr1 = input1.data();
 #endif
         return ptr1;
     };
@@ -70,10 +67,9 @@ class ReturnPointerBase {
     static cmplx* return_pointer_cmplx(array_type<std::complex<double>> input1, std::string name)
     {
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-        cmplx *ptr1 = (cmplx *)(input1.get_compatible_typed_pointer());
+        cmplx *ptr1 = (cmplx*) input1.data();
 #else
-        py::buffer_info buf1 = input1.request();
-        cmplx* ptr1 = static_cast<cmplx *>(buf1.ptr);
+        cmplx* ptr1 = (cmplx*) input1.data();
 #endif
         return ptr1;
     };
