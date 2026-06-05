@@ -2,8 +2,9 @@
 #include "PSD.hpp"
 #include <string>
 #include <iostream>
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 #include "binding.hpp"
 
 // Phase 3J: this binding TU is the SOLE registration site for the shared
@@ -43,16 +44,15 @@ static_assert(offsetof(Orbits, sc_r)        == offsetof(OrbitsView, sc_r),      
 static_assert(offsetof(Orbits, sc_e)        == offsetof(OrbitsView, sc_e),        "OrbitsView.sc_e layout drift");
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#include "pybind11_cuda_array_interface.hpp"
 #endif
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 // Phase 3E (2026-06-02): LISAResponse-related pybind11 bindings absorbed
-// from lisa-on-gpu. The actual class definitions and `response_part(py::module&)`
+// from lisa-on-gpu. The actual class definitions and `response_part(nb::module&)`
 // implementation live in binding_flr.cxx, which is compiled into the
 // pycppdetector pybind11 module alongside this file.
-void response_part(py::module &m);
+void response_part(nb::module_ &m);
 
 void OrbitsWrap::get_light_travel_time_wrap(array_type<double> ltt, array_type<double> t, array_type<int> link, int num)
 {
@@ -223,24 +223,24 @@ void XYZSensitivityMatrixWrap::get_inverse_det_wrap(
 
 std::string get_module_path() {
     // Acquire the GIL if it's not already held (safe to call multiple times)
-    py::gil_scoped_acquire acquire;
+    nb::gil_scoped_acquire acquire;
 
     // Import the module by its name
-    // Note: The module name here ("pycppdetector") must match the name used in PYBIND11_MODULE
-    py::object module = py::module::import("pycppdetector");
+    // Note: The module name here ("pycppdetector") must match the name used in NB_MODULE
+    nb::object module = nb::module_::import_("pycppdetector");
 
     // Access the __file__ attribute and cast it to a C++ string
     try {
-        std::string path = module.attr("__file__").cast<std::string>();
+        std::string path = nb::cast<std::string>(module.attr("__file__"));
         return path;
-    } catch (const py::error_already_set& e) {
+    } catch (const nb::python_error& e) {
         // Handle the error if __file__ attribute is missing (e.g., if module is a namespace package)
         std::cerr << "Error getting __file__ attribute: " << e.what() << std::endl;
         return "";
     }
 }
 
-// PYBIND11_MODULE creates the entry point for the Python module
+// NB_MODULE creates the entry point for the Python module
 // The module name here must match the one used in CMakeLists.txt
 
 
@@ -249,17 +249,15 @@ template<typename T>
 T* return_ptr(array_type<T> input1, std::string name, int N, int multiplier)
 {
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-        T *ptr1 = static_cast<T *>(input1.get_compatible_typed_pointer());
+        T *ptr1 = input1.data();
         
 #else
-        py::buffer_info buf1 = input1.request();
-
-        if (buf1.size != N * multiplier)
+        if (input1.size() != static_cast<size_t>(N) * static_cast<size_t>(multiplier))
         {
-            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(N * multiplier) + ". It's length is " + std::to_string(buf1.size) + ".";
+            std::string err_out = name + ": input arrays have the incorrect length. Should be " + std::to_string(static_cast<size_t>(N) * static_cast<size_t>(multiplier)) + ". It's length is " + std::to_string(input1.size()) + ".";
             throw std::invalid_argument(err_out);
         }
-        T* ptr1 = static_cast<T *>(buf1.ptr);
+        T* ptr1 = input1.data();
 #endif
         return ptr1;
 };
@@ -344,77 +342,77 @@ T* return_ptr(array_type<T> input1, std::string name, int N, int multiplier)
 //     );
 // }
 
-void detector_part(py::module &m) {
+void detector_part(nb::module_ &m) {
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<OrbitsWrap>(m, "OrbitsWrapGPU")
+    nb::class_<OrbitsWrap>(m, "OrbitsWrapGPU")
 #else
-    py::class_<OrbitsWrap>(m, "OrbitsWrapCPU")
+    nb::class_<OrbitsWrap>(m, "OrbitsWrapCPU")
 #endif 
 
     // Bind the constructor
-    .def(py::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
-         py::arg("sc_t0"), py::arg("sc_dt"), py::arg("sc_N"), py::arg("ltt_t0"), py::arg("ltt_dt"), py::arg("ltt_N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
+    .def(nb::init<double, double, int, double, double, int, array_type<double>, array_type<double>, array_type<double>, array_type<int>, array_type<int>, array_type<int>, double>(), 
+         nb::arg("sc_t0"), nb::arg("sc_dt"), nb::arg("sc_N"), nb::arg("ltt_t0"), nb::arg("ltt_dt"), nb::arg("ltt_N"), nb::arg("n_arr"), nb::arg("ltt_arr"), nb::arg("x_arr"), nb::arg("links"), nb::arg("sc_r"), nb::arg("sc_e"), nb::arg("armlength"))
     // Bind member functions
     .def("get_light_travel_time_wrap", &OrbitsWrap::get_light_travel_time_wrap, "Get the light travel time.")
     .def("get_pos_wrap", &OrbitsWrap::get_pos_wrap, "Get spacecraft position.")
     .def("get_normal_unit_vec_wrap", &OrbitsWrap::get_normal_unit_vec_wrap, "Get link normal vector.")
-    // You can also expose public data members directly using def_readwrite
-    .def_readwrite("orbits", &OrbitsWrap::orbits)
+    // You can also expose public data members directly using def_rw
+    .def_rw("orbits", &OrbitsWrap::orbits)
     // .def("get_link_ind", &OrbitsWrap::get_link_ind, "Get link index.")
     .def("__copy__",  [](const OrbitsWrap &self) {
         return OrbitsWrap(self);
     })
-    .def("__deepcopy__", [](const OrbitsWrap &self, py::dict) {
+    .def("__deepcopy__", [](const OrbitsWrap &self, nb::dict) {
         return OrbitsWrap(self);
     });
 
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<Orbits>(m, "OrbitsGPU")
+    nb::class_<Orbits>(m, "OrbitsGPU")
 #else
-    py::class_<Orbits>(m, "OrbitsCPU")
+    nb::class_<Orbits>(m, "OrbitsCPU")
 #endif
 
     // Bind the constructor
-    .def(py::init<double, double, int, double, double, int, double *, double *, double *, int *, int *, int *, double>(),
-         py::arg("sc_t0"), py::arg("sc_dt"), py::arg("sc_N"), py::arg("ltt_t0"), py::arg("ltt_dt"), py::arg("ltt_N"), py::arg("n_arr"), py::arg("ltt_arr"), py::arg("x_arr"), py::arg("links"), py::arg("sc_r"), py::arg("sc_e"), py::arg("armlength"))
+    .def(nb::init<double, double, int, double, double, int, double *, double *, double *, int *, int *, int *, double>(),
+         nb::arg("sc_t0"), nb::arg("sc_dt"), nb::arg("sc_N"), nb::arg("ltt_t0"), nb::arg("ltt_dt"), nb::arg("ltt_N"), nb::arg("n_arr"), nb::arg("ltt_arr"), nb::arg("x_arr"), nb::arg("links"), nb::arg("sc_r"), nb::arg("sc_e"), nb::arg("armlength"))
 
     ;
 
 #if 0  // === XYZBackend disabled (symbol issues on Linux): pybind11 class bindings ===
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapGPU")
+    nb::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapGPU")
 #else
-    py::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapCPU")
+    nb::class_<XYZSensitivityMatrixWrap>(m, "XYZSensitivityMatrixWrapCPU")
 #endif
-    .def(py::init<array_type<double>, array_type<double>, int, double, int, bool, double>(),
-            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
+    .def(nb::init<array_type<double>, array_type<double>, int, double, int, bool, double>(),
+            nb::arg("averaged_ltts_arr"), nb::arg("delta_ltts_arr"), nb::arg("n_times"), nb::arg("armlength"), nb::arg("generation"), nb::arg("spline_noise"), nb::arg("window_factor") = 1.0)
     .def("get_noise_tfs_wrap", &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap, "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
     .def("get_inverse_det_wrap", &XYZSensitivityMatrixWrap::get_inverse_det_wrap, "Batch invert 3x3 Hermitian matrices and compute determinants.")
-    .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
+    .def_rw("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
     .def("__copy__",  [](const XYZSensitivityMatrixWrap &self) {
         return XYZSensitivityMatrixWrap(self);
     })
-    .def("__deepcopy__", [](const XYZSensitivityMatrixWrap &self, py::dict) {
+    .def("__deepcopy__", [](const XYZSensitivityMatrixWrap &self, nb::dict) {
         return XYZSensitivityMatrixWrap(self);
     });
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixGPU")
+    nb::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixGPU")
 #else
-    py::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixCPU")
+    nb::class_<XYZSensitivityMatrix>(m, "XYZSensitivityMatrixCPU")
 #endif
-    .def(py::init<double *, double *, int, double, int, bool, double>(),
-            py::arg("averaged_ltts_arr"), py::arg("delta_ltts_arr"), py::arg("n_times"), py::arg("armlength"), py::arg("generation"), py::arg("spline_noise"), py::arg("window_factor") = 1.0)
+    .def(nb::init<double *, double *, int, double, int, bool, double>(),
+            nb::arg("averaged_ltts_arr"), nb::arg("delta_ltts_arr"), nb::arg("n_times"), nb::arg("armlength"), nb::arg("generation"), nb::arg("spline_noise"), nb::arg("window_factor") = 1.0)
     ;
 #endif  // === end pybind11 class bindings ===
 }
 
 
-PYBIND11_MODULE(pycppdetector, m) {
+NB_MODULE(pycppdetector, m) {
     m.doc() = "Orbits/Detector/Response C++ plug-in"; // Optional module docstring
 
     // Call initialization functions from other files
@@ -429,10 +427,10 @@ PYBIND11_MODULE(pycppdetector, m) {
     m.def("check_12", &check_12, "Check12");
 
     try {
-        std::string path_at_init = m.attr("__file__").cast<std::string>();
+        std::string path_at_init = nb::cast<std::string>(m.attr("__file__"));
         // std::cout << "Module loaded from: " << path_at_init << std::endl;
-        m.attr("module_dir") = py::cast(path_at_init.substr(0, path_at_init.find_last_of("/\\")));
-    } catch (py::error_already_set &e) {
+        m.attr("module_dir") = nb::cast(path_at_init.substr(0, path_at_init.find_last_of("/\\")));
+    } catch (nb::python_error &e) {
          // Handle potential error here, e.g., by logging or setting a default value
         std::cerr << "Could not capture __file__ at init time." << std::endl;
         e.restore(); // Restore exception state for proper Python handling
