@@ -103,6 +103,44 @@ CubicSpline fit_cubic_spline_pcr(double *x, double *y,
 
 
 // ----------------------------------------------------------------------------
+// Block-wide double-sum reductions. `block_reduce` takes a per-thread
+// staging slot in shared memory (`array[threadIdx.x]`); `block_reduce_scalar`
+// takes a per-thread register value and skips the staging array. Both rely
+// on `NUM_THREADS_HERE` (defined just above) so the cub::BlockReduce
+// template width matches the launch shape.
+//
+// Defined here -- not in a host .cu -- because GBGPU's gb_tdi_on_the_fly.cu
+// and lisa-on-gpu's TDIonTheFly.cu (and future SOBBH/BBHx kernels)
+// all need these. CUDA-only: cub is the underlying primitive and the
+// CPU mirror collapses to a single thread (NUM_THREADS_HERE == 1)
+// where the reduction is just the scalar identity.
+// ----------------------------------------------------------------------------
+#ifdef __CUDACC__
+#include <cub/cub.cuh>
+
+CUDA_DEVICE
+inline double block_reduce(double *array)
+{
+    using BlockReduce = cub::BlockReduce<double, NUM_THREADS_HERE>;
+    int tid = threadIdx.x;
+    CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
+    CUDA_SYNC_THREADS;
+    double thread_data = array[tid];
+    return BlockReduce(temp_storage).Sum(thread_data);
+}
+
+CUDA_DEVICE
+inline double block_reduce_scalar(double thread_data)
+{
+    using BlockReduce = cub::BlockReduce<double, NUM_THREADS_HERE>;
+    CUDA_SHARED typename BlockReduce::TempStorage temp_storage;
+    CUDA_SYNC_THREADS;
+    return BlockReduce(temp_storage).Sum(thread_data);
+}
+#endif
+
+
+// ----------------------------------------------------------------------------
 // Upper bound on the number of thread-strided iterations any per-thread
 // register array sees when sweeping `[0, Nt_sub)` at
 // `blockDim.x = NUM_THREADS_HERE`. Compile-time so it can size
