@@ -19,3 +19,4 @@
 
    lisatools_tutorial
    lisa_response_tutorial
+   wdm_transform_tutorial

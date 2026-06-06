@@ -29,6 +29,12 @@ shutil.copy(
     dir_path + "docs/source/lisa_response_tutorial.ipynb",
 )
 
+# WDM transform tutorial (Phase 3L.7 follow-up, 2026-06-05).
+shutil.copy(
+    dir_path + "examples/wdm_transform_tutorial.ipynb",
+    dir_path + "docs/source/wdm_transform_tutorial.ipynb",
+)
+
 sys.path.insert(0, os.path.abspath("../../"))
 
 here = os.path.abspath(os.path.dirname(__file__))
