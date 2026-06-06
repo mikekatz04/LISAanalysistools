@@ -201,15 +201,38 @@ def build_pack(
     )
     tdi_wrap = gb_gen.wave_gen
 
+    # The dense-TD kernel ``gb_run_wave_tdi_kernel`` allocates ``O(N)`` shared
+    # memory per block (N = t_tdi grid length). At ``N=16384`` the per-block
+    # buffer reaches ~475 KB, which exceeds the dynamic-shared-mem cap on
+    # most NVIDIA parts (even with cudaFuncSetAttribute opt-in: A100 -> 99
+    # KB, H100 -> 228 KB). The dense injection build is a one-time cost,
+    # so we always do it on CPU and copy the resulting TD trace over to the
+    # backend ``xp`` (cupy on GPU) before wrapping in TDSignal. The
+    # signal-het kernel still uses the GPU-side ``tdi_wrap`` for the
+    # per-call template build that runs every MCMC step.
+    if is_gpu:
+        orbits_cpu = ESAOrbits(force_backend="cpu")
+        tdi_config_cpu = TDIConfig("2nd generation", force_backend="cpu")
+        gb_gen_inj = GBTDIonTheFly(
+            t_tdi, Tobs, t_start, 1.0 / dt, 1,
+            tdi_config=tdi_config_cpu, orbits=orbits_cpu, tdi_chan="XYZ",
+            force_backend="cpu",
+        )
+    else:
+        gb_gen_inj = gb_gen
+
     def real_td_cb(p):
         amp, f0, fdot, fddot, phi0, inc, psi, lam, beta = p
-        spline = gb_gen(
+        spline = gb_gen_inj(
             np.array([amp]), np.array([f0]), np.array([fdot]),
             np.array([fddot]), np.array([phi0]), np.array([inc]),
             np.array([psi]), np.array([lam]), np.array([beta]),
             convert_to_ra_dec=False, return_spline=True,
         )
-        return np.asarray(spline.eval_tdi(t_arr))[0]
+        td = np.asarray(spline.eval_tdi(t_arr))[0]
+        # Transfer to backend xp so downstream ``TDSignal(td, settings=td_set)``
+        # ``.transform(wdm_set, window=window)`` runs on the right device.
+        return xp.asarray(td) if is_gpu else td
 
     td_set = TDSettings(Nobs, dt, force_backend=backend_name)
     window = _tukey(Nobs, alpha=tukey_alpha).astype(float)
