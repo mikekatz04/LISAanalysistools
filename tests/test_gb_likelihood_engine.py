@@ -14,7 +14,7 @@ Two parity tests:
    ``gb_lookup_table_test_script.py`` at the repo root.
 
 Both tests skip unless their underlying backends (``gbgpu``/``cupy`` for FD,
-``fastlisaresponse`` for WDM) are importable.
+``gbgpu.gbcomps`` for the WDM engine) are importable.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ def _have_gbgpu() -> bool:
         return False
 
 
-def _have_fastlisaresponse() -> bool:
+def _have_gbgpu_wdm() -> bool:
     try:
-        import fastlisaresponse  # noqa: F401
+        from gbgpu.gbcomps import GBWDMComputations  # noqa: F401
 
         return True
     except (ImportError, ModuleNotFoundError):
@@ -71,8 +71,8 @@ class FDEngineEquivalenceTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    _have_fastlisaresponse(),
-    "requires fastlisaresponse (lisa-on-gpu) for the WDM engine",
+    _have_gbgpu_wdm(),
+    "requires gbgpu.gbcomps.GBWDMComputations for the WDM engine",
 )
 class WDMEngineSelfConsistencyTest(unittest.TestCase):
     """End-to-end self-consistency of the WDM engine.

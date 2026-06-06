@@ -10,8 +10,9 @@ try:
 except ImportError:
     import numpy as cp
 
-from fastlisaresponse import pyResponseTDI
 from lisaconstants import ASTRONOMICAL_YEAR as YRSID_SI
+
+from ..response import pyResponseTDI
 
 from ..domains import (
     DomainBase,

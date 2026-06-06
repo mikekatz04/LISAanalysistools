@@ -2457,6 +2457,11 @@ class WDMSignal(WDMSettings, DomainBase):
             else:
                 assert ax is not None
 
+            try:
+                len(ax)
+            except TypeError:
+                ax = [ax]
+                
             for i, (ax_i, channel)  in enumerate(zip(ax, ["X", "Y", "Z"])):
                 z = self.arr[i]
                 x, y = self.t_arr_edges, self.f_arr_edges

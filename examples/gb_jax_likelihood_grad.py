@@ -2,11 +2,13 @@
 
 Pieces wired together:
 
-* ``fastlisaresponse.jax`` -- TDI-on-the-fly GB JAX waveform driven by
-  :class:`JaxUCBSource`, projected through :func:`gb_run_wave_tdi`. The
-  TDI projection uses an :class:`OrbitsWrapJAX` and
-  :class:`TDIConfigWrapJAX` built from LISAtools' ``EqualArmlengthOrbits``
-  and ``fastlisaresponse.tdiconfig.TDIConfig`` on the jax backend.
+* ``gbgpu.jax`` + ``lisatools.jax.response`` -- TDI-on-the-fly GB JAX
+  waveform driven by :class:`gbgpu.jax.sources.JaxUCBSource`, projected
+  through :func:`gbgpu.jax.tdi_on_the_fly.gb_run_wave_tdi`. The TDI
+  projection uses an :class:`OrbitsWrapJAX` and
+  :class:`lisatools.jax.response.TDIConfigWrapJAX` built from LISAtools'
+  ``EqualArmlengthOrbits`` and ``lisatools.response.tdiconfig.TDIConfig``
+  on the jax backend.
 * ``lisatools`` -- :class:`AnalysisContainer` + :class:`DataResidualArray`
   + :class:`SensitivityMatrix` package the data, the PSD, and the signal
   generator on the lisatools side. The actual likelihood and its
@@ -56,12 +58,11 @@ from lisatools.sensitivity import (
 )
 from lisatools.stochastic import StochasticContribution
 
-# lisa-on-gpu jax GB TDI-on-the-fly
-from fastlisaresponse.jax import (
-    JaxUCBSource,
-    TDIConfigWrapJAX,
-    gb_run_wave_tdi,
-)
+# GB JAX TDI-on-the-fly (carved out of lisa-on-gpu at Phase 3L.7j into
+# lisatools.jax.response / gbgpu.jax).
+from lisatools.jax.response import TDIConfigWrapJAX
+from gbgpu.jax.sources import JaxUCBSource
+from gbgpu.jax.tdi_on_the_fly import gb_run_wave_tdi
 from lisatools.response.tdiconfig import TDIConfig
 
 # Eryn pieces for the MCMC stage
