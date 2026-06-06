@@ -109,9 +109,31 @@ def build_pack(
     nt_sub=256,
     n_sparse=256,
     n_pad=None,
-    n_cp_sig=48,
-    n_cp_orbit=32,
-    tukey_alpha=0.05,
+    # Default to the DIRECT (uncached) path so chunked-het matches lisatools
+    # direct to machine precision, and therefore matches signal-het (which
+    # was already validated against lisatools direct). ``gb_chunked_test_script.py``
+    # and ``gb_chunked_prior_draws.py`` -- the canonical validation drivers --
+    # also default to N_cp_sig=0 / N_cp_orbit=0 for this reason.
+    #
+    # Set these >0 to opt into the spline-cached chunked-het path for
+    # production speed. With N_cp_sig=48 / N_cp_orbit=32 the per-chunk
+    # spline approximation adds an ~mm ~ 4e-11 (GB) bias to <d|h>/<h|h>,
+    # which shows up here as a small constant logL offset between
+    # chunked-het and signal-het at injection. That bias is harmless for
+    # MCMC posterior SHAPE but breaks the absolute-logL equivalence test.
+    n_cp_sig=0,
+    n_cp_orbit=0,
+    # TUKEY_ALPHA = 0.0 -- NO TD-Tukey on the injection. This is the regime
+    # ``gb_chunked_test_script.py`` validates as matching lisatools direct
+    # to mm ~ 1e-9 (see its comment block around line 174). With TUKEY_ALPHA
+    # > 0 the chunked-het template's intrinsic per-chunk Tukey (~0.05 at
+    # N_sparse=256) doesn't mirror the global TD-Tukey applied to the data,
+    # which shifts chunked-het's <d|h>/<h|h> by ~4 logL units at injection
+    # while signal-het still matches because its bin-fold pipeline applies
+    # an effective FD Tukey that does mirror the TD taper. Keep this at 0.0
+    # for the absolute-logL equivalence test; raise it only for sampler-
+    # robustness studies where the constant chunked-het offset doesn't matter.
+    tukey_alpha=0.0,
     max_r=5.0,
     ll_ceiling=10.0,
     ll_reject=-1e30,
@@ -152,8 +174,10 @@ def build_pack(
     else:
         xp = np
 
-    assert 0.01 <= tukey_alpha <= 0.05, (
-        f"tukey_alpha={tukey_alpha} outside validated [0.01, 0.05] range.")
+    # Allow tukey_alpha = 0.0 (validated regime in gb_chunked_test_script.py)
+    # plus the documented [0.01, 0.05] band for sampler-robustness runs.
+    assert tukey_alpha == 0.0 or 0.01 <= tukey_alpha <= 0.05, (
+        f"tukey_alpha={tukey_alpha} not in {{0.0}} U [0.01, 0.05].")
     if n_pad is None:
         n_pad = nt_sub // 8
 
@@ -413,9 +437,12 @@ def main():
     # same posterior peak; only the absolute logL normalisation differs
     # by a constant -- harmless for MCMC posterior shape, but the
     # comparison-at-injection numerics will look asymmetric.
-    TUKEY_ALPHA   = float(os.environ.get("TUKEY_ALPHA", "0.05"))
-    assert 0.01 <= TUKEY_ALPHA <= 0.05, (
-        f"TUKEY_ALPHA={TUKEY_ALPHA} outside validated [0.01, 0.05] range.")
+    # Default 0.0 = NO TD-Tukey on injection; the validated regime that
+    # makes chunked-het match lisatools direct (and therefore signal-het).
+    # See the comment block at ``build_pack`` for why.
+    TUKEY_ALPHA   = float(os.environ.get("TUKEY_ALPHA", "0.0"))
+    assert TUKEY_ALPHA == 0.0 or 0.01 <= TUKEY_ALPHA <= 0.05, (
+        f"TUKEY_ALPHA={TUKEY_ALPHA} not in {{0.0}} U [0.01, 0.05].")
     # signal-het knobs
     NT_LAYER      = int(os.environ.get("NT_LAYER", "64"))
     N_SPARSE_FD   = int(os.environ.get("N_SPARSE_FD", "1024"))
@@ -424,8 +451,12 @@ def main():
     NT_SUB        = int(os.environ.get("NT_SUB", "256"))
     N_SPARSE      = int(os.environ.get("N_SPARSE", "256"))
     N_PAD         = int(os.environ.get("N_PAD", str(NT_SUB // 8)))
-    N_CP_SIG      = int(os.environ.get("N_CP_SIG", "48"))
-    N_CP_ORBIT    = int(os.environ.get("N_CP_ORBIT", "32"))
+    # Default to N_cp_sig=0 / N_cp_orbit=0 (direct, uncached chunked-het).
+    # See the comment at ``build_pack`` -- the cached path biases logL by
+    # ~mm 4e-11 vs signal-het / lisatools direct. Opt in via env var for
+    # production timing runs.
+    N_CP_SIG      = int(os.environ.get("N_CP_SIG", "0"))
+    N_CP_ORBIT    = int(os.environ.get("N_CP_ORBIT", "0"))
     # priors (wide angular priors by default, matching the stretch-clip run)
     PRIOR_FAC_F0      = float(os.environ.get("PRIOR_FAC_F0",     "0.4"))
     PRIOR_FAC_AMP     = float(os.environ.get("PRIOR_FAC_AMP",    "0.5"))
