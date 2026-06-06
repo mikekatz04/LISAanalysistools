@@ -154,10 +154,7 @@ class Sensitivity(ABC):
             f, cls.get_stochastic_contribution(f, **kwargs), **kwargs
         )
 
-        try:
-            Sout += stochastic_contribution
-        except:
-            breakpoint()
+        Sout += stochastic_contribution
         return Sout
 
     @classmethod
@@ -1314,7 +1311,6 @@ class SensitivityMatrixBase:
 
         new_mat.sens_mat = self.sens_mat[(Ellipsis,) + basis_idx]
         new_mat.detC = self.detC[basis_idx]
-        breakpoint()
         new_mat.invC = self.invC[(Ellipsis,) + basis_idx]
 
         # now set skip_inv_det to False

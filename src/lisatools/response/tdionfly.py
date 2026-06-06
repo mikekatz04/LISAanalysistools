@@ -250,9 +250,6 @@ class TDTDIonTheFly(TDIonTheFly):
             amp_c2 = amp.c[1, :].copy()
             amp_c3 = amp.c[0, :].copy()
 
-            breakpoint()
-            # x = amp
-
             # convert to pointers
             targs, twkargs = wrapper(t, phase_y, phase_c1, phase_c2, phase_c3, amp_y, amp_c1, amp_c2, amp_c3)
             (_t, _phase_y, _phase_c1, _phase_c2, _phase_c3, _amp_y, _amp_c1, _amp_c2, _amp_c3) = targs
@@ -261,7 +258,11 @@ class TDTDIonTheFly(TDIonTheFly):
 
         elif isinstance(amp, CubicSplineInterpolant):
             assert isinstance(phase, CubicSplineInterpolant)
-            breakpoint()
+            raise NotImplementedError(
+                "CubicSplineInterpolant amp/phase input is not yet wired into "
+                "TDIonTheFly; pass scipy.CubicSpline objects (handled above) "
+                "or pre-built pyCubicSplineWrap instances instead."
+            )
 
         else:
             raise ValueError("# TODO: fix this.")
@@ -532,9 +533,6 @@ class FDTDIonTheFly(TDIonTheFly):
             amp_c1 = amp.c[2, :].copy()
             amp_c2 = amp.c[1, :].copy()
             amp_c3 = amp.c[0, :].copy()
-
-            breakpoint()
-            # x = amp
 
             # convert to pointers
             targs, twkargs = wrapper(t, freq_y, freq_c1, freq_c2, freq_c3, amp_y, amp_c1, amp_c2, amp_c3)

@@ -986,10 +986,7 @@ class FDSignal(FDSettings, DomainBase):
     """
 
     def __init__(self, arr, settings: FDSettings):
-        try:
-            FDSettings.__init__(self, *settings.args, **settings.kwargs)
-        except:
-            breakpoint()
+        FDSettings.__init__(self, *settings.args, **settings.kwargs)
         DomainBase.__init__(self, arr)
         if self.arr.shape[-1] != self.N_active:
             assert arr.shape[-1] == self.N
@@ -1974,17 +1971,6 @@ class WDMSettings(DomainSettingsBase):
             return wavelet_N
         else:
             return self.xp.fft.ifft(wavelet_N) / self.norm
-        breakpoint()
-        wavelets_rfft = self.xp.zeros((len(m), int((self.Nt * self.Nf) / 2 + 1)))
-
-        self.xp.put_along_axis(wavelets_rfft, k, base_window * 1 / np.sqrt(2.), axis=-1)
-        freq = self.xp.fft.fftshift(self.xp.fft.fftfreq(self.Nt * self.Nf, self.data_dt))
-        wavelets_fft = self.xp.exp(-1j * 2 * np.pi * freq[None, :] * n[:, None] * self.data_dt) * self.xp.concatenate([wavelets_rfft[:, ::-1][:, :-1], wavelets_rfft[:, :-1]], axis=-1)
-        if in_fd:
-            return wavelets_fft
-        else:
-            wavelets_time = self.xp.fft.ifft(wavelets_fft, axis=-1) / self.norm
-            return wavelets_time
 
     def get_shift_map(self, m: np.ndarray[int]) -> np.ndarray:
         """Return a 2D shift map ``m * Nt/2 + arange(-Nt/2, Nt/2)`` used by the WDM transform."""
@@ -2372,34 +2358,6 @@ class WDMSignal(WDMSettings, DomainBase):
         # add dt factor for units
         arr_fd *= self.data_dt
         return FDSignal(arr_fd, settings)
-        breakpoint()
-        prefactors = self.xp.zeros((self.nchannels, self.Nf + 1, self.Nt), dtype=complex)
-        is_m_plus_n_even = (((m + n) % 2 == 0))[None, :]
-        prefactors[:, 1:-1] = self.arr[:, 1:] * is_m_plus_n_even[:, 1:] - 1j * self.arr[:, 1:] * (~is_m_plus_n_even)[:, 1:]
-        
-        # dc layer
-        prefactors[:, 0] = self.arr[:, 0, (2*(n[0])) % self.Nt+0] / np.sqrt(2.)
-        prefactors[:, -1] = self.arr[:, 0, (2*(n[-1])) % self.Nt+1] / np.sqrt(2.)
-
-        Nthalf = int(self.Nt / 2)
-        after_fft = self.xp.fft.ifft(prefactors, axis=-1)
-
-        after_fft_with_window = after_fft[:, :, 1:] * base_window[None, None, :]
-        
-        k = self.get_shift_map(m_special)[:, :Nthalf]  # center - Nthalf + self.xp.arange(0, self.Nt)[None, :    ]
-
-        # this makes the indexing work for  the first piece
-        assert len(_tmp_2_k := ((_tmp_k := np.unique(k))[(_tmp_k >= 0) & (_tmp_k < self.N)])) == settings.N
-        assert self.xp.all(_tmp_2_k == self.xp.arange(settings.N))
-
-        keep_k = (k >= 0)
-        pre_transform = after_fft_with_window[:, :, 1:Nthalf + 1]
-
-        new_arr = pre_transform[:, keep_k]
-
-        assert new_arr.shape[-1] == settings.N
-        assert new_arr.shape == (self.nchannels, settings.N)
-        return FDSignal(new_arr, settings)
 
     def transform(self, new_domain: DomainSettingsBase, window: np.ndarray | cp.ndarray = None):
         """Dispatch to the correct WDM-to-X conversion based on ``new_domain``."""
