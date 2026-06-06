@@ -68,7 +68,7 @@ class GBSettings(Settings):
     # — no string mode flag.
     domain_settings: Optional[DomainSettingsBase] = None
     # Optional WDM-domain likelihood object (a
-    # ``fastlisaresponse.gbcomps.GBWDMComputations`` instance). Required when
+    # ``gbgpu.gbcomps.GBWDMComputations`` instance). Required when
     # ``domain_settings`` is a :class:`WDMSettings`; ignored otherwise. The
     # user builds this once their WDM grid + lookup table are known
     # (see global-fit input scripts).

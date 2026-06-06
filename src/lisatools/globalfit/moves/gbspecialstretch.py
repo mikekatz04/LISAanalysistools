@@ -1028,7 +1028,7 @@ class Buffer(LISAToolsParallelModule):
         that source already -- before invoking this.
 
         The compute backend (C++ central-FD or JAX autograd) is fixed
-        on the ``GBWDMHeterodyne`` instance passed in at Buffer
+        on the ``GBWDMComputations`` instance passed in at Buffer
         construction time via ``gb_wdm_comp``. Per the sprint-wide
         rule there is no runtime ``backend=`` kwarg; build a JAX-
         backed ``gb_wdm_comp`` if you need the autograd path.
@@ -1754,7 +1754,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         run_swaps: Whether to run band-temperature swaps.
         max_data_store_size: Cap on the per-iteration data store size.
         force_backend: Optional backend override.
-        gb_wdm_comp: Optional :class:`fastlisaresponse.gbcomps.GBWDMComputations`
+        gb_wdm_comp: Optional :class:`gbgpu.gbcomps.GBWDMComputations`
             instance. Required when ``mgh.settings`` is a
             :class:`~lisatools.domains.WDMSettings`; ignored otherwise.
     """

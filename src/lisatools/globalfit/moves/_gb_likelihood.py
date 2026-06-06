@@ -7,7 +7,7 @@ Two implementations live here:
   :meth:`Buffer.get_swap_ll` / :meth:`Buffer.adjust_sources_in_band_buffer`.
 
 * :class:`WDMBandLikelihoodEngine` -- wraps
-  :class:`fastlisaresponse.gbcomps.GBWDMComputations` (WDM time-frequency
+  :class:`gbgpu.gbcomps.GBWDMComputations` (WDM time-frequency
   domain). Uses :func:`GBWDMComputations.get_ll_wdm`,
   :func:`get_swap_ll_wdm`, :func:`fill_global_wdm`.
 
@@ -448,7 +448,7 @@ class FDBandLikelihoodEngine:
 
 class WDMBandLikelihoodEngine:
     """WDM engine wrapping a
-    :class:`fastlisaresponse.gbcomps.GBWDMComputations` instance.
+    :class:`gbgpu.gbcomps.GBWDMComputations` instance.
 
     Three calls all route through the same ``gb_comps`` object: fill, get_ll,
     and get_swap_ll. The per-band ACA is forwarded directly -- the GB WDM
@@ -643,7 +643,7 @@ class WDMBandLikelihoodEngine:
     # ---------- get_ll_grad / hessian (chunked-het backends only) ----------
     #
     # These two methods are present on ``gb_comps`` only when the
-    # underlying generator is :class:`GBWDMHeterodyne` (the chunked-het
+    # underlying generator is :class:`GBWDMComputations` (the chunked-het
     # backend). The legacy lookup-table ``GBWDMComputations`` does not
     # expose ``hessian_wdm`` (its FD ``get_ll_grad_wdm`` is implemented
     # but the in-the-kernel info-matrix path it served has been retired).
@@ -656,7 +656,7 @@ class WDMBandLikelihoodEngine:
                 f"WDMBandLikelihoodEngine.{method_name.replace('_wdm','')}: "
                 f"underlying gb_comps ({type(self.gb_comps).__name__}) "
                 f"does not expose {method_name!r}. The gradient / Hessian "
-                "paths require a GBWDMHeterodyne backend; rebuild the "
+                "paths require a GBWDMComputations backend; rebuild the "
                 "Buffer with the chunked-het generator."
             )
 
@@ -676,7 +676,7 @@ class WDMBandLikelihoodEngine:
 
         Returns ``(num_proposals, nparams)`` -- one row per source.
         The compute backend (C++ central-FD vs JAX autograd) is fixed
-        at the ``GBWDMHeterodyne``'s construction-time
+        at the ``GBWDMComputations``'s construction-time
         ``force_backend``; per the sprint-wide rule no ``backend=``
         runtime kwarg is taken.
         """
@@ -708,7 +708,7 @@ class WDMBandLikelihoodEngine:
         ``psd_fix=True`` returns ``M = |−H|`` (eigendecompose +
         ``|lambda|``), ready to feed to ``NUTSSampler(metric=M)``. The
         compute backend (JAX autograd only at present) is fixed at
-        ``GBWDMHeterodyne`` construction; calling this on a non-JAX
+        ``GBWDMComputations`` construction; calling this on a non-JAX
         chunked-het instance raises ``NotImplementedError`` inside
         ``hessian_wdm``.
         """
