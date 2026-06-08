@@ -155,11 +155,11 @@ LOG10_TM_ASD_RANGE = (-16.0, -13.0)
 LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
 
 # Galactic foreground prior ranges
-LOG10_AMP_RANGE = (-47.0, -40.0)
-ALPHA_RANGE = (1.0, 1.0e3)
-LOG10_FREQ1_RANGE = (np.log10(5e-6), np.log10(10**(-2.5)))
-LOG10_FREQ2_RANGE = (np.log10(1e-5), np.log10(10**(-2.5)))
-LOG10_FKNEE_RANGE = (np.log10(1e-10), np.log10(1e-2))
+LOG10_AMP_RANGE = (-50.0, -40.0)
+ALPHA_RANGE = (1.0, 10.0)
+LOG10_FREQ1_RANGE = (np.log10(1e-4), np.log10(1e-2))
+LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
+LOG10_FKNEE_RANGE = (np.log10(1e-3), np.log10(1e-1))
 
 
 def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
@@ -178,14 +178,14 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     else:
         raise ValueError(f"Unsupported prior model: {prior_model}")
     
-    # prior_model_config = {
-    #     r"$S_{\rm oms}$": LOG10_OMS_ASD_RANGE,  # Soms_d
-    #     r"$S_{\rm tm}$": LOG10_TM_ASD_RANGE,
-    # }
     prior_model_config = {
-        r"$S_{\rm oms}$": (6.0e-12, 20.0e-11),
-        r"$S_{\rm tm}$": (1.0e-15, 20.0e-14),
+        r"$S_{\rm oms}$": LOG10_OMS_ASD_RANGE,  # Soms_d
+        r"$S_{\rm tm}$": LOG10_TM_ASD_RANGE,
     }
+    # prior_model_config = {
+    #     r"$S_{\rm oms}$": (6.0e-12, 20.0e-11),
+    #     r"$S_{\rm tm}$": (1.0e-15, 20.0e-14),
+    # }
 
     psd_input_basis = [
         r"$S_{\rm oms}$",
@@ -193,15 +193,15 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
     ]
 
 
-    # psd_transform = TransformContainer(
-    #     input_basis=psd_input_basis,
-    #     output_basis=psd_input_basis,
-    #     parameter_transforms={
-    #         r"$S_{\rm oms}$": ten_to_the_x,
-    #         r"$S_{\rm tm}$": ten_to_the_x,
-    #     },
-    # )
-    psd_transform = None
+    psd_transform = TransformContainer(
+        input_basis=psd_input_basis,
+        output_basis=psd_input_basis,
+        parameter_transforms={
+            r"$S_{\rm oms}$": ten_to_the_x,
+            r"$S_{\rm tm}$": ten_to_the_x,
+        },
+    )
+    # psd_transform = None
 
     # waveform kwargs
     initialize_kwargs_psd = dict()
@@ -213,8 +213,8 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
     priors = {"psd": ProbDistContainer(priors_psd)}
 
-    #injection = np.array([np.log10(15e-12), np.log10(3e-15)])  # for diagnostic plots
-    injection = np.array([15e-12, 3e-15])
+    injection = np.array([np.log10(15e-12), np.log10(3e-15)])  # for diagnostic plots
+    #injection = np.array([15e-12, 3e-15])
 
     psd_settings = PSDSettings(
         Tobs=general_set.Tobs,
@@ -460,14 +460,14 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
-    start_freq = 5e-5
+    start_freq = 1e-4
     end_freq = 2.9e-2
 
     head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "galfor_test" #"test_mbh_18_with_covariance"
+    base_file_name = "galfor_test_v3" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir
-    gpus = [1]
+    gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
     # Restrict JAX to only see the target GPU — must be set before JAX backend init
     import jax
@@ -476,7 +476,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     backend = "cuda12x" if gpus is not None else "cpu"
     nwalkers = 20
-    ntemps = 10
+    ntemps = 20
 
     window_type = "tukey"
     window_taper_duration = 2 / start_freq
