@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from lisatools.detector import L1Orbits
-from lisatools.domains import FDSettings, TDSettings
+from lisatools.domains import FDSettings
 from lisatools.sensitivity import XYZSensitivityBackend
 from lisatools.utils.constants import YRSID_SI
 
@@ -40,14 +40,10 @@ def _to_np(a):
 def _backend(average):
     orbits = L1Orbits(NOISE_FILE, force_backend="cpu", frame="icrs")
     orbits.configure(linear_interp_setup=True)
-    t0 = float(np.asarray(orbits.ltt_t)[0])
-    # data_td_settings is only used by the non-averaging (single median epoch) path;
-    # the averaging path decimates the orbit grid itself and needs no epoch count.
-    td = TDSettings(t0=t0, N=int(Tobs / 5.0), dt=5.0, force_backend="cpu")
     # df chosen so the [min_freq, max_freq] band fits within N (active_slice end_idx
     # is NOT clamped to N), keeping total_terms == len(f_arr).
     fd = FDSettings(N=4096, df=5e-6, min_freq=1e-4, max_freq=2e-2, force_backend="cpu")
-    bk = XYZSensitivityBackend(orbits=orbits, settings=fd, data_td_settings=td, tdi_generation=2,
+    bk = XYZSensitivityBackend(orbits=orbits, settings=fd, tdi_generation=2,
                                force_backend="cpu", average_transfer_functions=average)
     return orbits, bk
 

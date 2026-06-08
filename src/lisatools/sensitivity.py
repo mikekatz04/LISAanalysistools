@@ -31,7 +31,7 @@ from cudakima import AkimaInterpolant1D
 
 from . import detector as lisa_models
 from .detector import L1Orbits, Orbits
-from .domains import DomainSettingsBase, TDSettings
+from .domains import DomainSettingsBase
 from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
     StochasticContribution,
@@ -1808,7 +1808,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     Args:
     orbits: L1Orbits object containing the orbital information for the LISA constellation.
     settings: DomainSettingsBase subclass containing the basis information (e.g., frequency array).
-    data_td_settings: Optional TDSettings object for time-domain data. Used if the provided settings do not contain the time array to compute the average light travel times on. If None, The LTTs will be averaged over the overall orbital information.
     tdi_generation: Integer indicating which TDI generation to use (1 or 2). Default is 2.
     use_splines: Whether to use spline interpolation for the sensitivity matrix. Default is False.
     spline_order: Order of the spline interpolation (e.g., "cubic", "linear"). Default is "cubic". Only relevant if use_splines is True.
@@ -1822,7 +1821,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self,
         orbits: Orbits | L1Orbits,
         settings: DomainSettingsBase,
-        data_td_settings: Optional[TDSettings] = None,
         tdi_generation: int = 2,
         use_splines: bool = False,
         spline_order: Optional[str] = "cubic",
@@ -1845,10 +1843,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.channel_shape = (3, 3)
 
         _use_gpu = force_backend != "cpu"
-
-        if data_td_settings is not None:
-            assert isinstance(data_td_settings, TDSettings), "data_td_settings must be a TDSettings object."
-        self.data_td_settings = data_td_settings
 
         self.use_splines = use_splines
         self.spline_order = spline_order
@@ -1877,7 +1871,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return {
             "orbits": self.orbits,
             "settings": self.basis_settings,
-            "data_td_settings": self.data_td_settings,
             "tdi_generation": self.tdi_generation,
             "use_splines": self.use_splines,
             "spline_order": self.spline_order,
@@ -1942,8 +1935,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                 # Average the transfer functions over the FULL orbit span. orbits.ltt_t is
                 # the native LTT time grid (fine cadence, ~25M pts); the breathing is smooth
                 # on day-to-month scales, so we decimate to ~daily resolution -> numerically
-                # identical to the full-grid average but tractable. No user-provided epoch
-                # count or data_td_settings needed.
+                # identical to the full-grid average but tractable. No user-provided
+                # epoch count needed.
                 t_full = self.xp.asarray(self.orbits.ltt_t)
                 stride = max(1, int(len(t_full) // _N_AVERAGE_EPOCHS))
                 t_arr = t_full[::stride]
@@ -1954,15 +1947,8 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                 self.time_indices = self.xp.array([0], dtype=self.xp.int32)
                 self._averaging_active = True
             else:
-                if self.data_td_settings is not None:
-                    t_arr = self.xp.asarray(self.data_td_settings.t_arr)
-                    tiled_times = self.xp.tile(t_arr[:, self.xp.newaxis], (1, 6)).flatten()
-                    links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
-                    ltts = self.xp.median(
-                        self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6),
-                        axis=0)[self.xp.newaxis, :]
-                else:
-                    ltts = self.orbits.ltt[:1].copy()
+                # single effective epoch: the orbit-averaged LTTs, i.e. C(E[L])
+                ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
                 self.time_indices = self.xp.array([0], dtype=self.xp.int32)
 
         # with orbits.LINKS order: 12, 23, 31, 13, 32, 21, we need averages between pairs
