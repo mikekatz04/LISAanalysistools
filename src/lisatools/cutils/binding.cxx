@@ -147,6 +147,30 @@ void XYZSensitivityMatrixWrap::get_noise_covariance_wrap(
     );
 }
 
+void XYZSensitivityMatrixWrap::set_averaged_tfs_wrap(
+    array_type<double> oms_xx, array_type<std::complex<double>> oms_xy, array_type<std::complex<double>> oms_xz,
+    array_type<double> oms_yy, array_type<std::complex<double>> oms_yz, array_type<double> oms_zz,
+    array_type<double> tm_xx,  array_type<std::complex<double>> tm_xy,  array_type<std::complex<double>> tm_xz,
+    array_type<double> tm_yy,  array_type<std::complex<double>> tm_yz,  array_type<double> tm_zz, int nf)
+{
+    sensitivity_matrix->set_averaged_tfs(
+        return_pointer_and_check_length(oms_xx, "oms_xx_avg", nf, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xy, "oms_xy_avg", nf, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_xz, "oms_xz_avg", nf, 1)),
+        return_pointer_and_check_length(oms_yy, "oms_yy_avg", nf, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(oms_yz, "oms_yz_avg", nf, 1)),
+        return_pointer_and_check_length(oms_zz, "oms_zz_avg", nf, 1),
+        return_pointer_and_check_length(tm_xx, "tm_xx_avg", nf, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xy, "tm_xy_avg", nf, 1)),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_xz, "tm_xz_avg", nf, 1)),
+        return_pointer_and_check_length(tm_yy, "tm_yy_avg", nf, 1),
+        reinterpret_cast<gcmplx::complex<double>*>(return_pointer_and_check_length(tm_yz, "tm_yz_avg", nf, 1)),
+        return_pointer_and_check_length(tm_zz, "tm_zz_avg", nf, 1),
+        nf);
+}
+
+void XYZSensitivityMatrixWrap::disable_averaged_tfs_wrap() { sensitivity_matrix->disable_averaged_tfs(); }
+
 void XYZSensitivityMatrixWrap::get_inverse_det_wrap(
     array_type<double> c00_arr, array_type<std::complex<double>> c01_arr, array_type<std::complex<double>> c02_arr,
     array_type<double> c11_arr, array_type<std::complex<double>> c12_arr, array_type<double> c22_arr,
@@ -429,6 +453,8 @@ void detector_part(py::module &m) {
          py::arg("run_async") = false,
          "Compute PSD likelihood.")
     .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap)
+    .def("set_averaged_tfs_wrap",     &XYZSensitivityMatrixWrap::set_averaged_tfs_wrap)
+    .def("disable_averaged_tfs_wrap", &XYZSensitivityMatrixWrap::disable_averaged_tfs_wrap)
     .def("get_inverse_det_wrap",      &XYZSensitivityMatrixWrap::get_inverse_det_wrap)
     .def_readwrite("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
     .def("__copy__",     [](const XYZSensitivityMatrixWrap &self) { return XYZSensitivityMatrixWrap(self); })

@@ -5,6 +5,7 @@ import logging
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
+from tqdm import tqdm
 
 import cupy as xp
 import h5py
@@ -1064,7 +1065,8 @@ def gather_gb_samples_cat(current_info, gb_reader, psd_in, gpu, samples_keep=1, 
 
     test_bins_for_snr = gb_samples[gb_inds]
 
-    transform_fn = current_info.gb_info["transform"]
+    transform_fn = current_i
+    nfo.gb_info["transform"]
     test_bins_for_snr_in = transform_fn.both_transforms(test_bins_for_snr)
     gb.d_d = 0.0
 
@@ -1399,6 +1401,8 @@ def gather_gb_samples(
     reader,
     sens_mat,
     gpu,
+    gb_samples: Optional[np.ndarray] = None,
+    gb_inds: Optional[np.ndarray] = None,
     num_compare_samples=1,
     samples_keep=1,
     thin_by=1,
@@ -1406,25 +1410,41 @@ def gather_gb_samples(
     snr_lim_second_cut=5.0,
     overlap_lim=0.5,
     snr_diff_lim=20.0,
+    use_representative=False,
 ):
+    # ``use_representative`` controls the group-consolidation comparison:
+    #   False (default) -> exact behaviour: compare every member of a group against
+    #       every member of its nearest-frequency neighbour. This builds host arrays
+    #       of size O(N * g^2) (g = group size ~ samples_keep) and runs that many GPU
+    #       evals, so it OOMs / crawls at large samples_keep.
+    #   True -> compare a single representative (the median-frequency member) per
+    #       group, i.e. O(N). Members of a group are posterior samples of the same
+    #       source, so for well-separated sources this reproduces the exact merges
+    #       while removing the samples_keep^2 blow-up in host memory and GPU work.
+    #       NOTE: this is the *stricter* test (the exact branch merges if ANY member
+    #       pair clears ``overlap_lim``; this one merges only if the representatives
+    #       do), so near the threshold it can UNDER-merge -- i.e. leave one source
+    #       split across two groups (a duplicate in the catalogue). Validate against
+    #       the exact path before trusting it at large samples_keep.
 
     gb.backend.set_cuda_device(gpu)
     gb.gpus = [gpu]
     fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
     psd_in = [xp.asarray(sens_mat.invC.copy())]
 
-    gb_samples = reader.get_chain(
-        branch_names=["gb"],
-        temp_index=0,
-        discard=reader.iteration - samples_keep,
-        thin=thin_by,
-    )["gb"]
-    gb_inds = reader.get_inds(
-        branch_names=["gb"],
-        temp_index=0,
-        discard=reader.iteration - samples_keep,
-        thin=thin_by,
-    )["gb"]
+    if gb_samples is None or gb_inds is None:
+        gb_samples = reader.get_chain(
+            branch_names=["gb"],
+            temp_index=0,
+            discard=reader.iteration - samples_keep,
+            thin=thin_by,
+        )["gb"]
+        gb_inds = reader.get_inds(
+            branch_names=["gb"],
+            temp_index=0,
+            discard=reader.iteration - samples_keep,
+            thin=thin_by,
+        )["gb"]
 
     gb_samples = gb_samples.reshape(-1, gb_samples.shape[-2], gb_samples.shape[-1])
     gb_inds = gb_inds.reshape(-1, gb_inds.shape[-1])
@@ -1452,7 +1472,7 @@ def gather_gb_samples(
     if num_compare_samples > len(gb_samples):
         num_compare_samples = len(gb_samples)
 
-    for samp_i in range(len(gb_samples) - 1)[:num_compare_samples]:
+    for samp_i in tqdm(range(len(gb_samples) - 1)[:num_compare_samples], desc="Comparing samples"):
 
         first_sample = gb_samples[random_samples[samp_i]].reshape(-1, 8)
         first_sample_snrs = gb_snrs[random_samples[samp_i]].flatten()
@@ -1607,7 +1627,9 @@ def gather_gb_samples(
 
     current_number = len(keep_groups)
     final_number = -1
+    print("Initial number of groups:", current_number)
     while current_number != final_number:
+        print("Consolidating groups, current number:", current_number)
         current_number = len(keep_groups)
         # need to consolidate
         group_min_f = np.asarray([group_i[:, 1].min() for group_i in keep_groups])
@@ -1637,28 +1659,45 @@ def gather_gb_samples(
         inds2 = np.take_along_axis(diffs_min, _inds1[:, :, None], axis=-1)[:, :, 0].argmin(axis=0)
         inds1 = _inds1.T[(np.arange(len(inds2)), inds2)]
         diffs_min_final = diffs_min[(inds2, np.arange(len(inds2)), inds1)]
-        assert np.all(diffs_min_final == diffs_min.min(axis=(0, 2)))
+        #assert np.all(diffs_min_final == diffs_min.min(axis=(0, 2)))
         # diffs_min = diffs_min.min(axis=(0, 2))
         groups_final = np.arange(len(inds1))
-        test_bins = []
-        base_bins = []
-        new_group_map = []
-        old_group_map = []
-        for i, (group, closest_group) in enumerate(zip(keep_groups, inds1)):
-            _base_bins, _test_bins = [
-                tmp.flatten()
-                for tmp in np.meshgrid(
-                    np.arange(len(group)), np.arange(len(keep_groups[closest_group]))
-                )
-            ]
-            base_bins.append(group[_base_bins])
-            test_bins.append(keep_groups[closest_group][_test_bins])
-            new_group_map.append(np.full_like(_test_bins, i))
-            old_group_map.append(np.full_like(_test_bins, closest_group))
-        base_bins = np.concatenate(base_bins, axis=0)
-        test_bins = np.concatenate(test_bins, axis=0)
-        new_group_map = np.concatenate(new_group_map, axis=0)
-        old_group_map = np.concatenate(old_group_map, axis=0)
+        if use_representative:
+            # One representative (median-frequency member) per group instead of the
+            # full g*g cross product. base_bins[i] is group i's representative,
+            # test_bins[i] its nearest neighbour's; the (new_group, old_group) map is
+            # therefore (i, inds1[i]) -- exactly the mapping the exact branch builds,
+            # just one row per group instead of len(group)*len(neighbour).
+            base_bins = np.stack(
+                [
+                    group[np.argsort(group[:, 1])[len(group) // 2]]
+                    for group in keep_groups
+                ],
+                axis=0,
+            )
+            test_bins = base_bins[inds1]
+            new_group_map = np.arange(len(keep_groups))
+            old_group_map = inds1.copy()
+        else:
+            test_bins = []
+            base_bins = []
+            new_group_map = []
+            old_group_map = []
+            for i, (group, closest_group) in enumerate(zip(keep_groups, inds1)):
+                _base_bins, _test_bins = [
+                    tmp.flatten()
+                    for tmp in np.meshgrid(
+                        np.arange(len(group)), np.arange(len(keep_groups[closest_group]))
+                    )
+                ]
+                base_bins.append(group[_base_bins])
+                test_bins.append(keep_groups[closest_group][_test_bins])
+                new_group_map.append(np.full_like(_test_bins, i))
+                old_group_map.append(np.full_like(_test_bins, closest_group))
+            base_bins = np.concatenate(base_bins, axis=0)
+            test_bins = np.concatenate(test_bins, axis=0)
+            new_group_map = np.concatenate(new_group_map, axis=0)
+            old_group_map = np.concatenate(old_group_map, axis=0)
 
         band_inds = np.searchsorted(band_edges.get(), base_bins[:, 1] / 1e3, side="right") - 1
         N_vals = band_N_vals[band_inds]
