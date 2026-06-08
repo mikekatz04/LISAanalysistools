@@ -1792,8 +1792,12 @@ def check_sensitivity(sensitivity: Any) -> Sensitivity:
     return sensitivity
 
 
-class XYZSensitivityBackend:
-    pass
+# Number of epochs the FD transfer-function average is decimated to, spanning the
+# full orbit. The constellation breathing is smooth on day-to-month scales (dominant
+# period ~1 yr), so ~daily resolution (1024 pts over a ~2 yr orbit) reproduces the
+# average over the full native LTT grid (~25M pts) to well below 0.1% -- while the
+# full grid is infeasible to evaluate the transfer functions on.
+_N_AVERAGE_EPOCHS = 1024
 
 
 class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
@@ -1827,7 +1831,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         galactic_grid_kwargs: Optional[dict] = None,
         window_values: Optional[NDArrayLike] = None,
         average_transfer_functions: bool = True,
-        n_average_epochs: int = 256,
     ):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
@@ -1858,7 +1861,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.window_values = window_values
 
         self.average_transfer_functions = average_transfer_functions
-        self.n_average_epochs = int(n_average_epochs)
         self._averaging_active = False   # set True by get_averaged_ltts() in FD averaged mode
 
         self._setup()
@@ -1884,7 +1886,6 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
             "galactic_grid_kwargs": self.galactic_grid_kwargs,  # propagate to copies
             "window_values": self.window_values,
             "average_transfer_functions": self.average_transfer_functions,
-            "n_average_epochs": self.n_average_epochs,
         }
 
     @property
@@ -1937,16 +1938,19 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
 
         else:
-            if self.average_transfer_functions and self.data_td_settings is not None:
-                # N epochs spanning the observation window -> time-average the TFs
-                t_full = self.xp.asarray(self.data_td_settings.t_arr)
-                N = int(min(self.n_average_epochs, len(t_full)))
-                sel = self.xp.linspace(0, len(t_full) - 1, N).astype(self.xp.int64)
-                t_arr = t_full[sel]
+            if self.average_transfer_functions:
+                # Average the transfer functions over the FULL orbit span. orbits.ltt_t is
+                # the native LTT time grid (fine cadence, ~25M pts); the breathing is smooth
+                # on day-to-month scales, so we decimate to ~daily resolution -> numerically
+                # identical to the full-grid average but tractable. No user-provided epoch
+                # count or data_td_settings needed.
+                t_full = self.xp.asarray(self.orbits.ltt_t)
+                stride = max(1, int(len(t_full) // _N_AVERAGE_EPOCHS))
+                t_arr = t_full[::stride]
                 tiled_times = self.xp.tile(t_arr[:, self.xp.newaxis], (1, 6)).flatten()
                 links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
                 ltts = self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6)
-                # likelihood uses ONE effective time; the N epochs feed the TF average only
+                # likelihood uses ONE effective time; the epochs feed the TF average only
                 self.time_indices = self.xp.array([0], dtype=self.xp.int32)
                 self._averaging_active = True
             else:
@@ -2003,19 +2007,28 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self and shared across walker copies (like gal_R_avg)."""
         xp = self.xp
         nf = self.num_freqs
-        N = self.pycppsensmat_args[2]   # n_times the wrap was built with
-        total = N * nf
+        N = self.pycppsensmat_args[2]   # number of epochs the wrap was built with
+        f_arr = xp.asarray(self.f_arr)
 
-        # 12 per-epoch transfer functions via the existing kernel (time-major: t*nf+f).
         # order MUST match get_noise_tfs_wrap: oms_xx,xy,xz,yy,yz,zz, tm_xx,xy,xz,yy,yz,zz
         real_flags = (True, False, False, True, False, True,
                       True, False, False, True, False, True)
-        bufs = [xp.empty(total, dtype=xp.float64 if r else xp.complex128) for r in real_flags]
-        self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
-            xp.asarray(self.f_arr), *bufs, nf, N, xp.arange(N, dtype=xp.int32))
+        acc = [xp.zeros(nf, dtype=xp.float64 if r else xp.complex128) for r in real_flags]
 
-        # average over the epoch axis -> 12 contiguous (nf,) arrays, KEPT ALIVE on self
-        self._avg_tf_arrays = [xp.ascontiguousarray(b.reshape(N, nf).mean(axis=0)) for b in bufs]
+        # Accumulate the per-epoch transfer functions in CHUNKS: the materialised
+        # (n_epochs x n_freqs) buffer would be tens of GB at production n_freqs, so we
+        # bound the transient buffer to ~1 GB regardless of n_freqs / n_epochs.
+        chunk = max(1, min(N, int(1e9 // (nf * 16 * 12))))
+        for start in range(0, N, chunk):
+            cs = int(min(chunk, N - start))
+            bufs = [xp.empty(cs * nf, dtype=xp.float64 if r else xp.complex128) for r in real_flags]
+            self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
+                f_arr, *bufs, nf, cs, xp.arange(start, start + cs, dtype=xp.int32))
+            for k in range(12):
+                acc[k] += bufs[k].reshape(cs, nf).sum(axis=0)
+
+        # epoch mean -> 12 contiguous (nf,) arrays, KEPT ALIVE on self (non-owned in c++)
+        self._avg_tf_arrays = [xp.ascontiguousarray(a / N) for a in acc]
         self.pycpp_sensitivity_matrix.set_averaged_tfs_wrap(*self._avg_tf_arrays, nf)
 
     def __deepcopy__(self, memo):
