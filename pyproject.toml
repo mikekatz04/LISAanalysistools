@@ -47,7 +47,6 @@ dependencies = [
   "scikit-learn",
   "cudakima",
   "pybind11>=3.0.4",
-  "marimo>=0.23.5",
 ]
 
 
