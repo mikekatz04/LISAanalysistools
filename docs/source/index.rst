@@ -7,6 +7,7 @@
 
    user/sensitivity
    user/detector
+   user/response
    user/stochastic
    user/datacontainer
    user/diagnostic
