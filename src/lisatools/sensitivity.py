@@ -1815,6 +1815,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     mask_percentage: Percentage of frequencies to mask around each "zero" in the sensitivity matrix to avoid numerical issues. Default is 0.05.
     galactic_grid_kwargs: Optional dictionary of keyword arguments to set up the galactic grid for foreground contributions. If None or empty, the galactic grid will not be included in the sensitivity matrix. Otherswise, this dictionary will be passed to :method:`_setup_galactic_grid`.
     window_values: Optional array of window values applied to the time domain data. If not None, a normalization factor will be applied to the sensitivity matrix to account for the windowing-induced loss of power.
+    average_transfer_functions: Whether to average the TDI transfer functions over the orbit (True) or use the values at a single average epoch (False), in the case of a frequency-domain basis. Default is False.
     """
 
     def __init__(
@@ -1828,7 +1829,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         mask_percentage: Optional[float] = None,
         galactic_grid_kwargs: Optional[dict] = None,
         window_values: Optional[NDArrayLike] = None,
-        average_transfer_functions: bool = True,
+        average_transfer_functions: bool = False,
     ):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
@@ -1904,15 +1905,33 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         """Compute averaged and differential light-travel times across LISA links.
 
         Reads orbital light-travel times at the segment centre times (STFT/WDM) or
-        at the single average epoch (FD), then forms per-arm averages and differences
+        at the appropriate FD epoch(s), then forms per-arm averages and differences
         needed by the C++ sensitivity kernel.
 
         Link ordering follows ``orbits.LINKS``: [12, 23, 31, 13, 32, 21].
         Averages are taken between opposite-direction pairs (12↔21, 23↔32, 31↔13).
 
         Returns:
-            avg_ltts: Mean light-travel times per arm. Shape ``(n_times, 6)``.
-            delta_ltts: Signed difference (forward − backward) per arm. Shape ``(n_times, 6)``.
+            avg_ltts: Mean light-travel times per arm. Shape ``(n_epochs, 6)``.
+            delta_ltts: Signed difference (forward − backward) per arm. Shape ``(n_epochs, 6)``.
+
+        Note:
+            ``n_epochs`` (the first axis of the returned arrays — it becomes the C++
+            wrap's ``n_times`` in :meth:`_setup`) is **not** always equal to
+            ``len(self.time_indices)``:
+
+            * STFT/WDM and FD non-averaging: ``n_epochs == len(self.time_indices)``
+              (one per segment, or 1 for FD).
+            * **FD averaging mode** (``average_transfer_functions=True``): the returned
+              arrays hold ``N ≈ _N_AVERAGE_EPOCHS`` decimated orbit epochs while
+              ``self.time_indices == [0]``. This mismatch is deliberate. Those N epochs
+              exist **only** to feed the one-time transfer-function average in
+              :meth:`_build_and_attach_averaged_tfs` (which evaluates the 12 TFs at all
+              N epochs via ``get_noise_tfs_wrap`` and means them). The likelihood and
+              :meth:`compute_sensitivity_matrix` instead read the precomputed averaged
+              TFs — ``get_noise_covariance`` indexes ``*_avg[f_idx]`` and ignores
+              ``time_index`` — so they iterate a SINGLE effective time. Once the average
+              is built, the wrap's N-epoch LTT array is no longer read in averaged mode.
         """
         # first, compute the average ltts and their differences.
         # check if we need multiple time points
@@ -1943,7 +1962,11 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
                 tiled_times = self.xp.tile(t_arr[:, self.xp.newaxis], (1, 6)).flatten()
                 links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
                 ltts = self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6)
-                # likelihood uses ONE effective time; the epochs feed the TF average only
+                # NOTE: ltts holds N decimated epochs -> the wrap is built with n_times=N
+                # (see _setup), but time_indices=[0]. The N epochs feed the one-time TF
+                # average only (_build_and_attach_averaged_tfs); the likelihood reads the
+                # averaged TFs and iterates a single effective time. See the
+                # get_averaged_ltts docstring for the full rationale.
                 self.time_indices = self.xp.array([0], dtype=self.xp.int32)
                 self._averaging_active = True
             else:
@@ -1972,7 +1995,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.pycppsensmat_args = [
             self.xp.asarray(avg_ltts.flatten().copy()),
             self.xp.asarray(delta_ltts.flatten().copy()),
-            avg_ltts.shape[0],  # n_times
+            avg_ltts.shape[0],  # n_times (= N decimated epochs in FD averaged mode; != len(time_indices) there)
             self.orbits.armlength,
             self.tdi_generation,
             self.use_splines,
@@ -1993,7 +2016,9 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self and shared across walker copies (like gal_R_avg)."""
         xp = self.xp
         nf = self.num_freqs
-        N = self.pycppsensmat_args[2]   # number of epochs the wrap was built with
+        # the epochs to average the transfer functions over (NOT likelihood time
+        # points; the likelihood uses time_indices=[0]). See get_averaged_ltts docstring.
+        N = self.pycppsensmat_args[2]
         f_arr = xp.asarray(self.f_arr)
 
         # order MUST match get_noise_tfs_wrap: oms_xx,xy,xz,yy,yz,zz, tm_xx,xy,xz,yy,yz,zz
