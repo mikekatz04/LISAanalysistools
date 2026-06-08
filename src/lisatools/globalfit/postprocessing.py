@@ -27,6 +27,7 @@ from eryn.utils import get_integrated_act
 from scipy.interpolate import CubicSpline
 from tqdm import tqdm
 
+from ..analysiscontainer import AnalysisContainerArray
 from ..datacontainer import DataResidualArray
 from ..domains import FDSettings, STFTSettings, TDSettings
 from ..utils.utility import windowfun
@@ -34,7 +35,6 @@ from .gathergalaxy import gather_gb_samples
 
 if TYPE_CHECKING:
     from eryn.utils.transform import TransformContainer
-    from ..analysiscontainer import AnalysisContainerArray, AnalysisContainer
     from ..detector import Orbits
     from ..domains import DomainSettingsBase, TDSettings
     from ..sensitivity import XYZSensitivityBackend
@@ -605,7 +605,7 @@ class BackendConsumer:
 
     def process_samples(
         self, discard: int | float = 0.0, ess: int = 10000, return_inds: bool = False
-    ) -> Tuple[dict, Optional[dict], np.ndarray, np.ndarray]:
+    ) -> Tuple[dict, dict, Optional[dict], np.ndarray, np.ndarray]:
         """
         Convenience method to run the end-to-end processing pipeline, starting from the raw samples.
 
@@ -615,21 +615,21 @@ class BackendConsumer:
             return_inds: bool (optional). Whether to return the corresponding inds arrays.
 
         Returns:
-            tuple: (transformed_samples, inds, log_prior, log_likelihood)
+            tuple: (original_samples, transformed_samples, inds, log_prior, log_likelihood)
         """
         if not self.configured:
             self.store_cold_chains()
 
-        samples, inds, log_prior, log_likelihood = self.get_independent_samples(
+        original_samples, inds, log_prior, log_likelihood = self.get_independent_samples(
             discard=discard, ess=ess, return_inds=True
         )
 
-        transformed_samples = self.transform(samples)
+        transformed_samples = self.transform(original_samples)
 
         if return_inds:
-            return transformed_samples, inds, log_prior, log_likelihood
+            return original_samples, transformed_samples, inds, log_prior, log_likelihood
 
-        return transformed_samples, log_prior, log_likelihood
+        return original_samples, transformed_samples, log_prior, log_likelihood
 
 
 # ——— Plotter ──────────────────────────────────────────────────────────────————
@@ -1247,7 +1247,7 @@ class SubmissionWriter(BackendConsumer):
 
         super().__init__(curr=curr, backend=backend)
 
-        self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(
+        self.original_samples, self.samples, self.inds, self.log_prior, self.log_likelihood = self.process_samples(
             ess=ess, return_inds=True
         )
 
@@ -1265,10 +1265,10 @@ class SubmissionWriter(BackendConsumer):
             if prepare_fn:
                 logger.info(f"Preparing samples for branch '{branch}' using '{prepare_fn.__name__}'")
                 self.samples[branch], self.inds[branch] = prepare_fn(
-                    acs, self.samples[branch], self.inds[branch]
+                    acs, self.original_samples[branch], self.samples[branch], self.inds[branch]
                 )
 
-    def _prepare_mbhb_samples(self, acs: AnalysisContainerArray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _prepare_mbhb_samples(self, acs: AnalysisContainerArray, original_samples: np.ndarray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Sort the MBHB samples according to the coalescence time, and cluster them if there are multiple sources in the same block."""
 
         coalescence_time_idx = list(PARAMETER_INFO_REGISTRY["mbh"].keys()).index("t_c")
@@ -1279,7 +1279,7 @@ class SubmissionWriter(BackendConsumer):
 
         return samples, inds
     
-    def _prepare_gb_samples(self, acs: AnalysisContainerArray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _prepare_gb_samples(self, acs: AnalysisContainerArray, original_samples: np.ndarray, samples: np.ndarray, inds: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Prepare GB samples for submission running the clustering algorithm.
         """
@@ -1331,7 +1331,7 @@ class SubmissionWriter(BackendConsumer):
             reader,
             sens_mat,
             gb_wave_gen.gpus[0],
-            gb_samples=samples,
+            gb_samples=original_samples,
             gb_inds=inds,
             **cluster_kwargs,
         )
@@ -1346,17 +1346,28 @@ class SubmissionWriter(BackendConsumer):
             f"num_in_groups: {num_in_groups}"
         )
         max_num_source = max([tmp.shape[0] for tmp in groups])
-        samples = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
+        
+        samples_fin = np.full((len(groups), max_num_source, groups[0].shape[-1]), np.nan)
         for i, group in enumerate(groups):
-            samples[i, : len(group)] = group
+            samples_fin[i, : len(group)] = group
 
-        samples_fin = samples[keep]
+        samples_fin = samples_fin[keep] # shape (nclusters, nsteps, ndim)
         num_in_groups_fin = num_in_groups[keep]
 
-        breakpoint()
+        samples_fin = samples_fin.transpose(1, 0, 2)
+        inds_fin = np.isfinite(samples_fin[..., 0])
 
+        # now transform again from the sampling space to the physical space
+        samples_fin = gb_info.transform.both_transforms(samples_fin)
 
-    # todo resume from here.
+        # now sort by frequency
+        frequency_idx = list(PARAMETER_INFO_REGISTRY["gb"].keys()).index("f0")
+        mean_frequencies = samples_fin[:, :, frequency_idx].mean(axis=0) # shape (nleaves_max,)
+        sorted_indices = np.argsort(mean_frequencies)
+        samples_fin = samples_fin[:, sorted_indices, :]
+        inds_fin = inds_fin[:, sorted_indices]
+
+        return samples_fin, inds_fin
 
     @property
     def prepare_samples_registry(self) -> dict[str, Callable[[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]]:
