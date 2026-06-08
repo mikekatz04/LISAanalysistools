@@ -32,7 +32,6 @@ from eryn.moves import StretchMove, TemperatureControl
 from eryn.moves.tempering import make_ladder
 from lisatools.globalfit.moves import GFCombineMove, MultiGPUPSDMove, TDMBHSpecialMove
 from lisatools.globalfit.engine import GlobalFitSettings, GeneralSetup, GeneralSettings, RankInfo
-from lisatools.globalfit.recipe_steps import subtract_initial_signal
 from lisatools.utils.constants import YRSID_SI
 
 from eryn.utils.updates import Update
@@ -41,12 +40,14 @@ from lisatools.globalfit.preprocessing import L1ProcessingStep
 from lisatools.globalfit.recipe_steps import (
     SearchRecipeStep,
     PERecipeStep,
+    RJRecipeStep,
     build_psd_moves,
     build_gb_moves,
     build_mbh_moves_phenom,
     scatter_around_injection,
     mbh_catalogue_to_sampling_basis,
     setup_state_for_injection,
+    subtract_initial_signal
 )
 
 from lisatools.globalfit.postprocessing import (
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
 
 
 MOJITO_REFERENCE_TIME = 97729089.327664
+MOJITO_AVERAGE_ARMLENGTH = 2493162305.42235
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,7 @@ def setup_recipe(
         psd_transform_fn=psd_info.transform,
         temperature_control=temperature_control,
         use_gpu=True,
-        run_async=True,
+        run_async=False,
         run_threaded=False
     )
 
@@ -134,13 +136,14 @@ def setup_recipe(
         curr.source_info["mbh"].injection = injection_params
 
         # Per-parameter spread for the Gaussian scatter
-        spread = np.array([1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-1])
+        spread = np.array([1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1])
 
         scatter_around_injection(
             state,
             "mbh",
             injection_params,
             spread,
+            priors=priors,
         )
         
     from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
@@ -171,8 +174,10 @@ def setup_recipe(
         inner_moves=mbh_info.inner_moves,
         betas_all=betas_all,
         permute_every=permute_every,
-        run_async=False,
-        run_threaded=False
+        pad_out_of_prior=True,
+        run_async=True,
+        run_threaded=True,
+        randomize_split=True
     )
 
     mbh_pe_move = TDMBHSpecialMove(**mbh_move_kwargs)
@@ -184,10 +189,12 @@ def setup_recipe(
     spread = np.array([1e-10, 1e-11, 1e-17, 1e-9, 1e-9, 1e-9, 1e-9, 1e-9])
     setup_state_for_injection(curr, state, "VGB", "gb", spread=spread)
 
-    _, gb_pe_moves = build_gb_moves(
+    gb_search_moves, gb_pe_moves = build_gb_moves(
         engine_info, curr, acs, priors, state
     )
 
+    search_weights = [0.8, 0.2]
+    recipe.add_recipe_component(RJRecipeStep(moves=gb_search_moves, weights=search_weights, convergence_iter=10), name="gb search")
 
     #_, mbh_pe_move = build_mbh_moves_phenom(curr, acs, priors, state, permute_every=40)
     pe_moves = GFCombineMove(moves=[gb_pe_moves[0], mbh_pe_move, psd_pe_move], share_temperature_control=False)
@@ -235,11 +242,11 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs_psd,
+        log_dir=general_set.artifacts_file_dir,
         priors=priors,
         ndim=2,
         injection=injection,
-        log_dir=general_set.file_store_dir,
-        num_prop_repeats=70,
+        num_prop_repeats=100,
     )
 
     psd_metadata = StochasticMetadata(
@@ -252,70 +259,69 @@ def get_psd_erebor_settings(general_set: GeneralSetup) -> PSDSetup:
 
     return PSDSetup(psd_settings), psd_metadata
 
-
 def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceMetadata]:
 
     waveform_model = "GBGPU"
     waveform_model_code_link = "https://github.com/Erebor-L2D/GBGPU/tree/cdl1-run0"
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
 
+    input_data_arr: DataResidualArray = general_set.input_data_residual_array
+
+    eps = 0.0001  
+    start_freq = float(input_data_arr.settings.f_arr[0]) * (1 + eps)
+    end_freq = float(input_data_arr.settings.f_arr[-1]) * (1 - eps)  # avoid edge effects by staying slightly within the band limits defined by the input data array
+
+    Tobs = 1/getattr(input_data_arr.settings, "df")
+    
     delta_safe = 1e-9
 
     A_lims = [10**(-23.2), 1e-20]
-    f0_lims = [1e-4, 0.023] # reset by band limits
-    
+    f0_lims = [start_freq, end_freq]#[general_set.start_freq, general_set.end_freq]  # reset by band limits
+
     m_chirp_lims = [0.03, 1.34]
     # fdot_max_val = get_fdot(f0_lims[-1], Mc=m_chirp_lims[-1])
     
-    fdot_lims = [get_fdot_mojito(f0_lims[-1], sign="-"), get_fdot_mojito(f0_lims[-1], sign="+")] # also reset in band limits
+    fdot_lims = [get_fdot_mojito(f0_lims[-1] * 2, sign="-"), get_fdot_mojito(f0_lims[-1] * 2, sign="+")] # also reset in band limits
     phi0_lims = [0.0, 2 * np.pi]
     iota_lims = [0.0 + delta_safe, np.pi - delta_safe]
     psi_lims = [0.0, np.pi]
     alpha_lims = [0.0, 2 * np.pi]
     delta_lims = [-np.pi / 2.0 + delta_safe, np.pi / 2.0 - delta_safe]
-    
-    input_data_arr: DataResidualArray = general_set.input_data_residual_array
-    # input_data_arr.settings
-    start_freq = float(input_data_arr.settings.f_arr[0])
-    end_freq = float(input_data_arr.settings.f_arr[-1])
 
     oversample = 4
     extra_buffer = 5
     
     assert start_freq and end_freq and general_set.Tobs and general_set.preprocess_kwargs
-    start_freq_ind = int(start_freq * general_set.Tobs)
-    
+    start_freq_ind = input_data_arr.start_freq_ind
+
     initialize_kwargs = dict(
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits, 
         t0=general_set.data_t0,
         force_backend=general_set.gpu_backend
-        )
+    )
 
-    ntemps = general_set.ntemps
     # geometric spacing 
-    betas = 1 / 1.2 ** np.arange(ntemps)
-    # betas[-1] = 0.0001
-
-    data_start_freq_ind = int(input_data_arr.settings.f_arr[0] / input_data_arr.settings.df)
-
+    betas = 1 / 1.2 ** np.arange(general_set.ntemps)
+    betas[-1] = 0.0001
+        
     search_kwargs = dict(
-        nwalkers = 32,
+        nwalkers = 16,
         ntemps = 24,
-        shutoff_band_iteration = 5,
-        shutoff_frequency_threshold = None, # 4e-3 
-        burn_1 = 200,
-        nsteps_1 = 200,
+        shutoff_band_iteration = 10,
+        shutoff_frequency_threshold = 4e-3,
+        burn_1 = 1000,
+        nsteps_1 = 400,
         snr_threshold = 8.0,
-        burn_2 = 500,
+        burn_2 = 1000,
         nsteps_2 = 500,
         refit_start_iteration = 5
     )
     
     waveform_kwargs = dict(
         dt=general_set.dt,
-        T=1/input_data_arr.settings.df,
+        T=Tobs,
         use_c_implementation=True,
-        start_freq_ind=data_start_freq_ind,
+        start_freq_ind=start_freq_ind,
         tdi_channel_setup="XYZ",
         tdi2=True,
         oversample=oversample,
@@ -342,7 +348,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         # t0=t0_gbs,
         # tdi_setup="XYZ",
         # use_tdi2=True,
-        Tobs=float(1/input_data_arr.settings.df),
+        Tobs=Tobs,
         dt=general_set.dt,
         initialize_kwargs=initialize_kwargs,
         waveform_kwargs=waveform_kwargs,
@@ -351,14 +357,13 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
         nleaves_min=0,
         ndim=8,
         betas=betas,
-        log_dir=general_set.file_store_dir,
-        # group_proposal_kwargs=dict(n_iter_update=1, live_dangerously=True, a=1.75, num_repeat_proposals=40)
-        num_repeat_proposals=40,
-        search_kwargs=search_kwargs
+        log_dir=general_set.artifacts_file_dir,
+        num_repeat_proposals=100, 
+        search_kwargs=search_kwargs        
     )
 
     gb_setup = GBSetup(gb_settings)
-
+    
     band_edges = gb_setup.band_edges.copy()
     band_starts = band_edges[:-1]
     band_ends = band_edges[1:]
@@ -383,7 +388,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> tuple[GBSetup:, SourceM
 def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     waveform_model = "PhenomTHMTDIWaveform"
-    waveform_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sources/bbh/waveform.py#L130://github.com/Erebor-L2D"
+    waveform_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sources/bbh/waveform.py#L130"
     prior_model_code_link = "https://priors-database-f0027f.gitlab.io/mojito_light_1a.html#massive-black-hole-binaries-mbhb"
     frequency_ranges = [(general_set.start_freq, general_set.end_freq)]
 
@@ -406,25 +411,25 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
         tdi_generation="2nd generation",
         tdi_channels="XYZ",
         orbits=general_set.gpu_orbits if gpu_available else general_set.orbits,
-        order=40,
+        order=30,
     )
 
     waveform_init_kwargs = dict(
         waveform_kwargs=wave_kwargs,
-        waveform_t0=MOJITO_REFERENCE_TIME,  # this is the reference time for the waveform generation, not necessarily the data start time, which is handled in the response kwargs
+        waveform_t0=MOJITO_REFERENCE_TIME,
         data_td_settings=general_set.data_td_settings,
         Tobs=1.0
         / 12.0
-        / 2.0
         * YRSID_SI,  # this is only for the waveform generation, not the data, which is still general_set.Tobs
         start_freq=7e-5,
         use_reference_time=True,
-        buffer_time=6000,
+        buffer_time=15_000,
         stft_dt=general_set.stft_dt,
         freq_min=general_set.start_freq,
         freq_max=general_set.end_freq,
         tukey_alpha=general_set.window_alpha,
         force_backend=general_set.force_backend,
+        fft_batch_size=2,
         **response_kwargs,
     )
 
@@ -432,17 +437,84 @@ def get_mbh_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     betas = 1 / 1.2 ** np.arange(general_set.ntemps)  # Geometric ladder with ratio 1.2
 
+    basis = [
+        r"$\log M$",
+        r"$Q$",
+        r"$s_{1z}$",
+        r"$s_{2z}$",
+        r"$d_L$",
+        r"$\phi_{\rm ref}$",
+        r"$\cos \iota$",
+        r"$\psi$",
+        r"$\alpha$",
+        r"$\sin \delta$",
+        r"$t_{\rm plunge}$",
+    ]
+
+    def gpc_to_mpc(x):
+        """
+        Transform from Gpc to Mpc, for distance prior.
+        """
+        return x * 1e3
+
+    def mT_Q(M, Q):
+        """
+        Transform from total mass and mass ratio m1/m2 to m1 and m2.
+        """
+        m2 = M / (1 + Q)
+        m1 = Q * m2
+        assert np.all(m1 >= m2), "m1 should be the larger mass"
+        return m1, m2
+
+    mbh_transform_fn_in = {
+        r"$\log M$": np.exp,
+        r"$d_L$": gpc_to_mpc,
+        r"$\cos \iota$": np.arccos,
+        r"$\sin \delta$": np.arcsin,
+        (r"$\log M$", r"$Q$"): mT_Q,
+        # (r"$t_{\rm plunge}$", r"$\lambda$", r"$\sin \delta$", r"$\psi$"): LISA_to_SSB,
+        # ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
+    }
+
+    transform = TransformContainer(
+        input_basis=basis,
+        output_basis=basis,
+        parameter_transforms=mbh_transform_fn_in,
+        fill_dict={},
+    )
+
+    periodic = {"mbh": {r"$\phi_{\rm ref}$": 2 * np.pi, r"$\alpha$": 2 * np.pi, r"$\psi$": np.pi}}
+
+    priors_mbh = {
+                r"$\log M$": uniform_dist(np.log(1e5), np.log(1e8)),
+                r"$Q$": log_uniform(1., 10.),
+                r"$s_{1z}$": uniform_dist(-0.99999999, +0.99999999),
+                r"$s_{2z}$": uniform_dist(-0.99999999, +0.99999999),
+                r"$d_L$": uniform_dist(1, 150.0), # uniform_dist(0.01, 1000.0),
+                r"$\phi_{\rm ref}$": uniform_dist(0.0, 2 * np.pi),
+                r"$\cos \iota$": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                r"$\psi$": uniform_dist(0.0, np.pi), #is this right?
+                r"$\alpha$": uniform_dist(0.0, 2 * np.pi),
+                r"$\sin \delta$": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                r"$t_{\rm plunge}$": uniform_dist(0.0, general_set.Tobs + 3600.0),
+            }
+    priors = {"mbh": ProbDistContainer(priors_mbh)}
+
     mbh_settings = MBHSettings(
+        log_dir=general_set.artifacts_file_dir,
         Tobs=general_set.Tobs,
         dt=general_set.dt,
         initialize_kwargs=waveform_init_kwargs,
+        transform=transform,
+        periodic=periodic,
+        priors=priors,
         waveform_kwargs=waveform_runtime_kwargs,
-        nleaves_max=3,
-        nleaves_min=3,
+        nleaves_max=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
+        nleaves_min=len(general_set.processor_init_kwargs["source_ids"]["mbhb"]),
         ndim=11,
-        num_prop_repeats=10,
-        log_dir=general_set.file_store_dir,
+        num_prop_repeats=50,
         betas=betas,
+        inner_moves=[StretchMove(),]
     )
 
     wf_metadata = waveform_init_kwargs.copy()
@@ -467,30 +539,30 @@ def get_general_erebor_settings() -> GeneralSetup:
     # now with negative fdots
 
     global_fit_codename = "erebor"
-    global_fit_version = "CDL1run1_v2"
+    global_fit_version = "CDL1run1_v3"
     global_fit_contact = "ereborl2d@googlegroups.com"
     global_fit_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/releases/tag/cdl1-run_0"
     global_fit_input_data_link = ""
     global_fit_input_reference = "mojito light"
     global_fit_noise_model = "parametric"
     global_fit_noise_model_code_link = "https://github.com/Erebor-L2D/LISAanalysistools/blob/9d63bb1e63e7b8f640d3780551d9421df5245992/src/lisatools/sensitivity.py#L1797" #todo populate repositories
-    comment = "new test run for mbhb+vgb+noise after fixing the parameter conversions."
+    comment = "new test run for mbhb+vgb+noise after implementing clustering and sorting."
 
     submission_folder = "/work/asantini/globalfit/l3c_exchange/mojito_light_results/"
 
-    num_iterations = 300
+    num_iterations = 150
 
-    source_ids = [18, 5, 16]
+    source_ids = [18, 5, 16, 7, 2, 12]
 
     Tobs = 9.0 * YRSID_SI / 12.0
     dt = 5.0
     start_freq = 1e-4
-    end_freq = 2.5e-2
+    end_freq = 2.9e-2
 
-    head_dir = "/data/asantini/packages/LISAanalysistools/"
+    head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = global_fit_version #"test_mbh_18_with_covariance"
-    file_store_dir = head_dir + "mojito_output/"
+    base_file_name = "joint_run_vgb_v2"
+    file_store_dir = head_dir
 
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
@@ -519,7 +591,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=backend, frame="icrs"),  # icrs
+        orbits_kwargs=dict(force_backend=backend, frame="icrs", armlength=MOJITO_AVERAGE_ARMLENGTH),  # icrs
     )
 
     downsample_kwargs = {
