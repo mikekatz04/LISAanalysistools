@@ -394,7 +394,7 @@ CUDA_KERNEL void psd_likelihood_xyz_kernel(
 
             // Get noise covariance matrix for this (time, frequency) pair
             sensitivity_matrix.get_noise_covariance(
-                f, time_index,
+                f, time_index, f_idx,
                 Soms_d_in, Sa_a_in,
                 Amp, alpha, f_1, f_knee, f_2,
                 spline_in_isi_oms, spline_in_testmass,
@@ -815,9 +815,25 @@ void XYZSensitivityMatrix::get_noise_tfs_arr(
 // Noise Covariance Matrix Computation
 // ============================================================================
 
+void XYZSensitivityMatrix::set_averaged_tfs(
+    double* oms_xx, cmplx* oms_xy, cmplx* oms_xz,
+    double* oms_yy, cmplx* oms_yz, double* oms_zz,
+    double* tm_xx,  cmplx* tm_xy,  cmplx* tm_xz,
+    double* tm_yy,  cmplx* tm_yz,  double* tm_zz, int nf)
+{
+    oms_xx_avg = oms_xx; oms_xy_avg = oms_xy; oms_xz_avg = oms_xz;
+    oms_yy_avg = oms_yy; oms_yz_avg = oms_yz; oms_zz_avg = oms_zz;
+    tm_xx_avg  = tm_xx;  tm_xy_avg  = tm_xy;  tm_xz_avg  = tm_xz;
+    tm_yy_avg  = tm_yy;  tm_yz_avg  = tm_yz;  tm_zz_avg  = tm_zz;
+    nf_avg = nf;
+    use_averaged_tfs = true;
+}
+
+void XYZSensitivityMatrix::disable_averaged_tfs() { use_averaged_tfs = false; }
+
 CUDA_DEVICE
 void XYZSensitivityMatrix::get_noise_covariance(
-    double f, int time_index,
+    double f, int time_index, int f_idx,
     double Soms_d_in, double Sa_a_in,
     double Amp, double alpha, double f_1, double f_knee, double f_2,
     double spline_in_isi_oms, double spline_in_testmass,
@@ -827,10 +843,20 @@ void XYZSensitivityMatrix::get_noise_covariance(
     double oms_xx, oms_yy, oms_zz, tm_xx, tm_yy, tm_zz;
     cmplx oms_xy, oms_xz, oms_yz, tm_xy, tm_xz, tm_yz;
 
-    get_noise_tfs(f,
-                  &oms_xx, &oms_xy, &oms_xz, &oms_yy, &oms_yz, &oms_zz,
-                  &tm_xx, &tm_xy, &tm_xz, &tm_yy, &tm_yz, &tm_zz,
-                  time_index);
+    if (use_averaged_tfs)
+    {
+        oms_xx = oms_xx_avg[f_idx]; oms_yy = oms_yy_avg[f_idx]; oms_zz = oms_zz_avg[f_idx];
+        oms_xy = oms_xy_avg[f_idx]; oms_xz = oms_xz_avg[f_idx]; oms_yz = oms_yz_avg[f_idx];
+        tm_xx  = tm_xx_avg[f_idx];  tm_yy  = tm_yy_avg[f_idx];  tm_zz  = tm_zz_avg[f_idx];
+        tm_xy  = tm_xy_avg[f_idx];  tm_xz  = tm_xz_avg[f_idx];  tm_yz  = tm_yz_avg[f_idx];
+    }
+    else
+    {
+        get_noise_tfs(f,
+                      &oms_xx, &oms_xy, &oms_xz, &oms_yy, &oms_yz, &oms_zz,
+                      &tm_xx, &tm_xy, &tm_xz, &tm_yy, &tm_yz, &tm_zz,
+                      time_index);
+    }
 
     double S_tm, S_isi_oms;
     noise_levels.get_isi_oms_noise(&S_isi_oms, f, Soms_d_in, spline_in_isi_oms);
@@ -921,7 +947,7 @@ void get_noise_covariance_kernel(
             spline_in_testmass = spline_in_testmass_arr[f_idx];
 
             sensitivity_matrix->get_noise_covariance(
-                f, time_index,
+                f, time_index, f_idx,
                 Soms_d_in, Sa_a_in,
                 Amp, alpha, f_1, f_knee, f_2,
                 spline_in_isi_oms, spline_in_testmass,

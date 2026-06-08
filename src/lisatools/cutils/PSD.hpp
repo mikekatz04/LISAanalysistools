@@ -72,6 +72,14 @@ public:
     double *gal_R_avg;
     bool    use_galactic;
 
+    // --- FD time-averaged transfer functions (non-owned, shared like gal_R_avg) ---
+    bool   use_averaged_tfs = false;
+    int    nf_avg = 0;
+    double *oms_xx_avg = nullptr, *oms_yy_avg = nullptr, *oms_zz_avg = nullptr;
+    gcmplx::complex<double> *oms_xy_avg = nullptr, *oms_xz_avg = nullptr, *oms_yz_avg = nullptr;
+    double *tm_xx_avg  = nullptr, *tm_yy_avg  = nullptr, *tm_zz_avg  = nullptr;
+    gcmplx::complex<double> *tm_xy_avg  = nullptr, *tm_xz_avg  = nullptr, *tm_yz_avg  = nullptr;
+
     // ---- constructor ----
     XYZSensitivityMatrix(double *averaged_ltts_arr_, double *delta_ltts_arr_,
                          int n_times_, double armlength_,
@@ -97,6 +105,13 @@ public:
     void set_galactic_grid(double *d_R_avg);
     void disable_galactic_grid();
 
+    // ---- FD averaged transfer function attachment (host-only, defined in PSD.cu) ----
+    void set_averaged_tfs(double* oms_xx, gcmplx::complex<double>* oms_xy, gcmplx::complex<double>* oms_xz,
+                          double* oms_yy, gcmplx::complex<double>* oms_yz, double* oms_zz,
+                          double* tm_xx,  gcmplx::complex<double>* tm_xy,  gcmplx::complex<double>* tm_xz,
+                          double* tm_yy,  gcmplx::complex<double>* tm_yz,  double* tm_zz, int nf);
+    void disable_averaged_tfs();
+
     // ---- device: noise transfer functions ----
     CUDA_DEVICE int get_adjacent_mosa(int mosa);
 
@@ -114,9 +129,9 @@ public:
         double *tm_yy,  gcmplx::complex<double> *tm_yz,  double *tm_zz,
         int time_index);
 
-    // ---- device: noise covariance (original 17-arg signature, unchanged) ----
+    // ---- device: noise covariance ----
     CUDA_DEVICE void get_noise_covariance(
-        double f, int time_index,
+        double f, int time_index, int f_idx,
         double Soms_d_in, double Sa_a_in,
         double Amp, double alpha, double f_1, double f_knee, double f_2,
         double spline_in_isi_oms, double spline_in_testmass,

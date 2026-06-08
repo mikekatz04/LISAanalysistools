@@ -31,7 +31,7 @@ from cudakima import AkimaInterpolant1D
 
 from . import detector as lisa_models
 from .detector import L1Orbits, Orbits
-from .domains import DomainSettingsBase
+from .domains import DomainSettingsBase, TDSettings
 from .stochastic import (
     FittedHyperbolicTangentGalacticForeground,
     StochasticContribution,
@@ -1804,6 +1804,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
     Args:
     orbits: L1Orbits object containing the orbital information for the LISA constellation.
     settings: DomainSettingsBase subclass containing the basis information (e.g., frequency array).
+    data_td_settings: Optional TDSettings object for time-domain data. Used if the provided settings do not contain the time array to compute the average light travel times on. If None, The LTTs will be averaged over the overall orbital information.
     tdi_generation: Integer indicating which TDI generation to use (1 or 2). Default is 2.
     use_splines: Whether to use spline interpolation for the sensitivity matrix. Default is False.
     spline_order: Order of the spline interpolation (e.g., "cubic", "linear"). Default is "cubic". Only relevant if use_splines is True.
@@ -1817,14 +1818,16 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self,
         orbits: Orbits | L1Orbits,
         settings: DomainSettingsBase,
+        data_td_settings: Optional[TDSettings] = None,
         tdi_generation: int = 2,
         use_splines: bool = False,
         spline_order: Optional[str] = "cubic",
         force_backend: Optional[str] = "cpu",
         mask_percentage: Optional[float] = None,
-        # --- new ---
-        galactic_grid_kwargs: Optional[dict] = None, 
-        window_values: Optional[NDArrayLike] = None
+        galactic_grid_kwargs: Optional[dict] = None,
+        window_values: Optional[NDArrayLike] = None,
+        average_transfer_functions: bool = True,
+        n_average_epochs: int = 256,
     ):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         SensitivityMatrixBase.__init__(self, settings)
@@ -1840,6 +1843,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         _use_gpu = force_backend != "cpu"
 
+        if data_td_settings is not None:
+            assert isinstance(data_td_settings, TDSettings), "data_td_settings must be a TDSettings object."
+        self.data_td_settings = data_td_settings
+
         self.use_splines = use_splines
         self.spline_order = spline_order
         self.spline_interpolant = AkimaInterpolant1D(
@@ -1849,6 +1856,11 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         self.mask_percentage = mask_percentage if mask_percentage is not None else 0.05
 
         self.window_values = window_values
+
+        self.average_transfer_functions = average_transfer_functions
+        self.n_average_epochs = int(n_average_epochs)
+        self._averaging_active = False   # set True by get_averaged_ltts() in FD averaged mode
+
         self._setup()
         
         self.galactic_grid_kwargs = galactic_grid_kwargs # for propagation to copies
@@ -1863,13 +1875,16 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         return {
             "orbits": self.orbits,
             "settings": self.basis_settings,
+            "data_td_settings": self.data_td_settings,
             "tdi_generation": self.tdi_generation,
             "use_splines": self.use_splines,
             "spline_order": self.spline_order,
             "force_backend": self.backend.backend_name.split("_")[-1],
             "mask_percentage": self.mask_percentage,
             "galactic_grid_kwargs": self.galactic_grid_kwargs,  # propagate to copies
-            "window_values": self.window_values
+            "window_values": self.window_values,
+            "average_transfer_functions": self.average_transfer_functions,
+            "n_average_epochs": self.n_average_epochs,
         }
 
     @property
@@ -1909,6 +1924,7 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
         # check if we need multiple time points
         if hasattr(self.basis_settings, "t_arr"):
             t_arr = self.xp.asarray(self.basis_settings.t_arr)
+        
             tiled_times = self.xp.tile(
                 t_arr[:, self.xp.newaxis], (1, 6)
             ).flatten()  # compute ltts at these times with orbits
@@ -1919,9 +1935,31 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
             self.time_indices = self.xp.arange(len(t_arr), dtype=self.xp.int32)
 
+
         else:
-            ltts = self.xp.mean(self.orbits.ltt, axis=0)[self.xp.newaxis, :]
-            self.time_indices = self.xp.array([0], dtype=self.xp.int32)
+            if self.average_transfer_functions and self.data_td_settings is not None:
+                # N epochs spanning the observation window -> time-average the TFs
+                t_full = self.xp.asarray(self.data_td_settings.t_arr)
+                N = int(min(self.n_average_epochs, len(t_full)))
+                sel = self.xp.linspace(0, len(t_full) - 1, N).astype(self.xp.int64)
+                t_arr = t_full[sel]
+                tiled_times = self.xp.tile(t_arr[:, self.xp.newaxis], (1, 6)).flatten()
+                links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
+                ltts = self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6)
+                # likelihood uses ONE effective time; the N epochs feed the TF average only
+                self.time_indices = self.xp.array([0], dtype=self.xp.int32)
+                self._averaging_active = True
+            else:
+                if self.data_td_settings is not None:
+                    t_arr = self.xp.asarray(self.data_td_settings.t_arr)
+                    tiled_times = self.xp.tile(t_arr[:, self.xp.newaxis], (1, 6)).flatten()
+                    links = self.xp.tile(self.xp.asarray(self.orbits.LINKS), (t_arr.shape[0],))
+                    ltts = self.xp.median(
+                        self.orbits.get_light_travel_times(tiled_times, links).reshape(len(t_arr), 6),
+                        axis=0)[self.xp.newaxis, :]
+                else:
+                    ltts = self.orbits.ltt[:1].copy()
+                self.time_indices = self.xp.array([0], dtype=self.xp.int32)
 
         # with orbits.LINKS order: 12, 23, 31, 13, 32, 21, we need averages between pairs
         # pairs: (12,21), (23,32), (31,13)
@@ -1955,6 +1993,31 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         self._init_basis_settings()
 
+        if self._averaging_active:
+            self._build_and_attach_averaged_tfs()
+
+    def _build_and_attach_averaged_tfs(self):
+        """Precompute epoch-averaged transfer functions and attach them to the
+        c++ object so the in-kernel covariance assembly (and the diagnostic path)
+        use E_t[C(f;L(t))].  Parameter-free -> computed once; arrays kept alive on
+        self and shared across walker copies (like gal_R_avg)."""
+        xp = self.xp
+        nf = self.num_freqs
+        N = self.pycppsensmat_args[2]   # n_times the wrap was built with
+        total = N * nf
+
+        # 12 per-epoch transfer functions via the existing kernel (time-major: t*nf+f).
+        # order MUST match get_noise_tfs_wrap: oms_xx,xy,xz,yy,yz,zz, tm_xx,xy,xz,yy,yz,zz
+        real_flags = (True, False, False, True, False, True,
+                      True, False, False, True, False, True)
+        bufs = [xp.empty(total, dtype=xp.float64 if r else xp.complex128) for r in real_flags]
+        self.pycpp_sensitivity_matrix.get_noise_tfs_wrap(
+            xp.asarray(self.f_arr), *bufs, nf, N, xp.arange(N, dtype=xp.int32))
+
+        # average over the epoch axis -> 12 contiguous (nf,) arrays, KEPT ALIVE on self
+        self._avg_tf_arrays = [xp.ascontiguousarray(b.reshape(N, nf).mean(axis=0)) for b in bufs]
+        self.pycpp_sensitivity_matrix.set_averaged_tfs_wrap(*self._avg_tf_arrays, nf)
+
     def __deepcopy__(self, memo):
         """Custom deepcopy to handle unpicklable backend objects."""
         from copy import copy
@@ -1968,8 +2031,10 @@ class XYZSensitivityBackend(LISAToolsParallelModule, SensitivityMatrixBase):
 
         # Manually copy attributes
         for key, value in self.__dict__.items():
-            if key in ("_backend", "pycpp_sensitivity_matrix", "_galactic_grid"):
-                # Don't deepcopy backend objects - just reference
+            if key in ("_backend", "pycpp_sensitivity_matrix", "_galactic_grid", "_avg_tf_arrays"):
+                # Don't deepcopy backend objects - just reference.
+                # _avg_tf_arrays is referenced by raw pointers inside the (shared)
+                # pycpp_sensitivity_matrix, so copies MUST share these arrays.
                 setattr(new_obj, key, value)
             elif key == "orbits":
                 # Shallow copy orbits (share the same backend)
