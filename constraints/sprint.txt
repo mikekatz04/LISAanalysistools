@@ -1,0 +1,37 @@
+# Sprint-wide pip constraint file.
+#
+# Why: pybind11 keys its process-global type registry by PYBIND11_INTERNALS_ID,
+# a string baked in at compile time from (pybind11 version, compiler ABI tag,
+# PYBIND11_BUILD_ABI). If GPUBackendTools, LISAanalysistools, GBGPU, BBHx, and
+# FastEMRIWaveforms are each built against a different pybind11, their
+# internals dicts diverge -- a class registered by LAT becomes opaque to GBGPU
+# at cross-wheel cast time, silently. This file pins the version sprint-wide
+# so that all wheels emit the same internals ID.
+#
+# How to use:
+#
+#   export PIP_CONSTRAINT="$(git rev-parse --show-toplevel)/constraints/sprint.txt"
+#   pip install -e GPUBackendTools/
+#   pip install -e LISAanalysistools/
+#   pip install -e GBGPU/   # etc.
+#
+# Every CI workflow in the sprint must also set PIP_CONSTRAINT before any
+# pip install step.  See plan §"Sprint-wide pybind11 pin" for rationale.
+#
+# Bump the pin in ONE PR sprint-wide; per-package upgrades are forbidden.
+
+# pybind11 pin kept for FastEMRIWaveforms (which intentionally stays on
+# pybind11 per the major-rework plan) and for any pybind11 lookup that
+# happens during the sprint-wide nanobind migration transition. Sprint
+# packages GBT / LAT / GBGPU / BBHx / lisa-on-gpu have migrated to
+# nanobind (Phase 3M, 2026-06-04); their binding TUs no longer link
+# against pybind11, but the pin survives so a stray transitive resolve
+# doesn't accidentally bump the version under FEW's feet.
+pybind11==3.0.4
+
+# Sprint-wide nanobind pin (Phase 3M, 2026-06-04). Same rationale as
+# the pybind11 pin: nanobind keeps a process-global type registry
+# (smaller hash, but still version-keyed) so all sprint wheels must
+# emit the same internals ID for cross-wheel pybind11/nanobind type
+# sharing to work. Bumping is sprint-wide and atomic, never per-package.
+nanobind==2.12.0

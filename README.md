@@ -1,6 +1,6 @@
 # LISA Analysis Tools
 
-[![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://mikekatz04.github.io/LISAanalysistools)
+[![Doc badge](https://img.shields.io/badge/Docs-master-brightgreen)](https://lisa-analysis-tools.github.io/lisa-analysis-tools)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17138723.svg)](https://doi.org/10.5281/zenodo.17138723)
 
 LISA Analysis Tools is a package for performing LISA Data Analysis tasks, including building the LISA Global Fit.  
@@ -75,7 +75,7 @@ The above exception was the direct cause of the following exception:
 lisatools.cutils.BackendAccessException: Backend 'cuda12x' is unavailable. See previous error messages.
 ```
 
-Once LISA Analysis Tools is working and the expected backends are selected, check out the [examples notebooks](https://github.com/mikekatz04/LISAanalysistools/tree/master/examples/)
+Once LISA Analysis Tools is working and the expected backends are selected, check out the [examples notebooks](https://github.com/lisa-analysis-tools/lisa-analysis-tools/tree/master/examples/)
 on how to start with this software.
 
 ## Installing from sources
@@ -98,13 +98,13 @@ We recommend to install LISA Analysis Tools using conda in order to have the com
 First clone the repo
 
 ```
-git clone https://github.com/mikekatz04/LISAanalysistools.git
-cd LISAanalysistools
+git clone https://github.com/lisa-analysis-tools/lisa-analysis-tools.git
+cd lisa-analysis-tools
 ```
 
 Now create an environment (these instructions work for all platforms but some
 adjustements can be needed, refer to the
-[detailed installation documentation](https://mikekatz04.github.io/LISAanalysistools) for more information):
+[detailed installation documentation](https://lisa-analysis-tools.github.io/lisa-analysis-tools) for more information):
 
 ```
 conda create -n lisatools_env -y -c conda-forge --override-channels |
@@ -143,17 +143,17 @@ the repository, and then simply run a `pip install` command:
 
 ```sh
 # Clone the repository
-git clone https://github.com/mikekatz04/LISAanalysistools.git
-cd LISAanalysistools
+git clone https://github.com/lisa-analysis-tools/lisa-analysis-tools.git
+cd lisa-analysis-tools
 
 # Run the install
 pip install .
 ```
 
 If the installation does not work, first check the [detailed installation
-documentation](https://mikekatz04.github.io/LISAanalysistools). If
+documentation](https://lisa-analysis-tools.github.io/lisa-analysis-tools). If
 it still does not work, please open an issue on the
-[GitHub repository](https://github.com/mikekatz04/LISAanalysistools/issues)
+[GitHub repository](https://github.com/lisa-analysis-tools/lisa-analysis-tools/issues)
 or contact the developers through other means.
 
 
@@ -171,16 +171,16 @@ pip install lisaanalysistools[testing]
 pip install lisaanalysistools-cuda12x[testing]
 
 # For from-source install with testing enabled
-git clone https://github.com/mikekatz04/LISAanalysistools.git
-cd LISAanalysistools
+git clone https://github.com/lisa-analysis-tools/lisa-analysis-tools.git
+cd lisa-analysis-tools
 pip install '.[testing]'
 ```
 
 To run the tests, open a terminal in a directory containing the sources of LISA Analysis Tools and then run the `unittest` module in `discover` mode:
 
 ```sh
-$ git clone https://github.com/mikekatz04/LISAanalysistools.git
-$ cd LISAanalysistools
+$ git clone https://github.com/lisa-analysis-tools/lisa-analysis-tools.git
+$ cd lisa-analysis-tools
 $ python -m lisatools.tests  # or "python -m unittest discover"
 ...
 ----------------------------------------------------------------------
@@ -195,8 +195,8 @@ Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduc
 If you want to develop LISA Analysis Tools and produce documentation, install `lisatools` from source with the `[dev]` label and in `editable` mode:
 
 ```
-$ git clone https://github.com/mikekatz04/LISAanalysistools.git
-$ cd LISAanalysistools
+$ git clone https://github.com/lisa-analysis-tools/lisa-analysis-tools.git
+$ cd lisa-analysis-tools
 pip install -e '.[dev, testing]'
 ```
 
@@ -206,7 +206,7 @@ The documentation source files are in `docs/source`. To compile the documentatio
 
 ## Versioning
 
-We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/mikekatz04/LISAanalysistools/tags).
+We use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/lisa-analysis-tools/lisa-analysis-tools/tags).
 
 ## Contributors
 
