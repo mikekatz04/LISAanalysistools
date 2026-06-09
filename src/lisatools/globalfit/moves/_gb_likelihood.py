@@ -442,7 +442,7 @@ class FDBandLikelihoodEngine:
 
 
 # ---------------------------------------------------------------------------
-# WDM-domain engine (wraps fastlisaresponse.GBWDMComputations)
+# WDM-domain engine (wraps gbgpu.gbcomps.GBWDMComputations)
 # ---------------------------------------------------------------------------
 
 
@@ -498,12 +498,12 @@ class WDMBandLikelihoodEngine:
         num_bin = params_phys.shape[0]
         factors_arr = xp.full(num_bin, float(factor), dtype=xp.float64)
 
-        # ``fill_global_wdm`` signature is (params, templates, wdm_holder, ...).
-        # buffer_aca.linear_data_arr[0] is the flat WDM template buffer.
+        # Post-Phase-3L.7p, ``fill_global_wdm`` signature is
+        # ``(params, templates, ...)`` -- the flat WDM-template buffer is the
+        # only positional after params, no third ``wdm_holder`` slot.
         self.gb_comps.fill_global_wdm(
             params_phys,
             buffer_aca.linear_data_arr[0],
-            buffer_aca,
             convert_to_ra_dec=False,
             data_index=params_index,
             factors=factors_arr,
@@ -681,12 +681,16 @@ class WDMBandLikelihoodEngine:
         runtime kwarg is taken.
         """
         self._require_chunked_het("get_ll_grad_wdm")
-        del N_vals, waveform_kwargs  # chunked-het doesn't gate by N here
+        # Post-Phase-3L.7p, ``get_ll_grad_wdm`` no longer accepts
+        # ``param_eps`` / ``chunk``; the JAX-autograd backend handles the
+        # full-precision derivative internally and the C++ kernel does
+        # not (yet) split the gradient over sub-chunks. Engine swallows
+        # the kwargs for caller backward-compat.
+        del N_vals, waveform_kwargs, param_eps, chunk
         return self.gb_comps.get_ll_grad_wdm(
             params_phys, buffer_aca,
-            param_eps=param_eps,
             data_index=data_index, noise_index=noise_index,
-            convert_to_ra_dec=False, chunk=chunk,
+            convert_to_ra_dec=False,
         )
 
     def hessian(
@@ -765,7 +769,7 @@ def make_band_likelihood_engine(
         if gb_wdm_comp is None:
             raise ValueError(
                 "WDMBandLikelihoodEngine requires a "
-                "fastlisaresponse.GBWDMComputations instance (pass "
+                "gbgpu.gbcomps.GBWDMComputations instance (pass "
                 "gb_wdm_comp=...)."
             )
         return WDMBandLikelihoodEngine(

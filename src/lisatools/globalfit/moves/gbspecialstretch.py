@@ -445,7 +445,7 @@ class Buffer(LISAToolsParallelModule):
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
         assert self.backend.name.split("_")[-1] == gb.backend.name.split("_")[-1]
         self.gb = gb
-        # WDM-domain likelihood object (a fastlisaresponse.GBWDMComputations).
+        # WDM-domain likelihood object (a gbgpu.gbcomps.GBWDMComputations).
         # Required when ``basis_settings`` is a WDMSettings, ignored otherwise.
         self.gb_wdm_comp = gb_wdm_comp
         self.df = df
@@ -1818,7 +1818,7 @@ class GBSpecialBase(GlobalFitMove, GroupStretchMove, Move, LISAToolsParallelModu
         self.priors = priors
         self.gb = gb
         # Optional WDM-domain likelihood object. Constructed once by the
-        # user (typically a fastlisaresponse.GBWDMComputations) and threaded
+        # user (typically a gbgpu.gbcomps.GBWDMComputations) and threaded
         # through to BandSorter -> Buffer -> WDMBandLikelihoodEngine when
         # the analysis container's DomainSettingsBase is a WDMSettings.
         # Stays None on the FD path; the FD engine path doesn't touch it.

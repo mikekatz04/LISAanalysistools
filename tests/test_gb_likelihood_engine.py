@@ -105,6 +105,117 @@ class WDMEngineSelfConsistencyTest(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    _have_gbgpu_wdm(),
+    "requires gbgpu.gbcomps for GBWDMComputations signature inspection",
+)
+class WDMEngineCallSignatureTest(unittest.TestCase):
+    """Regression-guard the engine's call layout into ``GBWDMComputations``.
+
+    After Phase 3L.7p, ``fill_global_wdm`` dropped its 3rd positional
+    ``wdm_holder`` slot and ``get_ll_grad_wdm`` dropped ``param_eps`` /
+    ``chunk``. Both shifts had to be mirrored on the engine side; this
+    test fails fast if either drifts again. The actual numerical
+    correctness of the kernels is covered by the kernel-level checks.
+    """
+
+    def _build_stub(self, sigs):
+        import numpy as np
+
+        class _Stub:
+            xp = np
+            d_h_out = np.zeros(1)
+            h_h_out = np.zeros(1)
+            calls = []
+
+            def fill_global_wdm(self, *args, **kwargs):
+                _Stub.calls.append(("fill_global_wdm", args, kwargs))
+                sigs["fill_global_wdm"].bind(self, *args, **kwargs)
+
+            def get_ll_wdm(self, *args, **kwargs):
+                _Stub.calls.append(("get_ll_wdm", args, kwargs))
+                sigs["get_ll_wdm"].bind(self, *args, **kwargs)
+                return np.zeros(args[0].shape[0])
+
+            def get_swap_ll_wdm(self, *args, **kwargs):
+                _Stub.calls.append(("get_swap_ll_wdm", args, kwargs))
+                sigs["get_swap_ll_wdm"].bind(self, *args, **kwargs)
+                z = np.zeros(args[0].shape[0])
+                return z, z, z, z, z, z, z
+
+            def get_ll_grad_wdm(self, *args, **kwargs):
+                _Stub.calls.append(("get_ll_grad_wdm", args, kwargs))
+                sigs["get_ll_grad_wdm"].bind(self, *args, **kwargs)
+                return np.zeros((args[0].shape[0], 9))
+
+        return _Stub()
+
+    def _build_aca_stub(self):
+        import numpy as np
+
+        class _ACA:
+            linear_data_arr = [np.zeros(8)]
+            linear_psd_arr = [np.zeros(8)]
+            def __len__(self):
+                return 1
+
+        return _ACA()
+
+    def test_engine_calls_bind_to_GBWDMComputations_signatures(self):
+        import inspect
+        import numpy as np
+
+        from lisatools.chunked_het import WDMComputationsBase
+        from lisatools.domains import WDMSettings
+        from lisatools.globalfit.moves._gb_likelihood import (
+            WDMBandLikelihoodEngine,
+        )
+
+        sigs = {
+            name: inspect.signature(getattr(WDMComputationsBase, name))
+            for name in (
+                "fill_global_wdm",
+                "get_ll_wdm",
+                "get_swap_ll_wdm",
+                "get_ll_grad_wdm",
+            )
+        }
+        stub = self._build_stub(sigs)
+        aca = self._build_aca_stub()
+
+        basis = WDMSettings(Nf=16, Nt=32, dt=15.0)
+        engine = WDMBandLikelihoodEngine(
+            gb_comps=stub,
+            basis_settings=basis,
+            nchannels=3,
+            tdi_channel_setup="XYZ",
+        )
+
+        params = np.zeros((1, 9))
+        params[:, 1] = basis.layer_df * (basis.ind_min_f + 1)
+        idx = np.zeros(1, dtype=np.int32)
+
+        engine.fill_template(aca, params, idx, N_vals=None,
+                             factor=-1, waveform_kwargs={})
+        engine.get_ll(aca, params, data_index=idx, noise_index=idx,
+                      N_vals=None, waveform_kwargs={})
+        engine.get_swap_ll(aca, params, params,
+                           data_index=idx, noise_index=idx, N_vals=None,
+                           phase_marginalize=False, waveform_kwargs={})
+        # param_eps / chunk are forwarded by gbspecialstretch.Buffer.get_ll_grad
+        # to the engine; the engine must swallow them because the underlying
+        # get_ll_grad_wdm no longer accepts them.
+        engine.get_ll_grad(aca, params, data_index=idx, noise_index=idx,
+                           N_vals=None, param_eps=1e-5, chunk=128,
+                           waveform_kwargs={})
+
+        seen = {name for (name, _, _) in stub.calls}
+        self.assertEqual(seen, {
+            "fill_global_wdm", "get_ll_wdm",
+            "get_swap_ll_wdm", "get_ll_grad_wdm",
+        })
+
+
 def _try_import_engine():
     """Import ``make_band_likelihood_engine`` or return (None, error msg).
 
