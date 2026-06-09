@@ -155,7 +155,7 @@ LOG10_TM_ASD_RANGE = (-16.0, -13.0)
 LOG10_OMS_ASD_RANGE = (-12.0, -10.0)
 
 # Galactic foreground prior ranges
-LOG10_AMP_RANGE = (-50.0, -40.0)
+LOG10_AMP_RANGE = (-48.0, -40.0)
 ALPHA_RANGE = (1.0, 10.0)
 LOG10_FREQ1_RANGE = (np.log10(1e-4), np.log10(1e-2))
 LOG10_FREQ2_RANGE = (np.log10(1e-4), np.log10(1e-2))
@@ -465,7 +465,7 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     head_dir = "/data/asantini/globalfit/erebor/mojito_runs/"
     data_input_path = "/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"
-    base_file_name = "galfor_test_v3" #"test_mbh_18_with_covariance"
+    base_file_name = "galfor_test_v4" #"test_mbh_18_with_covariance"
     file_store_dir = head_dir
     gpus = [0]
     cp.cuda.runtime.setDevice(gpus[0])
@@ -475,7 +475,7 @@ def get_general_erebor_settings() -> GeneralSetup:
     jax.config.update("jax_cuda_visible_devices", ",".join(str(gpu) for gpu in gpus))
 
     backend = "cuda12x" if gpus is not None else "cpu"
-    nwalkers = 20
+    nwalkers = 30
     ntemps = 20
 
     window_type = "tukey"
@@ -543,7 +543,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         N_beta=60,   # sky grid latitude points
     )
 
-    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, galactic_grid_kwargs=galactic_grid_kwargs)
+    sensitivity_init_kwargs = dict(tdi_generation=2, mask_percentage=0.02, galactic_grid_kwargs=galactic_grid_kwargs, average_transfer_functions=True)
 
     general_settings = GeneralSettings(
         num_iterations=num_iterations,
