@@ -7,7 +7,13 @@ from datetime import datetime
 from typing import Any, List, Optional, Tuple
 from tqdm import tqdm
 
-import cupy as xp
+try:
+    import cupy as xp
+    GPU_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    import numpy as xp
+    GPU_AVAILABLE = False
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -1427,6 +1433,10 @@ def gather_gb_samples(
     #       split across two groups (a duplicate in the catalogue). Validate against
     #       the exact path before trusting it at large samples_keep.
 
+    if not GPU_AVAILABLE:
+        logger.warning("GPU not available, cannot gather GB samples.")
+        return None
+    
     gb.backend.set_cuda_device(gpu)
     gb.gpus = [gpu]
     fake_data = [xp.zeros((len(waveform_kwargs["tdi_channel_setup"]), fd.shape[0]), dtype=xp.complex128)]
