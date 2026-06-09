@@ -177,12 +177,14 @@ MOJITO_SOURCE_IDS = {
 }
 
 # Synthetic instrument noise (fixed, no PSD branch).
+ADD_INSTRUMENT_NOISE = False
 NOISE_SOMS_D = 15e-12
 NOISE_SA_A = 3e-15
 NOISE_SEED = 12345
 
 # Galactic foreground (fixed, no galfor branch). Pass `None` to use the
 # FittedHyperbolicTangentGalacticForeground default tabulated values.
+ADD_GALACTIC_FOREGROUND = False
 FOREGROUND_PARAMS = None  # or e.g. (3.27e-44, 1e-2, 1.183, 941.0, 103.0)
 FOREGROUND_SEED = 67890
 
@@ -615,25 +617,25 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         # super().__init__ already called load_data() and stored .data,
         # .times, .fs, .orbits, .catalogue.
 
-        # Add synthetic FD instrument noise.
+        # Add synthetic FD instrument noise + modulated foreground.
         N = int(round(self.T / self.dt))
-        noise_td = _generate_correlated_fd_noise(
-            N=N, dt=self.dt,
-            Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
-            tdi_generation=TDI_GEN, seed=NOISE_SEED,
-        )
-        fg_td = _generate_modulated_foreground_td(
-            N=N, dt=self.dt, Tobs=self.T,
-            foreground_params=FOREGROUND_PARAMS,
-            tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
-        )
-        # mojito gives (nch, n_times); align lengths defensively.
         nch = self.data.shape[0]
-        self.data = (
-            _pad_or_clip(self.data[:nch], N)
-            + _pad_or_clip(noise_td[:nch], N)
-            + _pad_or_clip(fg_td[:nch], N)
-        )
+        combined = _pad_or_clip(self.data[:nch], N)
+        if ADD_INSTRUMENT_NOISE:
+            noise_td = _generate_correlated_fd_noise(
+                N=N, dt=self.dt,
+                Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
+                tdi_generation=TDI_GEN, seed=NOISE_SEED,
+            )
+            combined = combined + _pad_or_clip(noise_td[:nch], N)
+        if ADD_GALACTIC_FOREGROUND:
+            fg_td = _generate_modulated_foreground_td(
+                N=N, dt=self.dt, Tobs=self.T,
+                foreground_params=FOREGROUND_PARAMS,
+                tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
+            )
+            combined = combined + _pad_or_clip(fg_td[:nch], N)
+        self.data = combined
 
 
 class SyntheticDataProcessor(BaseProcessingStep):
@@ -672,18 +674,21 @@ class SyntheticDataProcessor(BaseProcessingStep):
             mbh_injections=mbh,
         )
 
-        noise_td = _generate_correlated_fd_noise(
-            N=target_N, dt=dt,
-            Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
-            tdi_generation=TDI_GEN, seed=NOISE_SEED,
-        )[:nchannels]
-        fg_td = _generate_modulated_foreground_td(
-            N=target_N, dt=dt, Tobs=Tobs,
-            foreground_params=FOREGROUND_PARAMS,
-            tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
-        )[:nchannels]
-
-        combined = emri_td + sobbh_td + mbh_td + noise_td + fg_td
+        combined = emri_td + sobbh_td + mbh_td
+        if ADD_INSTRUMENT_NOISE:
+            noise_td = _generate_correlated_fd_noise(
+                N=target_N, dt=dt,
+                Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
+                tdi_generation=TDI_GEN, seed=NOISE_SEED,
+            )[:nchannels]
+            combined = combined + noise_td
+        if ADD_GALACTIC_FOREGROUND:
+            fg_td = _generate_modulated_foreground_td(
+                N=target_N, dt=dt, Tobs=Tobs,
+                foreground_params=FOREGROUND_PARAMS,
+                tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
+            )[:nchannels]
+            combined = combined + fg_td
         times = np.arange(target_N) * dt + t_start
         fs = 1.0 / dt
         BaseProcessingStep.__init__(
