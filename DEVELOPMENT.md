@@ -195,7 +195,7 @@ Large-scale global fit (same building blocks, wrapped in Eryn moves):
 #   - per-source Eryn move (StretchMove inside ResidualAddOneRemoveOneMove)
 #   - shared data (synthetic noise + galactic foreground)
 
-python run_mpi_global_fit.py \
+python scripts/run_mpi_global_fit.py \
     --settings global_fit_input/full_year_combined_global_fit_settings.py
 ```
 
@@ -258,7 +258,7 @@ python scripts/run_global.py \
     --settings global_fit_input/full_year_combined_global_fit_settings.py
 
 # MPI (production)
-mpirun -n <N> python LISAanalysistools/run_mpi_global_fit.py \
+mpirun -n <N> python LISAanalysistools/scripts/run_mpi_global_fit.py \
     --settings global_fit_input/full_year_combined_global_fit_settings.py
 ```
 

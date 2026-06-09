@@ -176,6 +176,22 @@ MOJITO_SOURCE_IDS = {
     "SOBHB": [0, 1, 2], # range(2)
 }
 
+
+def _normalize_source_ids(d: dict) -> dict:
+    """Coerce per-class IDs to a list: ``None`` -> ``[]``, scalar -> ``[v]``."""
+    out = {}
+    for k, v in d.items():
+        if v is None:
+            out[k] = []
+        elif isinstance(v, (list, tuple)):
+            out[k] = list(v)
+        else:
+            out[k] = [v]
+    return out
+
+
+MOJITO_SOURCE_IDS = _normalize_source_ids(MOJITO_SOURCE_IDS)
+
 # Synthetic instrument noise (fixed, no PSD branch).
 ADD_INSTRUMENT_NOISE = False
 NOISE_SOMS_D = 15e-12
@@ -243,6 +259,12 @@ logger.info(
 N_MBH_INJECTIONS = len(MOJITO_SOURCE_IDS["MBHB"])
 N_EMRI_INJECTIONS = len(MOJITO_SOURCE_IDS["EMRI"])
 N_SOBBH_INJECTIONS = len(MOJITO_SOURCE_IDS["SOBHB"])
+
+if N_MBH_INJECTIONS + N_EMRI_INJECTIONS + N_SOBBH_INJECTIONS < 1:
+    raise ValueError(
+        "MOJITO_SOURCE_IDS must inject at least 1 source total across "
+        "MBHB / EMRI / SOBHB (all three are currently empty)."
+    )
 
 
 # ============================================================
@@ -446,6 +468,8 @@ def _make_emri_injections(n: int) -> np.ndarray:
     sky / phase / distance vary per source.
     """
     base = _SINGLE_EMRI_INJECTION.copy()
+    if n == 0:
+        return np.zeros((0, base.size), dtype=base.dtype)
     rng = np.random.default_rng(11)
     rows = []
     for i in range(n):
@@ -463,6 +487,8 @@ def _make_emri_injections(n: int) -> np.ndarray:
 def _make_sobbh_injections(n: int) -> np.ndarray:
     """Return ``(n, 11)`` SOBBH waveform-basis injection vectors."""
     base = _SINGLE_SOBBH_INJECTION.copy()
+    if n == 0:
+        return np.zeros((0, base.size), dtype=base.dtype)
     rng = np.random.default_rng(22)
     rows = []
     for i in range(n):
@@ -480,6 +506,8 @@ def _make_sobbh_injections(n: int) -> np.ndarray:
 def _make_mbh_injections(n: int, tobs: float) -> np.ndarray:
     """Return ``(n, 11)`` MBH-phentax waveform-basis injection vectors."""
     base = _SINGLE_MBH_PHENTAX_INJECTION.copy()
+    if n == 0:
+        return np.zeros((0, base.size), dtype=base.dtype)
     rng = np.random.default_rng(33)
     rows = []
     for i in range(n):
@@ -596,10 +624,13 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         do_plots: bool = False,
         Tobs: float = None
     ):
-        # We hardcode source_types to MBHB / EMRI / SOBHB only — instrument
-        # noise + galactic foreground come from the synthetic generators
-        # below, not from mojito.
-        source_types = ["MBHB", "EMRI", "SOBHB"]
+        # Source types are MBHB / EMRI / SOBHB; drop any class whose
+        # source_ids list is empty (mojito's L1DataLoader raises on
+        # missing IDs). Instrument noise + galactic foreground come from
+        # the synthetic generators below, not from mojito.
+        source_types = [
+            t for t in ["MBHB", "EMRI", "SOBHB"] if source_ids.get(t)
+        ]
         if orbits_class is None:
             from lisatools.detector import L1Orbits
             orbits_class = L1Orbits
@@ -716,13 +747,16 @@ def _force_backend_for_branch() -> str:
     return GPU_BACKEND if gpu_available else "cpu"
 
 
-def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
+def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISetup]:
     """EMRI setup with ``nleaves_max = N_EMRI_INJECTIONS``.
 
     Stretch inner moves. Tight per-leaf intrinsic priors derived from the
     shared intrinsic baseline; sky/phase/distance use the default wide
-    priors inside :class:`EMRISetup`.
+    priors inside :class:`EMRISetup`. Returns ``None`` when no EMRI
+    leaves are injected so the caller can skip the branch.
     """
+    if N_EMRI_INJECTIONS == 0:
+        return None
     force_backend = _force_backend_for_branch()
     initialize_kwargs_emri = dict(
         T=general_set.Tobs / YRSID_SI,
@@ -778,12 +812,14 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
     return EMRISetup(emri_settings)
 
 
-def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
+def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBHSetup]:
     """SOBBH setup with ``nleaves_max = N_SOBBH_INJECTIONS``.
 
     Uses ``StretchMove`` as the inner move (mirrors the EMRI / MBH
-    branches).
+    branches). Returns ``None`` when no SOBBH leaves are injected.
     """
+    if N_SOBBH_INJECTIONS == 0:
+        return None
     force_backend = _force_backend_for_branch()
     initialize_kwargs_sobbh = dict(
         T=general_set.Tobs / YRSID_SI,
@@ -839,14 +875,17 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> SOBBHSetup:
     return SOBBHSetup(sobbh_settings)
 
 
-def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
+def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> Optional[MBHSetup]:
     """MBH-phentax setup with ``nleaves_max = N_MBH_INJECTIONS``.
 
     GPU-ready: ``force_backend`` flips with ``gpu_available`` (mirrors
     the EMRI / SOBBH pattern), so a cupy install + visible GPU drives
     the phentax response wrapper onto GPU automatically. If phentax
-    itself isn't GPU-ready it will surface at first call.
+    itself isn't GPU-ready it will surface at first call. Returns
+    ``None`` when no MBH leaves are injected.
     """
+    if N_MBH_INJECTIONS == 0:
+        return None
     force_backend = _force_backend_for_branch()
     initialize_kwargs_mbh = dict(
         T=general_set.Tobs / YRSID_SI,
@@ -1128,11 +1167,15 @@ def setup_recipe(
     if gpus is not None:
         cp.cuda.runtime.setDevice(gpus[0])
 
-    mbh_pe_move = _build_mbh_phentax_move_runtime(curr, acs, priors, state)
-    emri_pe_move = _build_emri_move_runtime(curr, acs, priors, state)
-    sobbh_pe_move = _build_sobbh_move_runtime(curr, acs, priors, state)
-
-    pe_moves = [mbh_pe_move, emri_pe_move, sobbh_pe_move]
+    # Only build moves for branches that were populated in source_info
+    # (i.e. classes with >= 1 injected leaf).
+    pe_moves = []
+    if "mbh" in curr.source_info:
+        pe_moves.append(_build_mbh_phentax_move_runtime(curr, acs, priors, state))
+    if "emri" in curr.source_info:
+        pe_moves.append(_build_emri_move_runtime(curr, acs, priors, state))
+    if "sobbh" in curr.source_info:
+        pe_moves.append(_build_sobbh_move_runtime(curr, acs, priors, state))
     gf_pe_move = GFCombineMove(
         moves=pe_moves, verbose=True, share_temperature_control=False,
     )
@@ -1259,16 +1302,19 @@ def get_global_fit_settings(copy_settings_file: bool = False):
 
     rank_info = RankInfo(head_rank=1, main_rank=0)
 
-    emri_setup = get_emri_multi_erebor_settings(general_setup)
-    sobbh_setup = get_sobbh_multi_erebor_settings(general_setup)
-    mbh_setup = get_mbh_phentax_multi_erebor_settings(general_setup)
+    # Skip branches with zero injected leaves; the per-branch setup
+    # functions return ``None`` in that case.
+    source_info = {}
+    for key, setup in (
+        ("mbh", get_mbh_phentax_multi_erebor_settings(general_setup)),
+        ("emri", get_emri_multi_erebor_settings(general_setup)),
+        ("sobbh", get_sobbh_multi_erebor_settings(general_setup)),
+    ):
+        if setup is not None:
+            source_info[key] = setup
 
     gf_settings = GlobalFitSettings(
-        source_info={
-            "mbh": mbh_setup,
-            "emri": emri_setup,
-            "sobbh": sobbh_setup,
-        },
+        source_info=source_info,
         general_info=general_setup,
         rank_info=rank_info,
         setup_function=setup_recipe,
