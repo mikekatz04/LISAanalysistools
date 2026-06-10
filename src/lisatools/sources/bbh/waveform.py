@@ -597,7 +597,11 @@ class PhenomTHMTDIOnFlyWaveform(TDTDIOnFlyWaveformBase, PhenomTHMWaveformBase):
 
         num_keep = times_out.shape[-1]
 
-        return times_out, amplitude[..., -num_keep:], phase[..., -num_keep:]
+        num_pad = num_keep - mask.sum(axis=1).astype(int)  # (Nbatch,)
+        taper_length = int(self.tdi_buffer_time * 5 / self.dt)
+        ramp = self._leading_onset_ramp(num_points=num_keep, num_pad=num_pad, taper_length=taper_length, xp=self.xp)  # (Nbatch, num_keep)
+
+        return times_out, amplitude[..., -num_keep:] * ramp, phase[..., -num_keep:] * ramp # should we also apply the ramp to the phase? 
 
     def process_amp_phase(
         self, amp: np.ndarray | cp.ndarray, phase: np.ndarray | cp.ndarray

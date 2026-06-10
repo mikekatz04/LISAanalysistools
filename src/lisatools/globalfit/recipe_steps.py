@@ -352,9 +352,9 @@ def gb_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float =
     
     assert len(t_ref) == 1
     t_ref = t_ref.item()
-    t_init = t_ref + 850.5 + trim_duration
+    t_init = t_ref + trim_duration
     
-    f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot)
+    f_init, phi_init, _ = evolve_galactic_binary(t_ref, t_init, f_ref, phi_ref, fdot, phase_sign=-1)
     
     f0_mHz = f_init * 1e3
     cos_iota = np.cos(np.array(catalogue_entry["InclinationAngle"]))# % (np.pi)
@@ -651,16 +651,14 @@ def build_gb_moves(
     
     #* Setting up gbgpu on correct backend and gpu(s) for correct orbits and timeshift
     from gbgpu.gbgpu import GBGPU
-    import gbgpu 
-    from ..detector import L1Orbits
-    # _gb_backend = gbgpu.get_backend(general_info.gpu_backend)
-    # _gb_backend.set_cuda_device(gpus[0])
+    
     cp.cuda.runtime.setDevice(gpus[0])
     gb = GBGPU(**gb_info.initialize_kwargs)
     # cp.cuda.runtime.setDevice(gpus[0])
     gb.gpus = gpus
 
     logger.debug(f"GBGPU initialized at t0 = {gb_info.initialize_kwargs['t0']}")
+    logger.debug(f"GBGPU initialized with gpus: {gb.gpus} and backend: {gb.backend}")
     
     #* Make sure that priors are evaluated on gpus
     gpu_priors_in = deepcopy(priors["gb"].priors_in)
@@ -669,18 +667,7 @@ def build_gb_moves(
     gpu_priors = {"gb": ProbDistContainer(gpu_priors_in, use_cupy=True)}
     
     nleaves_max_gb = state.branches["gb"].shape[-2]
-
-    # waveform_kwargs = GBWaveformDict(
-    #     dt=general_info.dt,
-    #     T=1/getattr(acs.settings, "df"),
-    #     use_c_implementation=True,
-    #     start_freq_ind=data_start_freq_ind,
-    #     tdi_channel_setup=gb_info.tdi_setup,
-    #     tdi2=gb_info.use_tdi2, 
-    #     window=general_info.window_type,
-    #     window_alpha=general_info.window_alpha
-    # )
-
+    
     #* Get band information
     band_edges = gb_info.band_edges
     band_N_vals = gb_info.band_N_vals
@@ -731,6 +718,14 @@ def build_gb_moves(
 
         logger.info("Removing GBs from residuals")
         template_in = deepcopy(acs.linear_data_arr)
+        # acs lays walkers out in contiguous blocks of ``len(gpu_splits[0])`` per
+        # GPU, so ``walker % num_per_gpu_walker`` recovers the intra-split residual
+        # index inside generate_global_template. Required (and only valid) for >1
+        # GPU; left None for single-GPU so GBGPU keeps its 1-GPU fast path. Mirrors
+        # GBSpecialBase.adjust_sources_in_residual_buffer.
+        num_per_gpu_walker = (
+            len(acs.gpu_splits[0]) if (acs.gpus is not None and len(acs.gpus) > 1) else None
+        )
         gb.generate_global_template(
             coords_in_in,
             data_index,
@@ -738,12 +733,15 @@ def build_gb_moves(
             data_length=acs.data_length,
             factors=factors,
             data_splits=acs.gpu_map,
+            num_per_gpu=num_per_gpu_walker,
             N=N_vals,
             **gb_info.waveform_kwargs,
         )
         max_diff_templates = cp.abs(template_in[0]-acs.linear_data_arr[0]).max()
         del template_in
         logger.debug(f"The difference in residuals in/out = {max_diff_templates:5e}")
+
+    acs[0].data_res_arr.data_res_arr.plot(channel=0, filename=curr.general_info.artifacts_file_dir + "data_post_subtraction.png")
 
     #* Check if we need to adjust the band temps, and adjust if required
     adjust_temps = False

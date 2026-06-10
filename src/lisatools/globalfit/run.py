@@ -681,15 +681,18 @@ class GlobalFit:
             # permute False is there for the PSD sampling for now
 
             truths = self.curr.get_truths_dict()
-            
-            _ = truths.pop("gb", None)
+
+            exclude_from_plot = ["gb"]  # TODO: make this more general
+            truths_plot = {key: val for key, val in truths.items() if key not in exclude_from_plot}
+            branches_plot = [name for name in branch_names if name not in exclude_from_plot]
 
             plot_container = PlotContainer(
                 plots=["base", "tempering"],
+                branches=branches_plot,
                 parent_folder=self.curr.general_info.artifacts_file_dir + "diagnostics/",
                 tempering_palette="icefire",
                 discard=0.3,
-                truths=truths,
+                truths=truths_plot,
             )
 
             sampler_mix = GlobalFitEngine(
