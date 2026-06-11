@@ -65,7 +65,7 @@ pip install \
 #export CXX=/usr/bin/clang++
 #export PKG_CONFIG_PATH="/opt/homebrew/opt/lapack/lib/pkgconfig:$PKG_CONFIG_PATH"
 
-LAPACKE_FLAG="--config-settings=cmake.define.GBT_LAPACKE_FETCH=ON"
+LAPACKE_FLAG="--config-settings=cmake.define.GBT_LAPACKE_DETECT_WITH=PKGCONFIG"
 
 # ----------------------------------------------------------------------
 # Helpers

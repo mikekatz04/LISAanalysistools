@@ -52,7 +52,7 @@ from eryn.utils.transform import TransformContainer
 from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
 
-from lisatools.detector import EqualArmlengthOrbits
+from lisatools.detector import EqualArmlengthOrbits, Orbits
 from lisatools.domains import (
     DomainBaseArray,
     FDSettings,
@@ -152,6 +152,7 @@ def mbh_full_to_sampling(params_full: np.ndarray) -> np.ndarray:
       ``sin_beta = sin(beta)``
       All other params pass through unchanged.
     """
+    # TODO: add an inversion tool to the transform container
     p = np.asarray(params_full, dtype=float).copy()
     m1, m2 = float(p[0]), float(p[1])
     p[0] = np.log(m1 + m2)
@@ -330,6 +331,7 @@ def get_mbh_phentax_response_wrapper(
     order: int = 40,
     t_buffer: float = 3e4,
     higher_modes: Optional[object] = "all",
+    orbits: Optional[Orbits] = None,
     force_backend: str = "cpu",
 ):
     """Build (and cache) a :class:`ResponseWrapper` around
@@ -378,7 +380,10 @@ def get_mbh_phentax_response_wrapper(
         "t_buffer": t_buffer,
     }
 
-    orbits = EqualArmlengthOrbits(force_backend=force_backend)
+    if orbits is None:
+        orbits = EqualArmlengthOrbits(force_backend=force_backend)
+        
+    # ResponseWrapper.get_t0_shift_to_data(, dt: float, t_start: float) -> float:
     wave_gen = ResponseWrapper(
         waveform_gen,
         orbits=orbits,
@@ -422,6 +427,7 @@ class MBHWaveWrap:
         # with ``[lam, beta]`` (ecliptic) rather than (ra, dec).
         call_kwargs.setdefault("convert_to_ra_dec", False)
         arr = np.asarray(self.wave_gen(*params, **call_kwargs))
+        breakpoint()
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
         return TDSignal(arr, self.td_settings).transform(
@@ -641,6 +647,7 @@ def _build_mbh_phentax_transform() -> TransformContainer:
         input_basis=basis,
         output_basis=basis,
         parameter_transforms={
+            "logM": np.exp,
             ("logM", "q"): mT_q,           # (M_total, q) -> (m1, m2)
             "cos_iota": np.arccos,         # cos_iota -> inc
             "sin_beta": np.arcsin,         # sin_beta -> beta
@@ -672,6 +679,8 @@ def get_mbh_phentax_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
     waveform_kwargs_pe = dict()
 
     delta_prior = 1e-2
+    # TODO: adjust this to regular transform container indexing
+    breakpoint()
     injection_sampling = mbh_full_to_sampling(INJECTION_PARAMS_FULL_BASIS)
 
     # Tight box around the injection in the sampling basis. Angles

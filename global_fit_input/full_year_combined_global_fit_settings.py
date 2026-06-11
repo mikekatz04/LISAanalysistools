@@ -171,9 +171,9 @@ MOJITO_DATA_PATH = os.environ.get(
 # Edit to match the mojito catalog you intend to load. Each class is
 # capped at len(<list>) leaves per branch.
 MOJITO_SOURCE_IDS = {
-    "MBHB": [0, 3, 5, 6], # range(2)
-    "EMRI": [0, 1, 2], # range(2)
-    "SOBHB": [0, 1, 2], # range(2)
+    "MBHB": [0], # range(2)
+    "EMRI": [],  # 0, 1, 2], # range(2)
+    "SOBHB": [],  # [0, 1, 2], # range(2)
 }
 
 
@@ -275,8 +275,8 @@ DOMAIN_CHOICE = WDMSettings.make_factory(
     Nt=NT,
     min_freq=1e-4,
     max_freq=2.5e-2,
-    min_time=20 * 3600.0,
-    max_time=(NT - 20) * 3600.0,
+    min_time=20 * WAVELET_DURATION,
+    max_time=(NT - 20) * WAVELET_DURATION,
 )
 
 
@@ -903,39 +903,44 @@ def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> Optional
     )
 
     delta_prior = 1e-2
-    injection_sampling_per_leaf = np.stack(
-        [mbh_full_to_sampling(row) for row in MBH_INJECTIONS_FULL_BASIS],
-        axis=0,
-    )
-    base = injection_sampling_per_leaf[0]
-    logM_inj = float(base[0])
-    q_inj = float(base[1])
-    s1z_inj = float(base[2])
-    s2z_inj = float(base[3])
+    
 
-    dist_min = float(injection_sampling_per_leaf[:, 4].min())
-    dist_max = float(injection_sampling_per_leaf[:, 4].max())
-    t_plunge_min = float(injection_sampling_per_leaf[:, 10].min())
-    t_plunge_max = float(injection_sampling_per_leaf[:, 10].max())
+    if DATA_PROCESSOR == "mojito":
+        injection_sampling_per_leaf = mbh_full_to_sampling(np.asarray([
+            [
+                general_set.data_processor.catalogue["MBHB"][i]["PrimaryMassSSBFrame"],
+                general_set.data_processor.catalogue["MBHB"][i]["SecondaryMassSSBFrame"],
+                general_set.data_processor.catalogue["MBHB"][i]["PrimarySpinCompZ"],
+                general_set.data_processor.catalogue["MBHB"][i]["SecondarySpinCompZ"],
+                general_set.data_processor.catalogue["MBHB"][i]["LuminosityDistance"],
+                general_set.data_processor.catalogue["MBHB"][i]["PhaseReferenceSourceFrame"],
+                general_set.data_processor.catalogue["MBHB"][i]["InclinationAngle"],
+                general_set.data_processor.catalogue["MBHB"][i]["RightAscension"],
+                general_set.data_processor.catalogue["MBHB"][i]["Declination"],
+                general_set.data_processor.catalogue["MBHB"][i]["PolarisationAngle"],
+                general_set.data_processor.catalogue["MBHB"][i]["TimeCoalescencePhenomTPHMSSBFrame"],
+            ]
+            for i in range(len(general_set.data_processor.catalogue["MBHB"].keys()))
+        ]).T).T
+
+    else:
+        injection_sampling_per_leaf = np.stack(
+            [mbh_full_to_sampling(row) for row in MBH_INJECTIONS_FULL_BASIS],
+            axis=0,
+        )
 
     priors_mbh = {
-        "logM":     uniform_dist((1 - delta_prior) * logM_inj,
-                                 (1 + delta_prior) * logM_inj),
-        "q":        uniform_dist(max(0.01, (1 - delta_prior) * q_inj),
-                                 min(0.999, (1 + delta_prior) * q_inj)),
-        "s1z":      uniform_dist(max(-0.99, s1z_inj - delta_prior),
-                                 min(0.99, s1z_inj + delta_prior)),
-        "s2z":      uniform_dist(max(-0.99, s2z_inj - delta_prior),
-                                 min(0.99, s2z_inj + delta_prior)),
-        "dist":     uniform_dist((1 - delta_prior) * dist_min,
-                                 (1 + delta_prior) * dist_max),
+        "logM":     uniform_dist(np.log(1e4), np.log(1e8)),
+        "q":        uniform_dist(0.01, 0.99999),
+        "s1z":      uniform_dist(-0.99999, 0.99999),
+        "s2z":      uniform_dist(-0.99999, 0.99999),
+        "dist":     uniform_dist(100., 1e5),  # Mpc
         "phi_ref":  uniform_dist(0.0, 2 * np.pi),
         "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
         "psi":      uniform_dist(0.0, 2 * np.pi),
         "lam":      uniform_dist(0.0, 2 * np.pi),
         "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        "t_plunge": uniform_dist(max(0.0, t_plunge_min - 60.0),
-                                 t_plunge_max + 60.0),
+        "t_plunge": uniform_dist(0.0, general_set.Tobs),
     }
     priors = {"mbh": ProbDistContainer(priors_mbh)}
 
@@ -955,7 +960,9 @@ def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> Optional
         periodic={"mbh": {"phi_ref": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}},
         log_dir=general_set.file_store_dir,
     )
-    return MBHSetup(mbh_settings)
+    mbh_setup = MBHSetup(mbh_settings)
+
+    return mbh_setup
 
 
 # ============================================================
@@ -1042,6 +1049,7 @@ def _build_mbh_phentax_move_runtime(
         t_start=general_info.data_t0,
         tdi_config=tdi_config, tdi_chan=TDI_CHAN,
         role="template", force_backend=force_backend,
+        orbits=general_info.orbits
     )
     td_settings = TDSettings(
         int(round(general_info.Tobs / general_info.dt)),
@@ -1054,6 +1062,7 @@ def _build_mbh_phentax_move_runtime(
     )
 
     if np.any(mbh_inds := state.branches_inds["mbh"][0]):
+        print("remove mbhs")
         for leaf in range(mbh_inds.shape[-1]):
             if not mbh_inds[0, leaf]:
                 continue
@@ -1061,7 +1070,9 @@ def _build_mbh_phentax_move_runtime(
             inj_coords = state.branches_coords["mbh"][0, :, leaf]
             inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
             for i in range(inj_coords.shape[0]):
+                breakpoint()
                 sig = wave_gen(*inj_coords_in[i], **mbh_info.waveform_kwargs)
+                breakpoint()
                 acs.add_signal_to_residual([sig], data_index=np.array([i]))
                 del sig
                 gc.collect()
@@ -1280,7 +1291,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         window_taper_duration=WINDOW_TAPER_DURATION,
         gpu_backend=GPU_BACKEND,
         gpus=gpus,
-        data_processor=processor_class,
+        data_processor_class=processor_class,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,

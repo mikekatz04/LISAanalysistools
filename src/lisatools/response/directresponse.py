@@ -763,6 +763,16 @@ class ResponseWrapper(FastLISAResponseParallelModule):
 
         self.Tobs = (self.n * self.response_model.dt) / YRSID_SI
 
+    @staticmethod
+    def get_t0_shift_to_data(t_arr: np.ndarray[float], dt: float, t_start: float) -> float:
+        # just in case the time grids do not align
+        _fake_data = (np.arange(10000) - int(10000 / 2)) * dt + t_arr[0]
+        assert np.abs(t_start - t_arr[0]) / dt < 10000
+        diff = np.abs(_fake_data - t_start)
+        _fake_data_closest = _fake_data[diff.argmin()]
+        t0_shift_to_data = _fake_data_closest - t_start
+        return t0_shift_to_data
+    
     @property
     def xp(self) -> object:
         return self.backend.xp

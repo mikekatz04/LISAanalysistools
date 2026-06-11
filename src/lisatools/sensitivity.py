@@ -3264,4 +3264,5 @@ class CompositeSensitivityBackend:
                 )
             )
         components.extend(self.extra_components)
-        return CompositeSensitivityMatrix(self.basis_settings, components)
+        _tmp = CompositeSensitivityMatrix(self.basis_settings, components)
+        return _tmp

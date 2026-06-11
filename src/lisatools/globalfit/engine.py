@@ -176,7 +176,7 @@ class GeneralSettings(Settings):
     gpu_backend: str = "cuda12x"
     gpus: typing.List[int] | None = None
     fixed_psd_kwargs: typing.Dict[str, typing.Any] | None = None
-    data_processor: Optional[BaseProcessingStep] = None
+    data_processor_class: Optional[BaseProcessingStep] = None
     processor_init_kwargs: Optional[dict] = None
     preprocess_kwargs: Optional[dict] = None
     sensitivity_init_kwargs: Optional[dict] = None
@@ -288,10 +288,10 @@ class GeneralSetup(Setup, GeneralSettings):
 
     def init_data_information(self):
         """Run preprocessing, build the basis domain, and configure the sensitivity backend."""
-        if self.data_processor is None:
-            raise ValueError("Must provide data_processor for GeneralSetup.")
+        if self.data_processor_class is None:
+            raise ValueError("Must provide data_processor_class for GeneralSetup.")
 
-        data_processor = self.data_processor(**(self.processor_init_kwargs or {}))
+        self.data_processor = self.data_processor_class(**(self.processor_init_kwargs or {}))
 
         # preprocess data
         if self.fixed_psd_kwargs is None:
@@ -316,11 +316,11 @@ class GeneralSetup(Setup, GeneralSettings):
         for key, value in preprocess_kwargs.items():
             self.logger.debug(f"Preprocess setting: {key} = {value}")
 
-        times, _ = data_processor.process(**preprocess_kwargs)
-        dt = data_processor.td_signal.settings.dt
+        times, _ = self.data_processor.process(**preprocess_kwargs)
+        dt = self.data_processor.td_signal.settings.dt
         Nt = len(times)
         self.data_t0 = float(times[0])
-        self.catalogue = getattr(data_processor, 'catalogue', {})
+        self.catalogue = getattr(self.data_processor, 'catalogue', {})
 
         domain_settings = self._resolve_domain_settings(times=times, dt=dt)
         self.basis_kwargs = dict(force_backend=self.force_backend)
@@ -355,7 +355,7 @@ class GeneralSetup(Setup, GeneralSettings):
             )
 
         self.domain_settings = domain_settings
-        self.input_data_residual_array, orbits = data_processor.pour(
+        self.input_data_residual_array, orbits = self.data_processor.pour(
             settings=domain_settings, window=window, return_orbits=True
         )
 
@@ -393,7 +393,7 @@ class GeneralSetup(Setup, GeneralSettings):
         if orbits is not None:
             self.orbits = orbits
             if self.force_backend == self.gpu_backend:
-                self.gpu_orbits = data_processor.orbits_class(
+                self.gpu_orbits = self.data_processor.orbits_class(
                     filename=orbits.filename,
                     armlength=orbits.armlength,
                     force_backend=self.gpu_backend,

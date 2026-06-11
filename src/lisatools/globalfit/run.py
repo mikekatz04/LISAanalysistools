@@ -308,6 +308,32 @@ class GlobalFit:
                 inds["psd"][:] = True
             if "galfor" in inds:
                 inds["galfor"][:] = True
+            if "mbh" in inds:
+                inds["mbh"][:] = True
+                self.logger.debug("initializing mbh inds to true")
+                if (
+                    "mbh" in self.curr.source_info
+                    and self.curr.source_info["mbh"].injection is not None
+                ):
+                    self.logger.debug(
+                        "override mbh starting coords to be close to the injection"
+                    )
+                    factor = 1e-5
+                    inj = np.asarray(self.curr.source_info["mbh"].injection)
+                    if inj.ndim == 1:
+                        inj = inj[None, :]
+                    nleaves_mbh = self.engine_info.nleaves_max["mbh"]
+                    ndim_mbh = inj.shape[-1]
+                    if inj.shape[0] == 1:
+                        inj = np.broadcast_to(inj, (nleaves_mbh, ndim_mbh))
+                    assert inj.shape == (nleaves_mbh, ndim_mbh), (
+                        f"MBH injection shape {inj.shape} doesn't match "
+                        f"(nleaves_max={nleaves_mbh}, ndim={ndim_mbh})."
+                    )
+                    coords["mbh"] = inj[None, None] + factor * np.random.randn(
+                        self.ntemps, self.nwalkers, nleaves_mbh, ndim_mbh
+                    ) 
+
             if "emri" in inds:
                 inds["emri"][:] = True
                 self.logger.debug("initializing emri inds to true")
@@ -427,7 +453,7 @@ class GlobalFit:
                     f"walker_{w}", **general_info.fixed_psd_kwargs
                 )
 
-            acs_tmp.append(AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here)))
+            acs_tmp.append((_analysis_tmp := AnalysisContainer(deepcopy(data_res_arr), deepcopy(sens_here))))
 
         gpus = general_info.gpus
         acs = AnalysisContainerArray(acs_tmp, gpus=gpus)
