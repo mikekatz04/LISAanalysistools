@@ -66,26 +66,6 @@ void check_response(LISAResponse *response)
 
 
 
-std::string get_module_path_responselisa() {
-    // Acquire the GIL if it's not already held (safe to call multiple times)
-    nb::gil_scoped_acquire acquire;
-
-    // Import the module by its name
-    // Note: The module name here ("responselisa") must match the name used in NB_MODULE
-    nb::object module = nb::module_::import_("responselisa");
-
-    // Access the __file__ attribute and cast it to a C++ string
-    try {
-        std::string path = nb::cast<std::string>(module.attr("__file__"));
-        return path;
-    } catch (const nb::python_error& e) {
-        // Handle the error if __file__ attribute is missing (e.g., if module is a namespace package)
-        std::cerr << "Error getting __file__ attribute: " << e.what() << std::endl;
-        return "";
-    }
-}
-
-
 // NB_MODULE creates the entry point for the Python module
 // The module name here must match the one used in CMakeLists.txt
 void response_part(nb::module_ &m) {
@@ -141,28 +121,21 @@ void response_part(nb::module_ &m) {
          nb::arg("unit_starts"), nb::arg("unit_lengths"), nb::arg("tdi_base_link"), nb::arg("tdi_link_combinations"), nb::arg("tdi_signs_in"), nb::arg("channels"), nb::arg("num_units"), nb::arg("num_channels"))
     ;
 
-    // Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa class + its pybind
-    // registration deleted. Use OrbitsWrap (binding.hpp) directly -- the two
+    // Phase 3L.7p (2026-06-04): legacy OrbitsWrap_responselisa class + its
+    // pybind registration deleted. Use OrbitsWrap (binding.hpp) directly -- the two
     // shipped identical constructor signatures + identical Orbits* fields;
     // the only structural difference was the (unused) ReturnPointerBase
     // inheritance. All downstream *TDIonTheFlyWrap / LISAResponseWrap
     // constructors now take OrbitsWrap *.
 
-#if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-    nb::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapGPU_responselisa")
-#else
-    nb::class_<CubicSplineWrap_responselisa>(m, "CubicSplineWrapCPU_responselisa")
-#endif
-
-    // Bind the constructor
-    .def(nb::init<array_type<double>, array_type<double>, array_type<double>, array_type<double>, array_type<double>, int, int, int>(),
-         nb::arg("x0"), nb::arg("y0"), nb::arg("c1"), nb::arg("c2"), nb::arg("c3"), nb::arg("ninterps"), nb::arg("length"), nb::arg("spline_type"))
-    // Bind member functions
-
-    // You can also expose public data members directly using def_rw
-    .def_rw("spline", &CubicSplineWrap_responselisa::spline)
-    // .def("get_link_ind", &CubicSplineWrap::get_link_ind, "Get link index.")
-    ;
+    // 2026-06-10: CubicSplineWrap registration removed -- the class is
+    // GBT's and GBT's `interp` module is its single registrant (same
+    // pattern as downstream packages consuming LAT's OrbitsWrap). LAT's
+    // FDSpline/TDSplineTDIWaveformWrap constructors take
+    // `CubicSplineWrap *`; nanobind resolves the shared typeid against
+    // GBT's registration at call time. Python code reaches the class
+    // via `gbt_backend_<flavor>.interp.CubicSplineWrap{CPU,GPU}`
+    // (re-exported on the LAT/GBGPU/BBHx backend objects).
 
     // Phase 3L: FDDomain + FDDomainWrap absorbed from lisa-on-gpu's
     // TDIonTheFly.hh / binding_tof.{cxx,hpp}. The C++ class definitions
@@ -248,7 +221,7 @@ void response_part(nb::module_ &m) {
 #else
     nb::class_<FDSplineTDIWaveformWrap>(m, "FDSplineTDIWaveformWrapCPU")
 #endif
-    .def(nb::init<OrbitsWrap *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+    .def(nb::init<OrbitsWrap *, TDIConfigWrap *, CubicSplineWrap *, CubicSplineWrap *>(),
          nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("freq_spline"))
     .def("run_wave_tdi_wrap", &FDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
     .def("get_buffer_size", &FDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
@@ -273,7 +246,7 @@ void response_part(nb::module_ &m) {
 #else
     nb::class_<TDSplineTDIWaveformWrap>(m, "TDSplineTDIWaveformWrapCPU")
 #endif
-    .def(nb::init<OrbitsWrap *, TDIConfigWrap *, CubicSplineWrap_responselisa *, CubicSplineWrap_responselisa *>(),
+    .def(nb::init<OrbitsWrap *, TDIConfigWrap *, CubicSplineWrap *, CubicSplineWrap *>(),
          nb::arg("orbits"), nb::arg("tdi_config"), nb::arg("amp_spline"), nb::arg("phase_spline"))
     .def("run_wave_tdi_wrap", &TDSplineTDIWaveformWrap::run_wave_tdi_wrap, "Preform TDI combinations.")
     .def("get_buffer_size", &TDSplineTDIWaveformWrap::get_buffer_size, "Get needed buffer size.")
@@ -297,12 +270,13 @@ void response_part(nb::module_ &m) {
 
 
 // NB_MODULE(responselisa, ...) removed during Phase 3E (2026-06-02):
-// the response classes (LISAResponseWrap, TDIConfigWrap,
-// CubicSplineWrap_responselisa) are now registered into LAT's `pycppdetector`
-// pybind11 module via response_part(m) called from binding.cxx's
-// NB_MODULE(pycppdetector, m) body.
+// the response classes (LISAResponseWrap, TDIConfigWrap) are now
+// registered into LAT's `pycppdetector` module via response_part(m)
+// called from binding.cxx's NB_MODULE(pycppdetector, m) body.
+// (CubicSplineWrap moved to GBT ownership 2026-06-10 -- registered
+// solely by GBT's `interp` module.)
 //
-// Helpers `check_response` and `get_module_path_responselisa` were also
+// Helpers `check_response` and `get_module_path` were also
 // only used by the deleted NB_MODULE body; the latter referenced a
 // module name that no longer exists.
 

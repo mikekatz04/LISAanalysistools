@@ -54,11 +54,13 @@ class LISAToolsBackendMethods(BackendMethods):
     FDSplineTDIWaveformWrap: object
     LISAResponseWrap: object
     LISAResponse: object
-    # Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa removed.
+    # Phase 3L.7p (2026-06-04): OrbitsWrap removed.
     # Consumers reach for OrbitsWrap above.
     TDIConfigWrap: object
     TDIConfig: object
-    CubicSplineWrap_responselisa: object
+    # Canonical name `CubicSplineWrap` (the `_responselisa` tail was
+    # dropped everywhere, mirroring the Phase 3L.7p OrbitsWrap collapse).
+    CubicSplineWrap: object
     WDMSettingsWrap: object
     WDMDomainWrap: object
     FDDomainWrap: object
@@ -96,7 +98,7 @@ class LISAToolsBackend:
     LISAResponse: object
     TDIConfigWrap: object
     TDIConfig: object
-    CubicSplineWrap_responselisa: object
+    CubicSplineWrap: object
     WDMSettingsWrap: object
     WDMDomainWrap: object
     FDDomainWrap: object
@@ -121,7 +123,7 @@ class LISAToolsBackend:
         self.LISAResponse = lisatools_backend_methods.LISAResponse
         self.TDIConfigWrap = lisatools_backend_methods.TDIConfigWrap
         self.TDIConfig = lisatools_backend_methods.TDIConfig
-        self.CubicSplineWrap_responselisa = lisatools_backend_methods.CubicSplineWrap_responselisa
+        self.CubicSplineWrap = lisatools_backend_methods.CubicSplineWrap
         self.WDMSettingsWrap = lisatools_backend_methods.WDMSettingsWrap
         self.WDMDomainWrap = lisatools_backend_methods.WDMDomainWrap
         self.FDDomainWrap = lisatools_backend_methods.FDDomainWrap
@@ -147,6 +149,7 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
                 imported (e.g. the CPU extension was not built).
         """
         try:
+            import gbt_backend_cpu.interp
             import lisatools_backend_cpu.pycppdetector
 
         except (ModuleNotFoundError, ImportError) as e:
@@ -169,7 +172,9 @@ class LISAToolsCpuBackend(CpuBackend, LISAToolsBackend):
             LISAResponse=_lat_pd.LISAResponseCPU,
             TDIConfigWrap=_lat_pd.TDIConfigWrapCPU,
             TDIConfig=_lat_pd.TDIConfigCPU,
-            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapCPU_responselisa,
+            # GBT is the single registrant for CubicSplineWrap (same
+            # pattern as downstream packages consuming LAT's OrbitsWrap).
+            CubicSplineWrap=gbt_backend_cpu.interp.CubicSplineWrapCPU,
             WDMSettingsWrap=_lat_pd.WDMSettingsWrapCPU,
             WDMDomainWrap=_lat_pd.WDMDomainWrapCPU,
             FDDomainWrap=_lat_pd.FDDomainWrapCPU,
@@ -199,6 +204,7 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
                 not installed.
         """
         try:
+            import gbt_backend_cuda11x.interp
             import lisatools_backend_cuda11x.pycppdetector
             # import lisatools_backend_cuda11x.psd
 
@@ -227,7 +233,8 @@ class LISAToolsCuda11xBackend(Cuda11xBackend, LISAToolsBackend):
             LISAResponse=_lat_pd.LISAResponseGPU,
             TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
             TDIConfig=_lat_pd.TDIConfigGPU,
-            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
+            # GBT is the single registrant for CubicSplineWrap.
+            CubicSplineWrap=gbt_backend_cuda11x.interp.CubicSplineWrapGPU,
             WDMSettingsWrap=_lat_pd.WDMSettingsWrapGPU,
             WDMDomainWrap=_lat_pd.WDMDomainWrapGPU,
             FDDomainWrap=_lat_pd.FDDomainWrapGPU,
@@ -257,6 +264,7 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
                 not installed.
         """
         try:
+            import gbt_backend_cuda12x.interp
             import lisatools_backend_cuda12x.pycppdetector
 
         except (ModuleNotFoundError, ImportError) as e:
@@ -284,7 +292,8 @@ class LISAToolsCuda12xBackend(Cuda12xBackend, LISAToolsBackend):
             LISAResponse=_lat_pd.LISAResponseGPU,
             TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
             TDIConfig=_lat_pd.TDIConfigGPU,
-            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
+            # GBT is the single registrant for CubicSplineWrap.
+            CubicSplineWrap=gbt_backend_cuda12x.interp.CubicSplineWrapGPU,
             WDMSettingsWrap=_lat_pd.WDMSettingsWrapGPU,
             WDMDomainWrap=_lat_pd.WDMDomainWrapGPU,
             FDDomainWrap=_lat_pd.FDDomainWrapGPU,
@@ -313,6 +322,7 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
                 not installed.
         """
         try:
+            import gbt_backend_cuda13x.interp
             import lisatools_backend_cuda13x.pycppdetector
 
             # import lisatools_backend_cuda13x.psd
@@ -342,7 +352,8 @@ class LISAToolsCuda13xBackend(Cuda13xBackend, LISAToolsBackend):
             LISAResponse=_lat_pd.LISAResponseGPU,
             TDIConfigWrap=_lat_pd.TDIConfigWrapGPU,
             TDIConfig=_lat_pd.TDIConfigGPU,
-            CubicSplineWrap_responselisa=_lat_pd.CubicSplineWrapGPU_responselisa,
+            # GBT is the single registrant for CubicSplineWrap.
+            CubicSplineWrap=gbt_backend_cuda13x.interp.CubicSplineWrapGPU,
             WDMSettingsWrap=_lat_pd.WDMSettingsWrapGPU,
             WDMDomainWrap=_lat_pd.WDMDomainWrapGPU,
             FDDomainWrap=_lat_pd.FDDomainWrapGPU,

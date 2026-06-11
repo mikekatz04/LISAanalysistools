@@ -24,13 +24,17 @@ using array_type = nb::ndarray<T, nb::device::cpu>;
 #define LISAResponseWrap LISAResponseWrapCPU
 #endif
 
-// Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa #define aliases dropped;
-// the class was deleted in favor of binding.hpp's canonical OrbitsWrap.
+// Phase 3L.7p (2026-06-04): legacy OrbitsWrap_responselisa #define aliases
+// dropped; the class was deleted in favor of binding.hpp's canonical OrbitsWrap.
+// 2026-06-10: CubicSplineWrap #define alias dropped too -- the class
+// is GBT's (gbt_binding.hpp, included above), which carries its own
+// CPU/GPU alias block. Same single-registrant pattern as OrbitsWrap:
+// GBT's `interp` module is the sole registrant; LAT consumes the class
+// through the shared header so the C++ typeid matches GBT's
+// registration and nanobind cross-module casting works.
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
-#define CubicSplineWrap_responselisa CubicSplineWrapGPU_responselisa
 #define TDIConfigWrap TDIConfigWrapGPU
 #else
-#define CubicSplineWrap_responselisa CubicSplineWrapCPU_responselisa
 #define TDIConfigWrap TDIConfigWrapCPU
 #endif
 
@@ -77,30 +81,13 @@ class ReturnPointerBase {
 
 };
 
-class CubicSplineWrap_responselisa : public ReturnPointerBase {
-  public:
-    CubicSpline *spline;
-    CubicSplineWrap_responselisa(array_type<double> x0_, array_type<double> y0_, array_type<double> c1_, array_type<double> c2_, array_type<double> c3_, int ninterps_, int length_, int spline_type_)
-    {
-
-        double *_x0 = return_pointer_and_check_length(x0_, "x0", length_, ninterps_);
-        double *_y0 = return_pointer_and_check_length(y0_, "y0", length_, ninterps_);
-        double *_c1 = return_pointer_and_check_length(c1_, "c1", length_, ninterps_);
-        double *_c2 = return_pointer_and_check_length(c2_, "c2", length_, ninterps_);
-        double *_c3 = return_pointer_and_check_length(c3_, "c3", length_, ninterps_);
-
-        spline = new CubicSpline(_x0, _y0, _c1, _c2, _c3, ninterps_, length_, spline_type_);
-    };
-    ~CubicSplineWrap_responselisa(){
-        delete spline;
-    };
-    void eval_wrap(array_type<double>y_new, array_type<double>x_new, array_type<int>spline_index, int N);
-
-};
+// 2026-06-10: LAT's local CubicSplineWrap class deleted -- it was a
+// byte-for-byte duplicate of GBT's (gbt_binding.hpp), differing only in
+// the (unused) ReturnPointerBase inheritance. LAT now consumes GBT's
+// class directly, mirroring how GBGPU/BBHx consume LAT's OrbitsWrap.
 
 
-
-// Phase 3L.7p (2026-06-04): OrbitsWrap_responselisa deleted -- collapsed
+// Phase 3L.7p (2026-06-04): legacy OrbitsWrap_responselisa deleted -- collapsed
 // into the canonical `OrbitsWrap` (binding.hpp). Both classes always
 // shipped identical constructor signatures; the only structural difference
 // was that this one inherited from ReturnPointerBase for its static

@@ -53,6 +53,7 @@ from lisatools.sampling.prior import SNRPrior, AmplitudeFromSNR, AmplitudeFreque
 from lisatools.globalfit.stock.erebor import (
     GalForSetup, GalForSettings, PSDSetup, PSDSettings,
     MBHSetup, MBHSettings, GBSetup, GBSettings, EMRISetup, EMRISettings,
+    make_emri_transform_container,
 )
 
 from eryn.prior import uniform_dist
@@ -422,12 +423,9 @@ def get_emri_erebor_settings(general_set: GeneralSetup) -> EMRISetup:
 
     fill_values = np.array([injection_params[5], injection_params[12]])
 
-    injection_sampling = deepcopy(injection_params)
-    injection_sampling[0] = np.log(injection_sampling[0])  # log mass
-    injection_sampling[7] = np.cos(injection_sampling[7])  # cos qK
-    injection_sampling[9] = np.cos(injection_sampling[9])  # cos qS
-
-    injection_sampling = np.delete(injection_sampling, [5, 12])
+    injection_sampling = make_emri_transform_container(fill_values).both_inverse_transforms(
+        injection_params
+    )
 
     #breakpoint()
     logm1_lims = [(1-delta_prior) * injection_sampling[0], (1+delta_prior) * injection_sampling[0]]

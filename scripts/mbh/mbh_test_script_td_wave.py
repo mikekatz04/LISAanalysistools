@@ -22,7 +22,7 @@ from lisatools.response.tdiconfig import TDIConfig
 from lisatools.response.directresponse import icrs_to_ecliptic
 
 from phentax.waveform import IMRPhenomTHM 
-from mbhtdionfly import MBHTDIonFly
+from bbhx.mbhtdionfly import MBHTDIonFly
 
 from lisatools.datacontainer import DataResidualArray
 from lisatools.analysiscontainer import AnalysisContainer

@@ -2,7 +2,12 @@
 
 Source classes
 --------------
-- MBH (phentax IMRPhenomTHM): StretchMove inside ResidualAddOneRemoveOneMove.
+- MBH (phentax IMRPhenomTHM amp/phase -> TDTDIonTheFly TD response):
+  StretchMove inside ResidualAddOneRemoveOneMove. The TD waveform is
+  generated via the TDI-on-the-fly spline path (mirrors
+  ``bbhx.mbhtdionfly`` (moved from ``scripts/mbh/mbhtdionfly.py``, 2026-06-10)) and then transformed to the WDM
+  domain. Waveform basis: ``(m1, m2, s1z, s2z, dist [Mpc], phi_ref,
+  inc, lam, beta, psi, t_merger)``.
 - EMRI                     : StretchMove inside ResidualAddOneRemoveOneMove.
 - SOBBH                    : StretchMove inside ResidualAddOneRemoveOneMove.
 
@@ -109,6 +114,8 @@ from lisatools.sensitivity import (
     GalacticForeground,
     InstrumentNoise,
 )
+from lisatools.sampling.moves.skymodehop import SkyMove
+from lisatools.sources.utils import icrs_to_ecliptic as icrs_sky_to_ecliptic
 from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
 from lisatools.utils.constants import YRSID_SI
 
@@ -140,19 +147,21 @@ from global_fit_settings import (
 
 from mbh_phentax_only_global_fit_settings import (
     INJECTION_PARAMS_FULL_BASIS as _SINGLE_MBH_PHENTAX_INJECTION,
-    IMRPhenomTHMWaveform,
-    MBHWaveWrap,
-    _build_mbh_phentax_transform,
-    get_mbh_phentax_response_wrapper,
-    mbh_full_to_sampling,
+    MBH_TDIONFLY_HIGHER_MODES,
+    MBHTDIonFlyWaveWrap,
+    _build_mbh_tdionfly_transform,
+    get_mbh_tdionfly_gen,
+    mbh_tdionfly_full_to_sampling,
 )
 
 # ============================================================
 # *** Top-of-file knobs (the "surface" the user touches) ***
 # ============================================================
 
-# Target observation length and sample step.
-TOBS_TARGET = YRSID_SI
+# Target observation length and sample step. TOBS_TARGET is
+# env-overridable so smoke tests can run on a shorter stretch
+# (e.g. TOBS_TARGET=2.6e6 for ~1 month) without editing this file.
+TOBS_TARGET = float(os.environ.get("TOBS_TARGET", YRSID_SI))
 DT = 2.5
 
 # Half-day-ish wavelet-duration search window for adjust_to_even_bins.
@@ -227,10 +236,22 @@ NCHANNELS = 3
 # Synthetic-mode start time (mojito mode pulls t_start from the L1 file).
 SYNTHETIC_T_START = 0.0
 
-# Engine-level
+# MBH TDI-on-the-fly: phentax waveform window before merger. ``None``
+# (env value "none") generates from the merger back through the merger
+# time itself, i.e. the waveform starts at the data start; the
+# test-script choice (1 month) keeps per-call cost down while covering
+# the in-band signal. NOTE: must stay <= the earliest sampled t_merger,
+# otherwise the waveform grid extends before the data start (and off
+# the orbit splines). (See scripts/mbh/mbh_test_script_td_wave.py.)
+_mwd_env = os.environ.get("MBH_WAVEFORM_DURATION", str(YRSID_SI / 12.0))
+MBH_WAVEFORM_DURATION = (
+    None if _mwd_env.strip().lower() in ("", "none") else float(_mwd_env)
+)
+
+# Engine-level (NWALKERS / NTEMPS env-overridable for smoke tests).
 RANDOM_SEED = 103209
-NWALKERS = 6
-NTEMPS = 3
+NWALKERS = int(os.environ.get("NWALKERS", 6))
+NTEMPS = int(os.environ.get("NTEMPS", 3))
 WINDOW_TAPER_DURATION = 0.0  # rectangular window
 
 # Output
@@ -504,23 +525,34 @@ def _make_sobbh_injections(n: int) -> np.ndarray:
 
 
 def _make_mbh_injections(n: int, tobs: float) -> np.ndarray:
-    """Return ``(n, 11)`` MBH-phentax waveform-basis injection vectors."""
-    base = _SINGLE_MBH_PHENTAX_INJECTION.copy()
+    """Return ``(n, 11)`` MBH TDI-on-the-fly waveform-basis injection vectors.
+
+    Basis: ``(m1, m2, s1z, s2z, dist [Mpc], phi_ref, inc, lam, beta,
+    psi, t_merger)`` — the :class:`MBHTDIonFly` call signature. Masses
+    and spins come from the shared phentax baseline; sky / phase /
+    distance / merger time vary per source.
+    """
+    base = _SINGLE_MBH_PHENTAX_INJECTION.copy()  # (m1, m2, s1z, s2z, ...)
     if n == 0:
-        return np.zeros((0, base.size), dtype=base.dtype)
+        return np.zeros((0, 11), dtype=float)
     rng = np.random.default_rng(33)
     rows = []
     for i in range(n):
-        row = base.copy()
-        row[4]  = 10.0 + 15.0 * rng.uniform()         # dist (Gpc)
-        row[5]  = rng.uniform(0.0, 2.0 * np.pi)       # phi_ref
-        row[6]  = rng.uniform(0.1, np.pi - 0.1)       # inc
-        row[7]  = rng.uniform(0.0, 2.0 * np.pi)       # psi
-        row[8]  = rng.uniform(0.0, 2.0 * np.pi)       # lam
-        row[9]  = rng.uniform(-np.pi / 2 + 0.1, np.pi / 2 - 0.1)  # beta
-        # Spread merger times across the interior of the observation.
-        row[10] = (0.2 + 0.6 * (i + 1) / (n + 1)) * tobs
-        rows.append(row)
+        rows.append(np.array([
+            base[0],                                       # m1 (M_sun)
+            base[1],                                       # m2 (M_sun)
+            base[2],                                       # s1z
+            base[3],                                       # s2z
+            (10.0 + 15.0 * rng.uniform()) * 1e3,           # dist (Mpc)
+            rng.uniform(0.0, 2.0 * np.pi),                 # phi_ref
+            rng.uniform(0.1, np.pi - 0.1),                 # inc
+            rng.uniform(0.0, 2.0 * np.pi),                 # lam
+            rng.uniform(-np.pi / 2 + 0.1, np.pi / 2 - 0.1),  # beta
+            rng.uniform(0.0, np.pi),                       # psi
+            # Spread merger times across the interior of the observation
+            # (relative to the data start time).
+            (0.2 + 0.6 * (i + 1) / (n + 1)) * tobs,        # t_merger
+        ]))
     return np.stack(rows, axis=0)
 
 
@@ -567,7 +599,7 @@ def _build_synthetic_source_streams(
         for ii, params in enumerate(emri_injections):
             print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
         
-            sig = np.asarray(emri_wave_gen(*params, convert_to_ra_dec=False))
+            sig = np.asarray(emri_wave_gen(*params))
             emri_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
             print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [end]")
         
@@ -581,22 +613,28 @@ def _build_synthetic_source_streams(
         )
         for ii, params in enumerate(sobbh_injections):
             print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
-            sig = np.asarray(sobbh_wave_gen(*params, convert_to_ra_dec=False))
+            sig = np.asarray(sobbh_wave_gen(*params))
             sobbh_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
             print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [end]")
 
     mbh_td = zero.copy()
     if mbh_injections.shape[0] > 0:
-        mbh_wave_gen = get_mbh_phentax_response_wrapper(
+        # TDI-on-the-fly path: evaluate the spline TDI output directly
+        # on the data time grid (no ResponseWrapper).
+        mbh_wave_gen = get_mbh_tdionfly_gen(
             Tobs=Tobs, dt=dt, t_start=t_start,
-            tdi_config=tdi_config, tdi_chan=TDI_CHAN,
-            role="injection", force_backend=force_backend,
+            tdi_config=tdi_config,
+            waveform_duration=MBH_WAVEFORM_DURATION,
+            force_backend=force_backend,
         )
+        t_arr = np.arange(target_N) * dt + t_start
         for ii, params in enumerate(mbh_injections):
             print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
-            sig = np.asarray(mbh_wave_gen(*params, convert_to_ra_dec=False))
+            sig = np.asarray(
+                mbh_wave_gen(*params, upsample_t_arr=t_arr, combine=True)
+            )
             mbh_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
-            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
+            print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [end]")
     return emri_td, sobbh_td, mbh_td
 
 
@@ -750,9 +788,10 @@ def _force_backend_for_branch() -> str:
 def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISetup]:
     """EMRI setup with ``nleaves_max = N_EMRI_INJECTIONS``.
 
-    Stretch inner moves. Tight per-leaf intrinsic priors derived from the
-    shared intrinsic baseline; sky/phase/distance use the default wide
-    priors inside :class:`EMRISetup`. Returns ``None`` when no EMRI
+    Stretch inner moves. Full-range priors: every parameter uses the
+    default wide priors inside :class:`EMRISetup` (all ``*_lims`` are
+    ``None``). Injections come from the mojito catalogue when
+    ``DATA_PROCESSOR == "mojito"``. Returns ``None`` when no EMRI
     leaves are injected so the caller can skip the branch.
     """
     if N_EMRI_INJECTIONS == 0:
@@ -773,21 +812,70 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
         ),
     )
 
-    delta_prior = 1e-2
+    if DATA_PROCESSOR == "mojito":
+        # NOTE: catalogue field names are best-guess (mojito EMRI catalogue
+        # schema unverified) — correct them against the actual
+        # emri_cat_mojito_lite_processed_MT.hdf5 keys. Sky and spin
+        # directions are read raw in ICRS and rotated to the SSB-ecliptic
+        # run frame below.
+        _emri_cat = general_set.data_processor.catalogue["EMRI"]
+        emri_injections_full_basis = np.asarray([
+            [
+                _emri_cat[i]["PrimaryMassSSBFrame"],        # M
+                _emri_cat[i]["SecondaryMassSSBFrame"],      # mu
+                _emri_cat[i]["PrimarySpin"],                # a
+                _emri_cat[i]["InitialSemiLatusRectum"],     # p0
+                _emri_cat[i]["InitialEccentricity"],        # e0
+                _emri_cat[i]["InitialCosineInclination"],   # xI0
+                _emri_cat[i]["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
+                _emri_cat[i]["Declination"],                # qS slot (raw Dec; converted below)
+                _emri_cat[i]["RightAscension"],             # phiS slot (raw RA; converted below)
+                _emri_cat[i]["PolarAngleOfSpin"],           # qK slot (raw ICRS polar; converted below)
+                _emri_cat[i]["AzimuthalAngleOfSpin"],       # phiK slot (raw ICRS azimuth; converted below)
+                _emri_cat[i]["InitialPhasePhiPhi"],         # Phi_phi0
+                _emri_cat[i]["InitialPhasePhiTheta"],       # Phi_theta0
+                _emri_cat[i]["InitialPhasePhiR"],           # Phi_r0
+            ]
+            for i in sorted(_emri_cat.keys())
+        ])
+        # Sky direction ICRS -> SSB ecliptic (the run frame). qS/phiS are
+        # polar/azimuthal angles: qS = pi/2 - latitude.
+        _, lam_S, beta_S = icrs_sky_to_ecliptic(
+            0.0,
+            emri_injections_full_basis[:, 8],  # RA
+            emri_injections_full_basis[:, 7],  # Dec
+        )
+        emri_injections_full_basis[:, 7] = np.pi / 2 - beta_S    # qS
+        emri_injections_full_basis[:, 8] = lam_S % (2 * np.pi)   # phiS
+        # The MBH spin orientation (qK, phiK) is likewise a direction on
+        # the sky; rotate it the same way (assumes the catalogue gives it
+        # as ICRS polar/azimuth angles).
+        _, lam_K, beta_K = icrs_sky_to_ecliptic(
+            0.0,
+            emri_injections_full_basis[:, 10],                   # azimuth (RA-like)
+            np.pi / 2 - emri_injections_full_basis[:, 9],        # polar -> dec
+        )
+        emri_injections_full_basis[:, 9] = np.pi / 2 - beta_K    # qK
+        emri_injections_full_basis[:, 10] = lam_K % (2 * np.pi)  # phiK
+    else:
+        emri_injections_full_basis = EMRI_INJECTIONS_FULL_BASIS
+
     injection_sampling_per_leaf = np.stack(
-        [emri_full_to_sampling(row) for row in EMRI_INJECTIONS_FULL_BASIS],
+        [emri_full_to_sampling(row) for row in emri_injections_full_basis],
         axis=0,
     )
-    base = injection_sampling_per_leaf[0]
-    logm1_lims = [(1 - delta_prior) * base[0], (1 + delta_prior) * base[0]]
-    m2_lims = [(1 - delta_prior) * base[1], (1 + delta_prior) * base[1]]
-    a_lims = [(1 - delta_prior) * base[2], min(0.999, (1 + delta_prior) * base[2])]
-    p0_lims = [(1 - delta_prior) * base[3], (1 + delta_prior) * base[3]]
-    e0_lims = [(1 - delta_prior) * base[4], (1 + delta_prior) * base[4]]
+
+    # Full-range priors: passing None for every *_lims keeps the wide
+    # defaults built inside EMRISetup.setup_priors (dist in Gpc).
+    logm1_lims = None
+    m2_lims = None
+    a_lims = None
+    p0_lims = None
+    e0_lims = None
 
     fill_values = np.array([
-        EMRI_INJECTIONS_FULL_BASIS[0, 5],   # xI0
-        EMRI_INJECTIONS_FULL_BASIS[0, 12],  # Phi_theta0
+        emri_injections_full_basis[0, 5],   # xI0
+        emri_injections_full_basis[0, 12],  # Phi_theta0
     ])
 
     emri_settings = EMRISettings(
@@ -816,7 +904,10 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
     """SOBBH setup with ``nleaves_max = N_SOBBH_INJECTIONS``.
 
     Uses ``StretchMove`` as the inner move (mirrors the EMRI / MBH
-    branches). Returns ``None`` when no SOBBH leaves are injected.
+    branches). Full-range priors (all ``*_lims`` are ``None`` so the
+    :class:`SOBBHSetup` defaults apply); injections come from the mojito
+    catalogue when ``DATA_PROCESSOR == "mojito"``. Returns ``None`` when
+    no SOBBH leaves are injected.
     """
     if N_SOBBH_INJECTIONS == 0:
         return None
@@ -836,22 +927,53 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
         ),
     )
 
-    delta_prior = 1e-2
+    if DATA_PROCESSOR == "mojito":
+        # NOTE: catalogue field names follow the MBHB schema (same MT
+        # processing); GW22FrequencySSBFrame -> f_low is a best guess —
+        # correct against the actual sobhb_cat_mojito_lite_processed_MT.hdf5
+        # keys. Sky + polarization are read raw in ICRS and rotated to the
+        # SSB-ecliptic run frame below.
+        _sobbh_cat = general_set.data_processor.catalogue["SOBHB"]
+        sobbh_injections_full_basis = np.asarray([
+            [
+                _sobbh_cat[i]["PrimaryMassSSBFrame"],       # m1
+                _sobbh_cat[i]["SecondaryMassSSBFrame"],     # m2
+                _sobbh_cat[i]["PrimarySpinCompZ"],          # s1
+                _sobbh_cat[i]["SecondarySpinCompZ"],        # s2
+                _sobbh_cat[i]["LuminosityDistance"] / 1e3,  # dist (Mpc -> Gpc)
+                _sobbh_cat[i]["InclinationAngle"],          # inc
+                _sobbh_cat[i]["GW22FrequencySSBFrame"],     # f_low
+                _sobbh_cat[i]["RightAscension"],            # lam slot (raw RA; converted below)
+                _sobbh_cat[i]["Declination"],               # beta slot (raw Dec; converted below)
+                _sobbh_cat[i]["PolarisationAngle"],         # psi (ICRS; converted below)
+                _sobbh_cat[i]["PhaseReferenceSourceFrame"], # phi0
+            ]
+            for i in sorted(_sobbh_cat.keys())
+        ])
+        # Sky + polarization ICRS -> SSB ecliptic (the run frame).
+        psi_ecl, lam_ecl, beta_ecl = icrs_sky_to_ecliptic(
+            sobbh_injections_full_basis[:, 9],
+            sobbh_injections_full_basis[:, 7],
+            sobbh_injections_full_basis[:, 8],
+        )
+        sobbh_injections_full_basis[:, 7] = lam_ecl % (2 * np.pi)
+        sobbh_injections_full_basis[:, 8] = beta_ecl
+        sobbh_injections_full_basis[:, 9] = psi_ecl % np.pi
+    else:
+        sobbh_injections_full_basis = SOBBH_INJECTIONS_FULL_BASIS
+
     injection_sampling_per_leaf = np.stack(
-        [sobbh_full_to_sampling(row) for row in SOBBH_INJECTIONS_FULL_BASIS],
+        [sobbh_full_to_sampling(row) for row in sobbh_injections_full_basis],
         axis=0,
     )
-    base = injection_sampling_per_leaf[0]
-    logm1_lims = [(1 - delta_prior) * base[0], (1 + delta_prior) * base[0]]
-    logm2_lims = [(1 - delta_prior) * base[1], (1 + delta_prior) * base[1]]
-    s1_lims = [
-        max(-0.99, base[2] - delta_prior), min(0.99, base[2] + delta_prior)
-    ]
-    s2_lims = [
-        max(-0.99, base[3] - delta_prior), min(0.99, base[3] + delta_prior)
-    ]
-    f_low_inj = base[6]
-    f_low_lims = [(1 - delta_prior) * f_low_inj, (1 + delta_prior) * f_low_inj]
+
+    # Full-range priors: passing None for every *_lims keeps the wide
+    # defaults built inside SOBBHSetup.setup_priors (dist in Gpc).
+    logm1_lims = None
+    logm2_lims = None
+    s1_lims = None
+    s2_lims = None
+    f_low_lims = None
 
     sobbh_settings = SOBBHSettings(
         Tobs=general_set.Tobs,
@@ -875,74 +997,109 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
     return SOBBHSetup(sobbh_settings)
 
 
-def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> Optional[MBHSetup]:
-    """MBH-phentax setup with ``nleaves_max = N_MBH_INJECTIONS``.
+def get_mbh_tdionfly_multi_erebor_settings(general_set: GeneralSetup) -> Optional[MBHSetup]:
+    """MBH TDI-on-the-fly setup with ``nleaves_max = N_MBH_INJECTIONS``.
 
-    GPU-ready: ``force_backend`` flips with ``gpu_available`` (mirrors
-    the EMRI / SOBBH pattern), so a cupy install + visible GPU drives
-    the phentax response wrapper onto GPU automatically. If phentax
-    itself isn't GPU-ready it will surface at first call. Returns
-    ``None`` when no MBH leaves are injected.
+    Waveform basis (11): ``(m1, m2, s1z, s2z, dist [Mpc], phi_ref, inc,
+    lam, beta, psi, t_merger)``; sampling basis: ``(mT, q, s1z, s2z,
+    dist, phi_ref, cosinc, lam, sinbeta, psi, t_merger)`` (mirrors
+    ``scripts/mbh/mbh_test_script_td_wave.py``). GPU-ready:
+    ``force_backend`` flips with ``gpu_available``. Returns ``None``
+    when no MBH leaves are injected.
     """
     if N_MBH_INJECTIONS == 0:
         return None
     force_backend = _force_backend_for_branch()
+    # Metadata snapshot of the active waveform path (the live generator
+    # is built in _build_mbh_tdionfly_move_runtime).
     initialize_kwargs_mbh = dict(
         T=general_set.Tobs / YRSID_SI,
         dt=general_set.dt,
-        mbh_waveform="phentax.IMRPhenomTHM",
-        mbh_waveform_kwargs=dict(higher_modes="all", force_backend=force_backend),
+        mbh_waveform="phentax.IMRPhenomTHM+TDTDIonTheFly",
+        mbh_waveform_kwargs=dict(
+            higher_modes=list(MBH_TDIONFLY_HIGHER_MODES),
+            force_backend=force_backend,
+        ),
         response_kwargs=dict(
             t0=general_set.data_t0,
-            order=40,
             tdi=TDI_GEN_STR,
             tdi_chan=TDI_CHAN,
             force_backend=force_backend,
-            remove_garbage="zero",
+            waveform_duration=MBH_WAVEFORM_DURATION,
         ),
     )
 
-    delta_prior = 1e-2
-    
-
     if DATA_PROCESSOR == "mojito":
-        injection_sampling_per_leaf = mbh_full_to_sampling(np.asarray([
+        # Catalogue ordering matches the TDI-on-the-fly waveform basis;
+        # LuminosityDistance is already in Mpc (phentax convention) and
+        # the merger time is relative to the data start. Sky + polarization
+        # are read raw in ICRS and rotated to the SSB-ecliptic run frame
+        # below (the orbits are loaded with frame="ecliptic" to match).
+        _mbh_cat = general_set.data_processor.catalogue["MBHB"]
+        mbh_injections_full_basis = np.asarray([
             [
-                general_set.data_processor.catalogue["MBHB"][i]["PrimaryMassSSBFrame"],
-                general_set.data_processor.catalogue["MBHB"][i]["SecondaryMassSSBFrame"],
-                general_set.data_processor.catalogue["MBHB"][i]["PrimarySpinCompZ"],
-                general_set.data_processor.catalogue["MBHB"][i]["SecondarySpinCompZ"],
-                general_set.data_processor.catalogue["MBHB"][i]["LuminosityDistance"],
-                general_set.data_processor.catalogue["MBHB"][i]["PhaseReferenceSourceFrame"],
-                general_set.data_processor.catalogue["MBHB"][i]["InclinationAngle"],
-                general_set.data_processor.catalogue["MBHB"][i]["RightAscension"],
-                general_set.data_processor.catalogue["MBHB"][i]["Declination"],
-                general_set.data_processor.catalogue["MBHB"][i]["PolarisationAngle"],
-                general_set.data_processor.catalogue["MBHB"][i]["TimeCoalescencePhenomTPHMSSBFrame"],
+                _mbh_cat[i]["PrimaryMassSSBFrame"],
+                _mbh_cat[i]["SecondaryMassSSBFrame"],
+                _mbh_cat[i]["PrimarySpinCompZ"],
+                _mbh_cat[i]["SecondarySpinCompZ"],
+                _mbh_cat[i]["LuminosityDistance"],          # Mpc
+                _mbh_cat[i]["PhaseReferenceSourceFrame"],
+                _mbh_cat[i]["InclinationAngle"],
+                _mbh_cat[i]["RightAscension"],              # lam slot (raw RA; converted below)
+                _mbh_cat[i]["Declination"],                 # beta slot (raw Dec; converted below)
+                _mbh_cat[i]["PolarisationAngle"],           # psi (ICRS; converted below)
+                _mbh_cat[i]["TimeCoalescencePhenomTPHMSSBFrame"],
             ]
-            for i in range(len(general_set.data_processor.catalogue["MBHB"].keys()))
-        ]).T).T
-
-    else:
-        injection_sampling_per_leaf = np.stack(
-            [mbh_full_to_sampling(row) for row in MBH_INJECTIONS_FULL_BASIS],
-            axis=0,
+            for i in sorted(_mbh_cat.keys())
+        ])
+        # Sky + polarization ICRS -> SSB ecliptic (the run frame).
+        psi_ecl, lam_ecl, beta_ecl = icrs_sky_to_ecliptic(
+            mbh_injections_full_basis[:, 9],
+            mbh_injections_full_basis[:, 7],
+            mbh_injections_full_basis[:, 8],
         )
+        mbh_injections_full_basis[:, 7] = lam_ecl % (2 * np.pi)
+        mbh_injections_full_basis[:, 8] = beta_ecl
+        mbh_injections_full_basis[:, 9] = psi_ecl % np.pi
+    else:
+        mbh_injections_full_basis = MBH_INJECTIONS_FULL_BASIS
+
+    injection_sampling_per_leaf = np.stack(
+        [mbh_tdionfly_full_to_sampling(row) for row in mbh_injections_full_basis],
+        axis=0,
+    )
 
     priors_mbh = {
-        "logM":     uniform_dist(np.log(1e4), np.log(1e8)),
+        "mT":       uniform_dist(1e4, 1e8),
         "q":        uniform_dist(0.01, 0.99999),
-        "s1z":      uniform_dist(-0.99999, 0.99999),
-        "s2z":      uniform_dist(-0.99999, 0.99999),
-        "dist":     uniform_dist(100., 1e5),  # Mpc
+        "s1z":      uniform_dist(-0.999999, 0.999999),
+        "s2z":      uniform_dist(-0.999999, 0.999999),
+        "dist":     uniform_dist(1e2, 1e5),  # Mpc
         "phi_ref":  uniform_dist(0.0, 2 * np.pi),
-        "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        "psi":      uniform_dist(0.0, 2 * np.pi),
+        "cosinc":   uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
         "lam":      uniform_dist(0.0, 2 * np.pi),
-        "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        "t_plunge": uniform_dist(0.0, general_set.Tobs),
+        "sinbeta":  uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+        "psi":      uniform_dist(0.0, np.pi),
+        "t_merger": uniform_dist(0.0, general_set.Tobs),  # relative to data_t0
     }
     priors = {"mbh": ProbDistContainer(priors_mbh)}
+
+    # Sky-mode hops: the sampling basis is SSB ecliptic, so the moves
+    # convert SSB -> LISA, hop between the (approximately) degenerate
+    # LISA-frame sky modes, and convert back. The default ind_map
+    # (cosinc=6, lam=7, sinbeta=8, psi=9, t_ref=10) matches this basis;
+    # t_merger is sampled relative to the data start, so the constellation
+    # phase reference is data_t0 (in years).
+    _sky_kwargs = dict(
+        coord_frame="ssb_ecliptic",
+        frame_t0=general_set.data_t0 / YRSID_SI,
+    )
+    inner_moves_mbh = [
+        (StretchMove(), 0.88),
+        (SkyMove(which="both", **_sky_kwargs), 0.02),
+        (SkyMove(which="long", **_sky_kwargs), 0.05),
+        (SkyMove(which="lat", **_sky_kwargs), 0.05),
+    ]
 
     mbh_settings = MBHSettings(
         Tobs=general_set.Tobs,
@@ -951,11 +1108,11 @@ def get_mbh_phentax_multi_erebor_settings(general_set: GeneralSetup) -> Optional
         num_prop_repeats=2,
         initialize_kwargs=initialize_kwargs_mbh,
         waveform_kwargs=dict(),
-        inner_moves=[(StretchMove(), 1.0)],
+        inner_moves=inner_moves_mbh,
         nleaves_max=N_MBH_INJECTIONS,
         nleaves_min=N_MBH_INJECTIONS,
         ndim=11,
-        transform=_build_mbh_phentax_transform(),
+        transform=_build_mbh_tdionfly_transform(),
         priors=priors,
         periodic={"mbh": {"phi_ref": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}},
         log_dir=general_set.file_store_dir,
@@ -987,6 +1144,7 @@ def _build_emri_move_runtime(
         t_start=general_info.data_t0,
         tdi_config=tdi_config, tdi_chan=TDI_CHAN,
         role="template", force_backend=force_backend,
+        orbits=general_info.orbits,
     )
     td_settings = TDSettings(
         int(round(general_info.Tobs / general_info.dt)),
@@ -1029,14 +1187,14 @@ def _build_emri_move_runtime(
     return move
 
 
-def _build_mbh_phentax_move_runtime(
+def _build_mbh_tdionfly_move_runtime(
     curr: CurrentInfoGlobalFit,
     acs: AnalysisContainerArray,
     priors: dict,
     state,
 ):
-    """MBH-phentax move using runtime ``general_info.data_t0`` and the
-    branch's force_backend (GPU when available)."""
+    """MBH TDI-on-the-fly move using runtime ``general_info.data_t0`` and
+    the branch's force_backend (GPU when available)."""
     general_info = curr.general_info
     mbh_info = curr.source_info["mbh"]
     nwalkers = general_info.nwalkers
@@ -1044,25 +1202,26 @@ def _build_mbh_phentax_move_runtime(
 
     force_backend = _force_backend_for_branch()
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
-    template_wave_gen = get_mbh_phentax_response_wrapper(
+    # Mojito mode: reuse the L1 orbits (their frame must match the sky
+    # coords fed to the generator). Synthetic mode: orbits is None ->
+    # the builder falls back to ESAOrbits (same as the injection path).
+    template_wave_gen = get_mbh_tdionfly_gen(
         Tobs=general_info.Tobs, dt=general_info.dt,
         t_start=general_info.data_t0,
-        tdi_config=tdi_config, tdi_chan=TDI_CHAN,
-        role="template", force_backend=force_backend,
-        orbits=general_info.orbits
-    )
-    td_settings = TDSettings(
-        int(round(general_info.Tobs / general_info.dt)),
-        general_info.dt,
+        tdi_config=tdi_config,
+        orbits=general_info.orbits,
+        waveform_duration=MBH_WAVEFORM_DURATION,
         force_backend=force_backend,
     )
-    wave_gen = MBHWaveWrap(
-        template_wave_gen, td_settings, general_info.domain_settings,
+    N = int(round(general_info.Tobs / general_info.dt))
+    td_settings = TDSettings(N, general_info.dt, force_backend=force_backend)
+    t_arr = np.arange(N) * general_info.dt + general_info.data_t0
+    wave_gen = MBHTDIonFlyWaveWrap(
+        template_wave_gen, t_arr, td_settings, general_info.domain_settings,
         td_window=None, nchannels=acs.nchannels,
     )
 
     if np.any(mbh_inds := state.branches_inds["mbh"][0]):
-        print("remove mbhs")
         for leaf in range(mbh_inds.shape[-1]):
             if not mbh_inds[0, leaf]:
                 continue
@@ -1070,9 +1229,7 @@ def _build_mbh_phentax_move_runtime(
             inj_coords = state.branches_coords["mbh"][0, :, leaf]
             inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
             for i in range(inj_coords.shape[0]):
-                breakpoint()
                 sig = wave_gen(*inj_coords_in[i], **mbh_info.waveform_kwargs)
-                breakpoint()
                 acs.add_signal_to_residual([sig], data_index=np.array([i]))
                 del sig
                 gc.collect()
@@ -1117,6 +1274,7 @@ def _build_sobbh_move_runtime(
         t_start=general_info.data_t0,
         tdi_config=tdi_config, tdi_chan=TDI_CHAN,
         role="template", force_backend=force_backend,
+        orbits=general_info.orbits,
     )
     td_settings = TDSettings(
         int(round(general_info.Tobs / general_info.dt)),
@@ -1182,7 +1340,7 @@ def setup_recipe(
     # (i.e. classes with >= 1 injected leaf).
     pe_moves = []
     if "mbh" in curr.source_info:
-        pe_moves.append(_build_mbh_phentax_move_runtime(curr, acs, priors, state))
+        pe_moves.append(_build_mbh_tdionfly_move_runtime(curr, acs, priors, state))
     if "emri" in curr.source_info:
         pe_moves.append(_build_emri_move_runtime(curr, acs, priors, state))
     if "sobbh" in curr.source_info:
@@ -1208,6 +1366,11 @@ def _select_data_processor():
             L1_folder=MOJITO_DATA_PATH,
             source_ids={k: list(v) for k, v in MOJITO_SOURCE_IDS.items()},
             orbits_class=L1Orbits,
+            # ecliptic: the run frame is SSB ecliptic — L1Orbits rotates
+            # the mojito ICRS positions/velocities to ecliptic on read-in,
+            # and the catalogue sky coords are rotated ICRS -> ecliptic in
+            # the per-branch setup functions, so sky coordinates and orbits
+            # reach the response in the same frame.
             orbits_kwargs=dict(
                 force_backend=_force_backend_for_branch(),
                 frame="ecliptic",
@@ -1317,7 +1480,7 @@ def get_global_fit_settings(copy_settings_file: bool = False):
     # functions return ``None`` in that case.
     source_info = {}
     for key, setup in (
-        ("mbh", get_mbh_phentax_multi_erebor_settings(general_setup)),
+        ("mbh", get_mbh_tdionfly_multi_erebor_settings(general_setup)),
         ("emri", get_emri_multi_erebor_settings(general_setup)),
         ("sobbh", get_sobbh_multi_erebor_settings(general_setup)),
     ):

@@ -237,6 +237,12 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     The sampling basis is:
     ``[logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi, lam, sin_beta, t_plunge]``
 
+    Sky / polarization / time parameters are returned in the **SSB
+    ecliptic frame** — the sprint-wide sampling frame. (LISA-frame
+    sampling is handled by the moves themselves, e.g.
+    :class:`lisatools.sampling.moves.skymodehop.SkyMove` with
+    ``coord_frame="ssb_ecliptic"``.)
+
     Parameters
     ----------
     catalogue_entry : dict
@@ -247,7 +253,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     -------
     np.ndarray
         Parameter vector of shape ``(11,)`` in the MBH sampling basis
-        (LISA frame for sky/time parameters).
+        (SSB ecliptic frame for sky/time parameters).
     """
     m1 = float(catalogue_entry["PrimaryMassSSBFrame"])
     m2 = float(catalogue_entry["SecondaryMassSSBFrame"])
@@ -265,7 +271,7 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     phi_ref = float(catalogue_entry["PhaseReferenceSourceFrame"]) % (2 * np.pi)
     cos_iota = np.cos(float(catalogue_entry["InclinationAngle"]))
 
-    # Sky coordinates: ICRS -> ecliptic -> SSB -> LISA
+    # Sky coordinates: ICRS -> SSB ecliptic (position + polarization)
     ra = float(catalogue_entry["RightAscension"])
     dec = float(catalogue_entry["Declination"])
     psi_icrs = float(catalogue_entry["PolarisationAngle"])
@@ -273,15 +279,16 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict) -> np.ndarray:
     t_ssb = float(catalogue_entry["TimeCoalescencePhenomTPHMSSBFrame"])
 
     logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
-    
-    t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
-    
-    lam_L = lam_L % (2 * np.pi)
-    psi_L = psi_L % np.pi
-    logger.debug(f"Converted to LISA frame: t_L={t_L}, lambda_L={lam_L}, beta_L={beta_L}, psi_L={psi_L}")
-    sin_beta_L = np.sin(beta_L)
 
-    return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_L, lam_L, sin_beta_L, t_L])
+    lam_ecl = lam_ecl % (2 * np.pi)
+    psi_ssb = psi_ssb % np.pi
+    logger.debug(
+        f"Converted to SSB ecliptic frame: t_ssb={t_ssb}, lambda={lam_ecl}, "
+        f"beta={beta_ecl}, psi={psi_ssb}"
+    )
+    sin_beta = np.sin(beta_ecl)
+
+    return np.array([logM, q, s1z, s2z, dist, phi_ref, cos_iota, psi_ssb, lam_ecl, sin_beta, t_ssb])
 
 
 def subtract_initial_signal(
@@ -609,7 +616,6 @@ def build_gb_moves(
                 coords_in_in,
                 acs.gather_linear_data_arr(),
                 acs,
-                convert_to_ra_dec=False,
                 data_index=xp.asarray(data_index),
                 factors=factors_arr,
             )

@@ -43,6 +43,12 @@ class Orbits(LISAToolsParallelModule, ABC):
         armlength: Armlength of detector.
         force_backend: If ``gpu`` or ``cuda``, use a gpu.
         t0: Initial time.
+        frame: Sky/position reference frame of the orbit data, either
+            ``"ecliptic"`` (SSB ecliptic — the convention of the stock
+            ``equalarmlength`` / ``esa-trailing`` orbit files) or
+            ``"icrs"`` (equatorial RA/Dec). Sky coordinates fed to any
+            response built on these orbits must be expressed in the same
+            frame; consumers can check ``orbits.frame`` to enforce this.
 
     """
 
@@ -52,6 +58,7 @@ class Orbits(LISAToolsParallelModule, ABC):
         armlength: Optional[float] = 2.5e9,
         force_backend: Optional[str] = None,
         t0: Optional[float] = 0.0,
+        frame: str = "ecliptic",
         **kwargs
     ) -> None:
 
@@ -59,9 +66,24 @@ class Orbits(LISAToolsParallelModule, ABC):
         self.filename = filename
         self.armlength = armlength
         self.t0 = t0
+        self.frame = frame
         self._setup()
         self.configured = False
         LISAToolsParallelModule.__init__(self, force_backend=force_backend)
+
+    @property
+    def frame(self) -> str:
+        """Reference frame of the orbit data (``"ecliptic"`` or ``"icrs"``)."""
+        return self._frame
+
+    @frame.setter
+    def frame(self, frame: str) -> None:
+        """frame setter."""
+        if frame not in ["ecliptic", "icrs"]:
+            raise ValueError(
+                f"frame must be 'ecliptic' or 'icrs', got {frame!r}."
+            )
+        self._frame = frame
 
     @property
     def xp(self):
@@ -628,7 +650,11 @@ def icrs_to_ecliptic(positions_icrs):
             unit="m",
             representation_type="cartesian",
         )
-        c_ecliptic = c_icrs.transform_to(astropy.coordinates.BarycentricMeanEcliptic)
+        # BarycentricTrueEcliptic to match the sky-angle conversions in
+        # lisatools.sources.utils / lisatools.response.directresponse
+        # ('barycentrictrueecliptic') so orbits and sky coordinates land in
+        # the identical ecliptic frame.
+        c_ecliptic = c_icrs.transform_to(astropy.coordinates.BarycentricTrueEcliptic)
         c_ecliptic.representation_type = "cartesian"
         positions_ecliptic[:, sc, :] = np.array(
             [c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]
@@ -649,16 +675,17 @@ class L1Orbits(Orbits):
     """
 
     def __init__(
-        self, 
+        self,
         filename: str,
         armlength: float = 2.5e9,
         force_backend: Optional[str] = None,
         frame: str = "ecliptic",
         **kwargs,
     ):
-        assert frame in ["ecliptic", "icrs"], "frame must be 'ecliptic' or 'icrs'"
-        self.frame = frame
-        super().__init__(filename, armlength, force_backend, **kwargs)
+        # frame is validated and stored by the Orbits base class (before
+        # ``_setup`` runs, which reads ``self.frame`` to decide whether to
+        # rotate the mojito ICRS positions to ecliptic).
+        super().__init__(filename, armlength, force_backend, frame=frame, **kwargs)
        
     @property
     def kwargs(self):
@@ -689,13 +716,18 @@ class L1Orbits(Orbits):
             self.ltt = f.ltts.ltts[:]  # Shape: (N_ltt_times, 6)
             self.ltt_t = f.ltts.time_sampling.t()  # Shape: (N_ltt_times,)
             
-            # Load spacecraft positions and their time array  
+            # Load spacecraft positions and their time array
             pos_icrs = f.orbits.positions[:]  # Shape: (N_pos_times, 3, 3)
+            vel_icrs = f.orbits.velocities[:]  # Shape: (N_pos_times, 3, 3)
             if self.frame == "ecliptic":
+                # ICRS -> ecliptic is a pure barycentric rotation, so
+                # velocities rotate with the same transformation as
+                # positions (they must live in the same frame).
                 self.x_base = icrs_to_ecliptic(pos_icrs)
+                self.v_base = icrs_to_ecliptic(vel_icrs)
             else:
                 self.x_base = pos_icrs
-            self.v_base = f.orbits.velocities[:]  # Shape: (N_pos_times, 3, 3)
+                self.v_base = vel_icrs
             self.sc_t_base = f.orbits.time_sampling.t()  # Shape: (N_pos_times,)
             self.size_base = self.sc_t_base.shape[0]
             self.dt_base = float(f.orbits.time_sampling.dt)
@@ -1238,6 +1270,7 @@ if jax_here:
                 "filename": self.filename,
                 "armlength": self._armlength,
                 "configured": self.configured,
+                "frame": getattr(self, "_frame", "ecliptic"),
                 "ltt_dt": self.ltt_dt,
                 "sc_dt": self.sc_dt,
                 "ltt_t0": self.ltt_t0,
@@ -1260,6 +1293,7 @@ if jax_here:
             obj.filename = aux_data["filename"]
             obj._armlength = aux_data["armlength"]
             obj.configured = aux_data["configured"]
+            obj._frame = aux_data.get("frame", "ecliptic")
             obj.ltt_dt = aux_data["ltt_dt"]
             obj.sc_dt = aux_data["sc_dt"]
             obj.ltt_t0 = aux_data["ltt_t0"]

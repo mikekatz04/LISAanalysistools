@@ -61,7 +61,7 @@ def ecliptic_to_icrs(lambda_ecl, beta_ecl):
 
 def icrs_to_ecliptic(ra, dec):
     """Convert ICRS coordinates (ra, dec) to ecliptic coordinates (lambda, beta)."""
-    
+
     icrs_coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
     ecliptic_coord = icrs_coord.barycentrictrueecliptic
 
@@ -69,6 +69,26 @@ def icrs_to_ecliptic(ra, dec):
     beta_ecl = ecliptic_coord.lat.rad
 
     return lambda_ecl, beta_ecl
+
+
+def warn_deprecated_frame_conversion(stacklevel: int = 3) -> None:
+    """Warn that per-call ``convert_to_ra_dec=True`` is deprecated.
+
+    Sky coordinates are consumed in the orbits frame directly (matching
+    the TDI-on-the-fly handling); the sprint runs everything in the SSB
+    ecliptic frame with orbits loaded as ``frame="ecliptic"``. Callers
+    that still sample in the ecliptic frame against ICRS-frame orbits can
+    keep passing ``convert_to_ra_dec=True`` for now, but should migrate
+    to orbit-frame coordinates (see ``Orbits.frame``).
+    """
+    warnings.warn(
+        "convert_to_ra_dec=True is deprecated: sky coordinates are now "
+        "consumed in the orbits frame directly (matching the "
+        "TDI-on-the-fly handling). Load orbits in the frame you sample "
+        "in (e.g. frame='ecliptic') and drop this kwarg.",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
 
 
 class pyResponseTDI(FastLISAResponseParallelModule):
@@ -792,12 +812,22 @@ class ResponseWrapper(FastLISAResponseParallelModule):
         # `_BACKEND_PREFIX` ("lisatools" via FastLISAResponseParallelModule).
         return [cls._BACKEND_PREFIX + "_" + _tmp for _tmp in cls.GPU_RECOMMENDED()]
 
-    def __call__(self, *args, convert_to_ra_dec: bool = True, **kwargs):
+    def __call__(self, *args, convert_to_ra_dec: Optional[bool] = None, **kwargs):
         """Run the waveform and response generation
+
+        Sky coordinates are consumed **in the orbits frame** directly
+        (matching the TDI-on-the-fly handling) — no frame conversion is
+        applied. Load the orbits in the frame you sample in (see
+        ``Orbits.frame``; the sprint convention is ``"ecliptic"``).
 
         Args:
             *args (list): Arguments to the waveform generator. This must include
-                the sky coordinates.
+                the sky coordinates, expressed in the orbits frame.
+            convert_to_ra_dec (bool, optional): **Deprecated.** Legacy
+                ecliptic -> ICRS conversion for setups that sample in the
+                ecliptic frame against ICRS-frame orbits. Default ``None``
+                (no conversion). Passing ``True`` still converts but emits
+                a ``DeprecationWarning``.
             **kwargs (dict): kwargs necessary for the waveform generator.
 
         Return:
@@ -831,13 +861,11 @@ class ResponseWrapper(FastLISAResponseParallelModule):
             h = h.real - 1j * h.imag
 
         if convert_to_ra_dec:
-            ra, dec = ecliptic_to_icrs(lam, beta)
-        else:
-            ra, dec = lam, beta
+            warn_deprecated_frame_conversion()
+            lam, beta = ecliptic_to_icrs(lam, beta)
 
         # TODO: make this customizable
-        # self.response_model.get_projections(h, lam, beta, t0=self.t0, t_buffer=self.t_buffer)
-        self.response_model.get_projections(h, ra, dec, t0_shift_to_data=self.t0_shift_to_data, t0=self.t0, t_buffer=self.t_buffer)
+        self.response_model.get_projections(h, lam, beta, t0_shift_to_data=self.t0_shift_to_data, t0=self.t0, t_buffer=self.t_buffer)
         tdi_out = self.response_model.get_tdi_delays()  # will take care of t0 automatically to match projections
 
         out = list(tdi_out)

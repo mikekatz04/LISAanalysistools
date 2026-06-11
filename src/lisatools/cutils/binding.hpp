@@ -1,5 +1,5 @@
-#ifndef __BINDING_HPP__
-#define __BINDING_HPP__
+#ifndef __LAT_BINDING_HPP__
+#define __LAT_BINDING_HPP__
 
 #include "Detector.hpp"
 #include "PSD.hpp"
@@ -189,4 +189,4 @@ public:
 #endif  // === end XYZBackend disabled ===
 
 
-#endif // __BINDING_HPP__
+#endif // __LAT_BINDING_HPP__

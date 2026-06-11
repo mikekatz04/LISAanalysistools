@@ -56,7 +56,7 @@ from few.waveform import GenerateEMRIWaveform
 from gbgpu.utils.utility import get_fdot
 
 from lisatools.analysiscontainer import AnalysisContainerArray
-from lisatools.detector import EqualArmlengthOrbits
+from lisatools.detector import EqualArmlengthOrbits, Orbits
 from lisatools.domains import (
     DomainBaseArray,
     TDSettings,
@@ -96,6 +96,8 @@ from lisatools.globalfit.stock.erebor import (
     PSDSetup,
     SOBBHSettings,
     SOBBHSetup,
+    make_emri_transform_container,
+    make_sobbh_transform_container,
 )
 from lisatools.sources.sobbh import SOBBHWaveform
 from lisatools.utils.constants import YRSID_SI
@@ -169,11 +171,9 @@ SAMPLE_FILL_INDICES = [5, 12]
 
 def emri_full_to_sampling(params_full):
     """Convert a 14-param waveform-basis vector to the 12-param sampling basis."""
-    p = np.asarray(params_full, dtype=float).copy()
-    p[0] = np.log(p[0])    # logM
-    p[7] = np.cos(p[7])    # cos qS
-    p[9] = np.cos(p[9])    # cos qK
-    return np.delete(p, SAMPLE_FILL_INDICES)
+    p = np.asarray(params_full, dtype=float)
+    transform = make_emri_transform_container(p[SAMPLE_FILL_INDICES])
+    return transform.both_inverse_transforms(p)
 
 
 # Shared inspiral / sum / mode-selector kwargs (mirrors emri_only).
@@ -199,6 +199,7 @@ def get_emri_response_wrapper(
     role: str = "template",
     order: int = 40,
     t_buffer: float = 3e4,
+    orbits: Optional[Orbits] = None,
     force_backend: str = "cpu",
 ):
     """Build (and cache) a :class:`ResponseWrapper` around ``GenerateEMRIWaveform``.
@@ -206,7 +207,7 @@ def get_emri_response_wrapper(
     Cached so the injection path and template path share one generator —
     building two on CPU exhausts RAM.
     """
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
+    key = (Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits))
     if key in _EMRI_WAVE_GEN_CACHE:
         return _EMRI_WAVE_GEN_CACHE[key]
 
@@ -235,7 +236,8 @@ def get_emri_response_wrapper(
         "t_buffer": t_buffer,
     }
 
-    orbits = EqualArmlengthOrbits(force_backend=force_backend)
+    if orbits is None:
+        orbits = EqualArmlengthOrbits(force_backend=force_backend)
     wave_gen = ResponseWrapper(
         few_generator,
         orbits=orbits,
@@ -273,7 +275,6 @@ class EMRIWaveWrap:
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        call_kwargs.setdefault("convert_to_ra_dec", False)
         arr = np.asarray(self.wave_gen(*params, **call_kwargs))
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
@@ -312,13 +313,8 @@ SOBBH_INJECTION_PARAMS_FULL_BASIS = np.array(
 
 def sobbh_full_to_sampling(params_full):
     """Convert an 11-param SOBBH waveform-basis vector to the 11-param sampling basis."""
-    p = np.asarray(params_full, dtype=float).copy()
-    p[0] = np.log(p[0])                       # m1 -> logm1
-    p[1] = np.log(p[1])                       # m2 -> logm2
-    p[5] = np.cos(p[5])                       # inc -> cosinc
-    # p[7] stays: lam -> phiS (same value)
-    p[8] = np.cos(np.pi / 2.0 - p[8])         # beta -> cosqS
-    return p
+    transform = make_sobbh_transform_container()
+    return transform.both_inverse_transforms(np.asarray(params_full, dtype=float))
 
 
 _SOBBH_WAVE_GEN_CACHE = {}
@@ -334,15 +330,17 @@ def get_sobbh_response_wrapper(
     role: str = "template",
     order: int = 40,
     t_buffer: float = 3e4,
+    orbits: Optional[Orbits] = None,
     force_backend: str = "cpu",
 ):
     """Build (and cache) a :class:`ResponseWrapper` around :class:`SOBBHWaveform`.
 
     Mirrors :func:`get_emri_response_wrapper`; one generator per
-    ``(Tobs, dt, t_start, tdi_chan, order, force_backend)`` cache key so
-    the injection path and the template path share the same instance.
+    ``(Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits))``
+    cache key so the injection path and the template path share the same
+    instance.
     """
-    key = (Tobs, dt, t_start, tdi_chan, order, force_backend)
+    key = (Tobs, dt, t_start, tdi_chan, order, force_backend, id(orbits))
     if key in _SOBBH_WAVE_GEN_CACHE:
         return _SOBBH_WAVE_GEN_CACHE[key]
 
@@ -368,7 +366,8 @@ def get_sobbh_response_wrapper(
         "t_buffer": t_buffer,
     }
 
-    orbits = EqualArmlengthOrbits(force_backend=force_backend)
+    if orbits is None:
+        orbits = EqualArmlengthOrbits(force_backend=force_backend)
     wave_gen = ResponseWrapper(
         sobbh_generator,
         orbits=orbits,
@@ -406,7 +405,6 @@ class SOBBHWaveWrap:
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        call_kwargs.setdefault("convert_to_ra_dec", False)
         arr = np.asarray(self.wave_gen(*params, **call_kwargs))
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
@@ -462,7 +460,7 @@ class SyntheticEMRIProcessingStep(BaseProcessingStep):
         )
 
         td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
+            wave_gen(*injection_params_full_basis)
         )
         td_signal = np.atleast_2d(td_signal)[:nchannels]
 
@@ -518,7 +516,7 @@ class SyntheticSOBBHProcessingStep(BaseProcessingStep):
         )
 
         td_signal = np.asarray(
-            wave_gen(*injection_params_full_basis, convert_to_ra_dec=False)
+            wave_gen(*injection_params_full_basis)
         )
         td_signal = np.atleast_2d(td_signal)[:nchannels]
 

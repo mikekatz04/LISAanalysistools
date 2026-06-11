@@ -28,12 +28,13 @@ sub-classes in their respective packages for the per-source-class
 constants.
 """
 from copy import deepcopy
+from typing import Optional
 
 import numpy as np
 
 from .detector import EqualArmlengthOrbits, Orbits
 from .domains import WDMSettings
-from .response.directresponse import ecliptic_to_icrs
+from .response.directresponse import ecliptic_to_icrs, warn_deprecated_frame_conversion
 from .response.parallelbase import FastLISAResponseParallelModule
 from .response.tdiconfig import TDIConfig
 from .wdm_het import (
@@ -330,7 +331,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         return data_index, noise_index
 
     def get_ll_wdm(self, params, wdm_holder, data_index=None, noise_index=None,
-                   convert_to_ra_dec: bool = True,
+                   convert_to_ra_dec: Optional[bool] = None,
                    grid_dim: int = 0,
                    use_layer_groups: bool = True,
                    group_band_layers: int = 5,
@@ -357,9 +358,9 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
 
         Args:
             params: ``(num_bin, nparams)`` array (1D auto-promoted via
-                ``atleast_2d``). Last two columns are ``(lam, beta)``;
-                with ``convert_to_ra_dec`` (default) they are converted
-                to ICRS before dispatch.
+                ``atleast_2d``). Last two columns are ``(lam, beta)`` in
+                the orbits frame (``convert_to_ra_dec=True`` is the
+                deprecated legacy ecliptic -> ICRS conversion).
             wdm_holder: ``AnalysisContainerArray`` providing
                 ``linear_data_arr[0]`` (WDM data) and
                 ``linear_psd_arr[0]`` (invC) -- both flat.
@@ -374,6 +375,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         nparams = int(self._NPARAMS)
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam = params_tmp[:, -2].copy()
             beta = params_tmp[:, -1].copy()
             lam, beta = ecliptic_to_icrs(lam, beta)
@@ -437,7 +439,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
 
     def get_swap_ll_wdm(self, params_add, params_remove, wdm_holder,
                         data_index=None, noise_index=None,
-                        convert_to_ra_dec: bool = True,
+                        convert_to_ra_dec: Optional[bool] = None,
                         grid_dim: int = 0,
                         use_layer_groups: bool = True,
                         group_band_layers: int = 5,
@@ -466,6 +468,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         nparams = int(self._NPARAMS)
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             for p_tmp in (params_add_tmp, params_remove_tmp):
                 lam = p_tmp[:, -2].copy()
                 beta = p_tmp[:, -1].copy()
@@ -552,7 +555,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
 
     def get_ll_grad_wdm(self, params, wdm_holder,
                         data_index=None, noise_index=None,
-                        convert_to_ra_dec: bool = True,
+                        convert_to_ra_dec: Optional[bool] = None,
                         grid_dim: int = 0,
                         use_layer_groups: bool = True,
                         group_band_layers: int = 5,
@@ -582,6 +585,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             f"params has {params_tmp.shape[1]} columns, expected {nparams}")
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam = params_tmp[:, -2].copy()
             beta = params_tmp[:, -1].copy()
             lam, beta = ecliptic_to_icrs(lam, beta)
@@ -636,7 +640,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
 
     def get_swap_ll_grad_wdm(self, params_add, params_remove, wdm_holder,
                              data_index=None, noise_index=None,
-                             convert_to_ra_dec: bool = True,
+                             convert_to_ra_dec: Optional[bool] = None,
                              grid_dim: int = 0,
                              use_layer_groups: bool = True,
                              group_band_layers: int = 5,
@@ -658,6 +662,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             f"params has {params_add_tmp.shape[1]} columns, expected {nparams}")
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             for p_tmp in (params_add_tmp, params_remove_tmp):
                 lam = p_tmp[:, -2].copy()
                 beta = p_tmp[:, -1].copy()
@@ -723,7 +728,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         return grad_add, grad_remove
 
     def fill_global_wdm(self, params, templates,
-                        convert_to_ra_dec: bool = True,
+                        convert_to_ra_dec: Optional[bool] = None,
                         data_index=None, factors=None,
                         grid_dim: int = 0,
                         m_band_half_width: int = 1):
@@ -745,8 +750,9 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             params: ``(num_bin, nparams)`` array (1D auto-promoted).
             templates: output buffer (see shapes above). Pre-zero
                 before calling -- the kernel accumulates.
-            convert_to_ra_dec: ecliptic-to-ICRS conversion for the last
-                two parameter columns.
+            convert_to_ra_dec: **Deprecated** legacy ecliptic-to-ICRS
+                conversion for the last two parameter columns; default
+                ``None`` consumes them in the orbits frame directly.
             data_index: per-binary slab index into ``templates``.
                 Default = all zeros (single shared template slab).
             factors: per-binary multiplicative factor at the
@@ -787,6 +793,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
             f"params has {params_tmp.shape[1]} columns, expected {nparams}")
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam = params_tmp[:, -2].copy()
             beta = params_tmp[:, -1].copy()
             lam, beta = ecliptic_to_icrs(lam, beta)
@@ -833,7 +840,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
 
     def get_fstat_ll_wdm(self, params, wdm_holder,
                           data_index=None, noise_index=None,
-                          convert_to_ra_dec: bool = True,
+                          convert_to_ra_dec: Optional[bool] = None,
                           grid_dim: int = 0,
                           m_band_half_width: int = 1):
         """Chunked-heterodyne F-stat over the WDM domain.
@@ -875,6 +882,7 @@ class WDMComputationsBase(FastLISAResponseParallelModule):
         nparams = int(self._NPARAMS)
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam = params_tmp[:, -2].copy()
             beta = params_tmp[:, -1].copy()
             lam, beta = ecliptic_to_icrs(lam, beta)

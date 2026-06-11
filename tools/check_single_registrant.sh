@@ -31,7 +31,9 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Sprint root is one level above the LAT repo (this script migrated from
+# the sprint-root tools/ into LAT/tools/ when the umbrella was archived).
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # Repos that consume LAT's shared wrappers but must NOT register them.
 CONSUMER_REPOS=(
@@ -47,8 +49,6 @@ FORBIDDEN_CLASSES=(
     "OrbitsWrap"
     "LISAResponseWrap"
     "TDIConfigWrap"
-    "CubicSplineWrap_responselisa"
-    "OrbitsWrap_responselisa"
     # Phase 3L (2026-06-02): TDIonTheFly carve-out begins. Classes moved
     # so far live in LAT under lisatools/cutils/.
     "FDDomain"
@@ -73,16 +73,46 @@ for repo in "${CONSUMER_REPOS[@]}"; do
 
     for cls in "${FORBIDDEN_CLASSES[@]}"; do
         # Look for `py::class_<<cls>>(`. We use \\b to anchor on a word boundary
-        # so `OrbitsWrap_responselisa` doesn't match `OrbitsWrap`.
+        # so a shorter class name doesn't match as a prefix of a longer one.
         # --include= patterns restrict to pybind11 binding source.
         matches=$(grep -rn \
             --include='*.cxx' --include='*.cpp' --include='*.cu' --include='*.cc' \
             --include='*.hpp' --include='*.hh' --include='*.h' \
-            -E "py::class_<\s*${cls}\b" \
+            -E "(py|nb)::class_<\s*${cls}\b" \
             "$repo_path" 2>/dev/null || true)
         if [ -n "$matches" ]; then
             echo "" >> "$violation_log"
             echo "VIOLATION: \`${cls}\` registered outside LISAanalysistools" >> "$violation_log"
+            echo "$matches" >> "$violation_log"
+            violations=$((violations + 1))
+        fi
+    done
+done
+
+# Classes owned by GPUBackendTools (registered in its `interp` module).
+# Registering these anywhere else -- INCLUDING LISAanalysistools -- is a
+# bug. (2026-06-10: LAT's duplicate CubicSplineWrap was deleted; LAT and
+# every downstream now consume GBT's class through gbt_binding.hpp, the
+# same way GBGPU/BBHx consume LAT's OrbitsWrap.)
+GBT_OWNED_CLASSES=(
+    "CubicSplineWrap"
+    "CubicSpline"
+)
+GBT_CONSUMER_REPOS=("LISAanalysistools" "${CONSUMER_REPOS[@]}")
+
+for repo in "${GBT_CONSUMER_REPOS[@]}"; do
+    repo_path="$ROOT/$repo"
+    [ -d "$repo_path" ] || continue
+
+    for cls in "${GBT_OWNED_CLASSES[@]}"; do
+        matches=$(grep -rn \
+            --include='*.cxx' --include='*.cpp' --include='*.cu' --include='*.cc' \
+            --include='*.hpp' --include='*.hh' --include='*.h' \
+            -E "(py|nb)::class_<\s*${cls}\b" \
+            "$repo_path" 2>/dev/null || true)
+        if [ -n "$matches" ]; then
+            echo "" >> "$violation_log"
+            echo "VIOLATION: \`${cls}\` is GBT-owned but registered in ${repo}" >> "$violation_log"
             echo "$matches" >> "$violation_log"
             violations=$((violations + 1))
         fi

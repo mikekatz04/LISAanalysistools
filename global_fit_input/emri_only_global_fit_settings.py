@@ -59,7 +59,11 @@ from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
 from lisatools.globalfit.preprocessing import BaseProcessingStep
 from lisatools.globalfit.recipe import RecipeStep
 from lisatools.globalfit.run import CurrentInfoGlobalFit
-from lisatools.globalfit.stock.erebor import EMRISettings, EMRISetup
+from lisatools.globalfit.stock.erebor import (
+    EMRISettings,
+    EMRISetup,
+    make_emri_transform_container,
+)
 from lisatools.utils.constants import YRSID_SI
 
 
@@ -114,11 +118,9 @@ SAMPLE_FILL_INDICES = [5, 12]
 
 def emri_full_to_sampling(params_full):
     """Convert a 14-param waveform-basis vector to the 12-param sampling basis."""
-    p = np.asarray(params_full, dtype=float).copy()
-    p[0] = np.log(p[0])    # logM
-    p[7] = np.cos(p[7])    # cos qS
-    p[9] = np.cos(p[9])    # cos qK
-    return np.delete(p, SAMPLE_FILL_INDICES)
+    p = np.asarray(params_full, dtype=float)
+    transform = make_emri_transform_container(p[SAMPLE_FILL_INDICES])
+    return transform.both_inverse_transforms(p)
 
 
 # ---- Cached EMRI generator + wrappers (shared across data path + moves) ----

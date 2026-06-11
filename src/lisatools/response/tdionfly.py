@@ -8,7 +8,7 @@ from gpubackendtools import wrapper
         
 import time
 import h5py
-from .directresponse import ecliptic_to_icrs
+from .directresponse import ecliptic_to_icrs, warn_deprecated_frame_conversion
 
 try:
     import cupy as cp
@@ -658,7 +658,7 @@ class GBFDTDIonTheFly(FastLISAResponseParallelModule):
         self,
         amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta,
         t_start: float,
-        convert_to_ra_dec: bool = True,
+        convert_to_ra_dec: Optional[bool] = None,
     ):
         """Generate the heterodyne FD GB TDI for ``num_sub`` sources.
 
@@ -668,8 +668,11 @@ class GBFDTDIonTheFly(FastLISAResponseParallelModule):
             t_start (float): Start of the sparse observation window in
                 seconds. Must equal ``t_ref`` -- the prototype assumes a
                 local time origin at the first sparse sample.
-            convert_to_ra_dec (bool): If True, convert (lam, beta) from
-                ecliptic to ICRS before passing to the kernel.
+            convert_to_ra_dec (bool, optional): **Deprecated.** Sky
+                coordinates are consumed in the orbits frame directly
+                (default ``None`` = no conversion). ``True`` still applies
+                the legacy ecliptic -> ICRS conversion but emits a
+                ``DeprecationWarning``.
 
         Returns:
             X_het (xp.ndarray): complex shape ``(num_sub, nchannels, N_sparse)``,
@@ -685,6 +688,7 @@ class GBFDTDIonTheFly(FastLISAResponseParallelModule):
                 f"Got t_start={t_start}, t_ref={self.t_ref}."
             )
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam, beta = ecliptic_to_icrs(lam, beta)
 
         params = self.xp.asarray(
@@ -752,9 +756,10 @@ class GBTDIonTheFly(TDIonTheFly):
         self._wave_gen = self.backend.GBTDIonTheFlyWrap(self.cpp_orbits, self.cpp_tdi_config, self.T, self.t_ref)
         return self._wave_gen
     
-    def __call__(self, amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta, convert_to_ra_dec: bool = True, return_spline: bool = False) -> TDIOutput:
+    def __call__(self, amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta, convert_to_ra_dec: Optional[bool] = None, return_spline: bool = False) -> TDIOutput:
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam, beta = ecliptic_to_icrs(lam, beta)
         params = self.xp.asarray([amp, f0, fdot0, fddot0, phi0, inc, psi, lam, beta]).T.flatten().copy()
 
@@ -865,9 +870,10 @@ class SOBBHTDIonTheFly(TDIonTheFly):
         )
 
     def __call__(self, m1, m2, s1, s2, distance, f_low, phi_c, inc, psi, lam, beta,
-                 convert_to_ra_dec: bool = True, return_spline: bool = False) -> TDIOutput:
+                 convert_to_ra_dec: Optional[bool] = None, return_spline: bool = False) -> TDIOutput:
 
         if convert_to_ra_dec:
+            warn_deprecated_frame_conversion()
             lam, beta = ecliptic_to_icrs(lam, beta)
         params = self.xp.asarray([m1, m2, s1, s2, distance, f_low, phi_c, inc, psi, lam, beta]).T.flatten().copy()
 

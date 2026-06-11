@@ -504,7 +504,6 @@ class WDMBandLikelihoodEngine:
         self.gb_comps.fill_global_wdm(
             params_phys,
             buffer_aca.linear_data_arr[0],
-            convert_to_ra_dec=False,
             data_index=params_index,
             factors=factors_arr,
         )
@@ -528,7 +527,6 @@ class WDMBandLikelihoodEngine:
             buffer_aca,
             data_index=data_index,
             noise_index=noise_index,
-            convert_to_ra_dec=False,
         )
         return (
             self.gb_comps.d_h_out.copy(),
@@ -601,7 +599,6 @@ class WDMBandLikelihoodEngine:
                 buffer_aca,
                 data_index=data_index[keep_idx],
                 noise_index=noise_index[keep_idx],
-                convert_to_ra_dec=False,
             )
 
             # ll_diff = like_add - like_remove + cross-term correction.
@@ -690,7 +687,6 @@ class WDMBandLikelihoodEngine:
         return self.gb_comps.get_ll_grad_wdm(
             params_phys, buffer_aca,
             data_index=data_index, noise_index=noise_index,
-            convert_to_ra_dec=False,
         )
 
     def hessian(
@@ -721,7 +717,6 @@ class WDMBandLikelihoodEngine:
         return self.gb_comps.hessian_wdm(
             params_phys, buffer_aca,
             data_index=data_index, noise_index=noise_index,
-            convert_to_ra_dec=False,
             chunk=chunk, psd_fix=psd_fix, psd_floor_rel=psd_floor_rel,
         )
 

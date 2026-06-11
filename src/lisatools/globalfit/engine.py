@@ -397,6 +397,7 @@ class GeneralSetup(Setup, GeneralSettings):
                     filename=orbits.filename,
                     armlength=orbits.armlength,
                     force_backend=self.gpu_backend,
+                    frame=orbits.frame,
                 )
 
         self.init_orbit_information()

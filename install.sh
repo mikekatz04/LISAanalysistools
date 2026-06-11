@@ -127,6 +127,8 @@ clone_or_reuse_sibling "$ORG" LATW || \
 if [ "$SKIP_PHENTAX" != "1" ]; then
     echo ""
     echo "===> installing phentax (MBH IMRPhenomTHM)"
+    # Equivalent to BBHx's `phentax` extra (pip install 'bbhx[phentax]');
+    # installed directly here since BBHx is already editable-installed above.
     pip install git+https://github.com/asantini29/phentax.git
 fi
 

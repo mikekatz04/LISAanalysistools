@@ -28,7 +28,7 @@ Smoke-test choices:
 import gc
 import logging
 import shutil
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -51,8 +51,9 @@ from eryn.utils.transform import TransformContainer
 
 from lisatools.response.directresponse import ResponseWrapper
 from lisatools.response.tdiconfig import TDIConfig
+from lisatools.response.tdionfly import TDTDIonTheFly
 
-from lisatools.detector import EqualArmlengthOrbits, Orbits
+from lisatools.detector import ESAOrbits, EqualArmlengthOrbits, Orbits
 from lisatools.domains import (
     DomainBaseArray,
     FDSettings,
@@ -70,7 +71,7 @@ from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
 from lisatools.globalfit.preprocessing import BaseProcessingStep
 from lisatools.globalfit.recipe import RecipeStep
 from lisatools.globalfit.run import CurrentInfoGlobalFit
-from lisatools.globalfit.stock.erebor import MBHSettings, MBHSetup
+from lisatools.globalfit.stock.erebor import MBHSettings, MBHSetup, m1_m2_to_mT_q
 from lisatools.utils.constants import YRSID_SI
 
 # ``phentax`` is the JAX implementation of IMRPhenomT(HM). Imported lazily
@@ -152,14 +153,8 @@ def mbh_full_to_sampling(params_full: np.ndarray) -> np.ndarray:
       ``sin_beta = sin(beta)``
       All other params pass through unchanged.
     """
-    # TODO: add an inversion tool to the transform container
-    p = np.asarray(params_full, dtype=float).copy()
-    m1, m2 = float(p[0]), float(p[1])
-    p[0] = np.log(m1 + m2)
-    p[1] = m2 / m1
-    p[6] = np.cos(p[6])      # cos_iota
-    p[9] = np.sin(p[9])      # sin_beta
-    return p
+    transform = _build_mbh_phentax_transform()
+    return transform.both_inverse_transforms(np.asarray(params_full, dtype=float))
 
 
 # ---- Cached MBH generator + wrappers (shared across data path + moves) ----
@@ -423,16 +418,188 @@ class MBHWaveWrap:
     def __call__(self, *params, **kwargs):
         call_kwargs = dict(self.runtime_kwargs)
         call_kwargs.update(kwargs)
-        # ``convert_to_ra_dec=False`` keeps the sampler basis aligned
-        # with ``[lam, beta]`` (ecliptic) rather than (ra, dec).
-        call_kwargs.setdefault("convert_to_ra_dec", False)
+        # Sky coords pass through in the orbits frame directly (sprint
+        # convention: SSB ecliptic) — no per-call frame conversion.
         arr = np.asarray(self.wave_gen(*params, **call_kwargs))
-        breakpoint()
         if self.nchannels is not None:
             arr = arr[: self.nchannels]
         return TDSignal(arr, self.td_settings).transform(
             self.target_domain, window=self.td_window
         )
+
+
+# ============================================================
+# *** MBH TDI-on-the-fly path ***
+# ============================================================
+# :class:`bbhx.mbhtdionfly.MBHTDIonFly` (moved there from
+# ``scripts/mbh/mbhtdionfly.py``): per call, phentax produces per-mode
+# strain amp/phase on its coarse adaptive time grid (merger at t=0);
+# the grid is shifted to ``t_merge + t0``; the TDI response is
+# evaluated on that grid via :class:`TDTDIonTheFly` spline kernels;
+# the result is upsampled onto the data grid before the domain
+# (WDM / FD) transform.
+#
+# Call basis (11 params):
+#     ``(m1, m2, s1z, s2z, dist, phi_ref, inc, lam, beta, psi, t_merger)``
+# * ``dist`` is in **Mpc** (phentax convention — no Gpc conversion).
+# * ``(lam, beta)`` must be in the sky frame the ``orbits`` were built
+#   with: ecliptic lon/lat for the stock orbit classes, ra/dec when the
+#   orbits use ``frame='icrs'`` (mojito catalogs).
+# * ``t_merger`` is the merger time **relative to** ``t0``.
+
+from bbhx.mbhtdionfly import MBHTDIonFly
+
+MBH_TDIONFLY_HIGHER_MODES = (21, 33, 44)
+MBH_TDIONFLY_TOL = 1e-12  # phentax root-finding tolerance
+MBH_TDIONFLY_COARSE_SCALE = 12.0
+
+
+_TDIONFLY_GEN_CACHE = {}
+
+
+def get_mbh_tdionfly_gen(
+    *,
+    Tobs: float,
+    dt: float,
+    t_start: float,
+    tdi_config: TDIConfig,
+    orbits: Optional[Orbits] = None,
+    waveform_duration: Optional[float] = None,
+    higher_modes: Optional[Sequence[int]] = None,
+    force_backend: str = "cpu",
+) -> MBHTDIonFly:
+    """Build (and cache) an :class:`MBHTDIonFly` generator.
+
+    Mirrors ``scripts/mbh/mbh_test_script_td_wave.py``: phentax
+    IMRPhenomTHM with coarse-grained amp/phase output feeding
+    :class:`TDTDIonTheFly`. A single generator is reused between the
+    synthetic-injection data loader and the template move (same caching
+    convention as :func:`get_mbh_phentax_response_wrapper`).
+    """
+    higher_modes = (
+        tuple(higher_modes) if higher_modes is not None else MBH_TDIONFLY_HIGHER_MODES
+    )
+    key = (Tobs, dt, t_start, force_backend, waveform_duration, higher_modes, id(orbits))
+    if key in _TDIONFLY_GEN_CACHE:
+        return _TDIONFLY_GEN_CACHE[key]
+
+    # Lazy phentax import (same convention as IMRPhenomTHMWaveform).
+    from phentax.waveform import IMRPhenomTHM
+
+    wave_gen = IMRPhenomTHM(
+        higher_modes=list(higher_modes),
+        include_negative_modes=True,  # negative m modes produced by symmetry
+        t_low_fit=True,  # fit-based start time for the t(f) root finder
+        coarse_grain=True,
+        coarse_graining_scale_factor=MBH_TDIONFLY_COARSE_SCALE,
+        atol=MBH_TDIONFLY_TOL,
+        rtol=MBH_TDIONFLY_TOL,
+        T=Tobs,
+    )
+
+    if orbits is None:
+        orbits = ESAOrbits(force_backend=force_backend)
+
+    gen = MBHTDIonFly(
+        wave_gen,
+        orbits,
+        tdi_config,
+        dt,
+        Tobs,
+        t0=t_start,
+        waveform_duration=waveform_duration,
+        force_backend=force_backend,
+    )
+    _TDIONFLY_GEN_CACHE[key] = gen
+    return gen
+
+
+class MBHTDIonFlyWaveWrap:
+    """Adapter: MBHTDIonFly TD output -> run-domain signal.
+
+    Mirrors :class:`MBHWaveWrap`, but evaluates the TDI-on-the-fly
+    generator on the data time grid (``upsample_t_arr``) with
+    ``combine=True`` (sum over modes) before the domain transform.
+    """
+
+    def __init__(
+        self,
+        wave_gen: MBHTDIonFly,
+        t_arr: np.ndarray,
+        td_settings: TDSettings,
+        target_domain,
+        td_window=None,
+        runtime_kwargs: Optional[dict] = None,
+        nchannels: Optional[int] = None,
+    ):
+        self.wave_gen = wave_gen
+        self.t_arr = t_arr
+        self.td_settings = td_settings
+        self.target_domain = target_domain
+        self.td_window = td_window
+        self.runtime_kwargs = runtime_kwargs or {}
+        self.nchannels = nchannels
+
+    def __call__(self, *params, **kwargs):
+        call_kwargs = dict(self.runtime_kwargs)
+        call_kwargs.update(kwargs)
+        # Old ResponseWrapper-path kwarg; the TDI-on-the-fly generator
+        # consumes (lam, beta) in the orbits frame directly.
+        call_kwargs.pop("convert_to_ra_dec", None)
+        arr = np.asarray(
+            self.wave_gen(*params, upsample_t_arr=self.t_arr, combine=True, **call_kwargs)
+        )
+        if self.nchannels is not None:
+            arr = arr[: self.nchannels]
+        return TDSignal(arr, self.td_settings).transform(
+            self.target_domain, window=self.td_window
+        )
+
+
+# Waveform (full) basis for the TDI-on-the-fly path. NOTE the ordering
+# differs from the old ResponseWrapper basis: (lam, beta) come before
+# psi, dist is Mpc, and the merger time is named t_merger.
+MBH_TDIONFLY_FULL_BASIS = [
+    "m1", "m2", "s1z", "s2z", "dist", "phi_ref",
+    "inc", "lam", "beta", "psi", "t_merger",
+]
+MBH_TDIONFLY_SAMPLED_BASIS = [
+    "mT", "q", "s1z", "s2z", "dist", "phi_ref",
+    "cosinc", "lam", "sinbeta", "psi", "t_merger",
+]
+
+
+def _build_mbh_tdionfly_transform() -> TransformContainer:
+    """Sampling-basis -> waveform-basis transform for the TDI-on-the-fly path.
+
+    Mirrors ``scripts/mbh/mbh_test_script_td_wave.py``: ``(mT, q)`` with
+    ``q = m2/m1`` maps to ``(m1, m2)``; ``cosinc`` / ``sinbeta`` invert
+    to the angles. ``dist`` passes through in Mpc.
+    """
+    return TransformContainer(
+        input_basis=MBH_TDIONFLY_SAMPLED_BASIS,
+        output_basis=MBH_TDIONFLY_FULL_BASIS,
+        parameter_transforms={
+            ("mT", "q"): mT_q,
+            "cosinc": np.arccos,
+            "sinbeta": np.arcsin,
+        },
+        key_map={"mT": "m1", "q": "m2", "cosinc": "inc", "sinbeta": "beta"},
+        inverse_parameter_transforms={
+            ("mT", "q"): m1_m2_to_mT_q,
+            "cosinc": np.cos,
+            "sinbeta": np.sin,
+        },
+    )
+
+
+def mbh_tdionfly_full_to_sampling(params_full: np.ndarray) -> np.ndarray:
+    """Waveform-basis -> sampling-basis (elementwise; works on (11,) or (11, n))."""
+    p = np.asarray(params_full, dtype=float)
+    transform = _build_mbh_tdionfly_transform()
+    # the container expects parameters on the last axis; this helper's
+    # contract puts them on the first
+    return transform.both_inverse_transforms(p.T).T
 
 
 class SyntheticMBHProcessingStep(BaseProcessingStep):
@@ -653,6 +820,12 @@ def _build_mbh_phentax_transform() -> TransformContainer:
             "sin_beta": np.arcsin,         # sin_beta -> beta
         },
         fill_dict={},
+        inverse_parameter_transforms={
+            "logM": np.log,
+            ("logM", "q"): m1_m2_to_mT_q,  # (m1, m2) -> (M_total, q)
+            "cos_iota": np.cos,            # inc -> cos_iota
+            "sin_beta": np.sin,            # beta -> sin_beta
+        },
     )
 
 
@@ -680,7 +853,6 @@ def get_mbh_phentax_erebor_settings(general_set: GeneralSetup) -> MBHSetup:
 
     delta_prior = 1e-2
     # TODO: adjust this to regular transform container indexing
-    breakpoint()
     injection_sampling = mbh_full_to_sampling(INJECTION_PARAMS_FULL_BASIS)
 
     # Tight box around the injection in the sampling basis. Angles

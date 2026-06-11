@@ -58,7 +58,11 @@ from lisatools.globalfit.moves import ResidualAddOneRemoveOneMove
 from lisatools.globalfit.preprocessing import BaseProcessingStep
 from lisatools.globalfit.recipe import RecipeStep
 from lisatools.globalfit.run import CurrentInfoGlobalFit
-from lisatools.globalfit.stock.erebor import SOBBHSettings, SOBBHSetup
+from lisatools.globalfit.stock.erebor import (
+    SOBBHSettings,
+    SOBBHSetup,
+    make_sobbh_transform_container,
+)
 from lisatools.sources.sobbh import SOBBHWaveform
 from lisatools.utils.constants import YRSID_SI
 
@@ -125,13 +129,8 @@ def sobbh_full_to_sampling(params_full):
     The waveform basis is ``(m1, m2, s1, s2, dist, inc, f_low, lam, beta, psi, phi0)``;
     the sampling basis is ``(logm1, logm2, s1, s2, dist, cosinc, f_low, phiS, cosqS, psi, phi0)``.
     """
-    p = np.asarray(params_full, dtype=float).copy()
-    p[0] = np.log(p[0])             # m1 -> logm1
-    p[1] = np.log(p[1])             # m2 -> logm2
-    p[5] = np.cos(p[5])             # inc -> cosinc
-    # p[7] stays: lam -> phiS (same value)
-    p[8] = np.cos(np.pi / 2.0 - p[8])  # beta -> cosqS
-    return p
+    transform = make_sobbh_transform_container()
+    return transform.both_inverse_transforms(np.asarray(params_full, dtype=float))
 
 
 # ---- Cached SOBBH generator + wrappers (shared across data path + moves) ----

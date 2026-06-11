@@ -80,6 +80,59 @@ def f_ms_to_s(x):
     return x * 1e-3
 
 
+def f_s_to_ms(x):
+    """Convert frequencies from Hz to mHz (inverse of :func:`f_ms_to_s`)."""
+    return x * 1e3
+
+
+def make_gb_transform_container():
+    """Build the stock GB :class:`TransformContainer` (forward + inverse).
+
+    Sampling basis: ``A (ln), f0 (mHz), fdot, phi0, cos_iota, psi, lam,
+    sin_beta``; output basis adds the filled ``fddot``. The inverse
+    transforms enable ``both_inverse_transforms`` (full basis -> sampling
+    basis).
+    """
+    input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
+
+    gb_transform_fn_in = {
+        "A": np.exp,
+        "f0": f_ms_to_s,
+        "cos_iota": np.arccos,
+        "sin_beta": np.arcsin,
+    }
+
+    gb_inverse_transform_fn_in = {
+        "A": np.log,
+        "f0": f_s_to_ms,
+        "cos_iota": np.cos,
+        "sin_beta": np.sin,
+    }
+
+    output_basis = [
+        "A",
+        "f0",
+        "fdot",
+        "fddot",
+        "phi0",
+        "cos_iota",
+        "psi",
+        "lam",
+        "sin_beta",
+    ]
+    gb_fill_dict = {"fddot": 0.0}
+
+    # gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
+
+    return TransformContainer(
+        input_basis=input_basis,
+        output_basis=output_basis,
+        parameter_transforms=gb_transform_fn_in,
+        fill_dict=gb_fill_dict,
+        inverse_parameter_transforms=gb_inverse_transform_fn_in,
+    )
+
+
 from ..hdfbackend import GBHDFBackend
 from ..state import GBState
 
@@ -108,34 +161,7 @@ class GBSetup(Setup, GBSettings):
         input_basis = ["A", "f0", "fdot", "phi0", "cos_iota", "psi", "lam", "sin_beta"]
 
         if self.transform is None:
-            gb_transform_fn_in = {
-                "A": np.exp,
-                "f0": f_ms_to_s,
-                "cos_iota": np.arccos,
-                "sin_beta": np.arcsin,
-            }
-
-            output_basis = [
-                "A",
-                "f0",
-                "fdot",
-                "fddot",
-                "phi0",
-                "cos_iota",
-                "psi",
-                "lam",
-                "sin_beta",
-            ]
-            gb_fill_dict = {"fddot": 0.0}
-
-            # gb_fill_dict = {"fill_inds": np.array([3]), "ndim_full": 9, "fill_values": np.array([0.0])}
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=gb_transform_fn_in,
-                fill_dict=gb_fill_dict,
-            )
+            self.transform = make_gb_transform_container()
 
         if self.periodic is None:
             # Use integer indices (relative to ``input_basis``) so eryn's
@@ -341,8 +367,78 @@ def gpc_to_mpc(x):
     return x * 1e3
 
 
-from bbhx.utils.transform import LISA_to_SSB, mT_q  # used by MBHSetup.init_sampling_info
+def mpc_to_gpc(x):
+    """
+    Transform from Mpc to Gpc (inverse of :func:`gpc_to_mpc`).
+    """
+    return x * 1e-3
+
+
+def m1_m2_to_mT_q(m1, m2):
+    """Convert m1, m2 to total mass and mass ratio (inverse of ``mT_q``)."""
+    return (m1 + m2, m2 / m1)
+
+
+from bbhx.utils.transform import LISA_to_SSB, SSB_to_LISA, mT_q  # used by MBHSetup.init_sampling_info
 from eryn.moves import Move
+
+
+def make_mbh_transform_container():
+    """Build the stock MBH :class:`TransformContainer` (forward + inverse).
+
+    Sampling basis: ``logM, q, s1z, s2z, dist (Gpc), phi_ref, cos_iota,
+    psi, lam, sin_beta, t_plunge (LISA frame)``; the output basis is the
+    same names holding ``m1, m2 (via mT_q), dist (Mpc), iota, beta`` and
+    SSB-frame sky/time/polarization. The inverse transforms enable
+    ``both_inverse_transforms`` (full basis -> sampling basis).
+    """
+    input_basis = [
+        "logM",
+        "q",
+        "s1z",
+        "s2z",
+        "dist",
+        "phi_ref",
+        "cos_iota",
+        "psi",
+        "lam",
+        "sin_beta",
+        "t_plunge",
+    ]
+
+    output_basis = list(input_basis)
+
+    mbh_transform_fn_in = {
+        "logM": np.exp,
+        "dist": gpc_to_mpc,
+        "cos_iota": np.arccos,
+        "sin_beta": np.arcsin,
+        ("logM", "q"): mT_q,
+        ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
+    }
+
+    # keyed identically to mbh_transform_fn_in; same insertion order so
+    # the multi-parameter inverses unwind in reverse of the forward order
+    mbh_inverse_transform_fn_in = {
+        "logM": np.log,
+        "dist": mpc_to_gpc,
+        "cos_iota": np.cos,
+        "sin_beta": np.sin,
+        ("logM", "q"): m1_m2_to_mT_q,
+        ("t_plunge", "lam", "sin_beta", "psi"): SSB_to_LISA,
+    }
+
+    # for transforms
+    # mbh_fill_dict = {"f_ref": 0.0}
+    mbh_fill_dict = {}
+
+    return TransformContainer(
+        input_basis=input_basis,
+        output_basis=output_basis,
+        parameter_transforms=mbh_transform_fn_in,
+        fill_dict=mbh_fill_dict,
+        inverse_parameter_transforms=mbh_inverse_transform_fn_in,
+    )
 
 from ..hdfbackend import MBHHDFBackend
 from ..state import MBHState
@@ -409,42 +505,7 @@ class MBHSetup(Setup):
         ]
 
         if self.transform is None:
-
-            output_basis = [
-                "logM",
-                "q",
-                "s1z",
-                "s2z",
-                "dist",
-                "phi_ref",
-                # "f_ref",
-                "cos_iota",
-                "psi",
-                "lam",
-                "sin_beta",
-                # "psi",
-                "t_plunge",
-            ]
-
-            mbh_transform_fn_in = {
-                "logM": np.exp,
-                "dist": gpc_to_mpc,
-                "cos_iota": np.arccos,
-                "sin_beta": np.arcsin,
-                ("logM", "q"): mT_q,
-                ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
-            }
-
-            # for transforms
-            # mbh_fill_dict = {"f_ref": 0.0}
-            mbh_fill_dict = {}
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=mbh_transform_fn_in,
-                fill_dict=mbh_fill_dict,
-            )
+            self.transform = make_mbh_transform_container()
 
         if self.periodic is None:
             self.periodic = {"mbh": {"phi_ref": 2 * np.pi, "lam": 2 * np.pi, "psi": np.pi}}
@@ -543,6 +604,78 @@ class MBHSetup(Setup):
             self.branch_backend = MBHHDFBackend
 
 
+def make_emri_transform_container(fill_values):
+    """Build the stock EMRI :class:`TransformContainer` (forward + inverse).
+
+    Sampling basis (12 params): ``logm1, m2, a, p0, e0, dist, qS (cos),
+    phiS, qK (cos), phiK, Phi_phi0, Phi_r0``; the output basis adds the
+    filled ``xI0`` and ``Phi_theta0``. The inverse transforms enable
+    ``both_inverse_transforms`` (full basis -> sampling basis).
+
+    Args:
+        fill_values: Length-2 sequence with the fill values for ``xI0``
+            (inclination) and ``Phi_theta0``.
+    """
+    input_basis = [
+        "logm1",
+        "m2",
+        "a",
+        "p0",
+        "e0",
+        "dist",
+        "qS",
+        "phiS",
+        "qK",
+        "phiK",
+        "Phi_phi0",
+        "Phi_r0",
+    ]
+
+    output_basis = [
+        "logm1",
+        "m2",
+        "a",
+        "p0",
+        "e0",
+        "xI0",
+        "dist",
+        "qS",
+        "phiS",
+        "qK",
+        "phiK",
+        "Phi_phi0",
+        "Phi_theta0",
+        "Phi_r0",
+    ]
+
+    # for transforms
+
+    emri_fill_dict = {
+        "xI0": fill_values[0],  # inclination
+        "Phi_theta0": fill_values[1],  # Phi_theta
+    }
+
+    emri_transform_fn_in = {
+        output_basis[0]: np.exp,  # M
+        output_basis[7]: np.arccos,  # qS
+        output_basis[9]: np.arccos,  # qK
+    }
+
+    emri_inverse_transform_fn_in = {
+        output_basis[0]: np.log,  # M
+        output_basis[7]: np.cos,  # qS
+        output_basis[9]: np.cos,  # qK
+    }
+
+    return TransformContainer(
+        input_basis=input_basis,
+        output_basis=output_basis,
+        parameter_transforms=emri_transform_fn_in,
+        fill_dict=emri_fill_dict,
+        inverse_parameter_transforms=emri_inverse_transform_fn_in,
+    )
+
+
 from ..hdfbackend import EMRIHDFBackend
 from ..state import EMRIState
 
@@ -611,43 +744,7 @@ class EMRISetup(Setup):
         ]
 
         if self.transform is None:
-
-            output_basis = [
-                "logm1",
-                "m2",
-                "a",
-                "p0",
-                "e0",
-                "xI0",
-                "dist",
-                "qS",
-                "phiS",
-                "qK",
-                "phiK",
-                "Phi_phi0",
-                "Phi_theta0",
-                "Phi_r0",
-            ]
-
-            # for transforms
-
-            emri_fill_dict = {
-                "xI0": self.fill_values[0],  # inclination
-                "Phi_theta0": self.fill_values[1],  # Phi_theta
-            }
-
-            emri_transform_fn_in = {
-                output_basis[0]: np.exp,  # M
-                output_basis[7]: np.arccos,  # qS
-                output_basis[9]: np.arccos,  # qK
-            }
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=emri_transform_fn_in,
-                fill_dict=emri_fill_dict,
-            )
+            self.transform = make_emri_transform_container(self.fill_values)
 
         if self.periodic is None:
             self.periodic = {
@@ -759,6 +856,83 @@ class EMRISetup(Setup):
             self.branch_backend = EMRIHDFBackend
 
 
+def cosqS_to_beta(x):
+    """Transform ``cosqS`` to ecliptic latitude ``beta = pi/2 - arccos(cosqS)``."""
+    return np.pi / 2.0 - np.arccos(x)
+
+
+def beta_to_cosqS(x):
+    """Transform ecliptic latitude ``beta`` to ``cosqS = sin(beta)`` (inverse of :func:`cosqS_to_beta`)."""
+    return np.sin(x)
+
+
+def make_sobbh_transform_container():
+    """Build the stock SOBBH :class:`TransformContainer` (forward + inverse).
+
+    Sampling basis (11 params): ``logm1, logm2, s1, s2, dist, cosinc,
+    f_low, phiS, cosqS, psi, phi0``; output basis: ``m1, m2, s1, s2,
+    dist, inc, f_low, lam, beta, psi, phi0``. The inverse transforms
+    enable ``both_inverse_transforms`` (full basis -> sampling basis).
+    """
+    input_basis = [
+        "logm1",
+        "logm2",
+        "s1",
+        "s2",
+        "dist",
+        "cosinc",
+        "f_low",
+        "phiS",
+        "cosqS",
+        "psi",
+        "phi0",
+    ]
+
+    output_basis = [
+        "m1",
+        "m2",
+        "s1",
+        "s2",
+        "dist",
+        "inc",
+        "f_low",
+        "lam",
+        "beta",
+        "psi",
+        "phi0",
+    ]
+
+    sobbh_transform_fn_in = {
+        output_basis[0]: np.exp,  # m1
+        output_basis[1]: np.exp,  # m2
+        output_basis[5]: np.arccos,  # inc <- cosinc
+        output_basis[8]: cosqS_to_beta,  # beta <- cosqS
+    }
+
+    sobbh_inverse_transform_fn_in = {
+        output_basis[0]: np.log,  # logm1 <- m1
+        output_basis[1]: np.log,  # logm2 <- m2
+        output_basis[5]: np.cos,  # cosinc <- inc
+        output_basis[8]: beta_to_cosqS,  # cosqS <- beta
+    }
+
+    # Every input-basis name not already present in output_basis
+    # needs a key_map entry pointing to its renamed counterpart.
+    return TransformContainer(
+        input_basis=input_basis,
+        output_basis=output_basis,
+        parameter_transforms=sobbh_transform_fn_in,
+        key_map={
+            "logm1": "m1",
+            "logm2": "m2",
+            "cosinc": "inc",
+            "cosqS": "beta",
+            "phiS": "lam",
+        },
+        inverse_parameter_transforms=sobbh_inverse_transform_fn_in,
+    )
+
+
 from ..hdfbackend import SOBBHHDFBackend
 from ..state import SOBBHState
 
@@ -839,41 +1013,7 @@ class SOBBHSetup(Setup):
         ]
 
         if self.transform is None:
-            output_basis = [
-                "m1",
-                "m2",
-                "s1",
-                "s2",
-                "dist",
-                "inc",
-                "f_low",
-                "lam",
-                "beta",
-                "psi",
-                "phi0",
-            ]
-
-            sobbh_transform_fn_in = {
-                output_basis[0]: np.exp,  # m1
-                output_basis[1]: np.exp,  # m2
-                output_basis[5]: np.arccos,  # inc <- cosinc
-                output_basis[8]: lambda x: np.pi / 2.0 - np.arccos(x),  # beta <- cosqS
-            }
-
-            # Every input-basis name not already present in output_basis
-            # needs a key_map entry pointing to its renamed counterpart.
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=sobbh_transform_fn_in,
-                key_map={
-                    "logm1": "m1",
-                    "logm2": "m2",
-                    "cosinc": "inc",
-                    "cosqS": "beta",
-                    "phiS": "lam",
-                },
-            )
+            self.transform = make_sobbh_transform_container()
 
         if self.periodic is None:
             self.periodic = {

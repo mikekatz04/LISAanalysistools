@@ -9,8 +9,9 @@
 #include "binding.hpp"
 
 // Phase 3J: this binding TU is the SOLE registration site for the shared
-// wrapper classes (OrbitsWrap, LISAResponseWrap, TDIConfigWrap,
-// CubicSplineWrap_responselisa, ...). Setting the toggle to 1 BEFORE
+// wrapper classes (OrbitsWrap, LISAResponseWrap, TDIConfigWrap, ...).
+// (CubicSplineWrap is GBT-owned as of 2026-06-10 and registered in
+// GBT's `interp` module, not here.) Setting the toggle to 1 BEFORE
 // including lisatools_header_abi.hpp marks this file as the owner; every
 // downstream TU (lisa-on-gpu/binding_tof.cxx, future GBGPU/BBHx bindings)
 // must leave the toggle at its default 0 and adds a static_assert(!toggle, ...)
@@ -426,10 +427,11 @@ NB_MODULE(pycppdetector, m) {
 
     // Call initialization functions from other files
     detector_part(m);
-    // Phase 3E: LISA-response wrappers (LISAResponseWrap, TDIConfigWrap,
-    // CubicSplineWrap_responselisa). Defined in binding_flr.cxx, absorbed
-    // from lisa-on-gpu. (OrbitsWrap_responselisa was deleted at Phase 3L.7p
-    // 2026-06-04 in favor of the canonical OrbitsWrap.)
+    // Phase 3E: LISA-response wrappers (LISAResponseWrap, TDIConfigWrap).
+    // Defined in binding_flr.cxx, absorbed from lisa-on-gpu.
+    // (The legacy OrbitsWrap_responselisa was deleted at Phase 3L.7p
+    // 2026-06-04 in favor of the canonical OrbitsWrap; CubicSplineWrap
+    // moved to GBT's `interp` module 2026-06-10.)
     response_part(m);
     m.def("check_orbits", &check_orbits, "Make sure that we can insert orbits properly.");
 

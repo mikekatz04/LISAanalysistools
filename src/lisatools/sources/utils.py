@@ -489,8 +489,77 @@ class EMRICalculationController(CalculationController):
         return params[deriv_inds], cov
 
 
-def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, float]:
+# Equatorial (ICRS) pole expressed in ecliptic cartesian coordinates,
+# computed lazily through the same astropy frame used for the position
+# conversions so the polarization rotation is exactly consistent with them.
+_EQ_POLE_ECL_XYZ = None
+
+
+def _equatorial_pole_ecliptic_xyz() -> np.ndarray:
+    """Unit vector of the ICRS pole in (barycentric true) ecliptic cartesian coords."""
+    global _EQ_POLE_ECL_XYZ
+    if _EQ_POLE_ECL_XYZ is None:
+        pole = SkyCoord(
+            ra=0.0 * u.rad, dec=(np.pi / 2.0) * u.rad, frame="icrs"
+        ).barycentrictrueecliptic
+        lam_p = pole.lon.rad
+        beta_p = pole.lat.rad
+        _EQ_POLE_ECL_XYZ = np.array(
+            [
+                np.cos(beta_p) * np.cos(lam_p),
+                np.cos(beta_p) * np.sin(lam_p),
+                np.sin(beta_p),
+            ]
+        )
+    return _EQ_POLE_ECL_XYZ
+
+
+def psi_rotation_icrs_to_ecliptic(lam_ecl, beta_ecl):
+    """Polarization-basis rotation ``chi`` such that ``psi_ecl = psi_icrs - chi``.
+
+    Both polarization angles are assumed measured from the respective
+    frame's local north (direction of increasing latitude) toward local
+    east, with the same rotational sense about the line of sight, so only
+    the relative rotation of the two local-north directions matters. The
+    rotation is position-dependent only and is computed in ecliptic
+    cartesian coordinates with the standard vector construction (local
+    north = frame pole projected onto the sky plane), using the same
+    astropy frames as the position conversion.
+
+    Args:
+        lam_ecl: Ecliptic longitude(s) in radians.
+        beta_ecl: Ecliptic latitude(s) in radians.
+
+    Returns:
+        ``chi`` in radians with the same shape as the inputs.
+    """
+    lam = np.asarray(lam_ecl)
+    beta = np.asarray(beta_ecl)
+    n = np.stack(
+        [np.cos(beta) * np.cos(lam), np.cos(beta) * np.sin(lam), np.sin(beta)],
+        axis=-1,
+    )  # line of sight (unit)
+    z_ecl = np.array([0.0, 0.0, 1.0])
+    p_eq = _equatorial_pole_ecliptic_xyz()
+
+    # Local-north directions (pole minus its line-of-sight component).
+    # Normalization is unnecessary: |cross(north_icrs, n)| == |north_icrs|
+    # since north_icrs is perpendicular to n, so the common positive factor
+    # |north_icrs| * |north_ecl| cancels inside arctan2.
+    north_ecl = z_ecl - (n @ z_ecl)[..., None] * n
+    north_icrs = p_eq - (n @ p_eq)[..., None] * n
+    east_icrs = np.cross(north_icrs, n)
+    chi = np.arctan2(
+        np.sum(east_icrs * north_ecl, axis=-1),
+        np.sum(north_icrs * north_ecl, axis=-1),
+    )
+    return chi
+
+
+def icrs_to_ecliptic(psi, ra, dec) -> Tuple[float, float, float]:
     """Convert ICRS sky coordinates and polarisation angle to ecliptic coordinates.
+
+    Vectorized: scalar or array inputs are both supported.
 
     Args:
         psi: Polarisation angle in radians, defined in the ICRS frame.
@@ -501,17 +570,36 @@ def icrs_to_ecliptic(psi: float, ra: float, dec: float) -> Tuple[float, float, f
         Tuple ``(psi_ecliptic, lambda, beta)`` of polarisation angle, ecliptic
         longitude, and ecliptic latitude (all in radians).
     """
-    eps = 0.40909263366002024 # obliquity of the ecliptic at J2000 in radians
-
     coord = SkyCoord(ra=ra * u.rad, dec=dec * u.rad, frame='icrs')
     ecliptic_coord = coord.barycentrictrueecliptic
 
     lambd = ecliptic_coord.lon.rad
     beta = ecliptic_coord.lat.rad
 
-    cosdeltapsi = 1./np.cos(dec) * (-np.sin(eps)*np.sin(beta)*np.sin(lambd) + np.cos(eps)*np.cos(beta))
-    sindeltapsi = -1./np.cos(dec) * np.sin(eps)*np.cos(lambd)
-    deltapsi = np.arctan2(sindeltapsi, cosdeltapsi)
-    psi_ecliptic = psi - deltapsi
+    psi_ecliptic = psi - psi_rotation_icrs_to_ecliptic(lambd, beta)
 
     return psi_ecliptic, lambd, beta
+
+
+def ecliptic_to_icrs(psi_ecl, lam, beta) -> Tuple[float, float, float]:
+    """Convert ecliptic sky coordinates and polarisation angle to ICRS (inverse of :func:`icrs_to_ecliptic`).
+
+    Vectorized: scalar or array inputs are both supported.
+
+    Args:
+        psi_ecl: Polarisation angle in radians, defined in the ecliptic frame.
+        lam: Ecliptic longitude in radians.
+        beta: Ecliptic latitude in radians.
+
+    Returns:
+        Tuple ``(psi_icrs, ra, dec)`` of polarisation angle, right
+        ascension, and declination (all in radians).
+    """
+    coord = SkyCoord(
+        lon=lam * u.rad, lat=beta * u.rad, frame="barycentrictrueecliptic"
+    )
+    icrs_coord = coord.icrs
+
+    psi_icrs = psi_ecl + psi_rotation_icrs_to_ecliptic(lam, beta)
+
+    return psi_icrs, icrs_coord.ra.rad, icrs_coord.dec.rad

@@ -362,7 +362,7 @@ def get_gb_erebor_settings(general_set: GeneralSetup) -> GBSetup:
     # WDM-domain GB likelihood object: built lazily in ``setup_recipe``
     # below. We can't hold it on the settings dataclass because
     # ``CurrentInfoGlobalFit.__init__`` deepcopies the whole settings tree,
-    # and the underlying fastlisaresponse C++ wrap (``OrbitsWrapCPU_responselisa``)
+    # and the underlying fastlisaresponse C++ wrap (``OrbitsWrapCPU``)
     # is not picklable.
     gb_wdm_comp = None
 
