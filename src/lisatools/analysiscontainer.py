@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import warnings
 from abc import ABC
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -1512,6 +1513,13 @@ class AnalysisContainerArray:
             GIL-releasing C++ kernels); pin ``OMP_NUM_THREADS`` /
             ``OPENBLAS_NUM_THREADS`` so ``n_splits * blas_threads`` does not
             oversubscribe the machine.
+        run_threaded: If ``True``, the array-level analysis ops
+            (:meth:`_vectorized_dispatch` consumers — ``likelihood``,
+            ``inner_product``, ``calculate_signal_*`` — and the domain-aware
+            :meth:`signal_operation`) execute their per-split batches
+            concurrently, one thread per split (GPU splits each enter their
+            own device context; CPU splits rely on GIL-releasing work). The
+            default ``False`` preserves the serial per-split loops.
 
     """
 
@@ -1527,7 +1535,10 @@ class AnalysisContainerArray:
         complex_psd: bool = False,
         gpu_assignment: Optional[np.ndarray] = None,
         n_splits: Optional[int] = None,
+        run_threaded: bool = False,
     ) -> None:
+        self.run_threaded = bool(run_threaded)
+        self._thread_pool = None
 
         if isinstance(analysis_containers, AnalysisContainer):
             acs = np.array([analysis_containers], dtype=object)
@@ -1939,23 +1950,35 @@ class AnalysisContainerArray:
                 return asnumpy(res)
             return res
 
+        # Per-split execution (rows grouped by split_map so CPU n_splits
+        # parallelize the same way GPU splits do). results[r] slots are
+        # distinct per row, so threaded workers never write the same slot.
+        split_to_rows = self._split_rows(index_arr)
+
         if self.gpus is None:
-            for r in range(N):
-                ac_i = int(index_arr[r])
-                res = _call_one(acs_flat[ac_i], _slice_row(payload, r))
-                results[r] = _to_host(res)
+
+            def _worker(split, rows):
+                for r in rows:
+                    ac_i = int(index_arr[int(r)])
+                    res = _call_one(acs_flat[ac_i], _slice_row(payload, int(r)))
+                    results[int(r)] = _to_host(res)
+
+            self._run_per_split(_worker, split_to_rows)
         else:
             main_gpu = self.xp.cuda.runtime.getDevice()
-            gpu_per_row = self.gpu_map[index_arr]
+
+            def _worker(split, rows):
+                # cupy's current device is thread-local: each worker enters
+                # its split's device itself.
+                with self.xp.cuda.Device(int(self.gpus[split])):
+                    for r in rows:
+                        ac_i = int(index_arr[int(r)])
+                        sub = _to_device(_slice_row(payload, int(r)))
+                        res = _call_one(acs_flat[ac_i], sub)
+                        results[int(r)] = _to_host(res)
+
             try:
-                for gpu in np.unique(gpu_per_row):
-                    rows_on_gpu = np.where(gpu_per_row == gpu)[0]
-                    with self.xp.cuda.Device(int(gpu)):
-                        for r in rows_on_gpu:
-                            ac_i = int(index_arr[r])
-                            sub = _to_device(_slice_row(payload, int(r)))
-                            res = _call_one(acs_flat[ac_i], sub)
-                            results[int(r)] = _to_host(res)
+                self._run_per_split(_worker, split_to_rows)
             finally:
                 self.xp.cuda.runtime.setDevice(main_gpu)
 
@@ -2009,6 +2032,54 @@ class AnalysisContainerArray:
     def layer_dt(self):
         """WDM layer time spacing of the first container (shared across the array)."""
         return self.acs[0].layer_dt
+
+    # ------------------------------------------------------------------
+    # Per-split execution (serial or threaded) — shared by the vectorized
+    # dispatcher and signal_operation. One Python orchestration layer
+    # spreading work across threads and GPUs: GPU splits each enter their
+    # own device context inside the worker (cupy's current device is
+    # thread-local); CPU splits (``n_splits``) run as plain threads and
+    # pay off where the per-row work releases the GIL.
+    # ------------------------------------------------------------------
+
+    @property
+    def thread_pool(self) -> ThreadPoolExecutor:
+        """Lazy ``ThreadPoolExecutor`` with one worker per split."""
+        if self._thread_pool is None:
+            self._thread_pool = ThreadPoolExecutor(
+                max_workers=max(1, len(self.gpu_splits))
+            )
+        return self._thread_pool
+
+    def _split_rows(self, index_arr: np.ndarray) -> dict:
+        """Group flat row positions by owning split: ``{split: rows}``."""
+        split_per_row = self.split_map[np.asarray(index_arr, dtype=int)]
+        return {
+            int(s): np.where(split_per_row == s)[0]
+            for s in np.unique(split_per_row)
+        }
+
+    def _run_per_split(self, worker, split_to_rows: dict, run_threaded=None) -> None:
+        """Run ``worker(split_index, rows)`` once per populated split.
+
+        With ``run_threaded`` (default :attr:`run_threaded`) and more than
+        one populated split, splits execute concurrently in
+        :attr:`thread_pool`; worker exceptions propagate to the caller.
+        The worker is responsible for entering its split's device context
+        (GPU splits) — see the call sites.
+        """
+        if run_threaded is None:
+            run_threaded = self.run_threaded
+        items = [(s, rows) for s, rows in split_to_rows.items() if len(rows)]
+        if run_threaded and len(items) > 1:
+            futures = [
+                self.thread_pool.submit(worker, s, rows) for s, rows in items
+            ]
+            for f in futures:
+                f.result()  # re-raise worker exceptions in caller
+        else:
+            for s, rows in items:
+                worker(s, rows)
 
     # ------------------------------------------------------------------
     # Vectorized analysis ops (sharded by ``index`` across GPUs)
@@ -2260,10 +2331,20 @@ class AnalysisContainerArray:
 
         acs_flat = self.acs.flatten()
 
+        # Per-split execution (serial by default; one thread per split with
+        # run_threaded=True — distinct ACs per row, so threaded workers
+        # never touch the same residual buffer).
+        split_to_rows = self._split_rows(data_index)
+
         if self.gpus is None:
-            for i, di in enumerate(data_index):
-                signal = item_list[i]
-                acs_flat[di].data.add_signal(signal, sign=sign)
+
+            def _worker(split, rows):
+                for i in rows:
+                    acs_flat[int(data_index[int(i)])].data.add_signal(
+                        item_list[int(i)], sign=sign
+                    )
+
+            self._run_per_split(_worker, split_to_rows)
             return
 
         # Multi-GPU: enter each owning device once per shard. Per-domain
@@ -2273,15 +2354,18 @@ class AnalysisContainerArray:
         # Templates produced on a different device are first migrated via
         # _signal_on_device (stft_tof cross-device hygiene).
         main_gpu = self.xp.cuda.runtime.getDevice()
-        gpu_per_template = self.gpu_map[data_index]
+
+        def _worker(split, rows):
+            gpu = int(self.gpus[split])
+            with self.xp.cuda.Device(gpu):
+                for i in rows:
+                    signal = self._signal_on_device(item_list[int(i)], gpu)
+                    acs_flat[int(data_index[int(i)])].data.add_signal(
+                        signal, sign=sign
+                    )
+
         try:
-            for gpu in np.unique(gpu_per_template):
-                mask = gpu_per_template == gpu
-                rows = np.where(mask)[0]
-                with self.xp.cuda.Device(int(gpu)):
-                    for i in rows:
-                        signal = self._signal_on_device(item_list[i], int(gpu))
-                        acs_flat[int(data_index[i])].data.add_signal(signal, sign=sign)
+            self._run_per_split(_worker, split_to_rows)
         finally:
             self.xp.cuda.runtime.setDevice(main_gpu)
 
