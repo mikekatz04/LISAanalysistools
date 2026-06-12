@@ -11,6 +11,7 @@ except (ModuleNotFoundError, ImportError) as e:
     gpu_available = True
 
 from lisatools.detector import EqualArmlengthOrbits
+from lisatools.domains import FDSettings, STFTSettings
 from lisatools.utils.constants import *
 from eryn.state import BranchSupplemental
 from lisatools.globalfit.hdfbackend import GFHDFBackend, GBHDFBackend, MBHHDFBackend, EMRIHDFBackend
@@ -210,14 +211,20 @@ def get_general_erebor_settings() -> GeneralSetup:
 
     galactic_grid_kwargs = None
 
+    # Domain communicated by settings factory, not a string flag (sprint
+    # rule): the engine calls ``factory(times, dt, force_backend)`` after
+    # loading the data so the grid is sized against the real time array.
+    assert basis_domain != "stft", "stft basis needs an stft_dt"
+    domain_settings = FDSettings.make_factory(
+        min_freq=start_freq, max_freq=end_freq
+    )
+
     general_settings = GeneralSettings(
         Tobs=Tobs,
         dt=dt,
         file_store_dir=file_store_dir,
         base_file_name=base_file_name,
-        start_freq=1e-4,
-        end_freq=0.029,
-        basis_domain=basis_domain,
+        domain_settings=domain_settings,
         random_seed=103209,
         backup_iter=5,
         nwalkers=nwalkers,
@@ -225,7 +232,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         winalpha=winalpha,
         wintype=wintype,
         gpus=gpus,
-        data_processor=L1ProcessingStep,
+        data_processor_class=L1ProcessingStep,
         processor_init_kwargs=processor_init_kwargs,
         preprocess_kwargs=preprocess_kwargs,
         sensitivity_init_kwargs=sensitivity_init_kwargs,
@@ -233,6 +240,11 @@ def get_general_erebor_settings() -> GeneralSetup:
     )
 
     general_setup = GeneralSetup(general_settings)
+    # Band/STFT metadata consumed by the per-source setup functions
+    # (no longer GeneralSettings fields post-merge; the analysis band
+    # itself lives on domain_settings).
+    general_setup.start_freq = start_freq
+    general_setup.end_freq = end_freq
     return general_setup
 
 
