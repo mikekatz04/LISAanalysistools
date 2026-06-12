@@ -522,7 +522,8 @@ void detector_part(nb::module_ &m) {
          "foreground in the likelihood.  Pass None to disable.")
     .def("disable_galactic_grid", &XYZSensitivityMatrixWrap::disable_galactic_grid,
          "Detach galactic grid (equivalent to set_galactic_grid(None)).")
-    .def("get_noise_tfs_wrap",        &XYZSensitivityMatrixWrap::get_noise_tfs_wrap, "Get noise transfer functions.")
+    .def("get_noise_tfs_wrap",        &XYZSensitivityMatrixWrap::get_noise_tfs_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Get noise transfer functions.")
     .def("psd_likelihood_wrap", &XYZSensitivityMatrixWrap::psd_likelihood_wrap,
          nb::arg("like_contrib_final"), nb::arg("f_arr"), nb::arg("data"),
          nb::arg("data_index_all"), nb::arg("time_index_all"),
@@ -532,11 +533,14 @@ void detector_part(nb::module_ &m) {
          nb::arg("differential_component"), nb::arg("num_freqs"), nb::arg("num_times"),
          nb::arg("dips_mask"), nb::arg("num_psds"),
          nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
          "Compute PSD likelihood.")
-    .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap, "Compute noise covariance matrix.")
+    .def("get_noise_covariance_wrap", &XYZSensitivityMatrixWrap::get_noise_covariance_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Compute noise covariance matrix.")
     .def("set_averaged_tfs_wrap",     &XYZSensitivityMatrixWrap::set_averaged_tfs_wrap, "Attach FD time-averaged transfer functions.")
     .def("disable_averaged_tfs_wrap", &XYZSensitivityMatrixWrap::disable_averaged_tfs_wrap, "Detach FD time-averaged transfer functions.")
-    .def("get_inverse_det_wrap",      &XYZSensitivityMatrixWrap::get_inverse_det_wrap, "Batch invert 3x3 Hermitian matrices and compute determinants.")
+    .def("get_inverse_det_wrap",      &XYZSensitivityMatrixWrap::get_inverse_det_wrap,
+         nb::call_guard<nb::gil_scoped_release>(), "Batch invert 3x3 Hermitian matrices and compute determinants.")
     .def_rw("sensitivity_matrix", &XYZSensitivityMatrixWrap::sensitivity_matrix)
     .def("__copy__",  [](const XYZSensitivityMatrixWrap &self) {
         return XYZSensitivityMatrixWrap(self);
@@ -555,10 +559,14 @@ void detector_part(nb::module_ &m) {
             nb::arg("averaged_ltts_arr"), nb::arg("delta_ltts_arr"), nb::arg("n_times"), nb::arg("armlength"), nb::arg("generation"), nb::arg("spline_noise"), nb::arg("window_factor") = 1.0)
     ;
 
-    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap, "Legacy PSD likelihood wrapping");
-    m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap, "Legacy PSD val wrapping");
-    m.def("psd_likelihood", &psd_likelihood_binding, "PSD likelihood computation");
-    m.def("compute_logpdf", &compute_logpdf_binding, "Compute log PDF from GMM");
+    m.def("psd_likelihood_legacy_wrap", &psd_likelihood_legacy_wrap,
+          nb::call_guard<nb::gil_scoped_release>(), "Legacy PSD likelihood wrapping");
+    m.def("get_psd_val_legacy_wrap", &get_psd_val_legacy_wrap,
+          nb::call_guard<nb::gil_scoped_release>(), "Legacy PSD val wrapping");
+    m.def("psd_likelihood", &psd_likelihood_binding,
+          nb::call_guard<nb::gil_scoped_release>(), "PSD likelihood computation");
+    m.def("compute_logpdf", &compute_logpdf_binding,
+          nb::call_guard<nb::gil_scoped_release>(), "Compute log PDF from GMM");
 }
 
 
@@ -596,6 +604,7 @@ void domains_part(nb::module_ &m) {
          nb::arg("data_index"), nb::arg("noise_index"),
          nb::arg("n_t_template"), nb::arg("n_f_template"),
          nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
          "Compute (d|h) and (h|h) likelihood terms for a batch of binaries.");
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
@@ -616,6 +625,7 @@ void domains_part(nb::module_ &m) {
          nb::arg("data_index"), nb::arg("noise_index"),
          nb::arg("n_f_template"),
          nb::arg("run_async") = false,
+         nb::call_guard<nb::gil_scoped_release>(),
          "Compute (d|h) and (h|h) likelihood terms for a batch of binaries (FD).");
 
 #if defined(__CUDA_COMPILATION__) || defined(__CUDACC__)
@@ -632,6 +642,7 @@ void domains_part(nb::module_ &m) {
          nb::arg("f0s"), nb::arg("fdot0s"), nb::arg("t0s"),
          nb::arg("freqs"), nb::arg("window_factor"),
          nb::arg("num_binaries"), nb::arg("num_freqs"),
+         nb::call_guard<nb::gil_scoped_release>(),
          "Compute Fresnel-based Fourier values for a batch of binaries.");
 }
 
