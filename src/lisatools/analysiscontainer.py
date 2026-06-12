@@ -1500,6 +1500,18 @@ class AnalysisContainerArray:
             If ``None``, everything is stored on the CPU.
         complex_psd: If ``True``, allocate a complex-valued PSD buffer (not yet
             implemented; raises ``NotImplementedError``).
+        n_splits: CPU-threading knob (mutually exclusive with ``gpus``): shard
+            the containers into this many CPU splits through the **same**
+            split structure used for GPUs (``gpu_splits`` / ``split_map`` /
+            per-split linear buffers). One thread per split is then driven by
+            :class:`~lisatools.domaincomputation.DomainComputationGroupArray`
+            with ``run_threaded=True`` exactly as in the multi-GPU case (each
+            split's computation group holds its own workspaces, so threads
+            never share scratch buffers). Threads pay off where the per-split
+            work releases the GIL (numpy/BLAS/FFT on large arrays, JAX-CPU,
+            GIL-releasing C++ kernels); pin ``OMP_NUM_THREADS`` /
+            ``OPENBLAS_NUM_THREADS`` so ``n_splits * blas_threads`` does not
+            oversubscribe the machine.
 
     """
 
@@ -1514,6 +1526,7 @@ class AnalysisContainerArray:
         gpus: list | int | None = None,
         complex_psd: bool = False,
         gpu_assignment: Optional[np.ndarray] = None,
+        n_splits: Optional[int] = None,
     ) -> None:
 
         if isinstance(analysis_containers, AnalysisContainer):
@@ -1559,6 +1572,19 @@ class AnalysisContainerArray:
 
         if isinstance(gpus, int):
             gpus = [gpus]
+        # Validate the CPU-split knob before any device work: with GPUs the
+        # split count is always len(gpus).
+        if n_splits is not None:
+            if gpus is not None:
+                raise ValueError(
+                    "n_splits is the CPU-split knob; with gpus the split "
+                    "count is len(gpus)."
+                )
+            if not (1 <= int(n_splits) <= int(self.acs_total_entries)):
+                raise ValueError(
+                    f"n_splits must be in [1, {int(self.acs_total_entries)}]; "
+                    f"got {n_splits}."
+                )
         self.gpus = gpus
         if gpus is not None:
             # Sanity-check: each entry is a valid device id.
@@ -1610,7 +1636,15 @@ class AnalysisContainerArray:
                 np.where(gpu_assignment == g)[0] for g in gpus
             ]
         else:
-            num_machines = 1 if gpus is None else len(gpus)
+            # CPU-thread splits (no GPUs): ``n_splits`` shards the containers
+            # through the same split structure as multi-GPU, one thread per
+            # split downstream (DCGA run_threaded). With GPUs, the split
+            # count is always len(gpus). (Arg validation happens above,
+            # before any device work.)
+            num_machines = (
+                int(n_splits) if (gpus is None and n_splits is not None)
+                else (1 if gpus is None else len(gpus))
+            )
             split_num = int(np.ceil(self.acs_total_entries / num_machines))
             split_inds = np.arange(split_num, self.acs_total_entries, split_num)
             self.gpu_splits = gpu_splits = np.split(
