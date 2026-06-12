@@ -785,6 +785,175 @@ class TDSignal(DomainBase, TDSettings):
             raise ValueError(f"new_domain type is not recognized {type(new_domain)}.")
 
 
+def pad_td_signal(
+    times,
+    signals,
+    *,
+    data_t0: float,
+    dt: float,
+    align_samples: int,
+    target_n: int = None,
+) -> Tuple[Any, Any]:
+    """Zero-pad time-domain arrays so the start aligns with a data grid.
+
+    Stock grid-alignment utility shared by the waveform wrappers
+    (:class:`lisatools.sources.waveformbase.TDWaveformBase`) and the
+    settings-file injection builders. Accepts either a single source or
+    a batch:
+
+    - Single:  ``times (num_times,)``,        ``signals (..., num_times)``
+    - Batched: ``times (num_bin, num_times)``, ``signals (num_bin, ..., num_times)``
+
+    Left-pads with zeros so that the number of samples between the (new)
+    ``t0`` and ``data_t0`` is an integer multiple of ``align_samples``.
+    For STFT this enforces segment-boundary alignment
+    (``align_samples = nperseg``); for FD / WDM pass
+    ``align_samples = target_n`` to align the start exactly to
+    ``data_t0`` (full-grid placement).
+
+    Then, if ``target_n`` is given, right-pads with zeros so the total
+    number of samples reaches ``target_n`` (ensuring the correct ``df``
+    after an FFT, or the full ``Nf * Nt`` grid for a WDM transform).
+
+    The signal must start on the ``data_t0 + k * dt`` grid at or after
+    ``data_t0``; callers are responsible for snapping each source's time
+    grid to integer multiples of ``dt`` relative to ``data_t0`` (see
+    ``TDWaveformBase.get_grid_time``). For batched inputs all sources
+    must produce the same left padding.
+
+    Args:
+        times: Time array, shape ``(num_times,)`` or ``(num_bin, num_times)``.
+        signals: Signal array whose trailing axis matches ``times``.
+        data_t0: Start time of the data grid in seconds.
+        dt: Sample spacing in seconds.
+        align_samples: Left-padding granularity. The signal is extended so
+            that ``round((signal_t0 - data_t0) / dt)`` becomes divisible by
+            this value.
+        target_n: If provided, right-pad to at least this many total samples.
+
+    Returns:
+        ``(padded_times, padded_signals)`` with the same leading dimensions
+        as the inputs.
+    """
+    xp = get_array_module(signals)
+
+    if times.ndim == 1:
+        n_to_data_t0 = round((float(times[0]) - data_t0) / dt)
+        n_left = n_to_data_t0 % align_samples
+    else:
+        n_to_data_t0 = xp.rint((times[:, 0] - data_t0) / dt).astype(int)
+        n_left_per_bin = n_to_data_t0 % align_samples
+        assert xp.all(n_left_per_bin == n_left_per_bin[0]), (
+            "Batched pad_td_signal: sources produce different n_left values — "
+            "ensure time grids are snapped to the dt grid before padding."
+        )
+        n_left = int(n_left_per_bin[0])
+
+    N = times.shape[-1]
+    n_right = 0
+    if target_n is not None:
+        new_n = N + n_left
+        if new_n < target_n:
+            n_right = target_n - new_n
+
+    if n_left == 0 and n_right == 0:
+        return times, signals
+
+    # Pad signals on the last (time) axis, preserving all leading dims.
+    pad_width = [(0, 0)] * (signals.ndim - 1) + [(n_left, n_right)]
+    padded_signals = xp.pad(signals, pad_width, mode="constant", constant_values=0)
+
+    # Extend the time array.
+    if times.ndim == 1:
+        parts = []
+        if n_left > 0:
+            parts.append(times[0] - xp.arange(n_left, 0, -1) * dt)
+        parts.append(times)
+        if n_right > 0:
+            parts.append(times[-1] + xp.arange(1, n_right + 1) * dt)
+        padded_times = xp.concatenate(parts)
+    else:
+        parts = []
+        if n_left > 0:
+            parts.append(times[:, 0:1] - xp.arange(n_left, 0, -1)[None, :] * dt)
+        parts.append(times)
+        if n_right > 0:
+            parts.append(times[:, -1:] + xp.arange(1, n_right + 1)[None, :] * dt)
+        padded_times = xp.concatenate(parts, axis=-1)
+
+    return padded_times, padded_signals
+
+
+def place_td_signal_on_grid(
+    signals,
+    settings: TDSettings,
+    times=None,
+) -> TDSignal:
+    """Place a time-domain signal onto the full grid described by ``settings``.
+
+    Stock utility for full-grid placement: the output :class:`TDSignal`
+    spans exactly ``[settings.t0, settings.t0 + settings.N * settings.dt)``
+    — left-padded back to ``settings.t0``, right-padded with zeros to
+    ``settings.N`` samples, and clipped at both ends if the input extends
+    outside the grid (samples outside the data span are unobserved and
+    are dropped). The result is ready for
+    :meth:`TDSignal.transform` into any analysis domain (FD / STFT / WDM)
+    or for direct summation into an injection data stream.
+
+    Args:
+        signals: Signal array of shape ``(..., num_times)``.
+        settings: :class:`TDSettings` describing the target grid.
+        times: Time array of shape ``(num_times,)`` giving the sample times
+            of ``signals``. Must lie on the ``settings.t0 + k * settings.dt``
+            grid. If ``None``, the signal is assumed to already start at
+            ``settings.t0`` (right-pad / clip only).
+
+    Returns:
+        :class:`TDSignal` on the full ``settings`` grid.
+    """
+    xp = get_array_module(signals)
+    N_target = settings.N
+    dt = settings.dt
+
+    if times is None:
+        # Already aligned at settings.t0: right-pad or clip to N samples.
+        n = signals.shape[-1]
+        if n < N_target:
+            pad_width = [(0, 0)] * (signals.ndim - 1) + [(0, N_target - n)]
+            arr = xp.pad(signals, pad_width, mode="constant", constant_values=0)
+        else:
+            arr = signals[..., :N_target]
+        return TDSignal(arr, settings)
+
+    if times.ndim != 1:
+        raise NotImplementedError(
+            "place_td_signal_on_grid handles one source at a time; loop over "
+            "the batch dimension for batched inputs."
+        )
+
+    # Drop leading samples before the grid start (unobserved).
+    n_clip = max(0, round((settings.t0 - float(times[0])) / dt))
+    if n_clip > 0:
+        times = times[n_clip:]
+        signals = signals[..., n_clip:]
+        if times.shape[-1] == 0:
+            return TDSignal(
+                xp.zeros(signals.shape[:-1] + (N_target,), dtype=signals.dtype),
+                settings,
+            )
+
+    padded_times, padded_signals = pad_td_signal(
+        times,
+        signals,
+        data_t0=settings.t0,
+        dt=dt,
+        align_samples=N_target,
+        target_n=N_target,
+    )
+    # Clip any overrun past the grid end (e.g. merger + response buffer).
+    return TDSignal(padded_signals[..., :N_target], settings)
+
+
 class FDSettings(DomainSettingsBase):
     """Frequency-domain basis settings on a uniform grid.
 

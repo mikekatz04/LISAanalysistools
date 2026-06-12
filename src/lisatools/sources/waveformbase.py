@@ -12,6 +12,7 @@ This module defines the base wrappers for waveform generation, including the app
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import inspect
 import logging
 from typing import TYPE_CHECKING, Tuple
 
@@ -30,7 +31,10 @@ from ..domains import (
     FDSettings,
     TDSettings,
     TDSignal,
+    WDMSettings,
     get_stft_settings,
+    pad_td_signal,
+    place_td_signal_on_grid,
 )
 from ..utils.parallelbase import LISAToolsParallelModule
 from ..utils.typing import NDArrayLike, ArrayModule
@@ -102,6 +106,14 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     force_uniform_stft: If True, batched calls in STFT mode will force all signals onto a common STFT grid
         spanning the union of all source time ranges. If False (default), each source retains its natural
         STFT grid derived from its own time range. Only relevant for batched calls with output_domain='STFT'.
+    output_domain_settings: Optional :class:`DomainSettingsBase` instance giving
+        the analysis-domain target directly (sprint rule: domains are
+        communicated by settings objects, not strings). Currently supports
+        :class:`WDMSettings` — the per-source output of
+        :meth:`get_signals_for_residuals` is placed on the full data grid and
+        transformed through the canonical ``TDSignal.transform`` chain. FD and
+        STFT targets continue to be configured via ``stft_dt`` / the frequency
+        bounds until the domain plumbing is unified.
     """
 
     def __init__(
@@ -117,6 +129,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         freq_min: float = 1e-5,
         freq_max: float = 1.0,
         fft_batch_size: int = 1,
+        output_domain_settings: DomainSettingsBase = None,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -132,14 +145,34 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         self.sampling_frequency = sampling_frequency
         self.orbits = orbits
 
-        if stft_dt is None:
-            logger.info(
-                "No stft timestep provided. By default, the waveform will be transformed to the frequency domain"
+        if output_domain_settings is not None and not isinstance(
+            output_domain_settings, WDMSettings
+        ):
+            raise NotImplementedError(
+                "output_domain_settings currently supports WDMSettings only; "
+                "FD / STFT targets are configured via stft_dt / the frequency "
+                f"bounds. Got: {type(output_domain_settings).__name__}."
             )
+        self.output_domain_settings = output_domain_settings
+
+        if stft_dt is None:
+            if output_domain_settings is None:
+                logger.info(
+                    "No stft timestep provided. By default, the waveform will be transformed to the frequency domain"
+                )
+            else:
+                logger.info(
+                    "Output domain set by settings object: "
+                    f"{type(output_domain_settings).__name__}"
+                )
             self.transform_to_domain = self.fft
             self.nperseg = None
 
         else:
+            assert output_domain_settings is None, (
+                "Pass either stft_dt (STFT target) or output_domain_settings "
+                "(settings-object target), not both."
+            )
             assert self.dt <= stft_dt
             nperseg = round(stft_dt / self.dt)
 
@@ -172,6 +205,7 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             "freq_min": self.freq_min,
             "freq_max": self.freq_max,
             "fft_batch_size": self.fft_batch_size,
+            "output_domain_settings": self.output_domain_settings,
             "force_backend": self.force_backend,
         }
 
@@ -229,6 +263,10 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
         """Set the Orbits object."""
 
         if orbits is None:
+            # Runtime import: detector is only imported under TYPE_CHECKING
+            # at module level (keeps import-time cost down).
+            from lisatools.detector import EqualArmlengthOrbits
+
             orbits = EqualArmlengthOrbits(force_backend=self.force_backend)
             logger.warning("No Orbits object provided. Using default EqualArmlengthOrbits.")
 
@@ -238,7 +276,9 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
     @property
     def analysis_domain(self) -> str:
-        """The domain in which the waveform is transformed for likelihood evaluation. Currently, either 'STFT' or 'FD'."""
+        """The domain in which the waveform is transformed for likelihood evaluation. Currently 'STFT', 'FD', or 'WDM' (settings-object target)."""
+        if isinstance(self.output_domain_settings, WDMSettings):
+            return "WDM"
         if self.nperseg:
             return "STFT"
         else:
@@ -340,6 +380,13 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
             left_edges = self.xp.full(shape=start_times.shape, fill_value=self.data_t0)
             grid_length = self.xp.full(shape=start_times.shape, fill_value=self.domain_settings.N)
 
+        else:
+            raise NotImplementedError(
+                f"The raw-array path (__call__ / build_common_grid) supports "
+                f"FD and STFT only; for {self.analysis_domain} targets use "
+                f"get_signals_for_residuals()."
+            )
+
         return left_edges, grid_length
 
     def build_common_grid(
@@ -417,80 +464,18 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
     ) -> Tuple[NDArrayLike, NDArrayLike]:
         """Pad time-domain arrays so the start is aligned with data_t0 and reaches a target length.
 
-        Accepts either a single source or a batch:
-
-        - Single:  ``times (num_times,)``,        ``signals (3, num_times)``
-        - Batched: ``times (num_bin, num_times)``, ``signals (num_bin, 3, num_times)``
-
-        Left-pads with zeros so that the number of samples between the (new) t0 and
-        data_t0 is an integer multiple of ``align_samples``.  For STFT this enforces
-        segment-boundary alignment (align_samples = nperseg); for FD pass align_samples=target_n to align to the full FFT length.
-        so that the signal starts exactly at data_t0.
-
-        Then, if ``target_n`` is given, right-pads with zeros so that the total number
-        of samples reaches ``target_n`` (ensuring the correct ``df`` after FFT).
-
-        For batched inputs all sources must produce the same ``n_left``; this is
-        guaranteed when callers have already snapped each source's time grid to integer
-        multiples of ``dt`` relative to ``data_t0``.
-
-        Args:
-            times: Time array, shape ``(num_times,)`` or ``(num_bin, num_times)``.
-            signals: Signal array, shape ``(3, num_times)`` or ``(num_bin, 3, num_times)``.
-            align_samples: Left-padding granularity.  The signal is extended so that
-                ``round((signal_t0 - data_t0) / dt)`` becomes divisible by this value.
-            target_n: If provided, right-pad to at least this many total samples.
-
-        Returns:
-            ``(padded_times, padded_signals)`` with the same leading dimensions as the inputs.
+        Thin delegate to the stock :func:`lisatools.domains.pad_td_signal`
+        utility (kept as a method for subclass / call-site compatibility);
+        see its docstring for the full semantics.
         """
-        dt = self.dt
-
-        if times.ndim == 1:
-            n_to_data_t0 = round((float(times[0]) - self.data_t0) / dt)
-            n_left = n_to_data_t0 % align_samples
-        else:
-            n_to_data_t0 = self.xp.rint((times[:, 0] - self.data_t0) / dt).astype(int)
-            n_left_per_bin = n_to_data_t0 % align_samples
-            assert self.xp.all(n_left_per_bin == n_left_per_bin[0]), (
-                "Batched _pad_td_signal: sources produce different n_left values — "
-                "ensure time grids are snapped to the dt grid before padding."
-            )
-            n_left = int(n_left_per_bin[0])
-
-        N = times.shape[-1]
-        n_right = 0
-        if target_n is not None:
-            new_n = N + n_left
-            if new_n < target_n:
-                n_right = target_n - new_n
-
-        if n_left == 0 and n_right == 0:
-            return times, signals
-
-        # Pad signals on the last (time) axis, preserving all leading dims.
-        pad_width = [(0, 0)] * (signals.ndim - 1) + [(n_left, n_right)]
-        padded_signals = self.xp.pad(signals, pad_width, mode="constant", constant_values=0)
-
-        # Extend the time array.
-        if times.ndim == 1:
-            parts = []
-            if n_left > 0:
-                parts.append(times[0] - self.xp.arange(n_left, 0, -1) * dt)
-            parts.append(times)
-            if n_right > 0:
-                parts.append(times[-1] + self.xp.arange(1, n_right + 1) * dt)
-            padded_times = self.xp.concatenate(parts)
-        else:
-            parts = []
-            if n_left > 0:
-                parts.append(times[:, 0:1] - self.xp.arange(n_left, 0, -1)[None, :] * dt)
-            parts.append(times)
-            if n_right > 0:
-                parts.append(times[:, -1:] + self.xp.arange(1, n_right + 1)[None, :] * dt)
-            padded_times = self.xp.concatenate(parts, axis=-1)
-
-        return padded_times, padded_signals
+        return pad_td_signal(
+            times,
+            signals,
+            data_t0=self.data_t0,
+            dt=self.dt,
+            align_samples=align_samples,
+            target_n=target_n,
+        )
 
     def _td_to_output_domain(
         self,
@@ -523,7 +508,28 @@ class TDWaveformBase(ABC, LISAToolsParallelModule):
 
         t0_here = times_in[0]
         dt_here = self.dt #float(times_in[2] - times_in[0])
-        
+
+        if use_default_domain and isinstance(self.output_domain_settings, WDMSettings):
+            # Settings-object target (sprint rule: no domain strings). Place
+            # the signal on the full data grid, then run the canonical
+            # lisatools transform chain (TDSignal -> FFT -> WDM).
+            full_grid = TDSettings(
+                N=self.domain_settings.N,
+                dt=dt_here,
+                t0=self.data_t0,
+                force_backend=self.force_backend,
+            )
+            padded_td_signal = place_td_signal_on_grid(
+                signal_in, full_grid, times=times_in
+            )
+            # Same treatment as the data side: full-length Tukey window
+            # (alpha = 0 -> rectangular, skip the multiply).
+            window = (
+                tukey(full_grid.N, alpha=self.tukey_alpha, xp=self.xp)
+                if self.tukey_alpha
+                else None
+            )
+            return padded_td_signal.transform(self.output_domain_settings, window=window)
 
         if output_domain == "TD":
             return TDSignal(
@@ -736,6 +742,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         signal_duration: float = None,
         buffer_time: int = 5000,
         run_async: bool = False,
+        output_domain_settings: DomainSettingsBase = None,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -751,6 +758,7 @@ class TDPyResponseWaveformBase(TDWaveformBase):
             freq_min=freq_min,
             freq_max=freq_max,
             fft_batch_size=fft_batch_size,
+            output_domain_settings=output_domain_settings,
             force_backend=force_backend,
         )
 
@@ -941,13 +949,36 @@ class TDPyResponseWaveformBase(TDWaveformBase):
                     f"merger_time={merger_time}, t_arr[0]={float(t_arr[:, 0].min()):.6e}."
                 )
 
-        self.response.get_projections(
-            strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
-        )
+        if "run_async" in inspect.signature(self.response.get_projections).parameters:
+            # stft_tof batched response API (array lam/beta/t0 + run_async).
+            self.response.get_projections(
+                strain, lam=ra, beta=dec, t0=shifted_t_arr[:, 0], t_buffer=self.buffer_time, run_async=self.run_async
+            )
 
-        tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)) # (Nbatch, num_channels, Ntimes) if batched else (num_channels, Ntimes)
-        if len(tdis.shape) == 3:
-            tdis = tdis.transpose(1, 0, 2)
+            tdis = self.xp.array(self.response.get_tdi_delays(run_async=self.run_async)) # (Nbatch, num_channels, Ntimes) if batched else (num_channels, Ntimes)
+            if len(tdis.shape) == 3:
+                tdis = tdis.transpose(1, 0, 2)
+        else:
+            # TODO(Phase B): lisatools' current ``pyResponseTDI`` is the
+            # single-source legacy API (scalar lam/beta/t0, fixed num_pts,
+            # no run_async). Loop the batch here until the tdi_on_fly
+            # legacy-response updates (batched arrays + run_async) are
+            # ported into ``lisatools.response.directresponse``.
+            tdis_per_source = []
+            for b in range(strain.shape[0]):
+                # output length tracks this source's padded window
+                self.response.num_pts = int(strain.shape[-1])
+                self.response.get_projections(
+                    strain[b],
+                    lam=float(ra[b]),
+                    beta=float(dec[b]),
+                    t0=float(shifted_t_arr[b, 0]),
+                    t_buffer=self.buffer_time,
+                )
+                tdis_per_source.append(
+                    self.xp.asarray(self.response.get_tdi_delays())
+                )
+            tdis = self.xp.array(tdis_per_source)  # (Nbatch, num_channels, Ntimes)
 
         tdis = tdis[..., :-num_buffer_ponts] # remove the padded points
         tdis[..., :num_buffer_ponts] = 0.0  # zero out the corrupted points at the start
@@ -968,6 +999,10 @@ class TDPyResponseWaveformBase(TDWaveformBase):
         # now remove the extra time dimensions if we only had one source (to be consistent with the single-source path)
         if single_source:
             shifted_t_arr = shifted_t_arr[0]
+            if tdis.ndim == 3:
+                # legacy-response fallback keeps a batch axis; squeeze to the
+                # (num_channels, Ntimes) single-source contract.
+                tdis = tdis[0]
 
         # if _saved_device is not None and _saved_device != _response_device_id:
         #     self.xp.cuda.runtime.setDevice(_saved_device)
@@ -1064,6 +1099,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
         freq_max: float = 1.0,
         fft_batch_size: int = 1,
         zero_inclination: bool = False,
+        output_domain_settings: DomainSettingsBase = None,
         force_backend: str = "cpu",
     ) -> None:
 
@@ -1084,6 +1120,7 @@ class TDTDIOnFlyWaveformBase(TDWaveformBase):
             freq_min=freq_min,
             freq_max=freq_max,
             fft_batch_size=fft_batch_size,
+            output_domain_settings=output_domain_settings,
             force_backend=force_backend,
         )
 

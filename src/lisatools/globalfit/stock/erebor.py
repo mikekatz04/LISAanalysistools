@@ -425,30 +425,40 @@ def m1_m2_to_mT_q(m1, m2):
     return (m1 + m2, m2 / m1)
 
 
-from bbhx.utils.transform import LISA_to_SSB, SSB_to_LISA, mT_q  # used by MBHSetup.init_sampling_info
+def m1_m2_to_mT_Q(m1, m2):
+    """Convert m1, m2 to total mass and ``Q = m1/m2 >= 1`` (inverse of :func:`mT_Q`)."""
+    return (m1 + m2, m1 / m2)
+
+
+from bbhx.utils.transform import LISA_to_SSB, SSB_to_LISA, mT_q  # frame helpers kept for settings files; the stock MBH basis is direct ICRS
 from eryn.moves import Move
 
 
 def make_mbh_transform_container():
     """Build the stock MBH :class:`TransformContainer` (forward + inverse).
 
-    Sampling basis: ``logM, q, s1z, s2z, dist (Gpc), phi_ref, cos_iota,
-    psi, lam, sin_beta, t_plunge (LISA frame)``; the output basis is the
-    same names holding ``m1, m2 (via mT_q), dist (Mpc), iota, beta`` and
-    SSB-frame sky/time/polarization. The inverse transforms enable
-    ``both_inverse_transforms`` (full basis -> sampling basis).
+    Sampling basis (ICRS — the 2026-06 run frame, matching
+    :func:`lisatools.globalfit.recipe_steps.mbh_catalogue_to_sampling_basis`):
+    ``logM, Q (= m1/m2 >= 1), s1z, s2z, dist (Gpc), phi_ref, cos_iota,
+    psi (ICRS), alpha (RA), sin_delta, t_plunge (SSB)``. The output basis
+    holds ``m1, m2 (via mT_Q), dist (Mpc), iota, delta`` with sky /
+    polarization passed through unchanged in ICRS — no frame
+    conversion; the orbits must be loaded with ``frame='icrs'`` so the
+    response consumes ``(alpha, delta)`` directly. The inverse
+    transforms enable ``both_inverse_transforms`` (full basis ->
+    sampling basis).
     """
     input_basis = [
         "logM",
-        "q",
+        "Q",
         "s1z",
         "s2z",
         "dist",
         "phi_ref",
         "cos_iota",
         "psi",
-        "lam",
-        "sin_beta",
+        "alpha",
+        "sin_delta",
         "t_plunge",
     ]
 
@@ -458,9 +468,8 @@ def make_mbh_transform_container():
         "logM": np.exp,
         "dist": gpc_to_mpc,
         "cos_iota": np.arccos,
-        "sin_beta": np.arcsin,
-        ("logM", "q"): mT_q,
-        ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
+        "sin_delta": np.arcsin,
+        ("logM", "Q"): mT_Q,
     }
 
     # keyed identically to mbh_transform_fn_in; same insertion order so
@@ -469,9 +478,8 @@ def make_mbh_transform_container():
         "logM": np.log,
         "dist": mpc_to_gpc,
         "cos_iota": np.cos,
-        "sin_beta": np.sin,
-        ("logM", "q"): m1_m2_to_mT_q,
-        ("t_plunge", "lam", "sin_beta", "psi"): SSB_to_LISA,
+        "sin_delta": np.sin,
+        ("logM", "Q"): m1_m2_to_mT_Q,
     }
 
     # for transforms
@@ -525,6 +533,12 @@ class MBHSetup(Setup):
     def init_sampling_info(self):
         """Build the MBH :class:`TransformContainer`, prior, periodicity, and waveform kwargs."""
 
+        # ICRS sampling basis (2026-06 run-frame directive): sky and
+        # polarization are sampled directly in ICRS (alpha = RA,
+        # sin_delta, psi = ICRS polarization), matching
+        # ``mbh_catalogue_to_sampling_basis``. No LISA->SSB->ICRS chain;
+        # the orbits must be loaded with ``frame='icrs'`` so the response
+        # consumes ``(alpha, delta)`` directly.
         input_basis = [
             "logM",
             "Q",
@@ -534,54 +548,20 @@ class MBHSetup(Setup):
             "phi_ref",
             "cos_iota",
             "psi",
-            "lam",
-            "sin_beta",
+            "alpha",
+            "sin_delta",
             "t_plunge",
         ]
 
         if self.transform is None:
-            # stft_tof MBH transform (kept at the 2026-06 merge): samples in
-            # the LISA frame, converts to SSB, then maps sky + polarization
-            # to ICRS (the run frame) via ecliptic_to_icrs.
-            output_basis = [
-                "logM",
-                "Q",
-                "s1z",
-                "s2z",
-                "dist",
-                "phi_ref",
-                # "f_ref",
-                "cos_iota",
-                "psi",
-                "lam",
-                "sin_beta",
-                # "psi",
-                "t_plunge",
-            ]
-
-            mbh_transform_fn_in = {
-                "logM": np.exp,
-                "dist": gpc_to_mpc,
-                "cos_iota": np.arccos,
-                "sin_beta": np.arcsin,
-                ("logM", "Q"): mT_Q,
-                ("t_plunge", "lam", "sin_beta", "psi"): LISA_to_SSB,
-                ("lam", "sin_beta", "psi"): ecliptic_to_icrs,
-            }
-
-            # for transforms
-            # mbh_fill_dict = {"f_ref": 0.0}
-            mbh_fill_dict = {}
-
-            self.transform = TransformContainer(
-                input_basis=input_basis,
-                output_basis=output_basis,
-                parameter_transforms=mbh_transform_fn_in,
-                fill_dict=mbh_fill_dict,
-            )
+            # Stock forward + inverse container (direct ICRS; same basis as
+            # ``input_basis`` above). The inverse transforms enable
+            # ``both_inverse_transforms`` (full basis -> sampling basis)
+            # for injection/diagnostic round trips.
+            self.transform = make_mbh_transform_container()
 
         if self.periodic is None:
-            self.periodic = {"mbh": {"phi_ref": 2 * np.pi, "lam": 2 * np.pi, "psi": np.pi}}
+            self.periodic = {"mbh": {"phi_ref": 2 * np.pi, "alpha": 2 * np.pi, "psi": np.pi}}
 
         self.logger.debug("Decide how to treat fdot prior")
         if self.priors is None:
@@ -594,8 +574,8 @@ class MBHSetup(Setup):
                 "phi_ref": uniform_dist(0.0, 2 * np.pi),
                 "cos_iota": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                 "psi": uniform_dist(0.0, np.pi), #is this right?
-                "lam": uniform_dist(0.0, 2 * np.pi),
-                "sin_beta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+                "alpha": uniform_dist(0.0, 2 * np.pi),
+                "sin_delta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
                 "t_plunge": uniform_dist(0.0, self.Tobs + 3600.0),
             }
 
@@ -652,15 +632,17 @@ class MBHSetup(Setup):
         if self.inner_moves is None:
             from eryn.moves import StretchMove
 
-            from lisatools.sampling.moves.skymodehop import SkyMove
-
-            angles_map = dict(cosinc=6, psi=7, lam=8, sinbeta=9)
-
+            # TODO(post-merge): re-enable SkyMove hops once the move
+            # supports the ICRS sampling basis — the stock MBH basis is
+            # now direct ICRS (alpha, sin_delta, psi ICRS) while the
+            # existing SkyMove geometry assumes SSB ecliptic. The index
+            # map is unchanged (cos_iota=6, psi=7, alpha=8, sin_delta=9):
+            #
+            #   from lisatools.sampling.moves.skymodehop import SkyMove
+            #   angles_map = dict(cosinc=6, psi=7, lam=8, sinbeta=9)
+            #   ... (SkyMove(ind_map=angles_map, which=...), w) ...
             self.inner_moves = [
-                (SkyMove(ind_map=angles_map, which="both"), 0.02),
-                (SkyMove(ind_map=angles_map, which="long"), 0.05),
-                (SkyMove(ind_map=angles_map, which="lat"), 0.05),
-                (StretchMove(), 0.88),
+                (StretchMove(), 1.0),
             ]
 
     def init_setup(self):

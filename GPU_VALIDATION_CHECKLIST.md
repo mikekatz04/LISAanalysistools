@@ -62,6 +62,24 @@ items arise; check off with notes + date when validated.
 - [ ] **`stretch_probability` mix**: acceptance-rate sanity for both
   proposal types in the in-model loop on GPU runs.
 
+## MBH phentax path (PhenomTHMTDIWaveform + engine-side signal_gen)
+
+- [ ] **Legacy-response fallback loop on GPU**: until the Phase-B port of
+  the vectorized legacy response (batched `get_projections` + `run_async`)
+  into `lisatools.response.directresponse`, `TDWaveformBase._apply_response`
+  loops the batch against the single-source API, mutating
+  `response.num_pts` per call. Verify on GPU (cupy strain slices, per-call
+  buffer sizing); delete the fallback when Phase B lands.
+- [ ] **Engine-side residual rebuild on GPU**: `setup_acs(rebuild_residuals
+  =True)` drives `signal_gen` → `build_template` → WDM transform per
+  walker; confirm cupy end-to-end and memory-pool behavior for full-year
+  grids (Nf*Nt ≈ 12.6M TD samples per waveform window).
+- [ ] **`output_domain_settings` WDM placement**: `place_td_signal_on_grid`
+  + full-grid `TDSignal.transform(WDMSettings)` on GPU (large rfft).
+- [ ] **ICRS orbits end-to-end**: `L1Orbits(frame='icrs')` + raw catalogue
+  `(ra, dec, psi_icrs)` through the response on GPU; CPU smoke verified
+  injection/template overlap = 1.0 in synthetic mode.
+
 ## Cross-cutting
 
 - [ ] **TDI flavor-int re-base**: stft's `domains.hpp` previously used

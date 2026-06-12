@@ -131,6 +131,16 @@ class Settings:
     branch_state: Optional[eryn_State] = None
     branch_backend: Optional[eryn_Backend] = None
     log_dir: Optional[str] = None
+    # Per-branch params-based template generator registered into every
+    # AnalysisContainer's dictionary ``signal_gen`` by ``setup_acs``
+    # (run.py). Called per leaf as ``fn(*sampling_params) -> DomainBase``
+    # and must therefore wrap the sampling->waveform transform AND the
+    # waveform generator + domain projection. With one registered, the
+    # engine builds/subtracts this branch's templates from the residuals
+    # under the hood (``rebuild_residuals``) -- no ``_build_*`` template
+    # loops or ``subtract_initial_signal`` calls needed in the settings
+    # file's recipe.
+    signal_gen: Optional[Callable] = None
 
 
 # Type alias: a user-supplied domain spec is either a fully constructed
@@ -257,10 +267,11 @@ class GeneralSetup(Setup, GeneralSettings):
     @property
     def data_dt(self) -> float:
         return self.data_td_settings.dt
-    
-    @property
-    def catalogue(self):
-        return getattr(self.data_processor, "catalogue", {})
+
+    # NOTE: ``catalogue`` is a plain attribute (a ``GeneralSettings``
+    # dataclass field re-applied by ``Setup.__init__`` and refreshed from
+    # ``data_processor.catalogue`` in ``init_data_information``) — it must
+    # NOT be a read-only property here or the dataclass-field setattr fails.
 
     def init_setup(self):
         """Validate required settings and trigger data preparation."""
@@ -346,15 +357,20 @@ class GeneralSetup(Setup, GeneralSettings):
         times, _ = self.data_processor.process(**self.preprocess_kwargs)
         dt = self.data_processor.td_signal.settings.dt
         Nt = len(times)
-        # data_t0 anchor: downstream waveform wrappers align their grids to
-        # the loader's first sample (dev-side fix).
-        self.data_t0 = float(times[0])
         self.catalogue = getattr(self.data_processor, 'catalogue', {})
         # TD settings of the loaded data (stft_tof side): consumed by the
-        # TDWaveformBase-family wrappers as ``data_td_settings``.
+        # TDWaveformBase-family wrappers as ``data_td_settings``. NOTE:
+        # ``TDSettings.args`` is only ``(N, dt)`` — ``t0`` must be carried
+        # explicitly or the loader's start time (the data_t0 anchor the
+        # downstream waveform wrappers align their grids to) is lost.
+        _loader_settings = self.data_processor.td_signal.settings
         self.data_td_settings = TDSettings(
-            *self.data_processor.td_signal.settings.args, force_backend=self.force_backend
+            *_loader_settings.args,
+            t0=float(times[0]),
+            force_backend=self.force_backend,
         )
+        # ``data_t0`` is the read-only property data_td_settings.t0.
+        assert abs(self.data_t0 - float(times[0])) < 1e-9
         self.Tobs = Nt * dt
 
         domain_settings = self._resolve_domain_settings(times=times, dt=dt)

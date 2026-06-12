@@ -14,6 +14,8 @@ import sys
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")  # force CPU backend
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+import unittest
+
 import numpy as np
 import pytest
 
@@ -25,10 +27,14 @@ from lisatools.utils.constants import YRSID_SI
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "gf_dev"))
 # ``ltt_averaging_diagnostic`` (validated AET projection) was an untracked
 # local helper on the stft_tof author's machine -- skip cleanly when absent.
-_ltt_diag = pytest.importorskip(
-    "ltt_averaging_diagnostic",
-    reason="ltt_averaging_diagnostic helper (gf_dev/) not present in this checkout",
-)
+# unittest.SkipTest is honored at collection by BOTH unittest discover and
+# pytest (pytest.importorskip's Skipped reads as an ERROR under unittest).
+try:
+    import ltt_averaging_diagnostic as _ltt_diag
+except ImportError:
+    raise unittest.SkipTest(
+        "ltt_averaging_diagnostic helper (gf_dev/) not present in this checkout"
+    )
 to_tt, to_aet_diag = _ltt_diag.to_tt, _ltt_diag.to_aet_diag
 
 NOISE_FILE = ("/data/asantini/globalfit/MOJITO_DATA/mojito_light_2p5s/"

@@ -2,14 +2,29 @@
 
 Source classes
 --------------
-- MBH (phentax IMRPhenomTHM amp/phase -> TDTDIonTheFly TD response):
-  StretchMove inside ResidualAddOneRemoveOneMove. The TD waveform is
-  generated via the TDI-on-the-fly spline path (mirrors
-  ``bbhx.mbhtdionfly`` (moved from ``scripts/mbh/mbhtdionfly.py``, 2026-06-10)) and then transformed to the WDM
-  domain. Waveform basis: ``(m1, m2, s1z, s2z, dist [Mpc], phi_ref,
-  inc, lam, beta, psi, t_merger)``.
+- MBH (phentax IMRPhenomTHM -> ``PhenomTHMTDIWaveform``, stft_tof
+  structure): StretchMove inside ResidualAddOneRemoveOneMove. The TD
+  waveform goes through the legacy ``pyResponseTDI`` response and is
+  placed on the full data grid, then transformed to the run's WDM
+  domain via the canonical ``TDSignal.transform`` chain
+  (``output_domain_settings``). Waveform basis: ``(m1, m2, s1z, s2z,
+  dist [Mpc], phi_ref, inc, psi, ra, dec, t_plunge)`` — sky in ICRS
+  (the run frame; ``bbhx.mbhtdionfly.MBHTDIonFly`` remains available in
+  BBHx as the spline TDI-on-the-fly alternative but is not wired here).
 - EMRI                     : StretchMove inside ResidualAddOneRemoveOneMove.
 - SOBBH                    : StretchMove inside ResidualAddOneRemoveOneMove.
+
+Template generation runs **under the hood in the engine**: each branch
+registers a params-based ``signal_gen`` on its Setup; ``run.py``'s
+``setup_acs(rebuild_residuals=True)`` subtracts the state's current
+templates from the residuals (the converted ``get_templates`` process).
+The recipe only builds moves — no ``subtract_initial_signal`` /
+pre-injection loops here.
+
+Run frame: ICRS. Catalogue sky/polarization parameters are sampled raw
+(``alpha``/RA, ``sin_delta``, ``psi`` ICRS) and the mojito orbits are
+loaded with ``frame='icrs'`` so the response consumes them directly —
+no per-injection frame conversion.
 
 No GB branch, no PSD branch, no galactic-foreground (galfor) sampling
 branch. Instrument noise and galactic foreground are fixed components of
@@ -88,7 +103,12 @@ from lisatools.response.tdiconfig import TDIConfig
 
 from lisatools.analysiscontainer import AnalysisContainerArray
 from lisatools.detector import DefaultOrbits, LISAModel
-from lisatools.domains import FDSettings, TDSettings, WDMSettings
+from lisatools.domains import (
+    FDSettings,
+    TDSettings,
+    WDMSettings,
+    place_td_signal_on_grid,
+)
 from lisatools.globalfit.engine import (
     GeneralSettings,
     GeneralSetup,
@@ -99,7 +119,12 @@ from lisatools.globalfit.engine import (
 from lisatools.globalfit.moves import GFCombineMove, ResidualAddOneRemoveOneMove
 from lisatools.globalfit.preprocessing import BaseProcessingStep, L1ProcessingStep
 from lisatools.globalfit.recipe import Recipe
-from lisatools.globalfit.recipe_steps import PERecipeStep
+from lisatools.globalfit.recipe_steps import (
+    MOJITO_REFERENCE_TIME,
+    PERecipeStep,
+    build_mbh_moves_phenom,
+    mbh_catalogue_to_sampling_basis,
+)
 from lisatools.globalfit.run import CurrentInfoGlobalFit
 from lisatools.globalfit.stock.erebor import (
     EMRISettings,
@@ -108,6 +133,7 @@ from lisatools.globalfit.stock.erebor import (
     MBHSetup,
     SOBBHSettings,
     SOBBHSetup,
+    make_mbh_transform_container,
 )
 from lisatools.sensitivity import (
     CompositeSensitivityMatrix,
@@ -115,13 +141,13 @@ from lisatools.sensitivity import (
     InstrumentNoise,
 )
 from lisatools.sampling.moves.skymodehop import SkyMove
-from lisatools.sources.utils import icrs_to_ecliptic as icrs_sky_to_ecliptic
 from lisatools.stochastic import FittedHyperbolicTangentGalacticForeground
 from lisatools.utils.constants import YRSID_SI
 
 from eryn.moves import StretchMove
 from eryn.moves.tempering import make_ladder
-from eryn.prior import ProbDistContainer, uniform_dist
+from eryn.prior import ProbDistContainer, log_uniform, uniform_dist
+from eryn.utils import TransformContainer
 
 
 # ============================================================
@@ -147,11 +173,6 @@ from global_fit_settings import (
 
 from mbh_phentax_only_global_fit_settings import (
     INJECTION_PARAMS_FULL_BASIS as _SINGLE_MBH_PHENTAX_INJECTION,
-    MBH_TDIONFLY_HIGHER_MODES,
-    MBHTDIonFlyWaveWrap,
-    _build_mbh_tdionfly_transform,
-    get_mbh_tdionfly_gen,
-    mbh_tdionfly_full_to_sampling,
 )
 
 # ============================================================
@@ -236,16 +257,29 @@ NCHANNELS = 3
 # Synthetic-mode start time (mojito mode pulls t_start from the L1 file).
 SYNTHETIC_T_START = 0.0
 
-# MBH TDI-on-the-fly: phentax waveform window before merger. ``None``
-# (env value "none") generates from the merger back through the merger
-# time itself, i.e. the waveform starts at the data start; the
-# test-script choice (1 month) keeps per-call cost down while covering
-# the in-band signal. NOTE: must stay <= the earliest sampled t_merger,
-# otherwise the waveform grid extends before the data start (and off
-# the orbit splines). (See scripts/mbh/mbh_test_script_td_wave.py.)
+# MBH phentax waveform window before merger (seconds; the phentax ``T``).
+# ``None`` (env value "none") falls back to the full data span. The
+# 1-month default keeps per-call cost down while covering the in-band
+# signal. NOTE: must stay <= the earliest sampled t_plunge, otherwise the
+# waveform grid extends before the data start.
 _mwd_env = os.environ.get("MBH_WAVEFORM_DURATION", str(YRSID_SI / 12.0))
 MBH_WAVEFORM_DURATION = (
     None if _mwd_env.strip().lower() in ("", "none") else float(_mwd_env)
+)
+
+# MBH phentax configuration (stft_tof choices: 21/33/44 higher modes,
+# fit-seeded t(f) root finder, dense equispaced grid for pyResponseTDI).
+MBH_HIGHER_MODES = (21, 33, 44)
+MBH_PHENOM_TOL = 1e-12     # phentax root-finding tolerance
+MBH_START_FREQ = 7e-5      # Hz; waveform-generation start frequency
+MBH_RESPONSE_ORDER = 30    # Lagrange interpolation order (pyResponseTDI)
+MBH_BUFFER_TIME = 15_000.0  # s; response edge buffer
+
+# Epoch the merger times (t_plunge) are referenced to. Mojito catalogue
+# coalescence times are relative to the mojito reference epoch; the
+# synthetic injections are relative to the synthetic data start.
+MBH_WAVEFORM_T0 = (
+    MOJITO_REFERENCE_TIME if DATA_PROCESSOR == "mojito" else SYNTHETIC_T_START
 )
 
 # Engine-level (NWALKERS / NTEMPS env-overridable for smoke tests).
@@ -291,11 +325,14 @@ if N_MBH_INJECTIONS + N_EMRI_INJECTIONS + N_SOBBH_INJECTIONS < 1:
 # ============================================================
 # *** Domain ***
 # ============================================================
+MIN_FREQ = 1e-4   # Hz; analysis band lower edge
+MAX_FREQ = 2.5e-2  # Hz; analysis band upper edge
+
 DOMAIN_CHOICE = WDMSettings.make_factory(
     Nf=NF,
     Nt=NT,
-    min_freq=1e-4,
-    max_freq=2.5e-2,
+    min_freq=MIN_FREQ,
+    max_freq=MAX_FREQ,
     min_time=20 * WAVELET_DURATION,
     max_time=(NT - 20) * WAVELET_DURATION,
 )
@@ -524,55 +561,129 @@ def _make_sobbh_injections(n: int) -> np.ndarray:
     return np.stack(rows, axis=0)
 
 
-def _make_mbh_injections(n: int, tobs: float) -> np.ndarray:
-    """Return ``(n, 11)`` MBH TDI-on-the-fly waveform-basis injection vectors.
+# MBH sampling-basis -> waveform-basis transform: the stock forward +
+# inverse container (direct ICRS) from erebor. Sampling basis matches
+# ``mbh_catalogue_to_sampling_basis``: ``(logM, Q, s1z, s2z, dist [Gpc],
+# phi_ref, cos_iota, psi, alpha, sin_delta, t_plunge)`` with
+# ``Q = m1/m2 >= 1``; the positional output is the
+# ``PhenomTHMTDIWaveform`` call order ``(m1, m2, s1z, s2z, dist [Mpc],
+# phi_ref, inc, psi, ra, dec, merger_time)`` — sky / polarization pass
+# through unchanged in ICRS (the run frame; orbits loaded with
+# ``frame='icrs'``).
+MBH_TRANSFORM = make_mbh_transform_container()
 
-    Basis: ``(m1, m2, s1z, s2z, dist [Mpc], phi_ref, inc, lam, beta,
-    psi, t_merger)`` — the :class:`MBHTDIonFly` call signature. Masses
-    and spins come from the shared phentax baseline; sky / phase /
-    distance / merger time vary per source.
+
+def _make_mbh_injections(n: int, tobs: float) -> np.ndarray:
+    """Return ``(n, 11)`` MBH sampling-basis injection vectors.
+
+    Basis: ``(logM, Q, s1z, s2z, dist [Gpc], phi_ref, cos_iota, psi,
+    alpha, sin_delta, t_plunge)`` — the MBH sampling basis (transformed
+    to the ``PhenomTHMTDIWaveform`` call order via ``MBH_TRANSFORM``).
+    Masses and spins come from the shared phentax baseline; sky / phase /
+    distance / merger time vary per source. Synthetic mode uses the
+    stock analytic (ecliptic-frame) orbits, so the "ICRS" sky slots are
+    simply interpreted in the orbits' native frame — self-consistent
+    between injection and template.
     """
     base = _SINGLE_MBH_PHENTAX_INJECTION.copy()  # (m1, m2, s1z, s2z, ...)
     if n == 0:
         return np.zeros((0, 11), dtype=float)
+    m1, m2 = float(base[0]), float(base[1])
     rng = np.random.default_rng(33)
     rows = []
     for i in range(n):
         rows.append(np.array([
-            base[0],                                       # m1 (M_sun)
-            base[1],                                       # m2 (M_sun)
+            np.log(m1 + m2),                               # logM
+            m1 / m2,                                       # Q (>= 1)
             base[2],                                       # s1z
             base[3],                                       # s2z
-            (10.0 + 15.0 * rng.uniform()) * 1e3,           # dist (Mpc)
+            10.0 + 15.0 * rng.uniform(),                   # dist (Gpc)
             rng.uniform(0.0, 2.0 * np.pi),                 # phi_ref
-            rng.uniform(0.1, np.pi - 0.1),                 # inc
-            rng.uniform(0.0, 2.0 * np.pi),                 # lam
-            rng.uniform(-np.pi / 2 + 0.1, np.pi / 2 - 0.1),  # beta
+            np.cos(rng.uniform(0.1, np.pi - 0.1)),         # cos_iota
             rng.uniform(0.0, np.pi),                       # psi
+            rng.uniform(0.0, 2.0 * np.pi),                 # alpha
+            np.sin(rng.uniform(-np.pi / 2 + 0.1, np.pi / 2 - 0.1)),  # sin_delta
             # Spread merger times across the interior of the observation
-            # (relative to the data start time).
-            (0.2 + 0.6 * (i + 1) / (n + 1)) * tobs,        # t_merger
+            # (relative to MBH_WAVEFORM_T0 = the data start in synthetic mode).
+            (0.2 + 0.6 * (i + 1) / (n + 1)) * tobs,        # t_plunge
         ]))
     return np.stack(rows, axis=0)
 
 
+# ---- Cached MBH PhenomTHMTDIWaveform (shared: signal_gen registration,
+# ----   synthetic injection stream, and the recipe's PE move) ----
+_MBH_PHENOM_GEN_CACHE = {}
+
+
+def _get_mbh_phenom_wave_gen(
+    *,
+    data_td_settings: TDSettings,
+    waveform_t0: float,
+    orbits=None,
+    output_domain_settings=None,
+    tukey_alpha: float = 0.0,
+    force_backend: str = "cpu",
+):
+    """Build (and cache) the MBH ``PhenomTHMTDIWaveform``.
+
+    One instance is shared between the engine-side residual rebuild
+    (``signal_gen``), the synthetic injection stream, and the PE move so
+    the (slow) phentax setup runs once per configuration.
+    """
+    key = (
+        id(data_td_settings), waveform_t0, id(orbits),
+        id(output_domain_settings), tukey_alpha, force_backend,
+    )
+    if key in _MBH_PHENOM_GEN_CACHE:
+        return _MBH_PHENOM_GEN_CACHE[key]
+
+    from lisatools.sources.bbh.waveform import PhenomTHMTDIWaveform
+
+    gen = PhenomTHMTDIWaveform(
+        waveform_kwargs=dict(
+            higher_modes=list(MBH_HIGHER_MODES),
+            include_negative_modes=True,  # negative m modes by symmetry
+            t_low_fit=True,  # fit-seeded start time for the t(f) root finder
+            coarse_grain=False,  # pyResponseTDI needs equispaced time arrays
+            atol=MBH_PHENOM_TOL,
+            rtol=MBH_PHENOM_TOL,
+        ),
+        # Waveform-generation window only (phentax ``T``), not the data span.
+        Tobs=(MBH_WAVEFORM_DURATION if MBH_WAVEFORM_DURATION is not None else TOBS),
+        start_freq=MBH_START_FREQ,
+        use_reference_time=True,
+        waveform_t0=waveform_t0,
+        data_td_settings=data_td_settings,
+        tdi_generation=TDI_GEN_STR,
+        tdi_channels=TDI_CHAN,
+        sampling_frequency=1.0 / DT,
+        orbits=orbits,
+        order=MBH_RESPONSE_ORDER,
+        tukey_alpha=tukey_alpha,
+        stft_dt=None,
+        freq_min=MIN_FREQ,
+        freq_max=MAX_FREQ,
+        fft_batch_size=2,
+        buffer_time=MBH_BUFFER_TIME,
+        # WDM run target — communicated by settings object (sprint rule).
+        # None on the injection path (TD output only).
+        output_domain_settings=output_domain_settings,
+        force_backend=force_backend,
+    )
+    _MBH_PHENOM_GEN_CACHE[key] = gen
+    return gen
+
+
 EMRI_INJECTIONS_FULL_BASIS = _make_emri_injections(N_EMRI_INJECTIONS)
 SOBBH_INJECTIONS_FULL_BASIS = _make_sobbh_injections(N_SOBBH_INJECTIONS)
-MBH_INJECTIONS_FULL_BASIS = _make_mbh_injections(N_MBH_INJECTIONS, TOBS)
+# Sampling basis (logM, Q, ..., alpha, sin_delta, t_plunge); transformed to
+# the waveform basis via MBH_TRANSFORM where needed.
+MBH_INJECTIONS_SAMPLING_BASIS = _make_mbh_injections(N_MBH_INJECTIONS, TOBS)
 
 
 # ============================================================
 # *** Data processors ***
 # ============================================================
-def _pad_or_clip(arr: np.ndarray, target_N: int) -> np.ndarray:
-    if arr.shape[-1] < target_N:
-        pad = target_N - arr.shape[-1]
-        return np.pad(arr, ((0, 0), (0, pad)), mode="constant")
-    if arr.shape[-1] > target_N:
-        return arr[:, :target_N]
-    return arr
-
-
 def _build_synthetic_source_streams(
     Tobs: float,
     dt: float,
@@ -587,8 +698,9 @@ def _build_synthetic_source_streams(
     """Build per-class TD signal sums via the cached response wrappers."""
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
     zero = np.zeros((nchannels, target_N), dtype=np.float64)
+    # Stock full-grid placement target (right-pad / clip onto the data grid).
+    grid = TDSettings(N=target_N, dt=dt, t0=t_start, force_backend="cpu")
 
-    
     emri_td = zero.copy()
     if emri_injections.shape[0] > 0:
         emri_wave_gen = get_emri_response_wrapper(
@@ -598,11 +710,13 @@ def _build_synthetic_source_streams(
         )
         for ii, params in enumerate(emri_injections):
             print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [start]")
-        
+
             sig = np.asarray(emri_wave_gen(*params))
-            emri_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
+            emri_td += np.asarray(
+                place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
+            )
             print(f"EMRI inject signal {ii + 1} of {len(emri_injections)} [end]")
-        
+
 
     sobbh_td = zero.copy()
     if sobbh_injections.shape[0] > 0:
@@ -614,26 +728,33 @@ def _build_synthetic_source_streams(
         for ii, params in enumerate(sobbh_injections):
             print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [start]")
             sig = np.asarray(sobbh_wave_gen(*params))
-            sobbh_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
+            sobbh_td += np.asarray(
+                place_td_signal_on_grid(np.atleast_2d(sig)[:nchannels], grid).arr
+            )
             print(f"SOBBH inject signal {ii + 1} of {len(sobbh_injections)} [end]")
 
     mbh_td = zero.copy()
     if mbh_injections.shape[0] > 0:
-        # TDI-on-the-fly path: evaluate the spline TDI output directly
-        # on the data time grid (no ResponseWrapper).
-        mbh_wave_gen = get_mbh_tdionfly_gen(
-            Tobs=Tobs, dt=dt, t_start=t_start,
-            tdi_config=tdi_config,
-            waveform_duration=MBH_WAVEFORM_DURATION,
+        # PhenomTHMTDIWaveform path (stft_tof structure): legacy
+        # pyResponseTDI response on the dense phentax grid, then stock
+        # full-grid placement. Same generator class as the PE templates so
+        # the engine-side residual rebuild nulls the injections exactly.
+        mbh_wave_gen = _get_mbh_phenom_wave_gen(
+            data_td_settings=grid,
+            waveform_t0=t_start,
+            orbits=None,  # stock analytic orbits (synthetic mode)
+            output_domain_settings=None,  # TD output only here
             force_backend=force_backend,
         )
-        t_arr = np.arange(target_N) * dt + t_start
         for ii, params in enumerate(mbh_injections):
             print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [start]")
-            sig = np.asarray(
-                mbh_wave_gen(*params, upsample_t_arr=t_arr, combine=True)
+            params_in = MBH_TRANSFORM.both_transforms(
+                np.asarray(params, dtype=float)
             )
-            mbh_td += _pad_or_clip(np.atleast_2d(sig)[:nchannels], target_N)
+            times, channels = mbh_wave_gen.compute_tdi_channels(*params_in)
+            mbh_td += np.asarray(
+                place_td_signal_on_grid(channels, grid, times=times).arr
+            )[:nchannels]
             print(f"MBHB inject signal {ii + 1} of {len(mbh_injections)} [end]")
     return emri_td, sobbh_td, mbh_td
 
@@ -687,23 +808,33 @@ class L1ProcessingStepWithSyntheticNoise(L1ProcessingStep):
         # .times, .fs, .orbits, .catalogue.
 
         # Add synthetic FD instrument noise + modulated foreground.
+        # Stock full-grid placement (right-pad / clip onto the data grid).
         N = int(round(self.T / self.dt))
         nch = self.data.shape[0]
-        combined = _pad_or_clip(self.data[:nch], N)
+        grid = TDSettings(
+            N=N, dt=self.dt, t0=float(self.times[0]), force_backend="cpu"
+        )
+        combined = np.asarray(
+            place_td_signal_on_grid(self.data[:nch], grid).arr
+        )
         if ADD_INSTRUMENT_NOISE:
             noise_td = _generate_correlated_fd_noise(
                 N=N, dt=self.dt,
                 Soms_d=NOISE_SOMS_D, Sa_a=NOISE_SA_A,
                 tdi_generation=TDI_GEN, seed=NOISE_SEED,
             )
-            combined = combined + _pad_or_clip(noise_td[:nch], N)
+            combined = combined + np.asarray(
+                place_td_signal_on_grid(noise_td[:nch], grid).arr
+            )
         if ADD_GALACTIC_FOREGROUND:
             fg_td = _generate_modulated_foreground_td(
                 N=N, dt=self.dt, Tobs=self.T,
                 foreground_params=FOREGROUND_PARAMS,
                 tdi_generation=TDI_GEN, seed=FOREGROUND_SEED,
             )
-            combined = combined + _pad_or_clip(fg_td[:nch], N)
+            combined = combined + np.asarray(
+                place_td_signal_on_grid(fg_td[:nch], grid).arr
+            )
         self.data = combined
 
 
@@ -724,7 +855,7 @@ class SyntheticDataProcessor(BaseProcessingStep):
         t_start: float,
         emri_injection_params_full_basis: np.ndarray,
         sobbh_injection_params_full_basis: np.ndarray,
-        mbh_injection_params_full_basis: np.ndarray,
+        mbh_injection_params_sampling_basis: np.ndarray,
         nchannels: int = NCHANNELS,
         force_backend: str = "cpu",
         verbose: bool = True,
@@ -733,7 +864,9 @@ class SyntheticDataProcessor(BaseProcessingStep):
         target_N = int(round(Tobs / dt))
         emri = np.atleast_2d(emri_injection_params_full_basis)
         sobbh = np.atleast_2d(sobbh_injection_params_full_basis)
-        mbh = np.atleast_2d(mbh_injection_params_full_basis)
+        # MBH rows arrive in the sampling basis; _build_synthetic_source_streams
+        # applies MBH_TRANSFORM per row.
+        mbh = np.atleast_2d(mbh_injection_params_sampling_basis)
 
         emri_td, sobbh_td, mbh_td = _build_synthetic_source_streams(
             Tobs=Tobs, dt=dt, t_start=t_start, target_N=target_N,
@@ -775,7 +908,7 @@ class SyntheticDataProcessor(BaseProcessingStep):
         # Stash truths so plot/diagnostic code can find them.
         self.emri_injection_params_full_basis = emri
         self.sobbh_injection_params_full_basis = sobbh
-        self.mbh_injection_params_full_basis = mbh
+        self.mbh_injection_params_sampling_basis = mbh
 
 
 # ============================================================
@@ -815,9 +948,11 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
     if DATA_PROCESSOR == "mojito":
         # NOTE: catalogue field names are best-guess (mojito EMRI catalogue
         # schema unverified) — correct them against the actual
-        # emri_cat_mojito_lite_processed_MT.hdf5 keys. Sky and spin
-        # directions are read raw in ICRS and rotated to the SSB-ecliptic
-        # run frame below.
+        # emri_cat_mojito_lite_processed_MT.hdf5 keys. ICRS run frame
+        # (2026-06 reversion): sky and spin directions are read raw in
+        # ICRS — qS/phiS are polar/azimuthal: qS = pi/2 - Dec, phiS = RA —
+        # and the orbits are loaded with frame='icrs' to match (no
+        # rotation here).
         _emri_cat = general_set.data_processor.catalogue["EMRI"]
         emri_injections_full_basis = np.asarray([
             [
@@ -828,33 +963,16 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
                 _emri_cat[i]["InitialEccentricity"],        # e0
                 _emri_cat[i]["InitialCosineInclination"],   # xI0
                 _emri_cat[i]["LuminosityDistance"] / 1e3,   # dist (Mpc -> Gpc)
-                _emri_cat[i]["Declination"],                # qS slot (raw Dec; converted below)
-                _emri_cat[i]["RightAscension"],             # phiS slot (raw RA; converted below)
-                _emri_cat[i]["PolarAngleOfSpin"],           # qK slot (raw ICRS polar; converted below)
-                _emri_cat[i]["AzimuthalAngleOfSpin"],       # phiK slot (raw ICRS azimuth; converted below)
+                np.pi / 2 - _emri_cat[i]["Declination"],    # qS (ICRS polar)
+                _emri_cat[i]["RightAscension"] % (2 * np.pi),  # phiS (ICRS azimuth)
+                _emri_cat[i]["PolarAngleOfSpin"],           # qK (ICRS polar)
+                _emri_cat[i]["AzimuthalAngleOfSpin"],       # phiK (ICRS azimuth)
                 _emri_cat[i]["InitialPhasePhiPhi"],         # Phi_phi0
                 _emri_cat[i]["InitialPhasePhiTheta"],       # Phi_theta0
                 _emri_cat[i]["InitialPhasePhiR"],           # Phi_r0
             ]
             for i in sorted(_emri_cat.keys())
         ])
-        # Sky direction ICRS -> SSB ecliptic (the run frame). qS/phiS are
-        # polar/azimuthal angles: qS = pi/2 - latitude.
-        lam_S, beta_S = icrs_sky_to_ecliptic(
-            emri_injections_full_basis[:, 8],  # RA
-            emri_injections_full_basis[:, 7],  # Dec
-        )
-        emri_injections_full_basis[:, 7] = np.pi / 2 - beta_S    # qS
-        emri_injections_full_basis[:, 8] = lam_S % (2 * np.pi)   # phiS
-        # The MBH spin orientation (qK, phiK) is likewise a direction on
-        # the sky; rotate it the same way (assumes the catalogue gives it
-        # as ICRS polar/azimuth angles).
-        lam_K, beta_K = icrs_sky_to_ecliptic(
-            emri_injections_full_basis[:, 10],                   # azimuth (RA-like)
-            np.pi / 2 - emri_injections_full_basis[:, 9],        # polar -> dec
-        )
-        emri_injections_full_basis[:, 9] = np.pi / 2 - beta_K    # qK
-        emri_injections_full_basis[:, 10] = lam_K % (2 * np.pi)  # phiK
     else:
         emri_injections_full_basis = EMRI_INJECTIONS_FULL_BASIS
 
@@ -895,7 +1013,20 @@ def get_emri_multi_erebor_settings(general_set: GeneralSetup) -> Optional[EMRISe
         nleaves_min=N_EMRI_INJECTIONS,
         ndim=12,
     )
-    return EMRISetup(emri_settings)
+    emri_setup = EMRISetup(emri_settings)
+
+    # Engine-side template generation (the converted ``get_templates``
+    # process): one sampling-basis row in -> one run-domain template out.
+    # The (slow) response build is deferred to first call via the cache.
+    def _emri_signal_gen(*params, **kwargs):
+        wave_wrap = _get_emri_wave_wrap(general_set)
+        params_in = emri_setup.transform.both_transforms(
+            np.asarray(params, dtype=float)
+        )
+        return wave_wrap(*params_in, **kwargs)
+
+    emri_setup.signal_gen = _emri_signal_gen
+    return emri_setup
 
 
 def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBHSetup]:
@@ -929,8 +1060,10 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
         # NOTE: catalogue field names follow the MBHB schema (same MT
         # processing); GW22FrequencySSBFrame -> f_low is a best guess —
         # correct against the actual sobhb_cat_mojito_lite_processed_MT.hdf5
-        # keys. Sky + polarization are read raw in ICRS and rotated to the
-        # SSB-ecliptic run frame below.
+        # keys. ICRS run frame (2026-06 reversion): sky + polarization are
+        # read raw in ICRS (RA in the lam slot, Dec in the beta slot,
+        # psi ICRS) and the orbits are loaded with frame='icrs' to match —
+        # no rotation here.
         _sobbh_cat = general_set.data_processor.catalogue["SOBHB"]
         sobbh_injections_full_basis = np.asarray([
             [
@@ -941,22 +1074,13 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
                 _sobbh_cat[i]["LuminosityDistance"] / 1e3,  # dist (Mpc -> Gpc)
                 _sobbh_cat[i]["InclinationAngle"],          # inc
                 _sobbh_cat[i]["GW22FrequencySSBFrame"],     # f_low
-                _sobbh_cat[i]["RightAscension"],            # lam slot (raw RA; converted below)
-                _sobbh_cat[i]["Declination"],               # beta slot (raw Dec; converted below)
-                _sobbh_cat[i]["PolarisationAngle"],         # psi (ICRS; converted below)
+                _sobbh_cat[i]["RightAscension"] % (2 * np.pi),  # RA (lam slot)
+                _sobbh_cat[i]["Declination"],               # Dec (beta slot)
+                _sobbh_cat[i]["PolarisationAngle"] % np.pi, # psi (ICRS)
                 _sobbh_cat[i]["PhaseReferenceSourceFrame"], # phi0
             ]
             for i in sorted(_sobbh_cat.keys())
         ])
-        # Sky + polarization ICRS -> SSB ecliptic (the run frame).
-        lam_ecl, beta_ecl, psi_ecl = icrs_sky_to_ecliptic(
-            sobbh_injections_full_basis[:, 7],
-            sobbh_injections_full_basis[:, 8],
-            sobbh_injections_full_basis[:, 9],
-        )
-        sobbh_injections_full_basis[:, 7] = lam_ecl % (2 * np.pi)
-        sobbh_injections_full_basis[:, 8] = beta_ecl
-        sobbh_injections_full_basis[:, 9] = psi_ecl % np.pi
     else:
         sobbh_injections_full_basis = SOBBH_INJECTIONS_FULL_BASIS
 
@@ -992,112 +1116,113 @@ def get_sobbh_multi_erebor_settings(general_set: GeneralSetup) -> Optional[SOBBH
         nleaves_min=N_SOBBH_INJECTIONS,
         ndim=11,
     )
-    return SOBBHSetup(sobbh_settings)
+    sobbh_setup = SOBBHSetup(sobbh_settings)
+
+    # Engine-side template generation (the converted ``get_templates``
+    # process): one sampling-basis row in -> one run-domain template out.
+    def _sobbh_signal_gen(*params, **kwargs):
+        wave_wrap = _get_sobbh_wave_wrap(general_set)
+        params_in = sobbh_setup.transform.both_transforms(
+            np.asarray(params, dtype=float)
+        )
+        return wave_wrap(*params_in, **kwargs)
+
+    sobbh_setup.signal_gen = _sobbh_signal_gen
+    return sobbh_setup
 
 
-def get_mbh_tdionfly_multi_erebor_settings(general_set: GeneralSetup) -> Optional[MBHSetup]:
-    """MBH TDI-on-the-fly setup with ``nleaves_max = N_MBH_INJECTIONS``.
+def _make_mbh_initialize_kwargs(general_set: GeneralSetup) -> dict:
+    """``PhenomTHMTDIWaveform`` construction kwargs for the template path.
+
+    Consumed by ``_get_mbh_phenom_wave_gen`` (keyword-for-keyword) so the
+    engine-side ``signal_gen``, the recipe's PE move, and any restart all
+    share one cached generator instance.
+    """
+    force_backend = _force_backend_for_branch()
+    return dict(
+        data_td_settings=general_set.data_td_settings,
+        waveform_t0=MBH_WAVEFORM_T0,
+        orbits=general_set.gpu_orbits if gpu_available else general_set.orbits,
+        # WDM run target — communicated by settings object (sprint rule).
+        output_domain_settings=general_set.domain_settings,
+        # Same window treatment as the data side (rectangular when the
+        # engine's taper duration is 0).
+        tukey_alpha=general_set.window_alpha,
+        force_backend=force_backend,
+    )
+
+
+def get_mbh_phenom_multi_erebor_settings(general_set: GeneralSetup) -> Optional[MBHSetup]:
+    """MBH ``PhenomTHMTDIWaveform`` setup (stft_tof structure, WDM-adjusted).
 
     Waveform basis (11): ``(m1, m2, s1z, s2z, dist [Mpc], phi_ref, inc,
-    lam, beta, psi, t_merger)``; sampling basis: ``(mT, q, s1z, s2z,
-    dist, phi_ref, cosinc, lam, sinbeta, psi, t_merger)`` (mirrors
-    ``scripts/mbh/mbh_test_script_td_wave.py``). GPU-ready:
-    ``force_backend`` flips with ``gpu_available``. Returns ``None``
-    when no MBH leaves are injected.
+    psi, ra, dec, t_plunge)`` — the ``PhenomTHMTDIWaveform`` call order
+    (sky in ICRS; the orbits are loaded with ``frame='icrs'`` in mojito
+    mode). Sampling basis: ``(logM, Q, s1z, s2z, dist [Gpc], phi_ref,
+    cos_iota, psi, alpha, sin_delta, t_plunge)`` — matches
+    ``mbh_catalogue_to_sampling_basis``. The per-source output is the
+    run's WDM domain via ``output_domain_settings``.
+
+    Registers ``signal_gen`` on the returned setup so the engine's
+    ``setup_acs(rebuild_residuals=True)`` builds/subtracts the MBH
+    templates under the hood. Returns ``None`` when no MBH leaves are
+    injected.
     """
     if N_MBH_INJECTIONS == 0:
         return None
-    force_backend = _force_backend_for_branch()
-    # Metadata snapshot of the active waveform path (the live generator
-    # is built in _build_mbh_tdionfly_move_runtime).
-    initialize_kwargs_mbh = dict(
-        T=general_set.Tobs / YRSID_SI,
-        dt=general_set.dt,
-        mbh_waveform="phentax.IMRPhenomTHM+TDTDIonTheFly",
-        mbh_waveform_kwargs=dict(
-            higher_modes=list(MBH_TDIONFLY_HIGHER_MODES),
-            force_backend=force_backend,
-        ),
-        response_kwargs=dict(
-            t0=general_set.data_t0,
-            tdi=TDI_GEN_STR,
-            tdi_chan=TDI_CHAN,
-            force_backend=force_backend,
-            waveform_duration=MBH_WAVEFORM_DURATION,
-        ),
-    )
+
+    initialize_kwargs_mbh = _make_mbh_initialize_kwargs(general_set)
 
     if DATA_PROCESSOR == "mojito":
-        # Catalogue ordering matches the TDI-on-the-fly waveform basis;
-        # LuminosityDistance is already in Mpc (phentax convention) and
-        # the merger time is relative to the data start. Sky + polarization
-        # are read raw in ICRS and rotated to the SSB-ecliptic run frame
-        # below (the orbits are loaded with frame="ecliptic" to match).
+        # Direct-ICRS sampling rows (logM, Q, ..., psi_icrs, ra, sin_dec,
+        # t_ssb) — no frame conversion (ICRS run frame; orbits loaded with
+        # frame='icrs').
         _mbh_cat = general_set.data_processor.catalogue["MBHB"]
-        mbh_injections_full_basis = np.asarray([
+        injection_sampling_per_leaf = np.stack(
             [
-                _mbh_cat[i]["PrimaryMassSSBFrame"],
-                _mbh_cat[i]["SecondaryMassSSBFrame"],
-                _mbh_cat[i]["PrimarySpinCompZ"],
-                _mbh_cat[i]["SecondarySpinCompZ"],
-                _mbh_cat[i]["LuminosityDistance"],          # Mpc
-                _mbh_cat[i]["PhaseReferenceSourceFrame"],
-                _mbh_cat[i]["InclinationAngle"],
-                _mbh_cat[i]["RightAscension"],              # lam slot (raw RA; converted below)
-                _mbh_cat[i]["Declination"],                 # beta slot (raw Dec; converted below)
-                _mbh_cat[i]["PolarisationAngle"],           # psi (ICRS; converted below)
-                _mbh_cat[i]["TimeCoalescencePhenomTPHMSSBFrame"],
-            ]
-            for i in sorted(_mbh_cat.keys())
-        ])
-        # Sky + polarization ICRS -> SSB ecliptic (the run frame).
-        psi_ecl, lam_ecl, beta_ecl = icrs_sky_to_ecliptic(
-            mbh_injections_full_basis[:, 9],
-            mbh_injections_full_basis[:, 7],
-            mbh_injections_full_basis[:, 8],
+                mbh_catalogue_to_sampling_basis(_mbh_cat[i])
+                for i in sorted(_mbh_cat.keys())
+            ],
+            axis=0,
         )
-        mbh_injections_full_basis[:, 7] = lam_ecl % (2 * np.pi)
-        mbh_injections_full_basis[:, 8] = beta_ecl
-        mbh_injections_full_basis[:, 9] = psi_ecl % np.pi
     else:
-        mbh_injections_full_basis = MBH_INJECTIONS_FULL_BASIS
-        
-    injection_sampling_per_leaf = np.stack(
-        [mbh_tdionfly_full_to_sampling(row) for row in mbh_injections_full_basis],
-        axis=0,
-    )
+        injection_sampling_per_leaf = MBH_INJECTIONS_SAMPLING_BASIS
 
+    # t_plunge is sampled relative to MBH_WAVEFORM_T0 (the epoch the
+    # catalogue/injection merger times are referenced to); the data span
+    # starts at data_t0 = MBH_WAVEFORM_T0 + trim in mojito mode and at
+    # MBH_WAVEFORM_T0 exactly in synthetic mode.
+    _t_rel_min = general_set.data_t0 - MBH_WAVEFORM_T0
     priors_mbh = {
-        "mT":       uniform_dist(1e4, 1e8),
-        "q":        uniform_dist(0.01, 0.99999),
-        "s1z":      uniform_dist(-0.999999, 0.999999),
-        "s2z":      uniform_dist(-0.999999, 0.999999),
-        "dist":     uniform_dist(1e2, 1e5),  # Mpc
-        "phi_ref":  uniform_dist(0.0, 2 * np.pi),
-        "cosinc":   uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        "lam":      uniform_dist(0.0, 2 * np.pi),
-        "sinbeta":  uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
-        "psi":      uniform_dist(0.0, np.pi),
-        "t_merger": uniform_dist(0.0, general_set.Tobs),  # relative to data_t0
+        "logM":      uniform_dist(np.log(1e5), np.log(1e8)),
+        "Q":         log_uniform(1.0, 10.0),
+        "s1z":       uniform_dist(-0.999999, 0.999999),
+        "s2z":       uniform_dist(-0.999999, 0.999999),
+        "dist":      uniform_dist(0.1, 150.0),  # Gpc
+        "phi_ref":   uniform_dist(0.0, 2 * np.pi),
+        "cos_iota":  uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+        "psi":       uniform_dist(0.0, np.pi),
+        "alpha":     uniform_dist(0.0, 2 * np.pi),
+        "sin_delta": uniform_dist(-1.0 + 1e-6, 1.0 - 1e-6),
+        "t_plunge":  uniform_dist(_t_rel_min, _t_rel_min + general_set.Tobs + 3600.0),
     }
     priors = {"mbh": ProbDistContainer(priors_mbh)}
 
-    # Sky-mode hops: the sampling basis is SSB ecliptic, so the moves
-    # convert SSB -> LISA, hop between the (approximately) degenerate
-    # LISA-frame sky modes, and convert back. The default ind_map
-    # (cosinc=6, lam=7, sinbeta=8, psi=9, t_ref=10) matches this basis;
-    # t_merger is sampled relative to the data start, so the constellation
-    # phase reference is data_t0 (in years).
-    _sky_kwargs = dict(
-        coord_frame="ssb_ecliptic",
-        frame_t0=general_set.data_t0 / YRSID_SI,
-    )
-    inner_moves_mbh = [
-        (StretchMove(), 0.88),
-        (SkyMove(which="both", **_sky_kwargs), 0.02),
-        (SkyMove(which="long", **_sky_kwargs), 0.05),
-        (SkyMove(which="lat", **_sky_kwargs), 0.05),
-    ]
+    # TODO(post-merge): re-enable SkyMove hops once the move supports the
+    # ICRS sampling basis (the existing implementation assumes an
+    # SSB-ecliptic basis; sky-frame checker + ICRS SkyMove pending).
+    inner_moves_mbh = [(StretchMove(), 1.0)]
+
+    # Engine-side template generation (the converted ``get_templates``
+    # process): one sampling-basis row in -> one WDM-domain template out.
+    # The wave-gen build is deferred to first call (cached) so settings
+    # construction stays cheap.
+    def _mbh_signal_gen(*params, **kwargs):
+        wave_gen = _get_mbh_phenom_wave_gen(**initialize_kwargs_mbh)
+        params_in = MBH_TRANSFORM.both_transforms(
+            np.asarray(params, dtype=float)
+        )
+        return wave_gen.get_signals_for_residuals(*params_in, **kwargs)
 
     mbh_settings = MBHSettings(
         Tobs=general_set.Tobs,
@@ -1110,10 +1235,11 @@ def get_mbh_tdionfly_multi_erebor_settings(general_set: GeneralSetup) -> Optiona
         nleaves_max=N_MBH_INJECTIONS,
         nleaves_min=N_MBH_INJECTIONS,
         ndim=11,
-        transform=_build_mbh_tdionfly_transform(),
+        transform=MBH_TRANSFORM,
         priors=priors,
-        periodic={"mbh": {"phi_ref": 2 * np.pi, "psi": np.pi, "lam": 2 * np.pi}},
+        periodic={"mbh": {"phi_ref": 2 * np.pi, "psi": np.pi, "alpha": 2 * np.pi}},
         log_dir=general_set.file_store_dir,
+        signal_gen=_mbh_signal_gen,
     )
     mbh_setup = MBHSetup(mbh_settings)
 
@@ -1123,18 +1249,17 @@ def get_mbh_tdionfly_multi_erebor_settings(general_set: GeneralSetup) -> Optiona
 # ============================================================
 # *** Per-branch move builders (runtime t_start) ***
 # ============================================================
-def _build_emri_move_runtime(
-    curr: CurrentInfoGlobalFit,
-    acs: AnalysisContainerArray,
-    priors: dict,
-    state,
-):
-    """EMRI move using the runtime ``general_info.data_t0`` for t_start."""
-    general_info = curr.general_info
-    emri_info = curr.source_info["emri"]
-    nwalkers = general_info.nwalkers
-    ntemps = general_info.ntemps
+# Cached domain-wrapped template generators, shared between the
+# engine-side ``signal_gen`` registrations and the PE moves so each
+# branch builds its (slow) response machinery once.
+_WAVE_WRAP_CACHE = {}
 
+
+def _get_emri_wave_wrap(general_info, nchannels: int = NCHANNELS):
+    """Build (and cache) the EMRI domain-wrapped template generator."""
+    key = ("emri", id(general_info), nchannels)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
     force_backend = _force_backend_for_branch()
     tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
     template_wave_gen = get_emri_response_wrapper(
@@ -1144,28 +1269,56 @@ def _build_emri_move_runtime(
         role="template", force_backend=force_backend,
         orbits=general_info.orbits,
     )
-    td_settings = TDSettings(
-        int(round(general_info.Tobs / general_info.dt)),
-        general_info.dt,
-        force_backend=force_backend,
+    # Engine-provided TD settings (carries the loader's data_t0 anchor).
+    wrap = EMRIWaveWrap(
+        template_wave_gen, general_info.data_td_settings,
+        general_info.domain_settings,
+        td_window=None, nchannels=nchannels,
     )
-    wave_gen = EMRIWaveWrap(
-        template_wave_gen, td_settings, general_info.domain_settings,
-        td_window=None, nchannels=acs.nchannels,
-    )
+    _WAVE_WRAP_CACHE[key] = wrap
+    return wrap
 
-    if np.any(emri_inds := state.branches_inds["emri"][0]):
-        for leaf in range(emri_inds.shape[-1]):
-            if not emri_inds[0, leaf]:
-                continue
-            assert np.all(emri_inds[:, leaf])
-            inj_coords = state.branches_coords["emri"][0, :, leaf]
-            inj_coords_in = emri_info.transform.both_transforms(inj_coords)
-            for i in range(inj_coords.shape[0]):
-                sig = wave_gen(*inj_coords_in[i], **emri_info.waveform_kwargs)
-                acs.add_signal_to_residual([sig], data_index=np.array([i]))
-                del sig
-                gc.collect()
+
+def _get_sobbh_wave_wrap(general_info, nchannels: int = NCHANNELS):
+    """Build (and cache) the SOBBH domain-wrapped template generator."""
+    key = ("sobbh", id(general_info), nchannels)
+    if key in _WAVE_WRAP_CACHE:
+        return _WAVE_WRAP_CACHE[key]
+    force_backend = _force_backend_for_branch()
+    tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
+    template_wave_gen = get_sobbh_response_wrapper(
+        Tobs=general_info.Tobs, dt=general_info.dt,
+        t_start=general_info.data_t0,
+        tdi_config=tdi_config, tdi_chan=TDI_CHAN,
+        role="template", force_backend=force_backend,
+        orbits=general_info.orbits,
+    )
+    # Engine-provided TD settings (carries the loader's data_t0 anchor).
+    wrap = SOBBHWaveWrap(
+        template_wave_gen, general_info.data_td_settings,
+        general_info.domain_settings,
+        td_window=None, nchannels=nchannels,
+    )
+    _WAVE_WRAP_CACHE[key] = wrap
+    return wrap
+def _build_emri_move_runtime(
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
+    state,
+):
+    """EMRI move using the runtime ``general_info.data_t0`` for t_start.
+
+    Builds the move only — the engine's ``setup_acs(rebuild_residuals=
+    True)`` already subtracted the state's templates from the residuals
+    via the registered ``signal_gen`` (no residual writes here).
+    """
+    general_info = curr.general_info
+    emri_info = curr.source_info["emri"]
+    nwalkers = general_info.nwalkers
+    ntemps = general_info.ntemps
+
+    wave_gen = _get_emri_wave_wrap(general_info)
 
     betas_all = np.tile(
         make_ladder(emri_info.ndim, ntemps=ntemps), (emri_info.nleaves_max, 1)
@@ -1185,69 +1338,26 @@ def _build_emri_move_runtime(
     return move
 
 
-def _build_mbh_tdionfly_move_runtime(
+def _build_mbh_move_runtime(
     curr: CurrentInfoGlobalFit,
     acs: AnalysisContainerArray,
     priors: dict,
     state,
 ):
-    """MBH TDI-on-the-fly move using runtime ``general_info.data_t0`` and
-    the branch's force_backend (GPU when available)."""
-    general_info = curr.general_info
+    """MBH PE move via the stock ``build_mbh_moves_phenom`` builder.
+
+    Reuses the cached ``PhenomTHMTDIWaveform`` (the same instance backing
+    the engine-side ``signal_gen``) and passes ``subtract_initial=False``
+    — the engine's ``setup_acs(rebuild_residuals=True)`` already
+    subtracted the state's MBH templates (no residual writes here).
+    """
     mbh_info = curr.source_info["mbh"]
-    nwalkers = general_info.nwalkers
-    ntemps = general_info.ntemps
-
-    force_backend = _force_backend_for_branch()
-    tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
-    # Mojito mode: reuse the L1 orbits (their frame must match the sky
-    # coords fed to the generator). Synthetic mode: orbits is None ->
-    # the builder falls back to ESAOrbits (same as the injection path).
-    template_wave_gen = get_mbh_tdionfly_gen(
-        Tobs=general_info.Tobs, dt=general_info.dt,
-        t_start=general_info.data_t0,
-        tdi_config=tdi_config,
-        orbits=general_info.orbits,
-        waveform_duration=MBH_WAVEFORM_DURATION,
-        force_backend=force_backend,
+    wave_gen = _get_mbh_phenom_wave_gen(**mbh_info.initialize_kwargs)
+    _, move = build_mbh_moves_phenom(
+        curr, acs, priors, state,
+        wave_gen=wave_gen,
+        subtract_initial=False,
     )
-    N = int(round(general_info.Tobs / general_info.dt))
-    td_settings = TDSettings(N, general_info.dt, force_backend=force_backend)
-    t_arr = np.arange(N) * general_info.dt + general_info.data_t0
-    wave_gen = MBHTDIonFlyWaveWrap(
-        template_wave_gen, t_arr, td_settings, general_info.domain_settings,
-        td_window=None, nchannels=acs.nchannels,
-    )
-
-    if np.any(mbh_inds := state.branches_inds["mbh"][0]):
-        for leaf in range(mbh_inds.shape[-1]):
-            if not mbh_inds[0, leaf]:
-                continue
-            assert np.all(mbh_inds[:, leaf])
-            inj_coords = state.branches_coords["mbh"][0, :, leaf]
-            inj_coords_in = mbh_info.transform.both_transforms(inj_coords)
-            for i in range(inj_coords.shape[0]):
-                sig = wave_gen(*inj_coords_in[i], **mbh_info.waveform_kwargs)
-                breakpoint()
-                acs.add_signal_to_residual([sig], data_index=np.array([i]))
-                del sig
-                gc.collect()
-
-    betas_all = np.tile(
-        make_ladder(mbh_info.ndim, ntemps=ntemps), (mbh_info.nleaves_max, 1)
-    )
-    state.sub_states["mbh"].betas_all = betas_all
-    coords_shape = (ntemps, nwalkers, mbh_info.nleaves_max, mbh_info.ndim)
-    move = ResidualAddOneRemoveOneMove(
-        "mbh", coords_shape, wave_gen,
-        mbh_info.waveform_kwargs.copy(),
-        mbh_info.waveform_kwargs.copy(),
-        acs, mbh_info.num_prop_repeats,
-        mbh_info.transform, priors,
-        mbh_info.inner_moves,
-        Tmax=np.inf, betas_all=betas_all,
-    )
-    move.accepted = np.zeros((ntemps, nwalkers), dtype=int)
     return move
 
 
@@ -1259,44 +1369,17 @@ def _build_sobbh_move_runtime(
 ):
     """SOBBH move using the runtime ``general_info.data_t0`` for t_start.
 
-    Mirrors the EMRI / MBH stretch builders.
+    Mirrors the EMRI / MBH stretch builders — move construction only; the
+    engine's ``setup_acs(rebuild_residuals=True)`` already subtracted the
+    state's templates via the registered ``signal_gen`` (no residual
+    writes here).
     """
     general_info = curr.general_info
     sobbh_info = curr.source_info["sobbh"]
     nwalkers = general_info.nwalkers
     ntemps = general_info.ntemps
 
-    force_backend = _force_backend_for_branch()
-    tdi_config = TDIConfig(TDI_GEN_STR, force_backend=force_backend)
-    template_wave_gen = get_sobbh_response_wrapper(
-        Tobs=general_info.Tobs, dt=general_info.dt,
-        t_start=general_info.data_t0,
-        tdi_config=tdi_config, tdi_chan=TDI_CHAN,
-        role="template", force_backend=force_backend,
-        orbits=general_info.orbits,
-    )
-    td_settings = TDSettings(
-        int(round(general_info.Tobs / general_info.dt)),
-        general_info.dt,
-        force_backend=force_backend,
-    )
-    wave_gen = SOBBHWaveWrap(
-        template_wave_gen, td_settings, general_info.domain_settings,
-        td_window=None, nchannels=acs.nchannels,
-    )
-
-    if np.any(sobbh_inds := state.branches_inds["sobbh"][0]):
-        for leaf in range(sobbh_inds.shape[-1]):
-            if not sobbh_inds[0, leaf]:
-                continue
-            assert np.all(sobbh_inds[:, leaf])
-            inj_coords = state.branches_coords["sobbh"][0, :, leaf]
-            inj_coords_in = sobbh_info.transform.both_transforms(inj_coords)
-            for i in range(inj_coords.shape[0]):
-                sig = wave_gen(*inj_coords_in[i], **sobbh_info.waveform_kwargs)
-                acs.add_signal_to_residual([sig], data_index=np.array([i]))
-                del sig
-                gc.collect()
+    wave_gen = _get_sobbh_wave_wrap(general_info)
 
     betas_all = np.tile(
         make_ladder(sobbh_info.ndim, ntemps=ntemps), (sobbh_info.nleaves_max, 1)
@@ -1327,7 +1410,12 @@ def setup_recipe(
     priors: dict,
     state,
 ):
-    """Three source branches — MBH (stretch), EMRI (stretch), SOBBH (stretch)."""
+    """Three source branches — MBH (stretch), EMRI (stretch), SOBBH (stretch).
+
+    Moves only: residual generation/subtraction already ran under the
+    hood in the engine (``setup_acs(rebuild_residuals=True)`` consuming
+    each branch's registered ``signal_gen``).
+    """
     general_info = curr.general_info
     nwalkers: int = general_info.nwalkers
     ntemps: int = general_info.ntemps
@@ -1339,7 +1427,7 @@ def setup_recipe(
     # (i.e. classes with >= 1 injected leaf).
     pe_moves = []
     if "mbh" in curr.source_info:
-        pe_moves.append(_build_mbh_tdionfly_move_runtime(curr, acs, priors, state))
+        pe_moves.append(_build_mbh_move_runtime(curr, acs, priors, state))
     if "emri" in curr.source_info:
         pe_moves.append(_build_emri_move_runtime(curr, acs, priors, state))
     if "sobbh" in curr.source_info:
@@ -1365,14 +1453,14 @@ def _select_data_processor():
             L1_folder=MOJITO_DATA_PATH,
             source_ids={k: list(v) for k, v in MOJITO_SOURCE_IDS.items()},
             orbits_class=L1Orbits,
-            # ecliptic: the run frame is SSB ecliptic — L1Orbits rotates
-            # the mojito ICRS positions/velocities to ecliptic on read-in,
-            # and the catalogue sky coords are rotated ICRS -> ecliptic in
-            # the per-branch setup functions, so sky coordinates and orbits
-            # reach the response in the same frame.
+            # icrs: the run frame is ICRS (2026-06 reversion) — the
+            # catalogue sky/polarization parameters are sampled raw
+            # (alpha/RA, sin_delta, psi ICRS) with no per-injection
+            # conversion, so the orbits must be ICRS too for the response
+            # to see consistent sky coordinates.
             orbits_kwargs=dict(
                 force_backend=_force_backend_for_branch(),
-                frame="ecliptic",
+                frame="icrs",
             ),
             verbose=True,
             do_plots=False,
@@ -1387,7 +1475,7 @@ def _select_data_processor():
             t_start=SYNTHETIC_T_START,
             emri_injection_params_full_basis=EMRI_INJECTIONS_FULL_BASIS,
             sobbh_injection_params_full_basis=SOBBH_INJECTIONS_FULL_BASIS,
-            mbh_injection_params_full_basis=MBH_INJECTIONS_FULL_BASIS,
+            mbh_injection_params_sampling_basis=MBH_INJECTIONS_SAMPLING_BASIS,
             nchannels=NCHANNELS,
             force_backend="cpu",
             verbose=True,
@@ -1479,7 +1567,7 @@ def get_global_fit_settings(copy_settings_file: bool = False):
     # functions return ``None`` in that case.
     source_info = {}
     for key, setup in (
-        ("mbh", get_mbh_tdionfly_multi_erebor_settings(general_setup)),
+        ("mbh", get_mbh_phenom_multi_erebor_settings(general_setup)),
         ("emri", get_emri_multi_erebor_settings(general_setup)),
         ("sobbh", get_sobbh_multi_erebor_settings(general_setup)),
     ):

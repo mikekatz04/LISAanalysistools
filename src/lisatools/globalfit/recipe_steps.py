@@ -337,9 +337,8 @@ def mbh_catalogue_to_sampling_basis(catalogue_entry: dict, trim_duration: float 
 
     # ICRS sampling basis (stft_tof + 2026-06 run-frame directive): sky and
     # polarization are kept in ICRS (ra, sin_dec, psi_icrs); time stays SSB.
-    # NOTE(phentax wiring): erebor's default MBH transform still carries the
-    # LISA->SSB->ICRS chain -- reconcile when the MBH settings are wired
-    # (settings files override the transform).
+    # Erebor's stock MBH transform (MBHSetup.init_sampling_info /
+    # make_mbh_transform_container) uses the same direct-ICRS basis.
     # logger.debug(f"Catalogue entry: RA={ra}, Dec={dec}, psi_icrs={psi_icrs}, t_ssb={t_ssb}")
 
     # t_L, lam_L, beta_L, psi_L = SSB_to_LISA(t_ssb, lam_ecl, beta_ecl, psi_ssb)
@@ -568,11 +567,13 @@ def build_psd_moves(
 
 
 def build_mbh_moves_phenom(
-    curr: CurrentInfoGlobalFit, 
-    acs: AnalysisContainerArray, 
-    priors: dict, 
+    curr: CurrentInfoGlobalFit,
+    acs: AnalysisContainerArray,
+    priors: dict,
     state: GFState,
     permute_every: int = 20,
+    wave_gen: typing.Callable = None,
+    subtract_initial: bool = True,
     ) -> tuple[typing.Callable, ResidualAddOneRemoveOneMove]:
     """Build MBH PE move using ``PhenomTHMTDIWaveform`` + ``ResidualAddOneRemoveOneMove``.
 
@@ -588,6 +589,20 @@ def build_mbh_moves_phenom(
         Shared priors dict (passed by reference).
     state :
         Current sampler state; ``sub_states["mbh"].betas_all`` is set here.
+    wave_gen :
+        Optional pre-built ``PhenomTHMTDIWaveform`` instance. When the
+        settings file already constructed (and cached) the generator —
+        e.g. to register ``source_info['mbh'].signal_gen`` for the
+        engine-side residual rebuild — pass it here so the move shares
+        the same instance. Default ``None`` builds a fresh one from
+        ``mbh_info.initialize_kwargs``.
+    subtract_initial : bool
+        If ``True`` (default), subtract the state's current MBH templates
+        from the residuals here (legacy recipe-side path). Settings files
+        that register ``source_info['mbh'].signal_gen`` must pass
+        ``False`` — the engine already subtracts during
+        ``setup_acs(rebuild_residuals=True)`` and doing it twice corrupts
+        the residuals.
 
     Returns
     -------
@@ -600,9 +615,10 @@ def build_mbh_moves_phenom(
     nwalkers = curr.general_info.nwalkers
     ntemps = curr.general_info.ntemps
 
-    wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
-    # breakpoint()
-    subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
+    if wave_gen is None:
+        wave_gen = PhenomTHMTDIWaveform(**mbh_info.initialize_kwargs)
+    if subtract_initial:
+        subtract_initial_signal(acs, state, wave_gen.get_signals_for_residuals, "mbh", mbh_info)
 
     if mbh_info.betas is None:
         mbh_info.betas = make_ladder(mbh_info.ndim, ntemps=ntemps)
@@ -618,7 +634,11 @@ def build_mbh_moves_phenom(
         wave_gen.get_signals_for_residuals,
         # tempering_kwargs,
         mbh_info.waveform_kwargs.copy(),  # waveform_gen_kwargs
-        dict(propagate_data_res_kwargs=False),  # waveform_like_kwargs
+        # waveform_like_kwargs flow through compute_acs_like ->
+        # template_likelihood -> inner_product; the stft_tof
+        # ``propagate_data_res_kwargs`` flag belonged to the retired
+        # DataResidualArray propagation path and is no longer accepted.
+        dict(),  # waveform_like_kwargs
         acs,
         mbh_info.num_prop_repeats,
         mbh_info.transform,

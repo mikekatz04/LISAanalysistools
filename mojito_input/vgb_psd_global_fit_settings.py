@@ -339,7 +339,7 @@ def get_general_erebor_settings() -> GeneralSetup:
         verbose=True,
         do_plots=True,
         orbits_class=L1Orbits,
-        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="ecliptic", armlength=2493162305.42235) #icrs
+        orbits_kwargs=dict(force_backend=GPU_BACKEND, frame="icrs", armlength=2493162305.42235)  # ICRS run frame (2026-06 reversion)
     )
 
     downsample_kwargs = {

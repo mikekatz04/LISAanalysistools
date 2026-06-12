@@ -702,7 +702,13 @@ class GlobalFit:
             # generate = GenerateCurrentState(A_inj, E_inj)
             # self.logger.debug("generate function created")
 
-            acs = self.setup_acs(state)
+            # rebuild_residuals=True: branches that registered a params-based
+            # ``signal_gen`` on their Setup get their current templates
+            # subtracted here, under the hood (the converted ``get_templates``
+            # process). Branches without one are skipped with a warning and
+            # may keep subtracting in their recipe (legacy path) -- no
+            # double-subtraction either way.
+            acs = self.setup_acs(state, rebuild_residuals=True)
             self.logger.debug("acs setup done")
 
             state.log_like[:] = acs.likelihood(complex=False)
