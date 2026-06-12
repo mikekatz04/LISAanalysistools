@@ -603,25 +603,18 @@ class DomainComputationGroupArray:
         return self._thread_pool
 
     @property
-    def domain_type(self):
-        """Analysis domain type, either 'STFT' or 'FD', inferred from the settings of the AnalysisContainerArray."""
-
-        if isinstance(self.acs.settings, STFTSettings):
-            return "STFT"
-        elif isinstance(self.acs.settings, FDSettings):
-            return "FD"
-        else:
-            raise NotImplementedError("Unsupported domain settings type in AnalysisContainerArray.")
-
-    @property
     def computation_group_class(self):
-        """Returns the appropriate DomainComputationGroup subclass based on the domain type."""
-        if self.domain_type == "STFT":
+        """The :class:`BaseDomainComputationGroup` subclass paired with the
+        ACA's settings. Dispatch is by :class:`DomainSettingsBase` child
+        class — never a string flag (sprint rule)."""
+        if isinstance(self.acs.settings, STFTSettings):
             return STFTComputationGroup
-        elif self.domain_type == "FD":
+        if isinstance(self.acs.settings, FDSettings):
             return FDComputationGroup
-        else:
-            raise NotImplementedError("Unsupported domain type for computation group class.")
+        raise NotImplementedError(
+            f"Unsupported domain settings type "
+            f"{type(self.acs.settings).__name__} for DomainComputationGroupArray."
+        )
 
     @contextmanager
     def device_context(self, device: int = None):
